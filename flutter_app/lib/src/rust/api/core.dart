@@ -221,8 +221,13 @@ Future<InstallResultDto> activateScheme({
   androidExtract: androidExtract,
 );
 
-Future<void> removeSchemePackage({required String schemeKey}) =>
-    RustLib.instance.api.crateApiCoreRemoveSchemePackage(schemeKey: schemeKey);
+Future<void> removeSchemePackage({
+  required String schemeKey,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreRemoveSchemePackage(
+  schemeKey: schemeKey,
+  androidDeploy: androidDeploy,
+);
 
 /// The persisted account, if a token is stored. The token never leaves Rust.
 Future<AccountUserDto?> accountSession() =>

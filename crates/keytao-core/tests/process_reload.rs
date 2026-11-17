@@ -99,6 +99,39 @@ fn independent_runtimes_share_one_librime() {
 }
 
 #[test]
+fn removing_every_schema_retires_live_sessions_without_loading_stale_builds() {
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("remove-last-schema");
+    smoke_fixture::write(&dir).unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    runtime.init().unwrap();
+    let session = runtime.create_session().unwrap();
+    assert_composes(&session, "before removal");
+
+    std::fs::remove_file(dir.join("build/.keytao-deployed")).unwrap();
+    assert!(runtime.reload_without_deploy().is_err());
+    assert_composes(&session, "while an installed schema awaits deployment");
+
+    std::fs::write(
+        dir.join("default.custom.yaml"),
+        "patch:\n  schema_list: []\n",
+    )
+    .unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert!(!runtime.is_initialized());
+    assert!(session.process_key_result(b'a' as u32, 0).is_none());
+    assert!(session.reset().is_none());
+    assert!(runtime.create_session().is_err());
+    assert!(runtime.init_without_deploy().is_err());
+    assert!(dir.join("build/default.yaml").is_file());
+
+    smoke_fixture::write(&dir).unwrap();
+    runtime.init().unwrap();
+    assert_composes(&session, "after reinstalling a schema");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn sessions_do_not_cross_over_to_another_runtimes_data_directories() {
     let _serialized = serialized();
     let first_dir = smoke_fixture::scratch_dir("runtime-first-directories");

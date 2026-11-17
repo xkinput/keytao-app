@@ -4683,6 +4683,16 @@ impl ImeRuntime {
         let result = (|| {
             let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
             let schema_state = schema_install_state(&dirs.user);
+            if schema_state.schemas.is_empty() {
+                if initialized.as_ref() == Some(&dirs) {
+                    let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+                    PROCESS_RIME.drop_live_engines();
+                    *initialized = None;
+                    PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+                    desktop::finalize_rime()?;
+                }
+                return Ok(());
+            }
             if !schema_state.deployed {
                 return Err(
                     "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),

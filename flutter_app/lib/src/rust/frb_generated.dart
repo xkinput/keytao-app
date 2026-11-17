@@ -302,7 +302,10 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiCoreRemoveDownloadedArchive({required String path});
 
-  Future<void> crateApiCoreRemoveSchemePackage({required String schemeKey});
+  Future<void> crateApiCoreRemoveSchemePackage({
+    required String schemeKey,
+    required FutureOr<String> Function() androidDeploy,
+  });
 
   String crateApiCoreResolveCandidatePanelPreview({
     required UiColorSchemeDto colorScheme,
@@ -2655,12 +2658,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCoreRemoveSchemePackage({required String schemeKey}) {
+  Future<void> crateApiCoreRemoveSchemePackage({
+    required String schemeKey,
+    required FutureOr<String> Function() androidDeploy,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(schemeKey, serializer);
+          sse_encode_DartFn_Inputs__Output_String_AnyhowException(
+            androidDeploy,
+            serializer,
+          );
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -2673,7 +2683,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreRemoveSchemePackageConstMeta,
-        argValues: [schemeKey],
+        argValues: [schemeKey, androidDeploy],
         apiImpl: this,
       ),
     );
@@ -2682,7 +2692,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreRemoveSchemePackageConstMeta =>
       const TaskConstMeta(
         debugName: "remove_scheme_package",
-        argNames: ["schemeKey"],
+        argNames: ["schemeKey", "androidDeploy"],
       );
 
   @override

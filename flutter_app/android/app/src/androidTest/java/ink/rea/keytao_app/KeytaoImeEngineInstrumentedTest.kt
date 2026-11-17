@@ -53,6 +53,29 @@ class KeytaoImeEngineInstrumentedTest {
     }
 
     @Test
+    fun removingLastSchemaDiscardsLoadedSession() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue(KeytaoSchemaFixture.install(context, allowSynthetic = true) != KeytaoSchemaFixture.Source.NONE)
+        val engine = KeytaoImeEngine(context)
+        try {
+            assertTrue("fixture should deploy and load", engine.deployNow())
+            val root = requireNotNull(engine.userDir)
+            File(root, "default.custom.yaml").writeText("patch:\n  schema_list: []\n")
+            File(root, "build/.keytao-deployed").delete()
+            KeytaoAndroidPaths.reloadStampFile(context).writeText("removed/${System.nanoTime()}")
+
+            assertEquals(Readiness.NOT_INSTALLED, engine.refreshReadiness())
+            assertFalse(engine.nativeReady)
+            assertEquals("", engine.state().schemaId)
+            assertFalse(engine.ensureReady())
+            assertEquals("", engine.processKey('a'.code, 0).schemaId)
+            assertEquals("removed schemas must not create another native session", 0L, KeytaoNativeBridge.createSession())
+        } finally {
+            engine.close()
+        }
+    }
+
+    @Test
     fun selectedSchemeComposesCandidates() {
         val args = InstrumentationRegistry.getArguments()
         val expectedSchemaName = args.getString("expectedSchemaName").orEmpty()

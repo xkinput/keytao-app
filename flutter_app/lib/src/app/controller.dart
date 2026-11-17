@@ -1681,21 +1681,31 @@ class AppController extends ChangeNotifier {
 
   Future<bool> removeSchemePackage(String key) {
     final package = installedPackageFor(key);
-    if (package == null || package.active) return Future.value(false);
+    if (package == null) return Future.value(false);
     return run(() async {
       packageError = null;
       _invalidateSchemeUpdates();
       try {
-        await core.removeSchemePackage(schemeKey: key);
+        await core.removeSchemePackage(
+          schemeKey: key,
+          androidDeploy: _androidDeploy,
+        );
         _invalidateSchemeUpdates();
-        await _readInstalledPackages();
-        if (package.source == 'local' && scheme == key) {
+        if (package.active) {
+          await _readState();
+        } else {
+          await _readInstalledPackages();
+        }
+        if (package.active || (package.source == 'local' && scheme == key)) {
           _manuallySelectedScheme = true;
           scheme =
               installedPackages
                   .where((package) => package.active)
                   .firstOrNull
                   ?.schemeKey ??
+              (package.active
+                  ? installedPackages.firstOrNull?.schemeKey
+                  : null) ??
               'keytao';
           await refreshRelease();
           await _persistSchemeSettings(schedule: false);
@@ -1703,6 +1713,11 @@ class AppController extends ChangeNotifier {
         scheduleSchemeProfileSync();
       } catch (failure) {
         packageError = errorText(failure);
+        if (package.active) {
+          try {
+            await _readState();
+          } catch (_) {}
+        }
         rethrow;
       }
     });

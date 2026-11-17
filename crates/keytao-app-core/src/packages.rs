@@ -876,12 +876,14 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
         .collect())
 }
 
-pub fn remove_scheme_package(core: &Core, scheme_key: &str) -> Result<(), CoreError> {
+pub async fn remove_scheme_package(
+    core: &Core,
+    scheme_key: &str,
+    host: &impl crate::scheme_host::SchemeHost,
+) -> Result<(), CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     if core.state().active_scheme.as_deref() == Some(scheme_key) {
-        return Err(CoreError::Other(
-            "Cannot remove the active scheme package; activate another scheme first".into(),
-        ));
+        remove_active_package(core, scheme_key, host).await?;
     }
     let dir = checked_store_dir(core)?;
     for extension in ["zip", "json"] {
@@ -894,6 +896,181 @@ pub fn remove_scheme_package(core: &Core, scheme_key: &str) -> Result<(), CoreEr
     core.update_state(|state| {
         state.installed_packages.remove(scheme_key);
     })
+}
+
+async fn remove_active_package(
+    core: &Core,
+    scheme_key: &str,
+    host: &impl crate::scheme_host::SchemeHost,
+) -> Result<(), CoreError> {
+    let root = host.user_root().map_err(CoreError::Other)?.canonicalize()?;
+    let mut active = None;
+    for path in [
+        safe_path(&root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?,
+        checked_store_dir(core)?.join("active-manifest.json"),
+    ] {
+        match fs::read(path) {
+            Ok(bytes) => {
+                let manifest: ActiveManifest = serde_json::from_slice(&bytes)?;
+                if Path::new(&manifest.root) != root
+                    || (!manifest.scheme_key.is_empty() && manifest.scheme_key != scheme_key)
+                {
+                    return Err(CoreError::Other(
+                        "Active scheme manifest does not match".into(),
+                    ));
+                }
+                active = Some(manifest);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let (manifest, package_rime_lua) = match active {
+        Some(active) => (active.manifest, active.rime_lua),
+        None => {
+            let manifest = stored_metadata(core, scheme_key)?
+                .ok_or_else(|| CoreError::Other("Active scheme file manifest is missing".into()))?
+                .manifest;
+            (manifest, None)
+        }
+    };
+    let user_rime_lua =
+        match fs::read_to_string(safe_path(&root, "rime.lua").map_err(CoreError::Other)?) {
+            Ok(content) if Some(content.as_str()) != package_rime_lua.as_deref() => Some(content),
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+    let protected: BTreeSet<_> = manifest
+        .keys()
+        .filter(|relative| {
+            relative.ends_with(".custom.yaml")
+                || relative.split('/').any(|part| {
+                    part == "sync" || part.contains(".userdb") || part.starts_with(".keytao-")
+                })
+                || crate::addon::is_package_file(relative)
+                || crate::wanxiang::installable(relative)
+                || relative.as_str() == "wanxiang-lts-zh-hans.gram"
+                || crate::rime_ice::installable(relative)
+        })
+        .cloned()
+        .collect();
+    let schema_ids: Vec<_> = manifest
+        .keys()
+        .filter(|relative| !protected.contains(*relative))
+        .filter_map(|relative| relative.strip_suffix(".schema.yaml").map(str::to_owned))
+        .collect();
+    let dictionary_ids: Vec<_> = manifest
+        .keys()
+        .filter(|relative| !protected.contains(*relative))
+        .filter_map(|relative| relative.strip_suffix(".dict.yaml").map(str::to_owned))
+        .collect();
+    let (relative, mut config) =
+        crate::addon::addon_default_custom(&root).map_err(CoreError::Other)?;
+    for schema in &schema_ids {
+        config = crate::addon::update_addon_schema_list_content(&config, schema, false)
+            .map_err(CoreError::Other)?;
+    }
+    let mut receipt = crate::wanxiang::InstallReceipt::new(&root).map_err(CoreError::Other)?;
+    cleanup_manifest_with(&root, &manifest, &protected, |relative| {
+        receipt.move_original(relative)
+    })
+    .map_err(CoreError::Other)?;
+    crate::addon::write_schema_list_content_transaction(
+        &mut receipt,
+        relative,
+        &config,
+        &crate::addon::shared_data_dir(core, &root),
+        user_rime_lua.as_deref(),
+    )
+    .map_err(CoreError::Other)?;
+    let previous = core.state();
+    let empty = crate::scheme_files::parse_schema_list(&config).is_empty();
+    #[cfg(target_os = "windows")]
+    let mut public_update = None;
+    let result: Result<(), CoreError> = async {
+        for marker in ["build/.keytao-deployed", "build/.keytao-deploying"] {
+            match fs::remove_file(safe_path(&root, marker).map_err(CoreError::Other)?) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        keytao_core::invalidate_rime_build_artifacts(&root, &schema_ids, &dictionary_ids)
+            .map_err(CoreError::Other)?;
+        #[cfg(target_os = "windows")]
+        {
+            let files = manifest
+                .keys()
+                .filter(|relative| {
+                    !protected.contains(*relative) && !excluded_from_manifest(relative)
+                })
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            public_update = Some(
+                crate::windows_public_schemas::update_public_schemas(|| {
+                    for schema in &schema_ids {
+                        host.remove_public_schema(schema, &files)?;
+                    }
+                    Ok(())
+                })
+                .map_err(CoreError::Other)?,
+            );
+        }
+        if empty {
+            host.write_reload_stamp(&root).map_err(CoreError::Other)?;
+        } else {
+            host.deploy().await.map_err(CoreError::Other)?;
+        }
+        core.update_state(|state| {
+            state.active_scheme = None;
+            if empty {
+                state.last_deploy = None;
+            } else if let Some(deploy) = state.last_deploy.as_mut() {
+                deploy.scheme_key = None;
+            }
+        })
+    }
+    .await;
+    if let Err(error) = result {
+        let rollback = receipt.rollback();
+        #[cfg(target_os = "windows")]
+        let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
+        let restore_state = core.update_state(|state| {
+            state.active_scheme = previous.active_scheme;
+            state.last_deploy = previous.last_deploy;
+        });
+        rollback.map_err(|restore| {
+            CoreError::Other(format!("{error}; restoring sources failed: {restore}"))
+        })?;
+        #[cfg(target_os = "windows")]
+        public_rollback.map_err(|restore| {
+            CoreError::Other(format!("{error}; restoring public schemas failed: {restore}"))
+        })?;
+        restore_state?;
+        let restore_deploy = host.deploy().await;
+        if let Some(lua) = user_rime_lua {
+            crate::scheme_files::write_file_atomic(
+                &safe_path(&root, "rime.lua").map_err(CoreError::Other)?,
+                lua.as_bytes(),
+            )?;
+        }
+        restore_deploy.map_err(|restore| {
+            CoreError::Other(format!(
+                "{error}; restoring the previous deployment failed: {restore}"
+            ))
+        })?;
+        return Err(error);
+    }
+    receipt.finish().map_err(CoreError::Other)?;
+    let store_manifest = checked_store_dir(core)?.join("active-manifest.json");
+    match fs::remove_file(store_manifest) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_relative(relative: &str) -> Result<(), String> {
@@ -1077,21 +1254,36 @@ pub(crate) fn cleanup_manifest(
     manifest: &BTreeMap<String, String>,
     incoming: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
+    let mut incoming = incoming.clone();
+    incoming.extend(
+        manifest
+            .keys()
+            .filter(|path| path.starts_with("lua/"))
+            .cloned(),
+    );
+    cleanup_manifest_with(root, manifest, &incoming, |relative| {
+        fs::remove_file(safe_path(root, relative)?).map_err(|error| error.to_string())
+    })
+}
+
+fn cleanup_manifest_with(
+    root: &Path,
+    manifest: &BTreeMap<String, String>,
+    incoming: &BTreeSet<String>,
+    mut remove: impl FnMut(&str) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
     let mut logs = Vec::new();
     for relative in manifest.keys() {
         safe_path(root, relative)?;
     }
     for (relative, expected) in manifest {
-        if incoming.contains(relative)
-            || excluded_from_manifest(relative)
-            || relative.starts_with("lua/")
-        {
+        if incoming.contains(relative) || excluded_from_manifest(relative) {
             continue;
         }
         let path = safe_path(root, relative)?;
         match sha256_file(&path) {
             Ok(digest) if digest == *expected => {
-                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                remove(relative)?;
                 logs.push(format!("[REMOVED] {relative}"));
             }
             Ok(_) => logs.push(format!("[KEPT] User-modified file: {relative}")),
@@ -1101,6 +1293,10 @@ pub(crate) fn cleanup_manifest(
     }
     Ok(logs)
 }
+
+#[cfg(test)]
+#[path = "package_removal_tests.rs"]
+mod removal_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1135,8 +1331,11 @@ mod tests {
         let root = dir.path().join("rime");
         fs::create_dir_all(&root).unwrap();
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("default.custom.yaml", zip::write::SimpleFileOptions::default())
-            .unwrap();
+        zip.start_file(
+            "default.custom.yaml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
         zip.write_all(b"patch:\n  schema_list:\n    - schema: keytao\n")
             .unwrap();
         let bytes = zip.finish().unwrap().into_inner();
