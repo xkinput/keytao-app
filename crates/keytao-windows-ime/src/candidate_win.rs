@@ -600,16 +600,20 @@ impl CandidateWindow {
         let scale = dpi_scale(self.owner_hwnd);
         let theme = current_theme();
         let model = candidate_panel_model(ime_state, embedded, &theme);
+        let mut work = self.available_area(POINT {
+            x: caret_x,
+            y: caret_y,
+        });
+        let margin = (theme.panel.screen_margin * scale).round() as i32;
+        work.left += margin;
+        work.right = (work.right - margin).max(work.left + 1);
+        let available_width = (work.right - work.left) as f32;
         let mut signature = PanelUploadSignature {
-            model: value_signature(&model),
+            model: value_signature(&(&model, available_width)),
             position: (0, 0),
             scale: scale.to_bits(),
             theme: value_signature(&theme),
         };
-        let work = self.available_area(POINT {
-            x: caret_x,
-            y: caret_y,
-        });
         // Input-pane COM calls can reenter the host after ensure_window().
         // Recheck before the cached-upload fast path trusts our visible flag.
         if !self.has_live_window() {
@@ -635,7 +639,7 @@ impl CandidateWindow {
         let Some(renderer) = &self.renderer else {
             return false;
         };
-        let rendered = renderer.render(&model, scale, theme);
+        let rendered = renderer.render(&model, scale, theme, available_width);
         let (w, h) = (rendered.width, rendered.height);
         if w == 0 || h == 0 {
             return false;

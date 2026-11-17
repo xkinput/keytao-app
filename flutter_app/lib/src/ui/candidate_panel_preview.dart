@@ -166,7 +166,7 @@ class CandidatePanelPreview extends StatelessWidget {
         _color(option, selected ? 'selectedCommentColor' : 'commentColor'),
         FontWeight.w400,
       );
-      final naturalWidth =
+      final width =
           measure(label, labelStyle).width +
           measure(_candidates[index], textStyle).width +
           inlineGap +
@@ -174,7 +174,6 @@ class CandidatePanelPreview extends StatelessWidget {
               ? 0
               : measure(comment, commentStyle).width + inlineGap) +
           _metric(option, 'paddingX') * 2;
-      final width = math.min(naturalWidth, _metric(option, 'maxWidth'));
       widths.add(width);
       candidates.add(
         Semantics(
@@ -289,10 +288,7 @@ class CandidatePanelPreview extends StatelessWidget {
             builder: (context, constraints) {
               final width = math.max(
                 naturalWidth + paddingX * 2,
-                math.min(
-                  _metric(panel, 'minWidth'),
-                  _metric(panel, 'maxWidth'),
-                ),
+                _metric(panel, 'minWidth'),
               );
               return Semantics(
                 container: true,

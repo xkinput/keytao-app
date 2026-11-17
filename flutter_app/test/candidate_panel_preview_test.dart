@@ -541,7 +541,7 @@ void main() {
       expect(rect.right, lessThanOrEqualTo(400));
       expect(tester.takeException(), isNull);
       if (sample.custom) {
-        expect(rect.width, 160);
+        expect(rect.width, greaterThan(320));
       } else {
         await _capture(tester, sample.name);
       }

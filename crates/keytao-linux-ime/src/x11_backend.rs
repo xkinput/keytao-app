@@ -318,9 +318,13 @@ impl KeyTaoHandler {
     /// Keep the whole panel on screen: a caret near the right or bottom edge
     /// would otherwise push half of it out of view.
     fn clamp_to_screen(&self, x: i32, y: i32, w: u32, h: u32) -> (i32, i32) {
-        let max_x = (self.screen_width - w as i32).max(0);
+        let margin = self
+            .renderer
+            .as_ref()
+            .map_or(0, PanelRenderer::screen_margin);
+        let max_x = (self.screen_width - w as i32 - margin).max(margin);
         let max_y = (self.screen_height - h as i32).max(0);
-        (x.clamp(0, max_x), y.clamp(0, max_y))
+        (x.clamp(margin, max_x), y.clamp(0, max_y))
     }
 
     fn draw_panel(&mut self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) {
@@ -424,7 +428,8 @@ impl KeyTaoHandler {
         } else {
             state
         };
-        let (pixels, w, h, hit_areas) = renderer.render_with_hit_areas(state);
+        let (pixels, w, h, hit_areas) =
+            renderer.render_with_hit_areas(state, self.screen_width as f32);
         self.panel_hit_areas = hit_areas;
         let (root_x, root_y) = self.last_anchor;
         // The panel now holds a composition, so the hint deadline must not be

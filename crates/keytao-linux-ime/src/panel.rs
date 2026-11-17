@@ -375,6 +375,8 @@ pub struct X11OverlayPanel {
     panel_win: u32,
     gc: u32,
     depth: u8,
+    screen_width: i32,
+    screen_height: i32,
     visible: bool,
     renderer: PanelRenderer,
 }
@@ -387,6 +389,8 @@ impl X11OverlayPanel {
         let root = screen.root;
         let visual = screen.root_visual;
         let depth = screen.root_depth;
+        let screen_width = screen.width_in_pixels as i32;
+        let screen_height = screen.height_in_pixels as i32;
 
         let panel_win = conn.generate_id().ok()?;
         conn.create_window(
@@ -417,6 +421,8 @@ impl X11OverlayPanel {
             panel_win,
             gc,
             depth,
+            screen_width,
+            screen_height,
             visible: false,
             renderer,
         })
@@ -427,7 +433,10 @@ impl X11OverlayPanel {
             self.hide();
             return;
         }
-        let (pixels, w, h) = self.renderer.render(state);
+        let (pixels, w, h) = self.renderer.render(state, self.screen_width as f32);
+        let margin = self.renderer.screen_margin();
+        let x = x.clamp(margin, (self.screen_width - w as i32 - margin).max(margin));
+        let y = y.clamp(0, (self.screen_height - h as i32).max(0));
         self.conn
             .configure_window(
                 self.panel_win,
@@ -589,15 +598,21 @@ impl PanelRenderer {
         crate::engine::candidate_panel_layout(&self.theme_resolver.current())
     }
 
+    pub fn screen_margin(&self) -> i32 {
+        self.s(self.theme_resolver.current().panel.screen_margin)
+            .ceil() as i32
+    }
+
     pub fn render_wayland(
         &mut self,
         state: Option<&ImeState>,
         ascii_mode: bool,
         scale: f32,
+        screen_width: f32,
     ) -> WaylandPanel {
         self.scale = scale;
         let (pixels, width, height, mut hit_areas) = if let Some(state) = state {
-            self.render_with_hit_areas(state)
+            self.render_with_hit_areas(state, screen_width * scale)
         } else {
             let (pixels, width, height) = self.render_mode_hint(ascii_mode);
             (pixels, width, height, PanelHitAreas::default())
@@ -643,13 +658,17 @@ impl PanelRenderer {
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
-    pub fn render(&self, state: &ImeState) -> (Vec<u8>, u32, u32) {
-        let (pixels, width, height, _) = self.render_with_hit_areas(state);
+    pub fn render(&self, state: &ImeState, screen_width: f32) -> (Vec<u8>, u32, u32) {
+        let (pixels, width, height, _) = self.render_with_hit_areas(state, screen_width);
         (pixels, width, height)
     }
 
     /// Like `render`, plus where each candidate and paging button was drawn.
-    pub fn render_with_hit_areas(&self, state: &ImeState) -> (Vec<u8>, u32, u32, PanelHitAreas) {
+    pub fn render_with_hit_areas(
+        &self,
+        state: &ImeState,
+        screen_width: f32,
+    ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
         let theme = scaled_candidate_panel(&self.theme_resolver.current());
         let model = theme
             .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
@@ -730,8 +749,12 @@ impl PanelRenderer {
             .s(theme.panel.min_width)
             .max(content_width + panel_pad_x * 2.0)
             .max(preedit_width)
-            .min(self.s(theme.panel.max_width))
-            .ceil() as u32;
+            .ceil()
+            .min(
+                (screen_width - self.screen_margin() as f32 * 2.0)
+                    .floor()
+                    .max(1.0),
+            ) as u32;
         let height = (content_height + panel_pad_y * 2.0)
             .min(self.s(theme.panel.max_height))
             .ceil()
@@ -1290,11 +1313,17 @@ mod tests {
 
         let mut state = ImeState::empty();
         state.candidates = vec![Candidate {
-            text: "候选".to_string(),
+            text: "候选".repeat(20),
             comment: None,
         }];
 
-        let (pixels, _, _) = renderer.render(&state);
+        let (pixels, width, _) = renderer.render(&state, 1920.0);
+        assert!(
+            width > 320,
+            "long candidate was capped at the legacy theme width"
+        );
+        let (_, constrained_width, _) = renderer.render(&state, 480.0);
+        assert_eq!(constrained_width, 480 - renderer.screen_margin() as u32 * 2);
         let visible_colors = pixels
             .chunks_exact(4)
             .filter(|pixel| pixel[3] > 0)
@@ -1326,14 +1355,18 @@ mod tests {
         }];
 
         let mut with_comment = base.clone();
-        with_comment.candidates[0].comment = Some("abcdefghijklmnopqrstuvwxyz".to_string());
+        with_comment.candidates[0].comment = Some("abcdefghijklmnopqrstuvwxyz".repeat(3));
 
-        let (_, base_width, _) = renderer.render(&base);
-        let (_, comment_width, _) = renderer.render(&with_comment);
+        let (_, base_width, _) = renderer.render(&base, 1920.0);
+        let (_, comment_width, _) = renderer.render(&with_comment, 1920.0);
 
         assert!(
             comment_width > base_width,
             "candidate comment did not affect rendered panel width"
+        );
+        assert!(
+            comment_width > 320,
+            "long comment was capped at the legacy theme width"
         );
     }
 
@@ -1429,8 +1462,8 @@ mod tests {
             comment: Some("~a".to_string()),
         }];
 
-        let (_, normal_width, normal_height) = normal.render(&state);
-        let (_, scaled_width, scaled_height) = scaled.render(&state);
+        let (_, normal_width, normal_height) = normal.render(&state, 1920.0);
+        let (_, scaled_width, scaled_height) = scaled.render(&state, 3840.0);
 
         assert!(scaled_width > normal_width);
         assert!(scaled_height > normal_height);

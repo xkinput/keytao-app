@@ -13,6 +13,7 @@ class CandidatePanel: NSPanel {
     private let containerView = NSView()
     private let stackView = NSStackView()
     private let candidateStack = NSStackView()
+    private lazy var candidateWidthConstraint = candidateStack.widthAnchor.constraint(lessThanOrEqualToConstant: 1)
     private var stackLeadingConstraint: NSLayoutConstraint?
     private var stackTrailingConstraint: NSLayoutConstraint?
     private var stackTopConstraint: NSLayoutConstraint?
@@ -92,7 +93,7 @@ class CandidatePanel: NSPanel {
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let chromeInset = Self.chromeInset
-        let maxWidth = min(theme.panel.maxWidth, max(80, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2))
+        let maxWidth = max(1, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2)
         let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2 - chromeInset * 2))
 
         stackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -110,6 +111,8 @@ class CandidatePanel: NSPanel {
         }
         if !model.candidates.isEmpty || model.navigation.canGoPrevious || model.navigation.canGoNext {
             stackView.addArrangedSubview(candidateStack)
+            candidateWidthConstraint.constant = max(1, maxWidth - theme.panel.paddingX * 2)
+            candidateWidthConstraint.isActive = true
         }
 
         for (position, candidate) in model.candidates.enumerated() {
@@ -124,6 +127,7 @@ class CandidatePanel: NSPanel {
             option.tag = candidate.index
             option.action = #selector(candidateClicked(_:))
             candidateStack.addArrangedSubview(option)
+            option.widthAnchor.constraint(lessThanOrEqualTo: candidateStack.widthAnchor).isActive = true
 
             if theme.candidate.separatorVisible && position < model.candidates.count - 1 {
                 candidateStack.addArrangedSubview(makeSeparator(theme: theme))
@@ -295,7 +299,6 @@ private final class CandidateOptionView: NSControl {
             contentStack.topAnchor.constraint(equalTo: topAnchor, constant: theme.candidate.paddingY),
             contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -theme.candidate.paddingY),
             heightAnchor.constraint(greaterThanOrEqualToConstant: theme.candidate.minHeight),
-            widthAnchor.constraint(lessThanOrEqualToConstant: theme.candidate.maxWidth),
         ])
 
         applyState()
@@ -307,11 +310,12 @@ private final class CandidateOptionView: NSControl {
 
     override var intrinsicContentSize: NSSize {
         let contentSize = contentStack.fittingSize
+        // Fitting size compresses the comment even when the screen has room.
+        let fields = [labelField, textField, commentField].filter { !$0.isHidden }
         return NSSize(
-            width: min(
-                contentSize.width + theme.candidate.paddingX * 2,
-                theme.candidate.maxWidth
-            ),
+            width: fields.reduce(0) { $0 + $1.intrinsicContentSize.width }
+                + CGFloat(fields.count - 1) * theme.candidate.inlineGap
+                + theme.candidate.paddingX * 2,
             height: max(
                 contentSize.height + theme.candidate.paddingY * 2,
                 theme.candidate.minHeight

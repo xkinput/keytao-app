@@ -44,6 +44,10 @@ use wayland_protocols::wp::{
     },
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
+use wayland_protocols::xdg::xdg_output::zv1::client::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1,
+    zxdg_output_v1::{self, ZxdgOutputV1},
+};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2},
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
@@ -349,7 +353,12 @@ impl App {
             logical_width,
             logical_height,
             hit_areas,
-        } = renderer.render_wayland(state, self.ascii_mode, self.panel_scale.scale(surface));
+        } = renderer.render_wayland(
+            state,
+            self.ascii_mode,
+            self.panel_scale.scale(surface),
+            self.panel_scale.screen_width(),
+        );
         if w == 0 || h == 0 {
             return;
         }
@@ -1118,6 +1127,26 @@ delegate_noop!(App: ignore WlBuffer);
 delegate_noop!(App: ignore WpFractionalScaleManagerV1);
 delegate_noop!(App: ignore WpViewporter);
 delegate_noop!(App: ignore WpViewport);
+delegate_noop!(App: ignore ZxdgOutputManagerV1);
+
+impl Dispatch<ZxdgOutputV1, u32> for App {
+    fn event(
+        state: &mut Self,
+        _: &ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        name: &u32,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let zxdg_output_v1::Event::LogicalSize { width, .. } = event {
+            state.panel_scale.output_logical_width(*name, width);
+            if state.panel_visible {
+                state.pressed_click = None;
+                state.redraw_panel(qh);
+            }
+        }
+    }
+}
 
 impl Dispatch<WlSurface, ()> for App {
     fn event(
@@ -1149,7 +1178,12 @@ impl Dispatch<WlOutput, u32> for App {
         qh: &QueueHandle<Self>,
     ) {
         state.panel_scale.output_event(output, &event);
-        if state.panel_visible && matches!(event, wl_output::Event::Scale { .. }) {
+        if state.panel_visible
+            && matches!(
+                event,
+                wl_output::Event::Scale { .. } | wl_output::Event::Done
+            )
+        {
             state.pressed_click = None;
             state.redraw_panel(qh);
         }
