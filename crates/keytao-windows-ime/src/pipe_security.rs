@@ -94,7 +94,15 @@ pub fn process_image(process: HANDLE) -> windows::core::Result<PathBuf> {
     )))
 }
 
-pub fn keytao_install_root() -> Result<PathBuf, String> {
+pub fn keytao_runtime_root() -> Result<PathBuf, String> {
+    let runtime = native_program_files_dir()?
+        .join("KeyTao")
+        .join("keytao-windows-ime-runtime");
+    crate::engine_config::resolve_install_root([runtime])
+        .ok_or_else(|| "cannot resolve KeyTao runtime root".into())
+}
+
+pub fn keytao_app_root() -> Result<PathBuf, String> {
     let installed = [
         (windows::core::w!("Software\\rea\\KeyTao"), PCWSTR::null()),
         (
@@ -106,15 +114,19 @@ pub fn keytao_install_root() -> Result<PathBuf, String> {
     .filter_map(|(key, name)| machine_registry_string(key, name).map(PathBuf::from));
     crate::engine_config::resolve_install_root(installed)
         .or_else(|| {
-            let program_files = machine_registry_string(
-                windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
-                windows::core::w!("ProgramFilesDir"),
-            )?;
-            let program_files =
-                crate::engine_config::resolve_install_root([PathBuf::from(program_files)])?;
+            let program_files = native_program_files_dir().ok()?;
             crate::engine_config::resolve_install_root([program_files.join("KeyTao")])
         })
-        .ok_or_else(|| "cannot resolve KeyTao installation directory".into())
+        .ok_or_else(|| "cannot resolve KeyTao app root".into())
+}
+
+fn native_program_files_dir() -> Result<PathBuf, String> {
+    machine_registry_string(
+        windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
+        windows::core::w!("ProgramFilesDir"),
+    )
+    .and_then(|path| crate::engine_config::resolve_install_root([PathBuf::from(path)]))
+    .ok_or_else(|| "cannot resolve native Program Files directory for KeyTao roots".into())
 }
 
 fn machine_registry_string(key: PCWSTR, name: PCWSTR) -> Option<String> {

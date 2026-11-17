@@ -42,7 +42,7 @@ use windows::{
 
 use crate::engine_backend::{EngineHandle, ImeEngineBackend};
 use crate::engine_config::is_descendant;
-use crate::pipe_security::{keytao_install_root, process_image, OwnedHandle};
+use crate::pipe_security::{keytao_runtime_root, process_image, OwnedHandle};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(80);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -539,12 +539,12 @@ fn verify_server_image(
         }
         Err(error) => return Err(format!("read engine server image path: {error}")),
     };
-    let root = keytao_install_root()?;
+    let root = keytao_runtime_root()?;
     let image = image
         .canonicalize()
         .map_err(|error| format!("resolve engine server image path: {error}"))?;
     if !is_descendant(&image, &root) {
-        return Err("engine server image is outside the KeyTao installation".into());
+        return Err("engine server image is outside the KeyTao runtime root".into());
     }
     log_server_verification("exe_path");
     Ok(())

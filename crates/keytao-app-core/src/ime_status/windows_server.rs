@@ -601,12 +601,13 @@ fn starts_with_ci(path: &Path, prefix: &Path) -> bool {
 fn verify_installation_path(path: &Path) -> Result<(), String> {
     let root = program_files_dir()?
         .join("KeyTao")
+        .join("keytao-windows-ime-runtime")
         .canonicalize()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("resolve KeyTao runtime root: {error}"))?;
     if path.components().count() > root.components().count() && starts_with_ci(path, &root) {
         Ok(())
     } else {
-        Err("IME server image is outside Program Files\\KeyTao".into())
+        Err("IME server image is outside the KeyTao runtime root".into())
     }
 }
 
