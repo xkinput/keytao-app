@@ -25,21 +25,23 @@ fn main() {
         .find(|arg| arg == "--deploy" || arg == "--deploy-public")
     {
         let code = keytao_windows_ime::engine_backend::InProcEngine::deploy_server(|| {
-            if subcommand == "--deploy-public" {
+            let code = if subcommand == "--deploy-public" {
                 keytao_core::deploy_child::run_deploy_child_main_with_action(
                     "--deploy-public",
                     keytao_app_core::windows_public_schemas::deploy_and_publish,
                 )
             } else {
                 keytao_core::deploy_child::run_deploy_child_main()
-            }
+            };
+            // Exit before deploy_server drops and unloads the librime DLL.
+            keytao_core::deploy_child::exit_deploy_child(code)
         })
         .unwrap_or_else(|error| {
             eprintln!("KeyTao deploy child: {error}");
             println!("{}", serde_json::json!({"ok": false, "error": error}));
             1
         });
-        std::process::exit(code);
+        keytao_core::deploy_child::exit_deploy_child(code);
     }
     if let Err(error) = server::run() {
         eprintln!("KeyTao IME server: {error}");

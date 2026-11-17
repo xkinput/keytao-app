@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     io::{self, BufRead, BufReader, Read, Write},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -82,7 +82,7 @@ fn write_message(output: &mut impl Write, message: &Message) -> Result<(), Strin
         .map_err(|error| format!("cannot flush deployment protocol: {error}"))
 }
 
-/// Handle exactly `--deploy`; binaries must exit with the returned code.
+/// Handle exactly `--deploy`; binaries must pass the code to [`exit_deploy_child`].
 /// No engine session or caller-supplied data paths are accepted.
 pub fn run_deploy_child_main() -> i32 {
     run_deploy_child_main_with_action(DEPLOY_SUBCOMMAND, || {
@@ -114,6 +114,35 @@ pub fn run_deploy_child_main_with_action(
         subcommand,
         action,
     )
+}
+
+/// Flush deployment output and terminate without running librime's static destructors.
+pub fn exit_deploy_child(code: i32) -> ! {
+    let code = if io::stdout().flush().is_ok() {
+        code
+    } else {
+        1
+    };
+    let _ = io::stderr().flush();
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn _exit(code: i32) -> !;
+        }
+        // A failed deploy can leave Deployer's maintenance thread joinable.
+        _exit(code)
+    }
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn TerminateProcess(process: *mut std::ffi::c_void, code: u32) -> i32;
+        }
+        // ExitProcess still runs DLL detach handlers and their C++ destructors.
+        TerminateProcess(GetCurrentProcess(), code as u32);
+        std::process::abort();
+    }
 }
 
 fn child_main(
@@ -184,17 +213,13 @@ impl Protocol {
         Ok(None)
     }
 
-    fn finish(self, exit_code: Option<i32>) -> Result<(), String> {
-        let result = self
-            .final_result
-            .ok_or("deploy child did not emit a final result")?;
-        if exit_code != Some(0) {
-            return Err(format!(
-                "deploy child exited unsuccessfully ({exit_code:?}): {}",
-                result.err().unwrap_or_default()
-            ));
+    fn finish(self, status: ExitStatus) -> Result<(), String> {
+        match self.final_result {
+            Some(Err(error)) => Err(error),
+            _ if !status.success() => Err(format!("deploy child exited unsuccessfully ({status})")),
+            Some(Ok(())) => Ok(()),
+            None => Err("deploy child did not emit a final result".into()),
         }
-        result
     }
 }
 
@@ -307,7 +332,7 @@ fn wait_for_child(
                 .try_wait()
                 .map_err(|error| format!("cannot wait for deploy child: {error}"))?
             {
-                return protocol.finish(status.code());
+                return protocol.finish(status);
             }
             thread::sleep(remaining.min(Duration::from_millis(10)));
         } else {
@@ -335,29 +360,33 @@ mod tests {
         for (output, code, expected) in [
             (
                 "{\"progress\":\"Compiling...\"}\n{\"ok\":true}\n",
-                Some(0),
+                0,
                 Ok(()),
             ),
             (
                 "{\"ok\":false,\"error\":\"compile failed\"}\n",
-                Some(0),
+                0,
+                Err("compile failed"),
+            ),
+            (
+                "{\"ok\":false,\"error\":\"compile failed\"}\n",
+                1,
                 Err("compile failed"),
             ),
             (
                 "{\"progress\":\"Compiling...\"}\n",
-                Some(0),
+                0,
                 Err("deploy child did not emit a final result"),
             ),
-            ("", Some(0), Err("deploy child did not emit a final result")),
+            ("", 0, Err("deploy child did not emit a final result")),
             (
                 "{\"ok\":true}\n",
-                Some(1),
-                Err("deploy child exited unsuccessfully (Some(1)): "),
-            ),
-            (
-                "{\"ok\":true}\n",
-                None,
-                Err("deploy child exited unsuccessfully (None): "),
+                1,
+                Err(if cfg!(unix) {
+                    "deploy child exited unsuccessfully (exit status: 1)"
+                } else {
+                    "deploy child exited unsuccessfully (exit code: 1)"
+                }),
             ),
         ] {
             let mut protocol = Protocol::default();
@@ -367,8 +396,18 @@ mod tests {
                     progress.push(message);
                 }
             }
+            #[cfg(unix)]
+            let status = {
+                use std::os::unix::process::ExitStatusExt;
+                ExitStatus::from_raw(code << 8)
+            };
+            #[cfg(windows)]
+            let status = {
+                use std::os::windows::process::ExitStatusExt;
+                ExitStatus::from_raw(code)
+            };
             assert_eq!(
-                protocol.finish(code),
+                protocol.finish(status),
                 expected.map_err(str::to_owned),
                 "{output:?}"
             );
@@ -459,6 +498,54 @@ mod tests {
     }
 
     #[test]
+    fn child_exit_preserves_result_and_skips_static_destructors() {
+        const CHILD: &str = "KEYTAO_DEPLOY_EXIT_TEST";
+        if let Ok(outcome) = std::env::var(CHILD) {
+            #[cfg(unix)]
+            unsafe {
+                extern "C" {
+                    fn atexit(callback: extern "C" fn()) -> i32;
+                }
+                extern "C" fn abort_on_normal_exit() {
+                    std::process::abort();
+                }
+                assert_eq!(atexit(abort_on_normal_exit), 0);
+            }
+            let code = child_main(
+                [OsString::from(DEPLOY_SUBCOMMAND)].into_iter(),
+                &mut io::stdout().lock(),
+                DEPLOY_SUBCOMMAND,
+                || match outcome.as_str() {
+                    "success" => Ok(()),
+                    "failure" => Err("compile failed".into()),
+                    _ => panic!("unexpected child outcome"),
+                },
+            );
+            exit_deploy_child(code);
+        }
+        for (outcome, code, final_line) in [
+            ("success", 0, "{\"ok\":true}\n"),
+            (
+                "failure",
+                1,
+                "{\"ok\":false,\"error\":\"compile failed\"}\n",
+            ),
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "deploy_child::tests::child_exit_preserves_result_and_skips_static_destructors",
+                    "--nocapture",
+                ])
+                .env(CHILD, outcome)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(code), "{output:?}");
+            assert!(output.stdout.ends_with(final_line.as_bytes()), "{output:?}");
+        }
+    }
+
+    #[test]
     fn action_child_runs_only_requested_action_and_rejects_extra_arguments() {
         for args in [
             vec!["--deploy-public"],
@@ -527,6 +614,39 @@ printf '%s\n' '{"progress":"Compiling..."}' '{"ok":true}'
         std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
         assert_eq!(result, Ok(()));
         assert_eq!(progress, ["Compiling..."]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_preserves_final_error_after_signal() {
+        let exe = helper_script(
+            "signal-error",
+            "printf '%s\\n' '{\"ok\":false,\"error\":\"Rime deploy failed: compile failed\"}'; kill -TERM $$",
+        );
+        let result = run_deploy_child(&exe, Duration::from_secs(5));
+        std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
+        assert_eq!(result, Err("Rime deploy failed: compile failed".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_reports_signal_without_treating_done_as_success() {
+        for (name, body) in [
+            ("signal-silent", "kill -TERM $$"),
+            (
+                "signal-done",
+                "printf '%s\\n' '{\"ok\":true}'; kill -TERM $$",
+            ),
+        ] {
+            let exe = helper_script(name, body);
+            let error = run_deploy_child(&exe, Duration::from_secs(5)).unwrap_err();
+            std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
+            assert!(
+                error.contains("deploy child exited unsuccessfully"),
+                "{error}"
+            );
+            assert!(error.contains("signal: 15"), "{error}");
+        }
     }
 
     #[cfg(target_os = "linux")]

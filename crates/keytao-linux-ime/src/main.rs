@@ -256,7 +256,9 @@ fn main() {
         .skip(1)
         .any(|arg| arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND)
     {
-        std::process::exit(keytao_core::deploy_child::run_deploy_child_main());
+        keytao_core::deploy_child::exit_deploy_child(
+            keytao_core::deploy_child::run_deploy_child_main(),
+        );
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
