@@ -22,6 +22,8 @@ pub struct PackageMeta {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_base_version: Option<String>,
     pub manifest: BTreeMap<String, String>,
     pub zip_sha256: String,
 }
@@ -490,6 +492,7 @@ pub(crate) fn store_cloud_archive_reader(
             // Built-in names and variants resolve through the UI catalogue.
             None
         },
+        selection_base_version: None,
         manifest,
         zip_sha256: digest,
     };
@@ -648,6 +651,7 @@ pub(crate) fn finalize_pending(
             .as_secs(),
         source: previous.map_or_else(|| "official".into(), |meta| meta.source),
         display_name,
+        selection_base_version: None,
         manifest: receipt.manifest.clone(),
         zip_sha256: receipt.zip_sha256.clone(),
     };
@@ -665,9 +669,6 @@ pub(crate) fn finalize_pending(
     archive.as_file().sync_all()?;
     archive
         .persist(archive_path)
-        .map_err(|error| CoreError::from(error.error))?;
-    temporary
-        .persist(dir.join(format!("{scheme_key}.json")))
         .map_err(|error| CoreError::from(error.error))?;
     if active {
         let active_manifest = ActiveManifest {
@@ -702,12 +703,59 @@ pub(crate) fn finalize_pending(
             .persist(dir.join("active-manifest.json"))
             .map_err(|error| CoreError::from(error.error))?;
     }
+    temporary
+        .persist(dir.join(format!("{scheme_key}.json")))
+        .map_err(|error| CoreError::from(error.error))?;
     *pending = None;
     if !preserve_cloud_id && core.state().scheme_cloud_ids.contains_key(scheme_key) {
         core.update_state(|state| {
             state.scheme_cloud_ids.remove(scheme_key);
         })?;
     }
+    Ok(())
+}
+
+fn select_package_primary_schema(receipt: &PendingPackage) -> Result<(), CoreError> {
+    let mut archive = zip::ZipArchive::new(BufReader::new(receipt.archive.reopen()?))
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    let Some(index) = archive.file_names().position(|name| {
+        matches!(
+            name.rsplit('/').next(),
+            Some("default.custom.yaml" | "default-custom.yaml")
+        )
+    }) else {
+        return Ok(());
+    };
+    let mut config = String::new();
+    archive
+        .by_index(index)
+        .map_err(|error| CoreError::Other(error.to_string()))?
+        .read_to_string(&mut config)?;
+    let Some(primary) = crate::scheme_files::parse_schema_list(&config)
+        .into_iter()
+        .next()
+    else {
+        return Ok(());
+    };
+    let path = safe_path(Path::new(&receipt.root), "user.yaml").map_err(CoreError::Other)?;
+    let mut user: serde_yaml::Mapping = match fs::read(&path) {
+        Ok(bytes) => serde_yaml::from_slice(&bytes)
+            .map_err(|error| CoreError::Other(format!("Cannot read user.yaml: {error}")))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_yaml::Mapping::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let vars = user
+        .entry(serde_yaml::Value::String("var".into()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        .as_mapping_mut()
+        .ok_or_else(|| CoreError::Other("user.yaml var must be a mapping".into()))?;
+    vars.insert(
+        serde_yaml::Value::String("previously_selected_schema".into()),
+        serde_yaml::Value::String(primary),
+    );
+    let content =
+        serde_yaml::to_string(&user).map_err(|error| CoreError::Other(error.to_string()))?;
+    crate::scheme_files::write_file_atomic(&path, content.as_bytes())?;
     Ok(())
 }
 
@@ -726,13 +774,42 @@ pub fn record_package(
             .unwrap_or_else(|error| error.into_inner()) = None;
         return Ok(());
     }
-    let installed_root = core
-        .pending_package
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .as_ref()
-        .filter(|receipt| !receipt.root.is_empty())
-        .map(|receipt| PathBuf::from(&receipt.root));
+    let state = core.state();
+    let selection_base_version = if crate::scheme::is_local_scheme_key(scheme_key)
+        && state.active_scheme.as_deref() == Some(scheme_key)
+    {
+        stored_metadata(core, scheme_key)?.and_then(|meta| meta.selection_base_version)
+    } else {
+        None
+    };
+    let updating_active_package = state.active_scheme.as_deref() == Some(scheme_key)
+        && state
+            .installed_packages
+            .get(scheme_key)
+            .is_some_and(|package| {
+                has_scheme_update(
+                    selection_base_version
+                        .as_deref()
+                        .or(package.version.as_deref())
+                        .unwrap_or_default(),
+                    version.unwrap_or_default(),
+                )
+            });
+    let installed_root = {
+        let pending = core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(receipt) = pending.as_ref().filter(|receipt| !receipt.root.is_empty()) {
+            // Only a same-package version update preserves a manual schema selection.
+            if !updating_active_package {
+                select_package_primary_schema(receipt)?;
+            }
+            Some(PathBuf::from(&receipt.root))
+        } else {
+            None
+        }
+    };
     finalize_pending(core, scheme_key, version, active)?;
     core.update_state(|state| {
         state.installed_packages.insert(
@@ -1049,6 +1126,34 @@ mod tests {
             Arc::new(NullSink),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn package_selection_rejects_invalid_user_yaml_without_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let root = dir.path().join("rime");
+        fs::create_dir_all(&root).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("default.custom.yaml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"patch:\n  schema_list:\n    - schema: keytao\n")
+            .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        stage_install(
+            &core,
+            &bytes,
+            BTreeMap::new(),
+            root.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        for user in ["var: [\n", "- keep\n", "var: keep\n", "var: {}\nvar: {}\n"] {
+            fs::write(root.join("user.yaml"), user).unwrap();
+            assert!(record_package(&core, "keytao", Some("v1"), true).is_err());
+            assert_eq!(fs::read_to_string(root.join("user.yaml")).unwrap(), user);
+            assert!(core.state().active_scheme.is_none());
+            assert!(core.pending_package.lock().unwrap().is_some());
+        }
     }
 
     #[test]
