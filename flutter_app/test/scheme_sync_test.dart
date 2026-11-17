@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/platform/android_host.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
@@ -10,6 +11,27 @@ class SyncCore implements RustLibApi {
   bool enabled = false;
   int accountId = 1;
   Map<String, dynamic>? cloudProfile;
+  Map<String, dynamic>? savedSettings;
+  String? accentOverride;
+  String? writtenAccent;
+  double? radius;
+  String background = '';
+  ImeUiSettingsDto get ui => ImeUiSettingsDto(
+    colorScheme: UiColorSchemeDto.auto,
+    effectiveColorScheme: EffectiveColorSchemeDto.dark,
+    orientation: PanelOrientationDto.vertical,
+    embeddedComposition: true,
+    hideCandidatePanel: true,
+    showTrayModeIndicator: true,
+    effectiveEmbeddedComposition: true,
+    accentColor: accentOverride ?? '#4A8DF6',
+    accentColorOverride: accentOverride,
+    fontSize: 24,
+    cornerRadius: radius,
+    backgroundColor: background,
+    themeExists: true,
+    message: '',
+  );
   final profile = <String, dynamic>{
     'version': 1,
     'active_scheme': 'keytao',
@@ -21,11 +43,24 @@ class SyncCore implements RustLibApi {
   dynamic noSuchMethod(Invocation invocation) {
     final method = invocation.memberName.toString();
     calls.add(method);
+    if (method.contains('GetImeUiSettings')) {
+      return Future<ImeUiSettingsDto>.value(ui);
+    }
+    if (method.contains('SetImeUiSettings')) {
+      writtenAccent = invocation.namedArguments[#accentColor] as String?;
+      accentOverride = writtenAccent ?? accentOverride;
+      radius = invocation.namedArguments[#cornerRadius] as double?;
+      background = invocation.namedArguments[#backgroundColor] as String;
+      return Future<ImeUiSettingsDto>.value(ui);
+    }
     if (method.contains('GetSchemeSyncState') ||
         method.contains('SetSchemeSyncPreferences')) {
+      if (invocation.namedArguments[#settingsJson] case final String json) {
+        savedSettings = jsonDecode(json) as Map<String, dynamic>;
+      }
       return Future<String>.value(
         jsonEncode({
-          'settings': <String, dynamic>{},
+          'settings': savedSettings ?? <String, dynamic>{},
           'follow_account_sync': enabled,
           'synced_schemes': ['keytao'],
         }),
@@ -42,6 +77,14 @@ class SyncCore implements RustLibApi {
     if (method.contains('ExportSchemeProfile')) {
       return Future<String>.value(jsonEncode(profile));
     }
+    if (method.contains('ApplySchemeProfile')) {
+      return Future<String>.value(
+        invocation.namedArguments[#profileJson] as String,
+      );
+    }
+    if (method.contains('ListInstalledPackages')) {
+      return Future<List<InstalledPackageDto>>.value([]);
+    }
     if (method.contains('ListCloudPackages')) {
       return Future<String>.value('[]');
     }
@@ -55,6 +98,14 @@ class SyncCore implements RustLibApi {
     }
     throw StateError('Unexpected bridge call: $method');
   }
+}
+
+class SyncAndroidHost extends AndroidHost {
+  @override
+  Future<Map<String, dynamic>> storagePermissionStatus() async => {
+    'granted': true,
+    'writable': true,
+  };
 }
 
 void main() {
@@ -77,6 +128,67 @@ void main() {
   tearDown(() {
     controller.dispose();
     RustLib.dispose();
+  });
+
+  for (final platform in [BridgePlatform.android, BridgePlatform.ios]) {
+    testWidgets(
+      '$platform saves and syncs appearance without forcing an accent',
+      (tester) async {
+        controller.dispose();
+        controller = AppController(
+          info: BridgeInfo(
+            platform: platform,
+            appVersion: 'test',
+            userRoot: '/local/rime',
+          ),
+          android: SyncAndroidHost(),
+        );
+        expect(await controller.saveUi(cornerRadius: 24), isTrue);
+        expect(api.writtenAccent, isNull);
+        expect(api.savedSettings!['ime_ui'], {
+          'color_scheme': 'auto',
+          'corner_radius': 24.0,
+          'background_color': '',
+        });
+        expect(await controller.saveUi(accentColor: '#123456'), isTrue);
+        expect(api.writtenAccent, '#123456');
+        expect(await controller.saveUi(backgroundColor: '#654321'), isTrue);
+        expect(api.writtenAccent, isNull);
+        expect(api.savedSettings!['ime_ui']['accent_color'], '#123456');
+        api.accentOverride = null;
+        expect(await controller.saveUi(backgroundColor: '#ABCDEF'), isTrue);
+        expect(api.writtenAccent, isNull);
+        expect(
+          api.savedSettings!['ime_ui'].containsKey('accent_color'),
+          isFalse,
+        );
+        controller.pendingCloudProfile = {
+          ...api.profile,
+          'settings': {
+            'ime_ui': {'corner_radius': 8},
+          },
+        };
+        expect(await controller.applyCloudProfile(), isTrue);
+        expect(api.writtenAccent, isNull);
+        expect(api.accentOverride, isNull);
+        expect(api.radius, 8);
+      },
+    );
+  }
+
+  testWidgets('desktop export keeps the complete IME UI settings', (
+    tester,
+  ) async {
+    expect(await controller.saveUi(cornerRadius: 24), isTrue);
+    expect(api.savedSettings!['ime_ui'], {
+      'color_scheme': 'auto',
+      'orientation': 'vertical',
+      'corner_radius': 24.0,
+      'background_color': '',
+      'font_size': 24.0,
+      'embedded_composition': true,
+      'hide_candidate_panel': true,
+    });
   });
 
   testWidgets('account sync stays off until enabled', (tester) async {

@@ -387,23 +387,31 @@ String resolveCandidatePanelPreview({
   required String accentColor,
   required double fontSize,
   required bool systemDark,
+  double? cornerRadius,
+  required String backgroundColor,
 }) => RustLib.instance.api.crateApiCoreResolveCandidatePanelPreview(
   colorScheme: colorScheme,
   accentColor: accentColor,
   fontSize: fontSize,
   systemDark: systemDark,
+  cornerRadius: cornerRadius,
+  backgroundColor: backgroundColor,
 );
 
 Future<ImeUiSettingsDto> setImeUiSettings({
   required UiColorSchemeDto colorScheme,
   required PanelOrientationDto orientation,
-  required String accentColor,
+  String? accentColor,
   required double fontSize,
+  double? cornerRadius,
+  required String backgroundColor,
 }) => RustLib.instance.api.crateApiCoreSetImeUiSettings(
   colorScheme: colorScheme,
   orientation: orientation,
   accentColor: accentColor,
   fontSize: fontSize,
+  cornerRadius: cornerRadius,
+  backgroundColor: backgroundColor,
 );
 
 Future<ImeUiSettingsDto> setImeEmbeddedComposition({required bool embedded}) =>

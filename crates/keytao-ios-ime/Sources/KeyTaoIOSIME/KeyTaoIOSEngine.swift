@@ -710,10 +710,15 @@ final class KeyTaoIOSEngine {
         }
     }
 
-    func persistThemeUi(colorScheme: String, accentHex: String?) -> Bool {
+    func persistThemeUi(colorScheme: String, accentHex: String?, resetAppearance: Bool = false) -> Bool {
         let path = KeyTaoIOSPaths.themeFile(userRoot: userRoot).path
         let written = path.withCString { pathPointer in
             colorScheme.withCString { schemePointer in
+                if resetAppearance {
+                    return "".withCString { clearPointer in
+                        keytao_write_theme_appearance(pathPointer, schemePointer, clearPointer, -1, clearPointer)
+                    }
+                }
                 if let accentHex {
                     return accentHex.withCString { accentPointer in
                         keytao_write_theme_ui(pathPointer, schemePointer, accentPointer)

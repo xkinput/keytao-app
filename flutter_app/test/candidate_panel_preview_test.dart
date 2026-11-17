@@ -18,7 +18,7 @@ import 'package:keytao/src/ui/widgets.dart';
 import 'view_fixture.dart';
 
 class _PreviewController extends ViewController {
-  _PreviewController() : super(BridgePlatform.macOs);
+  _PreviewController([super.platform = BridgePlatform.macOs]);
 
   final savedFonts = <double>[];
   Completer<bool>? saveGate;
@@ -27,6 +27,9 @@ class _PreviewController extends ViewController {
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,
     String? accentColor,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+    String? backgroundColor,
     double? fontSize,
   }) {
     final current = uiSettings!;
@@ -39,6 +42,10 @@ class _PreviewController extends ViewController {
       showTrayModeIndicator: current.showTrayModeIndicator,
       effectiveEmbeddedComposition: current.effectiveEmbeddedComposition,
       accentColor: accentColor ?? current.accentColor,
+      cornerRadius: resetCornerRadius
+          ? null
+          : cornerRadius ?? current.cornerRadius,
+      backgroundColor: backgroundColor ?? current.backgroundColor,
       fontSize: fontSize ?? current.fontSize,
       themeExists: current.themeExists,
       themePath: current.themePath,
@@ -53,6 +60,9 @@ class _PreviewController extends ViewController {
     PanelOrientationDto? orientation,
     bool? hideCandidatePanel,
     String? accentColor,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+    String? backgroundColor,
     double? fontSize,
   }) async {
     if (fontSize != null) savedFonts.add(fontSize);
@@ -61,6 +71,9 @@ class _PreviewController extends ViewController {
       colorScheme: colorScheme,
       orientation: orientation,
       accentColor: accentColor,
+      cornerRadius: cornerRadius,
+      resetCornerRadius: resetCornerRadius,
+      backgroundColor: backgroundColor,
       fontSize: fontSize,
     );
     return true;
@@ -86,7 +99,7 @@ Future<void> _pumpSettings(
   addTearDown(controller.dispose);
   await tester.pumpWidget(
     KeyTaoTheme(
-      platform: BridgePlatform.macOs,
+      platform: controller.info.platform,
       home: FScaffold(
         child: SingleChildScrollView(
           child: Padding(
@@ -182,10 +195,7 @@ void main() {
       expect(find.text(key), findsNothing);
     }
     for (final label in ['⇧', '⌫', '123', '，', '键道6', '。', '↵']) {
-      expect(
-        find.byKey(ValueKey('keyboard-preview-key-$label')),
-        findsNothing,
-      );
+      expect(find.byKey(ValueKey('keyboard-preview-key-$label')), findsNothing);
     }
     expect(find.text('1'), findsOneWidget);
     expect(find.text('@'), findsOneWidget);
@@ -310,7 +320,12 @@ void main() {
       await tester.ensureVisible(green);
       await tester.tap(green);
       await tester.pump();
-      expect(controller.previewAccent, '#0F9F8F');
+      expect(
+        tester
+            .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
+            .theme['ui']['accentColor'],
+        {'red': 15, 'green': 159, 'blue': 143, 'alpha': 255},
+      );
       expect(controller.uiSettings!.accentColor, '#3B73D9');
       controller.saveGate!.complete(true);
       await tester.pumpAndSettle();
@@ -339,6 +354,108 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  for (final entry in {
+    BridgePlatform.macOs: TargetPlatform.macOS,
+    BridgePlatform.android: TargetPlatform.android,
+  }.entries) {
+    testWidgets('${entry.key.name} appearance edits update the live preview', (
+      tester,
+    ) async {
+      final controller = _PreviewController(entry.key);
+      await _pumpSettings(tester, controller);
+      final panel = entry.key == BridgePlatform.android
+          ? find.byKey(const ValueKey('mobile-keyboard-preview'))
+          : _panel;
+      BoxDecoration decoration(Finder finder) =>
+          tester.widget<Container>(finder).decoration! as BoxDecoration;
+      final originalColor = decoration(panel).color;
+      final radius = tester.widget<SliderSetting>(
+        find.widgetWithText(SliderSetting, '圆角'),
+      );
+      radius.onPreview!(24);
+      await tester.pump();
+      expect(decoration(panel).borderRadius, BorderRadius.circular(24));
+      final preview = tester.widget<CandidatePanelPreview>(
+        find.byType(CandidatePanelPreview),
+      );
+      expect(preview.theme['candidate']['cornerRadius'], 16.5);
+      if (controller.isMobile) {
+        expect(
+          decoration(find.byKey(const ValueKey('keyboard-preview-key-q')))
+              .borderRadius,
+          BorderRadius.circular(15),
+        );
+      }
+      radius.onPreview!(0);
+      await tester.pump();
+      expect(decoration(panel).borderRadius, BorderRadius.zero);
+      controller.saveGate = Completer<bool>();
+      radius.onChanged!(0);
+      await tester.pump();
+      expect(controller.uiSettings!.cornerRadius, isNull);
+      controller.saveGate!.complete(true);
+      await tester.pumpAndSettle();
+      expect(controller.uiSettings!.cornerRadius, 0);
+
+      final picker = find.byType(BackgroundPicker);
+      final custom = find.descendant(
+        of: picker,
+        matching: find.byIcon(FLucideIcons.pipette),
+      );
+      Future<void> editBackground() async {
+        await tester.ensureVisible(custom);
+        await tester.tap(custom);
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.descendant(
+            of: find.byType(AppDialog),
+            matching: find.byType(EditableText),
+          ),
+          '#102030',
+        );
+        await tester.pump();
+      }
+
+      await editBackground();
+      expect(decoration(panel).color, isNot(originalColor));
+      expect(decoration(panel).color!.a, originalColor!.a);
+      expect(controller.uiSettings!.backgroundColor, isEmpty);
+      if (controller.isMobile) {
+        expect(
+          decoration(find.byKey(const ValueKey('keyboard-preview-key-q')))
+              .color,
+          const Color(0xAA2A303A),
+        );
+      }
+      await tester.tap(find.text(AppStrings.cancel));
+      await tester.pumpAndSettle();
+      expect(decoration(panel).color, originalColor);
+
+      await editBackground();
+      controller.saveGate = Completer<bool>();
+      await tester.tap(find.text(AppStrings.apply));
+      await tester.pumpAndSettle();
+      expect(controller.uiSettings!.backgroundColor, isEmpty);
+      expect(decoration(panel).color, isNot(originalColor));
+      controller.saveGate!.complete(true);
+      await tester.pumpAndSettle();
+      expect(controller.uiSettings!.backgroundColor, '#102030');
+      expect(decoration(panel).borderRadius, BorderRadius.zero);
+
+      final reset = find.descendant(
+        of: picker,
+        matching: find.byIcon(FLucideIcons.rotateCcw),
+      );
+      await tester.ensureVisible(reset);
+      await tester.tap(reset);
+      await tester.pumpAndSettle();
+      expect(controller.uiSettings!.backgroundColor, isEmpty);
+      expect(decoration(panel).color, originalColor);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, variant: TargetPlatformVariant.only(entry.value));
+  }
 
   for (final sample in [
     (

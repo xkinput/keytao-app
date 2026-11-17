@@ -822,6 +822,61 @@ mod tests {
     }
 
     #[test]
+    fn appearance_file_updates_reach_panel_pixels_without_engine_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.yaml");
+        let resolver = keytao_theme::ThemeResolver::with_system_scheme(
+            None,
+            Some(path.clone()),
+            Some(keytao_theme::EffectiveColorScheme::Light),
+        );
+        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let render = || {
+            let theme = resolver.current();
+            let model = theme.candidate_panel_model(
+                CandidatePanelInput {
+                    preedit: String::new(),
+                    candidates: Vec::new(),
+                    highlighted_candidate_index: 0,
+                    page: 0,
+                    is_last_page: true,
+                    select_keys: None,
+                },
+                &UiCapabilities::full_custom(),
+            );
+            renderer.render(&model, 1.0, theme)
+        };
+        let rounded = render();
+        keytao_theme::write_ime_ui_settings_to_path(
+            &path,
+            keytao_theme::UiColorScheme::Light,
+            PanelOrientation::Vertical,
+            Some("#4A8DF6".into()),
+            20.0,
+            Some(0.0),
+            "#2468AC".into(),
+        )
+        .unwrap();
+        let square = render();
+        assert_eq!(
+            (rounded.width, rounded.height),
+            (square.width, square.height)
+        );
+        let pixel = |panel: &super::RenderedPanel, x: u32, y: u32| {
+            let offset = ((y * panel.width + x) * 4) as usize;
+            <[u8; 4]>::try_from(&panel.pixels[offset..offset + 4]).unwrap()
+        };
+        assert_eq!(pixel(&rounded, 2, 2)[3], 0);
+        assert!(pixel(&square, 2, 2)[3] > 0);
+        let background = pixel(&square, square.width / 2, 3);
+        assert_eq!(background[3], 0xF2);
+        for (actual, channel) in background[..3].iter().zip([0xACu16, 0x68, 0x24]) {
+            let expected = (channel * 0xF2 + 127) / 255;
+            assert!((*actual as i32 - expected as i32).abs() <= 1);
+        }
+    }
+
+    #[test]
     fn mode_hint_uses_candidate_font_measurement_and_ignores_legacy_box_fields() {
         let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
         let mut theme = ResolvedImeTheme::default();

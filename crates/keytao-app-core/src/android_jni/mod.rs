@@ -2,9 +2,9 @@
 //! The host owns the cdylib; this module owns the IME runtime and JNI boundary.
 
 use jni::{
+    JNIEnv,
     objects::{JByteArray, JObject, JString},
     sys::{jboolean, jint, jlong, jstring},
-    JNIEnv,
 };
 use serde::Serialize;
 use std::{
@@ -525,35 +525,91 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeWriteTh
     accent_hex: JString<'_>,
 ) -> jboolean {
     android_jni_guard("nativeWriteThemeUi", 0, || {
-        let Some(path) = optional_jni_path(&mut env, path) else {
-            return 0;
-        };
-        let Some(color_scheme) = optional_jni_text(&mut env, color_scheme) else {
-            return 0;
-        };
-        let color_scheme = match color_scheme.to_ascii_lowercase().as_str() {
-            "auto" => keytao_theme::UiColorScheme::Auto,
-            "light" => keytao_theme::UiColorScheme::Light,
-            "dark" => keytao_theme::UiColorScheme::Dark,
-            _ => return 0,
-        };
-        let accent_hex = if accent_hex.is_null() {
-            None
-        } else {
-            let Ok(accent_hex) = env.get_string(&accent_hex) else {
-                return 0;
-            };
-            Some(accent_hex.to_string_lossy().trim().to_owned())
-        };
-        if keytao_theme::write_theme_ui_to_path(&path, color_scheme, accent_hex).is_ok() {
-            if let Ok(mut resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
-                *resolver = None;
-            }
-            1
-        } else {
-            0
-        }
+        write_android_theme_appearance(
+            &mut env,
+            path,
+            color_scheme,
+            accent_hex,
+            None,
+            JString::default(),
+        )
     })
+}
+
+/// Negative radii clear the override; null colors preserve and empty colors clear.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeWriteThemeAppearance(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    path: JString<'_>,
+    color_scheme: JString<'_>,
+    accent_hex: JString<'_>,
+    corner_radius: jni::sys::jfloat,
+    background_hex: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeWriteThemeAppearance", 0, || {
+        if !corner_radius.is_finite() {
+            return 0;
+        }
+        write_android_theme_appearance(
+            &mut env,
+            path,
+            color_scheme,
+            accent_hex,
+            Some((corner_radius >= 0.0).then_some(corner_radius)),
+            background_hex,
+        )
+    })
+}
+
+#[cfg(target_os = "android")]
+fn write_android_theme_appearance(
+    env: &mut JNIEnv<'_>,
+    path: JString<'_>,
+    color_scheme: JString<'_>,
+    accent_hex: JString<'_>,
+    corner_radius: Option<Option<f32>>,
+    background_hex: JString<'_>,
+) -> jboolean {
+    let Some(path) = optional_jni_path(env, path) else {
+        return 0;
+    };
+    let Some(color_scheme) = optional_jni_text(env, color_scheme) else {
+        return 0;
+    };
+    let color_scheme = match color_scheme.to_ascii_lowercase().as_str() {
+        "auto" => keytao_theme::UiColorScheme::Auto,
+        "light" => keytao_theme::UiColorScheme::Light,
+        "dark" => keytao_theme::UiColorScheme::Dark,
+        _ => return 0,
+    };
+    let mut color = |value: JString<'_>| {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            env.get_string(&value)
+                .map(|value| Some(value.to_string_lossy().trim().to_owned()))
+        }
+    };
+    let (Ok(accent_hex), Ok(background_hex)) = (color(accent_hex), color(background_hex)) else {
+        return 0;
+    };
+    if keytao_theme::write_theme_appearance_to_path(
+        &path,
+        color_scheme,
+        accent_hex,
+        corner_radius,
+        background_hex,
+    )
+    .is_err()
+    {
+        return 0;
+    }
+    if let Ok(mut resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
+        *resolver = None;
+    }
+    1
 }
 
 #[cfg(target_os = "android")]

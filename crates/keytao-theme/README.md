@@ -99,6 +99,10 @@ modeHint:
 
 `ui.accentColor` 可写 `#RRGGBB` 或 `#RRGGBBAA`，解析后会派生候选高亮、hover 和模式提示的强调色。
 
+`ui.cornerRadius` accepts 0–28 logical pixels. When present, it sets the panel radius and scales candidate, navigation, and mode-hint radii by 11/16, 10/16, and 14/16. When omitted, each theme radius remains unchanged.
+
+`ui.backgroundColor` accepts `#RRGGBB` and replaces the resolved panel RGB after light/dark variants while retaining its alpha. Missing, empty, or invalid values retain the theme background. Both appearance overrides are applied before deriving accent colors.
+
 主题可以提供模式变体，根级字段作为通用配置，`light:` 和 `dark:` 下的字段只在对应实际模式生效：
 
 ```yaml

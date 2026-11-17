@@ -42,21 +42,34 @@ pub const MAX_CANDIDATE_FONT_SIZE: f32 = 36.0;
 
 /// Atomically update the complete set of App-owned IME UI settings while
 /// preserving every unrelated key in the user's theme document.
+/// An omitted accent preserves the existing override, including its absence.
 pub fn write_ime_ui_settings_to_path(
     theme_path: &Path,
     color_scheme: UiColorScheme,
     orientation: PanelOrientation,
-    accent_color: String,
+    accent_color: Option<String>,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<(), String> {
-    let accent_color = normalize_hex_color(&accent_color)?;
+    let accent_color = accent_color
+        .map(|value| normalize_hex_color(&value))
+        .transpose()?;
     let font_size = normalize_candidate_font_size(font_size)?;
+    let corner_radius = corner_radius.map(normalize_corner_radius).transpose()?;
+    let background_color = normalize_background_color(&background_color)?;
     let mut root = read_theme_yaml_mapping(theme_path)?;
     let mapping = root
         .as_mapping_mut()
         .ok_or("主题配置根节点必须是 YAML mapping")?;
     ensure_theme_version(mapping);
-    write_theme_ui_mapping(mapping, color_scheme, Some(accent_color))?;
+    write_theme_ui_mapping(
+        mapping,
+        color_scheme,
+        accent_color,
+        Some(corner_radius),
+        Some(background_color),
+    )?;
 
     let panel_mapping = yaml_child_mapping(mapping, "panel", "主题面板配置必须是 YAML mapping")?;
     panel_mapping.insert(
@@ -85,17 +98,41 @@ pub fn write_theme_ui_to_path(
     color_scheme: UiColorScheme,
     accent_color: Option<String>,
 ) -> Result<(), String> {
+    write_theme_appearance_to_path(theme_path, color_scheme, accent_color, None, None)
+}
+
+/// Update appearance while preserving omitted values. `Some(None)` removes the
+/// radius override; an empty color string removes that color override.
+pub fn write_theme_appearance_to_path(
+    theme_path: &Path,
+    color_scheme: UiColorScheme,
+    accent_color: Option<String>,
+    corner_radius: Option<Option<f32>>,
+    background_color: Option<String>,
+) -> Result<(), String> {
     let accent_color = match accent_color {
         Some(value) if value.trim().is_empty() => Some(String::new()),
         Some(value) => Some(normalize_hex_color(&value)?),
         None => None,
     };
+    let corner_radius = corner_radius
+        .map(|value| value.map(normalize_corner_radius).transpose())
+        .transpose()?;
+    let background_color = background_color
+        .map(|value| normalize_background_color(&value))
+        .transpose()?;
     let mut root = read_theme_yaml_mapping(theme_path)?;
     let mapping = root
         .as_mapping_mut()
         .ok_or("主题配置根节点必须是 YAML mapping")?;
     ensure_theme_version(mapping);
-    write_theme_ui_mapping(mapping, color_scheme, accent_color)?;
+    write_theme_ui_mapping(
+        mapping,
+        color_scheme,
+        accent_color,
+        corner_radius,
+        background_color,
+    )?;
     write_theme_yaml_atomic(theme_path, &root)
 }
 
@@ -129,6 +166,8 @@ fn write_theme_ui_mapping(
     mapping: &mut serde_yaml::Mapping,
     color_scheme: UiColorScheme,
     accent_color: Option<String>,
+    corner_radius: Option<Option<f32>>,
+    background_color: Option<String>,
 ) -> Result<(), String> {
     let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
     ui_mapping.insert(
@@ -148,6 +187,25 @@ fn write_theme_ui_mapping(
             ui_mapping.remove(&accent_key);
         } else {
             ui_mapping.insert(accent_key, serde_yaml::Value::String(accent_color));
+        }
+    }
+    if let Some(corner_radius) = corner_radius {
+        let radius_key = serde_yaml::Value::String("cornerRadius".into());
+        if let Some(corner_radius) = corner_radius {
+            ui_mapping.insert(
+                radius_key,
+                serde_yaml::to_value(corner_radius).map_err(|e| format!("序列化圆角失败: {e}"))?,
+            );
+        } else {
+            ui_mapping.remove(&radius_key);
+        }
+    }
+    if let Some(background_color) = background_color {
+        let background_key = serde_yaml::Value::String("backgroundColor".into());
+        if background_color.is_empty() {
+            ui_mapping.remove(&background_key);
+        } else {
+            ui_mapping.insert(background_key, serde_yaml::Value::String(background_color));
         }
     }
     Ok(())
@@ -180,6 +238,21 @@ fn normalize_candidate_font_size(value: f32) -> Result<f32, String> {
         return Err("候选字号必须是有效数字".into());
     }
     Ok(value.clamp(MIN_CANDIDATE_FONT_SIZE, MAX_CANDIDATE_FONT_SIZE))
+}
+
+fn normalize_corner_radius(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err("圆角必须是有效数字".into());
+    }
+    Ok(value.clamp(0.0, 28.0))
+}
+
+fn normalize_background_color(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Ok(String::new())
+    } else {
+        normalize_hex_color(value)
+    }
 }
 
 fn write_theme_yaml_atomic(theme_path: &Path, root: &serde_yaml::Value) -> Result<(), String> {
@@ -269,6 +342,8 @@ pub struct UiTheme {
     pub color_scheme: UiColorScheme,
     pub effective_color_scheme: EffectiveColorScheme,
     pub accent_color: Option<RgbaColor>,
+    pub corner_radius: Option<f32>,
+    pub background_color: Option<RgbaColor>,
     pub embedded_composition: bool,
     pub hide_candidate_panel: bool,
     pub show_tray_mode_indicator: bool,
@@ -278,10 +353,12 @@ impl Serialize for UiTheme {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("UiTheme", 7)?;
+        let mut state = serializer.serialize_struct("UiTheme", 9)?;
         state.serialize_field("colorScheme", &self.color_scheme)?;
         state.serialize_field("effectiveColorScheme", &self.effective_color_scheme)?;
         state.serialize_field("accentColor", &self.accent_color)?;
+        state.serialize_field("cornerRadius", &self.corner_radius)?;
+        state.serialize_field("backgroundColor", &self.background_color)?;
         state.serialize_field("embeddedComposition", &self.embedded_composition)?;
         state.serialize_field("hideCandidatePanel", &self.hide_candidate_panel)?;
         state.serialize_field("showTrayModeIndicator", &self.show_tray_mode_indicator)?;
@@ -687,13 +764,19 @@ pub fn resolve_candidate_panel_preview_from_paths(
     color_scheme: UiColorScheme,
     accent_color: &str,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: &str,
 ) -> Result<ResolvedImeTheme, String> {
     let accent_color = normalize_hex_color(accent_color)?;
     let font_size = normalize_candidate_font_size(font_size)?;
+    let corner_radius = corner_radius.map(normalize_corner_radius).transpose()?;
+    let background_color = normalize_background_color(background_color)?;
     let pending = PartialTheme {
         ui: Some(PartialUiTheme {
             color_scheme: Some(color_scheme),
             accent_color: parse_color(&accent_color),
+            corner_radius: Some(corner_radius),
+            background_color: Some(parse_color(&background_color)),
             ..Default::default()
         }),
         font: Some(PartialFontTheme {
@@ -756,6 +839,15 @@ fn resolve_theme_with_pending_settings(
         }
     }
     theme.ui = ui.clone();
+    if let Some(radius) = ui.corner_radius {
+        theme.panel.corner_radius = radius;
+        theme.candidate.corner_radius = radius * 11.0 / 16.0;
+        theme.navigation.corner_radius = radius * 10.0 / 16.0;
+        theme.mode_hint.corner_radius = radius * 14.0 / 16.0;
+    }
+    if let Some(background) = ui.background_color {
+        theme.panel.background = with_alpha(background, theme.panel.background.alpha);
+    }
     if let Some(accent_color) = ui.accent_color {
         theme.apply_accent_color(accent_color);
     }
@@ -1017,6 +1109,8 @@ impl Default for UiTheme {
             color_scheme: UiColorScheme::Auto,
             effective_color_scheme: EffectiveColorScheme::Light,
             accent_color: None,
+            corner_radius: None,
+            background_color: None,
             embedded_composition: false,
             hide_candidate_panel: false,
             show_tray_mode_indicator: true,
@@ -1070,6 +1164,10 @@ struct PartialUiTheme {
     night_mode: Option<bool>,
     #[serde(default, deserialize_with = "optional_color")]
     accent_color: Option<RgbaColor>,
+    #[serde(default, deserialize_with = "optional_corner_radius")]
+    corner_radius: Option<Option<f32>>,
+    #[serde(default, deserialize_with = "optional_background_color")]
+    background_color: Option<Option<RgbaColor>>,
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -1197,6 +1295,8 @@ impl UiTheme {
         if let Some(accent_color) = partial.accent_color {
             self.accent_color = Some(accent_color);
         }
+        assign(&mut self.corner_radius, partial.corner_radius);
+        assign(&mut self.background_color, partial.background_color);
         if let Some(embedded_composition) = partial.embedded_composition {
             self.embedded_composition = embedded_composition;
         }
@@ -1326,6 +1426,29 @@ where
     value
         .map(|value| parse_color(&value).ok_or_else(|| serde::de::Error::custom("invalid color")))
         .transpose()
+}
+
+fn optional_corner_radius<'de, D>(deserializer: D) -> Result<Option<Option<f32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    Ok(Some(value.as_f64().and_then(|value| {
+        normalize_corner_radius(value as f32).ok()
+    })))
+}
+
+fn optional_background_color<'de, D>(deserializer: D) -> Result<Option<Option<RgbaColor>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    Ok(Some(value.as_str().and_then(|value| {
+        let hex = value.trim().strip_prefix('#')?;
+        (hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| parse_color(value))
+            .flatten()
+    })))
 }
 
 fn parse_color(value: &str) -> Option<RgbaColor> {
@@ -1564,6 +1687,206 @@ mod tests {
     use super::*;
 
     #[test]
+    fn appearance_defaults_match_existing_light_and_dark_themes() {
+        for (scheme, background) in [
+            (EffectiveColorScheme::Light, rgba(0xf8, 0xfa, 0xff, 0xf2)),
+            (EffectiveColorScheme::Dark, rgba(0x17, 0x1a, 0x20, 0xf2)),
+        ] {
+            let theme = resolve_theme_from_paths_with_system_scheme(None, None, scheme);
+            assert_eq!(theme.ui.corner_radius, None);
+            assert_eq!(theme.ui.background_color, None);
+            assert_eq!(theme.panel.background, background);
+            assert_eq!(theme.panel.corner_radius, 16.0);
+            assert_eq!(theme.candidate.corner_radius, 11.0);
+            assert_eq!(theme.navigation.corner_radius, 10.0);
+            assert_eq!(theme.mode_hint.corner_radius, 14.0);
+        }
+    }
+
+    #[test]
+    fn appearance_overrides_follow_variants_and_preserve_background_alpha() {
+        for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+            let theme = resolve_theme_with_pending_settings(
+                None,
+                None,
+                scheme,
+                Some(serde_yaml::from_str(
+                    "ui:\n  cornerRadius: 24\n  backgroundColor: '#123456'\n  accentColor: '#ABCDEF'\nlight:\n  panel:\n    background: '#FFFFFF80'\n    cornerRadius: 7\ndark:\n  panel:\n    background: '#00000090'\n    cornerRadius: 8\n",
+                ).unwrap()),
+            );
+            assert_eq!(theme.panel.corner_radius, 24.0);
+            assert_eq!(theme.candidate.corner_radius, 16.5);
+            assert_eq!(theme.navigation.corner_radius, 15.0);
+            assert_eq!(theme.mode_hint.corner_radius, 21.0);
+            let alpha = if scheme == EffectiveColorScheme::Light {
+                0x80
+            } else {
+                0x90
+            };
+            assert_eq!(theme.panel.background, rgba(0x12, 0x34, 0x56, alpha));
+            let weight = if scheme == EffectiveColorScheme::Light {
+                0.18
+            } else {
+                0.42
+            };
+            assert_eq!(
+                theme.candidate.selected_background,
+                mix_color(theme.panel.background, rgba(0xab, 0xcd, 0xef, 255), weight)
+            );
+            let json = serde_json::to_value(&theme).unwrap();
+            assert_eq!(json["ui"]["cornerRadius"], 24.0);
+            assert_eq!(json["ui"]["backgroundColor"]["alpha"], 255);
+        }
+    }
+
+    #[test]
+    fn appearance_parsing_clamps_numbers_and_defaults_invalid_values() {
+        for (value, expected) in [
+            ("-4", Some(0.0)),
+            ("99", Some(28.0)),
+            ("8.5", Some(8.5)),
+            (".nan", None),
+            (".inf", None),
+            ("'bad'", None),
+            ("null", None),
+            ("[]", None),
+        ] {
+            let theme = resolve_theme_with_pending_settings(
+                None,
+                None,
+                EffectiveColorScheme::Light,
+                Some(serde_yaml::from_str(&format!("ui:\n  cornerRadius: {value}\n")).unwrap()),
+            );
+            assert_eq!(theme.ui.corner_radius, expected);
+            assert_eq!(theme.panel.corner_radius, expected.unwrap_or(16.0));
+        }
+        for value in [
+            "''",
+            "'#12345678'",
+            "'#+12345'",
+            "'bad'",
+            "123",
+            "null",
+            "[]",
+        ] {
+            let theme = resolve_theme_with_pending_settings(
+                None,
+                None,
+                EffectiveColorScheme::Light,
+                Some(serde_yaml::from_str(&format!("ui:\n  backgroundColor: {value}\n")).unwrap()),
+            );
+            assert_eq!(theme.ui.background_color, None);
+            assert_eq!(theme.panel.background, rgba(0xf8, 0xfa, 0xff, 0xf2));
+        }
+    }
+
+    #[test]
+    fn appearance_writer_preserves_and_clears_overrides_and_unrelated_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-theme-appearance-writer-{}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "ui:\n  showTrayModeIndicator: false\ncustom: preserved\n",
+        )
+        .unwrap();
+        write_theme_appearance_to_path(
+            &path,
+            UiColorScheme::Light,
+            None,
+            Some(Some(99.0)),
+            Some("#aabbcc".into()),
+        )
+        .unwrap();
+        write_theme_ui_to_path(&path, UiColorScheme::Dark, None).unwrap();
+        let theme = resolve_theme_from_paths(None, Some(&path));
+        assert_eq!(theme.ui.corner_radius, Some(28.0));
+        assert_eq!(theme.ui.background_color, Some(rgba(0xaa, 0xbb, 0xcc, 255)));
+        assert!(!theme.ui.show_tray_mode_indicator);
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("custom: preserved"));
+        assert!(write_theme_appearance_to_path(
+            &path,
+            UiColorScheme::Light,
+            None,
+            Some(Some(f32::NAN)),
+            None
+        )
+        .is_err());
+        assert!(write_theme_appearance_to_path(
+            &path,
+            UiColorScheme::Light,
+            None,
+            None,
+            Some("#12345678".into())
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        write_ime_ui_settings_to_path(
+            &path,
+            UiColorScheme::Light,
+            PanelOrientation::Horizontal,
+            Some("#123456".into()),
+            20.0,
+            None,
+            String::new(),
+        )
+        .unwrap();
+        let theme = resolve_theme_from_paths(None, Some(&path));
+        assert_eq!(theme.ui.corner_radius, None);
+        assert_eq!(theme.ui.background_color, None);
+        write_theme_appearance_to_path(
+            &path,
+            UiColorScheme::Light,
+            None,
+            Some(Some(8.0)),
+            Some("#123456".into()),
+        )
+        .unwrap();
+        write_theme_appearance_to_path(
+            &path,
+            UiColorScheme::Light,
+            None,
+            Some(None),
+            Some(String::new()),
+        )
+        .unwrap();
+        let written: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written["ui"].get("cornerRadius").is_none());
+        assert!(written["ui"].get("backgroundColor").is_none());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn preview_can_clear_saved_appearance_without_writing_it() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-theme-appearance-preview-{}.yaml",
+            std::process::id()
+        ));
+        let saved = "ui:\n  cornerRadius: 28\n  backgroundColor: '#123456'\n";
+        fs::write(&path, saved).unwrap();
+        let theme = resolve_candidate_panel_preview_from_paths(
+            None,
+            Some(&path),
+            EffectiveColorScheme::Light,
+            UiColorScheme::Light,
+            "#3B73D9",
+            20.0,
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(theme.panel.corner_radius, 16.0);
+        assert_eq!(theme.panel.background, rgba(0xf8, 0xfa, 0xff, 0xf2));
+        assert_eq!(theme.ui.corner_radius, None);
+        assert_eq!(theme.ui.background_color, None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn mobile_theme_writer_updates_ui_and_preserves_other_settings() {
         let path = std::env::temp_dir().join(format!(
             "keytao-theme-mobile-writer-{}-{}.yaml",
@@ -1645,8 +1968,10 @@ mod tests {
             &path,
             UiColorScheme::Auto,
             PanelOrientation::Horizontal,
-            "#3B73D9".into(),
+            Some("#3B73D9".into()),
             99.0,
+            None,
+            String::new(),
         )
         .unwrap();
         let theme = resolve_theme_from_paths(None, Some(&path));
@@ -1656,8 +1981,10 @@ mod tests {
             &path,
             UiColorScheme::Auto,
             PanelOrientation::Horizontal,
-            "#3B73D9".into(),
+            Some("#3B73D9".into()),
             f32::NAN,
+            None,
+            String::new(),
         )
         .is_err());
         fs::remove_file(path).ok();
@@ -1912,6 +2239,8 @@ mod tests {
             UiColorScheme::Light,
             "123456",
             15.0,
+            None,
+            "",
         )
         .unwrap();
 
@@ -1939,6 +2268,8 @@ mod tests {
                 UiColorScheme::Auto,
                 "#3B73D9",
                 20.0,
+                None,
+                "",
             )
             .unwrap();
             assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
@@ -1990,6 +2321,8 @@ mod tests {
             UiColorScheme::Light,
             "#3B73D9",
             20.0,
+            None,
+            "",
         )
         .unwrap();
         let small = resolve_candidate_panel_preview_from_paths(
@@ -1999,6 +2332,8 @@ mod tests {
             UiColorScheme::Light,
             "#3B73D9",
             10.0,
+            None,
+            "",
         )
         .unwrap();
         assert_eq!(small.font.size, 10.0);

@@ -1016,16 +1016,20 @@ class AppController extends ChangeNotifier {
         read(() async {
           androidSettings = await core.getAndroidImeInputSettings();
         }),
-      if (!isMobile) ...[
+      if (!isAndroid || storageReady)
         read(() async {
           uiSettings = await core.getImeUiSettings();
         }),
+      if (!isMobile) ...[
         read(() async {
           desktopEnglishMode = await core.getDesktopEnglishMode();
         }),
       ],
     ]);
-    if (isAndroid && !storageReady) androidSettings = null;
+    if (isAndroid && !storageReady) {
+      androidSettings = null;
+      uiSettings = null;
+    }
     if (errors.isNotEmpty) error = errors.toSet().join('\n');
     if (isAndroid && setupReady && !onboardingCompleted) {
       await core.completeOnboarding();
@@ -1980,11 +1984,16 @@ class AppController extends ChangeNotifier {
       if (ui != null)
         'ime_ui': {
           'color_scheme': ui.colorScheme.name,
-          'orientation': ui.orientation.name,
-          'accent_color': ui.accentColor,
-          'font_size': ui.fontSize,
-          'embedded_composition': ui.embeddedComposition,
-          'hide_candidate_panel': ui.hideCandidatePanel,
+          if (ui.accentColorOverride != null)
+            'accent_color': ui.accentColorOverride,
+          'corner_radius': ui.cornerRadius,
+          'background_color': ui.backgroundColor,
+          if (!isMobile) ...{
+            'orientation': ui.orientation.name,
+            'font_size': ui.fontSize,
+            'embedded_composition': ui.embeddedComposition,
+            'hide_candidate_panel': ui.hideCandidatePanel,
+          },
           if (isWindows) 'show_tray_mode_indicator': ui.showTrayModeIndicator,
         },
       'desktop_english_mode': desktopEnglishMode.name,
@@ -2255,7 +2264,8 @@ class AppController extends ChangeNotifier {
         ),
       );
     }
-    if (!isMobile && settings['ime_ui'] is Map) {
+    if (settings['ime_ui'] is Map) {
+      if (isAndroid) await _requireStorage();
       final ui = settings['ime_ui'] as Map;
       final current = await core.getImeUiSettings();
       uiSettings = await core.setImeUiSettings(
@@ -2263,17 +2273,26 @@ class AppController extends ChangeNotifier {
           (value) => value.name == ui['color_scheme'],
           orElse: () => current.colorScheme,
         ),
-        orientation: PanelOrientationDto.values.firstWhere(
-          (value) => value.name == ui['orientation'],
-          orElse: () => current.orientation,
-        ),
-        accentColor: ui['accent_color'] as String? ?? current.accentColor,
-        fontSize: (ui['font_size'] as num?)?.toDouble() ?? current.fontSize,
+        orientation: isMobile
+            ? current.orientation
+            : PanelOrientationDto.values.firstWhere(
+                (value) => value.name == ui['orientation'],
+                orElse: () => current.orientation,
+              ),
+        accentColor: ui['accent_color'] as String?,
+        cornerRadius: ui.containsKey('corner_radius')
+            ? (ui['corner_radius'] as num?)?.toDouble()
+            : current.cornerRadius,
+        backgroundColor:
+            ui['background_color'] as String? ?? current.backgroundColor,
+        fontSize: isMobile
+            ? current.fontSize
+            : (ui['font_size'] as num?)?.toDouble() ?? current.fontSize,
       );
-      if (ui['embedded_composition'] case final bool value) {
+      if (ui['embedded_composition'] case final bool value when !isMobile) {
         uiSettings = await core.setImeEmbeddedComposition(embedded: value);
       }
-      if (ui['hide_candidate_panel'] case final bool value) {
+      if (ui['hide_candidate_panel'] case final bool value when !isMobile) {
         uiSettings = await core.setImeHideCandidatePanel(hide_: value);
       }
       if (ui['show_tray_mode_indicator'] case final bool value when isWindows) {
@@ -2876,12 +2895,16 @@ class AppController extends ChangeNotifier {
   Map<String, dynamic> resolveCandidatePanelPreview({
     required UiColorSchemeDto colorScheme,
     required String accentColor,
+    double? cornerRadius,
+    String backgroundColor = '',
     required double fontSize,
     required bool systemDark,
   }) => jsonDecode(
     core.resolveCandidatePanelPreview(
       colorScheme: colorScheme,
       accentColor: accentColor,
+      cornerRadius: cornerRadius,
+      backgroundColor: backgroundColor,
       fontSize: fontSize,
       systemDark: systemDark,
     ),
@@ -2892,19 +2915,34 @@ class AppController extends ChangeNotifier {
     PanelOrientationDto? orientation,
     bool? hideCandidatePanel,
     String? accentColor,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+    String? backgroundColor,
     double? fontSize,
   }) {
     final normalizedAccent = accentColor?.trim().toUpperCase();
+    final normalizedBackground = backgroundColor?.trim().toUpperCase();
     if (normalizedAccent != null &&
         !RegExp(r'^#[0-9A-F]{6}$').hasMatch(normalizedAccent)) {
       return Future.value(false);
     }
+    if ((cornerRadius != null && !cornerRadius.isFinite) ||
+        (normalizedBackground != null &&
+            normalizedBackground.isNotEmpty &&
+            !RegExp(r'^#[0-9A-F]{6}$').hasMatch(normalizedBackground))) {
+      return Future.value(false);
+    }
     return run(() async {
+      if (isAndroid) await _requireStorage();
       final current = await core.getImeUiSettings();
       uiSettings = await core.setImeUiSettings(
         colorScheme: colorScheme ?? current.colorScheme,
         orientation: orientation ?? current.orientation,
-        accentColor: normalizedAccent ?? current.accentColor,
+        accentColor: normalizedAccent,
+        cornerRadius: resetCornerRadius
+            ? null
+            : (cornerRadius ?? current.cornerRadius)?.clamp(0, 28),
+        backgroundColor: normalizedBackground ?? current.backgroundColor,
         fontSize: (fontSize ?? current.fontSize).clamp(10, 36),
       );
       if (hideCandidatePanel != null &&

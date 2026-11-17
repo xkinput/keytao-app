@@ -967,6 +967,8 @@ pub fn resolve_candidate_panel_preview(
     accent_color: String,
     font_size: f32,
     system_dark: bool,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<String, String> {
     let theme = keytao_theme::resolve_candidate_panel_preview_from_paths(
         keytao_theme::default_bundled_theme_path().as_deref(),
@@ -983,6 +985,8 @@ pub fn resolve_candidate_panel_preview(
         },
         &accent_color,
         font_size,
+        corner_radius,
+        &background_color,
     )?;
     keytao_theme::resolved_theme_json(&theme).map_err(|error| error.to_string())
 }
@@ -990,8 +994,10 @@ pub fn resolve_candidate_panel_preview(
 pub fn set_ime_ui_settings(
     color_scheme: UiColorSchemeDto,
     orientation: PanelOrientationDto,
-    accent_color: String,
+    accent_color: Option<String>,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<ImeUiSettingsDto, String> {
     let state = runtime::state()?;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1004,6 +1010,8 @@ pub fn set_ime_ui_settings(
             runtime::dto(orientation)?,
             accent_color,
             font_size,
+            corner_radius,
+            background_color,
         )
         .map_err(|error| error.to_string())?,
     )
@@ -1452,29 +1460,45 @@ mod tests {
 
     #[test]
     fn candidate_preview_resolves_pending_settings_and_rejects_invalid_inputs() {
-        let json =
-            resolve_candidate_panel_preview(UiColorSchemeDto::Auto, "#123456".into(), 15.0, true)
-                .unwrap();
+        let json = resolve_candidate_panel_preview(
+            UiColorSchemeDto::Auto,
+            "#123456".into(),
+            15.0,
+            true,
+            Some(24.0),
+            "#654321".into(),
+        )
+        .unwrap();
         let theme: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(theme["ui"]["colorScheme"], "auto");
         assert_eq!(theme["ui"]["effectiveColorScheme"], "dark");
         assert_eq!(theme["font"]["size"], 15.0);
         assert_eq!(theme["candidate"]["selectedLabelColor"]["red"], 0x12);
-        assert!(resolve_candidate_panel_preview(
-            UiColorSchemeDto::Light,
-            "invalid".into(),
-            20.0,
-            false,
-        )
-        .is_err());
-        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert!(resolve_candidate_panel_preview(
+        assert_eq!(theme["panel"]["cornerRadius"], 24.0);
+        assert_eq!(theme["panel"]["background"]["red"], 0x65);
+        assert!(
+            resolve_candidate_panel_preview(
                 UiColorSchemeDto::Light,
-                "#123456".into(),
-                invalid,
+                "invalid".into(),
+                20.0,
                 false,
+                None,
+                String::new(),
             )
-            .is_err());
+            .is_err()
+        );
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(
+                resolve_candidate_panel_preview(
+                    UiColorSchemeDto::Light,
+                    "#123456".into(),
+                    invalid,
+                    false,
+                    None,
+                    String::new(),
+                )
+                .is_err()
+            );
         }
     }
 

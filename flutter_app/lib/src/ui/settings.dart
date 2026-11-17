@@ -228,12 +228,18 @@ class _SettingsCardState extends State<SettingsCard> {
   UiColorSchemeDto? _previewScheme;
   PanelOrientationDto? _previewOrientation;
   String? _previewAccent;
+  String? _previewBackground;
+  double? _previewRadius;
+  bool _resetRadius = false;
   double? _previewFontSize;
 
   void _resetPreview() {
     _previewScheme = null;
     _previewOrientation = null;
     _previewAccent = null;
+    _previewBackground = null;
+    _previewRadius = null;
+    _resetRadius = false;
     _previewFontSize = null;
   }
 
@@ -242,35 +248,52 @@ class _SettingsCardState extends State<SettingsCard> {
     PanelOrientationDto? orientation,
     bool? hideCandidatePanel,
     double? fontSize,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
   }) async {
     setState(() {
       _previewScheme = colorScheme ?? _previewScheme;
       _previewOrientation = orientation ?? _previewOrientation;
       _previewFontSize = fontSize ?? _previewFontSize;
+      _previewRadius = resetCornerRadius
+          ? null
+          : cornerRadius ?? _previewRadius;
+      if (cornerRadius != null || resetCornerRadius) {
+        _resetRadius = resetCornerRadius;
+      }
     });
     final saved = await controller.saveUi(
       colorScheme: colorScheme,
       orientation: orientation,
       hideCandidatePanel: hideCandidatePanel,
       fontSize: fontSize,
+      cornerRadius: cornerRadius,
+      resetCornerRadius: resetCornerRadius,
     );
     if (!saved && mounted) setState(_resetPreview);
   }
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      if (controller.isMobile) ...[
-        ?widget.hero,
-        const SizedBox(height: 16),
-        _preview(context, keyboard: true),
-        const SizedBox(height: 24),
-        _mobile(context),
-      ] else
-        _desktop(context),
-    ],
-  );
+  Widget build(BuildContext context) {
+    final settings = controller.uiSettings;
+    if (!identical(settings, _previewSource)) {
+      _previewSource = settings;
+      _resetPreview();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (controller.isMobile) ...[
+          ?widget.hero,
+          const SizedBox(height: 16),
+          _preview(context, keyboard: true),
+          const SizedBox(height: 24),
+          _mobile(context),
+        ] else
+          _desktop(context),
+      ],
+    );
+  }
 
   Widget _candidatePageSize() {
     final c = controller;
@@ -307,10 +330,6 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget _desktop(BuildContext context) {
     final c = controller;
     final s = c.uiSettings;
-    if (!identical(s, _previewSource)) {
-      _previewSource = s;
-      _resetPreview();
-    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -393,14 +412,7 @@ class _SettingsCardState extends State<SettingsCard> {
                       : (value) => _savePreview(colorScheme: value),
                 ),
                 if (!s.hideCandidatePanel) ...[
-                  _separated(
-                    AccentPicker(
-                      controller: c,
-                      onPreview: (value) {
-                        if (mounted) setState(() => _previewAccent = value);
-                      },
-                    ),
-                  ),
+                  ..._appearanceControls(),
                   SliderSetting(
                     label: AppStrings.candidateFontSize,
                     value: s.fontSize,
@@ -439,6 +451,49 @@ class _SettingsCardState extends State<SettingsCard> {
     child: child,
   );
 
+  List<Widget> _appearanceControls() {
+    final c = controller;
+    final settings = c.uiSettings!;
+    return [
+      _separated(
+        AccentPicker(
+          controller: c,
+          onPreview: (value) {
+            if (mounted) setState(() => _previewAccent = value);
+          },
+        ),
+      ),
+      BackgroundPicker(
+        controller: c,
+        onPreview: (value) {
+          if (mounted) setState(() => _previewBackground = value);
+        },
+      ),
+      SliderSetting(
+        label: '圆角',
+        value: settings.cornerRadius ?? 16,
+        min: 0,
+        max: 28,
+        divisions: 28,
+        onPreview: (value) => setState(() {
+          _previewRadius = value;
+          _resetRadius = false;
+        }),
+        onChanged: c.busy ? null : (value) => _savePreview(cornerRadius: value),
+      ),
+      Align(
+        alignment: Alignment.centerRight,
+        child: ActionButton(
+          '恢复默认',
+          icon: FLucideIcons.rotateCcw,
+          onPress: c.busy || settings.cornerRadius == null
+              ? null
+              : () => _savePreview(resetCornerRadius: true),
+        ),
+      ),
+    ];
+  }
+
   Widget _preview(BuildContext context, {bool keyboard = false}) {
     final c = controller;
     final s = c.uiSettings;
@@ -450,11 +505,23 @@ class _SettingsCardState extends State<SettingsCard> {
         ? PanelOrientationDto.horizontal
         : _previewOrientation ?? s!.orientation;
     final fontSize = _previewFontSize ?? s?.fontSize ?? 18;
+    final cornerRadius = _resetRadius
+        ? null
+        : _previewRadius ?? s?.cornerRadius;
+    final backgroundColor = _previewBackground ?? s?.backgroundColor ?? '';
     final preview = CandidatePanelPreview(
-      key: ValueKey((_previewScheme ?? s?.colorScheme, accent, orientation)),
+      key: ValueKey((
+        _previewScheme ?? s?.colorScheme,
+        accent,
+        orientation,
+        cornerRadius,
+        backgroundColor,
+      )),
       theme: c.resolveCandidatePanelPreview(
         colorScheme: _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto,
         accentColor: accent,
+        cornerRadius: cornerRadius,
+        backgroundColor: backgroundColor,
         fontSize: fontSize,
         systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
       ),
@@ -563,6 +630,8 @@ class _SettingsCardState extends State<SettingsCard> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       spacing: 24,
       children: [
+        if (c.uiSettings != null)
+          Section(title: '外观', children: _appearanceControls()),
         Semantics(
           label: AppStrings.mobileKeyboard,
           child: Section(

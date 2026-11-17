@@ -17,53 +17,98 @@ String _hex(Color color) =>
     '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
 
 class AccentPicker extends StatelessWidget {
-  const AccentPicker({super.key, required this.controller, this.onPreview});
+  const AccentPicker({
+    super.key,
+    required this.controller,
+    this.onPreview,
+    this.background = false,
+  });
   final AppController controller;
   final ValueChanged<String>? onPreview;
+  final bool background;
+  String get _selected => background
+      ? controller.uiSettings!.backgroundColor
+      : controller.uiSettings!.accentColor;
+  String get _chooseLabel =>
+      background ? '选择背景色' : AppStrings.chooseAccentColor;
+
   Future<void> _save(String value) async {
     onPreview?.call(value);
-    final saved = await controller.saveUi(accentColor: value);
-    if (!saved) onPreview?.call(controller.uiSettings!.accentColor);
+    final saved = await (background
+        ? controller.saveUi(backgroundColor: value)
+        : controller.saveUi(accentColor: value));
+    if (!saved) onPreview?.call(_selected);
   }
 
-  Future<void> _pick(BuildContext context) async {
+  Future<void> _pick(BuildContext context, String initial) async {
     final value = await showFDialog<String>(
       context: context,
       builder: (_, _, animation) => _ColorDialog(
-        initial: controller.uiSettings!.accentColor,
+        initial: initial,
         animation: animation,
+        title: _chooseLabel,
+        onPreview: onPreview,
       ),
     );
-    if (value != null) await _save(value);
+    if (value != null) {
+      await _save(value);
+    } else {
+      onPreview?.call(_selected);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final selected = controller.uiSettings!.accentColor.toUpperCase();
+    final selected = _selected.toUpperCase();
+    var defaultColor = '#3B73D9';
+    if (background) {
+      final settings = controller.uiSettings!;
+      final theme = controller.resolveCandidatePanelPreview(
+        colorScheme: settings.colorScheme,
+        accentColor: settings.accentColor,
+        cornerRadius: settings.cornerRadius,
+        systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+        fontSize: settings.fontSize,
+      );
+      final color = theme['panel']['background'] as Map<String, dynamic>;
+      defaultColor = _hex(
+        Color.fromARGB(
+          255,
+          color['red'] as int,
+          color['green'] as int,
+          color['blue'] as int,
+        ),
+      );
+    }
     final touch = context.platformVariant.touch;
     final size = touch ? 44.0 : 28.0;
     final gap = touch ? 8.0 : 4.0;
     final accent = ChromeAccent.of(context);
-    Widget swatch(String hex, {bool custom = false}) {
-      final isSelected = custom
-          ? !themeAccents.containsKey(selected)
+    Widget swatch(String hex, {bool custom = false, bool reset = false}) {
+      final isSelected = reset
+          ? selected.isEmpty
+          : custom
+          ? selected.isNotEmpty && !themeAccents.containsKey(selected)
           : selected == hex;
+      final label = reset
+          ? '恢复默认'
+          : custom
+          ? _chooseLabel
+          : background
+          ? '使用背景色 $hex'
+          : AppStrings.useColor(hex);
       return FTooltip(
-        tipBuilder: (_, _) => Text(
-          custom ? AppStrings.chooseAccentColor : AppStrings.useColor(hex),
-        ),
+        tipBuilder: (_, _) => Text(label),
         child: Semantics(
           selected: isSelected,
-          label: custom
-              ? AppStrings.chooseAccentColor
-              : AppStrings.useColor(hex),
+          label: label,
           child: FTappable(
             focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
               borderRadius: BorderRadius.circular(8),
             ),
             onPress: controller.busy
                 ? null
-                : () => custom ? _pick(context) : _save(hex),
+                : () => custom ? _pick(context, hex) : _save(reset ? '' : hex),
             child: AnimatedContainer(
               duration: MediaQuery.disableAnimationsOf(context)
                   ? Duration.zero
@@ -88,12 +133,16 @@ class AccentPicker extends StatelessWidget {
                     color: parseAccentColor(hex),
                     borderRadius: BorderRadius.circular(custom ? 8 : 16),
                   ),
-                  child: custom || selected == hex
+                  child: custom || reset || selected == hex
                       ? Icon(
-                          custom ? FLucideIcons.pipette : FLucideIcons.check,
+                          reset
+                              ? FLucideIcons.rotateCcw
+                              : custom
+                              ? FLucideIcons.pipette
+                              : FLucideIcons.check,
                           size: touch ? 18 : 16,
                           color:
-                              custom &&
+                              (custom || reset) &&
                                   parseAccentColor(hex).computeLuminance() > .5
                               ? Colors.black
                               : Colors.white,
@@ -108,11 +157,11 @@ class AccentPicker extends StatelessWidget {
     }
 
     return SettingRow(
-      AppStrings.accentColor,
+      background ? '背景色' : AppStrings.accentColor,
       controlAlignment: Alignment.centerLeft,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final count = themeAccents.length + 1;
+          final count = themeAccents.length + (background ? 2 : 1);
           final capacity = ((constraints.maxWidth + gap) / (size + gap))
               .floor()
               .clamp(1, count);
@@ -127,7 +176,11 @@ class AccentPicker extends StatelessWidget {
                 runSpacing: 8,
                 children: [
                   for (final hex in themeAccents.keys) swatch(hex),
-                  swatch(selected, custom: true),
+                  swatch(
+                    selected.isEmpty ? defaultColor : selected,
+                    custom: true,
+                  ),
+                  if (background) swatch(defaultColor, reset: true),
                 ],
               ),
             ),
@@ -138,10 +191,25 @@ class AccentPicker extends StatelessWidget {
   }
 }
 
+class BackgroundPicker extends AccentPicker {
+  const BackgroundPicker({
+    super.key,
+    required super.controller,
+    super.onPreview,
+  }) : super(background: true);
+}
+
 class _ColorDialog extends StatefulWidget {
-  const _ColorDialog({required this.initial, required this.animation});
+  const _ColorDialog({
+    required this.initial,
+    required this.animation,
+    required this.title,
+    this.onPreview,
+  });
   final String initial;
   final Animation<double> animation;
+  final String title;
+  final ValueChanged<String>? onPreview;
   @override
   State<_ColorDialog> createState() => _ColorDialogState();
 }
@@ -154,6 +222,7 @@ class _ColorDialogState extends State<_ColorDialog> {
     _color = color;
     _text.text = _hex(color.toColor());
     _valid = true;
+    widget.onPreview?.call(_text.text);
   });
   @override
   void dispose() {
@@ -163,7 +232,7 @@ class _ColorDialogState extends State<_ColorDialog> {
 
   @override
   Widget build(BuildContext context) => AppDialog(
-    title: AppStrings.chooseAccentColor,
+    title: widget.title,
     animation: widget.animation,
     actions: [
       ActionButton(AppStrings.cancel, onPress: () => Navigator.pop(context)),
@@ -188,7 +257,7 @@ class _ColorDialogState extends State<_ColorDialog> {
                   .withValue((1 - position.dy / 140).clamp(0, 1)),
             );
             return Semantics(
-              label: AppStrings.chooseAccentColor,
+              label: widget.title,
               child: GestureDetector(
                 onPanDown: (details) => pick(details.localPosition),
                 onPanUpdate: (details) => pick(details.localPosition),
@@ -264,6 +333,7 @@ class _ColorDialogState extends State<_ColorDialog> {
               _valid = RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(value.text);
               if (_valid) {
                 _color = HSVColor.fromColor(parseAccentColor(value.text));
+                widget.onPreview?.call(_hex(_color.toColor()));
               }
             }),
           ),

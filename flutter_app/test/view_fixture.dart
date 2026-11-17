@@ -99,6 +99,8 @@ class ViewController extends AppController {
       showTrayModeIndicator: true,
       effectiveEmbeddedComposition: false,
       accentColor: '#3B73D9',
+      cornerRadius: null,
+      backgroundColor: '',
       fontSize: 18,
       themeExists: true,
       themePath: '$defaultDir/keytao/theme.yaml',
@@ -240,6 +242,8 @@ class ViewController extends AppController {
   Map<String, dynamic> resolveCandidatePanelPreview({
     required UiColorSchemeDto colorScheme,
     required String accentColor,
+    double? cornerRadius,
+    String backgroundColor = '',
     required double fontSize,
     required bool systemDark,
   }) {
@@ -251,6 +255,32 @@ class ViewController extends AppController {
       jsonEncode(_candidatePanelThemes[dark ? 'dark' : 'light']),
     ) as Map<String, dynamic>;
     (theme['ui'] as Map<String, dynamic>)['colorScheme'] = colorScheme.name;
+    final accent = int.parse(accentColor.substring(1), radix: 16);
+    theme['ui']['accentColor'] = {
+      'red': (accent >> 16) & 255,
+      'green': (accent >> 8) & 255,
+      'blue': accent & 255,
+      'alpha': 255,
+    };
+    if (cornerRadius != null) {
+      final radius = cornerRadius.clamp(0, 28);
+      for (final entry in {
+        'panel': radius,
+        'candidate': radius * 11 / 16,
+        'navigation': radius * 10 / 16,
+        'modeHint': radius * 14 / 16,
+      }.entries) {
+        (theme[entry.key] as Map<String, dynamic>)['cornerRadius'] =
+            entry.value;
+      }
+    }
+    if (backgroundColor.isNotEmpty) {
+      final rgb = int.parse(backgroundColor.substring(1), radix: 16);
+      final background = theme['panel']['background'] as Map<String, dynamic>;
+      background['red'] = (rgb >> 16) & 255;
+      background['green'] = (rgb >> 8) & 255;
+      background['blue'] = rgb & 255;
+    }
     final scale = fontSize / 20;
     final font = theme['font'] as Map<String, dynamic>;
     font['size'] = fontSize;

@@ -2678,9 +2678,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun candidateInlineGapDp(): Float = min(theme.candidateInlineGapDp, 4f).coerceAtLeast(2f)
 
-    private fun candidateCornerRadiusDp(): Float = min(theme.keyCornerRadiusDp, 8f).coerceAtLeast(6f)
+    private fun candidateCornerRadiusDp(): Float = theme.keyCornerRadiusDp * 8f / 11f
 
-    private fun keyCornerRadiusDp(): Float = min(theme.keyCornerRadiusDp + 1f, 10f).coerceAtLeast(7f)
+    private fun keyCornerRadiusDp(): Float = theme.keyCornerRadiusDp * 10f / 11f
 
     private fun drawCandidateOption(
         canvas: Canvas,
@@ -4253,7 +4253,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun drawVoiceInputOverlay(canvas: Canvas) {
         if (voiceState == KeytaoVoiceInput.State.IDLE) return
         val card = voiceOverlayRect()
-        val radius = min(dp(18f), card.height() / 2f)
+        val radius = min(dp(18f * theme.panelCornerRadiusDp / 16f), card.height() / 2f)
         drawSurfaceShadow(canvas, card, pressed = false)
         paint.style = Paint.Style.FILL
         val background = panelBackgroundColor()
@@ -4335,11 +4335,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         drawSurfaceShadow(canvas, bubble, pressed = false)
         paint.style = Paint.Style.FILL
         paint.color = theme.keyPressedBackground.toArgb()
-        canvas.drawRoundRect(bubble, dp(keyCornerRadiusDp() + 3f), dp(keyCornerRadiusDp() + 3f), paint)
+        canvas.drawRoundRect(bubble, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(1f, dp(1f))
         paint.color = theme.candidateSelectedBorderColor.toArgb()
-        canvas.drawRoundRect(bubble, dp(keyCornerRadiusDp() + 3f), dp(keyCornerRadiusDp() + 3f), paint)
+        canvas.drawRoundRect(bubble, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(keyPreviewTextSizeSp)
         textPaint.color = theme.keySelectedForeground.toArgb()
@@ -4350,7 +4350,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         drawSurfaceShadow(canvas, panel.rect, pressed = false)
         paint.style = Paint.Style.FILL
         paint.color = panelBackgroundColor()
-        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp() + 3f), dp(keyCornerRadiusDp() + 3f), paint)
+        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
         val itemWidth = panel.rect.width() / panel.options.size
         for ((index, option) in panel.options.withIndex()) {
             val item = RectF(
@@ -4376,7 +4376,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(1f, dp(1f))
         paint.color = theme.candidateSelectedBorderColor.toArgb()
-        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp() + 3f), dp(keyCornerRadiusDp() + 3f), paint)
+        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
     }
 
     private fun resolveCommand(key: KeySpec, deltaY: Float, rect: RectF? = null, releaseY: Float? = null): KeyCommand {

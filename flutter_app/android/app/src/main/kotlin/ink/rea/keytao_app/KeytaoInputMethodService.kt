@@ -1271,9 +1271,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             baseKeyboardConfig = next
             applyKeyboardPresentation(next, keyboardLayoutState)
             val configWritten = KeytaoAndroidImeConfig.persistSettings(this, patch)
-            val themeWritten = KeytaoNativeBridge.writeThemeUi(
+            val themeWritten = KeytaoNativeBridge.writeThemeAppearance(
                 themeFile.absolutePath,
                 "auto",
+                "",
+                -1f,
                 "",
             )
             KeytaoThemeResolver.invalidate()

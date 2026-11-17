@@ -23,6 +23,9 @@ class _PanelController extends ViewController {
     PanelOrientationDto? orientation,
     bool? hideCandidatePanel,
     String? accentColor,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+    String? backgroundColor,
     double? fontSize,
   }) async {
     if (orientation != null) savedOrientations.add(orientation);
@@ -51,6 +54,8 @@ class _PanelController extends ViewController {
       showTrayModeIndicator: current.showTrayModeIndicator,
       effectiveEmbeddedComposition: hide || current.embeddedComposition,
       accentColor: current.accentColor,
+      cornerRadius: current.cornerRadius,
+      backgroundColor: current.backgroundColor,
       fontSize: current.fontSize,
       themeExists: current.themeExists,
       themePath: current.themePath,

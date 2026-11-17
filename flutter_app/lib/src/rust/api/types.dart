@@ -525,7 +525,10 @@ class ImeUiSettingsDto {
   final bool showTrayModeIndicator;
   final bool effectiveEmbeddedComposition;
   final String accentColor;
+  final String? accentColorOverride;
   final double fontSize;
+  final double? cornerRadius;
+  final String backgroundColor;
   final String? themePath;
   final bool themeExists;
   final String? reloadStampPath;
@@ -541,7 +544,10 @@ class ImeUiSettingsDto {
     required this.showTrayModeIndicator,
     required this.effectiveEmbeddedComposition,
     required this.accentColor,
+    this.accentColorOverride,
     required this.fontSize,
+    this.cornerRadius,
+    required this.backgroundColor,
     this.themePath,
     required this.themeExists,
     this.reloadStampPath,
@@ -559,7 +565,10 @@ class ImeUiSettingsDto {
       showTrayModeIndicator.hashCode ^
       effectiveEmbeddedComposition.hashCode ^
       accentColor.hashCode ^
+      accentColorOverride.hashCode ^
       fontSize.hashCode ^
+      cornerRadius.hashCode ^
+      backgroundColor.hashCode ^
       themePath.hashCode ^
       themeExists.hashCode ^
       reloadStampPath.hashCode ^
@@ -579,7 +588,10 @@ class ImeUiSettingsDto {
           showTrayModeIndicator == other.showTrayModeIndicator &&
           effectiveEmbeddedComposition == other.effectiveEmbeddedComposition &&
           accentColor == other.accentColor &&
+          accentColorOverride == other.accentColorOverride &&
           fontSize == other.fontSize &&
+          cornerRadius == other.cornerRadius &&
+          backgroundColor == other.backgroundColor &&
           themePath == other.themePath &&
           themeExists == other.themeExists &&
           reloadStampPath == other.reloadStampPath &&

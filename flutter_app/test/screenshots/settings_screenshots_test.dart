@@ -89,12 +89,16 @@ class _ScreenshotController extends ViewController {
   Map<String, dynamic> resolveCandidatePanelPreview({
     required UiColorSchemeDto colorScheme,
     required String accentColor,
+    double? cornerRadius,
+    String backgroundColor = '',
     required double fontSize,
     required bool systemDark,
   }) {
     final theme = super.resolveCandidatePanelPreview(
       colorScheme: colorScheme,
       accentColor: accentColor,
+      cornerRadius: cornerRadius,
+      backgroundColor: backgroundColor,
       fontSize: fontSize,
       systemDark: systemDark,
     );

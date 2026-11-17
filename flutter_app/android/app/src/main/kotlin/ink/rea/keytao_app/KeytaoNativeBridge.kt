@@ -50,6 +50,19 @@ object KeytaoNativeBridge {
         return runCatching { nativeWriteThemeUi(path, colorScheme, accentHex) }.getOrDefault(false)
     }
 
+    fun writeThemeAppearance(
+        path: String,
+        colorScheme: String,
+        accentHex: String?,
+        cornerRadius: Float,
+        backgroundHex: String?,
+    ): Boolean {
+        if (!loaded) return false
+        return runCatching {
+            nativeWriteThemeAppearance(path, colorScheme, accentHex, cornerRadius, backgroundHex)
+        }.getOrDefault(false)
+    }
+
     fun defaultKeyboardYaml(): String? {
         if (!loaded) return null
         return runCatching { nativeDefaultKeyboardYaml() }
@@ -378,6 +391,14 @@ object KeytaoNativeBridge {
     ): String
 
     external fun nativeWriteThemeUi(path: String, colorScheme: String, accentHex: String?): Boolean
+
+    external fun nativeWriteThemeAppearance(
+        path: String,
+        colorScheme: String,
+        accentHex: String?,
+        cornerRadius: Float,
+        backgroundHex: String?,
+    ): Boolean
 
     external fun nativeDefaultKeyboardYaml(): String
 

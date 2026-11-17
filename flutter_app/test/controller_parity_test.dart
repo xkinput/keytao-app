@@ -220,6 +220,8 @@ class FakeCore implements RustLibApi {
         showTrayModeIndicator: true,
         effectiveEmbeddedComposition: false,
         accentColor: '#3B73D9',
+        cornerRadius: null,
+        backgroundColor: '',
         fontSize: 20,
         themeExists: false,
         message: '',

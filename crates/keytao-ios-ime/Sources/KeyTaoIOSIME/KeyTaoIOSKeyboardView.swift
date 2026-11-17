@@ -3948,11 +3948,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         let left = max(margin, min(bounds.width - margin - bubbleWidth, key.rect.midX - bubbleWidth / 2))
         let top = max(margin, key.rect.minY - bubbleHeight + Self.keyPreviewKeyOverlap)
         let bubble = CGRect(x: left, y: top, width: bubbleWidth, height: bubbleHeight)
-        drawSurfaceShadow(bubble, pressed: false, cornerRadius: keyCornerRadius(for: bubble) + 3)
+        drawSurfaceShadow(bubble, pressed: false, cornerRadius: keyCornerRadius(for: bubble) * 13 / 10)
         theme.candidate.pressedBackground.uiColor.setFill()
-        UIBezierPath(roundedRect: bubble, cornerRadius: keyCornerRadius(for: bubble) + 3).fill()
+        UIBezierPath(roundedRect: bubble, cornerRadius: keyCornerRadius(for: bubble) * 13 / 10).fill()
         theme.candidate.selectedBorderColor.uiColor.setStroke()
-        let border = UIBezierPath(roundedRect: bubble, cornerRadius: keyCornerRadius(for: bubble) + 3)
+        let border = UIBezierPath(roundedRect: bubble, cornerRadius: keyCornerRadius(for: bubble) * 13 / 10)
         border.lineWidth = max(1, pixel)
         border.stroke()
         drawText(
@@ -3966,9 +3966,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawAlternatePanel(_ panel: AlternatePanel) {
-        drawSurfaceShadow(panel.rect, pressed: false, cornerRadius: keyCornerRadius(for: panel.rect) + 3)
+        drawSurfaceShadow(panel.rect, pressed: false, cornerRadius: keyCornerRadius(for: panel.rect) * 13 / 10)
         panelBackgroundColor().setFill()
-        UIBezierPath(roundedRect: panel.rect, cornerRadius: keyCornerRadius(for: panel.rect) + 3).fill()
+        UIBezierPath(roundedRect: panel.rect, cornerRadius: keyCornerRadius(for: panel.rect) * 13 / 10).fill()
         let itemWidth = panel.rect.width / CGFloat(panel.options.count)
         for (index, option) in panel.options.enumerated() {
             let item = CGRect(
@@ -3993,7 +3993,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             )
         }
         theme.candidate.selectedBorderColor.uiColor.setStroke()
-        let border = UIBezierPath(roundedRect: panel.rect, cornerRadius: keyCornerRadius(for: panel.rect) + 3)
+        let border = UIBezierPath(roundedRect: panel.rect, cornerRadius: keyCornerRadius(for: panel.rect) * 13 / 10)
         border.lineWidth = max(1, pixel)
         border.stroke()
     }
@@ -7007,11 +7007,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func candidateCornerRadius() -> CGFloat {
-        max(6, min(theme.candidate.cornerRadius, 8))
+        theme.candidate.cornerRadius * 8 / 11
     }
 
     private func keyCornerRadius(for rect: CGRect) -> CGFloat {
-        min(max(7, min(theme.candidate.cornerRadius + 1, 10)), rect.width * 0.28, rect.height * 0.28)
+        min(theme.candidate.cornerRadius * 10 / 11, rect.width * 0.28, rect.height * 0.28)
     }
 
     private func keyWeight(_ key: KeyTaoKeySpec) -> CGFloat {

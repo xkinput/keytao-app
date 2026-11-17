@@ -50,14 +50,15 @@ class MobileKeyboardPreview extends StatelessWidget {
     final panel = theme['panel'] as Map<String, dynamic>;
     final candidate = theme['candidate'] as Map<String, dynamic>;
     final font = theme['font'] as Map<String, dynamic>;
-    final dark = ui['effectiveColorScheme'] == 'dark';
+    final panelColor = _color(panel, 'background');
+    final dark =
+        (panelColor.r * 299 + panelColor.g * 587 + panelColor.b * 114) <
+        128 / 255 * 1000;
     final accent = _color(ui, 'accentColor');
-    final background = Color.lerp(_color(panel, 'background'), accent, .07)!;
+    final background = Color.lerp(panelColor, accent, .07)!;
     final foreground = _color(candidate, 'foreground');
     final hintColor = _color(candidate, 'commentColor');
-    final radius = ((candidate['cornerRadius'] as num).toDouble() + 1)
-        .clamp(7.0, 10.0)
-        .toDouble();
+    final radius = (candidate['cornerRadius'] as num).toDouble() * 10 / 11;
     final configuredKey = _color(candidate, 'background');
     final keySurface = configuredKey.a > 0
         ? configuredKey
