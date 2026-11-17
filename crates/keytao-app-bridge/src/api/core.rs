@@ -425,10 +425,15 @@ pub async fn activate_scheme(
     Ok(install_result_dto(result))
 }
 
-pub async fn remove_scheme_package(scheme_key: String) -> Result<(), String> {
+pub async fn remove_scheme_package(
+    scheme_key: String,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    keytao_app_core::packages::remove_scheme_package(&state.core, &scheme_key)
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    keytao_app_core::packages::remove_scheme_package(&state.core, &scheme_key, &host)
+        .await
         .map_err(|error| error.to_string())
 }
 

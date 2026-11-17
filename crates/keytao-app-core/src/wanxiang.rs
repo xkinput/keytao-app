@@ -596,7 +596,7 @@ pub(crate) fn safe_target(root: &Path, relative: &str) -> Result<PathBuf, String
     Ok(path)
 }
 
-fn installable(name: &str) -> bool {
+pub(crate) fn installable(name: &str) -> bool {
     REQUIRED.contains(&name)
         || name == NOTICE
         || name == FLYPY_PATCH

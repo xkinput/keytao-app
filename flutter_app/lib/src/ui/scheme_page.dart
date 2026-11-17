@@ -435,18 +435,18 @@ class SchemePackageRow extends StatelessWidget {
                                 );
                               },
                       ),
-                    if (!active)
-                      FItem(
-                        title: const Text('删除'),
-                        variant: FItemVariant.destructive,
-                        prefix: const Icon(FLucideIcons.trash2),
-                        onPress: c.busy
-                            ? null
-                            : () {
-                                popover.hide();
-                                c.removeSchemePackage(schemeKey);
-                              },
-                      ),
+                    FItem(
+                      title: const Text('删除'),
+                      variant: FItemVariant.destructive,
+                      prefix: const Icon(FLucideIcons.trash2),
+                      enabled: !c.busy,
+                      onPress: c.busy
+                          ? null
+                          : () {
+                              popover.hide();
+                              c.removeSchemePackage(schemeKey);
+                            },
+                    ),
                   ],
                 ],
               ),

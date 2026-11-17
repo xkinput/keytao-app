@@ -2686,12 +2686,18 @@ fn wire__crate__api__core__remove_scheme_package_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_android_deploy = decode_DartFn_Inputs__Output_String_AnyhowException(
+                <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
+            );
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::core::remove_scheme_package(api_scheme_key).await?;
+                        let output_ok = crate::api::core::remove_scheme_package(
+                            api_scheme_key,
+                            api_android_deploy,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,

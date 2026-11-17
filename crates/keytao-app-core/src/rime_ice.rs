@@ -182,7 +182,7 @@ fn package_destination(name: &str) -> Option<String> {
     (name.ends_with(".lua") || name == "lunar.db").then(|| format!("lua/rime_ice/{name}"))
 }
 
-fn installable(name: &str) -> bool {
+pub(crate) fn installable(name: &str) -> bool {
     REQUIRED.contains(&name)
         || name == NOTICE
         || name.strip_prefix("rime_ice-dicts/").is_some_and(|name| {

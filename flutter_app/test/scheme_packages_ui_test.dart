@@ -10,6 +10,7 @@ import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/login.dart' show showAccountDialog;
+import 'package:keytao/src/ui/onboarding.dart';
 import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/settings.dart' show showCloudPackageTransfer;
 import 'package:keytao/src/ui/theme.dart';
@@ -292,6 +293,49 @@ void main() {
     },
   );
 
+  testWidgets(
+    'empty schemes render the app and first-run setup on all platforms',
+    (tester) async {
+      _size(tester, const Size(1200, 1000));
+      for (final platform in [
+        BridgePlatform.macOs,
+        BridgePlatform.android,
+        BridgePlatform.ios,
+      ]) {
+        final c = _PackageController(platform)
+          ..installedPackages = []
+          ..local = const LocalSchemaDto(
+            installed: false,
+            deployed: false,
+            schemas: [],
+          );
+        c.addon = c.wanxiang;
+        addTearDown(c.dispose);
+        for (final completed in [true, false]) {
+          await tester.pumpWidget(
+            KeyTaoApp(
+              key: ValueKey('${platform.name}-$completed'),
+              controller: c,
+              initialOnboarding: OnboardingDto(completed: completed),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(c.setupReady, isFalse);
+          expect(
+            find.byType(OnboardingPage),
+            completed ? findsNothing : findsOneWidget,
+          );
+          if (completed) {
+            expect(find.text(AppStrings.notInstalled), findsWidgets);
+          }
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        }
+      }
+    },
+  );
+
   testWidgets('scheme page avoids overflow above a tall landscape keyboard', (
     tester,
   ) async {
@@ -492,8 +536,8 @@ void main() {
           hasPackageZip: true,
         ),
         update: false,
-        labels: <String>[],
-        calls: <String>[],
+        labels: ['删除'],
+        calls: ['remove:keytao'],
       ),
       (
         package: const InstalledPackageDto(
@@ -503,8 +547,8 @@ void main() {
           hasPackageZip: false,
         ),
         update: false,
-        labels: ['重新下载'],
-        calls: ['install:keytao'],
+        labels: ['重新下载', '删除'],
+        calls: ['install:keytao', 'remove:keytao'],
       ),
       (
         package: const InstalledPackageDto(
@@ -547,8 +591,8 @@ void main() {
           hasPackageZip: true,
         ),
         update: true,
-        labels: ['更新'],
-        calls: ['update:keytao'],
+        labels: ['更新', '删除'],
+        calls: ['update:keytao', 'remove:keytao'],
       ),
       (
         package: const InstalledPackageDto(
@@ -558,8 +602,8 @@ void main() {
           hasPackageZip: false,
         ),
         update: true,
-        labels: ['更新'],
-        calls: ['update:keytao'],
+        labels: ['更新', '删除'],
+        calls: ['update:keytao', 'remove:keytao'],
       ),
     ];
     for (final entry in cases) {
@@ -633,7 +677,7 @@ void main() {
         await tester.tap(find.byIcon(FLucideIcons.ellipsis));
         await tester.pumpAndSettle();
         expect(find.text('自造词'), findsOneWidget);
-        expect(find.text('删除'), findsNothing);
+        expect(find.text('删除'), findsOneWidget);
         await tester.tap(find.byIcon(FLucideIcons.ellipsis));
         await tester.pumpAndSettle();
       }
@@ -785,7 +829,9 @@ void main() {
     expect(tester.takeException(), isNull);
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  testWidgets('local package menu hides delete while active', (tester) async {
+  testWidgets('local package menu allows deleting active packages', (
+    tester,
+  ) async {
     final c = _PackageController()..accountUser = const AccountUserDto(id: 1);
     addTearDown(c.dispose);
     _size(tester, const Size(360, 800));
@@ -808,7 +854,7 @@ void main() {
       await tester.tap(more);
       await tester.pumpAndSettle();
       expect(find.text('上传'), active ? findsOneWidget : findsNothing);
-      expect(find.text('删除'), active ? findsNothing : findsOneWidget);
+      expect(find.text('删除'), findsOneWidget);
       expect(
         tester
             .widget<FItem>(find.widgetWithText(FItem, '随账号同步'))
@@ -829,13 +875,11 @@ void main() {
       await tester.tap(find.widgetWithText(FItem, '重新导入'));
       await tester.pumpAndSettle();
       expect(c.actions.last, 'import:local-custom');
-      if (!active) {
-        await tester.tap(more);
-        await tester.pumpAndSettle();
-        await tester.tap(find.widgetWithText(FItem, '删除'));
-        await tester.pumpAndSettle();
-        expect(c.actions.last, 'remove:local-custom');
-      }
+      await tester.tap(more);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FItem, '删除'));
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'remove:local-custom');
       expect(tester.takeException(), isNull);
     }
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));

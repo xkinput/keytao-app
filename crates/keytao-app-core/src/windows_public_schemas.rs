@@ -582,7 +582,16 @@ pub fn remove_schema(schema_id: &str, package_paths: &[PathBuf]) -> Result<(), S
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let root = public_root()?;
-    let mut files = read_snapshot(&root)?;
+    remove_schema_at(&root, schema_id, package_paths, true)
+}
+
+fn remove_schema_at(
+    root: &Path,
+    schema_id: &str,
+    package_paths: &[PathBuf],
+    grant_access: bool,
+) -> Result<(), String> {
+    let mut files = read_snapshot(root)?;
     files.retain(|path, _| !path.starts_with("build"));
     for relative in package_paths {
         files.remove(&checked_relative(relative)?);
@@ -604,7 +613,7 @@ pub fn remove_schema(schema_id: &str, package_paths: &[PathBuf]) -> Result<(), S
             .map_err(|error| error.to_string())?
             .into_bytes();
     }
-    store_snapshot(&root, &files, true)
+    store_snapshot(root, &files, grant_access)
 }
 
 /// Publish input preferences without exposing private metadata or dictionaries.
@@ -850,7 +859,20 @@ fn store_snapshot(
     grant_access: bool,
 ) -> Result<(), String> {
     let previous = GenerationPointers::read(root)?;
-    let preserve_current = !files.contains_key(Path::new(LIBRIME_VERSION_FILE))
+    // An empty schema list needs no compile before retiring the current generation.
+    let empty_schema_list = files
+        .get(Path::new("default.custom.yaml"))
+        .and_then(|content| serde_yaml::from_slice::<serde_yaml::Value>(content).ok())
+        .and_then(|document| {
+            document
+                .get("patch")?
+                .get("schema_list")?
+                .as_sequence()
+                .map(Vec::is_empty)
+        })
+        .unwrap_or(false);
+    let preserve_current = !empty_schema_list
+        && !files.contains_key(Path::new(LIBRIME_VERSION_FILE))
         && previous
             .current
             .as_ref()
@@ -985,6 +1007,72 @@ fn grant_appcontainer_read(_root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_package_clears_public_sources_and_activates_an_empty_schema_list() {
+        for keep_addon in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let config = format!(
+                "patch:\n  schema_list:\n    - schema: keytao6\n    - schema: auxiliary\n{}",
+                if keep_addon {
+                    "    - schema: easy_en\n"
+                } else {
+                    ""
+                }
+            );
+            let package_paths = [
+                "keytao6.schema.yaml",
+                "auxiliary.schema.yaml",
+                "keytao.dict.yaml",
+                "lua/main.lua",
+            ]
+            .map(PathBuf::from);
+            let mut initial = BTreeMap::from([
+                ("default.custom.yaml".into(), config.into_bytes()),
+                ("easy_en.schema.yaml".into(), b"addon source".to_vec()),
+                ("easy_en.dict.yaml".into(), b"addon dictionary".to_vec()),
+                (
+                    "build/keytao6.schema.yaml".into(),
+                    b"compiled schema".to_vec(),
+                ),
+                (LIBRIME_VERSION_FILE.into(), b"1.0".to_vec()),
+            ]);
+            for path in &package_paths {
+                initial.insert(path.clone(), b"package source".to_vec());
+            }
+            store_snapshot(root.path(), &initial, false).unwrap();
+            let previous = GenerationPointers::read(root.path()).unwrap();
+            let update = update_public_schemas_at(root.path().into(), || {
+                for id in ["keytao6", "auxiliary"] {
+                    remove_schema_at(root.path(), id, &package_paths, false)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            let files = read_snapshot(root.path()).unwrap();
+            let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
+            assert_eq!(
+                crate::scheme_files::parse_schema_list(config),
+                if keep_addon { vec!["easy_en"] } else { vec![] }
+            );
+            for path in &package_paths {
+                assert!(!files.contains_key(path), "{path:?}");
+            }
+            assert_eq!(files[Path::new("easy_en.schema.yaml")], b"addon source");
+            assert_eq!(files[Path::new("easy_en.dict.yaml")], b"addon dictionary");
+            assert!(!files.keys().any(|path| path.starts_with("build")));
+            let pointers = GenerationPointers::read(root.path()).unwrap();
+            if keep_addon {
+                assert_eq!(pointers.current, previous.current);
+                assert!(pointers.pending.is_some());
+            } else {
+                assert_ne!(pointers.current, previous.current);
+                assert!(pointers.pending.is_none());
+            }
+            update.rollback().unwrap();
+            assert_eq!(read_snapshot(root.path()).unwrap(), initial);
+        }
+    }
 
     #[test]
     fn runtime_error_details_preserve_long_unicode_messages_without_string_truncation() {

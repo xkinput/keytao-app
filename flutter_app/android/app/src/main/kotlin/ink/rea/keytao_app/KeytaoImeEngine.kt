@@ -141,7 +141,10 @@ class KeytaoImeEngine(context: Context) {
         }
         warmUpIfStorageReady()
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
-        if (!hasInstalledSchema()) return Readiness.NOT_INSTALLED
+        if (!hasInstalledSchema()) {
+            if (session != 0L) reload()
+            return Readiness.NOT_INSTALLED
+        }
         if (!warmupComplete) return Readiness.NOT_DEPLOYED
         if (!hasDeployedSchema()) {
             val schemas = KeytaoAndroidPaths.configuredSchemas(root)
@@ -421,7 +424,15 @@ class KeytaoImeEngine(context: Context) {
             schemaLogoGeneration++
             schemaLogoKey = null
             schemaLogoRequest = null
-            if (!hasInstalledSchema()) return false
+            if (!hasInstalledSchema()) {
+                KeytaoNativeBridge.destroySession(session)
+                session = 0L
+                lastState = KeytaoImeState.empty(asciiMode = lastState.asciiMode)
+                if (reinitialize) {
+                    KeytaoNativeBridge.reinitialize(root.absolutePath, sharedDataDir?.absolutePath)
+                }
+                return false
+            }
             if (!deploy && !hasDeployedSchema()) return false
             ensureBundledSharedData(appContext)
             val sharedDir = findSharedDataDir() ?: return false

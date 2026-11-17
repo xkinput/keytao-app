@@ -52,6 +52,13 @@ class PackageCore extends FakeCore {
   final downloadedSources = <String>[];
   Completer<void>? activationGate;
   Completer<List<SchemeUpdateDto>>? updateGate;
+  bool androidRemoval = false;
+  String? removalFailure;
+  LocalSchemaDto localAfterRemoval = const LocalSchemaDto(
+    installed: false,
+    deployed: false,
+    schemas: [],
+  );
 
   @override
   Future<String?> crateApiCoreActiveSchemaLogoPath() async =>
@@ -137,9 +144,18 @@ class PackageCore extends FakeCore {
   @override
   Future<void> crateApiCoreRemoveSchemePackage({
     required String schemeKey,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('packageRemove:$schemeKey');
+    final active = packages.any(
+      (package) => package.schemeKey == schemeKey && package.active,
+    );
     packages.removeWhere((package) => package.schemeKey == schemeKey);
+    if (active) {
+      if (androidRemoval) expect(await androidDeploy(), isEmpty);
+      local = localAfterRemoval;
+    }
+    if (removalFailure case final failure?) throw StateError(failure);
   }
 
   @override
@@ -321,16 +337,125 @@ void main() {
     expect(controller.busy, isFalse);
   });
 
-  test('active removal is refused before entering the bridge', () async {
+  test('inactive removal preserves the active package and selection', () async {
     await controller.refreshSchemeUpdates();
 
-    expect(await controller.removeSchemePackage('keytao'), isFalse);
-    expect(core.calls, isEmpty);
-    expect(controller.installedPackageFor('keytao')!.active, isTrue);
     expect(await controller.removeSchemePackage('xmjd'), isTrue);
     expect(core.calls, ['packageRemove:xmjd']);
     expect(controller.installedPackageFor('xmjd'), isNull);
+    expect(controller.installedPackageFor('keytao')!.active, isTrue);
+    expect(controller.scheme, 'keytao');
   });
+
+  test(
+    'active removal selects a remaining cached package and refreshes state',
+    () async {
+      core.packages = [
+        const InstalledPackageDto(
+          schemeKey: 'xmjd',
+          active: true,
+          hasPackageZip: true,
+        ),
+        const InstalledPackageDto(
+          schemeKey: 'keytao',
+          active: false,
+          hasPackageZip: true,
+        ),
+      ];
+      core.readActiveLocal(deployed: true);
+      controller.scheme = 'xmjd';
+      await controller.refreshSchemeUpdates();
+
+      expect(await controller.removeSchemePackage('xmjd'), isTrue);
+
+      expect(controller.installedPackageFor('xmjd'), isNull);
+      expect(controller.installedPackageFor('keytao')!.active, isFalse);
+      expect(controller.scheme, 'keytao');
+      expect(controller.local!.installed, isFalse);
+      expect(controller.local!.deployed, isFalse);
+      expect(controller.local!.schemas, isEmpty);
+      expect(controller.activeSchemaLogoPath, isNull);
+      expect(controller.schemaSwitches, isEmpty);
+      expect(controller.setupReady, isFalse);
+      expect(core.calls, ['packageRemove:xmjd', 'englishMode', 'latest']);
+    },
+  );
+
+  for (final addonsRemain in [false, true]) {
+    test(
+      'active removal restores ${addonsRemain ? 'add-on-only' : 'fresh install'} state',
+      () async {
+        core.packages = [keytaoPackage];
+        if (addonsRemain) {
+          core.localAfterRemoval = const LocalSchemaDto(
+            installed: true,
+            deployed: true,
+            schemas: ['easy_en', 'wanxiang'],
+          );
+        }
+        await controller.refreshSchemeUpdates();
+
+        expect(await controller.removeSchemePackage('keytao'), isTrue);
+
+        expect(controller.installedPackages, isEmpty);
+        expect(controller.scheme, 'keytao');
+        expect(controller.activeSchemeKey, addonsRemain ? 'easy_en' : 'keytao');
+        expect(controller.local!.installed, addonsRemain);
+        expect(controller.local!.deployed, addonsRemain);
+        expect(controller.setupReady, addonsRemain);
+        expect(core.calls, ['packageRemove:keytao', 'englishMode', 'latest']);
+      },
+    );
+  }
+
+  test(
+    'Android active removal uses the deployment callback and refreshes state',
+    () async {
+      controller.dispose();
+      controller = create(mobile: true);
+      android.permission = {'granted': false, 'writable': false};
+      core
+        ..packages = [keytaoPackage]
+        ..androidRemoval = true
+        ..localAfterRemoval = const LocalSchemaDto(
+          installed: true,
+          deployed: true,
+          schemas: ['easy_en'],
+        );
+      await controller.refreshSchemeUpdates();
+
+      expect(await controller.removeSchemePackage('keytao'), isTrue);
+
+      expect(core.calls, [
+        'packageRemove:keytao',
+        'deployImeData',
+        'permission',
+        'latest',
+      ]);
+      expect(controller.installedPackages, isEmpty);
+      expect(controller.activeSchemeKey, 'easy_en');
+      expect(controller.local!.deployed, isTrue);
+      expect(controller.ime?['enabled'], isTrue);
+    },
+  );
+
+  test(
+    'active removal refreshes actual state after a later bridge failure',
+    () async {
+      core
+        ..packages = [keytaoPackage]
+        ..removalFailure = 'package store failed';
+      await controller.refreshSchemeUpdates();
+
+      expect(await controller.removeSchemePackage('keytao'), isFalse);
+
+      expect(controller.packageError, 'package store failed');
+      expect(controller.installedPackages, isEmpty);
+      expect(controller.local!.installed, isFalse);
+      expect(controller.local!.deployed, isFalse);
+      expect(controller.setupReady, isFalse);
+    },
+  );
 
   test(
     'stale update checks cannot undo dismissal or a package write',

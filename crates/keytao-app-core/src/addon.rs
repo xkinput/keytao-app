@@ -79,7 +79,7 @@ fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
     Ok(Some(manifest))
 }
 
-fn is_package_file(path: &str) -> bool {
+pub(crate) fn is_package_file(path: &str) -> bool {
     path == LICENSE
         || addon_schema_source_files(EASY_EN_ADDON_ID)
             .iter()
@@ -289,7 +289,7 @@ pub fn write_addon_schema_list(root: &Path, id: &str, installed: bool) -> Result
         .map_err(|error| format!("写入附加方案列表失败: {error}"))
 }
 
-fn addon_default_custom(root: &Path) -> Result<(&'static str, String), String> {
+pub(crate) fn addon_default_custom(root: &Path) -> Result<(&'static str, String), String> {
     let relative = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find(|name| root.join(name).is_file())
@@ -570,10 +570,20 @@ pub(crate) fn write_schema_list_transaction(
 ) -> Result<(), String> {
     let (relative, existing) = addon_default_custom(&receipt.root)?;
     let updated = update_addon_schema_list_content(&existing, id, installed)?;
+    write_schema_list_content_transaction(receipt, relative, &updated, shared, None)
+}
+
+pub(crate) fn write_schema_list_content_transaction(
+    receipt: &mut InstallReceipt,
+    relative: &str,
+    updated: &str,
+    shared: &Path,
+    rime_lua: Option<&str>,
+) -> Result<(), String> {
     let path = receipt.work.join("default.custom.yaml");
-    std::fs::write(&path, &updated).map_err(|e| e.to_string())?;
+    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
     receipt.replace(relative, &path, wanxiang::fingerprint(&path)?.0)?;
-    let schemas = parse_schema_list(&updated);
+    let schemas = parse_schema_list(updated);
     let addon_only = schemas
         .iter()
         .all(|schema| keytao_core::is_addon_schema(schema));
@@ -594,7 +604,7 @@ pub(crate) fn write_schema_list_transaction(
             "root": receipt.root,
             "scheme_key": schemas.first().map(String::as_str).unwrap_or(""),
             "manifest": {},
-            "rime_lua": null,
+            "rime_lua": rime_lua,
         });
         std::fs::write(
             &path,
@@ -606,7 +616,9 @@ pub(crate) fn write_schema_list_transaction(
             &path,
             wanxiang::fingerprint(&path)?.0,
         )?;
-        receipt.move_original("rime.lua")?;
+        if rime_lua.is_none() {
+            receipt.move_original("rime.lua")?;
+        }
     }
     Ok(())
 }
