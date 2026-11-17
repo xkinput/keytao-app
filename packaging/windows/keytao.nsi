@@ -67,6 +67,9 @@ Var UpdateMode
 Page custom CreateRunningProcessesPage LeaveRunningProcessesPage
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_TEXT "$(KeyTaoFinishText)"
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_TEXT "$(KeyTaoRunText)"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchKeyTaoAsUser
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 UninstPage custom un.CreateRunningProcessesPage un.LeaveRunningProcessesPage
@@ -75,6 +78,9 @@ UninstPage custom un.CreateRunningProcessesPage un.LeaveRunningProcessesPage
 !insertmacro MUI_LANGUAGE "SimpChinese"
 LangString KeyTaoFinishText ${LANG_ENGLISH} "KeyTao has been installed. Applications that already loaded the old input method can keep running. Reopen those applications, or sign out of Windows later, to use the updated input method."
 LangString KeyTaoFinishText ${LANG_SIMPCHINESE} "KeyTao 已安装完成。已经加载旧输入法的应用可以继续使用；在方便时重新打开这些应用，或注销 Windows 后重新登录，即可使用新版输入法。"
+LangString KeyTaoRunText ${LANG_ENGLISH} "Run KeyTao"
+LangString KeyTaoRunText ${LANG_SIMPCHINESE} "运行 KeyTao"
+!include "unelevated-launch.nsh"
 !include /CHARSET=UTF8 "running-processes.nsh"
 !include "upgrade-existing.nsh"
 !include "replace-payload.nsh"
