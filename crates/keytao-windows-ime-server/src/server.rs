@@ -14,8 +14,11 @@ use keytao_windows_ime::{
 use std::{
     fs::File,
     io::{self, Read, Write},
-    os::windows::io::{AsRawHandle, FromRawHandle},
-    path::PathBuf,
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle},
+    },
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, TryLockError},
     time::{Duration, Instant},
 };
@@ -24,7 +27,7 @@ use windows::{
     Win32::{
         Foundation::{
             LocalFree, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ,
-            GENERIC_WRITE, HANDLE, HLOCAL,
+            GENERIC_WRITE, HANDLE, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{
@@ -33,7 +36,9 @@ use windows::{
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
         Storage::FileSystem::{
-            CreateFileW, FlushFileBuffers, ReadFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
+            CreateFileW, FindCloseChangeNotification, FindFirstChangeNotificationW,
+            FindNextChangeNotification, FlushFileBuffers, ReadFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
             FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
             SECURITY_SQOS_PRESENT,
         },
@@ -48,7 +53,10 @@ use windows::{
                 GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, SetNamedPipeHandleState,
                 PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
             },
-            Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{
+                GetCurrentProcess, OpenProcess, WaitForSingleObject,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
     },
 };
@@ -418,6 +426,40 @@ impl Runtime {
     }
 }
 
+struct ReloadNotification(HANDLE);
+
+impl ReloadNotification {
+    fn new(dir: &Path) -> Option<Self> {
+        let path: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            FindFirstChangeNotificationW(
+                PCWSTR(path.as_ptr()),
+                false,
+                FILE_NOTIFY_CHANGE_LAST_WRITE
+                    | FILE_NOTIFY_CHANGE_FILE_NAME
+                    | FILE_NOTIFY_CHANGE_SIZE,
+            )
+        }
+        .ok()
+        .map(Self)
+    }
+
+    fn wait(&self) -> bool {
+        match unsafe { WaitForSingleObject(self.0, 5_000) } {
+            // Rearm before refreshing so a stamp written during reload is still observed.
+            WAIT_OBJECT_0 => unsafe { FindNextChangeNotification(self.0) }.is_ok(),
+            WAIT_TIMEOUT => true,
+            _ => false,
+        }
+    }
+}
+
+impl Drop for ReloadNotification {
+    fn drop(&mut self) {
+        let _ = unsafe { FindCloseChangeNotification(self.0) };
+    }
+}
+
 pub fn run() -> Result<(), String> {
     let identity = Arc::new(current_identity()?);
     let dir =
@@ -430,20 +472,28 @@ pub fn run() -> Result<(), String> {
     };
     loop {
         let watched_runtime = Arc::clone(&runtime);
+        let watched_dir = dir.clone();
         let started = std::thread::Builder::new()
             .name("ime-runtime-reload".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_millis(100));
-                let result = {
-                    let mut runtime = watched_runtime.lock().unwrap_or_else(|p| p.into_inner());
-                    if runtime.engine.is_none() {
-                        continue;
+            .spawn(move || {
+                let mut notification = ReloadNotification::new(&watched_dir);
+                loop {
+                    if !notification.as_ref().is_some_and(ReloadNotification::wait) {
+                        drop(notification.take());
+                        std::thread::sleep(Duration::from_secs(1));
+                        notification = ReloadNotification::new(&watched_dir);
                     }
-                    runtime.refresh()
-                };
-                if let Err(error) = result {
-                    keytao_core::rt_log!(Level::Info, "ipc", "reload_failed", msg = error);
-                    std::thread::sleep(Duration::from_secs(5));
+                    let result = {
+                        let mut runtime = watched_runtime.lock().unwrap_or_else(|p| p.into_inner());
+                        if runtime.engine.is_none() {
+                            continue;
+                        }
+                        runtime.refresh()
+                    };
+                    if let Err(error) = result {
+                        keytao_core::rt_log!(Level::Info, "ipc", "reload_failed", msg = error);
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
                 }
             });
         match started {
@@ -754,6 +804,31 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_notification_rearms_after_stamp_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-reload-notification-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let notification = ReloadNotification::new(&dir).unwrap();
+        for contents in ["first", "second"] {
+            std::fs::write(keytao_core::ReloadStamp::path(&dir), contents).unwrap();
+            assert_eq!(
+                unsafe { WaitForSingleObject(notification.0, 5_000) },
+                WAIT_OBJECT_0
+            );
+            assert!(notification.wait());
+        }
+        drop(notification);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(ReloadNotification::new(&dir).is_none());
+    }
 
     #[test]
     fn requests_cannot_use_an_uncreated_session() {

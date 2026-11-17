@@ -86,7 +86,7 @@ pub(super) fn start_watchdog() {
                 if let Err(error) = ensure_started() {
                     tracing::warn!(%error, "IME server watchdog failed");
                 }
-                std::thread::sleep(Duration::from_secs(5));
+                std::thread::sleep(Duration::from_secs(30));
             }
         })
     {
