@@ -7,8 +7,8 @@ use keytao_windows_ime::{
     engine_backend::{ImeEngineBackend, InProcEngine},
     engine_status,
     pipe_security::{
-        current_identity, keytao_install_root, pipe_client_identity, process_identity,
-        process_image, Identity, OwnedHandle,
+        current_identity, keytao_app_root, keytao_runtime_root, pipe_client_identity,
+        process_identity, process_image, Identity, OwnedHandle,
     },
 };
 use std::{
@@ -155,7 +155,8 @@ fn request_shutdown(name: &str, identity: &Identity, deadline: Instant) -> Resul
     if peer.session_id != identity.session_id {
         return Err("old IME server session does not match".into());
     }
-    let image = installed_process(pid, &peer.sid, &identity.sid)?;
+    let image = installed_process(pid, &peer.sid, &identity.sid, &[keytao_runtime_root()])
+        .map_err(|error| format!("old IME server failed runtime root verification: {error}"))?;
     let current_image = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|error| format!("resolve current server image: {error}"))?;
@@ -257,7 +258,12 @@ impl Write for DeadlinePipe {
     }
 }
 
-fn installed_process(pid: u32, caller_sid: &str, server_sid: &str) -> Result<PathBuf, String> {
+fn installed_process(
+    pid: u32,
+    caller_sid: &str,
+    server_sid: &str,
+    roots: &[Result<PathBuf, String>],
+) -> Result<PathBuf, String> {
     let process = OwnedHandle(
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
             .map_err(|error| format!("open installed caller process: {error}"))?,
@@ -266,9 +272,15 @@ fn installed_process(pid: u32, caller_sid: &str, server_sid: &str) -> Result<Pat
         .map_err(|error| format!("read installed caller image: {error}"))?
         .canonicalize()
         .map_err(|error| format!("resolve installed caller image: {error}"))?;
-    let root = keytao_install_root()?;
-    if !crate::authorization::installed_caller(caller_sid, server_sid, &image, &root) {
-        return Err("caller image or user is outside the KeyTao installation".into());
+    if !crate::authorization::installed_caller(
+        caller_sid,
+        server_sid,
+        &image,
+        roots.iter().filter_map(|root| root.as_deref().ok()),
+    ) {
+        return Err(format!(
+            "caller image or user is outside the trusted KeyTao roots: {roots:?}"
+        ));
     }
     Ok(image)
 }
@@ -556,7 +568,13 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
         // A replacement must wait for deployment/userdb maintenance before exiting.
         let shutdown_guard = if shutdown
             && !client.is_appcontainer
-            && installed_process(pid, &client.sid, &server.sid).is_ok()
+            && installed_process(
+                pid,
+                &client.sid,
+                &server.sid,
+                &[keytao_app_root(), keytao_runtime_root()],
+            )
+            .is_ok()
         {
             Some(runtime.lock().unwrap_or_else(|p| p.into_inner()))
         } else {
@@ -567,7 +585,7 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
                 Response::Ok
             } else {
                 Response::Err(EngineError::Failed(
-                    "Shutdown caller is not installed".into(),
+                    "Shutdown requires an authenticated caller under the KeyTao app or runtime root".into(),
                 ))
             }
         } else if matches!(request.message, Request::Deploy) {
@@ -575,12 +593,12 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
             if crate::authorization::deployment_allowed(
                 role,
                 client.is_appcontainer,
-                installed_process(pid, &client.sid, &server.sid).is_ok(),
+                installed_process(pid, &client.sid, &server.sid, &[keytao_app_root()]).is_ok(),
             ) {
                 Response::Deployed(runtime.lock().unwrap_or_else(|p| p.into_inner()).deploy())
             } else {
                 Response::Deployed(Err(
-                    "Deploy requires an installed authenticated App caller".into()
+                    "Deploy requires an authenticated App caller under the KeyTao app root".into(),
                 ))
             }
         } else {
