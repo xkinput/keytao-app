@@ -1443,6 +1443,7 @@ fn state_json(state: ImeState, accepted: bool) -> String {
         "committed": state.committed.unwrap_or_default(),
         "selectKeys": state.select_keys.unwrap_or_default(),
         "asciiMode": state.ascii_mode,
+        "chordComposer": state.chord_composer,
         "englishMode": english_mode,
         "schemaId": state.schema_id,
         "schemaName": state.schema_name,
@@ -1965,8 +1966,10 @@ mod tests {
         let mut state = ImeState::empty();
         state.schema_id = "easy_en".into();
         state.schema_name = "Easy English".into();
+        state.chord_composer = true;
         let value: serde_json::Value = serde_json::from_str(&state_json(state, true)).unwrap();
         assert_eq!(value["asciiMode"], false);
+        assert_eq!(value["chordComposer"], true);
         assert_eq!(value["englishMode"], true);
         assert_eq!(value["schemaId"], "easy_en");
         assert_eq!(value["modeHint"]["asciiMode"], true);

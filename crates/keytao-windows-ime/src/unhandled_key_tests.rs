@@ -137,6 +137,25 @@ fn schema_handled_digits_and_full_width_commits_are_preserved() {
 }
 
 #[test]
+fn chord_accumulation_consumes_presses_without_committing_raw_text() {
+    let mut state = ImeState::empty();
+    state.chord_composer = true;
+    let before = state.clone();
+    let mut result = KeyProcessResult {
+        accepted: true,
+        state,
+    };
+    complete_unhandled_key('a' as u32, 0, &mut result);
+    assert_eq!(result.state.committed, None);
+    assert!(!has_visible_state(&result.state));
+    assert!(should_consume_processed_state(
+        result.accepted,
+        &before,
+        &result.state
+    ));
+}
+
+#[test]
 fn ongoing_compositions_do_not_gain_a_raw_character() {
     for after in [preedit(), candidates()] {
         let mut result = declined(after);

@@ -138,22 +138,41 @@ fn printable_keysym(
         // the unmodified character plus the Control mask.
         return fallback_printable_keysym(key, mods);
     }
-    match translated_printable_keysym(vk, lparam) {
+    match translated_printable_keysym(vk, lparam, false) {
         PrintableTranslation::Character(keysym) => Some(keysym),
         PrintableTranslation::DeadKey => None,
         PrintableTranslation::Unavailable => fallback_printable_keysym(key, mods),
     }
 }
 
-fn translated_printable_keysym(vk: u16, lparam: isize) -> PrintableTranslation {
+fn translated_printable_keysym(
+    vk: u16,
+    lparam: isize,
+    ignore_shortcut_modifiers: bool,
+) -> PrintableTranslation {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetKeyboardLayout, GetKeyboardState, ToUnicodeEx,
+        GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VK_CONTROL, VK_LCONTROL, VK_LMENU,
+        VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RWIN,
     };
 
     let mut keyboard_state = [0u8; 256];
     unsafe {
         if GetKeyboardState(&mut keyboard_state).is_err() {
             return PrintableTranslation::Unavailable;
+        }
+        if ignore_shortcut_modifiers {
+            for key in [
+                VK_CONTROL,
+                VK_LCONTROL,
+                VK_RCONTROL,
+                VK_MENU,
+                VK_LMENU,
+                VK_RMENU,
+                VK_LWIN,
+                VK_RWIN,
+            ] {
+                keyboard_state[key.0 as usize] = 0;
+            }
         }
         let scan_code = ((lparam as usize >> 16) & 0xff) as u32;
         let mut buffer = [0u16; 4];
@@ -408,6 +427,31 @@ pub fn should_bypass_empty_composition(vk: u16, mods: u32, state: &keytao_core::
     key_policy::should_bypass_empty_composition_key(is_nonstarter_vk(vk), mods, state)
 }
 
+pub fn chord_keysym_for_vk(
+    vk: u16,
+    lparam: isize,
+    mods: u32,
+    state: &keytao_core::ImeState,
+) -> Option<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+
+    if !state.chord_composer || state.ascii_mode {
+        return None;
+    }
+    let key = VIRTUAL_KEY(vk);
+    let keysym = if is_printable_vk(key) {
+        // A newly pressed shortcut modifier must not change the released chord key.
+        match translated_printable_keysym(vk, lparam, true) {
+            PrintableTranslation::Character(keysym) => Some(keysym),
+            PrintableTranslation::DeadKey => None,
+            PrintableTranslation::Unavailable => fallback_printable_keysym(key, mods),
+        }
+    } else {
+        vk_to_keysym(vk, lparam, mods)
+    };
+    keysym.filter(|&sym| key_policy::should_forward_chord_release(sym, mods, state))
+}
+
 /// Windows applications own Ctrl/Alt/Win chords, even with a live preedit.
 /// Rime's default Emacs bindings otherwise turn Ctrl+V into candidate paging
 /// and Ctrl+A into preedit navigation. Preserve only the desktop IME's menu
@@ -572,9 +616,9 @@ mod tests {
     };
 
     use super::{
-        ascii_mode_rejects_key, fallback_printable_keysym, is_application_shortcut,
-        letters_are_uppercase, shift_pending_after_key_down, should_bypass_empty_composition,
-        should_eat_key, vk_to_keysym,
+        ascii_mode_rejects_key, chord_keysym_for_vk, fallback_printable_keysym,
+        is_application_shortcut, letters_are_uppercase, shift_pending_after_key_down,
+        should_bypass_empty_composition, should_eat_key, vk_to_keysym,
     };
 
     fn composing_state() -> ImeState {
@@ -632,6 +676,61 @@ mod tests {
         assert!(should_eat_key(VK_OEM_COMMA.0, false, 0));
         assert!(should_eat_key(VK_1.0, false, 0));
         assert!(should_eat_key(VK_A.0, false, 0));
+    }
+
+    #[test]
+    fn chord_releases_require_the_active_chord_schema_and_preserve_shortcut_presses() {
+        let mut state = ImeState::empty();
+        assert_eq!(chord_keysym_for_vk(VK_A.0, 0, 0, &state), None);
+        state.chord_composer = true;
+        assert_eq!(chord_keysym_for_vk(VK_A.0, 0, 0, &state), Some('a' as u32));
+        assert_eq!(
+            chord_keysym_for_vk(VK_SPACE.0, 0, 0, &state),
+            Some(' ' as u32)
+        );
+        assert_eq!(chord_keysym_for_vk(VK_BACK.0, 0, 0, &state), None);
+        assert_eq!(chord_keysym_for_vk(VK_SHIFT.0, 0, 0, &state), None);
+        for mods in [RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
+            assert_eq!(
+                chord_keysym_for_vk(VK_A.0, 0, mods, &state),
+                Some('a' as u32)
+            );
+            assert!(is_application_shortcut(VK_A.0, mods, false));
+            assert!(!should_eat_key(VK_A.0, false, mods));
+            assert!(!should_eat_key(VK_A.0, true, mods));
+        }
+        state.ascii_mode = true;
+        assert_eq!(chord_keysym_for_vk(VK_A.0, 0, 0, &state), None);
+    }
+
+    #[test]
+    fn modified_chord_releases_keep_the_layout_character() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+        // SetKeyboardState affects only this dedicated thread, which exits here.
+        std::thread::spawn(|| {
+            let mut state = ImeState::empty();
+            state.chord_composer = true;
+            for key in [VK_1, VK_OEM_COMMA] {
+                unsafe { SetKeyboardState(&[0; 256]).unwrap() };
+                let expected = chord_keysym_for_vk(key.0, 0, 0, &state);
+                for (mods, modifier_keys) in [
+                    (RIME_MOD_CONTROL, [VK_CONTROL, VK_LCONTROL]),
+                    (RIME_MOD_ALT, [VK_MENU, VK_LMENU]),
+                    (RIME_MOD_SUPER, [VK_LWIN, VK_LWIN]),
+                    (RIME_MOD_CONTROL | RIME_MOD_ALT, [VK_CONTROL, VK_MENU]),
+                ] {
+                    let mut keyboard = [0; 256];
+                    for modifier in modifier_keys {
+                        keyboard[modifier.0 as usize] = 0x80;
+                    }
+                    unsafe { SetKeyboardState(&keyboard).unwrap() };
+                    assert_eq!(chord_keysym_for_vk(key.0, 0, mods, &state), expected);
+                }
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

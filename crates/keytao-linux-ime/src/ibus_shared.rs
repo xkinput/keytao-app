@@ -42,8 +42,8 @@ pub enum KeyPhase {
     Sensitive,
     /// A Shift release, which `ascii_composer` may turn into a mode switch.
     ShiftRelease,
-    /// Any other release; librime is only interested in Shift releases.
-    IgnoredRelease,
+    /// Any other release; only a chord schema needs printable releases.
+    OtherRelease,
     /// A press, still to be routed against the composition librime holds.
     Press,
 }
@@ -58,7 +58,7 @@ pub fn key_phase(keyval: u32, state: u32, policy: InputContextPolicy) -> KeyPhas
     if is_shift_key(keyval) {
         KeyPhase::ShiftRelease
     } else {
-        KeyPhase::IgnoredRelease
+        KeyPhase::OtherRelease
     }
 }
 
@@ -135,7 +135,20 @@ pub fn process_key_event(
     theme_resolver: &ThemeResolver,
 ) -> KeyOutcome {
     match key_phase(keyval, state, session.input_policy()) {
-        KeyPhase::Sensitive | KeyPhase::IgnoredRelease => KeyOutcome::Forward,
+        KeyPhase::Sensitive => KeyOutcome::Forward,
+        KeyPhase::OtherRelease => {
+            if key_policy::should_forward_chord_release(keyval, state, &session.state()) {
+                // IBus can report Super as the X11 Mod4 bit instead of Rime's bit 26.
+                let state = if state & (1 << 6) != 0 {
+                    state | keytao_core::RIME_MOD_SUPER
+                } else {
+                    state
+                };
+                KeyOutcome::from_result(session.process_key_result(keyval, state))
+            } else {
+                KeyOutcome::Forward
+            }
+        }
         // A mode-switch release can commit the current code or clear the
         // composition even when Rime returns accepted=false. Publish the full
         // result before handing the release back to the client.
@@ -530,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn only_shift_releases_survive_the_release_filter() {
+    fn non_shift_releases_require_a_schema_decision() {
         let policy = InputContextPolicy::default();
         assert_eq!(
             key_phase(0xffe1, RIME_RELEASE_MASK, policy),
@@ -538,7 +551,7 @@ mod tests {
         );
         assert_eq!(
             key_phase(0x61, RIME_RELEASE_MASK, policy),
-            KeyPhase::IgnoredRelease
+            KeyPhase::OtherRelease
         );
         assert_eq!(key_phase(0x61, 0, policy), KeyPhase::Press);
         assert_eq!(key_phase(0xffe1, 0, policy), KeyPhase::Press);
