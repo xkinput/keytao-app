@@ -7,8 +7,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
+import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
-import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/shell.dart';
 import 'package:keytao/src/ui/theme.dart';
 
@@ -16,13 +16,22 @@ import '../view_fixture.dart';
 
 const _directory =
     '/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/'
-    '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/ui-shots';
+    '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/redesign-shots';
 const _cjkFamily = 'SettingsScreenshotCjk';
 const _captureKey = ValueKey('settings-screenshot');
 
 class _ScreenshotController extends ViewController {
   _ScreenshotController(super.platform) {
     candidatePageSize = 6;
+    appUpdate = null;
+    installedPackages = [
+      InstalledPackageDto(
+        schemeKey: 'keytao',
+        version: local!.version,
+        active: true,
+        hasPackageZip: true,
+      ),
+    ];
   }
 
   @override
@@ -82,110 +91,105 @@ void main() {
   for (final device in [
     (
       name: 'desktop',
-      size: const Size(1280, 900),
+      size: const Size(1440, 1220),
       platform: BridgePlatform.macOs,
-      candidateCount: 6,
     ),
     (
       name: 'phone',
       size: const Size(390, 844),
       platform: BridgePlatform.android,
-      candidateCount: 6,
-    ),
-    (
-      name: 'desktop',
-      size: const Size(1280, 900),
-      platform: BridgePlatform.macOs,
-      candidateCount: 9,
     ),
   ]) {
-    for (final brightness
-        in device.candidateCount == 9
-            ? [Brightness.light]
-            : Brightness.values) {
-      final name =
-          '${device.name}-${brightness.name}'
-          '${device.candidateCount == 9 ? '-9' : ''}';
-      testWidgets('capture input settings $name', (tester) async {
-        final controller = _ScreenshotController(device.platform)
-          ..candidatePageSize = device.candidateCount;
-        addTearDown(controller.dispose);
-        tester.view.devicePixelRatio = 1;
-        tester.view.physicalSize = device.size;
-        tester.platformDispatcher.platformBrightnessTestValue = brightness;
-        addTearDown(tester.view.resetPhysicalSize);
-        addTearDown(tester.view.resetDevicePixelRatio);
-        addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    for (final page in [AppPage.input, AppPage.scheme]) {
+      for (final brightness in Brightness.values) {
+        final name = '${device.name}-${page.id}-${brightness.name}';
+        testWidgets('capture settings $name', (tester) async {
+          final controller = _ScreenshotController(device.platform)
+            ..activePage = page;
+          addTearDown(controller.dispose);
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = device.size;
+          tester.platformDispatcher.platformBrightnessTestValue = brightness;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(
+            tester.platformDispatcher.clearPlatformBrightnessTestValue,
+          );
 
-        await tester.pumpWidget(
-          RepaintBoundary(
-            key: _captureKey,
-            child: KeyTaoTheme(
-              platform: device.platform,
-              home: Builder(
-                builder: (context) {
-                  final theme = context.theme;
-                  final typeface = FTypeface.inherit(
-                    colors: theme.colors,
-                    touch: context.platformVariant.touch,
-                    fontFamilyFallback: const [_cjkFamily],
-                  );
-                  return FTheme(
-                    platform: context.platformVariant,
-                    data: FThemeData(
+          await tester.pumpWidget(
+            RepaintBoundary(
+              key: _captureKey,
+              child: KeyTaoTheme(
+                platform: device.platform,
+                home: Builder(
+                  builder: (context) {
+                    final theme = context.theme;
+                    final typeface = FTypeface.inherit(
                       colors: theme.colors,
                       touch: context.platformVariant.touch,
-                      typography: FTypography(
-                        display: typeface,
-                        body: typeface,
+                      fontFamilyFallback: const [_cjkFamily],
+                    );
+                    return FTheme(
+                      platform: context.platformVariant,
+                      data: FThemeData(
+                        colors: theme.colors,
+                        touch: context.platformVariant.touch,
+                        typography: FTypography(
+                          display: typeface,
+                          body: typeface,
+                        ),
                       ),
-                    ),
-                    child: AppShell(controller: controller),
-                  );
-                },
+                      child: AppShell(controller: controller),
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(tester.getSize(find.byKey(_captureKey)), device.size);
+          );
+          await tester.pumpAndSettle();
+          expect(tester.getSize(find.byKey(_captureKey)), device.size);
 
-        final scrollable = tester.state<ScrollableState>(
-          find
-              .descendant(
-                of: find.byType(InputPage),
-                matching: find.byType(Scrollable),
-              )
-              .first,
-        );
-        // Keep the viewport width and responsive layout while exposing all rows.
-        tester.view.physicalSize = Size(
-          device.size.width,
-          device.size.height + scrollable.position.maxScrollExtent.ceil(),
-        );
-        await tester.pumpAndSettle();
-        expect(scrollable.position.maxScrollExtent, lessThanOrEqualTo(1));
-        expect(tester.takeException(), isNull);
-
-        final boundary = tester.renderObject<RenderRepaintBoundary>(
-          find.byKey(_captureKey),
-        );
-        await tester.runAsync(() async {
-          final image = await boundary.toImage();
-          try {
-            final png = await image.toByteData(format: ui.ImageByteFormat.png);
-            expect(png, isNotNull);
-            expect(png!.lengthInBytes, greaterThan(10000));
-            await Directory(_directory).create(recursive: true);
-            await File('$_directory/$name.png').writeAsBytes(
-              png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+          if (device.name == 'phone') {
+            final scrollable = tester.state<ScrollableState>(
+              find
+                  .descendant(
+                    of: find.byKey(PageStorageKey(page.id)),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
             );
-          } finally {
-            image.dispose();
+            // Keep the phone width while exposing every setting below the fold.
+            tester.view.physicalSize = Size(
+              device.size.width,
+              device.size.height + scrollable.position.maxScrollExtent.ceil(),
+            );
+            await tester.pumpAndSettle();
+            expect(scrollable.position.maxScrollExtent, lessThanOrEqualTo(1));
           }
-        });
-        await tester.pumpWidget(const SizedBox.shrink());
-      }, skip: !enabled);
+          expect(tester.takeException(), isNull);
+
+          final boundary = tester.renderObject<RenderRepaintBoundary>(
+            find.byKey(_captureKey),
+          );
+          await tester.runAsync(() async {
+            final image = await boundary.toImage();
+            try {
+              final png = await image.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              expect(png, isNotNull);
+              expect(png!.lengthInBytes, greaterThan(10000));
+              await Directory(_directory).create(recursive: true);
+              await File('$_directory/$name.png').writeAsBytes(
+                png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+              );
+            } finally {
+              image.dispose();
+            }
+          });
+          await tester.pumpWidget(const SizedBox.shrink());
+        }, skip: !enabled);
+      }
     }
   }
 }

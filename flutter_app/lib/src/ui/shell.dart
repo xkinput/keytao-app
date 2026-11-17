@@ -1,8 +1,10 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter/semantics.dart';
 import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import '../rust/api/types.dart';
 import 'about_page.dart';
 import 'color_picker.dart';
 import 'debug_page.dart';
@@ -14,6 +16,8 @@ import 'theme.dart';
 import 'widgets.dart';
 
 extension PageIcon on AppPage {
+  String get navigationLabel => this == AppPage.extension ? '扩展' : title;
+
   IconData get icon => switch (this) {
     AppPage.input => FLucideIcons.keyboard,
     AppPage.scheme => FLucideIcons.download,
@@ -40,7 +44,7 @@ Widget _navigationIcon(AppPage page, AppController controller, double size) =>
                   width: 7,
                   height: 7,
                   decoration: BoxDecoration(
-                    color: context.theme.colors.primary,
+                    color: ChromeAccent.of(context),
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -145,113 +149,93 @@ class _AppShellState extends State<AppShell> {
       final shell = LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 720;
-          final touch = context.platformVariant.touch;
-          final iconSize = touch ? 18.0 : 16.0;
-          final display = context.theme.typography.display;
-          final titleStyle = (touch ? display.xl2 : display.xl).copyWith(
-            fontWeight: FontWeight.w500,
-          );
+          final palette = AppPalette.of(context);
           final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
           final availableHeight = constraints.maxHeight - keyboardInset;
           return FScaffold(
             scaffoldStyle: FScaffoldStyleDelta.delta(
+              backgroundColor: palette.ground,
+              headerDecoration: DecorationDelta.value(
+                BoxDecoration(
+                  border: wide
+                      ? Border(bottom: BorderSide(color: palette.hairline))
+                      : null,
+                ),
+              ),
+              footerDecoration: const DecorationDelta.value(BoxDecoration()),
               systemOverlayStyle: c.isAndroid
                   ? AppSystemBars.styleOf(context)
                   : null,
             ),
             childPad: false,
-            sidebar: wide
-                ? FSidebar(
-                    style: const FSidebarStyleDelta.delta(
-                      constraints: BoxConstraints.tightFor(width: 216),
-                      headerPadding: EdgeInsetsGeometryDelta.value(
-                        EdgeInsets.zero,
-                      ),
-                      contentPadding: EdgeInsetsGeometryDelta.value(
-                        EdgeInsets.symmetric(horizontal: 8),
-                      ),
-                    ),
-                    header: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 24, 12, 24),
-                      child: AppBrand(
-                        version: c.info.appVersion,
-                        compact: true,
-                      ),
-                    ),
-                    children: [
-                      for (final page in AppPage.values)
-                        AnimatedContainer(
-                          duration: MediaQuery.disableAnimationsOf(context)
-                              ? Duration.zero
-                              : const Duration(milliseconds: 150),
-                          curve: Curves.easeOutCubic,
-                          decoration: BoxDecoration(
-                            color: c.activePage == page
-                                ? accent.withValues(alpha: .12)
-                                : const Color(0x00000000),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          foregroundDecoration: BoxDecoration(
-                            border: Border.all(
-                              color: c.activePage == page
-                                  ? accent
-                                  : const Color(0x00000000),
-                            ),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: FSidebarItem(
-                            key: ValueKey('nav-${page.id}'),
-                            style: FSidebarItemStyleDelta.delta(
-                              backgroundColor: c.activePage == page
-                                  ? const FVariants.all(Color(0x00000000))
-                                  : null,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            icon: _navigationIcon(page, c, iconSize),
-                            label: Text(page.title),
-                            selected: c.activePage == page,
-                            onPress: () => select(page.index),
-                          ),
-                        ),
-                    ],
-                  )
-                : null,
             header: keyboardInset > 0 && availableHeight < 160
                 ? null
                 : SafeArea(
                     bottom: false,
                     child: Padding(
-                      padding: EdgeInsets.fromLTRB(
-                        touch ? 16 : 32,
-                        20,
-                        touch ? 16 : 32,
-                        12,
-                      ),
+                      padding: wide
+                          ? const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 16,
+                            )
+                          : const EdgeInsets.fromLTRB(16, 20, 16, 12),
                       child: Align(
                         alignment: Alignment.topCenter,
                         child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 760),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  c.activePage.title,
-                                  style: titleStyle,
-                                ),
-                              ),
-                              FTooltip(
-                                tipBuilder: (_, _) => const Text('账号'),
-                                child: FButton.icon(
-                                  variant: FButtonVariant.ghost,
-                                  onPress: () => showAccountDialog(context, c),
-                                  child: Icon(
-                                    FLucideIcons.user,
-                                    size: iconSize,
-                                    semanticLabel: '账号',
+                          constraints: BoxConstraints(
+                            maxWidth: wide ? 1392 : 760,
+                          ),
+                          child: SizedBox(
+                            width: double.infinity,
+                            child: wide
+                                ? Wrap(
+                                    alignment: WrapAlignment.spaceBetween,
+                                    crossAxisAlignment:
+                                        WrapCrossAlignment.center,
+                                    spacing: 16,
+                                    runSpacing: 16,
+                                    children: [
+                                      _DesktopNavigation(
+                                        controller: c,
+                                        onSelect: select,
+                                      ),
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          _ShellStatus(controller: c),
+                                          const SizedBox(width: 12),
+                                          _AccountButton(
+                                            controller: c,
+                                            showName: true,
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  )
+                                : Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          c.activePage.title,
+                                          style: context
+                                              .theme
+                                              .typography
+                                              .display
+                                              .xl2
+                                              .copyWith(
+                                                fontSize: 30,
+                                                fontWeight: FontWeight.w700,
+                                                color: palette.ink,
+                                              ),
+                                        ),
+                                      ),
+                                      if (c.activePage == AppPage.input) ...[
+                                        _ShellStatus(controller: c),
+                                        const SizedBox(width: 4),
+                                      ],
+                                      _AccountButton(controller: c),
+                                    ],
                                   ),
-                                ),
-                              ),
-                            ],
                           ),
                         ),
                       ),
@@ -261,15 +245,67 @@ class _AppShellState extends State<AppShell> {
                 ? null
                 : SafeArea(
                     top: false,
+                    bottom: false,
                     child: FBottomNavigationBar(
+                      safeAreaBottom: true,
+                      style: FBottomNavigationBarStyleDelta.delta(
+                        decoration: DecorationDelta.value(
+                          BoxDecoration(
+                            color: palette.surface,
+                            border: Border(
+                              top: BorderSide(color: palette.hairline),
+                            ),
+                          ),
+                        ),
+                        padding: const EdgeInsetsGeometryDelta.value(
+                          EdgeInsets.fromLTRB(4, 6, 4, 18),
+                        ),
+                        itemStyle: FBottomNavigationBarItemStyleDelta.delta(
+                          padding: const EdgeInsetsGeometryDelta.value(
+                            EdgeInsets.symmetric(vertical: 4),
+                          ),
+                          iconStyle: FVariants(
+                            IconThemeData(color: palette.muted, size: 22),
+                            variants: {
+                              [FTappableVariant.selected]: IconThemeData(
+                                color: accent,
+                                size: 22,
+                              ),
+                            },
+                          ),
+                          textStyle: FVariants(
+                            context.theme.typography.body.sm.copyWith(
+                              fontSize: 12,
+                              height: 1.5,
+                              color: palette.muted,
+                            ),
+                            variants: {
+                              [FTappableVariant.selected]: context
+                                  .theme
+                                  .typography
+                                  .body
+                                  .sm
+                                  .copyWith(
+                                    fontSize: 12,
+                                    height: 1.5,
+                                    color: accent,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                            },
+                          ),
+                        ),
+                      ),
                       index: c.activePage.index,
                       onChange: select,
                       children: [
                         for (final page in AppPage.values)
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
-                            icon: _navigationIcon(page, c, iconSize),
-                            label: Text(page.title),
+                            icon: _navigationIcon(page, c, 22),
+                            label: Text(
+                              page.navigationLabel,
+                              semanticsLabel: page.title,
+                            ),
                           ),
                       ],
                     ),
@@ -293,4 +329,177 @@ class _AppShellState extends State<AppShell> {
       );
     },
   );
+}
+
+class _DesktopNavigation extends StatelessWidget {
+  const _DesktopNavigation({required this.controller, required this.onSelect});
+  final AppController controller;
+  final ValueChanged<int> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final accent = ChromeAccent.of(context);
+    return Semantics(
+      key: const ValueKey('desktop-navigation'),
+      container: true,
+      role: SemanticsRole.tabBar,
+      label: '主导航',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: palette.controlSurface,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            children: [
+              for (final page in AppPage.values)
+                FTappable(
+                  key: ValueKey('nav-${page.id}'),
+                  semanticsButton: false,
+                  semanticsRole: SemanticsRole.tab,
+                  selected: controller.activePage == page,
+                  onPress: () => onSelect(page.index),
+                  builder: (context, variants, _) => Container(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: controller.activePage == page
+                          ? accent
+                          : variants.contains(FTappableVariant.hovered) ||
+                                variants.contains(FTappableVariant.pressed)
+                          ? palette.hairline
+                          : null,
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          page.navigationLabel,
+                          semanticsLabel: page.title,
+                          style: context.theme.typography.body.sm.copyWith(
+                            fontSize: 15,
+                            height: 1.5,
+                            fontWeight: controller.activePage == page
+                                ? FontWeight.w600
+                                : FontWeight.w500,
+                            color: controller.activePage == page
+                                ? const Color(0xFFFFFFFF)
+                                : palette.ink,
+                          ),
+                        ),
+                        if (page == AppPage.scheme &&
+                            controller.hasSchemeUpdates) ...[
+                          const SizedBox(width: 8),
+                          Semantics(
+                            label: AppStrings.checkUpdate,
+                            child: Container(
+                              key: const ValueKey('scheme-update-indicator'),
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: controller.activePage == page
+                                    ? const Color(0xFFFFFFFF)
+                                    : accent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountButton extends StatelessWidget {
+  const _AccountButton({required this.controller, this.showName = false});
+  final AppController controller;
+  final bool showName;
+
+  @override
+  Widget build(BuildContext context) => FTooltip(
+    tipBuilder: (_, _) => const Text('账号'),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 44, maxWidth: 160),
+      child: FButton(
+        variant: FButtonVariant.ghost,
+        semanticsLabel: '账号',
+        mainAxisSize: MainAxisSize.min,
+        style: FButtonStyleDelta.delta(
+          contentStyle: FButtonContentStyleDelta.delta(
+            constraints: const BoxConstraints(minHeight: 44),
+            padding: const EdgeInsetsGeometryDelta.value(
+              EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            ),
+            textStyle: FVariants.all(
+              context.theme.typography.body.sm.copyWith(
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+                color: AppPalette.of(context).ink,
+              ),
+            ),
+          ),
+        ),
+        onPress: () => showAccountDialog(context, controller),
+        prefix: const Icon(FLucideIcons.user, size: 18),
+        child: showName
+            ? Flexible(
+                child: Text(
+                  controller.accountName ?? '账号',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )
+            : const SizedBox.shrink(),
+      ),
+    ),
+  );
+}
+
+class _ShellStatus extends StatelessWidget {
+  const _ShellStatus({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final macos = controller.info.platform == BridgePlatform.macOs;
+    final mobile = controller.isMobile;
+    final ready = switch (controller.info.platform) {
+      BridgePlatform.macOs => controller.macosImeBadge == ImeBadgeState.ready,
+      BridgePlatform.android =>
+        controller.ime?['enabled'] == true &&
+            controller.ime?['selected'] == true,
+      BridgePlatform.ios => controller.iosKeyboardEnabled,
+      _ => controller.local?.deployed == true,
+    };
+    return StatusPill(
+      macos
+          ? controller.macosImeBadgeText
+          : mobile
+          ? ready
+                ? '已启用'
+                : '未启用'
+          : controller.local == null
+          ? AppStrings.checking
+          : ready
+          ? AppStrings.deployed
+          : AppStrings.pendingDeploy,
+      color: ready
+          ? AppPalette.of(context).success
+          : AppPalette.of(context).muted,
+    );
+  }
 }

@@ -113,7 +113,7 @@ void unifiedGateCases(BridgePlatform platform) {
             showShell ? findsOneWidget : findsNothing,
           );
           expect(
-            find.byType(FSidebar),
+            find.byKey(const ValueKey('desktop-navigation')),
             showShell && width >= 720 ? findsOneWidget : findsNothing,
           );
           expect(
@@ -140,7 +140,7 @@ void unifiedGateCases(BridgePlatform platform) {
             }
             if (platform == BridgePlatform.ios) {
               expect(find.text(AppStrings.iosOnboarding), findsOneWidget);
-              expect(find.text(AppStrings.mobileKeyboard), findsOneWidget);
+              expect(find.text('候选与键盘'), findsOneWidget);
               expect(find.text(AppStrings.candidateFontSize), findsNothing);
               expect(find.text(AppStrings.openStoragePermission), findsNothing);
               expect(find.text(AppStrings.chooseKeytao), findsNothing);

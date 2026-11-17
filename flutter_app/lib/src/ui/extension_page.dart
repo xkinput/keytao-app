@@ -5,6 +5,7 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
 import 'scheme_page.dart';
+import 'theme.dart';
 import 'widgets.dart';
 
 class ExtensionPage extends StatelessWidget {
@@ -21,7 +22,12 @@ class ExtensionPage extends StatelessWidget {
           title: AppStrings.customDirectory,
           icon: FLucideIcons.folderOpen,
           children: [
-            const Text(AppStrings.customDirectoryDescription),
+            Text(
+              AppStrings.customDirectoryDescription,
+              style: context.theme.typography.body.sm.copyWith(
+                color: AppPalette.of(context).muted,
+              ),
+            ),
             VersionPicker(controller: c),
             ActionRow(
               children: [
@@ -70,7 +76,11 @@ class ExtensionPage extends StatelessWidget {
                     children: [
                       const Text(AppStrings.detectedSchemas),
                       for (final schema in schemas.schemas)
-                        FBadge(child: Text(schema)),
+                        AppBadge(
+                          schema,
+                          background: AppPalette.of(context).controlSurface,
+                          foreground: AppPalette.of(context).muted,
+                        ),
                     ],
                   ),
               ],
@@ -132,7 +142,7 @@ class CustomFileList extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         if (c.filesLoading)
           const StatusMessage(AppStrings.reading)
         else if (c.customFiles.isEmpty)
@@ -147,11 +157,30 @@ class CustomFileList extends StatelessWidget {
               itemCount: c.customFiles.length,
               itemBuilder: (context, index) {
                 final file = c.customFiles[index];
-                return FTile(
-                  prefix: Icon(
-                    file.isDir ? FLucideIcons.folder : FLucideIcons.fileText,
+                return DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                        color: AppPalette.of(context).hairline,
+                      ),
+                    ),
                   ),
-                  title: SelectableText(file.name),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Row(
+                      spacing: 12,
+                      children: [
+                        Icon(
+                          file.isDir
+                              ? FLucideIcons.folder
+                              : FLucideIcons.fileText,
+                          size: 20,
+                          color: AppPalette.of(context).muted,
+                        ),
+                        Expanded(child: SelectableText(file.name)),
+                      ],
+                    ),
+                  ),
                 );
               },
             ),

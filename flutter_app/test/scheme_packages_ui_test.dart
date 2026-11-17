@@ -200,8 +200,13 @@ void main() {
         .first;
     final position = tester.state<ScrollableState>(scrollable).position;
     final source = find.byKey(const ValueKey('scheme-source'));
-    final tab = find.descendant(of: source, matching: find.byType(FTabs));
-    final label = find.descendant(of: tab, matching: find.byType(Text)).first;
+    final sourceButton = find.descendant(
+      of: source,
+      matching: find.byType(FButton),
+    );
+    final label = find
+        .descendant(of: sourceButton, matching: find.byType(Text))
+        .first;
     Focus.of(tester.element(label)).requestFocus();
     await tester.pumpAndSettle();
     position.jumpTo(60);
@@ -441,8 +446,8 @@ void main() {
       if (entry.package != null) {
         expect(find.text('v1'), findsOneWidget);
         expect(
-          tester.getCenter(find.text('v1')).dy,
-          closeTo(tester.getCenter(title).dy, 0.01),
+          tester.getBottomLeft(find.text('v1')).dy,
+          lessThan(tester.getTopLeft(title).dy),
         );
         expect(
           tester.getTopLeft(find.byType(ActionRow)).dy,
@@ -563,8 +568,9 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    final catalogue = find.widgetWithText(Section, '键道方案');
-    final local = find.widgetWithText(Section, '本地方案');
+    final catalogue = find.byKey(const ValueKey('cloud-schemes'));
+    final local = find.byKey(const ValueKey('local-schemes'));
+    final active = find.byKey(const ValueKey('scheme-package-local-custom'));
     final deployment = find.byWidgetPredicate(
       (widget) => widget is Section && widget.title == '部署',
     );
@@ -573,23 +579,20 @@ void main() {
       findsNWidgets(4),
     );
     expect(
-      find.descendant(of: local, matching: find.text('Custom scheme')),
+      find.descendant(of: active, matching: find.text('Custom scheme')),
       findsOneWidget,
     );
     expect(
-      find.descendant(of: local, matching: find.text('使用中')),
+      find.descendant(of: active, matching: find.text('使用中')),
       findsOneWidget,
     );
     expect(
       find.descendant(of: deployment, matching: find.byType(VersionPicker)),
       findsNothing,
     );
+    expect(find.text('Custom scheme'), findsOneWidget);
     expect(
-      find.descendant(of: deployment, matching: find.text('Custom scheme')),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(of: deployment, matching: find.text('已启用')),
+      find.descendant(of: active, matching: find.text('在用')),
       findsOneWidget,
     );
     expect(
@@ -699,13 +702,23 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    final catalogue = find.widgetWithText(Section, '键道方案');
+    final catalogue = find.byKey(const ValueKey('cloud-schemes'));
     expect(
-      find.descendant(of: catalogue, matching: find.text('星猫键道 · 顶功')),
+      find.descendant(
+        of: catalogue,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is Text && widget.semanticsLabel == '星猫键道 · 顶功',
+        ),
+      ),
       findsOneWidget,
     );
     expect(
-      find.descendant(of: catalogue, matching: find.text('星猫键道 · 非顶')),
+      find.descendant(
+        of: catalogue,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is Text && widget.semanticsLabel == '星猫键道 · 非顶',
+        ),
+      ),
       findsOneWidget,
     );
     expect(find.text('20261104'), findsOneWidget);
@@ -713,7 +726,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd')),
-        matching: find.byType(FTabs),
+        matching: find.byType(BigTextRadioGroup<String>),
       ),
       findsOneWidget,
     );
@@ -728,7 +741,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
-        matching: find.byType(FTabs),
+        matching: find.byType(BigTextRadioGroup<String>),
       ),
       findsOneWidget,
     );

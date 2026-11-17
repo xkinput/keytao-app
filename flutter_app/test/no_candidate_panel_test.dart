@@ -100,10 +100,7 @@ void main() {
             orientation: PanelOrientationDto.vertical,
           );
         await _pumpSettings(tester, controller);
-        final mode = find.widgetWithText(
-          ChoiceSetting<PanelOrientationDto?>,
-          '候选模式',
-        );
+        final mode = find.byType(BigTextRadioGroup<PanelOrientationDto?>);
         final embedded = find.widgetWithText(
           SwitchSetting,
           AppStrings.embedded,
@@ -125,10 +122,13 @@ void main() {
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
         expect(mode, findsOneWidget);
         expect(
-          tester.widget<ChoiceSetting<PanelOrientationDto?>>(mode).value,
+          tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
           PanelOrientationDto.vertical,
         );
-        expect(find.text('配色方案'), findsOneWidget);
+        expect(
+          find.byType(BigTextRadioGroup<UiColorSchemeDto>),
+          findsOneWidget,
+        );
 
         await tester.ensureVisible(hidden);
         await tester.tap(hidden);
@@ -152,10 +152,13 @@ void main() {
         expect(find.byType(CandidatePanelPreview), findsNothing);
         expect(mode, findsOneWidget);
         expect(
-          tester.widget<ChoiceSetting<PanelOrientationDto?>>(mode).value,
+          tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
           isNull,
         );
-        expect(find.text('配色方案'), findsOneWidget);
+        expect(
+          find.byType(BigTextRadioGroup<UiColorSchemeDto>),
+          findsOneWidget,
+        );
         expect(find.text(AppStrings.englishMode), findsOneWidget);
 
         final horizontal = find.text('横排');
@@ -182,7 +185,7 @@ void main() {
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
         expect(mode, findsOneWidget);
         expect(
-          tester.widget<ChoiceSetting<PanelOrientationDto?>>(mode).value,
+          tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
           PanelOrientationDto.horizontal,
         );
         expect(tester.takeException(), isNull);

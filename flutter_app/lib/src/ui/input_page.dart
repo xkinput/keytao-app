@@ -1,4 +1,4 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
@@ -6,6 +6,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'settings.dart';
 import 'progress.dart';
+import 'theme.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -47,25 +48,204 @@ class InputPage extends StatelessWidget {
   Widget build(BuildContext context) => AppPageBody(
     controller: controller,
     page: AppPage.input,
+    fullWidth: true,
+    spacing: 0,
     children: [
       if (controller.userWordsReport != null ||
           controller.userWordsReportError != null)
         UserWordsNotice(controller: controller),
-      if (controller.isAndroid) ...[
-        AppBrand(version: controller.info.appVersion),
-        AndroidImeCard(controller: controller),
-      ],
-      if (controller.info.platform == BridgePlatform.macOs)
-        MacosImeCard(controller: controller),
-      if (controller.isWindows) WindowsImeCard(controller: controller),
-      if (controller.isLinux) LinuxImeCard(controller: controller),
-      if (controller.isIos) IosImeCard(controller: controller),
+      SettingsCard(
+        controller: controller,
+        hero: _CurrentSchemeHero(controller: controller),
+      ),
       if (controller.isWindows && controller.deploySteps.isNotEmpty)
         DeploySteps(controller: controller),
-      SettingsCard(controller: controller),
-      AccountCard(controller: controller),
+      HairlineGridSection(
+        children: [
+          HairlineGridCell(child: AccountCard(controller: controller)),
+          if (controller.operationLogs.any(
+            (line) =>
+                line.contains('[DEPLOY]') || line.contains('[DEPLOY ERROR]'),
+          ))
+            HairlineGridCell(
+              child: Section(
+                title: '刚刚',
+                children: [
+                  for (final line
+                      in controller.operationLogs.reversed
+                          .where(
+                            (line) =>
+                                line.contains('[DEPLOY]') ||
+                                line.contains('[DEPLOY ERROR]'),
+                          )
+                          .take(4))
+                    Text(
+                      line,
+                      style: context.theme.typography.body.sm.copyWith(
+                        color: line.contains('[DEPLOY ERROR]')
+                            ? AppPalette.of(context).error
+                            : AppPalette.of(context).success,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          HairlineGridCell(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 24,
+              children: [
+                if (controller.isAndroid)
+                  AndroidImeCard(controller: controller),
+                if (controller.info.platform == BridgePlatform.macOs)
+                  MacosImeCard(controller: controller),
+                if (controller.isWindows)
+                  WindowsImeCard(controller: controller),
+                if (controller.isLinux) LinuxImeCard(controller: controller),
+                if (controller.isIos) IosImeCard(controller: controller),
+                ValueRow('版本', controller.info.appVersion),
+                if (!controller.isMobile &&
+                    controller.uiSettings?.themePath != null)
+                  ValueRow(
+                    AppStrings.theme,
+                    controller.uiSettings!.themePath!,
+                    trailing: FTooltip(
+                      tipBuilder: (_, _) => const Text(AppStrings.openTheme),
+                      child: FButton.icon(
+                        onPress: controller.canOpenTheme
+                            ? controller.openTheme
+                            : null,
+                        variant: FButtonVariant.ghost,
+                        child: const Icon(
+                          FLucideIcons.folderOpen,
+                          size: 16,
+                          semanticLabel: AppStrings.openTheme,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     ],
   );
+}
+
+class _CurrentSchemeHero extends StatelessWidget {
+  const _CurrentSchemeHero({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final desktop = MediaQuery.sizeOf(context).width >= 720;
+    final palette = AppPalette.of(context);
+    final package = c.installedPackageFor(c.activeSchemeKey);
+    final local = c.local;
+    final version =
+        package?.version ??
+        (local == null
+            ? null
+            : displayedSchemeVersion(
+                local.schemas,
+                local.version,
+                local.installedScheme,
+                local.installedSchemeVersion,
+              ));
+    final deployed = local?.deployed == true;
+    final deployLabel = local == null
+        ? AppStrings.checking
+        : !local.installed
+        ? AppStrings.notInstalled
+        : deployed
+        ? AppStrings.deployed
+        : AppStrings.pendingDeploy;
+    final title =
+        package?.displayName ??
+        (local?.installed == true
+            ? schemeDisplayName(c.activeSchemeKey)
+            : local == null
+            ? AppStrings.checking
+            : AppStrings.notInstalled);
+    final source = downloadSources[package?.source];
+    return Container(
+      margin: desktop ? EdgeInsets.zero : const EdgeInsets.only(top: 4),
+      padding: desktop
+          ? const EdgeInsets.symmetric(horizontal: 32, vertical: 40)
+          : const EdgeInsets.all(20),
+      decoration: desktop
+          ? null
+          : BoxDecoration(
+              color: palette.surface,
+              border: Border.all(color: palette.hairline),
+              borderRadius: BorderRadius.circular(18),
+            ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: desktop ? 20 : 12,
+        children: [
+          EyebrowLabel(
+            desktop ? '当前方案 · ${c.aboutValues['平台']} 系统输入法' : '当前方案',
+          ),
+          Row(
+            spacing: 16,
+            children: [
+              if (desktop)
+                Icon(
+                  FLucideIcons.star,
+                  size: 52,
+                  color: ChromeAccent.of(context),
+                ),
+              Expanded(
+                child: Text(
+                  title,
+                  style: context.theme.typography.body.sm.copyWith(
+                    color: palette.ink,
+                    fontSize: desktop ? 56 : 32,
+                    fontWeight: FontWeight.w700,
+                    height: 1.05,
+                    letterSpacing: desktop ? -1.12 : -.32,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (version?.isNotEmpty == true)
+                Text(version!.startsWith('v') ? version : 'v$version'),
+              AppBadge(
+                deployLabel,
+                background: deployed
+                    ? palette.successBackground
+                    : palette.controlSurface,
+                foreground: deployed
+                    ? palette.successForeground
+                    : palette.muted,
+              ),
+              if (source != null) Text('来自 $source'),
+            ],
+          ),
+          ActionRow(
+            children: [
+              ActionButton(
+                AppStrings.redeploy,
+                primary: true,
+                tooltip: c.deployTooltip,
+                onPress: c.canDeploy ? c.deploy : null,
+              ),
+              ActionButton('切换方案', onPress: () => c.selectPage(AppPage.scheme)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class WindowsImeCard extends StatelessWidget {

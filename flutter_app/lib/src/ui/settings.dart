@@ -6,6 +6,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
+import 'theme.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -214,8 +215,9 @@ String cloudSyncDate(String? value) {
 }
 
 class SettingsCard extends StatefulWidget {
-  const SettingsCard({super.key, required this.controller});
+  const SettingsCard({super.key, required this.controller, this.hero});
   final AppController controller;
+  final Widget? hero;
   @override
   State<SettingsCard> createState() => _SettingsCardState();
 }
@@ -259,7 +261,14 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      controller.isMobile ? _mobile(context) : _desktop(context),
+      if (controller.isMobile) ...[
+        ?widget.hero,
+        const SizedBox(height: 16),
+        _preview(context, keyboard: true),
+        const SizedBox(height: 24),
+        _mobile(context),
+      ] else
+        _desktop(context),
       if (controller.local?.deployed == true &&
           controller.schemaSwitches.isNotEmpty) ...[
         const SizedBox(height: 32),
@@ -304,24 +313,28 @@ class _SettingsCardState extends State<SettingsCard> {
     final enabled = !c.busy && (!c.isAndroid || c.storageReady);
     return SettingRow(
       '候选个数',
+      keepInline: true,
       controlMaxWidth: 160,
       child: Semantics(
         label: '候选个数',
         enabled: enabled,
-        child: FSelect<int>(
-          size: context.platformVariant.touch
-              ? FTextFieldSizeVariant.sm
-              : FTextFieldSizeVariant.md,
-          enabled: enabled,
-          control: FSelectControl.lifted(
-            value: c.candidatePageSize ?? 0,
-            onChange: (value) =>
-                c.saveCandidatePageSize(value == 0 ? null : value),
+        child: SizedBox(
+          width: 160,
+          child: FSelect<int>(
+            size: context.platformVariant.touch
+                ? FTextFieldSizeVariant.sm
+                : FTextFieldSizeVariant.md,
+            enabled: enabled,
+            control: FSelectControl.lifted(
+              value: c.candidatePageSize ?? 0,
+              onChange: (value) =>
+                  c.saveCandidatePageSize(value == 0 ? null : value),
+            ),
+            items: {
+              '跟随方案': 0,
+              for (var size = 1; size <= 10; size++) '$size': size,
+            },
           ),
-          items: {
-            '跟随方案': 0,
-            for (var size = 1; size <= 10; size++) '$size': size,
-          },
         ),
       ),
     );
@@ -334,136 +347,188 @@ class _SettingsCardState extends State<SettingsCard> {
       _previewSource = s;
       _resetPreview();
     }
-    return Section(
-      title: AppStrings.imeSettings,
-      icon: FLucideIcons.palette,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        HairlineGridSection(
+          minCellWidth: 440,
+          children: [
+            ?widget.hero,
+            if (s != null && !s.hideCandidatePanel) _preview(context),
+          ],
+        ),
         if (s == null)
-          SettingRow(
-            AppStrings.checking,
-            child: ActionButton(
-              AppStrings.recheck,
-              onPress: c.busy ? null : c.refreshState,
+          HairlineGridCell(
+            child: SettingRow(
+              AppStrings.checking,
+              child: ActionButton(
+                AppStrings.recheck,
+                onPress: c.busy ? null : c.refreshState,
+              ),
             ),
           )
-        else ...[
-          if (!s.hideCandidatePanel)
-            LayoutBuilder(
-              builder: (context, constraints) => Container(
-                color: context.theme.colors.secondary,
-                padding: EdgeInsets.all(constraints.maxWidth < 480 ? 16 : 24),
-                child: Center(
-                  child: AnimatedSwitcher(
-                    duration: MediaQuery.disableAnimationsOf(context)
-                        ? Duration.zero
-                        : const Duration(milliseconds: 160),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeOutCubic,
-                    layoutBuilder: (current, _) =>
-                        current ?? const SizedBox.shrink(),
-                    child: CandidatePanelPreview(
-                      key: ValueKey((
-                        _previewScheme ?? s.colorScheme,
-                        _previewAccent ?? s.accentColor,
-                        _previewOrientation ?? s.orientation,
-                      )),
-                      theme: c.resolveCandidatePanelPreview(
-                        colorScheme: _previewScheme ?? s.colorScheme,
-                        accentColor: _previewAccent ?? s.accentColor,
-                        fontSize: _previewFontSize ?? s.fontSize,
-                        systemDark:
-                            MediaQuery.platformBrightnessOf(context) ==
-                            Brightness.dark,
-                      ),
-                      orientation: _previewOrientation ?? s.orientation,
-                      showPreedit: !s.effectiveEmbeddedComposition,
-                      candidateCount: c.candidatePageSize ?? 6,
+        else
+          HairlineGridSection(
+            children: [
+              _settingsCell('候选模式', [
+                BigTextRadioGroup<PanelOrientationDto?>(
+                  label: '候选模式',
+                  value: s.hideCandidatePanel ? null : s.orientation,
+                  options: const {...orientations, null: '隐藏'},
+                  onChanged: c.busy
+                      ? null
+                      : (value) => value == null
+                            ? c.saveHideCandidatePanel(true)
+                            : _savePreview(
+                                orientation: value,
+                                hideCandidatePanel: false,
+                              ),
+                ),
+                if (c.showsEmbeddedComposition)
+                  _separated(
+                    SwitchSetting(
+                      AppStrings.embedded,
+                      value: s.effectiveEmbeddedComposition,
+                      onChanged: c.busy || s.hideCandidatePanel
+                          ? null
+                          : c.saveEmbedded,
                     ),
                   ),
-                ),
-              ),
-            ),
-          ChoiceSetting<UiColorSchemeDto>(
-            label: '配色方案',
-            value: s.colorScheme,
-            options: colorSchemes,
-            onChanged: c.busy
-                ? null
-                : (value) => _savePreview(colorScheme: value),
-          ),
-          ChoiceSetting<PanelOrientationDto?>(
-            label: '候选模式',
-            value: s.hideCandidatePanel ? null : s.orientation,
-            options: const {...orientations, null: '隐藏'},
-            onChanged: c.busy
-                ? null
-                : (value) => value == null
-                      ? c.saveHideCandidatePanel(true)
-                      : _savePreview(
-                          orientation: value,
-                          hideCandidatePanel: false,
-                        ),
-          ),
-          ChoiceSetting<EnglishModeDto>(
-            label: AppStrings.englishMode,
-            value: c.desktopEnglishMode,
-            options: c.englishModes,
-            disabled: c.disabledEnglishModes,
-            hint: c.englishModeHint,
-            onChanged: c.busy ? null : c.saveDesktopEnglish,
-          ),
-          _candidatePageSize(),
-          if (c.isWindows)
-            SwitchSetting(
-              '托盘显示中英状态',
-              value: s.showTrayModeIndicator,
-              onChanged: c.busy ? null : c.saveShowTrayModeIndicator,
-            ),
-          if (c.showsEmbeddedComposition)
-            SwitchSetting(
-              AppStrings.embedded,
-              value: s.effectiveEmbeddedComposition,
-              onChanged: c.busy || s.hideCandidatePanel ? null : c.saveEmbedded,
-            ),
-          if (!s.hideCandidatePanel) ...[
-            SliderSetting(
-              label: AppStrings.candidateFontSize,
-              value: s.fontSize,
-              min: candidateFontMin,
-              max: candidateFontMax,
-              divisions: candidateFontDivisions,
-              onPreview: (value) => setState(() => _previewFontSize = value),
-              onChanged: c.busy
-                  ? null
-                  : (value) => _savePreview(fontSize: value),
-            ),
-            AccentPicker(
-              controller: c,
-              onPreview: (value) {
-                if (mounted) setState(() => _previewAccent = value);
-              },
-            ),
-          ],
-          if (s.themePath case final path?)
-            ValueRow(
-              AppStrings.theme,
-              path,
-              trailing: FTooltip(
-                tipBuilder: (_, _) => const Text(AppStrings.openTheme),
-                child: FButton.icon(
-                  onPress: c.canOpenTheme ? c.openTheme : null,
-                  variant: FButtonVariant.ghost,
-                  child: Icon(
-                    FLucideIcons.folderOpen,
-                    size: context.platformVariant.touch ? 18 : 16,
-                    semanticLabel: AppStrings.openTheme,
+                if (c.isWindows)
+                  _separated(
+                    SwitchSetting(
+                      '托盘显示中英状态',
+                      value: s.showTrayModeIndicator,
+                      onChanged: c.busy ? null : c.saveShowTrayModeIndicator,
+                    ),
                   ),
+              ]),
+              _settingsCell(AppStrings.englishMode, [
+                BigTextRadioGroup<EnglishModeDto>(
+                  label: AppStrings.englishMode,
+                  value: c.desktopEnglishMode,
+                  options: const {
+                    EnglishModeDto.ascii: 'ASCII',
+                    EnglishModeDto.schema: AppStrings.englishSchema,
+                  },
+                  semanticLabels: c.englishModes,
+                  disabled: c.disabledEnglishModes,
+                  onChanged: c.busy ? null : c.saveDesktopEnglish,
                 ),
-              ),
-            ),
-        ],
+                if (c.englishModeHint case final hint?)
+                  Text(hint, style: context.theme.typography.body.xs),
+                _separated(_candidatePageSize()),
+              ]),
+              _settingsCell('外观', [
+                BigTextRadioGroup<UiColorSchemeDto>(
+                  label: '配色方案',
+                  value: s.colorScheme,
+                  options: colorSchemes,
+                  onChanged: c.busy
+                      ? null
+                      : (value) => _savePreview(colorScheme: value),
+                ),
+                if (!s.hideCandidatePanel) ...[
+                  _separated(
+                    AccentPicker(
+                      controller: c,
+                      onPreview: (value) {
+                        if (mounted) setState(() => _previewAccent = value);
+                      },
+                    ),
+                  ),
+                  SliderSetting(
+                    label: AppStrings.candidateFontSize,
+                    value: s.fontSize,
+                    min: candidateFontMin,
+                    max: candidateFontMax,
+                    divisions: candidateFontDivisions,
+                    onPreview: (value) =>
+                        setState(() => _previewFontSize = value),
+                    onChanged: c.busy
+                        ? null
+                        : (value) => _savePreview(fontSize: value),
+                  ),
+                ],
+              ]),
+            ],
+          ),
         if (c.imeUiError case final error?) ErrorMessage(error),
       ],
+    );
+  }
+
+  Widget _settingsCell(String label, List<Widget> children) => HairlineGridCell(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: 14,
+      children: [EyebrowLabel(label), ...children],
+    ),
+  );
+
+  Widget _separated(Widget child) => Container(
+    padding: const EdgeInsets.only(top: 14),
+    decoration: BoxDecoration(
+      border: Border(top: BorderSide(color: AppPalette.of(context).hairline)),
+    ),
+    child: child,
+  );
+
+  Widget _preview(BuildContext context, {bool keyboard = false}) {
+    final c = controller;
+    final s = c.uiSettings;
+    final accent =
+        _previewAccent ??
+        s?.accentColor ??
+        '#${(ChromeAccent.of(context).toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+    final orientation = keyboard
+        ? PanelOrientationDto.horizontal
+        : _previewOrientation ?? s!.orientation;
+    final fontSize = _previewFontSize ?? s?.fontSize ?? 18;
+    final preview = CandidatePanelPreview(
+      key: ValueKey((_previewScheme ?? s?.colorScheme, accent, orientation)),
+      theme: c.resolveCandidatePanelPreview(
+        colorScheme: _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto,
+        accentColor: accent,
+        fontSize: fontSize,
+        systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+      ),
+      orientation: orientation,
+      showPreedit: !keyboard && !s!.effectiveEmbeddedComposition,
+      candidateCount: c.candidatePageSize ?? 6,
+      keyboard: keyboard,
+    );
+    if (keyboard) return preview;
+    return CustomPaint(
+      painter: _PreviewDots(AppPalette.of(context).hairline),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 380),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 40, 24, 20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AnimatedSwitcher(
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 160),
+                layoutBuilder: (current, _) =>
+                    current ?? const SizedBox.shrink(),
+                child: preview,
+              ),
+              const SizedBox(height: 24),
+              Text(
+                '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
+                textAlign: TextAlign.right,
+                style: context.theme.typography.body.xs.copyWith(
+                  color: AppPalette.of(context).muted,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -522,207 +587,240 @@ class _SettingsCardState extends State<SettingsCard> {
       options: options,
       onChanged: enabled ? (value) => save(field, value) : null,
     );
-    return Section(
-      title: AppStrings.mobileKeyboard,
-      icon: FLucideIcons.keyboard,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: 24,
       children: [
-        _mobileGroupLabel(context, AppStrings.gestures),
-        slider(
-          AppStrings.longPressDelay,
-          'longPressDelayMs',
-          s?.longPressDelayMs ?? 300,
-          100,
-          700,
-          60,
-          'ms',
-        ),
-        ChoiceSetting<String>(
-          label: AppStrings.englishMode,
-          value: s?.englishMode ?? 'ascii',
-          hint: c.englishModeHint,
-          options: c.androidEnglishModes,
-          disabled: c.disabledAndroidEnglishModes,
-          onChanged: enabled ? (value) => save('englishMode', value) : null,
-        ),
-        _candidatePageSize(),
-        slider(
-          AppStrings.keyboardHeight,
-          'keyboardHeightScale',
-          s?.keyboardHeightScale ?? 100,
-          85,
-          130,
-          9,
-          '%',
-        ),
-        choice(
-          AppStrings.deleteSpeed,
-          'deleteSpeed',
-          s?.deleteSpeed ?? 'standard',
-          const {
-            'slow': AppStrings.slow,
-            'standard': AppStrings.standard,
-            'fast': AppStrings.fast,
-          },
-        ),
-        choice(
-          AppStrings.backspaceGesture,
-          'backspaceGestureMode',
-          s?.backspaceGestureMode ?? 'immediate',
-          const {
-            'immediate': AppStrings.immediateDelete,
-            'selectThenDelete': AppStrings.selectThenDelete,
-          },
-        ),
-        toggle(
-          AppStrings.flickKeys,
-          'flickKeysEnabled',
-          s?.flickKeysEnabled ?? true,
-          hint: AppStrings.flickKeysHint,
-        ),
-        toggle(
-          AppStrings.doubleSpacePeriod,
-          'doubleSpacePeriodEnabled',
-          s?.doubleSpacePeriodEnabled ?? true,
-          hint: AppStrings.doubleSpaceHint,
-        ),
-        toggle(
-          AppStrings.symbolAutoReturn,
-          'symbolAutoReturn',
-          s?.symbolAutoReturn ?? false,
-        ),
-        SettingRow(
-          AppStrings.phrases,
-          child: ActionButton(
-            '编辑',
-            onPress: enabled
-                ? () => showFDialog<void>(
-                    context: context,
-                    barrierDismissible: false,
-                    builder: (_, _, animation) =>
-                        _PhrasesEditor(controller: c, animation: animation),
-                  )
-                : null,
+        Semantics(
+          label: AppStrings.mobileKeyboard,
+          child: Section(
+            title: '候选与键盘',
+            children: [
+              Text(AppStrings.englishMode),
+              BigTextRadioGroup<String>(
+                label: AppStrings.englishMode,
+                value: s?.englishMode ?? 'ascii',
+                options: const {
+                  'ascii': 'ASCII',
+                  'schema': AppStrings.englishSchema,
+                },
+                semanticLabels: c.androidEnglishModes,
+                disabled: c.disabledAndroidEnglishModes,
+                onChanged: enabled
+                    ? (value) => save('englishMode', value)
+                    : null,
+              ),
+              if (c.englishModeHint case final hint?)
+                Text(hint, style: context.theme.typography.body.xs),
+              _candidatePageSize(),
+              slider(
+                AppStrings.longPressDelay,
+                'longPressDelayMs',
+                s?.longPressDelayMs ?? 300,
+                100,
+                700,
+                60,
+                'ms',
+              ),
+              slider(
+                AppStrings.keyboardHeight,
+                'keyboardHeightScale',
+                s?.keyboardHeightScale ?? 100,
+                85,
+                130,
+                9,
+                '%',
+              ),
+              choice(
+                AppStrings.deleteSpeed,
+                'deleteSpeed',
+                s?.deleteSpeed ?? 'standard',
+                const {
+                  'slow': AppStrings.slow,
+                  'standard': AppStrings.standard,
+                  'fast': AppStrings.fast,
+                },
+              ),
+              choice(
+                AppStrings.backspaceGesture,
+                'backspaceGestureMode',
+                s?.backspaceGestureMode ?? 'immediate',
+                const {
+                  'immediate': AppStrings.immediateDelete,
+                  'selectThenDelete': AppStrings.selectThenDelete,
+                },
+              ),
+              toggle(
+                AppStrings.flickKeys,
+                'flickKeysEnabled',
+                s?.flickKeysEnabled ?? true,
+                hint: AppStrings.flickKeysHint,
+              ),
+              toggle(
+                AppStrings.doubleSpacePeriod,
+                'doubleSpacePeriodEnabled',
+                s?.doubleSpacePeriodEnabled ?? true,
+                hint: AppStrings.doubleSpaceHint,
+              ),
+              toggle(
+                AppStrings.symbolAutoReturn,
+                'symbolAutoReturn',
+                s?.symbolAutoReturn ?? false,
+              ),
+              SettingRow(
+                AppStrings.phrases,
+                child: ActionButton(
+                  '编辑',
+                  onPress: enabled
+                      ? () => showFDialog<void>(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (_, _, animation) => _PhrasesEditor(
+                            controller: c,
+                            animation: animation,
+                          ),
+                        )
+                      : null,
+                ),
+              ),
+              slider(
+                AppStrings.swipeThreshold,
+                'swipeThresholdDp',
+                s?.swipeThresholdDp ?? 34,
+                12,
+                96,
+                84,
+                'dp',
+              ),
+            ],
           ),
         ),
-        slider(
-          AppStrings.swipeThreshold,
-          'swipeThresholdDp',
-          s?.swipeThresholdDp ?? 34,
-          12,
-          96,
-          84,
-          'dp',
-        ),
-        _mobileGroupLabel(context, AppStrings.clipboard),
-        toggle(
-          AppStrings.clipboardHistoryEnabled,
-          'clipboardHistoryEnabled',
-          clipboardEnabled,
-        ),
-        slider(
-          AppStrings.clipboardHistoryLimit,
-          'clipboardHistoryLimit',
-          s?.clipboardHistoryLimit ?? 50,
-          10,
-          200,
-          190,
-          '条',
-          available: clipboardEnabled,
-        ),
-        toggle(
-          AppStrings.clipboardSuggestionEnabled,
-          'clipboardSuggestionEnabled',
-          s?.clipboardSuggestionEnabled ?? true,
-          available: clipboardEnabled,
-        ),
-        slider(
-          AppStrings.clipboardSuggestionTimeoutSec,
-          'clipboardSuggestionTimeoutSec',
-          s?.clipboardSuggestionTimeoutSec ?? 30,
-          5,
-          120,
-          115,
-          '秒',
-          available:
-              clipboardEnabled && (s?.clipboardSuggestionEnabled ?? true),
-        ),
-        toggle(
-          AppStrings.clipboardReturnAfterPaste,
-          'clipboardReturnAfterPaste',
-          s?.clipboardReturnAfterPaste ?? true,
-          available: clipboardEnabled,
-        ),
-        toggle(
-          AppStrings.clipboardHideSensitive,
-          'clipboardHideSensitive',
-          s?.clipboardHideSensitive ?? true,
-          available: clipboardEnabled,
-        ),
-        _mobileGroupLabel(context, AppStrings.layout),
-        toggle(
-          portraitLabel,
-          'floatingPortraitEnabled',
-          s?.floatingPortraitEnabled ?? false,
-        ),
-        slider(
-          AppStrings.scale,
-          'floatingPortraitScale',
-          s?.floatingPortraitScale ?? 88,
-          70,
-          100,
-          30,
-          '%',
-          available: s?.floatingPortraitEnabled ?? false,
-          semanticLabel: AppStrings.floatingScale(portraitLabel),
-        ),
-        toggle(
-          landscapeLabel,
-          'floatingLandscapeEnabled',
-          s?.floatingLandscapeEnabled ?? true,
-        ),
-        slider(
-          AppStrings.scale,
-          'floatingLandscapeScale',
-          s?.floatingLandscapeScale ?? 72,
-          45,
-          100,
-          55,
-          '%',
-          available: s?.floatingLandscapeEnabled ?? true,
-          semanticLabel: AppStrings.floatingScale(landscapeLabel),
-        ),
-        choice(
-          AppStrings.enterKey,
-          'enterKeyBehavior',
-          s?.enterKeyBehavior ?? 'system',
-          const {
-            'system': AppStrings.smartEnter,
-            'newline': AppStrings.newline,
-          },
-        ),
-        if (s?.configPath?.isNotEmpty == true)
-          ValueRow(AppStrings.config, s!.configPath!),
-        ActionRow(
+        Section(
+          title: AppStrings.clipboard,
           children: [
-            ActionButton(
-              AppStrings.resetMobileKeyboard,
-              onPress: enabled ? c.resetAndroidSettings : null,
+            toggle(
+              AppStrings.clipboardHistoryEnabled,
+              'clipboardHistoryEnabled',
+              clipboardEnabled,
+            ),
+            slider(
+              AppStrings.clipboardHistoryLimit,
+              'clipboardHistoryLimit',
+              s?.clipboardHistoryLimit ?? 50,
+              10,
+              200,
+              190,
+              '条',
+              available: clipboardEnabled,
+            ),
+            toggle(
+              AppStrings.clipboardSuggestionEnabled,
+              'clipboardSuggestionEnabled',
+              s?.clipboardSuggestionEnabled ?? true,
+              available: clipboardEnabled,
+            ),
+            slider(
+              AppStrings.clipboardSuggestionTimeoutSec,
+              'clipboardSuggestionTimeoutSec',
+              s?.clipboardSuggestionTimeoutSec ?? 30,
+              5,
+              120,
+              115,
+              '秒',
+              available:
+                  clipboardEnabled && (s?.clipboardSuggestionEnabled ?? true),
+            ),
+            toggle(
+              AppStrings.clipboardReturnAfterPaste,
+              'clipboardReturnAfterPaste',
+              s?.clipboardReturnAfterPaste ?? true,
+              available: clipboardEnabled,
+            ),
+            toggle(
+              AppStrings.clipboardHideSensitive,
+              'clipboardHideSensitive',
+              s?.clipboardHideSensitive ?? true,
+              available: clipboardEnabled,
+            ),
+          ],
+        ),
+        Section(
+          title: AppStrings.layout,
+          children: [
+            toggle(
+              portraitLabel,
+              'floatingPortraitEnabled',
+              s?.floatingPortraitEnabled ?? false,
+            ),
+            slider(
+              AppStrings.scale,
+              'floatingPortraitScale',
+              s?.floatingPortraitScale ?? 88,
+              70,
+              100,
+              30,
+              '%',
+              available: s?.floatingPortraitEnabled ?? false,
+              semanticLabel: AppStrings.floatingScale(portraitLabel),
+            ),
+            toggle(
+              landscapeLabel,
+              'floatingLandscapeEnabled',
+              s?.floatingLandscapeEnabled ?? true,
+            ),
+            slider(
+              AppStrings.scale,
+              'floatingLandscapeScale',
+              s?.floatingLandscapeScale ?? 72,
+              45,
+              100,
+              55,
+              '%',
+              available: s?.floatingLandscapeEnabled ?? true,
+              semanticLabel: AppStrings.floatingScale(landscapeLabel),
+            ),
+            choice(
+              AppStrings.enterKey,
+              'enterKeyBehavior',
+              s?.enterKeyBehavior ?? 'system',
+              const {
+                'system': AppStrings.smartEnter,
+                'newline': AppStrings.newline,
+              },
+            ),
+            if (s?.configPath?.isNotEmpty == true)
+              ValueRow(AppStrings.config, s!.configPath!),
+            ActionRow(
+              children: [
+                ActionButton(
+                  AppStrings.resetMobileKeyboard,
+                  onPress: enabled ? c.resetAndroidSettings : null,
+                ),
+              ],
             ),
           ],
         ),
       ],
     );
   }
+}
 
-  Widget _mobileGroupLabel(BuildContext context, String label) => Padding(
-    padding: const EdgeInsets.only(top: 16, bottom: 4),
-    child: Text(
-      label,
-      style: context.theme.typography.body.xs.copyWith(
-        color: context.theme.colors.mutedForeground,
-      ),
-    ),
-  );
+class _PreviewDots extends CustomPainter {
+  const _PreviewDots(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    for (var y = 7.0; y < size.height; y += 14) {
+      for (var x = 7.0; x < size.width; x += 14) {
+        canvas.drawCircle(Offset(x, y), 1, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PreviewDots oldDelegate) => color != oldDelegate.color;
 }
 
 class _PhrasesEditor extends StatefulWidget {
@@ -843,101 +941,105 @@ class AccountCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    return Section(
-      title: '数据管理',
-      icon: FLucideIcons.database,
-      children: [
-        ActionRow(
-          children: [
-            ActionButton(
-              '自造词',
-              icon: FLucideIcons.bookOpen,
-              onPress:
-                  c.busy ||
-                      (c.installedPackages.isEmpty &&
-                          c.local?.installed != true)
-                  ? null
-                  : () => openUserWords(context, c),
-            ),
-          ],
-        ),
-        if (c.accountUser != null) ...[
-          if (c.accountMessage case final message?) StatusMessage(message),
-          if (c.accountError case final error?) ErrorMessage(error),
+    return Semantics(
+      label: '数据管理',
+      child: Section(
+        title: '自造词 · 我的词库',
+        icon: FLucideIcons.database,
+        children: [
           ActionRow(
             children: [
               ActionButton(
-                '上传配置',
-                onPress: c.busy ? null : c.uploadSchemeProfile,
-              ),
-              ActionButton(
-                '从云端下载',
-                onPress: c.busy ? null : c.fetchCloudProfile,
+                '自造词',
+                icon: FLucideIcons.bookOpen,
+                onPress:
+                    c.busy ||
+                        (c.installedPackages.isEmpty &&
+                            c.local?.installed != true)
+                    ? null
+                    : () => openUserWords(context, c),
               ),
             ],
           ),
-          SwitchSetting(
-            '跟随账号同步',
-            value: c.followAccountSync,
-            onChanged: c.busy ? null : c.setFollowAccountSync,
-          ),
-          ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
-          SettingRow(
-            '云端方案',
-            child: FTooltip(
-              tipBuilder: (_, _) => const Text('刷新云端方案'),
-              child: FButton.icon(
-                variant: FButtonVariant.ghost,
-                onPress: c.busy ? null : c.refreshCloudPackages,
-                child: Icon(
-                  FLucideIcons.refreshCw,
-                  size: context.platformVariant.touch ? 18 : 16,
-                  semanticLabel: '刷新云端方案',
-                ),
-              ),
-            ),
-          ),
-          for (final package in c.cloudPackages)
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+          if (c.accountUser != null) ...[
+            if (c.accountMessage case final message?) StatusMessage(message),
+            if (c.accountError case final error?) ErrorMessage(error),
+            ActionRow(
               children: [
-                Text('${package['name']}'),
-                Text(
-                  '${package['version'] ?? '—'} · '
-                  '${formatLogBytes(BigInt.from((package['size'] as num?)?.toInt() ?? 0))} · '
-                  '${cloudSyncDate(package['createAt'] as String?)}',
-                  style: context.theme.typography.body.xs,
+                ActionButton(
+                  '上传配置',
+                  onPress: c.busy ? null : c.uploadSchemeProfile,
                 ),
-                const SizedBox(height: 8),
-                ActionRow(
-                  children: [
-                    ActionButton(
-                      '下载',
-                      onPress: c.busy
-                          ? null
-                          : () => showCloudPackageTransfer(
-                              context,
-                              c,
-                              schemeKey: package['schemeKey'] as String,
-                              packageId: package['id'] as String,
-                              totalBytes:
-                                  (package['size'] as num?)?.toInt() ?? 0,
-                            ),
-                    ),
-                    ActionButton(
-                      '删除',
-                      onPress: c.busy
-                          ? null
-                          : () => c.deleteCloudPackage(package['id'] as String),
-                    ),
-                  ],
+                ActionButton(
+                  '从云端下载',
+                  onPress: c.busy ? null : c.fetchCloudProfile,
                 ),
               ],
             ),
-          if (c.schemeSyncBusy) const FProgress(),
-          if (c.schemeSyncError case final error?) ErrorMessage(error),
+            SwitchSetting(
+              '跟随账号同步',
+              value: c.followAccountSync,
+              onChanged: c.busy ? null : c.setFollowAccountSync,
+            ),
+            ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
+            SettingRow(
+              '云端方案',
+              child: FTooltip(
+                tipBuilder: (_, _) => const Text('刷新云端方案'),
+                child: FButton.icon(
+                  variant: FButtonVariant.ghost,
+                  onPress: c.busy ? null : c.refreshCloudPackages,
+                  child: Icon(
+                    FLucideIcons.refreshCw,
+                    size: context.platformVariant.touch ? 18 : 16,
+                    semanticLabel: '刷新云端方案',
+                  ),
+                ),
+              ),
+            ),
+            for (final package in c.cloudPackages)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('${package['name']}'),
+                  Text(
+                    '${package['version'] ?? '—'} · '
+                    '${formatLogBytes(BigInt.from((package['size'] as num?)?.toInt() ?? 0))} · '
+                    '${cloudSyncDate(package['createAt'] as String?)}',
+                    style: context.theme.typography.body.xs,
+                  ),
+                  const SizedBox(height: 8),
+                  ActionRow(
+                    children: [
+                      ActionButton(
+                        '下载',
+                        onPress: c.busy
+                            ? null
+                            : () => showCloudPackageTransfer(
+                                context,
+                                c,
+                                schemeKey: package['schemeKey'] as String,
+                                packageId: package['id'] as String,
+                                totalBytes:
+                                    (package['size'] as num?)?.toInt() ?? 0,
+                              ),
+                      ),
+                      ActionButton(
+                        '删除',
+                        onPress: c.busy
+                            ? null
+                            : () =>
+                                  c.deleteCloudPackage(package['id'] as String),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            if (c.schemeSyncBusy) const FProgress(),
+            if (c.schemeSyncError case final error?) ErrorMessage(error),
+          ],
         ],
-      ],
+      ),
     );
   }
 }

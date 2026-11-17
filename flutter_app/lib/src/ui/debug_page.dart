@@ -17,91 +17,99 @@ class DebugPage extends StatelessWidget {
     return AppPageBody(
       controller: c,
       page: AppPage.debug,
+      fullWidth: true,
+      spacing: 0,
       children: [
-        Section(
-          title: AppStrings.runtimeLogs,
-          icon: FLucideIcons.scrollText,
-          children: [
-            SwitchSetting(
-              settings == null
-                  ? AppStrings.readingLogSettings
-                  : settings.enabled
-                  ? AppStrings.logsEnabled
-                  : AppStrings.logsDisabled,
-              value: settings?.enabled ?? false,
-              onChanged: enabled
-                  ? (value) => c.saveLogSettings(value, settings!.level)
-                  : null,
-            ),
-            ChoiceSetting<RuntimeLogLevelDto>(
-              label: AppStrings.logLevel,
-              value: settings?.level ?? RuntimeLogLevelDto.info,
-              options: logLevels,
-              onChanged: enabled
-                  ? (value) => c.saveLogSettings(settings!.enabled, value)
-                  : null,
-            ),
-            ActionRow(
-              children: [
-                ActionButton(
-                  AppStrings.refresh,
-                  primary: true,
-                  icon: FLucideIcons.refreshCw,
-                  onPress: c.busy || c.logsLoading ? null : c.refreshLogs,
-                ),
-                if (c.isAndroid)
+        HairlineGridCell(
+          child: Section(
+            title: AppStrings.runtimeLogs,
+            icon: FLucideIcons.scrollText,
+            children: [
+              SwitchSetting(
+                settings == null
+                    ? AppStrings.readingLogSettings
+                    : settings.enabled
+                    ? AppStrings.logsEnabled
+                    : AppStrings.logsDisabled,
+                value: settings?.enabled ?? false,
+                onChanged: enabled
+                    ? (value) => c.saveLogSettings(value, settings!.level)
+                    : null,
+              ),
+              ChoiceSetting<RuntimeLogLevelDto>(
+                label: AppStrings.logLevel,
+                value: settings?.level ?? RuntimeLogLevelDto.info,
+                options: logLevels,
+                onChanged: enabled
+                    ? (value) => c.saveLogSettings(settings!.enabled, value)
+                    : null,
+              ),
+              ActionRow(
+                children: [
                   ActionButton(
-                    AppStrings.share,
-                    icon: FLucideIcons.share2,
-                    onPress: c.busy || c.logsLoading ? null : c.shareLogs,
+                    AppStrings.refresh,
+                    primary: true,
+                    icon: FLucideIcons.refreshCw,
+                    onPress: c.busy || c.logsLoading ? null : c.refreshLogs,
                   ),
-                ActionButton(
-                  AppStrings.clear,
-                  icon: FLucideIcons.trash2,
-                  onPress: c.busy || (c.isMobile && c.logsLoading)
-                      ? null
-                      : c.clearLogs,
-                ),
-                if (!c.isMobile) ...[
+                  if (c.isAndroid)
+                    ActionButton(
+                      AppStrings.share,
+                      icon: FLucideIcons.share2,
+                      onPress: c.busy || c.logsLoading ? null : c.shareLogs,
+                    ),
                   ActionButton(
-                    AppStrings.openLogDirectory,
-                    icon: FLucideIcons.folderOpen,
-                    onPress: c.canEditLogs ? c.openLogDirectory : null,
+                    AppStrings.clear,
+                    icon: FLucideIcons.trash2,
+                    onPress: c.busy || (c.isMobile && c.logsLoading)
+                        ? null
+                        : c.clearLogs,
                   ),
-                  ActionButton(
-                    AppStrings.copyPath,
-                    icon: FLucideIcons.copy,
-                    onPress: c.canEditLogs ? c.copyLogDirectory : null,
-                  ),
+                  if (!c.isMobile) ...[
+                    ActionButton(
+                      AppStrings.openLogDirectory,
+                      icon: FLucideIcons.folderOpen,
+                      onPress: c.canEditLogs ? c.openLogDirectory : null,
+                    ),
+                    ActionButton(
+                      AppStrings.copyPath,
+                      icon: FLucideIcons.copy,
+                      onPress: c.canEditLogs ? c.copyLogDirectory : null,
+                    ),
+                  ],
                 ],
-              ],
+              ),
+              if (c.logsLoading) const FProgress(),
+              if (c.debugError case final error?) ErrorMessage(error),
+              if (c.debugNotice case final notice?) StatusMessage(notice),
+              if (c.isAndroid && c.sharedLogResultText != null)
+                StatusMessage(c.sharedLogResultText!),
+              if (c.logStatsText case final stats?) StatusMessage(stats),
+              for (final file in c.logFileLines) SelectableText(file),
+              if (!c.isMobile && c.logDirectory != null)
+                StatusMessage(c.logDirectory!),
+            ],
+          ),
+        ),
+        HairlineGridSection(
+          children: [
+            DebugLogPanel(
+              title: AppStrings.structuredRuntimeLogs,
+              log: c.runtimeLog,
+              storageKey: 'runtimeLogs',
+              height: 240,
             ),
-            if (c.logsLoading) const FProgress(),
-            if (c.debugError case final error?) ErrorMessage(error),
-            if (c.debugNotice case final notice?) StatusMessage(notice),
-            if (c.isAndroid && c.sharedLogResultText != null)
-              StatusMessage(c.sharedLogResultText!),
-            if (c.logStatsText case final stats?) StatusMessage(stats),
-            for (final file in c.logFileLines) SelectableText(file),
-            if (!c.isMobile && c.logDirectory != null)
-              StatusMessage(c.logDirectory!),
+            DebugLogPanel(
+              title: AppStrings.imeLogs,
+              log: c.systemLogs?.ime,
+              storageKey: 'imeLogs',
+            ),
+            DebugLogPanel(
+              title: AppStrings.appLogs,
+              log: c.systemLogs?.app,
+              storageKey: 'appLogs',
+            ),
           ],
-        ),
-        DebugLogPanel(
-          title: AppStrings.structuredRuntimeLogs,
-          log: c.runtimeLog,
-          storageKey: 'runtimeLogs',
-          height: 240,
-        ),
-        DebugLogPanel(
-          title: AppStrings.imeLogs,
-          log: c.systemLogs?.ime,
-          storageKey: 'imeLogs',
-        ),
-        DebugLogPanel(
-          title: AppStrings.appLogs,
-          log: c.systemLogs?.app,
-          storageKey: 'appLogs',
         ),
       ],
     );
@@ -121,13 +129,12 @@ class DebugLogPanel extends StatelessWidget {
   final String storageKey;
   final double height;
   @override
-  // The section's tile group is itself scrollable and would draw a second
-  // desktop scrollbar next to the one LogLines owns.
-  Widget build(BuildContext context) => ScrollConfiguration(
-    behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-    child: Section(
-      title: title,
+  Widget build(BuildContext context) => HairlineGridCell(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: 12,
       children: [
+        EyebrowLabel(title),
         if (log?.truncated == true)
           Text(
             AppStrings.recentLines(log!.lines.length),
