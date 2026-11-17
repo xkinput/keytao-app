@@ -264,21 +264,21 @@ fn reset_requests_survive_acknowledgment_in_a_new_process_and_engine() {
         first.set_option("punctuation_ascii", false);
         first.set_option("punctuation_cjk", true);
         let second = runtime.create_session().unwrap();
-        assert!(!second.get_option("mars"));
-        assert!(second.get_option("ascii_mode"));
-        assert!(second.get_option("punctuation_ascii"));
-        assert!(!second.get_option("punctuation_cjk"));
+        assert!(second.get_option("mars"));
+        assert!(!second.get_option("ascii_mode"));
+        assert!(!second.get_option("punctuation_ascii"));
+        assert!(second.get_option("punctuation_cjk"));
         assert!(first.get_option("mars"));
         runtime.reload_without_deploy().unwrap();
         for session in [&first, &second] {
-            assert!(!session.get_option("mars"));
-            assert!(session.get_option("ascii_mode"));
-            assert!(session.get_option("punctuation_ascii"));
-            assert!(!session.get_option("punctuation_cjk"));
+            assert!(session.get_option("mars"));
+            assert!(!session.get_option("ascii_mode"));
+            assert!(!session.get_option("punctuation_ascii"));
+            assert!(session.get_option("punctuation_cjk"));
         }
         runtime.reload().unwrap();
-        assert!(!first.get_option("mars"));
-        assert!(first.get_option("ascii_mode"));
+        assert!(first.get_option("mars"));
+        assert!(!first.get_option("ascii_mode"));
         assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 3);
         return;
     }

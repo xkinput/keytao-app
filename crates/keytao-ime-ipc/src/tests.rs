@@ -112,8 +112,12 @@ fn every_request_variant_round_trips() {
         Request::Generation,
         Request::Deploy,
         Request::Shutdown,
+        Request::SetContextAsciiMode {
+            enabled: Some(true),
+        },
+        Request::SetContextAsciiMode { enabled: None },
     ];
-    assert_eq!(requests.len(), 14);
+    assert_eq!(requests.len(), 16);
     for (seq, message) in requests.into_iter().enumerate() {
         assert_round_trip(&Envelope {
             seq: seq as u64,

@@ -792,6 +792,9 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
                 Request::SetInputPolicy { policy } => {
                     Response::State(engine.set_input_policy(*policy))
                 }
+                Request::SetContextAsciiMode { enabled } => {
+                    Response::State(engine.set_context_ascii_mode(*enabled))
+                }
                 Request::SetEnglishMode { enabled } => {
                     Response::English(engine.set_english_mode(*enabled))
                 }
@@ -838,6 +841,9 @@ mod tests {
             Request::ProcessEnter,
             Request::Reset,
             Request::GetState,
+            Request::SetContextAsciiMode {
+                enabled: Some(true),
+            },
             Request::ProcessKeys {
                 keys: vec![(97, 0)],
             },

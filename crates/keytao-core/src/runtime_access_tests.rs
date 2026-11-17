@@ -20,8 +20,11 @@ fn empty_runtime_session() -> (ImeRuntime, ImeRuntimeSession) {
             carried_ascii_mode: None,
             carried_english_mode: None,
             english_mode: english_mode::EnglishModeController::default(),
+            applied_input_version: 0,
+            last_input_state: None,
         })),
         policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
+        context_ascii_mode: Arc::new(AtomicU8::new(0)),
     };
     (runtime, session)
 }
