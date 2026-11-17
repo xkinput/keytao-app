@@ -6,6 +6,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/ui/settings.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -288,6 +289,79 @@ void main() {
       await _finish(tester);
     },
   );
+
+  testWidgets('schema switches use two columns only when both widths fit', (
+    tester,
+  ) async {
+    final controller = ViewController(BridgePlatform.macOs)
+      ..schemaSwitches = [
+        for (var index = 0; index < 5; index++)
+          SchemaSwitchDto(
+            schemaId: 'keytao',
+            name: 'switch_$index',
+            states: index == 3
+                ? const [
+                    'Disabled',
+                    'Simplified characters',
+                    'Traditional characters',
+                  ]
+                : ['Off', 'Switch $index'],
+            options: index == 3
+                ? const ['off', 'simplified', 'traditional']
+                : const [],
+            value: 0,
+          ),
+      ];
+    addTearDown(controller.dispose);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    for (final layout in [
+      (viewport: const Size(1440, 900), width: 1440.0, columns: 2),
+      (viewport: const Size(390, 844), width: 390.0, columns: 1),
+      (viewport: const Size(2560, 900), width: 2560.0, columns: 2),
+      (viewport: const Size(1440, 900), width: 639.0, columns: 1),
+      (viewport: const Size(1440, 900), width: 640.0, columns: 2),
+      (viewport: const Size(719, 900), width: 719.0, columns: 1),
+      (viewport: const Size(720, 900), width: 640.0, columns: 2),
+    ]) {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = layout.viewport;
+      await _pump(
+        tester,
+        SizedBox(
+          width: layout.width,
+          child: SchemaSwitchesSection(controller: controller),
+        ),
+      );
+      final rows = find.byType(SettingRow);
+      expect(rows, findsNWidgets(5));
+      expect(find.byType(ChoiceSetting<int>), findsOneWidget);
+      final first = tester.getTopLeft(rows.first);
+      for (var index = 0; index < 5; index++) {
+        final position = tester.getTopLeft(rows.at(index));
+        expect(
+          position.dx,
+          closeTo(
+            first.dx + (index % layout.columns) * (layout.width / 2 + 16),
+            .01,
+          ),
+        );
+        expect(
+          position.dy,
+          index < layout.columns ? first.dy : greaterThan(first.dy),
+        );
+      }
+      if (layout.columns == 2) {
+        expect(tester.widget<Table>(find.byType(Table).last).border, isNull);
+        expect(
+          tester.getSize(rows.last).width,
+          lessThanOrEqualTo(layout.width / 2),
+        );
+      }
+      expect(tester.takeException(), isNull);
+    }
+    await _finish(tester);
+  });
 
   testWidgets('dialogs retain the user accent and action callbacks', (
     tester,

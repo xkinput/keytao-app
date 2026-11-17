@@ -1024,32 +1024,68 @@ class SchemaSwitchesSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    return Section(
-      title: '方案开关',
-      icon: FLucideIcons.slidersHorizontal,
-      children: [
-        for (final entry in c.schemaSwitches)
-          if (entry.options.isEmpty)
-            SwitchSetting(
-              entry.states[1],
-              value: entry.value == 1,
-              onChanged: c.busy
-                  ? null
-                  : (value) => c.saveSchemaSwitch(entry, value ? 1 : 0),
-            )
-          else
-            ChoiceSetting<int>(
-              label: entry.states.join(' / '),
-              value: entry.value,
-              options: {
-                for (var index = 0; index < entry.states.length; index++)
-                  index: entry.states[index],
-              },
-              onChanged: c.busy
-                  ? null
-                  : (value) => c.saveSchemaSwitch(entry, value),
-            ),
-      ],
+    final switches = [
+      for (final entry in c.schemaSwitches)
+        if (entry.options.isEmpty)
+          SwitchSetting(
+            entry.states[1],
+            value: entry.value == 1,
+            onChanged: c.busy
+                ? null
+                : (value) => c.saveSchemaSwitch(entry, value ? 1 : 0),
+          )
+        else
+          ChoiceSetting<int>(
+            label: entry.states.join(' / '),
+            value: entry.value,
+            options: {
+              for (var index = 0; index < entry.states.length; index++)
+                index: entry.states[index],
+            },
+            onChanged: c.busy
+                ? null
+                : (value) => c.saveSchemaSwitch(entry, value),
+          ),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) => Section(
+        title: '方案开关',
+        icon: FLucideIcons.slidersHorizontal,
+        children:
+            MediaQuery.sizeOf(context).width >= 720 &&
+                constraints.hasBoundedWidth &&
+                constraints.maxWidth >= 640
+            ? [
+                for (var index = 0; index < switches.length; index += 2)
+                  Table(
+                    border: index + 1 < switches.length
+                        ? TableBorder(
+                            verticalInside: BorderSide(
+                              color: AppPalette.of(context).hairline,
+                            ),
+                          )
+                        : null,
+                    children: [
+                      TableRow(
+                        children: [
+                          HairlineGridCell(
+                            padding: const EdgeInsets.only(right: 16),
+                            child: switches[index],
+                          ),
+                          if (index + 1 < switches.length)
+                            HairlineGridCell(
+                              padding: const EdgeInsets.only(left: 16),
+                              child: switches[index + 1],
+                            )
+                          else
+                            const SizedBox.shrink(),
+                        ],
+                      ),
+                    ],
+                  ),
+              ]
+            : switches,
+      ),
     );
   }
 }
