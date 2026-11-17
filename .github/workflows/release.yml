@@ -191,6 +191,19 @@ jobs:
             curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-prelude/master/$file" -o "$runtime/rime-data/$file"
           done
           curl -fsSL --retry 3 https://raw.githubusercontent.com/rime/rime-essay/master/essay.txt -o "$runtime/rime-data/essay.txt"
+          for file in \
+            luna_pinyin.dict.yaml \
+            luna_pinyin.schema.yaml \
+            luna_pinyin_fluency.schema.yaml \
+            luna_pinyin_simp.schema.yaml \
+            luna_pinyin_tw.schema.yaml \
+            luna_quanpin.schema.yaml \
+            pinyin.yaml; do
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-luna-pinyin/master/$file" -o "$runtime/rime-data/$file"
+          done
+          for file in stroke.dict.yaml stroke.schema.yaml; do
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-stroke/master/$file" -o "$runtime/rime-data/$file"
+          done
 
       - name: Set build version
         shell: bash

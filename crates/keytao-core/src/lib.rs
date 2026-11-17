@@ -1144,12 +1144,19 @@ mod desktop {
     fn validate_deployed_schemas(user_dir: &Path) -> Result<(), String> {
         let schemas = validate_deployed_schema_files(user_dir)?;
         let _rime = rime_api_lock();
+        // Validation selections persist in user.yaml, even when validation fails.
+        let schema_to_keep = deployed_schema_id_from_dir(user_dir)
+            .filter(|schema| schemas.contains(schema))
+            .or_else(|| preferred_schema_from_list(schemas.clone()));
         let session =
             create_session().map_err(|error| format!("create validation session: {error:?}"))?;
-        for schema_id in &schemas {
-            select_schema_checked(&session, schema_id)?;
-        }
-        Ok(())
+        let result = schemas
+            .iter()
+            .try_for_each(|schema_id| select_schema_checked(&session, schema_id));
+        let restored = schema_to_keep.as_deref().map_or(Ok(()), |schema_id| {
+            select_schema_checked(&session, schema_id)
+        });
+        result.and(restored)
     }
 
     #[cfg(target_os = "android")]
