@@ -8,12 +8,14 @@ mod deployment_log;
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+mod reload_stamp_cache;
 #[cfg(all(
     test,
     any(target_os = "windows", target_os = "macos", target_os = "linux")
 ))]
 mod runtime_access_tests;
 pub mod runtime_log;
+pub use reload_stamp_cache::ReloadStampCache;
 mod schema_switch_request;
 pub use schema_switch_request::{
     read_schema_switch_request, schema_switch_applied_generation, write_file_atomic,

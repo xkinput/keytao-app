@@ -44,6 +44,10 @@ use crate::engine_backend::{EngineHandle, ImeEngineBackend};
 use crate::engine_config::is_descendant;
 use crate::pipe_security::{keytao_runtime_root, process_image, OwnedHandle};
 
+#[path = "generation_activity.rs"]
+mod generation_activity;
+use generation_activity::{reaper_wait, GenerationActivity};
+
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(80);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30);
 const GENERATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -61,7 +65,8 @@ struct Shared {
     reload_required: AtomicBool,
     generation: AtomicU64,
     epoch: AtomicU64,
-    reaper: OnceLock<Sender<PendingIo>>,
+    activity: Mutex<GenerationActivity>,
+    reaper: OnceLock<Sender<ReaperMessage>>,
 }
 
 #[derive(Default)]
@@ -139,11 +144,30 @@ impl ImeEngineBackend for PipeEngine {
             .store(connection.generation, Ordering::Release);
         inner.connection = Some(connection);
         self.shared.active.store(true, Ordering::Release);
+        drop(inner);
+        let _ = self
+            .shared
+            .reaper
+            .get()
+            .unwrap()
+            .send(ReaperMessage::Activity);
         Ok(handle)
     }
 
     fn reload_needed(&self) -> bool {
-        // The worker polls Generation; a key callback never adds a second RTT.
+        let was_idle = self
+            .shared
+            .activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_key(Instant::now());
+        if was_idle {
+            // Check before State decides whether this key needs a new session.
+            poll_generation(&self.shared, true);
+            if let Some(reaper) = self.shared.reaper.get() {
+                let _ = reaper.send(ReaperMessage::Activity);
+            }
+        }
         self.shared.reload_required.load(Ordering::Acquire)
     }
 
@@ -221,13 +245,13 @@ impl ImeEngineBackend for PipeEngine {
 
 struct Connection {
     pipe: Arc<OwnedHandle>,
-    reaper: Sender<PendingIo>,
+    reaper: Sender<ReaperMessage>,
     sequence: u64,
     generation: u64,
 }
 
 impl Connection {
-    fn connect(reaper: Sender<PendingIo>) -> Result<(Self, Self, EngineHandle), String> {
+    fn connect(reaper: Sender<ReaperMessage>) -> Result<(Self, Self, EngineHandle), String> {
         let deadline = Instant::now() + BUILD_TIMEOUT;
         let mut connection = Self::open(reaper.clone(), deadline)?;
         let schema_id = match connection.request(Request::CreateSession, deadline)? {
@@ -244,7 +268,7 @@ impl Connection {
         Ok((connection, control, EngineHandle { schema_id }))
     }
 
-    fn open(reaper: Sender<PendingIo>, deadline: Instant) -> Result<Self, String> {
+    fn open(reaper: Sender<ReaperMessage>, deadline: Instant) -> Result<Self, String> {
         let identity = crate::pipe_security::current_identity()?;
         let name = wide(&crate::engine_config::pipe_name(
             &identity.sid,
@@ -399,11 +423,16 @@ impl Connection {
         unsafe {
             let _ = CancelIoEx(self.pipe.0, Some(&*pending.overlapped));
         }
-        if let Err(error) = self.reaper.send(pending) {
+        if let Err(error) = self.reaper.send(ReaperMessage::Pending(pending)) {
             // A failed reaper must leak rather than free pending I/O memory.
             std::mem::forget(error.0);
         }
     }
+}
+
+enum ReaperMessage {
+    Activity,
+    Pending(PendingIo),
 }
 
 struct PendingIo {
@@ -427,7 +456,7 @@ impl PendingIo {
     }
 }
 
-fn start_reaper(shared: std::sync::Weak<Shared>) -> Result<Sender<PendingIo>, String> {
+fn start_reaper(shared: std::sync::Weak<Shared>) -> Result<Sender<ReaperMessage>, String> {
     crate::globals::pin_module().map_err(|error| format!("pin pipe worker module: {error}"))?;
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
@@ -437,16 +466,40 @@ fn start_reaper(shared: std::sync::Weak<Shared>) -> Result<Sender<PendingIo>, St
     Ok(sender)
 }
 
-fn reap_pending(receiver: Receiver<PendingIo>, shared: std::sync::Weak<Shared>) {
+fn reap_pending(receiver: Receiver<ReaperMessage>, shared: std::sync::Weak<Shared>) {
     let mut pending = Vec::new();
     let mut disconnected = false;
     let mut check_at = Instant::now() + GENERATION_POLL_INTERVAL;
     loop {
-        let wait = check_at
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(100));
-        match receiver.recv_timeout(wait) {
-            Ok(operation) => pending.push(operation),
+        let now = Instant::now();
+        let activity_remaining = shared.upgrade().and_then(|shared| {
+            if !shared.active.load(Ordering::Acquire)
+                || shared.reload_required.load(Ordering::Acquire)
+            {
+                return None;
+            }
+            let remaining = shared
+                .activity
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remaining(now);
+            remaining
+        });
+        let message = match reaper_wait(
+            activity_remaining,
+            check_at.saturating_duration_since(now),
+            !pending.is_empty(),
+        ) {
+            Some(wait) => receiver.recv_timeout(wait),
+            None => receiver
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match message {
+            Ok(ReaperMessage::Pending(operation)) => pending.push(operation),
+            Ok(ReaperMessage::Activity) => {
+                check_at = Instant::now() + GENERATION_POLL_INTERVAL;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -454,7 +507,15 @@ fn reap_pending(receiver: Receiver<PendingIo>, shared: std::sync::Weak<Shared>) 
         if Instant::now() >= check_at {
             check_at = Instant::now() + GENERATION_POLL_INTERVAL;
             if let Some(shared) = shared.upgrade() {
-                poll_generation(&shared);
+                let active = shared
+                    .activity
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remaining(Instant::now())
+                    .is_some();
+                if active {
+                    poll_generation(&shared, false);
+                }
             }
         }
         if disconnected {
@@ -466,18 +527,30 @@ fn reap_pending(receiver: Receiver<PendingIo>, shared: std::sync::Weak<Shared>) 
     }
 }
 
-fn poll_generation(shared: &Shared) {
+fn poll_generation(shared: &Shared, synchronous: bool) {
+    if !shared.active.load(Ordering::Acquire) || shared.reload_required.load(Ordering::Acquire) {
+        return;
+    }
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let mut control = if synchronous {
+        shared
+            .control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    } else {
+        let Ok(control) = shared.control.try_lock() else {
+            return;
+        };
+        control
+    };
     if !shared.active.load(Ordering::Acquire) || shared.reload_required.load(Ordering::Acquire) {
         return;
     }
     let epoch = shared.epoch.load(Ordering::Acquire);
-    let Ok(mut control) = shared.control.try_lock() else {
-        return;
-    };
     let Some(connection) = control.as_mut() else {
         return;
     };
-    let response = connection.request(Request::Generation, Instant::now() + REQUEST_TIMEOUT);
+    let response = connection.request(Request::Generation, deadline);
     if shared.epoch.load(Ordering::Acquire) != epoch {
         *control = None;
         return;

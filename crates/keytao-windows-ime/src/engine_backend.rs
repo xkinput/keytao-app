@@ -3,7 +3,8 @@
 use crate::globals::dll_related_dirs;
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
-    InputContextPolicy, KeyProcessResult, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
+    InputContextPolicy, KeyProcessResult, ReloadStamp, ReloadStampCache,
+    WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -144,6 +145,7 @@ struct InProcState {
     session: Option<ImeRuntimeSession>,
     reload_stamp_path: Option<PathBuf>,
     reload_stamp_signature: Option<String>,
+    reload_stamp_cache: ReloadStampCache,
     rime_dll: Option<Arc<LoadedRimeDll>>,
 }
 
@@ -209,6 +211,7 @@ impl InProcEngine {
                 session: Some(session),
                 reload_stamp_path: inner.reload_stamp_path.clone(),
                 reload_stamp_signature: inner.reload_stamp_signature.clone(),
+                reload_stamp_cache: inner.reload_stamp_cache.clone(),
                 rime_dll: inner.rime_dll.clone(),
             }),
             ..Self::default()
@@ -281,6 +284,7 @@ impl InProcEngine {
             session: Some(session),
             reload_stamp_path: Some(reload_stamp_path),
             reload_stamp_signature,
+            reload_stamp_cache: ReloadStampCache::default(),
             rime_dll,
         })
     }
@@ -351,6 +355,7 @@ impl InProcEngine {
             session: Some(session),
             reload_stamp_signature,
             reload_stamp_path: Some(path),
+            reload_stamp_cache: ReloadStampCache::default(),
             rime_dll,
         })
     }
@@ -485,8 +490,20 @@ impl ImeEngineBackend for InProcEngine {
         if self.pipe_ready.load(Ordering::Acquire) {
             return true;
         }
-        let (path, signature) = self.reload_stamp();
-        stamp_changed(path.as_deref(), signature.as_deref())
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let InProcState {
+            reload_stamp_path,
+            reload_stamp_signature,
+            reload_stamp_cache,
+            ..
+        } = &mut *inner;
+        let Some(current) = reload_stamp_path
+            .as_deref()
+            .and_then(|path| reload_stamp_cache.signature_at(path))
+        else {
+            return false;
+        };
+        reload_stamp_signature.as_deref() != Some(current.as_str())
     }
 
     fn status_error(&self) -> Option<&'static str> {
