@@ -275,6 +275,10 @@ private final class CandidateOptionView: NSControl {
         }
         labelField.setContentHuggingPriority(.required, for: .horizontal)
         commentField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        // A long comment (e.g. reverse-lookup codes) must truncate before the candidate text.
+        labelField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        textField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        commentField.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
         contentStack.orientation = .horizontal
         contentStack.alignment = .firstBaseline
