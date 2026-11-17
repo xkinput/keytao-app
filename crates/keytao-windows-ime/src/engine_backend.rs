@@ -154,7 +154,7 @@ impl InProcEngine {
         self.install(Self::try_build_engine(false)?)
     }
 
-    /// Reload externally deployed artifacts without moving deployment out of the App.
+    /// Load externally deployed artifacts without running deployment in this process.
     pub fn reload_server(&self) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _init_guard = EngineInitGuard::acquire(false)?;
@@ -171,32 +171,25 @@ impl InProcEngine {
         Ok(())
     }
 
-    /// The server serializes callers; core teardown invalidates every live engine.
-    pub fn deploy_server(&self) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+    /// Release mapped dictionaries before the child invalidates their files on Windows.
+    pub fn prepare_server_deploy(&self) -> Result<(), String> {
+        let _inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _init_guard = EngineInitGuard::acquire(false)?;
         let user_dir = default_user_data_dir().ok_or("cannot determine KeyTao data directory")?;
+        keytao_core::reinitialize(
+            user_dir.to_string_lossy().into_owned(),
+            server_shared_data_dir(),
+        )
+    }
+
+    /// Only the short-lived `--deploy` entry point may call this.
+    pub fn deploy_server(deploy: impl FnOnce() -> i32) -> Result<i32, String> {
+        let _init_guard = EngineInitGuard::acquire(false)?;
         let shared = server_shared_data_dir();
-        let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
-        keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared.clone())?;
-        keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
-        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared.clone())?;
-        keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
-        let runtime = inner
-            .runtime
-            .clone()
-            .unwrap_or_else(|| ImeRuntime::with_dirs(&user_dir, shared).with_ime_host());
-        runtime.reload_without_deploy()?;
-        let session = runtime.create_session()?;
-        let path = ReloadStamp::write(&user_dir)?;
-        *inner = InProcState {
-            runtime: Some(runtime),
-            session: Some(session),
-            reload_stamp_signature: ReloadStamp::signature_at(&path),
-            reload_stamp_path: Some(path),
-            rime_dll,
-        };
-        Ok(())
+        let _rime_dll = preload_rime_dll(&shared)?;
+        // The generic child must use the same bundled data as the server.
+        std::env::set_var("KEYTAO_RIME_SHARED_DATA_DIR", shared);
+        Ok(deploy())
     }
 
     /// A server owns one initialized runtime; each connection gets its own session.

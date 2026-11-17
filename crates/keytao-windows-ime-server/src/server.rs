@@ -16,7 +16,7 @@ use std::{
     io::{self, Read, Write},
     os::windows::io::{AsRawHandle, FromRawHandle},
     path::PathBuf,
-    sync::{Arc, Mutex, TryLockError},
+    sync::{Arc, Mutex, OnceLock, TryLockError},
     time::{Duration, Instant},
 };
 use windows::{
@@ -38,12 +38,17 @@ use windows::{
             SECURITY_SQOS_PRESENT,
         },
         System::{
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
             Pipes::{
                 ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
                 GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, SetNamedPipeHandleState,
                 PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
             },
-            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         },
     },
 };
@@ -292,20 +297,59 @@ struct Runtime {
     ready: bool,
 }
 
+fn ensure_deploy_job() -> Result<(), String> {
+    // Keep the sole, non-inherited handle until server exit; children inherit job membership.
+    static JOB: OnceLock<Result<OwnedHandle, String>> = OnceLock::new();
+    JOB.get_or_init(|| {
+        let job = OwnedHandle(
+            unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+                .map_err(|error| format!("create deploy job: {error}"))?,
+        );
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                std::mem::size_of_val(&limits) as u32,
+            )
+        }
+        .map_err(|error| format!("configure deploy job: {error}"))?;
+        // Joining before spawn avoids an orphan window between spawn and assignment.
+        unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) }
+            .map_err(|error| format!("join deploy job: {error}"))?;
+        Ok(job)
+    })
+    .as_ref()
+    .map(|_| ())
+    .map_err(Clone::clone)
+}
+
 impl Runtime {
     fn deploy(&mut self) -> Result<(), String> {
         self.ready = false;
         self.generation = self.generation.wrapping_add(1);
-        let result = if let Some(engine) = &self.engine {
-            engine.deploy_server()
-        } else {
-            let engine = InProcEngine::default();
-            let result = engine.deploy_server();
-            if result.is_ok() {
+        let result = (|| {
+            ensure_deploy_job()?;
+            let exe = std::env::current_exe()
+                .map_err(|error| format!("resolve deploy child executable: {error}"))?;
+            if let Some(engine) = &self.engine {
+                engine.prepare_server_deploy()?;
+            }
+            keytao_core::deploy_child::run_deploy_child(&exe, Duration::from_secs(600))?;
+            let user_dir = keytao_core::default_user_data_dir()
+                .ok_or("cannot determine KeyTao user directory")?;
+            keytao_core::ReloadStamp::write(&user_dir)?;
+            if let Some(engine) = &self.engine {
+                engine.reload_server()?;
+            } else {
+                let engine = InProcEngine::default();
+                engine.build_server()?;
                 self.engine = Some(engine);
             }
-            result
-        };
+            Ok(())
+        })();
         self.ready = result.is_ok();
         self.write_status(
             result.as_ref().err().map(String::as_str),
