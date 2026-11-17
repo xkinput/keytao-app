@@ -10,6 +10,8 @@ use std::{
 #[path = "local_import.rs"]
 mod local_import;
 pub use local_import::import_local_scheme;
+#[path = "package_logos.rs"]
+mod package_logos;
 
 #[derive(Serialize, Deserialize)]
 pub struct PackageMeta {
@@ -42,6 +44,7 @@ pub struct InstalledPackageInfo {
     pub supports_user_words: bool,
     pub source: String,
     pub display_name: Option<String>,
+    pub logo_path: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -639,6 +642,12 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
                 None
             };
             Some(InstalledPackageInfo {
+                logo_path: if has_package_zip {
+                    package_logos::package_logo_path(core, &scheme_key)
+                        .map(|path| path.to_string_lossy().into_owned())
+                } else {
+                    None
+                },
                 active: state.active_scheme.as_deref() == Some(&scheme_key),
                 supports_user_words: crate::user_words::supports_user_words(core, &scheme_key)
                     .unwrap_or_else(|error| {

@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../rust/api/types.dart';
-import 'theme.dart';
+import 'mobile_keyboard_preview.dart';
 
 class CandidatePanelPreview extends StatelessWidget {
   const CandidatePanelPreview({
@@ -13,12 +13,16 @@ class CandidatePanelPreview extends StatelessWidget {
     required this.showPreedit,
     this.candidateCount = 6,
     this.keyboard = false,
+    this.keyboardSchemeName = 'KeyTao',
+    this.keyboardLogo,
   }) : assert(candidateCount >= 1 && candidateCount <= 10);
 
   final Map<String, dynamic> theme;
   final PanelOrientationDto orientation;
   final int candidateCount;
   final bool keyboard;
+  final String keyboardSchemeName;
+  final Widget? keyboardLogo;
   // The IME shows the preedit in the panel only when it is not embedded.
   final bool showPreedit;
 
@@ -62,6 +66,13 @@ class CandidatePanelPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (keyboard) {
+      return MobileKeyboardPreview(
+        theme: theme,
+        schemeName: keyboardSchemeName,
+        logo: keyboardLogo,
+      );
+    }
     final font = theme['font'] as Map<String, dynamic>;
     final panel = theme['panel'] as Map<String, dynamic>;
     final option = theme['candidate'] as Map<String, dynamic>;
@@ -339,55 +350,6 @@ class CandidatePanelPreview extends StatelessWidget {
         ),
       ],
     );
-    if (!keyboard) return panelPreview;
-    final palette = AppPalette.of(context);
-    return Semantics(
-      label: '键盘预览',
-      child: Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: palette.controlSurface,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(padding: const EdgeInsets.all(8), child: panelPreview),
-            for (final row in const ['qwertyuiop', 'asdfghjkl'])
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  row.length == 10 ? 4 : 20,
-                  0,
-                  row.length == 10 ? 4 : 20,
-                  8,
-                ),
-                child: Row(
-                  spacing: 5,
-                  children: [
-                    for (final key in row.split(''))
-                      Expanded(
-                        child: Container(
-                          height: 40,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: palette.surface,
-                            borderRadius: BorderRadius.circular(7),
-                            border: Border(
-                              bottom: BorderSide(color: palette.hairline),
-                            ),
-                          ),
-                          child: Text(
-                            key,
-                            style: TextStyle(color: palette.ink, fontSize: 19),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
+    return panelPreview;
   }
 }

@@ -271,8 +271,7 @@ class _SettingsCardState extends State<SettingsCard> {
         _desktop(context),
       if (controller.local?.deployed == true &&
           controller.schemaSwitches.isNotEmpty) ...[
-        const SizedBox(height: 32),
-        _schemaSwitches(),
+        HairlineGridCell(child: _schemaSwitches()),
       ],
     ],
   );
@@ -453,7 +452,8 @@ class _SettingsCardState extends State<SettingsCard> {
               ]),
             ],
           ),
-        if (c.imeUiError case final error?) ErrorMessage(error),
+        if (c.imeUiError case final error?)
+          HairlineGridCell(child: ErrorMessage(error)),
       ],
     );
   }
@@ -497,6 +497,10 @@ class _SettingsCardState extends State<SettingsCard> {
       showPreedit: !keyboard && !s!.effectiveEmbeddedComposition,
       candidateCount: c.candidatePageSize ?? 6,
       keyboard: keyboard,
+      keyboardSchemeName:
+          c.installedPackageFor(c.activeSchemeKey)?.displayName ??
+          schemeDisplayName(c.activeSchemeKey),
+      keyboardLogo: SchemaLogo(controller: c, size: 28),
     );
     if (keyboard) return preview;
     return CustomPaint(
@@ -504,7 +508,7 @@ class _SettingsCardState extends State<SettingsCard> {
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 380),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 40, 24, 20),
+          padding: const EdgeInsets.fromLTRB(32, 40, 32, 20),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,

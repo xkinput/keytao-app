@@ -19,7 +19,10 @@ class AppStartup extends StatelessWidget {
       child: FScaffold(
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.symmetric(
+              horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,
+              vertical: 24,
+            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [

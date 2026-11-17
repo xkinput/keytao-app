@@ -637,6 +637,7 @@ class InstalledPackageDto {
   final bool supportsUserWords;
   final String? source;
   final String? displayName;
+  final String? logoPath;
 
   const InstalledPackageDto({
     required this.schemeKey,
@@ -646,6 +647,7 @@ class InstalledPackageDto {
     this.supportsUserWords = true,
     this.source,
     this.displayName,
+    this.logoPath,
   });
 
   @override
@@ -656,7 +658,8 @@ class InstalledPackageDto {
       hasPackageZip.hashCode ^
       supportsUserWords.hashCode ^
       source.hashCode ^
-      displayName.hashCode;
+      displayName.hashCode ^
+      logoPath.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -669,7 +672,8 @@ class InstalledPackageDto {
           hasPackageZip == other.hasPackageZip &&
           supportsUserWords == other.supportsUserWords &&
           source == other.source &&
-          displayName == other.displayName;
+          displayName == other.displayName &&
+          logoPath == other.logoPath;
 }
 
 class LinuxImeStatusDto {

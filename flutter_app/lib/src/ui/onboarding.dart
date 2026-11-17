@@ -207,7 +207,10 @@ class _OnboardingPageState extends State<OnboardingPage> {
             Expanded(
               child: SingleChildScrollView(
                 key: ValueKey('setup-${step.name}'),
-                padding: const EdgeInsets.all(24),
+                padding: EdgeInsets.symmetric(
+                  horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,
+                  vertical: 24,
+                ),
                 child: Align(
                   alignment: Alignment.topCenter,
                   child: ConstrainedBox(
@@ -448,7 +451,10 @@ class _OnboardingPageState extends State<OnboardingPage> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(24),
+              padding: EdgeInsets.symmetric(
+                horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,
+                vertical: 24,
+              ),
               child: Align(
                 alignment: Alignment.bottomCenter,
                 child: ConstrainedBox(

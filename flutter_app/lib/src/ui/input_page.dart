@@ -59,7 +59,7 @@ class InputPage extends StatelessWidget {
         hero: _CurrentSchemeHero(controller: controller),
       ),
       if (controller.isWindows && controller.deploySteps.isNotEmpty)
-        DeploySteps(controller: controller),
+        HairlineGridCell(child: DeploySteps(controller: controller)),
       HairlineGridSection(
         children: [
           HairlineGridCell(child: AccountCard(controller: controller)),
@@ -199,7 +199,7 @@ class _CurrentSchemeHero extends StatelessWidget {
       margin: desktop ? EdgeInsets.zero : const EdgeInsets.only(top: 4),
       padding: desktop
           ? const EdgeInsets.symmetric(horizontal: 32, vertical: 40)
-          : const EdgeInsets.all(20),
+          : const EdgeInsets.all(16),
       decoration: desktop
           ? null
           : BoxDecoration(

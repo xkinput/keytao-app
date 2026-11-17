@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/shell.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
@@ -21,6 +22,26 @@ const _directory =
 const _cjkFamily = 'SettingsScreenshotCjk';
 const _captureKey = ValueKey('settings-screenshot');
 const _schemaLogoPath = '$_directory/schema-logo.png';
+const _catLogoPath = '$_directory/cat-logo.png';
+const _tianLogoPath = '$_directory/tian-logo.png';
+const _conflict = UserWordComparisonDto(
+  entry: UserWordDto(id: 1, word: '测试词', code: 'csci'),
+  status: 'code_taken',
+  words: ['测试'],
+  codes: [],
+);
+
+class _ScreenshotCore implements RustLibApi {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      switch (invocation.memberName) {
+        #crateApiCoreListUserWords => Future.value([_conflict.entry]),
+        #crateApiCoreCompareUserWords => Future.value([_conflict]),
+        _ => throw StateError(
+          'Unexpected screenshot bridge call: ${invocation.memberName}',
+        ),
+      };
+}
 
 class _ScreenshotController extends ViewController {
   _ScreenshotController(super.platform) {
@@ -33,7 +54,34 @@ class _ScreenshotController extends ViewController {
         version: local!.version,
         active: true,
         hasPackageZip: true,
+        logoPath: _schemaLogoPath,
       ),
+      const InstalledPackageDto(
+        schemeKey: 'xmjd',
+        active: false,
+        hasPackageZip: true,
+        logoPath: _catLogoPath,
+      ),
+      const InstalledPackageDto(
+        schemeKey: 'txjx',
+        active: false,
+        hasPackageZip: true,
+        logoPath: _tianLogoPath,
+      ),
+    ];
+    schemaSwitches = [
+      for (final (name, off, on) in [
+        ('ascii_mode', '中文', '西文'),
+        ('full_shape', '半角', '全角'),
+        ('traditional', '简体', '繁體'),
+      ])
+        SchemaSwitchDto(
+          schemaId: 'keytao',
+          name: name,
+          states: [off, on],
+          options: const [],
+          value: 0,
+        ),
     ];
   }
 
@@ -84,17 +132,17 @@ Future<void> _loadFonts() async {
   throw StateError('No macOS CJK font could be loaded for screenshots.');
 }
 
-Future<void> _writeSchemaLogo() async {
+Future<void> _writeSchemaLogo(String path, String label, Color color) async {
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   final text = TextPainter(
-    text: const TextSpan(
-      text: '键道',
+    text: TextSpan(
+      text: label,
       style: TextStyle(
         fontFamily: _cjkFamily,
         fontSize: 82,
         fontWeight: FontWeight.w700,
-        color: Color(0xFF3B73D9),
+        color: color,
       ),
     ),
     textDirection: TextDirection.ltr,
@@ -106,11 +154,29 @@ Future<void> _writeSchemaLogo() async {
   try {
     final png = (await image.toByteData(format: ui.ImageByteFormat.png))!;
     await Directory(_directory).create(recursive: true);
-    await File(_schemaLogoPath).writeAsBytes(png.buffer.asUint8List());
+    await File(path).writeAsBytes(png.buffer.asUint8List());
   } finally {
     image.dispose();
     picture.dispose();
   }
+}
+
+Future<void> _capture(WidgetTester tester, String name) async {
+  final boundary = tester.renderObject<RenderRepaintBoundary>(
+    find.byKey(_captureKey),
+  );
+  await tester.runAsync(() async {
+    final image = await boundary.toImage();
+    try {
+      final png = (await image.toByteData(format: ui.ImageByteFormat.png))!;
+      expect(png.lengthInBytes, greaterThan(10000));
+      await File('$_directory/$name.png').writeAsBytes(
+        png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+      );
+    } finally {
+      image.dispose();
+    }
+  });
 }
 
 void main() {
@@ -119,7 +185,9 @@ void main() {
   setUpAll(() async {
     if (enabled) {
       await _loadFonts();
-      await _writeSchemaLogo();
+      await _writeSchemaLogo(_schemaLogoPath, '键道', const Color(0xFF3B73D9));
+      await _writeSchemaLogo(_catLogoPath, '星猫', const Color(0xFF9964CC));
+      await _writeSchemaLogo(_tianLogoPath, '天行', const Color(0xFF188574));
     }
   });
 
@@ -141,6 +209,15 @@ void main() {
         testWidgets('capture settings $name', (tester) async {
           final controller = _ScreenshotController(device.platform)
             ..activePage = page;
+          if (page == AppPage.scheme) {
+            controller.userWordsReportScheme = 'keytao';
+            controller.userWordsReport = const UserWordsReportDto(
+              removed: [],
+              conflicts: [_conflict],
+            );
+          }
+          RustLib.initMock(api: _ScreenshotCore());
+          addTearDown(RustLib.dispose);
           addTearDown(controller.dispose);
           tester.view.devicePixelRatio = 1;
           tester.view.physicalSize = device.size;
@@ -152,14 +229,16 @@ void main() {
           );
 
           await tester.pumpWidget(const SizedBox(key: _captureKey));
-          await tester.runAsync(
-            () => precacheImage(
-              FileImage(File(_schemaLogoPath)),
-              tester.element(find.byKey(_captureKey)),
-              onError: (error, stack) =>
-                  Error.throwWithStackTrace(error, stack!),
-            ),
-          );
+          for (final path in [_schemaLogoPath, _catLogoPath, _tianLogoPath]) {
+            await tester.runAsync(
+              () => precacheImage(
+                FileImage(File(path)),
+                tester.element(find.byKey(_captureKey)),
+                onError: (error, stack) =>
+                    Error.throwWithStackTrace(error, stack!),
+              ),
+            );
+          }
           await tester.pumpWidget(
             RepaintBoundary(
               key: _captureKey,
@@ -183,7 +262,17 @@ void main() {
                           body: typeface,
                         ),
                       ),
-                      child: AppShell(controller: controller),
+                      child: Theme(
+                        data: Theme.of(context).copyWith(
+                          textTheme: Theme.of(context).textTheme
+                              .apply(fontFamilyFallback: const [_cjkFamily]),
+                        ),
+                        child: Navigator(
+                          onGenerateRoute: (_) => MaterialPageRoute<void>(
+                            builder: (_) => AppShell(controller: controller),
+                          ),
+                        ),
+                      ),
                     );
                   },
                 ),
@@ -191,8 +280,9 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          final logo = find.byType(SchemaLogo);
-          expect(logo, findsOneWidget);
+          final logos = find.byType(SchemaLogo);
+          expect(logos, findsWidgets);
+          final logo = logos.first;
           final logoImage = tester.widget<Image>(
             find.descendant(of: logo, matching: find.byType(Image)),
           );
@@ -203,6 +293,36 @@ void main() {
           expect(renderedLogo.image?.width, 192);
           expect(renderedLogo.image?.height, 192);
           expect(tester.getSize(find.byKey(_captureKey)), device.size);
+          if (page == AppPage.scheme) {
+            for (final (key, path) in [
+              ('keytao', _schemaLogoPath),
+              ('xmjd', _catLogoPath),
+              ('txjx', _tianLogoPath),
+            ]) {
+              final card = find.byKey(ValueKey('scheme-package-$key'));
+              final image = tester.widget<Image>(
+                find.descendant(of: card, matching: find.byType(Image)).first,
+              );
+              expect((image.image as FileImage).file.path, path);
+            }
+            final notice = find.text('键道6 · 自造词');
+            expect(
+              tester.getTopLeft(notice).dx,
+              greaterThanOrEqualTo(device.name == 'desktop' ? 32 : 16),
+            );
+          } else {
+            expect(find.text('方案开关'), findsOneWidget);
+            for (final label in ['西文', '全角', '繁體']) {
+              expect(
+                tester.getTopLeft(find.text(label)).dx,
+                greaterThanOrEqualTo(device.name == 'desktop' ? 32 : 16),
+              );
+            }
+          }
+
+          if (device.name == 'phone' && page == AppPage.input) {
+            await _capture(tester, 'phone-keyboard-${brightness.name}');
+          }
 
           if (device.name == 'phone') {
             final scrollable = tester.state<ScrollableState>(
@@ -223,25 +343,19 @@ void main() {
           }
           expect(tester.takeException(), isNull);
 
-          final boundary = tester.renderObject<RenderRepaintBoundary>(
-            find.byKey(_captureKey),
-          );
-          await tester.runAsync(() async {
-            final image = await boundary.toImage();
-            try {
-              final png = await image.toByteData(
-                format: ui.ImageByteFormat.png,
-              );
-              expect(png, isNotNull);
-              expect(png!.lengthInBytes, greaterThan(10000));
-              await Directory(_directory).create(recursive: true);
-              await File('$_directory/$name.png').writeAsBytes(
-                png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
-              );
-            } finally {
-              image.dispose();
-            }
-          });
+          await _capture(tester, name);
+          if (page == AppPage.scheme) {
+            tester.view.physicalSize = device.size;
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('查看冲突'));
+            await tester.pumpAndSettle();
+            expect(find.text('测试词'), findsOneWidget);
+            expect(tester.takeException(), isNull);
+            await _capture(
+              tester,
+              '${device.name}-user-words-${brightness.name}',
+            );
+          }
           await tester.pumpWidget(const SizedBox.shrink());
         }, skip: !enabled);
       }

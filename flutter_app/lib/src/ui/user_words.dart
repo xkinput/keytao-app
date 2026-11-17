@@ -44,39 +44,41 @@ class UserWordsNotice extends StatelessWidget {
     final report = c.userWordsReport;
     final error = c.userWordsReportError;
     if (report == null && error == null) return const SizedBox.shrink();
-    return Section(
-      title: c.userWordsReportScheme == null
-          ? '自造词'
-          : '${schemeDisplayName(c.userWordsReportScheme!)} · 自造词',
-      icon: FLucideIcons.bookOpen,
-      trailing: FButton.icon(
-        variant: FButtonVariant.ghost,
-        onPress: c.dismissUserWordsReport,
-        child: const Icon(FLucideIcons.x, size: 16, semanticLabel: '关闭'),
-      ),
-      children: [
-        if (report != null) ...[
-          Text(
-            '已移除重复 ${report.removed.length} 条，冲突 ${report.conflicts.length} 条',
-          ),
-          ActionRow(
-            children: [
-              ActionButton(
-                report.conflicts.isEmpty ? '查看自造词' : '查看冲突',
-                onPress: c.busy
-                    ? null
-                    : () => openUserWords(
-                        context,
-                        c,
-                        schemeKey: c.userWordsReportScheme,
-                        conflictsOnly: report.conflicts.isNotEmpty,
-                      ),
-              ),
-            ],
-          ),
+    return HairlineGridCell(
+      child: Section(
+        title: c.userWordsReportScheme == null
+            ? '自造词'
+            : '${schemeDisplayName(c.userWordsReportScheme!)} · 自造词',
+        icon: FLucideIcons.bookOpen,
+        trailing: FButton.icon(
+          variant: FButtonVariant.ghost,
+          onPress: c.dismissUserWordsReport,
+          child: const Icon(FLucideIcons.x, size: 16, semanticLabel: '关闭'),
+        ),
+        children: [
+          if (report != null) ...[
+            Text(
+              '已移除重复 ${report.removed.length} 条，冲突 ${report.conflicts.length} 条',
+            ),
+            ActionRow(
+              children: [
+                ActionButton(
+                  report.conflicts.isEmpty ? '查看自造词' : '查看冲突',
+                  onPress: c.busy
+                      ? null
+                      : () => openUserWords(
+                          context,
+                          c,
+                          schemeKey: c.userWordsReportScheme,
+                          conflictsOnly: report.conflicts.isNotEmpty,
+                        ),
+                ),
+              ],
+            ),
+          ],
+          if (error != null) ErrorMessage(error),
         ],
-        if (error != null) ErrorMessage(error),
-      ],
+      ),
     );
   }
 }
@@ -532,7 +534,10 @@ class _UserWordsPageState extends State<UserWordsPage> {
         mainAxisMaxRatio: 0.9,
         useSafeArea: true,
         builder: (sheetContext) => Padding(
-          padding: const EdgeInsets.all(24),
+          padding: EdgeInsets.symmetric(
+            horizontal: MediaQuery.sizeOf(sheetContext).width >= 720 ? 32 : 16,
+            vertical: 24,
+          ),
           child: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -608,7 +613,12 @@ class _UserWordsPageState extends State<UserWordsPage> {
           mainAxisMaxRatio: 0.9,
           useSafeArea: true,
           builder: (sheetContext) => Padding(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.symmetric(
+              horizontal: MediaQuery.sizeOf(sheetContext).width >= 720
+                  ? 32
+                  : 16,
+              vertical: 24,
+            ),
             child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -743,6 +753,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
+      final horizontalPadding = MediaQuery.sizeOf(context).width >= 720
+          ? 32.0
+          : 16.0;
       final blocked =
           c.busyWithoutPendingUserWordDeletes ||
           _loading ||
@@ -791,7 +804,12 @@ class _UserWordsPageState extends State<UserWordsPage> {
           header: SafeArea(
             bottom: false,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 16, 20, 12),
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                16,
+                horizontalPadding,
+                12,
+              ),
               child: Row(
                 children: [
                   FButton.icon(
@@ -827,7 +845,12 @@ class _UserWordsPageState extends State<UserWordsPage> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                    padding: EdgeInsets.fromLTRB(
+                      horizontalPadding,
+                      0,
+                      horizontalPadding,
+                      16,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       spacing: 12,
@@ -923,7 +946,12 @@ class _UserWordsPageState extends State<UserWordsPage> {
                             ),
                           )
                         : ListView.separated(
-                            padding: const EdgeInsets.fromLTRB(20, 0, 20, 28),
+                            padding: EdgeInsets.fromLTRB(
+                              horizontalPadding,
+                              0,
+                              horizontalPadding,
+                              28,
+                            ),
                             itemCount: entries.length,
                             separatorBuilder: (_, _) => Divider(
                               height: 1,
@@ -1309,7 +1337,10 @@ class _UserWordEditorState extends State<_UserWordEditor> {
         child: SafeArea(
           top: false,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.symmetric(
+              horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,
+              vertical: 24,
+            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,

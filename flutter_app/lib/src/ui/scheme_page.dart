@@ -93,7 +93,7 @@ class _SchemePageState extends State<SchemePage> {
           padding: EdgeInsets.fromLTRB(
             desktop ? 32 : 0,
             8,
-            desktop ? 24 : 0,
+            desktop ? 32 : 0,
             12,
           ),
           child: Row(
@@ -121,7 +121,7 @@ class _SchemePageState extends State<SchemePage> {
         if (!desktop && activeKey != null)
           Container(
             margin: const EdgeInsets.only(bottom: 24),
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: palette.surface,
               border: Border.all(color: palette.hairline),
@@ -291,6 +291,8 @@ class SchemePackageRow extends StatelessWidget {
     final isLocal = package?.source == 'local';
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
+    final hasLogo =
+        (active && c.activeSchemaLogoPath != null) || package?.logoPath != null;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
     final deploying = activating || (active && c.isDeploying);
     final installing = c.installingSchemeKey == schemeKey;
@@ -551,12 +553,33 @@ class SchemePackageRow extends StatelessWidget {
     final heading = compact
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [title, metadata],
+            children: [
+              Row(
+                spacing: 8,
+                children: [
+                  if (hasLogo)
+                    SchemaLogo(
+                      controller: c,
+                      size: 28,
+                      schemeKey: schemeKey,
+                      appLogoFallback: false,
+                    ),
+                  Flexible(child: title),
+                ],
+              ),
+              metadata,
+            ],
           )
         : Row(
             spacing: 6,
             children: [
-              if (active) SchemaLogo(controller: c, size: desktop ? 52 : 36),
+              if (hasLogo)
+                SchemaLogo(
+                  controller: c,
+                  size: desktop ? 52 : 36,
+                  schemeKey: schemeKey,
+                  appLogoFallback: false,
+                ),
               Flexible(child: title),
               ?state,
               if (update != null)
@@ -602,10 +625,6 @@ class SchemePackageRow extends StatelessWidget {
         if (compact)
           Row(
             children: [
-              if (active) ...[
-                SchemaLogo(controller: c, size: 36),
-                const SizedBox(width: 8),
-              ],
               Expanded(flex: 3, child: heading),
               const SizedBox(width: 8),
               Flexible(flex: 4, child: actions),

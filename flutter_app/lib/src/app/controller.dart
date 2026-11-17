@@ -1083,6 +1083,12 @@ class AppController extends ChangeNotifier {
     final request = _schemeUpdatesRequest;
     final packages = await core.listInstalledPackages();
     if (_disposed || request != _schemeUpdatesRequest) return;
+    for (final package in packages) {
+      if (package.logoPath case final path?) {
+        await FileImage(File(path)).evict();
+      }
+    }
+    if (_disposed || request != _schemeUpdatesRequest) return;
     installedPackages = packages;
     schemeUpdates = [
       for (final update in schemeUpdates)

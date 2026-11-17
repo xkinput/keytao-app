@@ -4027,6 +4027,7 @@ impl SseDecode for crate::api::types::InstalledPackageDto {
         let mut var_supportsUserWords = <bool>::sse_decode(deserializer);
         let mut var_source = <Option<String>>::sse_decode(deserializer);
         let mut var_displayName = <Option<String>>::sse_decode(deserializer);
+        let mut var_logoPath = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::InstalledPackageDto {
             scheme_key: var_schemeKey,
             version: var_version,
@@ -4035,6 +4036,7 @@ impl SseDecode for crate::api::types::InstalledPackageDto {
             supports_user_words: var_supportsUserWords,
             source: var_source,
             display_name: var_displayName,
+            logo_path: var_logoPath,
         };
     }
 }
@@ -5558,6 +5560,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::InstalledPackageDto {
             self.supports_user_words.into_into_dart().into_dart(),
             self.source.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
+            self.logo_path.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6485,6 +6488,7 @@ impl SseEncode for crate::api::types::InstalledPackageDto {
         <bool>::sse_encode(self.supports_user_words, serializer);
         <Option<String>>::sse_encode(self.source, serializer);
         <Option<String>>::sse_encode(self.display_name, serializer);
+        <Option<String>>::sse_encode(self.logo_path, serializer);
     }
 }
 

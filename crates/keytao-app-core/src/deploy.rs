@@ -103,6 +103,7 @@ pub fn render_user_schema_logos(user_dir: &std::path::Path) {
 
 pub fn active_schema_logo_path(user_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let schema_id = keytao_core::deployed_schema_id_from_dir(user_dir)?;
+    render_user_schema_logos(user_dir);
     let output = user_dir.canonicalize().ok()?.join(".keytao-logo");
     let path = output.join(format!("{schema_id}.png")).canonicalize().ok()?;
     (path.starts_with(&output) && path.is_file()).then_some(path)
@@ -327,8 +328,6 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(active_schema_logo_path(root).is_none());
-        render_user_schema_logos(root);
         let output = root.canonicalize().unwrap().join(".keytao-logo");
         assert_eq!(active_schema_logo_path(root), Some(output.join("xmjd6.png")));
         std::fs::write(
@@ -340,7 +339,7 @@ mod tests {
         assert_eq!(active_schema_logo_path(root), Some(selected.clone()));
         assert!(std::fs::read(&selected).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
         std::fs::remove_file(selected).unwrap();
-        assert!(active_schema_logo_path(root).is_none());
+        assert!(active_schema_logo_path(root).is_some());
     }
 
     #[test]

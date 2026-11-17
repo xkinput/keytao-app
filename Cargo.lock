@@ -1700,6 +1700,8 @@ version = "1.2.5-alpha.18"
 dependencies = [
  "image",
  "resvg",
+ "serde_yaml",
+ "sha2",
  "tempfile",
 ]
 

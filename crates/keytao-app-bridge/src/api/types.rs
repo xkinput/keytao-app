@@ -43,6 +43,7 @@ pub struct InstalledPackageDto {
     pub supports_user_words: bool,
     pub source: Option<String>,
     pub display_name: Option<String>,
+    pub logo_path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

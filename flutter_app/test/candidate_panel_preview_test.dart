@@ -177,14 +177,16 @@ void main() {
     for (final key in 'qwertyuiopasdfghjkl'.split('')) {
       expect(find.text(key), findsOneWidget);
     }
-    expect(
-      find.byKey(const ValueKey('candidate-preview-text-2')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('candidate-preview-text-3')),
-      findsNothing,
-    );
+    for (final label in ['⇧', '⌫', '123', '，', '键道6', '。', '↵']) {
+      expect(
+        find.byKey(ValueKey('keyboard-preview-key-$label')),
+        findsOneWidget,
+      );
+    }
+    expect(find.text('1'), findsOneWidget);
+    expect(find.text('@'), findsOneWidget);
+    expect(find.byIcon(FLucideIcons.ellipsis), findsOneWidget);
+    expect(find.bySemanticsLabel('KeyTao 键盘预览，键道6，静态展示'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));

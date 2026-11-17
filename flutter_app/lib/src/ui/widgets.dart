@@ -10,19 +10,33 @@ import '../rust/api/types.dart';
 import 'theme.dart';
 
 class SchemaLogo extends StatelessWidget {
-  const SchemaLogo({super.key, required this.controller, required this.size});
+  const SchemaLogo({
+    super.key,
+    required this.controller,
+    required this.size,
+    this.schemeKey,
+    this.appLogoFallback = true,
+  });
   final AppController controller;
   final double size;
+  final String? schemeKey;
+  final bool appLogoFallback;
 
   @override
   Widget build(BuildContext context) {
-    Widget fallback() => Image.asset(
-      logoAsset,
-      width: size,
-      height: size,
-      excludeFromSemantics: true,
-    );
-    final path = controller.activeSchemaLogoPath;
+    Widget fallback() => appLogoFallback
+        ? Image.asset(
+            logoAsset,
+            width: size,
+            height: size,
+            excludeFromSemantics: true,
+          )
+        : const SizedBox.shrink();
+    final key = schemeKey ?? controller.activeSchemeKey;
+    final package = controller.installedPackageFor(key);
+    final path = key == controller.activeSchemeKey
+        ? controller.activeSchemaLogoPath ?? package?.logoPath
+        : package?.logoPath;
     return path == null
         ? fallback()
         : Image.file(
@@ -923,9 +937,9 @@ class AppPageBody extends StatelessWidget {
         ? MediaQuery.sizeOf(context).width >= 720
               ? EdgeInsets.zero
               : const EdgeInsets.fromLTRB(16, 0, 16, 24)
-        : context.platformVariant.touch
-        ? const EdgeInsets.fromLTRB(16, 8, 16, 24)
-        : const EdgeInsets.fromLTRB(32, 8, 32, 32),
+        : MediaQuery.sizeOf(context).width >= 720
+        ? const EdgeInsets.fromLTRB(32, 8, 32, 32)
+        : const EdgeInsets.fromLTRB(16, 8, 16, 24),
     child: Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
@@ -935,18 +949,23 @@ class AppPageBody extends StatelessWidget {
           spacing: spacing,
           children: [
             if (controller.appUpdate?.hasUpdate == true)
-              AppUpdateBanner(controller: controller),
+              _notice(AppUpdateBanner(controller: controller)),
             for (final update in controller.visibleSchemeUpdates)
-              SchemeUpdateBanner(controller: controller, update: update),
+              _notice(
+                SchemeUpdateBanner(controller: controller, update: update),
+              ),
             if (controller.info.platform != BridgePlatform.macOs &&
                 controller.unhandledError != null)
-              ErrorMessage(controller.unhandledError),
+              _notice(ErrorMessage(controller.unhandledError)),
             ...children,
           ],
         ),
       ),
     ),
   );
+
+  Widget _notice(Widget child) =>
+      fullWidth ? HairlineGridCell(child: child) : child;
 }
 
 class AppUpdateBanner extends StatelessWidget {
@@ -1244,7 +1263,10 @@ class AppDialog extends StatelessWidget {
   Widget build(BuildContext context) => FDialog(
     animation: animation,
     builder: (context, _) => Padding(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.symmetric(
+        horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,
+        vertical: 24,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,

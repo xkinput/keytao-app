@@ -3912,8 +3912,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   InstalledPackageDto dco_decode_installed_package_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return InstalledPackageDto(
       schemeKey: dco_decode_String(arr[0]),
       version: dco_decode_opt_String(arr[1]),
@@ -3922,6 +3922,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       supportsUserWords: dco_decode_bool(arr[4]),
       source: dco_decode_opt_String(arr[5]),
       displayName: dco_decode_opt_String(arr[6]),
+      logoPath: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -4994,6 +4995,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_supportsUserWords = sse_decode_bool(deserializer);
     var var_source = sse_decode_opt_String(deserializer);
     var var_displayName = sse_decode_opt_String(deserializer);
+    var var_logoPath = sse_decode_opt_String(deserializer);
     return InstalledPackageDto(
       schemeKey: var_schemeKey,
       version: var_version,
@@ -5002,6 +5004,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       supportsUserWords: var_supportsUserWords,
       source: var_source,
       displayName: var_displayName,
+      logoPath: var_logoPath,
     );
   }
 
@@ -6220,6 +6223,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.supportsUserWords, serializer);
     sse_encode_opt_String(self.source, serializer);
     sse_encode_opt_String(self.displayName, serializer);
+    sse_encode_opt_String(self.logoPath, serializer);
   }
 
   @protected
