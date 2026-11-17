@@ -165,89 +165,106 @@ class MobileKeyboardPreview extends StatelessWidget {
     return Semantics(
       container: true,
       label: 'KeyTao 键盘预览，$schemeName，静态展示',
-      child: ExcludeSemantics(
-        child: IgnorePointer(
-          child: AspectRatio(
-            aspectRatio: _width / (_toolbarHeight + _previewHeight),
-            child: FittedBox(
-              fit: BoxFit.contain,
-              child: Container(
-                key: const ValueKey('mobile-keyboard-preview'),
-                width: _width,
-                height: _toolbarHeight + _previewHeight,
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: background,
-                  border: Border.all(color: _color(panel, 'borderColor')),
-                  borderRadius: BorderRadius.circular(
-                    (panel['cornerRadius'] as num).toDouble(),
-                  ),
-                ),
-                child: Column(
-                  children: [
-                    SizedBox(
-                      height: _toolbarHeight,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Row(
-                          spacing: 6,
-                          children: [
-                            toolbarIcon(FLucideIcons.grid2x2),
-                            toolbarItem(
-                              Text(
-                                '中 En',
-                                textScaler: TextScaler.noScaling,
-                                style: textStyle(14, foreground),
-                              ),
-                              flex: 14,
-                            ),
-                            toolbarIcon(FLucideIcons.mousePointer2),
-                            toolbarIcon(FLucideIcons.clipboard),
-                            toolbarIcon(FLucideIcons.smile),
-                            toolbarIcon(
-                              FLucideIcons.panelLeft,
-                              accented: false,
-                            ),
-                            toolbarIcon(FLucideIcons.ellipsis, accented: false),
-                            if (logo != null)
-                              SizedBox.square(dimension: 28, child: logo),
-                          ],
-                        ),
-                      ),
+      // Fade the cut-off rows out so the preview reads as a glimpse of the keyboard.
+      child: ShaderMask(
+        blendMode: BlendMode.dstIn,
+        shaderCallback: (bounds) => const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFFFFFFFF), Color(0xFFFFFFFF), Color(0x00FFFFFF)],
+          stops: [0, 0.55, 1],
+        ).createShader(bounds),
+        child: ExcludeSemantics(
+          child: IgnorePointer(
+            child: AspectRatio(
+              aspectRatio: _width / (_toolbarHeight + _previewHeight),
+              child: FittedBox(
+                fit: BoxFit.contain,
+                child: Container(
+                  key: const ValueKey('mobile-keyboard-preview'),
+                  width: _width,
+                  height: _toolbarHeight + _previewHeight,
+                  clipBehavior: Clip.antiAlias,
+                  decoration: BoxDecoration(
+                    color: background,
+                    border: Border.all(color: _color(panel, 'borderColor')),
+                    borderRadius: BorderRadius.circular(
+                      (panel['cornerRadius'] as num).toDouble(),
                     ),
-                    const SizedBox(height: _verticalGap),
-                    for (var row = 0; row < _previewRows; row++) ...[
-                      Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: row == 1 ? 24 : 5,
-                        ),
-                        child: Row(
-                          spacing: _horizontalGap,
-                          children: [
-                            if (row == 2)
-                              key(
-                                '⇧',
-                                weight: 130,
-                                icon: FLucideIcons.arrowBigUp,
+                  ),
+                  child: Column(
+                    children: [
+                      SizedBox(
+                        height: _toolbarHeight,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Row(
+                            spacing: 6,
+                            children: [
+                              toolbarIcon(FLucideIcons.grid2x2),
+                              toolbarItem(
+                                Text(
+                                  '中 En',
+                                  textScaler: TextScaler.noScaling,
+                                  style: textStyle(14, foreground),
+                                ),
+                                flex: 14,
                               ),
-                            for (var i = 0; i < _letterRows[row].$1.length; i++)
-                              key(
-                                _letterRows[row].$1[i],
-                                hint: _letterRows[row].$2[i],
+                              toolbarIcon(FLucideIcons.mousePointer2),
+                              toolbarIcon(FLucideIcons.clipboard),
+                              toolbarIcon(FLucideIcons.smile),
+                              toolbarIcon(
+                                FLucideIcons.panelLeft,
+                                accented: false,
                               ),
-                            if (row == 2)
-                              key(
-                                '⌫',
-                                weight: 130,
-                                accented: true,
-                                icon: FLucideIcons.delete,
+                              toolbarIcon(
+                                FLucideIcons.ellipsis,
+                                accented: false,
                               ),
-                          ],
+                              if (logo != null)
+                                SizedBox.square(dimension: 28, child: logo),
+                            ],
+                          ),
                         ),
                       ),
                       const SizedBox(height: _verticalGap),
+                      for (var row = 0; row < _previewRows; row++) ...[
+                        Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: row == 1 ? 24 : 5,
+                          ),
+                          child: Row(
+                            spacing: _horizontalGap,
+                            children: [
+                              if (row == 2)
+                                key(
+                                  '⇧',
+                                  weight: 130,
+                                  icon: FLucideIcons.arrowBigUp,
+                                ),
+                              for (
+                                var i = 0;
+                                i < _letterRows[row].$1.length;
+                                i++
+                              )
+                                key(
+                                  _letterRows[row].$1[i],
+                                  hint: _letterRows[row].$2[i],
+                                ),
+                              if (row == 2)
+                                key(
+                                  '⌫',
+                                  weight: 130,
+                                  accented: true,
+                                  icon: FLucideIcons.delete,
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: _verticalGap),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
