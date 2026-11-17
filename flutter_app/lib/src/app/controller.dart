@@ -455,12 +455,22 @@ class AppController extends ChangeNotifier {
       wanxiangLatestVersion != null &&
       _normalizedVersion(wanxiangLatestVersion!) !=
           _normalizedVersion(wanxiang!.version);
-  bool get showAddonInstall => addon?.deployed != true || addonHasUpdate;
+  bool get showAddonInstall =>
+      addon?.installed != true || addon?.deployed != true || addonHasUpdate;
+  bool get showWanxiangInstall =>
+      wanxiang?.installed != true ||
+      wanxiang?.deployed != true ||
+      wanxiangHasUpdate ||
+      selectedWanxiangVariant != installedWanxiangVariant;
   bool get rimeIceHasUpdate =>
       rimeIce?.installed == true &&
       rimeIceLatestVersion != null &&
       _normalizedVersion(rimeIceLatestVersion!) !=
           _normalizedVersion(rimeIce!.version);
+  bool get showRimeIceInstall =>
+      rimeIce?.installed != true ||
+      rimeIce?.deployed != true ||
+      rimeIceHasUpdate;
   bool get canInstallCustom => canInstall && selectedDirectory != null;
   int get operationLogCount => operationLogs.length;
   int get customVerifyFailureCount =>
@@ -486,7 +496,7 @@ class AppController extends ChangeNotifier {
   String get addonButtonLabel => addonHasUpdate
       ? AppStrings.update
       : addon?.installed == true
-      ? AppStrings.redeploy
+      ? AppStrings.deploy
       : AppStrings.install;
   String get wanxiangButtonLabel =>
       wanxiang?.installed == true &&
@@ -495,14 +505,14 @@ class AppController extends ChangeNotifier {
       : wanxiangHasUpdate
       ? AppStrings.update
       : wanxiang?.installed == true
-      ? AppStrings.redeploy
+      ? AppStrings.deploy
       : AppStrings.install;
   String get addonStatusText =>
       _addonStatus(addon?.installed, addon?.deployed, addon?.version);
   String get rimeIceButtonLabel => rimeIceHasUpdate
       ? AppStrings.update
       : rimeIce?.installed == true
-      ? AppStrings.redeploy
+      ? AppStrings.deploy
       : AppStrings.install;
   String get rimeIceStatusText =>
       _addonStatus(rimeIce?.installed, rimeIce?.deployed, rimeIce?.version);

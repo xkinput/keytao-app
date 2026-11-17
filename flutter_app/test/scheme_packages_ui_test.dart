@@ -143,6 +143,86 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  for (final (installed, deployed, latest, label) in [
+    (false, false, '2', AppStrings.install),
+    (true, true, '1', null),
+    (true, false, '1', AppStrings.deploy),
+    (true, true, '2', AppStrings.update),
+    (true, false, '2', AppStrings.update),
+  ]) {
+    testWidgets(
+      'add-on actions for installed=$installed deployed=$deployed latest=$latest',
+      (tester) async {
+        final c = _PackageController();
+        addTearDown(c.dispose);
+        _size(tester, const Size(1000, 1200));
+        final status = AddonStatusDto(
+          installed: installed,
+          deployed: deployed,
+          version: '1',
+          englishAvailable: false,
+        );
+        c.addon = c.wanxiang = c.rimeIce = status;
+        c.addonLatestVersion = c.wanxiangLatestVersion =
+            c.rimeIceLatestVersion = latest;
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: c.info.platform,
+            home: FScaffold(child: AddonCard(controller: c)),
+          ),
+        );
+        final buttons = tester.widgetList<ActionButton>(
+          find.byType(ActionButton),
+        );
+        expect(
+          buttons
+              .where((button) => button.primary)
+              .map((button) => button.label),
+          label == null ? isEmpty : [label, label, label],
+        );
+        expect(
+          buttons.where((button) => button.label == AppStrings.uninstall),
+          hasLength(installed ? 3 : 0),
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final latest in ['1', '2']) {
+    testWidgets('Wanxiang variant replacement with latest=$latest', (
+      tester,
+    ) async {
+      final c = _PackageController()
+        ..wanxiang = const AddonStatusDto(
+          installed: true,
+          deployed: true,
+          version: '1',
+          variant: 'base',
+          englishAvailable: false,
+        )
+        ..wanxiangLatestVersion = latest;
+      addTearDown(c.dispose);
+      _size(tester, const Size(1000, 1200));
+      c.selectWanxiangVariant('pure');
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: c.info.platform,
+          home: FScaffold(child: AddonCard(controller: c)),
+        ),
+      );
+      expect(
+        find.widgetWithText(ActionButton, AppStrings.replace),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(ActionButton, AppStrings.update),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('add-on install controls work without a main scheme', (
     tester,
   ) async {
