@@ -1,7 +1,7 @@
 <h1><img src="packaging/icons/icon.png" width="40" height="40" align="left" alt="">&nbsp;键道 KeyTao</h1>
 
 <p align="center">
-  <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS 与 Android 上的输入与设置界面">
+  <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS 与手机上的新版设置界面">
 </p>
 
 键道输入方案的安装工具与各平台系统输入法：App 负责下载、安装、合并和部署 Rime 方案，系统输入法通过同一套 librime 核心输入。
