@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show Locale, PlatformDispatcher;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
@@ -116,6 +117,9 @@ String errorText(Object error) => error is PlatformException
     : error is StateError
     ? error.message
     : '$error';
+
+String formatWindowTitle(String pageTitle, Locale locale) =>
+    '$pageTitle · KeyTao ${locale.languageCode.startsWith('zh') ? '输入法' : 'Input Method'}';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -770,7 +774,7 @@ class AppController extends ChangeNotifier {
   void selectPage(AppPage page) {
     if (activePage == page) return;
     activePage = page;
-    if (info.platform == BridgePlatform.macOs) unawaited(setWindowTitle());
+    unawaited(setWindowTitle());
     if (page == AppPage.debug) {
       sharedLogPath = null;
       if (busy) {
@@ -2788,12 +2792,17 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  // A title change must not toggle `busy`; a missing macOS channel is ignored.
+  // A title change must not toggle `busy`; a missing desktop channel is ignored.
   Future<void> setWindowTitle([String? title]) async {
-    if (info.platform != BridgePlatform.macOs) return;
+    if (isMobile) return;
     try {
-      await const MethodChannel('ink.rea.keytao/window')
-          .invokeMethod<void>('setTitle', title ?? activePage.title);
+      await const MethodChannel('ink.rea.keytao/window').invokeMethod<void>(
+        'setTitle',
+        formatWindowTitle(
+          title ?? activePage.title,
+          PlatformDispatcher.instance.locale,
+        ),
+      );
     } on Object catch (_) {}
   }
 

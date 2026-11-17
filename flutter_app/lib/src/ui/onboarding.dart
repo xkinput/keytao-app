@@ -19,7 +19,8 @@ class OnboardingPage extends StatefulWidget {
   State<OnboardingPage> createState() => _OnboardingPageState();
 }
 
-class _OnboardingPageState extends State<OnboardingPage> {
+class _OnboardingPageState extends State<OnboardingPage>
+    with WidgetsBindingObserver {
   int _index = 0;
   bool _completionScheduled = false;
   bool _finished = false;
@@ -37,6 +38,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _index = _initialIndex;
     _retargetPending = widget.controller.busy;
     widget.controller.addListener(_onControllerChanged);
@@ -48,6 +50,11 @@ class _OnboardingPageState extends State<OnboardingPage> {
     );
     widget.controller.setWindowTitle(_steps[_index].title);
     _checkCompletion();
+  }
+
+  @override
+  void didChangeLocales(List<Locale>? locales) {
+    widget.controller.setWindowTitle(_steps[_index].title);
   }
 
   @override
@@ -131,6 +138,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _lifecycle.dispose();
     widget.controller.removeListener(_onControllerChanged);
     super.dispose();

@@ -310,7 +310,6 @@ void main() {
               tester.getTopLeft(notice).dx,
               greaterThanOrEqualTo(device.name == 'desktop' ? 32 : 16),
             );
-          } else {
             expect(find.text('方案开关'), findsOneWidget);
             for (final label in ['西文', '全角', '繁體']) {
               expect(

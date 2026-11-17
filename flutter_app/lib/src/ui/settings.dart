@@ -476,7 +476,7 @@ class _SettingsCardState extends State<SettingsCard> {
           padding: const EdgeInsets.fromLTRB(32, 40, 32, 20),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               AnimatedSwitcher(
                 duration: MediaQuery.disableAnimationsOf(context)
@@ -487,11 +487,14 @@ class _SettingsCardState extends State<SettingsCard> {
                 child: preview,
               ),
               const SizedBox(height: 24),
-              Text(
-                '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
-                textAlign: TextAlign.right,
-                style: context.theme.typography.body.xs.copyWith(
-                  color: AppPalette.of(context).muted,
+              Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
+                  textAlign: TextAlign.right,
+                  style: context.theme.typography.body.xs.copyWith(
+                    color: AppPalette.of(context).muted,
+                  ),
                 ),
               ),
             ],

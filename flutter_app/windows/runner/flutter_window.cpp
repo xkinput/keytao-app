@@ -5,6 +5,7 @@
 
 #include <cwchar>
 #include <optional>
+#include <variant>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "single_instance.h"
@@ -35,6 +36,32 @@ bool FlutterWindow::OnCreate() {
   args_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "keytao/windows",
       &flutter::StandardMethodCodec::GetInstance());
+  window_channel_ = std::make_unique<flutter::MethodChannel<>>(
+      flutter_controller_->engine()->messenger(), "ink.rea.keytao/window",
+      &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [window = GetHandle()](const flutter::MethodCall<>& call,
+                             std::unique_ptr<flutter::MethodResult<>> result) {
+        const auto* title = std::get_if<std::string>(call.arguments());
+        if (call.method_name() != "setTitle" || !title) {
+          result->NotImplemented();
+          return;
+        }
+        const int length = MultiByteToWideChar(
+            CP_UTF8, MB_ERR_INVALID_CHARS, title->c_str(), -1, nullptr, 0);
+        if (length == 0) {
+          result->Error("INVALID_TITLE", "Window title is not valid UTF-8.");
+          return;
+        }
+        std::wstring wide_title(length, L'\0');
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, title->c_str(), -1,
+                                wide_title.data(), length) == 0 ||
+            !SetWindowTextW(window, wide_title.c_str())) {
+          result->Error("SET_TITLE_FAILED", "Failed to set window title.");
+          return;
+        }
+        result->Success();
+      });
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();

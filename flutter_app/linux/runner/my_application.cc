@@ -19,6 +19,30 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
 }
 
+static void window_method_call_handler(FlMethodChannel* channel,
+                                      FlMethodCall* method_call,
+                                      gpointer user_data) {
+  FlValue* args = fl_method_call_get_args(method_call);
+  g_autoptr(FlMethodResponse) response = nullptr;
+  if (g_strcmp0(fl_method_call_get_name(method_call), "setTitle") == 0 &&
+      args != nullptr && fl_value_get_type(args) == FL_VALUE_TYPE_STRING) {
+    GtkWindow* window = GTK_WINDOW(user_data);
+    const gchar* title = fl_value_get_string(args);
+    gtk_window_set_title(window, title);
+    GtkWidget* titlebar = gtk_window_get_titlebar(window);
+    if (GTK_IS_HEADER_BAR(titlebar)) {
+      gtk_header_bar_set_title(GTK_HEADER_BAR(titlebar), title);
+    }
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  } else {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  }
+  g_autoptr(GError) error = nullptr;
+  if (!fl_method_call_respond(method_call, response, &error)) {
+    g_warning("Failed to send window title response: %s", error->message);
+  }
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
@@ -66,6 +90,16 @@ static void my_application_activate(GApplication* application) {
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+
+  g_autoptr(FlStandardMethodCodec) window_codec = fl_standard_method_codec_new();
+  FlMethodChannel* window_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "ink.rea.keytao/window", FL_METHOD_CODEC(window_codec));
+  fl_method_channel_set_method_call_handler(
+      window_channel, window_method_call_handler, window, nullptr);
+  // The channel must outlive this function; the window owns the reference.
+  g_object_set_data_full(G_OBJECT(window), "keytao-window-channel",
+                         window_channel, g_object_unref);
 
   // Show the window when Flutter renders.
   // Requires the view to be realized so we can start rendering.

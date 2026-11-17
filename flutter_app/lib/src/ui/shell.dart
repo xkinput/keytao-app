@@ -62,15 +62,21 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _cloudDialogOpen = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.controller.setWindowTitle();
     widget.controller.addListener(_cloudSyncChanged);
     _cloudSyncChanged();
+  }
+
+  @override
+  void didChangeLocales(List<Locale>? locales) {
+    widget.controller.setWindowTitle();
   }
 
   @override
@@ -78,6 +84,7 @@ class _AppShellState extends State<AppShell> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller.removeListener(_cloudSyncChanged);
+      widget.controller.setWindowTitle();
       widget.controller.addListener(_cloudSyncChanged);
       _cloudSyncChanged();
     }
@@ -85,6 +92,7 @@ class _AppShellState extends State<AppShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.controller.removeListener(_cloudSyncChanged);
     super.dispose();
   }

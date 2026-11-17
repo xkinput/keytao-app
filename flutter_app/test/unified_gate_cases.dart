@@ -1,8 +1,11 @@
+import 'dart:ui' show PlatformDispatcher;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
+import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/onboarding.dart';
@@ -161,8 +164,14 @@ void unifiedGateCases(BridgePlatform platform) {
               await tester.tap(find.byKey(ValueKey('nav-${page.id}')));
               await tester.pumpAndSettle();
               expect(c.activePage, page);
-              if (platform == BridgePlatform.macOs) {
-                expect(titleCalls.last, page.title);
+              if (!c.isMobile) {
+                expect(
+                  titleCalls.last,
+                  formatWindowTitle(
+                    page.title,
+                    PlatformDispatcher.instance.locale,
+                  ),
+                );
               }
               expect(find.text(AppStrings.appUpdate), findsOneWidget);
               expect(tester.takeException(), isNull);
@@ -186,7 +195,13 @@ void unifiedGateCases(BridgePlatform platform) {
                 item.onSelected!();
                 await tester.pumpAndSettle();
                 expect(c.activePage, page);
-                expect(titleCalls.last, page.title);
+                expect(
+                  titleCalls.last,
+                  formatWindowTitle(
+                    page.title,
+                    PlatformDispatcher.instance.locale,
+                  ),
+                );
               }
             }
           }
