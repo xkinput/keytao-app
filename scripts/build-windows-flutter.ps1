@@ -29,10 +29,13 @@ $bundleDir = Join-Path $workDir "bundle"
 $uninstallFiles = Join-Path $workDir "uninstall-files.nsh"
 $installFiles = Join-Path $workDir "install-files.nsh"
 $installer = Join-Path $repoRoot "target\release\bundle\nsis\keytao-app-$version-windows-$Arch-setup.exe"
+$setupHelper = Join-Path $repoRoot "target\keytao-windows-tools\keytao-setup-helper-x64.exe"
+$setupHelperArm64 = Join-Path $repoRoot "target\keytao-windows-tools\keytao-setup-helper-arm64.exe"
 
 if ($DryRun) {
     Write-Host "$productName ($identifier): $version ($numericVersion); perMachine; HKLM uninstall key: $productName"
     Write-Host "IME: x86 -> x64 -> arm64 -> arm64x (scripts/build-windows-ime.ps1 + build-windows-arm64x.ps1)"
+    Write-Host "Setup helper: x64 + arm64 (static CRT, built with each IME runtime)"
     Write-Host "flutter build windows --release --build-name $version --build-number 0"
     Write-Host "Bundle: $bundleDir"
     Write-Host "makensis: packaging/windows/keytao.nsi -> $installer"
@@ -117,6 +120,7 @@ try {
     if (Test-Path -LiteralPath $installer) { Remove-Item -LiteralPath $installer -Force }
     Invoke-Checked $MakeNsis @("/INPUTCHARSET", "UTF8", "/V3", "/DVERSION=$version", "/DVERSION_NUMERIC=$numericVersion",
         "/DREPO_ROOT=$repoRoot", "/DBUNDLE_DIR=$bundleDir", "/DUNINSTALL_FILES=$uninstallFiles", "/DINSTALL_FILES=$installFiles",
+        "/DSETUP_HELPER=$setupHelper", "/DSETUP_HELPER_ARM64=$setupHelperArm64",
         "/DOUTPUT_FILE=$installer", (Join-Path $repoRoot "packaging\windows\keytao.nsi"))
     & (Join-Path $PSScriptRoot "verify-windows-bundle.ps1") -ReleaseDir $bundleDir -InstallerPath $installer
     Write-Host "Windows Flutter installer ready: $installer"

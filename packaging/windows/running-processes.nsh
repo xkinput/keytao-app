@@ -2,6 +2,7 @@
 !define KEYTAO_RUNNING_PROCESSES_INCLUDED
 !include "nsDialogs.nsh"
 !include "TextFunc.nsh"
+!include "x64.nsh"
 
 Var PreflightStatus
 Var PreflightReport
@@ -41,13 +42,21 @@ LangString PreflightBlocked ${LANG_SIMPCHINESE} "未能结束 KeyTao 程序。�
 !macro DefineRunningProcesses Prefix
 Function ${Prefix}CheckRunningProcesses
   InitPluginsDir
-  File /oname=$PLUGINSDIR\check-running-processes.ps1 "${REPO_ROOT}\packaging\windows\check-running-processes.ps1"
+  !ifdef SETUP_HELPER_ARM64
+    ${If} ${IsNativeARM64}
+      File /oname=$PLUGINSDIR\keytao-setup-helper.exe "${SETUP_HELPER_ARM64}"
+    ${Else}
+  !endif
+      File /oname=$PLUGINSDIR\keytao-setup-helper.exe "${SETUP_HELPER}"
+  !ifdef SETUP_HELPER_ARM64
+    ${EndIf}
+  !endif
   Delete "$PLUGINSDIR\running-processes.txt"
   StrCpy $PreflightStatus 20
   StrCpy $PreflightReport ""
   ; Page previews leave PreflightStopArg empty. Only Continue/section entry
-  ; sets -StopOwnedProcesses; never infer ownership from loaded DLLs.
-  nsExec::ExecToStack /TIMEOUT=60000 '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\check-running-processes.ps1" -InstallDir "$INSTDIR\." -ReportPath "$PLUGINSDIR\running-processes.txt" $PreflightStopArg'
+  ; sets --stop-owned-processes; never infer ownership from loaded DLLs.
+  nsExec::ExecToStack /TIMEOUT=60000 '"$PLUGINSDIR\keytao-setup-helper.exe" --install-dir "$INSTDIR\." --report-path "$PLUGINSDIR\running-processes.txt" $PreflightStopArg'
   Pop $PreflightStatus
   Pop $0
   ${If} $PreflightStatus != 0
@@ -145,7 +154,7 @@ FunctionEnd
 
 Function ${Prefix}EnsureProcessesStopped
   ${Do}
-    StrCpy $PreflightStopArg "-StopOwnedProcesses"
+    StrCpy $PreflightStopArg "--stop-owned-processes"
     Call ${Prefix}CheckRunningProcesses
     StrCpy $PreflightStopArg ""
     ${If} $PreflightStatus == 0

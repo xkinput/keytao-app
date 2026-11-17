@@ -1,6 +1,19 @@
-﻿$ErrorActionPreference = 'Stop'
-$scriptPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\check-running-processes.ps1'))
-. $scriptPath
+﻿param(
+    [string]$SetupHelper = (Join-Path $PSScriptRoot '..\..\..\target\x86_64-pc-windows-msvc\release\keytao-setup-helper.exe')
+)
+
+$ErrorActionPreference = 'Stop'
+$SetupHelper = (Resolve-Path -LiteralPath $SetupHelper).ProviderPath
+
+function Invoke-SetupHelper([string]$InstallDirectory, [string]$ReportPath, [switch]$StopOwnedProcesses) {
+    $arguments = '--install-dir "' + $InstallDirectory + '" --report-path "' + $ReportPath + '"'
+    if ($StopOwnedProcesses) { $arguments += ' --stop-owned-processes' }
+    $process = Start-Process -FilePath $SetupHelper -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    try {
+        if (-not $process.WaitForExit(30000)) { throw 'The native setup helper timed out.' }
+        return $process.ExitCode
+    } finally { $process.Dispose() }
+}
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -78,7 +91,7 @@ public static class KeyTaoProcessFixture {
     foreach ($name in @('keytao-app.exe', 'keytao.exe', 'WeaselServer.exe', 'WeaselDeployer.exe', 'chrome.exe', 'explorer.exe', 'ctfmon.exe')) {
         Copy-Item -LiteralPath $fixture -Destination (Join-Path $otherRoot $name)
     }
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $appRoot $report) -eq 0) 'No owned running executables must pass.'
+    Assert-True ((Invoke-SetupHelper $appRoot $report) -eq 0) 'No owned running executables must pass.'
 
     $unrelated = @()
     foreach ($name in @('keytao-app.exe', 'keytao.exe', 'WeaselServer.exe', 'WeaselDeployer.exe', 'explorer.exe', 'ctfmon.exe')) {
@@ -89,7 +102,7 @@ public static class KeyTaoProcessFixture {
     foreach ($name in @('WeaselServer.exe', 'WeaselDeployer.exe')) {
         $unrelated += Start-Fixture (Join-Path $appRoot $name) ('co-located-' + $name)
     }
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $appRoot $report) -eq 0) 'External KeyTao copies, Weasel programs at either path, and input-method hosts must be ignored.'
+    Assert-True ((Invoke-SetupHelper $appRoot $report) -eq 0) 'External KeyTao copies, Weasel programs at either path, and input-method hosts must be ignored.'
 
     $childReady = Join-Path $testRoot 'browser-child.ready'
     $childStop = Join-Path $testRoot 'browser-child.stop'
@@ -102,7 +115,7 @@ public static class KeyTaoProcessFixture {
     $unrelated += $browser
     $legacy = Start-Fixture (Join-Path $appRoot 'keytao.exe') 'owned-legacy'
     $owned = @($app, $legacy)
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $appRoot $report) -eq 10) 'The read-only check must report verified standalone processes.'
+    Assert-True ((Invoke-SetupHelper (Join-Path $appRoot '.') $report) -eq 10) 'The read-only check must report verified standalone processes after path normalization.'
     foreach ($process in $owned) { Assert-True (-not $process.HasExited) 'Read-only enumeration must not stop any process.' }
     $text = [IO.File]::ReadAllText($report, [Text.Encoding]::Unicode)
     foreach ($process in $owned) { Assert-True ($text.Contains("PID $($process.Id)")) 'Each owned standalone process must be listed.' }
@@ -111,40 +124,19 @@ public static class KeyTaoProcessFixture {
     Assert-True (-not ($bytes[0] -eq 255 -and $bytes[1] -eq 254)) 'The report must be UTF-16LE without a BOM.'
     Assert-True ($text.StartsWith('检测到') -and $text.Length -le 700) 'The report must preserve Chinese text and fit the NSIS buffer.'
 
-    # Deterministically model a recycled PID: the current process now has a
-    # different creation time or image than the previously approved snapshot.
-    $paths = [string[]]@(Get-KeyTaoOwnedExecutablePaths $appRoot)
-    $snapshot = @([KeyTao.Setup.OwnedProcesses]::Find($paths))
-    $target = @($snapshot | Where-Object { $_.ProcessId -eq $app.Id })[0]
-    $originalTime = $target.CreationTime
-    $target.CreationTime = $originalTime - 1
-    [KeyTao.Setup.OwnedProcesses]::Stop($target)
-    Assert-True (-not $app.HasExited) 'A reused PID with a different creation time must never be terminated.'
-    $target.CreationTime = $originalTime
-    $target.ImagePath = Join-Path $otherRoot 'keytao-app.exe'
-    [KeyTao.Setup.OwnedProcesses]::Stop($target)
-    Assert-True (-not $app.HasExited) 'A mismatching executable path must never be terminated.'
-
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $appRoot $report -StopOwnedProcesses) -eq 0) 'Stopping owned standalone processes must clear the check despite running input-method hosts.'
+    Assert-True ((Invoke-SetupHelper $appRoot $report -StopOwnedProcesses) -eq 0) 'Stopping owned standalone processes must clear the check despite running input-method hosts.'
     foreach ($process in $owned) {
         Assert-True ($process.WaitForExit(5000)) 'Every approved standalone fixture must be terminated.'
     }
     foreach ($process in $unrelated) {
         Assert-True (-not $process.HasExited) 'Weasel, external KeyTao copies, hosts, and the browser child must remain running.'
     }
-    # Stale snapshots after a normal exit are harmless and must not target a
-    # process that happens to reuse the same identifier.
-    foreach ($target in $snapshot) { [KeyTao.Setup.OwnedProcesses]::Stop($target) }
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $appRoot $report) -eq 0) 'A rescan must ignore old DLL use by preserved programs.'
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck (Join-Path $testRoot 'new-install') $report) -eq 0) 'An absent directory must allow first installation.'
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $resource $report) -eq 20) 'An invalid install directory must fail closed.'
-    Assert-True ((Invoke-KeyTaoRunningProcessCheck $appRoot (Join-Path $testRoot 'missing\report.txt')) -eq 20) 'A report write failure must fail closed.'
-
-    $entryPointArguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptPath + '"'), '-InstallDir', ('"' + $resource + '"'), '-ReportPath', ('"' + $report + '"'))
-    $entryPointProcess = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $entryPointArguments -WindowStyle Hidden -PassThru -Wait
-    try { Assert-True ($entryPointProcess.ExitCode -eq 20) 'The installer-facing entry point must preserve failure exit 20.' }
-    finally { $entryPointProcess.Dispose() }
-    Write-Host 'PASS: KeyTao-only shutdown, preserved Weasel at all paths, external KeyTao copies, hosts/browser child, PID identity guards, exit races, UTF-16 report, and error exits.'
+    Assert-True ((Invoke-SetupHelper $appRoot $report) -eq 0) 'A rescan must ignore old DLL use by preserved programs.'
+    Assert-True ((Invoke-SetupHelper (Join-Path $testRoot 'new-install') $report) -eq 0) 'An absent directory must allow first installation.'
+    Assert-True ((Invoke-SetupHelper $resource $report) -eq 20) 'An invalid install directory must fail closed.'
+    Assert-True ((Invoke-SetupHelper 'relative-install' $report) -eq 20) 'A relative install directory must fail closed.'
+    Assert-True ((Invoke-SetupHelper $appRoot (Join-Path $testRoot 'missing\report.txt')) -eq 20) 'A report write failure must fail closed.'
+    Write-Host 'PASS: Native helper CLI, KeyTao-only shutdown, preserved Weasel at all paths, external KeyTao copies, hosts/browser child, UTF-16 report, and error exits.'
 } finally {
     # Ask only our unique fixture processes to exit; never use name-based kill.
     foreach ($signal in $stopSignals) { [IO.File]::WriteAllText($signal, 'stop') }

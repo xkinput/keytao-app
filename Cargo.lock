@@ -1709,6 +1709,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "keytao-setup-helper"
+version = "1.2.10"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "keytao-theme"
 version = "0.1.0"
 dependencies = [

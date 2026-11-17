@@ -26,6 +26,12 @@ Unicode true
 !ifndef INSTALL_FILES
   !error "INSTALL_FILES is required"
 !endif
+!ifndef SETUP_HELPER
+  !error "SETUP_HELPER is required"
+!endif
+!ifndef SETUP_HELPER_ARM64
+  !error "SETUP_HELPER_ARM64 is required"
+!endif
 
 ; Match Tauri's perMachine x64 defaults. The publisher defaults to the
 ; second component of ink.rea.keytao-app, not the Cargo authors field.

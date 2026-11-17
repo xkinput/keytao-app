@@ -342,7 +342,7 @@ function Find-WindowsRuntimeDll([string]$Name, [string]$WindowsArch) {
 
 $cargoArgs = @("build", "-p", "keytao-windows-ime", "--target", $target)
 if ($Arch -ne "x86") {
-    $cargoArgs += @("-p", "keytao-windows-ime-server")
+    $cargoArgs += @("-p", "keytao-windows-ime-server", "-p", "keytao-setup-helper")
 }
 if (-not $DebugBuild) {
     $cargoArgs += "--release"
@@ -374,6 +374,12 @@ $cargoTargetRoot = if ($env:CARGO_TARGET_DIR) {
     }
 } else {
     Join-Path $repoRoot "target"
+}
+if ($Arch -ne "x86") {
+    $setupHelperDir = Join-Path $repoRoot "target\keytao-windows-tools"
+    New-Item -ItemType Directory -Force -Path $setupHelperDir | Out-Null
+    Copy-Item -Force -LiteralPath (Join-Path $cargoTargetRoot "$target\$profile\keytao-setup-helper.exe") `
+        -Destination (Join-Path $setupHelperDir "keytao-setup-helper-$Arch.exe")
 }
 $dll = Join-Path $cargoTargetRoot "$target\$profile\keytao_windows_ime.dll"
 $runtimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\$Arch"

@@ -62,14 +62,16 @@ block installation merely because they loaded a KeyTao/Rime DLL. Reopen those
 applications later to activate the new input method code; switching input
 methods alone may leave an old DLL loaded.
 
-`check-running-processes.ps1` recognizes only `keytao-app.exe` and the legacy
+`keytao-setup-helper.exe` is a native Rust helper bundled in the installer and
+extracted to `$PLUGINSDIR`; it does not start PowerShell or compile C# during
+process checks. It recognizes only `keytao-app.exe` and the legacy
 `keytao.exe` at exact paths within the selected KeyTao installation. It does not
 inspect Weasel registration or stop WeaselServer/WeaselDeployer, even if those
 executables happen to be in the same directory. KeyTao runs librime in
 `keytao-windows-ime-server.exe` by default; in-process mode is used only for
 explicit `EngineMode=0` or the no-learning fallback. See
 [Windows IME engine server](../../docs/windows-ime-server.md).
-`-StopOwnedProcesses` enables stopping;
+`--stop-owned-processes` enables stopping;
 without it, the helper only previews. Before terminating a process it rechecks
 its executable path and creation time using the same held handle, and never
 terminates a process tree. The installer repeats this step immediately before
@@ -99,13 +101,15 @@ compiles the real single-instance state machine against mock Win32 calls.
 Neither builds nor runs a Windows executable. On Windows with NSIS 3, also run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/tests/check_running_processes_test.ps1
+cargo build --release --target x86_64-pc-windows-msvc -p keytao-setup-helper
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/tests/check_running_processes_test.ps1 -SetupHelper target/x86_64-pc-windows-msvc/release/keytao-setup-helper.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/tests/running_processes_gate_test.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/tests/replace_payload_test.ps1
 ```
 
-These start isolated fixture processes to verify selective stopping and compile
-harmless NSIS fixtures to verify read-only previews, Continue/section stopping,
+These start isolated fixture processes to verify the native helper's selective
+stopping and compile harmless NSIS fixtures with a native Rust stub to verify
+read-only previews, Continue/section stopping,
 upgrade recovery, loaded-DLL replacement, Unicode reports and silent exit codes.
 The replacement test also requires LLVM/clang and leaves the system reboot
 deletion queue untouched. The fixtures never
