@@ -163,7 +163,7 @@ void main() {
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, AppStrings.install),
     );
-    expect(installs, hasLength(2));
+    expect(installs, hasLength(3));
     expect(installs.every((button) => button.onPress != null), isTrue);
     expect(tester.takeException(), isNull);
   });

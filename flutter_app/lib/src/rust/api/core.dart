@@ -452,6 +452,24 @@ Future<AddonStatusDto> addonSchemaUninstall({
 Future<AddonStatusDto> wanxiangStatus() =>
     RustLib.instance.api.crateApiCoreWanxiangStatus();
 
+Future<WanxiangGrammarStatusDto> wanxiangGrammarStatus() =>
+    RustLib.instance.api.crateApiCoreWanxiangGrammarStatus();
+
+Future<void> cancelWanxiangGrammarDownload() =>
+    RustLib.instance.api.crateApiCoreCancelWanxiangGrammarDownload();
+
+/// Uses the add-on deploy contract and holds the install lock through rollback.
+Future<WanxiangGrammarStatusDto> manageWanxiangGrammar({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageWanxiangGrammar(
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+Future<AddonStatusDto> rimeIceStatus() =>
+    RustLib.instance.api.crateApiCoreRimeIceStatus();
+
 /// A failed upstream check leaves the locally installed status available.
 Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
     RustLib.instance.api.crateApiCoreCheckAddonUpdate(id: id);
@@ -466,6 +484,15 @@ Future<AddonStatusDto> manageWanxiang({
 }) => RustLib.instance.api.crateApiCoreManageWanxiang(
   installed: installed,
   variant: variant,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+Future<AddonStatusDto> manageRimeIce({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageRimeIce(
+  installed: installed,
   androidDeploy: androidDeploy,
 );
 
@@ -563,4 +590,35 @@ class AddonStatusDto {
           variant == other.variant &&
           englishAvailable == other.englishAvailable &&
           latestVersion == other.latestVersion;
+}
+
+class WanxiangGrammarStatusDto {
+  final bool available;
+  final bool installed;
+  final String version;
+  final BigInt size;
+
+  const WanxiangGrammarStatusDto({
+    required this.available,
+    required this.installed,
+    required this.version,
+    required this.size,
+  });
+
+  @override
+  int get hashCode =>
+      available.hashCode ^
+      installed.hashCode ^
+      version.hashCode ^
+      size.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WanxiangGrammarStatusDto &&
+          runtimeType == other.runtimeType &&
+          available == other.available &&
+          installed == other.installed &&
+          version == other.version &&
+          size == other.size;
 }

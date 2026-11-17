@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the pinned Linux librime with static dependencies and merged Lua support.
+# Build the pinned Linux librime with static dependencies and merged Lua/Octagram.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,15 +17,16 @@ git clone --depth 1 --branch "$LIBRIME_VERSION" https://github.com/rime/librime.
 git -C "$SOURCE_DIR" submodule update --init --depth 1 \
   deps/glog deps/leveldb deps/marisa-trie deps/opencc deps/yaml-cpp
 
-checkout_lua_revision() {
-  local revision="$1" destination="$2"
+checkout_plugin_revision() {
+  local repository="$1" revision="$2" destination="$3"
   git init -q "$destination"
-  git -C "$destination" remote add origin https://github.com/hchunhui/librime-lua.git
+  git -C "$destination" remote add origin "https://github.com/$repository.git"
   git -C "$destination" fetch --depth 1 origin "$revision"
   git -C "$destination" checkout --detach FETCH_HEAD
 }
-checkout_lua_revision "$LIBRIME_LUA_REF" "$SOURCE_DIR/plugins/lua"
-checkout_lua_revision "$LIBRIME_LUA_THIRDPARTY_REF" "$SOURCE_DIR/plugins/lua/thirdparty"
+checkout_plugin_revision hchunhui/librime-lua "$LIBRIME_LUA_REF" "$SOURCE_DIR/plugins/lua"
+checkout_plugin_revision hchunhui/librime-lua "$LIBRIME_LUA_THIRDPARTY_REF" "$SOURCE_DIR/plugins/lua/thirdparty"
+checkout_plugin_revision lotem/librime-octagram "$LIBRIME_OCTAGRAM_REF" "$SOURCE_DIR/plugins/octagram"
 
 DEPS_CMAKE_ARGS=(
   -G Ninja
@@ -67,9 +68,11 @@ cmake -S "$SOURCE_DIR" -B "$WORK_DIR/build/librime" -G Ninja \
   "-DCMAKE_INSTALL_PREFIX=$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib "-DCMAKE_PREFIX_PATH=$DEPS_PREFIX" \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
   -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC=ON -DBUILD_MERGED_PLUGINS=ON \
-  -DENABLE_EXTERNAL_PLUGINS=OFF -DBUILD_TEST=OFF -DBUILD_DATA=OFF \
+  -DENABLE_EXTERNAL_PLUGINS=OFF -DBUILD_TEST=OFF -DBUILD_DATA=OFF -DBUILD_TOOLS=OFF \
   -DCMAKE_CXX_STANDARD_LIBRARIES=-lsnappy -DCMAKE_SHARED_LINKER_FLAGS=-Wl,--exclude-libs,ALL
 cmake --build "$WORK_DIR/build/librime" --target install
+nm -D "$PREFIX/lib/librime.so.1" | grep '_Z28rime_require_module_octagramv' >/dev/null \
+  || { echo 'librime must include the merged Octagram module' >&2; exit 1; }
 strip --strip-all "$PREFIX/lib/librime.so.1"
 mkdir -p "$PREFIX/share/opencc"
 cp -a "$DEPS_PREFIX/share/opencc/." "$PREFIX/share/opencc/"

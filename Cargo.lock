@@ -1624,6 +1624,7 @@ dependencies = [
  "keytao-ime-ipc",
  "keytao-schema-logo",
  "keytao-theme",
+ "libc",
  "reqwest",
  "semver",
  "serde",

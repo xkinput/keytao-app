@@ -21,6 +21,9 @@ tracing = "0.1"
 dirs.workspace = true
 time = { version = "0.3", features = ["parsing"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 

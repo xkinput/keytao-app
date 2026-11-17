@@ -8,7 +8,8 @@ import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/platform/android_host.dart';
 import 'package:keytao/src/platform/ios_host.dart';
-import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
+import 'package:keytao/src/rust/api/core.dart'
+    show AddonStatusDto, WanxiangGrammarStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
@@ -85,6 +86,13 @@ class FakeCore implements RustLibApi {
   final addonUpdateRequests = <String, Completer<AddonStatusDto>>{};
   AddonStatusDto addonStatus = missingAddon;
   AddonStatusDto wanxiangStatus = missingAddon;
+  WanxiangGrammarStatusDto wanxiangGrammarStatus = WanxiangGrammarStatusDto(
+    available: true,
+    installed: false,
+    version: '',
+    size: BigInt.zero,
+  );
+  AddonStatusDto rimeIceStatus = missingAddon;
   bool delayAddonUpdates = false;
   bool addonUpdateFails = false;
   bool delayReleases = false;
@@ -155,6 +163,32 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreWanxiangStatus() async =>
       wanxiangStatus;
+  @override
+  Future<WanxiangGrammarStatusDto> crateApiCoreWanxiangGrammarStatus() async =>
+      wanxiangGrammarStatus;
+  @override
+  Future<WanxiangGrammarStatusDto> crateApiCoreManageWanxiangGrammar({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('wanxiangGrammar:$installed');
+    await emitAddonDeployProgress();
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    return wanxiangGrammarStatus = WanxiangGrammarStatusDto(
+      available: true,
+      installed: installed,
+      version: installed ? 'LTS' : '',
+      size: BigInt.zero,
+    );
+  }
+  @override
+  Future<void> crateApiCoreCancelWanxiangGrammarDownload() async {
+    calls.add('cancelWanxiangGrammar');
+  }
+  @override
+  Future<AddonStatusDto> crateApiCoreRimeIceStatus() async => rimeIceStatus;
   @override
   Future<AddonStatusDto> crateApiCoreCheckAddonUpdate({required String id}) async {
     calls.add('addonUpdate:$id');
@@ -333,6 +367,19 @@ class FakeCore implements RustLibApi {
       englishAvailable: false,
       variant: installed ? variant : null,
     );
+  }
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeIce({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('rimeIce:$installed');
+    await emitAddonDeployProgress();
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    return rimeIceStatus = installed ? installedAddon : missingAddon;
   }
 
   @override
@@ -602,6 +649,8 @@ void main() {
           controller.uninstallAddon,
           () => controller.manageWanxiang(true),
           () => controller.manageWanxiang(false),
+          () => controller.manageRimeIce(true),
+          () => controller.manageRimeIce(false),
         ]) {
           controller.clearOperationLogs();
           expect(await action(), isTrue);
@@ -633,7 +682,11 @@ void main() {
       controller.installAddon,
       controller.uninstallAddon,
       () => controller.manageWanxiang(true),
+      () => controller.manageWanxiangGrammar(true),
+      () => controller.manageWanxiangGrammar(false),
       () => controller.manageWanxiang(false),
+      () => controller.manageRimeIce(true),
+      () => controller.manageRimeIce(false),
     ]) {
       controller.deploySteps.clear();
       controller.clearOperationLogs();
@@ -661,6 +714,8 @@ void main() {
         OperationKind.customDirectory,
         OperationKind.addon,
         OperationKind.wanxiang,
+        OperationKind.wanxiangGrammar,
+        OperationKind.rimeIce,
       ]) {
         controller.operation = operation;
         const progress = InstallProgressDto(
@@ -687,6 +742,12 @@ void main() {
         if (operation == OperationKind.wanxiang) {
           expect(controller.wanxiangProgress, same(progress));
         }
+        if (operation == OperationKind.wanxiangGrammar) {
+          expect(controller.wanxiangGrammarProgress, same(progress));
+        }
+        if (operation == OperationKind.rimeIce) {
+          expect(controller.rimeIceProgress, same(progress));
+        }
       }
       var changes = 0;
       controller.addListener(() => changes++);
@@ -703,6 +764,38 @@ void main() {
       expect(controller.operationLogs, logs);
     },
   );
+
+  test('grammar download cancels only during its download stage', () async {
+    await controller.connectEvents();
+    await settle();
+    controller.operation = OperationKind.wanxiangGrammar;
+    controller.busy = true;
+    for (final stage in [
+      'wanxiang-grammar-download',
+      'wanxiang-grammar-deploy',
+    ]) {
+      core.events.add(
+        BridgeEvent(
+          kind: BridgeEventKind.installProgress,
+          installProgress: InstallProgressDto(
+            stage: stage,
+            percent: 40,
+            message: stage,
+          ),
+        ),
+      );
+      await settle();
+      expect(
+        controller.canCancelWanxiangGrammarDownload,
+        stage == 'wanxiang-grammar-download',
+      );
+      await controller.cancelWanxiangGrammarDownload();
+    }
+    expect(core.calls.where((call) => call == 'cancelWanxiangGrammar'), [
+      'cancelWanxiangGrammar',
+    ]);
+    expect(await controller.manageWanxiangGrammar(true), isFalse);
+  });
 
   test(
     'startup checks once and stale scheme releases cannot enable install',
@@ -851,6 +944,17 @@ void main() {
       ['addonUpdate:easy_en', 'addonUpdate:wanxiang'],
     );
     expect(controller.wanxiangLatestVersion, '2');
+    core.rimeIceStatus = installedAddon;
+    await controller.refreshState();
+    core.addonUpdateRequests['rime_ice']!.complete(addonUpdate);
+    await settle();
+    await controller.refreshState();
+    expect(
+      core.calls.where((call) => call == 'addonUpdate:rime_ice'),
+      hasLength(1),
+    );
+    expect(controller.rimeIceLatestVersion, '2');
+    expect(controller.rimeIceHasUpdate, isTrue);
   });
 
   test('add-on update check failures remain nonblocking for the session', () async {
@@ -858,19 +962,22 @@ void main() {
     controller = create(mobile: false);
     core.addonStatus = installedAddon;
     core.wanxiangStatus = installedAddon;
+    core.rimeIceStatus = installedAddon;
     core.addonUpdateFails = true;
     expect(await controller.refreshState(), isTrue);
     expect(await controller.refreshState(), isTrue);
     await settle();
     expect(
       core.calls.where((call) => call.startsWith('addonUpdate:')),
-      ['addonUpdate:easy_en', 'addonUpdate:wanxiang'],
+      ['addonUpdate:easy_en', 'addonUpdate:wanxiang', 'addonUpdate:rime_ice'],
     );
     expect(controller.error, isNull);
     expect(controller.addonError, isNull);
     expect(controller.wanxiangError, isNull);
+    expect(controller.rimeIceError, isNull);
     expect(controller.addonLatestVersion, isNull);
     expect(controller.wanxiangLatestVersion, isNull);
+    expect(controller.rimeIceLatestVersion, isNull);
   });
 
   test('add-on update checks discard results across install and uninstall', () async {
@@ -879,21 +986,26 @@ void main() {
       controller = create(mobile: false);
       core.addonStatus = installedAddon;
       core.wanxiangStatus = installedAddon;
+      core.rimeIceStatus = installedAddon;
       core.delayAddonUpdates = true;
       await controller.refreshState();
       final easyEnRequest = core.addonUpdateRequests['easy_en']!;
       final wanxiangRequest = core.addonUpdateRequests['wanxiang']!;
+      final rimeIceRequest = core.addonUpdateRequests['rime_ice']!;
       expect(
         await (installed
             ? controller.installAddon()
             : controller.uninstallAddon()),
         isTrue,
       );
+      expect(await controller.manageRimeIce(installed), isTrue);
       easyEnRequest.complete(addonUpdate);
       wanxiangRequest.complete(addonUpdate);
+      rimeIceRequest.complete(addonUpdate);
       await settle();
       expect(controller.addonLatestVersion, installed ? '1' : null);
       expect(controller.wanxiangLatestVersion, '2');
+      expect(controller.rimeIceLatestVersion, installed ? '1' : null);
     }
   });
 
@@ -1027,6 +1139,8 @@ void main() {
     expect(controller.local, isNull);
     expect(controller.canInstallAddon, isTrue);
     expect(controller.canInstallWanxiang, isTrue);
+    expect(controller.canInstallRimeIce, isTrue);
+    expect(await controller.manageRimeIce(true), isTrue);
     expect(await controller.manageWanxiang(true), isTrue);
     core.calls.clear();
     expect(await controller.installAddon(), isTrue);
@@ -1043,10 +1157,14 @@ void main() {
     expect(await controller.manageWanxiang(true), isFalse);
     expect(core.calls, contains('callback:deploy failed'));
     expect(controller.wanxiangError, 'deploy failed');
+    expect(await controller.manageRimeIce(true), isFalse);
+    expect(controller.rimeIceError, 'deploy failed');
     android.failDeploy = false;
     android.deployed = false;
     expect(await controller.manageWanxiang(true), isFalse);
     expect(core.calls, contains('callback:部署未完成'));
+    expect(await controller.manageRimeIce(true), isFalse);
+    expect(controller.rimeIceError, '部署未完成');
     controller.dispose();
     controller = create(mobile: false)
       ..desktopEnglishMode = EnglishModeDto.schema;

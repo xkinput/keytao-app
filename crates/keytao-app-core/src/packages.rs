@@ -1128,8 +1128,13 @@ mod tests {
 
     #[tokio::test]
     async fn active_package_selects_main_schema_only_after_standalone_addon() {
-        for (previous, existing_user) in [("easy_en", true), ("wanxiang", false), ("keytao", true)]
-        {
+        for (previous, existing_user) in [
+            ("easy_en", true),
+            ("wanxiang", false),
+            ("rime_ice", true),
+            ("rime_ice", false),
+            ("keytao", true),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let core = open_core(dir.path());
             let root = dir.path().join("rime");

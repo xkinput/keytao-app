@@ -231,6 +231,10 @@ $luaPluginRef = Find-PluginRefInVersionInfo $versionInfo.FullName "hchunhui/libr
 if (-not $luaPluginRef) {
     throw "Official librime SDK $($release.tag_name) does not declare merged librime-lua support."
 }
+$octagramPluginRef = Find-PluginRefInVersionInfo $versionInfo.FullName "lotem/librime-octagram"
+if (-not $octagramPluginRef) {
+    throw "Official librime SDK $($release.tag_name) does not declare merged librime-octagram support."
+}
 
 $includeSource = Split-Path -Parent $header.FullName
 $libSource = Split-Path -Parent $lib.FullName
@@ -260,10 +264,15 @@ foreach ($marker in @("lua_translator", "lua_filter", "lua_processor")) {
         throw "Official librime SDK $($release.tag_name) is missing merged librime-lua marker '$marker'."
     }
 }
+if (-not $rimeDllText.Contains("grammar/language")) {
+    throw "Official librime SDK $($release.tag_name) is missing the merged librime-octagram grammar component."
+}
 @(
     "librime=$($release.tag_name)",
     "librime-lua=merged",
-    "librime-lua-ref=$luaPluginRef"
+    "librime-lua-ref=$luaPluginRef",
+    "librime-octagram=merged",
+    "librime-octagram-ref=$octagramPluginRef"
 ) | Set-Content -LiteralPath (Join-Path $Destination "librime-features.txt") -Encoding ASCII
 
 $rimeData = Get-ChildItem -Recurse -File -Path $extractDir -Filter "default.yaml" |

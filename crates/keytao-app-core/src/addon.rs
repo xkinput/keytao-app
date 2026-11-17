@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn standalone_addons_use_shared_defaults_without_shadowing_them() {
-        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID] {
+        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID, crate::rime_ice::SCHEMA_ID] {
             let root = TestRoot::new();
             std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
             let shared = root.path().join("rime-data");
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn standalone_fallback_cleanup_preserves_edits_and_rolls_back() {
-        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID] {
+        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID, crate::rime_ice::SCHEMA_ID] {
             for edited in [false, true] {
                 let root = TestRoot::new();
                 std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn standalone_defaults_compile_and_input_with_librime() {
-        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID] {
+        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID, crate::rime_ice::SCHEMA_ID] {
             let root = TestRoot::new();
             smoke_fixture::write(root.path()).unwrap();
             for suffix in ["schema.yaml", "dict.yaml"] {

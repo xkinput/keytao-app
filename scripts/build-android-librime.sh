@@ -133,6 +133,8 @@ build_abi() {
         -DOpencc_INCLUDE_PATH="$prefix/include" -DOpencc_LIBRARY="$prefix/lib/libopencc.a" \
         -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 -Wl,--exclude-libs,ALL -Wl,--gc-sections"
     [ -f "$prefix/lib/librime.so" ] || die "missing built librime.so for $abi"
+    "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(host_tag)/bin/llvm-nm" -D "$prefix/lib/librime.so" \
+        | grep '_Z28rime_require_module_octagramv' >/dev/null || die "missing merged Octagram module for $abi"
     cp "$prefix/include"/rime*.h "$sdk_dir/include/"
     cp -L "$prefix/lib/librime.so" "$sdk_dir/lib/librime.so"
     "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(host_tag)/bin/llvm-strip" --strip-unneeded "$sdk_dir/lib/librime.so"

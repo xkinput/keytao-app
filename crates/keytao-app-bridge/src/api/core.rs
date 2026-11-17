@@ -1144,15 +1144,61 @@ pub fn wanxiang_status() -> Result<AddonStatusDto, String> {
     )
 }
 
+#[derive(serde::Deserialize)]
+pub struct WanxiangGrammarStatusDto {
+    pub available: bool,
+    pub installed: bool,
+    pub version: String,
+    pub size: u64,
+}
+
+pub fn wanxiang_grammar_status() -> Result<WanxiangGrammarStatusDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::wanxiang::grammar_status(&state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn cancel_wanxiang_grammar_download() -> Result<(), String> {
+    runtime::state()?.core.cancel_download();
+    Ok(())
+}
+
+/// Uses the add-on deploy contract and holds the install lock through rollback.
+pub async fn manage_wanxiang_grammar(
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<WanxiangGrammarStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::wanxiang::manage_grammar(&state.core, installed, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn rime_ice_status() -> Result<AddonStatusDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::rime_ice::rime_ice_status(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
 /// A failed upstream check leaves the locally installed status available.
 pub async fn check_addon_update(id: String) -> Result<AddonStatusDto, String> {
     let mut status = match id.as_str() {
         "easy_en" => addon_schema_status(id.clone())?,
         "wanxiang" => wanxiang_status()?,
+        "rime_ice" => rime_ice_status()?,
         _ => return Err(format!("Unsupported add-on: {id}")),
     };
     status.latest_version = match id.as_str() {
         "easy_en" => keytao_app_core::addon::latest_version().await.ok(),
+        "rime_ice" => keytao_app_core::rime_ice::latest_version().await.ok(),
         _ => keytao_app_core::wanxiang::latest_version().await.ok(),
     };
     Ok(status)
@@ -1171,6 +1217,21 @@ pub async fn manage_wanxiang(
     let host = InstallHost::new(state.host.clone(), android_deploy);
     runtime::dto(
         keytao_app_core::wanxiang::manage_wanxiang(&state.core, installed, variant, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+pub async fn manage_rime_ice(
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<AddonStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::rime_ice::manage_rime_ice(&state.core, installed, &host)
             .await
             .map_err(|error| error.to_string())?,
     )

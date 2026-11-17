@@ -8,6 +8,8 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 const VERSION: &str = "fixture-version";
 const SOURCE_URL: &str = "https://github.com/amzxyz/rime-wanxiang/releases/tag/fixture-version";
 const DOWNLOAD_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ALGEBRA: &str =
+    "pro:\n  直接辅助:\n    __append:\n      - abbrev/^([a-z◯]+)(\\d?);([a-z])([a-z]).*$/$1$3$4/\n";
 
 fn fixture_package() -> RemotePackage {
     RemotePackage {
@@ -16,6 +18,242 @@ fn fixture_package() -> RemotePackage {
         download_url: "https://example.invalid/package.zip".into(),
         download_bytes: None,
     }
+}
+
+fn grammar_fixture(receipt: &InstallReceipt) -> (PathBuf, RemotePackage) {
+    let path = receipt.work.join("fixture.gram");
+    fs::write(&path, b"tiny fake grammar fixture").unwrap();
+    let package = RemotePackage {
+        version: "LTS@fixture".into(),
+        source: GRAMMAR_RELEASE.into(),
+        download_url: GRAMMAR_DOWNLOAD.into(),
+        download_bytes: Some(fs::metadata(&path).unwrap().len()),
+    };
+    (path, package)
+}
+
+fn install_grammar_fixture(root: &Path) -> InstallReceipt {
+    let mut receipt = InstallReceipt::new(root).unwrap();
+    let (path, package) = grammar_fixture(&receipt);
+    commit_grammar(&mut receipt, Some((&path, &package)), true, true).unwrap();
+    receipt
+}
+
+#[test]
+fn grammar_install_remove_and_rollback_use_tiny_root_model_and_manifest_receipt() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "flypy")
+        .finish()
+        .unwrap();
+    install_grammar_fixture(&root.path).finish().unwrap();
+    let model = root.path.join(GRAMMAR_FILE);
+    assert_eq!(fs::read(&model).unwrap(), b"tiny fake grammar fixture");
+    let status = grammar_status(&root.path).unwrap();
+    assert!(status.installed);
+    assert_eq!(status.version, "LTS@fixture");
+    assert_eq!(status.size, 25);
+    let manifest = read_manifest(&root.path).unwrap().unwrap();
+    assert!(manifest.includes_grammar);
+    assert_eq!(manifest.grammar.unwrap().size, 25);
+    let original_schema = fs::read(root.path.join("wanxiang.schema.yaml")).unwrap();
+    let original_manifest = fs::read(root.path.join(MANIFEST)).unwrap();
+    for finish in [false, true] {
+        let mut receipt = InstallReceipt::new(&root.path).unwrap();
+        commit_grammar(&mut receipt, None, false, true).unwrap();
+        assert!(!model.exists());
+        let schema = fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap();
+        assert!(schema.contains("language: \"\""));
+        assert!(
+            read_manifest(&root.path)
+                .unwrap()
+                .unwrap()
+                .grammar
+                .is_none()
+        );
+        if finish {
+            receipt.finish().unwrap();
+        } else {
+            drop(receipt);
+            assert_eq!(fs::read(&model).unwrap(), b"tiny fake grammar fixture");
+            assert_eq!(
+                fs::read(root.path.join("wanxiang.schema.yaml")).unwrap(),
+                original_schema
+            );
+            assert_eq!(
+                fs::read(root.path.join(MANIFEST)).unwrap(),
+                original_manifest
+            );
+        }
+    }
+    assert!(!grammar_status(&root.path).unwrap().installed);
+}
+
+#[test]
+fn grammar_install_upgrades_old_owned_schema_with_upstream_defaults() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "base")
+        .finish()
+        .unwrap();
+    let schema = BASIC_SCHEMA.replace("  max_homophones: 8\n", "");
+    let schema = schema
+        .lines()
+        .filter(|line| !line.contains("collocation_") && !line.contains("rear_penalty"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let schema_path = root.path.join("wanxiang.schema.yaml");
+    fs::write(&schema_path, schema).unwrap();
+    let mut manifest = read_manifest(&root.path).unwrap().unwrap();
+    let file = manifest
+        .files
+        .iter_mut()
+        .find(|file| file.path == "wanxiang.schema.yaml")
+        .unwrap();
+    (file.sha256, file.size) = fingerprint(&schema_path).unwrap();
+    fs::write(
+        root.path.join(MANIFEST),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    install_grammar_fixture(&root.path).finish().unwrap();
+    let schema: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(&schema_path).unwrap()).unwrap();
+    assert_eq!(schema["grammar"]["language"], GRAMMAR_LANGUAGE);
+    for (key, value) in [
+        ("collocation_max_length", 6),
+        ("collocation_min_length", 2),
+        ("collocation_penalty", -14),
+        ("non_collocation_penalty", -6),
+        ("weak_collocation_penalty", -100),
+        ("rear_penalty", -18),
+    ] {
+        assert_eq!(schema["grammar"][key], value);
+    }
+    assert_eq!(schema["translator"]["contextual_suggestions"], false);
+    assert_eq!(schema["translator"]["max_homophones"], 8);
+    assert!(grammar_schema(BASIC_SCHEMA, false).contains("language: \"\""));
+}
+
+#[test]
+fn grammar_updates_keep_model_and_receipt_and_uninstall_removes_both() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "base")
+        .finish()
+        .unwrap();
+    install_grammar_fixture(&root.path).finish().unwrap();
+    for variant in ["base", "flypy", "zrm"] {
+        install_variant_fixture(&root.path, variant)
+            .finish()
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+            b"tiny fake grammar fixture"
+        );
+        let manifest = read_manifest(&root.path).unwrap().unwrap();
+        assert!(manifest.includes_grammar);
+        assert_eq!(manifest.grammar.unwrap().version, "LTS@fixture");
+        let schema = fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap();
+        assert_eq!(
+            schema.contains("language: wanxiang-lts-zh-hans"),
+            grammar_supported()
+        );
+    }
+    let removal = uninstall(&root.path).unwrap();
+    assert!(!root.path.join(GRAMMAR_FILE).exists());
+    assert!(!root.path.join(MANIFEST).exists());
+    removal.rollback().unwrap();
+    assert!(grammar_status(&root.path).unwrap().installed);
+    uninstall(&root.path).unwrap().finish().unwrap();
+    assert!(!root.path.join(GRAMMAR_FILE).exists());
+    assert!(!root.path.join(MANIFEST).exists());
+}
+
+#[test]
+fn grammar_rejects_edited_schema_before_moving_model() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "base")
+        .finish()
+        .unwrap();
+    let schema = root.path.join("wanxiang.schema.yaml");
+    fs::write(&schema, "private edits").unwrap();
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    let (path, package) = grammar_fixture(&receipt);
+    assert!(
+        commit_grammar(&mut receipt, Some((&path, &package)), true, true)
+            .unwrap_err()
+            .contains("已修改")
+    );
+    drop(receipt);
+    assert!(!root.path.join(GRAMMAR_FILE).exists());
+    assert_eq!(fs::read_to_string(schema).unwrap(), "private edits");
+}
+
+#[test]
+fn grammar_release_metadata_and_disk_space_are_validated_without_network() {
+    let json =
+        r#"{"assets":[{"name":"wanxiang-lts-zh-hans.gram","size":25,"updated_at":"fixture"}]}"#;
+    let package = grammar_package(json).unwrap();
+    assert_eq!(package.download_bytes, Some(25));
+    assert_eq!(package.version, "LTS@fixture");
+    assert_eq!(package.download_url, GRAMMAR_DOWNLOAD);
+    for json in [
+        "{}",
+        r#"{"assets":[{"name":"wanxiang-lts-zh-hans.gram","size":0}]}"#,
+    ] {
+        assert!(grammar_package(json).is_err());
+    }
+    assert!(verify_disk_space(25 + 64 * 1024 * 1024, 25).is_ok());
+    assert!(
+        verify_disk_space(24 + 64 * 1024 * 1024, 25)
+            .unwrap_err()
+            .contains("磁盘空间不足")
+    );
+}
+
+#[tokio::test]
+async fn grammar_stream_validates_size_and_cleans_partial_files_without_network() {
+    let root = TestRoot::new();
+    let (_sender, mut cancel) = tokio::sync::watch::channel(0);
+    let chunks: Vec<Result<Vec<u8>, String>> = vec![Ok(b"tiny".to_vec()), Ok(b" model".to_vec())];
+    let path = save_grammar_stream(
+        &root.path,
+        futures_util::stream::iter(chunks),
+        10,
+        &mut cancel,
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"tiny model");
+    drop(path);
+    for expected in [1, 11] {
+        let chunks: Vec<Result<Vec<u8>, String>> = vec![Ok(b"tiny model".to_vec())];
+        assert!(
+            save_grammar_stream(
+                &root.path,
+                futures_util::stream::iter(chunks),
+                expected,
+                &mut cancel,
+                &|_, _| {}
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(&root.path).unwrap().count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn grammar_stream_cancel_removes_partial_download_without_network() {
+    let root = TestRoot::new();
+    let (sender, mut cancel) = tokio::sync::watch::channel(0);
+    let chunks = futures_util::stream::iter([Ok::<_, String>(b"tiny".to_vec())])
+        .chain(futures_util::stream::pending());
+    let result = save_grammar_stream(&root.path, chunks, 10, &mut cancel, &|_, _| {
+        sender.send_modify(|value| *value += 1);
+    })
+    .await;
+    assert_eq!(result.unwrap_err(), crate::download::DOWNLOAD_CANCELLED);
+    assert_eq!(fs::read_dir(&root.path).unwrap().count(), 0);
 }
 
 fn commit_fixture(receipt: &mut InstallReceipt, files: Vec<InstalledFile>) -> Result<(), String> {
@@ -35,6 +273,8 @@ fn download_requires_complete_bounded_bytes_without_pinning_a_release_hash() {
     for size in [0, 41, 43, MAX_DOWNLOAD_BYTES + 1] {
         assert!(verify_download(size, Some(42)).is_err());
     }
+    assert!(verify_download_with_limit(42, None, 42).is_ok());
+    assert!(verify_download_with_limit(43, None, 42).is_err());
 }
 
 #[test]
@@ -238,6 +478,8 @@ fn stage_variant_fixture(
             name,
             if name == dictionary_name {
                 dictionary.as_str()
+            } else if name == "wanxiang_algebra.yaml" {
+                ALGEBRA
             } else {
                 "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n"
             },
@@ -388,6 +630,10 @@ fn flypy_installs_own_double_pinyin_patch_transactionally() {
         serde_yaml::from_str(&fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap())
             .unwrap();
     assert_eq!(schema["__patch"], "keytao_wanxiang_flypy:/patch?");
+    assert_eq!(schema["translator"]["spelling_hints"], 50);
+    let algebra = fs::read_to_string(root.path.join("wanxiang_algebra.yaml")).unwrap();
+    assert!(!algebra.contains(FLYPY_TWO_LETTER_AUX));
+    assert!(algebra.contains(&FLYPY_TWO_LETTER_AUX.replacen("abbrev/", "derive/", 1)));
     drop(receipt);
     assert!(!custom_path.exists());
     assert!(!root.path.join(MANIFEST).exists());
@@ -401,6 +647,27 @@ fn flypy_installs_own_double_pinyin_patch_transactionally() {
     assert_eq!(fs::read_to_string(&custom_path).unwrap(), custom);
     uninstall(&root.path).unwrap().finish().unwrap();
     assert!(!custom_path.exists());
+}
+
+#[test]
+fn changed_flypy_auxiliary_rule_leaves_previous_installation_intact() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "flypy")
+        .finish()
+        .unwrap();
+    let manifest = fs::read(root.path.join(MANIFEST)).unwrap();
+    let algebra_path = root.path.join("wanxiang_algebra.yaml");
+    let algebra = fs::read(&algebra_path).unwrap();
+    for content in ["changed upstream algebra".into(), ALGEBRA.repeat(2)] {
+        let receipt = InstallReceipt::new(&root.path).unwrap();
+        let staged = receipt.work.join("changed-algebra.yaml");
+        fs::write(&staged, content).unwrap();
+        let error = adapt_source("wanxiang_algebra.yaml", &staged, "flypy").unwrap_err();
+        assert!(error.contains("规则已变更"), "{error}");
+        drop(receipt);
+        assert_eq!(fs::read(&algebra_path).unwrap(), algebra);
+        assert_eq!(fs::read(root.path.join(MANIFEST)).unwrap(), manifest);
+    }
 }
 
 #[test]
@@ -420,6 +687,16 @@ fn non_flypy_variants_do_not_install_a_layout_patch() {
         )
         .unwrap();
         assert!(schema.get("__patch").is_none(), "variant: {variant}");
+        let expected_hints = if matches!(variant, "base" | "lite") {
+            0
+        } else {
+            50
+        };
+        assert_eq!(schema["translator"]["spelling_hints"], expected_hints);
+        assert_eq!(
+            fs::read_to_string(root.path.join("wanxiang_algebra.yaml")).unwrap(),
+            ALGEBRA
+        );
         assert!(status_at(&root.path).installed);
     }
 }
@@ -574,7 +851,7 @@ fn variant_archive_profiles_preserve_dictionary_imports_and_matching_algebra() {
             &[
                 (&schema_name, "upstream schema fixture"),
                 (&dictionary_name, &dictionary),
-                ("wanxiang_algebra.yaml", "upstream algebra fixture"),
+                ("wanxiang_algebra.yaml", ALGEBRA),
                 (&character_name, "character fixture"),
                 (&phrase_name, "phrase fixture"),
                 ("dicts/private.pro.dict.yaml", "excluded private table"),
@@ -1065,6 +1342,7 @@ fn untrusted_manifest_cannot_delete_outside_package() {
         source: SOURCE_URL.into(),
         archive_sha256: DOWNLOAD_SHA256.into(),
         includes_grammar: false,
+        grammar: None,
         files: vec![InstalledFile {
             path: "default.custom.yaml".into(),
             sha256: "a".repeat(64),
@@ -1169,6 +1447,14 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
             ("vsgo", "中国"),
             ("wjan", "晚安"),
             ("xnhe", "小鹤"),
+            ("uuv", "书"),
+            ("uui", "输"),
+            ("uuvd", "书"),
+            ("uuid", "输"),
+            ("uuvd/", "书"),
+            ("uuVd", "书"),
+            ("yilx", "意"),
+            ("yilxyidx", "意义"),
         ]
     } else if variant_source(&variant).unwrap() == "wanxiang_pro" {
         vec![("nihk", "你好"), ("vsgo", "中国"), ("wjan", "晚安")]
@@ -1196,6 +1482,9 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
             candidates.contains(&expected),
             "missing {expected}: {candidates:?}"
         );
+        if variant == "flypy" && matches!(input, "uuvd" | "uuid" | "yilx" | "yilxyidx") {
+            assert_eq!(candidates.first().copied(), Some(expected));
+        }
     }
     assert!(status_at(&root.path).deployed);
     assert_eq!(status_at(&root.path).variant, variant);

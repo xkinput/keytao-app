@@ -921,6 +921,7 @@ class AddonCard extends StatelessWidget {
       required Widget progress,
       required String? error,
       Widget? variant,
+      Widget? extra,
     }) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -955,6 +956,7 @@ class AddonCard extends StatelessWidget {
         ),
         if (active) ...[const SizedBox(height: 12), progress],
         if (error != null) ...[const SizedBox(height: 8), ErrorMessage(error)],
+        if (extra != null) ...[const SizedBox(height: 16), extra],
       ],
     );
     return Section(
@@ -1015,6 +1017,72 @@ class AddonCard extends StatelessWidget {
             progress: c.wanxiangProgress,
           ),
           error: c.wanxiangError,
+          extra: c.showWanxiangGrammar
+              ? Column(
+                  key: const ValueKey('wanxiang-grammar'),
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        const Expanded(child: Text(AppStrings.wanxiangGrammar)),
+                        Text(
+                          c.wanxiangGrammarSize,
+                          style: context.theme.typography.body.xs.copyWith(
+                            color: context.theme.colors.mutedForeground,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        if (c.isManagingWanxiangGrammar)
+                          ActionButton(
+                            AppStrings.cancel,
+                            onPress: c.canCancelWanxiangGrammarDownload
+                                ? c.cancelWanxiangGrammarDownload
+                                : null,
+                          )
+                        else
+                          ActionButton(
+                            c.wanxiangGrammar?.installed == true ? '删除' : '下载',
+                            icon: c.wanxiangGrammar?.installed == true
+                                ? FLucideIcons.trash2
+                                : FLucideIcons.download,
+                            onPress: c.canManageWanxiangGrammar
+                                ? () => c.manageWanxiangGrammar(
+                                    c.wanxiangGrammar?.installed != true,
+                                  )
+                                : null,
+                          ),
+                      ],
+                    ),
+                    if (c.isManagingWanxiangGrammar) ...[
+                      const SizedBox(height: 8),
+                      InstallProgressView(
+                        active: true,
+                        progress: c.wanxiangGrammarProgress,
+                      ),
+                    ],
+                    if (c.wanxiangGrammarError case final error?) ...[
+                      const SizedBox(height: 8),
+                      ErrorMessage(error),
+                    ],
+                  ],
+                )
+              : null,
+        ),
+        addon(
+          title: AppStrings.rimeIce,
+          status: c.rimeIceStatusText,
+          label: c.rimeIceButtonLabel,
+          tooltip: c.rimeIceTooltip,
+          showInstall: true,
+          install: c.canInstallRimeIce ? () => c.manageRimeIce(true) : null,
+          installed: c.rimeIce?.installed == true,
+          uninstall: c.canUninstallRimeIce ? () => c.manageRimeIce(false) : null,
+          active: c.isManagingRimeIce,
+          progress: InstallProgressView(
+            active: c.isManagingRimeIce,
+            progress: c.rimeIceProgress,
+          ),
+          error: c.rimeIceError,
         ),
       ],
     );

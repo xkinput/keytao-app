@@ -27,6 +27,7 @@ pub mod user_words;
 mod remove_filter;
 mod candidate_page_size;
 pub mod wanxiang;
+pub mod rime_ice;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_public_schemas;
 pub use scheme_types::*;

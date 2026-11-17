@@ -251,7 +251,10 @@ jobs:
       - name: Build macOS universal pkg
         if: matrix.os_name == 'macos'
         shell: bash
-        run: scripts/build-macos.sh
+        run: |
+          scripts/build-macos.sh
+          plugin="$(find target/keytao-macos-pkg -path '*/Contents/Frameworks/rime-plugins/librime-octagram.dylib' -print -quit)"
+          [[ -n "$plugin" && -f "$plugin" ]] || { echo 'Missing bundled Octagram plugin' >&2; exit 1; }
 
       - name: Verify macOS universal pkg
         if: matrix.os_name == 'macos'
@@ -408,6 +411,8 @@ jobs:
             cp -R "$data_root/rime-data" "$runtime/rime-data"
             cp "$data_root/opencc-release.txt" "$runtime/opencc-release.txt"
             scripts/android-librime-runtime.sh verify --abi "$abi"
+            "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D "$runtime/lib/librime.so" \
+              | grep '_Z28rime_require_module_octagramv' >/dev/null
           done
 
       - name: Build Android APKs

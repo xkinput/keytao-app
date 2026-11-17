@@ -4,6 +4,13 @@
   <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS 与手机上的新版设置界面">
 </p>
 
+## 特性
+
+- 默认支持键道6四种流行方案：键道6、星猫键道、天行键、键道·我流。
+- 支持导入通用 Rime 方案。
+- 内置下载万象拼音、雾凇拼音、Easy English。
+- 支持 macOS、Windows、Linux、Android、iOS 五端。
+
 键道输入方案的安装工具与各平台系统输入法：App 负责下载、安装、合并和部署 Rime 方案，系统输入法通过同一套 librime 核心输入。
 
 | 平台 | 系统输入法形态 | Release 产物 |
