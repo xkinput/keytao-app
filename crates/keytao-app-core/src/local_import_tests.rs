@@ -72,6 +72,43 @@ fn local_import_requires_directory_with_schema() {
 }
 
 #[test]
+fn local_import_preserves_package_schema_order() {
+    for config_name in [
+        Some("default.custom.yaml"),
+        Some("default-custom.yaml"),
+        None,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let core = open_core(directory.path());
+        let path = directory.path().join("keytao-backslash-test");
+        fs::create_dir_all(&path).unwrap();
+        for schema in ["keytao", "keytao-dz", "keytao-bj", "keytao-cx", "keytao-aa"] {
+            fs::write(
+                path.join(format!("{schema}.schema.yaml")),
+                format!("schema:\n  schema_id: {schema}\n"),
+            )
+            .unwrap();
+        }
+        if let Some(name) = config_name {
+            fs::write(
+                path.join(name),
+                "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n    - schema: keytao-bj\n    - schema: missing\n    - schema: keytao\n",
+            )
+            .unwrap();
+        }
+        let key = import_local_scheme(&core, &path, "Local", None).unwrap();
+        let files = archive_files(&core, &key);
+        let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
+        let expected = if config_name.is_some() {
+            ["keytao", "keytao-dz", "keytao-bj", "keytao-aa", "keytao-cx"]
+        } else {
+            ["keytao-aa", "keytao-bj", "keytao-cx", "keytao-dz", "keytao"]
+        };
+        assert_eq!(crate::scheme_files::parse_schema_list(config), expected);
+    }
+}
+
+#[test]
 fn local_import_allocates_unique_slugs_and_deterministic_content_versions() {
     let directory = tempfile::tempdir().unwrap();
     let core = open_core(directory.path());

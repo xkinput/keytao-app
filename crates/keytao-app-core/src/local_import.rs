@@ -109,7 +109,7 @@ pub fn import_local_scheme(
     }
     let mut files = BTreeMap::new();
     collect(&directory, "", &mut files, &mut 0)?;
-    let schemas: Vec<_> = files
+    let mut schemas: Vec<_> = files
         .keys()
         .filter(|name| !name.contains('/'))
         .filter_map(|name| name.strip_suffix(".schema.yaml"))
@@ -119,6 +119,17 @@ pub fn import_local_scheme(
             "目录根部未找到 .schema.yaml 方案文件".into(),
         ));
     }
+    let schema_order = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find_map(|name| fs::read_to_string(directory.join(name)).ok())
+        .map(|content| crate::scheme_files::parse_schema_list(&content))
+        .unwrap_or_default();
+    schemas.sort_by_key(|schema| {
+        schema_order
+            .iter()
+            .position(|id| id == schema)
+            .unwrap_or(usize::MAX)
+    });
     let mut config = String::from("patch:\n  schema_list:\n");
     for schema in schemas {
         config.push_str(&format!(
