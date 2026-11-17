@@ -453,9 +453,73 @@ pub async fn smart_install(
     .await
 }
 
-pub(crate) async fn smart_install_preserving_settings(
+async fn smart_install_preserving_settings(
     core: &Core,
     zip_path: String,
+    dest_path: String,
+    preserve_default_settings: bool,
+    #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
+) -> Result<InstallResult, CoreError> {
+    use std::io::Read;
+    let zip_bytes = std::fs::read(&zip_path)?;
+    crate::packages::archive_paths(&zip_bytes, std::path::Path::new(&dest_path))
+        .map_err(CoreError::Other)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    let mut files = Vec::new();
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        if !file.is_dir() {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            files.push((file.name().to_owned(), bytes));
+        }
+    }
+    drop(archive);
+    let result = smart_install_entries(
+        core,
+        files,
+        zip_bytes,
+        dest_path,
+        preserve_default_settings,
+        #[cfg(target_os = "windows")]
+        finish_windows,
+    )
+    .await;
+    if result.is_ok() {
+        std::fs::remove_file(zip_path).ok();
+    }
+    result
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) async fn smart_install_files(
+    core: &Core,
+    files: Vec<(String, Vec<u8>)>,
+    dest_path: String,
+    preserve_default_settings: bool,
+    #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
+) -> Result<InstallResult, CoreError> {
+    // Existing receipts and platform verification use a transient archive.
+    let zip_bytes = crate::packages::archive_from_files(&files)?;
+    smart_install_entries(
+        core,
+        files,
+        zip_bytes,
+        dest_path,
+        preserve_default_settings,
+        #[cfg(target_os = "windows")]
+        finish_windows,
+    )
+    .await
+}
+
+async fn smart_install_entries(
+    core: &Core,
+    files: Vec<(String, Vec<u8>)>,
+    zip_bytes: Vec<u8>,
     dest_path: String,
     preserve_default_settings: bool,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
@@ -471,7 +535,6 @@ pub(crate) async fn smart_install_preserving_settings(
 
         emit("extracting", 61, "正在解压...");
 
-        let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
         let dest = PathBuf::from(&dest_path);
         let replacing_root = dest.canonicalize().ok();
         core.update_state(|state| {
@@ -491,28 +554,16 @@ pub(crate) async fn smart_install_preserving_settings(
 
         // First pass: merge default settings.
         let (merged_dc_path, merged_dc_content, merged_schemas) = {
-            use std::io::Read;
-
-            let cursor = std::io::Cursor::new(&zip_bytes);
-            let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
-
             let mut zip_dc_path: Option<String> = None;
             let mut zip_dc_content: Option<String> = None;
 
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-                let raw = file.name().to_string();
-                let relative = raw.trim_end_matches('/').to_string();
-                if relative.is_empty() || file.is_dir() {
-                    continue;
-                }
+            for (relative, bytes) in &files {
                 let filename = relative.rsplit('/').next().unwrap_or(&relative).to_string();
 
                 if is_default_custom(&filename) && zip_dc_path.is_none() {
-                    let mut buf = String::new();
-                    file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-                    zip_dc_path = Some(relative);
-                    zip_dc_content = Some(buf);
+                    zip_dc_path = Some(relative.clone());
+                    zip_dc_content =
+                        Some(String::from_utf8(bytes.clone()).map_err(|error| error.to_string())?);
                 }
             }
 
@@ -536,34 +587,12 @@ pub(crate) async fn smart_install_preserving_settings(
         };
 
         // Second pass: smart extraction
-        let cursor = std::io::Cursor::new(&zip_bytes);
-        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
-        let total = archive.len();
+        let total = files.len();
         let mut logs = std::mem::take(&mut cleanup_logs);
         let mut manifest = std::collections::BTreeMap::new();
 
-        for i in 0..total {
-            let (relative, is_dir, content) = {
-                let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-                let raw = file.name().to_string();
-                let relative = raw.trim_end_matches('/').to_string();
-                if relative.is_empty() {
-                    continue;
-                }
-                let is_dir = file.is_dir();
-                let mut buf = Vec::new();
-                if !is_dir {
-                    use std::io::Read;
-                    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-                }
-                (relative, is_dir, buf)
-            };
-
-            if is_dir {
-                if let Err(e) = std::fs::create_dir_all(dest.join(&relative)) {
-                    logs.push(format!("[WARN] mkdir {relative}: {e}"));
-                }
-            } else if Some(&relative) == merged_dc_path.as_ref() {
+        for (i, (relative, content)) in files.into_iter().enumerate() {
+            if Some(&relative) == merged_dc_path.as_ref() {
                 if let Some(ref mc) = merged_dc_content {
                     let out = dest.join(&relative);
                     match write_file_force(&out, mc.as_bytes()) {
@@ -635,12 +664,6 @@ pub(crate) async fn smart_install_preserving_settings(
                 .into_owned(),
         )
         .map_err(|e| e.to_string())?;
-        // Activation reads the permanent archive through this same pipeline.
-        if !std::path::Path::new(&zip_path)
-            .starts_with(crate::package_store::PackageStore::new(core).root())
-        {
-            std::fs::remove_file(&zip_path).ok();
-        }
         emit("done", 100, "安装完成！");
 
         let verify = verify_install(

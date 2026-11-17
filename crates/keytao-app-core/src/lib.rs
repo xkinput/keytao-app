@@ -84,7 +84,7 @@ impl Core {
             }
             Err(error) => return Err(error),
         };
-        Ok(Arc::new(Self {
+        let core = Arc::new(Self {
             env,
             sink,
             state: Mutex::new(state),
@@ -92,7 +92,11 @@ impl Core {
             recovered_state_file,
             pending_package: Mutex::new(None),
             user_words: Mutex::new(user_words::UserWordsState::default()),
-        }))
+        });
+        if let Err(error) = package_store::PackageStore::new(&core).migrate() {
+            tracing::warn!(%error, "Package store migration will retry at next startup");
+        }
+        Ok(core)
     }
 
     /// The preserved corrupt state file, if this Core recovered during startup.

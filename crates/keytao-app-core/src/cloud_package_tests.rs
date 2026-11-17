@@ -2,7 +2,11 @@ use super::*;
 use crate::{AppEnv, CoreEvent, EventSink, Platform, package_store::PackageStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::VecDeque, io::Write, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    io::{Read, Write},
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -70,6 +74,21 @@ fn fixture_with_sink(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Arc<Core>,
 fn package(bytes: &[u8]) -> Value {
     json!({"id":21,"schemeKey":"xmjd","name":"xmjd","version":"v1","size":bytes.len(),
         "sha256":format!("{:x}", Sha256::digest(bytes)),"createAt":"2026-11-11T00:00:00.000Z"})
+}
+
+fn archive_files(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    (0..archive.len())
+        .filter_map(|index| {
+            let mut file = archive.by_index(index).unwrap();
+            if file.is_dir() {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            Some((file.name().into(), bytes))
+        })
+        .collect()
 }
 
 fn deployed_fixture() -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
@@ -220,7 +239,10 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
         .lines()
         .filter(|line| line.starts_with("content-length:"))
         .collect();
-    assert_eq!(content_lengths, [format!("content-length: {}", bytes.len())]);
+    assert_eq!(
+        content_lengths,
+        [format!("content-length: {}", bytes.len())]
+    );
     assert!(
         headers[2]
             .to_ascii_lowercase()
@@ -235,7 +257,13 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
         + 4;
     assert_eq!(&requests[2][body..], bytes.as_slice());
     let progress = sink.0.lock().unwrap();
-    assert!(progress.iter().filter(|event| event.bytes_transferred > 0).count() > 1);
+    assert!(
+        progress
+            .iter()
+            .filter(|event| event.bytes_transferred > 0)
+            .count()
+            > 1
+    );
     assert_eq!(progress.first().unwrap().bytes_transferred, 0);
     assert_eq!(
         progress.last().unwrap().bytes_transferred,
@@ -299,7 +327,7 @@ async fn download_sha_mismatch_rejects_without_writing_package_or_state() {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("SHA-256"), "{error}");
     assert_eq!(serde_json::to_value(core.state()).unwrap(), before);
-    assert!(!PackageStore::new(&core).archive_path("txjx").exists());
+    assert!(!PackageStore::new(&core).package_path("txjx").exists());
     assert!(!PackageStore::new(&core).metadata_path("txjx").exists());
     assert_eq!(requests.len(), 3);
     let storage_headers = String::from_utf8_lossy(&requests[2]).to_ascii_lowercase();
@@ -364,23 +392,16 @@ async fn downloading_conflicting_local_package_preserves_existing_content_and_ac
         download_at(&core, "21", &source, &mock.url).await.unwrap();
         assert_eq!(mock.finish().await.len(), 3);
         let after = crate::packages::stored_archive(&core, &own).unwrap();
-        assert_eq!(after.0, before.0);
+        assert_eq!(archive_files(&after.0), archive_files(&before.0));
         assert_eq!(after.1.zip_sha256, before.1.zip_sha256);
         assert_eq!(core.state().scheme_cloud_ids[&own], "19");
         assert_eq!(core.state().scheme_cloud_ids["local-rime-3"], "21");
+        let downloaded = crate::packages::stored_archive(&core, "local-rime-3").unwrap();
+        assert_eq!(downloaded.1.display_name.as_deref(), Some("Cloud package"));
+        assert_eq!(archive_files(&downloaded.0), archive_files(&bytes));
         assert_eq!(
-            crate::packages::stored_archive(&core, "local-rime-3")
-                .unwrap()
-                .1
-                .display_name
-                .as_deref(),
-            Some("Cloud package")
-        );
-        assert_eq!(
-            crate::packages::stored_archive(&core, "local-rime-3")
-                .unwrap()
-                .0,
-            bytes
+            downloaded.1.zip_sha256,
+            format!("{:x}", Sha256::digest(&bytes))
         );
         assert_eq!(core.state().active_scheme, active.then_some(own));
     }
@@ -425,19 +446,12 @@ async fn downloading_identical_local_package_reuses_key() {
     assert_eq!(mock.finish().await.len(), 3);
     assert_eq!(core.state().scheme_cloud_ids["local-rime"], "21");
     assert!(!core.state().installed_packages.contains_key("local-rime-2"));
+    let downloaded = crate::packages::stored_archive(&core, "local-rime").unwrap();
+    assert_eq!(downloaded.1.display_name.as_deref(), Some("Stored name"));
+    assert_eq!(archive_files(&downloaded.0), archive_files(&bytes));
     assert_eq!(
-        crate::packages::stored_archive(&core, "local-rime")
-            .unwrap()
-            .1
-            .display_name
-            .as_deref(),
-        Some("Stored name")
-    );
-    assert_eq!(
-        crate::packages::stored_archive(&core, "local-rime")
-            .unwrap()
-            .0,
-        bytes
+        downloaded.1.zip_sha256,
+        format!("{:x}", Sha256::digest(&bytes))
     );
 }
 
@@ -790,9 +804,11 @@ async fn upload_rechecks_with_the_prepared_shared_directory() {
         .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
         .unwrap();
     std::fs::write(root.join("build/xmjd6.schema.yaml"), schema).unwrap();
-    let prepared = prepare_with_smoke(&core, "xmjd", &root, Some(&shared), |_, _| Ok(()))
-        .unwrap();
-    assert_eq!(prepared.bundle.files, ["default.custom.yaml", "xmjd6.schema.yaml"]);
+    let prepared = prepare_with_smoke(&core, "xmjd", &root, Some(&shared), |_, _| Ok(())).unwrap();
+    assert_eq!(
+        prepared.bundle.files,
+        ["default.custom.yaml", "xmjd6.schema.yaml"]
+    );
     let ready = package(&prepared.bundle.bytes);
     let mock = server(|_| vec![response("200 OK", json!({"packages":[ready]}))]).await;
     let result = upload_prepared_at(&core, "xmjd", &root, prepared, &mock.url).await;
@@ -880,13 +896,7 @@ fn desktop_preview_smokes_a_shared_dictionary_from_a_small_temp_scheme() {
     runtime.init().unwrap();
     crate::deploy::record_result(&core, &root, true).unwrap();
     let preview = preview(&core, "xmjd", &root).unwrap();
-    assert_eq!(
-        preview.files,
-        [
-            "default.custom.yaml",
-            "xmjd6.schema.yaml"
-        ]
-    );
+    assert_eq!(preview.files, ["default.custom.yaml", "xmjd6.schema.yaml"]);
     assert!(preview.validation.contains("冒烟检查"));
 }
 
@@ -962,5 +972,5 @@ async fn logout_while_storage_download_is_running_prevents_local_account_referen
     assert!(matches!(result, Err(CoreError::Permission(_))));
     assert!(!core.state().installed_packages.contains_key("txjx"));
     assert!(!core.state().scheme_cloud_ids.contains_key("txjx"));
-    assert!(!PackageStore::new(&core).archive_path("txjx").exists());
+    assert!(!PackageStore::new(&core).package_path("txjx").exists());
 }

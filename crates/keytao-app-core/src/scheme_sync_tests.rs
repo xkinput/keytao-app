@@ -146,8 +146,17 @@ fn account_change_clears_private_package_references_but_token_refresh_preserves_
 fn cloud_package_without_reference_keeps_its_source_in_the_profile() {
     let (_dir, core) = fixture();
     let store = PackageStore::new(&core);
-    std::fs::create_dir_all(store.root()).unwrap();
-    std::fs::write(store.metadata_path("xmjd"),json!({"scheme_key":"xmjd","version":"v1","installed_at_unix":0,"source":"cloud","manifest":{},"zip_sha256":"a".repeat(64)}).to_string()).unwrap();
+    std::fs::create_dir_all(store.package_path("xmjd")).unwrap();
+    std::fs::write(
+        store.metadata_path("xmjd"),
+        json!({
+            "key":"xmjd", "scheme_key":"xmjd", "version":"v1",
+            "installed_at":0, "installed_at_unix":0, "source":"cloud",
+            "origin":null, "files":[], "manifest":{}, "zip_sha256":"a".repeat(64),
+        })
+        .to_string(),
+    )
+    .unwrap();
     core.update_state(|state| {
         state.installed_packages.insert(
             "xmjd".into(),

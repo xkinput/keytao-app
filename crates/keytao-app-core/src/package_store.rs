@@ -2,19 +2,79 @@ use crate::{
     Core, CoreError,
     packages::{InstalledPackageInfo, PackageMeta, safe_path, sha256_reader},
 };
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     fs,
-    io::{BufReader, Seek},
-    path::PathBuf,
+    io::{Read, Seek, Write},
+    path::{Path, PathBuf},
 };
 
 pub(crate) enum Staging {
-    Cloud,
     Metadata,
     Pending,
-    Archive,
     ActiveManifest,
-    Local,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PackageFile {
+    path: String,
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredPackage {
+    key: String,
+    origin: Option<String>,
+    installed_at: u64,
+    files: Vec<PackageFile>,
+    #[serde(flatten)]
+    meta: PackageMeta,
+}
+
+struct PackageStage(PathBuf);
+
+impl Drop for PackageStage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+pub(crate) struct StagingFile {
+    file: tempfile::NamedTempFile,
+    _stage: PackageStage,
+}
+
+impl std::ops::Deref for StagingFile {
+    type Target = tempfile::NamedTempFile;
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl std::ops::DerefMut for StagingFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
+}
+
+impl Write for StagingFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl StagingFile {
+    pub(crate) fn persist(
+        self,
+        path: impl AsRef<Path>,
+    ) -> Result<fs::File, tempfile::PersistError> {
+        self.file.persist(path)
+    }
 }
 
 pub(crate) struct PackageStore<'a> {
@@ -40,28 +100,40 @@ impl<'a> PackageStore<'a> {
         Ok(dir)
     }
 
-    pub(crate) fn archive_path(&self, key: &str) -> PathBuf {
-        self.root().join(format!("{key}.zip"))
+    pub(crate) fn package_path(&self, key: &str) -> PathBuf {
+        self.root()
+            .join(if crate::scheme::is_local_scheme_key(key) {
+                "local"
+            } else {
+                "cloud"
+            })
+            .join(key)
     }
 
     pub(crate) fn metadata_path(&self, key: &str) -> PathBuf {
-        self.root().join(format!("{key}.json"))
+        self.package_path(key).join("package.json")
+    }
+
+    fn checked_package_path(&self, key: &str) -> Result<PathBuf, CoreError> {
+        crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
+        self.checked_root()?;
+        let namespace = if crate::scheme::is_local_scheme_key(key) {
+            "local"
+        } else {
+            "cloud"
+        };
+        safe_path(&self.root(), &format!("{namespace}/{key}")).map_err(CoreError::Other)
     }
 
     pub(crate) fn read_metadata_bytes(&self, key: &str) -> std::io::Result<Vec<u8>> {
-        fs::read(self.metadata_path(key))
-    }
-
-    pub(crate) fn open_archive_file(&self, key: &str) -> std::io::Result<fs::File> {
-        fs::File::open(self.archive_path(key))
-    }
-
-    pub(crate) fn checked_archive_path(&self, key: &str) -> Result<PathBuf, CoreError> {
-        safe_path(&self.root(), &format!("{key}.zip")).map_err(CoreError::Other)
+        let path = self
+            .checked_metadata_path(key)
+            .map_err(std::io::Error::other)?;
+        fs::read(path)
     }
 
     pub(crate) fn checked_metadata_path(&self, key: &str) -> Result<PathBuf, CoreError> {
-        safe_path(&self.root(), &format!("{key}.json")).map_err(CoreError::Other)
+        safe_path(&self.checked_package_path(key)?, "package.json").map_err(CoreError::Other)
     }
 
     pub(crate) fn active_manifest_path(&self) -> PathBuf {
@@ -70,246 +142,908 @@ impl<'a> PackageStore<'a> {
 
     pub(crate) fn checked_active_manifest_path(&self) -> Result<PathBuf, CoreError> {
         self.checked_root()?;
-        Ok(self.active_manifest_path())
+        safe_path(&self.root(), "active-manifest.json").map_err(CoreError::Other)
     }
 
-    pub(crate) fn staging_file(
-        &self,
-        staging: Staging,
-    ) -> std::io::Result<tempfile::NamedTempFile> {
+    fn staging_root(&self) -> Result<PathBuf, CoreError> {
+        self.checked_root()?;
+        let path = safe_path(&self.root(), ".staging").map_err(CoreError::Other)?;
+        fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+
+    pub(crate) fn staging_file(&self, staging: Staging) -> std::io::Result<StagingFile> {
         let prefix = match staging {
-            Staging::Cloud => ".cloud-",
             Staging::Metadata => ".meta-",
             Staging::Pending => ".pending-",
-            Staging::Archive => ".archive-",
             Staging::ActiveManifest => ".active-",
-            Staging::Local => ".local-",
         };
-        tempfile::Builder::new()
+        let stage = self.stage().map_err(std::io::Error::other)?;
+        let file = tempfile::Builder::new()
             .prefix(prefix)
-            .tempfile_in(self.root())
+            .tempfile_in(&stage.0)?;
+        Ok(StagingFile {
+            file,
+            _stage: stage,
+        })
     }
 
-    pub(crate) fn read_meta(&self, scheme_key: &str) -> Result<Option<PackageMeta>, CoreError> {
-        let scheme_key =
-            crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-        let _store_guard = self
+    fn stage(&self) -> Result<PackageStage, CoreError> {
+        let root = self.staging_root()?;
+        let temporary = tempfile::tempdir_in(&root)?;
+        let digest = sha256_reader(temporary.path().as_os_str().as_encoded_bytes())?;
+        let name = format!(
+            "{}-{}-4{}-a{}-{}",
+            &digest[..8],
+            &digest[8..12],
+            &digest[13..16],
+            &digest[17..20],
+            &digest[20..32]
+        );
+        let destination = root.join(name);
+        fs::rename(temporary.path(), &destination)?;
+        Ok(PackageStage(destination))
+    }
+
+    pub(crate) fn read_meta(&self, key: &str) -> Result<Option<PackageMeta>, CoreError> {
+        let _guard = self
             .core
             .pending_package
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        self.checked_root()?;
-        let metadata = self.checked_metadata_path(scheme_key)?;
-        let bytes = match fs::read(metadata) {
+        let bytes = match self.read_metadata_bytes(key) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let meta: PackageMeta = serde_json::from_slice(&bytes)?;
-        if meta.scheme_key != scheme_key
-            || meta.zip_sha256.len() != 64
-            || !meta.zip_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(CoreError::Other("本地方案包信息无效".into()));
-        }
-        Ok(Some(meta))
+        let stored: StoredPackage = serde_json::from_slice(&bytes)?;
+        validate_metadata(key, &stored)?;
+        Ok(Some(stored.meta))
     }
 
-    pub(crate) fn open_archive(
+    fn read_files_at(
+        path: &Path,
+        key: &str,
+    ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
+        let metadata_path = safe_path(path, "package.json").map_err(CoreError::Other)?;
+        let stored: StoredPackage = serde_json::from_slice(&fs::read(metadata_path)?)?;
+        validate_metadata(key, &stored)?;
+        let root = safe_path(path, "files").map_err(CoreError::Other)?;
+        let mut expected = BTreeSet::new();
+        let mut entries = Vec::with_capacity(stored.files.len());
+        let mut total = 0u64;
+        for entry in &stored.files {
+            if !expected.insert(entry.path.clone()) {
+                return Err(CoreError::Other("Duplicate package file".into()));
+            }
+            let path = safe_path(&root, &entry.path).map_err(CoreError::Other)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            total = total.saturating_add(metadata.len());
+            if !metadata.is_file() || metadata.len() != entry.size || total > 512 * 1024 * 1024 {
+                return Err(CoreError::Other("Package file size mismatch".into()));
+            }
+            let bytes = fs::read(path)?;
+            if sha256_reader(bytes.as_slice())? != entry.sha256 {
+                return Err(CoreError::Other("Package file checksum mismatch".into()));
+            }
+            entries.push((entry.path.clone(), bytes));
+        }
+        let mut actual = BTreeSet::new();
+        collect_files(&root, &root, &mut actual)?;
+        if actual != expected {
+            return Err(CoreError::Other("Package file count mismatch".into()));
+        }
+        Ok((entries, stored.meta))
+    }
+
+    pub(crate) fn read_files(
         &self,
-        scheme_key: &str,
-    ) -> Result<(BufReader<fs::File>, PackageMeta), CoreError> {
-        let scheme_key =
-            crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-        let _store_guard = self
+        key: &str,
+    ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
+        let _guard = self
             .core
             .pending_package
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        self.checked_root()?;
-        let archive = self.checked_archive_path(scheme_key)?;
-        let metadata = self.checked_metadata_path(scheme_key)?;
-        // The upload size limit applies to the rebuilt dependency zip, not this distribution.
-        let mut archive = BufReader::new(fs::File::open(archive)?);
-        let meta: PackageMeta = serde_json::from_slice(&fs::read(metadata)?)?;
-        if meta.scheme_key != scheme_key || meta.zip_sha256 != sha256_reader(&mut archive)? {
-            return Err(CoreError::Other("本地方案包校验失败".into()));
+        Self::read_files_at(&self.checked_package_path(key)?, key)
+    }
+
+    pub(crate) fn write_archive(
+        &self,
+        reader: impl Read + Seek,
+        meta: &PackageMeta,
+        origin: Option<&str>,
+    ) -> Result<(), CoreError> {
+        self.write_archive_with(reader, meta, origin, |source, target| {
+            fs::rename(source, target)
+        })
+    }
+
+    fn write_archive_with(
+        &self,
+        reader: impl Read + Seek,
+        meta: &PackageMeta,
+        origin: Option<&str>,
+        rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<(), CoreError> {
+        let destination = self.checked_package_path(&meta.scheme_key)?;
+        let stage = self.stage()?;
+        let files_root = stage.0.join("files");
+        fs::create_dir(&files_root)?;
+        let mut archive =
+            zip::ZipArchive::new(reader).map_err(|error| CoreError::Other(error.to_string()))?;
+        if archive.len() > 10_000 {
+            return Err(CoreError::Other("Package contains too many files".into()));
         }
-        archive.rewind()?;
-        Ok((archive, meta))
+        let mut files = Vec::new();
+        let mut names = BTreeSet::new();
+        let mut total = 0u64;
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| CoreError::Other(error.to_string()))?;
+            let relative = entry.name().trim_end_matches('/').to_owned();
+            let target = safe_path(&files_root, &relative).map_err(CoreError::Other)?;
+            if entry
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170000 == 0o120000)
+            {
+                return Err(CoreError::Other("Package contains a symlink".into()));
+            }
+            if entry.is_dir() {
+                continue;
+            }
+            if !names.insert(relative.clone()) {
+                return Err(CoreError::Other("Package contains duplicate paths".into()));
+            }
+            total = total.saturating_add(entry.size());
+            if total > 512 * 1024 * 1024 {
+                return Err(CoreError::Other("Expanded package is too large".into()));
+            }
+            fs::create_dir_all(target.parent().unwrap())?;
+            let mut output = fs::File::create(&target)?;
+            let expected_size = entry.size();
+            let size = std::io::copy(
+                &mut entry.by_ref().take(expected_size.saturating_add(1)),
+                &mut output,
+            )?;
+            if size != expected_size {
+                return Err(CoreError::Other("Package file size mismatch".into()));
+            }
+            output.sync_all()?;
+            files.push(PackageFile {
+                path: relative,
+                sha256: sha256_reader(fs::File::open(target)?)?,
+                size,
+            });
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let stored = StoredPackage {
+            key: meta.scheme_key.clone(),
+            origin: origin.map(str::to_owned).or_else(|| {
+                self.read_metadata_bytes(&meta.scheme_key)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<StoredPackage>(&bytes).ok())
+                    .and_then(|stored| stored.origin)
+            }),
+            installed_at: meta.installed_at_unix,
+            files,
+            meta: serde_json::from_value(serde_json::to_value(meta)?)?,
+        };
+        validate_metadata(&meta.scheme_key, &stored)?;
+        let mut metadata = fs::File::create(stage.0.join("package.json"))?;
+        serde_json::to_writer_pretty(&mut metadata, &stored)?;
+        metadata.sync_all()?;
+        Self::read_files_at(&stage.0, &meta.scheme_key)?;
+        sync_package_directories(&stage.0)?;
+        fs::create_dir_all(destination.parent().unwrap())?;
+        sync_directory(&self.root())?;
+        self.recover_old(&meta.scheme_key)?;
+        let old = destination.with_file_name(format!(".old-{}", meta.scheme_key));
+        let had_old = destination.exists();
+        if had_old {
+            fs::rename(&destination, &old)?;
+            if let Err(error) = sync_directory(destination.parent().unwrap()) {
+                fs::rename(&old, &destination)?;
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = rename_new(&stage.0, &destination) {
+            if had_old {
+                fs::rename(&old, &destination).map_err(|rollback| {
+                    CoreError::Other(format!(
+                        "Package update failed: {error}; rollback failed: {rollback}"
+                    ))
+                })?;
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = sync_directory(destination.parent().unwrap()) {
+            fs::remove_dir_all(&destination)?;
+            if had_old {
+                fs::rename(&old, &destination)?;
+            }
+            return Err(error.into());
+        }
+        if had_old {
+            if let Err(error) = fs::remove_dir_all(&old) {
+                tracing::warn!(%error, "Old package cleanup deferred until next launch");
+            }
+        }
+        Ok(())
+    }
+
+    fn recover_old(&self, key: &str) -> Result<(), CoreError> {
+        let destination = self.checked_package_path(key)?;
+        let old = destination.with_file_name(format!(".old-{key}"));
+        if !old.try_exists()? {
+            return Ok(());
+        }
+        safe_path(
+            destination.parent().unwrap(),
+            old.file_name().unwrap().to_str().unwrap(),
+        )
+        .map_err(CoreError::Other)?;
+        if destination.try_exists()? && Self::read_files_at(&destination, key).is_ok() {
+            fs::remove_dir_all(old)?;
+        } else {
+            if destination.try_exists()? {
+                fs::remove_dir_all(&destination)?;
+            }
+            fs::rename(old, destination)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove(&self, key: &str) -> Result<(), CoreError> {
+        let _guard = self
+            .core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let destination = self.checked_package_path(key)?;
+        for path in [
+            &destination,
+            &destination.with_file_name(format!(".old-{key}")),
+        ] {
+            match fs::remove_dir_all(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn export_archive(
+        &self,
+        key: &str,
+    ) -> Result<(StagingFile, PackageMeta), CoreError> {
+        let (entries, meta) = self.read_files(key)?;
+        let stage = self.stage()?;
+        let file = tempfile::Builder::new()
+            .prefix(&format!("{key}-"))
+            .suffix(".zip")
+            .tempfile_in(&stage.0)?;
+        let mut temporary = StagingFile {
+            file,
+            _stage: stage,
+        };
+        {
+            let mut archive = zip::ZipWriter::new(temporary.as_file_mut());
+            for (path, bytes) in entries {
+                archive
+                    .start_file(path, zip::write::SimpleFileOptions::default())
+                    .map_err(|error| CoreError::Other(error.to_string()))?;
+                archive.write_all(&bytes)?;
+            }
+            archive
+                .finish()
+                .map_err(|error| CoreError::Other(error.to_string()))?;
+        }
+        temporary.as_file_mut().rewind()?;
+        Ok((temporary, meta))
+    }
+
+    pub(crate) fn migrate(&self) -> Result<(), CoreError> {
+        let _guard = self
+            .core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = self.checked_root()?;
+        if !root.try_exists()? {
+            return Ok(());
+        }
+        for namespace in ["cloud", "local"] {
+            let directory = safe_path(&root, namespace).map_err(CoreError::Other)?;
+            if directory.exists() {
+                for entry in fs::read_dir(directory)? {
+                    let name = entry?.file_name();
+                    if let Some(key) = name.to_str().and_then(|name| name.strip_prefix(".old-")) {
+                        self.recover_old(key)?;
+                    }
+                }
+            }
+        }
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(key) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                continue;
+            };
+            if crate::scheme::validate_scheme_key(key).is_ok()
+                && !root.join(format!("{key}.zip")).try_exists()?
+                && Self::read_files_at(&self.checked_package_path(key)?, key).is_ok()
+            {
+                let path = safe_path(&root, &format!("{key}.json")).map_err(CoreError::Other)?;
+                let legacy: PackageMeta = serde_json::from_slice(&fs::read(&path)?)?;
+                if legacy.scheme_key == key {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+        let marker = safe_path(&root, ".layout-v2").map_err(CoreError::Other)?;
+        if marker.exists() {
+            return Ok(());
+        }
+        let mut failed = false;
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(key) = name.to_str().and_then(|name| name.strip_suffix(".zip")) else {
+                continue;
+            };
+            let result = (|| {
+                crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
+                let zip_path = safe_path(&root, &format!("{key}.zip")).map_err(CoreError::Other)?;
+                let json_path =
+                    safe_path(&root, &format!("{key}.json")).map_err(CoreError::Other)?;
+                let installed = Self::read_files_at(&self.checked_package_path(key)?, key).is_ok();
+                let metadata = match fs::read(&json_path) {
+                    Ok(bytes) => Some(bytes),
+                    // A published directory is authoritative, including updates after migration.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound && installed => None,
+                    Err(error) => return Err(error.into()),
+                };
+                if let Some(metadata) = &metadata {
+                    let meta: PackageMeta = serde_json::from_slice(metadata)?;
+                    if meta.scheme_key != key
+                        || sha256_reader(fs::File::open(&zip_path)?)? != meta.zip_sha256
+                    {
+                        return Err(CoreError::Other("Legacy package checksum mismatch".into()));
+                    }
+                    if !installed {
+                        self.write_archive(fs::File::open(&zip_path)?, &meta, None)?;
+                    }
+                }
+                // Keep the archive until the new directory has passed a complete read-back.
+                Self::read_files_at(&self.checked_package_path(key)?, key)?;
+                match fs::remove_file(&json_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                if let Err(error) = fs::remove_file(zip_path) {
+                    if let Some(metadata) = metadata {
+                        if let Err(restore) = fs::write(json_path, metadata) {
+                            tracing::warn!(%restore, "Legacy metadata cleanup will resume from published package");
+                        }
+                    }
+                    return Err(error.into());
+                }
+                Ok::<_, CoreError>(())
+            })();
+            if let Err(error) = result {
+                failed = true;
+                tracing::warn!(%key, %error, "Package migration deferred; legacy archive retained");
+            }
+        }
+        if !failed {
+            let mut temporary = self.staging_file(Staging::Metadata)?;
+            temporary.write_all(b"2\n")?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist(marker)
+                .map_err(|error| CoreError::Io(error.error))?;
+            sync_directory(&root)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn list_installed_packages(&self) -> Result<Vec<InstalledPackageInfo>, CoreError> {
         self.checked_root()?;
         let core = self.core;
         let state = core.state();
-        Ok(state
-            .installed_packages
-            .into_iter()
-            .filter_map(|(scheme_key, package)| {
-                let has_package_zip = crate::scheme::validate_scheme_key(&scheme_key).is_ok()
-                    && fs::symlink_metadata(self.archive_path(&scheme_key))
-                        .is_ok_and(|meta| meta.is_file());
-                let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
-                    match self.read_meta(&scheme_key) {
-                        Ok(meta) => meta,
-                        Err(error) => {
-                            tracing::warn!(%scheme_key, %error, "Skipping unreadable package metadata");
-                            return None;
-                        }
+        Ok(state.installed_packages.into_iter().filter_map(|(scheme_key, package)| {
+            let has_package_zip = self.checked_package_path(&scheme_key).is_ok_and(|path| path.is_dir());
+            let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
+                match self.read_meta(&scheme_key) {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        tracing::warn!(%scheme_key, %error, "Skipping unreadable package metadata");
+                        return None;
                     }
-                } else {
-                    None
-                };
-                Some(InstalledPackageInfo {
-                    logo_path: if has_package_zip {
-                        crate::packages::package_logos::package_logo_path(core, &scheme_key)
-                            .map(|path| path.to_string_lossy().into_owned())
-                    } else {
-                        None
-                    },
-                    active: state.active_scheme.as_deref() == Some(&scheme_key),
-                    supports_user_words: crate::user_words::supports_user_words(core, &scheme_key)
-                        .unwrap_or_else(|error| {
-                            tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
-                            false
-                        }),
-                    scheme_key,
-                    version: package.version,
-                    has_package_zip,
-                    source: meta
-                        .as_ref()
-                        .map(|meta| meta.source.clone())
-                        .unwrap_or_else(|| "official".into()),
-                    display_name: meta.and_then(|meta| meta.display_name),
-                })
+                }
+            } else { None };
+            Some(InstalledPackageInfo {
+                logo_path: if has_package_zip {
+                    crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
+                } else { None },
+                active: state.active_scheme.as_deref() == Some(&scheme_key),
+                supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
+                    tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
+                    false
+                }),
+                scheme_key,
+                version: package.version,
+                has_package_zip,
+                source: meta.as_ref().map(|meta| meta.source.clone()).unwrap_or_else(|| "official".into()),
+                display_name: meta.and_then(|meta| meta.display_name),
             })
-            .collect())
+        }).collect())
     }
+}
+
+fn validate_metadata(key: &str, stored: &StoredPackage) -> Result<(), CoreError> {
+    crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
+    if stored.key != key
+        || stored.meta.scheme_key != key
+        || stored.files.len() > 10_000
+        || stored.meta.zip_sha256.len() != 64
+        || !stored
+            .meta
+            .zip_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || stored.installed_at != stored.meta.installed_at_unix
+    {
+        return Err(CoreError::Other("Invalid package metadata".into()));
+    }
+    Ok(())
+}
+
+fn collect_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut BTreeSet<String>,
+) -> Result<(), CoreError> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(CoreError::Other("Package contains a symlink".into()));
+        }
+        if metadata.is_dir() {
+            collect_files(root, &entry.path(), files)?;
+        } else if metadata.is_file() {
+            files.insert(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        } else {
+            return Err(CoreError::Other("Package contains a special file".into()));
+        }
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn sync_package_directories(path: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_package_directories(&entry.path())?;
+        }
+    }
+    sync_directory(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AppEnv, CoreEvent, EventSink, Platform};
-    use std::{collections::BTreeMap, io::Read, sync::Arc};
+    use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 
     struct NullSink;
-
     impl EventSink for NullSink {
         fn emit(&self, _: CoreEvent) {}
     }
 
-    #[test]
-    fn legacy_package_store_layout_golden() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = Core::new(
+    fn core(path: &Path) -> Arc<Core> {
+        Core::new(
             AppEnv {
-                data_dir: dir.path().into(),
-                cache_dir: dir.path().join("cache"),
-                resource_dir: dir.path().join("resources"),
+                data_dir: path.into(),
+                cache_dir: path.join("cache"),
+                resource_dir: path.join("resources"),
                 app_version: "test".into(),
                 platform: Platform::Android,
             },
             Arc::new(NullSink),
         )
-        .unwrap();
-        let store = PackageStore::new(&core);
-        let expected_root = dir.path().join("scheme-packages");
-        assert_eq!(store.root(), expected_root);
-        assert_eq!(store.checked_root().unwrap(), expected_root);
-        for key in ["keytao", "local-example"] {
-            assert_eq!(
-                store.archive_path(key),
-                expected_root.join(format!("{key}.zip"))
-            );
-            assert_eq!(
-                store.metadata_path(key),
-                expected_root.join(format!("{key}.json"))
-            );
-            assert_eq!(
-                store.checked_archive_path(key).unwrap(),
-                store.archive_path(key)
-            );
-            assert_eq!(
-                store.checked_metadata_path(key).unwrap(),
-                store.metadata_path(key)
-            );
+        .unwrap()
+    }
+
+    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (path, bytes) in entries {
+            writer
+                .start_file(*path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
         }
-        assert_eq!(
-            store.active_manifest_path(),
-            expected_root.join("active-manifest.json")
-        );
-        assert_eq!(
-            store.checked_active_manifest_path().unwrap(),
-            store.active_manifest_path()
-        );
-        fs::create_dir_all(store.root()).unwrap();
-        for (staging, prefix) in [
-            (Staging::Cloud, ".cloud-"),
-            (Staging::Metadata, ".meta-"),
-            (Staging::Pending, ".pending-"),
-            (Staging::Archive, ".archive-"),
-            (Staging::ActiveManifest, ".active-"),
-            (Staging::Local, ".local-"),
-        ] {
-            let file = store.staging_file(staging).unwrap();
-            assert_eq!(file.path().parent().unwrap(), expected_root);
-            assert!(
-                file.path()
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .starts_with(prefix)
-            );
-        }
-        let meta = PackageMeta {
-            scheme_key: "local-example".into(),
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn metadata(key: &str, zip: &[u8]) -> PackageMeta {
+        PackageMeta {
+            scheme_key: key.into(),
             version: Some("v1".into()),
             installed_at_unix: 7,
-            source: "local".into(),
+            source: if key.starts_with("local-") {
+                "local"
+            } else {
+                "official"
+            }
+            .into(),
             display_name: Some("Example".into()),
-            selection_base_version: Some("v0".into()),
-            manifest: BTreeMap::from([("example.schema.yaml".into(), "hash".into())]),
-            zip_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
-        };
-        let expected_metadata = r#"{
-  "scheme_key": "local-example",
-  "version": "v1",
-  "installed_at_unix": 7,
-  "source": "local",
-  "display_name": "Example",
-  "selection_base_version": "v0",
-  "manifest": {
-    "example.schema.yaml": "hash"
-  },
-  "zip_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-}"#;
-        let mut staged = store.staging_file(Staging::Metadata).unwrap();
-        serde_json::to_writer_pretty(staged.as_file_mut(), &meta).unwrap();
-        staged.as_file().sync_all().unwrap();
-        staged
-            .persist(store.checked_metadata_path("local-example").unwrap())
+            selection_base_version: None,
+            manifest: BTreeMap::new(),
+            zip_sha256: sha256_reader(zip).unwrap(),
+        }
+    }
+
+    fn legacy_fixture(store: &PackageStore<'_>, key: &str, bytes: &[u8]) {
+        fs::create_dir_all(store.root()).unwrap();
+        fs::write(store.root().join(format!("{key}.zip")), bytes).unwrap();
+        fs::write(
+            store.root().join(format!("{key}.json")),
+            serde_json::to_vec_pretty(&metadata(key, bytes)).unwrap(),
+        )
+        .unwrap();
+        let _ = fs::remove_file(store.root().join(".layout-v2"));
+    }
+
+    #[test]
+    fn directory_package_store_layout_golden() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"abc")]);
+        let meta = metadata("local-example", &bytes);
+        store
+            .write_archive(Cursor::new(&bytes), &meta, Some("/import/example"))
             .unwrap();
+        assert_eq!(store.root(), directory.path().join("scheme-packages"));
         assert_eq!(
-            store.read_metadata_bytes("local-example").unwrap(),
-            expected_metadata.as_bytes()
+            store.package_path("keytao"),
+            store.root().join("cloud/keytao")
         );
-        let read = store.read_meta("local-example").unwrap().unwrap();
         assert_eq!(
-            serde_json::to_string_pretty(&read).unwrap(),
-            expected_metadata
+            store.package_path("local-example"),
+            store.root().join("local/local-example")
+        );
+        assert_eq!(
+            store.metadata_path("local-example"),
+            store.package_path("local-example").join("package.json")
+        );
+        assert_eq!(
+            store.active_manifest_path(),
+            store.root().join("active-manifest.json")
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&store.read_metadata_bytes("local-example").unwrap()).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({
+                "key": "local-example", "origin": "/import/example", "installed_at": 7,
+                "files": [{"path": "example.schema.yaml", "size": 3, "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}],
+                "scheme_key": "local-example", "version": "v1", "installed_at_unix": 7,
+                "source": "local", "display_name": "Example", "manifest": {}, "zip_sha256": meta.zip_sha256,
+            })
+        );
+        assert_eq!(
+            store.read_files("local-example").unwrap().0,
+            vec![("example.schema.yaml".into(), b"abc".to_vec())]
         );
         assert!(store.read_meta("keytao").unwrap().is_none());
-        fs::write(store.archive_path("local-example"), b"abc").unwrap();
-        let (mut archive, read) = store.open_archive("local-example").unwrap();
-        let mut bytes = Vec::new();
-        archive.read_to_end(&mut bytes).unwrap();
-        assert_eq!(bytes, b"abc");
+        assert!(!store.root().join("local-example.zip").exists());
+        assert!(!store.root().join("local-example.json").exists());
         assert_eq!(
-            serde_json::to_string_pretty(&read).unwrap(),
-            expected_metadata
+            fs::read_dir(store.root().join(".staging")).unwrap().count(),
+            0
         );
+        for kind in [Staging::Metadata, Staging::Pending, Staging::ActiveManifest] {
+            let staged = store.staging_file(kind).unwrap();
+            let parent = staged.path().parent().unwrap();
+            assert_eq!(parent.parent().unwrap(), store.root().join(".staging"));
+            assert_eq!(parent.file_name().unwrap().to_str().unwrap().len(), 36);
+        }
+    }
+
+    #[test]
+    fn legacy_layout_fixture_migrates_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[
+            ("example.schema.yaml", b"schema"),
+            ("lua/example.lua", b"return {}"),
+        ]);
+        legacy_fixture(&store, "keytao", &bytes);
+        legacy_fixture(&store, "local-example", &bytes);
+        fs::write(store.active_manifest_path(), b"preserved activation").unwrap();
+        store.migrate().unwrap();
+        let before = store.read_metadata_bytes("keytao").unwrap();
+        assert!(store.root().join(".layout-v2").is_file());
+        for key in ["keytao", "local-example"] {
+            assert_eq!(store.read_files(key).unwrap().0.len(), 2);
+            assert!(!store.root().join(format!("{key}.zip")).exists());
+            assert!(!store.root().join(format!("{key}.json")).exists());
+        }
+        store.migrate().unwrap();
+        assert_eq!(store.read_metadata_bytes("keytao").unwrap(), before);
+        assert_eq!(
+            fs::read(store.active_manifest_path()).unwrap(),
+            b"preserved activation"
+        );
+    }
+
+    #[test]
+    fn migration_failure_after_extraction_keeps_zip_and_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bad = archive(&[
+            ("first.schema.yaml", b"copied before failure"),
+            ("../escape", b"unsafe"),
+        ]);
+        legacy_fixture(&store, "keytao", &bad);
+        store.migrate().unwrap();
+        assert_eq!(fs::read(store.root().join("keytao.zip")).unwrap(), bad);
+        assert!(store.root().join("keytao.json").is_file());
+        assert!(!store.root().join(".layout-v2").exists());
+        assert!(!store.package_path("keytao").exists());
+        assert_eq!(
+            fs::read_dir(store.root().join(".staging")).unwrap().count(),
+            0
+        );
+        let good = archive(&[("first.schema.yaml", b"retry succeeds")]);
+        legacy_fixture(&store, "keytao", &good);
+        store.migrate().unwrap();
+        assert_eq!(
+            store.read_files("keytao").unwrap().0[0].1,
+            b"retry succeeds"
+        );
+        assert!(store.root().join(".layout-v2").is_file());
+    }
+
+    #[test]
+    fn migration_checksum_failure_preserves_legacy_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"schema")]);
+        legacy_fixture(&store, "keytao", &bytes);
+        fs::write(store.root().join("keytao.zip"), b"corrupt").unwrap();
+        store.migrate().unwrap();
+        assert_eq!(
+            fs::read(store.root().join("keytao.zip")).unwrap(),
+            b"corrupt"
+        );
+        assert!(!store.root().join(".layout-v2").exists());
+    }
+
+    #[test]
+    fn migration_retries_crash_between_removing_metadata_and_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"schema")]);
+        legacy_fixture(&store, "keytao", &bytes);
+        store
+            .write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None)
+            .unwrap();
+        fs::remove_file(store.root().join("keytao.json")).unwrap();
+        store.migrate().unwrap();
+        assert!(store.root().join(".layout-v2").is_file());
+        assert!(!store.root().join("keytao.zip").exists());
+        assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"schema");
+    }
+
+    #[test]
+    fn migration_does_not_overwrite_newer_published_package() {
+        for legacy_metadata_present in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let core = core(directory.path());
+            let store = PackageStore::new(&core);
+            let old = archive(&[("example.schema.yaml", b"old")]);
+            let new = archive(&[("example.schema.yaml", b"new")]);
+            legacy_fixture(&store, "keytao", &old);
+            store
+                .write_archive(
+                    Cursor::new(&new),
+                    &metadata("keytao", &new),
+                    Some("https://example/new"),
+                )
+                .unwrap();
+            if !legacy_metadata_present {
+                fs::remove_file(store.root().join("keytao.json")).unwrap();
+            }
+            store.migrate().unwrap();
+            assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"new");
+            assert!(store.root().join(".layout-v2").is_file());
+            assert!(!store.root().join("keytao.zip").exists());
+            assert!(!store.root().join("keytao.json").exists());
+        }
+    }
+
+    #[test]
+    fn migration_cleans_orphan_legacy_metadata_after_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"abc")]);
+        store
+            .write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None)
+            .unwrap();
+        fs::write(
+            store.root().join("keytao.json"),
+            serde_json::to_vec(&metadata("keytao", &bytes)).unwrap(),
+        )
+        .unwrap();
+        store.migrate().unwrap();
+        assert!(!store.root().join("keytao.json").exists());
+    }
+
+    #[test]
+    fn update_is_atomic_and_rolls_back_failed_rename() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let old = archive(&[("example.schema.yaml", b"old")]);
+        let new = archive(&[("example.schema.yaml", b"new")]);
+        store
+            .write_archive(Cursor::new(&old), &metadata("keytao", &old), None)
+            .unwrap();
+        let result = store.write_archive_with(
+            Cursor::new(&new),
+            &metadata("keytao", &new),
+            None,
+            |source, destination| {
+                assert!(source.join("package.json").is_file());
+                assert!(!destination.exists());
+                assert!(destination.with_file_name(".old-keytao").is_dir());
+                Err(std::io::Error::other("injected publication failure"))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"old");
+        assert!(!store.root().join("cloud/.old-keytao").exists());
+        store
+            .write_archive(Cursor::new(&new), &metadata("keytao", &new), None)
+            .unwrap();
+        assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"new");
+        assert!(!store.root().join("cloud/.old-keytao").exists());
+    }
+
+    #[test]
+    fn startup_recovers_crashed_update_with_or_without_new_directory() {
+        for incomplete_new in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let core = core(directory.path());
+            let store = PackageStore::new(&core);
+            let bytes = archive(&[("example.schema.yaml", b"recover")]);
+            store
+                .write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None)
+                .unwrap();
+            let path = store.package_path("keytao");
+            fs::rename(&path, path.with_file_name(".old-keytao")).unwrap();
+            if incomplete_new {
+                fs::create_dir(&path).unwrap();
+                fs::write(path.join("package.json"), b"partial").unwrap();
+            }
+            store.migrate().unwrap();
+            assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"recover");
+            assert!(!path.with_file_name(".old-keytao").exists());
+        }
+    }
+
+    #[test]
+    fn directory_reader_checks_hash_size_and_file_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"abc")]);
+        store
+            .write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None)
+            .unwrap();
+        let files = store.package_path("keytao").join("files");
+        fs::write(files.join("example.schema.yaml"), b"abd").unwrap();
+        assert!(store.read_files("keytao").is_err());
+        fs::write(files.join("example.schema.yaml"), b"abcd").unwrap();
+        assert!(store.read_files("keytao").is_err());
+        fs::write(files.join("example.schema.yaml"), b"abc").unwrap();
+        fs::write(files.join("extra"), b"extra").unwrap();
+        assert!(store.read_files("keytao").is_err());
+    }
+
+    #[test]
+    fn delete_removes_directory_and_ephemeral_archive_roundtrips() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"abc")]);
+        store
+            .write_archive(
+                Cursor::new(&bytes),
+                &metadata("local-example", &bytes),
+                None,
+            )
+            .unwrap();
+        let (temporary, _) = store.export_archive("local-example").unwrap();
+        let name = temporary.path().file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("local-example-"));
+        assert!(name.ends_with(".zip"));
+        let mut archive = zip::ZipArchive::new(temporary.reopen().unwrap()).unwrap();
+        let mut result = Vec::new();
+        archive
+            .by_name("example.schema.yaml")
+            .unwrap()
+            .read_to_end(&mut result)
+            .unwrap();
+        assert_eq!(result, b"abc");
+        drop(archive);
+        drop(temporary);
+        store.remove("local-example").unwrap();
+        assert!(!store.package_path("local-example").exists());
+        store.remove("local-example").unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires PKGB1_MIGRATION_DATA_DIR pointing to an isolated store copy"]
+    fn migrate_copy_from_environment() {
+        let directory = PathBuf::from(
+            std::env::var_os("PKGB1_MIGRATION_DATA_DIR")
+                .expect("Explicit isolated data directory required"),
+        );
+        assert!(
+            directory.starts_with("/private/tmp/"),
+            "Only an isolated /private/tmp copy is allowed"
+        );
+        let core = core(&directory);
+        let store = PackageStore::new(&core);
+        store.migrate().unwrap();
+        assert!(store.root().join(".layout-v2").is_file());
+        let mut packages = 0;
+        let mut files = 0;
+        for namespace in ["cloud", "local"] {
+            let path = store.root().join(namespace);
+            if path.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    let name = entry.file_name();
+                    let key = name.to_str().unwrap();
+                    let (entries, _) = store.read_files(key).unwrap();
+                    packages += 1;
+                    files += entries.len();
+                }
+            }
+        }
+        println!("MIGRATION_COPY packages={packages} files={files}");
     }
 }

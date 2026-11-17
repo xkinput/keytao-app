@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
-    io::{BufRead, Read, Write},
+    io::{BufRead, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, OnceLock},
     time::SystemTime,
@@ -245,7 +245,7 @@ fn load_package_data(
     };
     crate::scheme::validate_scheme_key(scheme).map_err(CoreError::Other)?;
     let store = crate::package_store::PackageStore::new(core);
-    let path = store.archive_path(scheme);
+    let path = store.package_path(scheme);
     for candidate in [&store.root(), &path] {
         if fs::symlink_metadata(candidate).is_ok_and(|meta| meta.file_type().is_symlink()) {
             return Err(CoreError::Other(
@@ -282,19 +282,14 @@ fn load_package_data(
     let mut dictionaries = HashMap::new();
     let mut schemas = HashMap::new();
     if fingerprint.is_some() {
-        let mut archive = zip::ZipArchive::new(store.open_archive_file(scheme)?)
-            .map_err(|error| CoreError::Other(error.to_string()))?;
-        for index in 0..archive.len() {
-            let mut file = archive
-                .by_index(index)
-                .map_err(|error| CoreError::Other(error.to_string()))?;
-            let filename = file.name().to_owned();
+        let (files, _) = store.read_files(scheme)?;
+        for (filename, content) in files {
             if !(filename.ends_with(".dict.yaml") || filename.ends_with(".schema.yaml")) {
                 continue;
             }
             let mut bytes = Vec::new();
             if metadata_only && filename.ends_with(".dict.yaml") {
-                let mut reader = std::io::BufReader::new(file);
+                let mut reader = content.as_slice();
                 loop {
                     let offset = bytes.len();
                     if reader.read_until(b'\n', &mut bytes)? == 0
@@ -305,7 +300,7 @@ fn load_package_data(
                     }
                 }
             } else {
-                file.read_to_end(&mut bytes)?;
+                bytes = content;
             }
             if let Some(name) = filename.strip_suffix(".dict.yaml") {
                 dictionaries.insert(name.to_owned(), bytes);
@@ -1139,8 +1134,6 @@ mod tests {
     }
 
     fn package(core: &Core, scheme: &str, files: &[(&str, &str)]) {
-        let store = crate::package_store::PackageStore::new(core);
-        fs::create_dir_all(store.root()).unwrap();
         let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, text) in files {
             archive
@@ -1148,11 +1141,9 @@ mod tests {
                 .unwrap();
             archive.write_all(text.as_bytes()).unwrap();
         }
-        fs::write(
-            store.archive_path(scheme),
-            archive.finish().unwrap().into_inner(),
-        )
-        .unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+        crate::packages::stage_install(core, &bytes, Default::default(), String::new()).unwrap();
+        crate::packages::finalize_pending(core, scheme, Some("v1"), false).unwrap();
     }
 
     #[test]
@@ -2032,11 +2023,6 @@ mod tests {
                 ("keytao.phrase.dict.yaml", &table),
             ],
         );
-        fs::write(
-            crate::package_store::PackageStore::new(&core).metadata_path("keytao"),
-            "{\"version\":\"v1\"}",
-        )
-        .unwrap();
         assert_eq!(
             lookup_user_word(&core, "keytao", "word123999", "code123999")
                 .unwrap()

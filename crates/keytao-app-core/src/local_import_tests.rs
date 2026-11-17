@@ -1,6 +1,6 @@
 use super::*;
 use crate::{AppEnv, CoreEvent, EventSink, Platform, package_store::PackageStore};
-use std::{io::Read, sync::Arc};
+use std::sync::Arc;
 
 struct NullSink;
 impl EventSink for NullSink {
@@ -32,17 +32,13 @@ fn source(directory: &Path, name: &str) -> std::path::PathBuf {
     path
 }
 
-fn archive_files(core: &Core, key: &str) -> BTreeMap<String, Vec<u8>> {
-    let (bytes, _) = crate::packages::stored_archive(core, key).unwrap();
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
-    let mut files = BTreeMap::new();
-    for index in 0..archive.len() {
-        let mut file = archive.by_index(index).unwrap();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        files.insert(file.name().into(), bytes);
-    }
-    files
+fn stored_files(core: &Core, key: &str) -> BTreeMap<String, Vec<u8>> {
+    PackageStore::new(core)
+        .read_files(key)
+        .unwrap()
+        .0
+        .into_iter()
+        .collect()
 }
 
 #[test]
@@ -97,7 +93,7 @@ fn local_import_preserves_package_schema_order() {
             .unwrap();
         }
         let key = import_local_scheme(&core, &path, "Local", None).unwrap();
-        let files = archive_files(&core, &key);
+        let files = stored_files(&core, &key);
         let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
         let expected = if config_name.is_some() {
             ["keytao", "keytao-dz", "keytao-bj", "keytao-aa", "keytao-cx"]
@@ -117,13 +113,30 @@ fn local_import_allocates_unique_slugs_and_deterministic_content_versions() {
     let second = import_local_scheme(&core, &path, "另一个方案", None).unwrap();
     assert_eq!(first, "local-my-rime-scheme");
     assert_eq!(second, "local-my-rime-scheme-2");
-    let (first_bytes, first_meta) = crate::packages::stored_archive(&core, &first).unwrap();
-    let (second_bytes, second_meta) = crate::packages::stored_archive(&core, &second).unwrap();
-    assert_eq!(first_bytes, second_bytes);
+    let store = PackageStore::new(&core);
+    let (first_files, first_meta) = store.read_files(&first).unwrap();
+    let (second_files, second_meta) = store.read_files(&second).unwrap();
+    assert_eq!(first_files, second_files);
     assert_eq!(first_meta.version, second_meta.version);
     assert_eq!(first_meta.version.as_ref().unwrap().len(), 12);
     assert_eq!(first_meta.source, "local");
     assert_eq!(first_meta.display_name.as_deref(), Some("我的方案"));
+    assert_eq!(
+        store.package_path(&first),
+        store.root().join("local").join(&first)
+    );
+    assert!(
+        store
+            .package_path(&first)
+            .join("files/example.schema.yaml")
+            .is_file()
+    );
+    assert!(!store.root().join(format!("{first}.zip")).exists());
+    assert!(!store.root().join(format!("{first}.json")).exists());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.metadata_path(&first)).unwrap()).unwrap();
+    let origin = path.canonicalize().unwrap();
+    assert_eq!(metadata["origin"], origin.to_str().unwrap());
     assert!(core.state().installed_packages.contains_key(&first));
     assert!(core.state().active_scheme.is_none());
     let unicode = source(directory.path(), "中文方案");
@@ -178,7 +191,7 @@ fn local_import_excludes_top_level_junk_and_recursive_private_files() {
         fs::write(path.join(name), "package data").unwrap();
     }
     let key = import_local_scheme(&core, &path, "Example", None).unwrap();
-    let files = archive_files(&core, &key);
+    let files = stored_files(&core, &key);
     assert_eq!(
         files.keys().map(String::as_str).collect::<Vec<_>>(),
         vec![
@@ -189,7 +202,6 @@ fn local_import_excludes_top_level_junk_and_recursive_private_files() {
             "example_user.txt",
             "lua/nested/helper.lua",
             "nested/build/data",
-            "nested/example.custom.yaml",
             "nested/example.user.dict.yaml",
             "nested/installation.yaml",
             "nested/sync/data",
@@ -200,10 +212,41 @@ fn local_import_excludes_top_level_junk_and_recursive_private_files() {
     let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
     assert_eq!(keytao_core::parse_schema_list(config), ["example"]);
     assert!(!config.contains("private content"));
-    let (_, meta) = crate::packages::stored_archive(&core, &key).unwrap();
-    assert_eq!(meta.manifest.len(), 9);
+    let (_, meta) = PackageStore::new(&core).read_files(&key).unwrap();
+    assert_eq!(meta.manifest.len(), 8);
     for name in nested {
         assert_eq!(files[name], b"package data");
+    }
+}
+
+#[test]
+fn local_import_only_keeps_root_customs_for_package_schemas() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = source(directory.path(), "source");
+    for name in [
+        "example.custom.yaml",
+        "orphan.custom.yaml",
+        "squirrel.custom.yaml",
+        "weasel.custom.yaml",
+        "nested/example.custom.yaml",
+    ] {
+        fs::create_dir_all(path.join(name).parent().unwrap()).unwrap();
+        fs::write(path.join(name), "patch: {keep: true}\n").unwrap();
+    }
+    // Frontend configuration remains excluded even if a schema has the same name.
+    fs::write(path.join("squirrel.schema.yaml"), "schema: {}\n").unwrap();
+    fs::write(path.join("weasel.schema.yaml"), "schema: {}\n").unwrap();
+    let key = import_local_scheme(&core, &path, "Example", None).unwrap();
+    let files = stored_files(&core, &key);
+    assert_eq!(files["example.custom.yaml"], b"patch: {keep: true}\n");
+    for name in [
+        "orphan.custom.yaml",
+        "squirrel.custom.yaml",
+        "weasel.custom.yaml",
+        "nested/example.custom.yaml",
+    ] {
+        assert!(!files.contains_key(name), "unexpected custom: {name}");
     }
 }
 
@@ -313,7 +356,12 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
             .unwrap()
             .contains("menu/page_size: 7")
     );
-    let (_, meta) = crate::packages::stored_archive(&core, &key).unwrap();
+    let (_, meta) = PackageStore::new(&core).read_files(&key).unwrap();
     assert_eq!(meta.source, "local");
     assert_eq!(meta.display_name.as_deref(), Some("Updated"));
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(PackageStore::new(&core).metadata_path(&key)).unwrap())
+            .unwrap();
+    let origin = path.canonicalize().unwrap();
+    assert_eq!(metadata["origin"], origin.to_str().unwrap());
 }

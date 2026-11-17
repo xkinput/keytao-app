@@ -32,7 +32,8 @@ fn record_reference(
     id: &str,
     stored_sha256: &str,
 ) -> Result<(), CoreError> {
-    if !crate::package_store::PackageStore::new(core).open_archive(scheme_key)?
+    if !crate::package_store::PackageStore::new(core)
+        .read_files(scheme_key)?
         .1
         .zip_sha256
         .eq_ignore_ascii_case(stored_sha256)
@@ -130,11 +131,9 @@ fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError>
 }
 
 fn package_schema_ids(
-    reader: impl std::io::Read + std::io::Seek,
+    files: &[(String, Vec<u8>)],
     meta: &crate::packages::PackageMeta,
 ) -> Result<Vec<String>, CoreError> {
-    use std::io::Read;
-    let mut zip = zip::ZipArchive::new(reader).map_err(|e| CoreError::Other(e.to_string()))?;
     let mut fallback = std::collections::BTreeSet::new();
     for name in meta.manifest.keys() {
         if !name.contains('/') {
@@ -143,15 +142,11 @@ fn package_schema_ids(
             }
         }
     }
-    for index in 0..zip.len() {
-        let mut file = zip
-            .by_index(index)
-            .map_err(|e| CoreError::Other(e.to_string()))?;
-        let name = file.name().to_owned();
+    for (name, bytes) in files {
         if matches!(name.as_str(), "default.custom.yaml" | "default-custom.yaml") {
-            let mut text = String::new();
-            file.read_to_string(&mut text)?;
-            let ids = keytao_core::parse_schema_list(&text);
+            let text =
+                std::str::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string()))?;
+            let ids = keytao_core::parse_schema_list(text);
             if !ids.is_empty() {
                 return Ok(ids);
             }
@@ -173,8 +168,8 @@ fn prepare_with_smoke(
     smoke: impl FnMut(&str, u32) -> Result<(), String>,
 ) -> Result<PreparedUpload, CoreError> {
     eligible(core, scheme_key, root)?;
-    let (stored, meta) = crate::package_store::PackageStore::new(core).open_archive(scheme_key)?;
-    let ids = package_schema_ids(stored, &meta)?;
+    let (stored, meta) = crate::package_store::PackageStore::new(core).read_files(scheme_key)?;
+    let ids = package_schema_ids(&stored, &meta)?;
     let bundle = if cfg!(target_os = "android") {
         // Android validates Kotlin's deploy result and artifacts, without in-process Rime.
         crate::upload_bundle::verified_artifacts(root, shared, &ids)?
@@ -577,6 +572,7 @@ pub(crate) async fn download_at(
         Some(&package.name),
         BufReader::new(archive.as_file()),
         user_root,
+        Some(&url),
     )?;
     record_reference(core, account, &scheme_key, id, &package.sha256)?;
     Ok(())

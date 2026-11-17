@@ -1,5 +1,6 @@
 use crate::{
-    AppEnv, Core, CoreEvent, EventSink, Platform, install::smart_install, package_store::PackageStore,
+    AppEnv, Core, CoreEvent, EventSink, Platform, install::smart_install,
+    package_store::PackageStore,
 };
 use std::{
     fs,
@@ -99,8 +100,7 @@ fn protected_file_install_keeps_utf8_bom_dictionary() {
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
 
-    crate::install::write_package_file(dir.path(), relative, b"entries: []\n", &mut logs)
-        .unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"entries: []\n", &mut logs).unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
     assert_eq!(logs, ["[KEPT] keytao.user.dict.yaml"]);
@@ -115,8 +115,7 @@ fn protected_file_install_keeps_duplicate_key_settings() {
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
 
-    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
-        .unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs).unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
     assert_eq!(logs, ["[KEPT] x.user.yaml"]);
@@ -130,8 +129,7 @@ fn protected_file_install_keeps_utf8_bom_settings() {
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
 
-    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
-        .unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs).unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
     assert_eq!(logs, ["[KEPT] x.user.yaml"]);
@@ -196,8 +194,10 @@ fn protected_file_install_decides_missing_valid_and_broken_with_backup() {
     logs.clear();
     crate::install::write_package_file(dir.path(), &relative, package, &mut logs).unwrap();
     assert_eq!(fs::read(&path).unwrap(), broken);
-    assert!(logs.iter().any(|line| line.starts_with("[BROKEN] ")
-        && line.contains("left untouched")));
+    assert!(
+        logs.iter()
+            .any(|line| line.starts_with("[BROKEN] ") && line.contains("left untouched"))
+    );
 }
 
 #[test]
@@ -354,7 +354,7 @@ async fn smart_install_keeps_user_dictionary_and_verifies_it() {
 }
 
 #[tokio::test]
-async fn activation_without_stored_zip_requires_redownload() {
+async fn activation_without_stored_directory_requires_redownload() {
     let dir = tempfile::tempdir().unwrap();
     let core = Core::new(
         AppEnv {
@@ -377,7 +377,7 @@ async fn activation_without_stored_zip_requires_redownload() {
     )
     .await
     .err()
-    .expect("Activation must reject an unavailable stored archive");
+    .expect("Activation must reject an unavailable stored package directory");
     assert!(error.to_string().contains("re-download"));
     assert_eq!(core.state().active_scheme.as_deref(), Some("keytao"));
 }
@@ -398,7 +398,7 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
     .unwrap();
     crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
     let store = PackageStore::new(&core);
-    fs::create_dir_all(store.root()).unwrap();
+    fs::create_dir_all(store.package_path("keytao")).unwrap();
     let active_root = dir.path().join("active");
     let custom_root = dir.path().join("custom");
     fs::create_dir_all(&active_root).unwrap();
@@ -578,6 +578,12 @@ async fn installing_switching_and_deploy_regeneration_use_only_the_active_packag
         .unwrap();
         assert!(result.verify.iter().all(|entry| entry.ok));
         crate::packages::record_package(&core, key, Some("v1"), true).unwrap();
+        let store = PackageStore::new(&core);
+        assert_eq!(
+            fs::read_to_string(store.package_path(key).join("files/rime.lua")).unwrap(),
+            rime_lua
+        );
+        assert!(!store.root().join(format!("{key}.zip")).exists());
         assert_eq!(fs::read_to_string(root.join("rime.lua")).unwrap(), rime_lua);
         assert!(!archive.exists());
     }
@@ -603,6 +609,26 @@ async fn installing_switching_and_deploy_regeneration_use_only_the_active_packag
 
 #[tokio::test]
 async fn custom_install_preserves_default_package_and_state() {
+    fn snapshot_files(
+        root: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                for (relative, bytes) in snapshot_files(&entry.path()) {
+                    files.insert(
+                        std::path::PathBuf::from(entry.file_name()).join(relative),
+                        bytes,
+                    );
+                }
+            } else {
+                files.insert(entry.file_name().into(), fs::read(entry.path()).unwrap());
+            }
+        }
+        files
+    }
+
     fn write_archive(path: &std::path::Path, version: &str) {
         let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
         for (name, content) in [
@@ -651,13 +677,7 @@ async fn custom_install_preserves_default_package_and_state() {
         let state_path = core.env().data_dir.join("app-state.json");
         let saved_state = fs::read(&state_path).unwrap();
         let store = PackageStore::new(&core).root();
-        let saved_store: std::collections::BTreeMap<_, _> = fs::read_dir(&store)
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (entry.file_name(), fs::read(entry.path()).unwrap())
-            })
-            .collect();
+        let saved_store = snapshot_files(&store);
 
         write_archive(&archive, "v2");
         smart_install(
@@ -671,15 +691,12 @@ async fn custom_install_preserves_default_package_and_state() {
         .unwrap();
         crate::packages::record_package(&core, custom_scheme, Some("v2"), false).unwrap();
 
-        assert!(core.state() == state, "Custom install changed package state");
+        assert!(
+            core.state() == state,
+            "Custom install changed package state"
+        );
         assert_eq!(fs::read(&state_path).unwrap(), saved_state);
-        let actual_store: std::collections::BTreeMap<_, _> = fs::read_dir(&store)
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (entry.file_name(), fs::read(entry.path()).unwrap())
-            })
-            .collect();
+        let actual_store = snapshot_files(&store);
         assert_eq!(
             actual_store, saved_store,
             "Custom install changed the store or left pending files"
@@ -885,11 +902,14 @@ async fn package_without_rime_lua_removes_all_previous_content() {
 fn package_custom_yaml_replaces_the_installed_copy() {
     let dir = tempfile::tempdir().unwrap();
     let relative = "xmjd6.custom.yaml";
-    fs::write(dir.path().join(relative), b"patch:\n  switches/@4/reset: 1\n").unwrap();
+    fs::write(
+        dir.path().join(relative),
+        b"patch:\n  switches/@4/reset: 1\n",
+    )
+    .unwrap();
     let mut logs = Vec::new();
 
-    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
-        .unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs).unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), b"patch: {}\n");
 }

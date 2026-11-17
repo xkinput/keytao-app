@@ -1,5 +1,5 @@
 use super::{PackageMeta, excluded_from_manifest, validate_relative};
-use crate::package_store::{PackageStore, Staging};
+use crate::package_store::PackageStore;
 use crate::{Core, CoreError};
 use sha2::{Digest, Sha256};
 use std::{
@@ -113,13 +113,20 @@ pub fn import_local_scheme(
     let mut schemas: Vec<_> = files
         .keys()
         .filter(|name| !name.contains('/'))
-        .filter_map(|name| name.strip_suffix(".schema.yaml"))
+        .filter_map(|name| name.strip_suffix(".schema.yaml").map(str::to_owned))
         .collect();
     if schemas.is_empty() {
         return Err(CoreError::Other(
             "目录根部未找到 .schema.yaml 方案文件".into(),
         ));
     }
+    files.retain(|name, _| {
+        name.strip_suffix(".custom.yaml").is_none_or(|schema| {
+            !name.contains('/')
+                && !matches!(schema, "squirrel" | "weasel")
+                && schemas.iter().any(|id| id == schema)
+        })
+    });
     let schema_order = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| fs::read_to_string(directory.join(name)).ok())
@@ -135,7 +142,7 @@ pub fn import_local_scheme(
     for schema in schemas {
         config.push_str(&format!(
             "    - schema: {}\n",
-            serde_json::to_string(schema)?
+            serde_json::to_string(&schema)?
         ));
     }
     files.insert("default.custom.yaml".into(), config.into_bytes());
@@ -180,7 +187,7 @@ pub fn import_local_scheme(
         let mut key = base.clone();
         let mut suffix = 2u64;
         while state.installed_packages.contains_key(&key)
-            || store.archive_path(&key).exists()
+            || store.package_path(&key).exists()
             || store.metadata_path(&key).exists()
         {
             key = format!("{base}-{suffix}");
@@ -225,17 +232,11 @@ pub fn import_local_scheme(
         manifest,
         zip_sha256: digest,
     };
-    let mut archive = store.staging_file(Staging::Local)?;
-    archive.write_all(&bytes)?;
-    archive.as_file().sync_all()?;
-    let mut meta = store.staging_file(Staging::Metadata)?;
-    serde_json::to_writer_pretty(meta.as_file_mut(), &metadata)?;
-    meta.as_file().sync_all()?;
-    archive
-        .persist(store.checked_archive_path(&scheme_key)?)
-        .map_err(|error| CoreError::from(error.error))?;
-    meta.persist(store.checked_metadata_path(&scheme_key)?)
-        .map_err(|error| CoreError::from(error.error))?;
+    store.write_archive(
+        Cursor::new(bytes),
+        &metadata,
+        Some(directory.to_string_lossy().as_ref()),
+    )?;
     core.update_state(|state| {
         state.installed_packages.insert(
             scheme_key.clone(),
