@@ -184,6 +184,21 @@ pub fn import_local_scheme(
     } else {
         name
     };
+    // Keep the active version until activation, including repeated imports and retries.
+    let selection_base_version = if state.active_scheme.as_deref() == Some(&scheme_key) {
+        fs::read(safe_path(&store, &format!("{scheme_key}.json")).map_err(CoreError::Other)?)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
+            .and_then(|meta| meta.selection_base_version)
+            .or_else(|| {
+                state
+                    .installed_packages
+                    .get(&scheme_key)
+                    .and_then(|package| package.version.clone())
+            })
+    } else {
+        None
+    };
     let metadata = PackageMeta {
         scheme_key: scheme_key.clone(),
         version: Some(version.clone()),
@@ -193,6 +208,7 @@ pub fn import_local_scheme(
             .as_secs(),
         source: "local".into(),
         display_name: Some(name.into()),
+        selection_base_version,
         manifest,
         zip_sha256: digest,
     };
