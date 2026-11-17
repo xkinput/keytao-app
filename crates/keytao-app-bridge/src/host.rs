@@ -173,10 +173,11 @@ impl BridgeHost {
                 "正在部署 librime...".into(),
             ));
             tokio::task::spawn_blocking(move || {
-                keytao_core::deploy(
-                    user.to_string_lossy().into_owned(),
+                keytao_core::ImeRuntime::with_dirs(
+                    user.clone(),
                     shared.to_string_lossy().into_owned(),
-                )?;
+                )
+                .reload()?;
                 keytao_app_core::deploy::render_user_schema_logos(&user);
                 Ok::<(), String>(())
             })

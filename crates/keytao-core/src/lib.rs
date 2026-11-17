@@ -8,6 +8,8 @@ mod deployment_log;
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+#[cfg(test)]
+mod grammar_tests;
 mod reload_stamp_cache;
 #[cfg(all(
     test,
@@ -543,7 +545,9 @@ pub fn librime_runtime_version() -> Option<String> {
     None
 }
 
-/// Whether the linked runtime can load the optional grammar model.
+/// Probe the optional grammar plugin without initializing its grammar component.
+/// macOS preflights loadability; other desktop platforms check module/file presence
+/// because loading a separate plugin runs its registration constructor.
 pub fn octagram_available() -> bool {
     #[cfg(any(
         target_os = "linux",
@@ -553,7 +557,7 @@ pub fn octagram_available() -> bool {
     ))]
     {
         let _rime = desktop::rime_api_lock();
-        unsafe { desktop::require_octagram_module() }
+        unsafe { desktop::octagram_available() }
     }
     #[cfg(not(any(
         target_os = "linux",
@@ -562,6 +566,101 @@ pub fn octagram_available() -> bool {
         target_os = "android"
     )))]
     false
+}
+
+const WANXIANG_GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
+// librime 1.17.0 grammar.h: Grammar::Evaluate's no-grammar log(1e-6).
+const NEUTRAL_GRAMMAR_PENALTY: f64 = -13.815510557964274;
+
+fn wanxiang_grammar_enabled(user_dir: &Path) -> bool {
+    !cfg!(target_os = "ios")
+        && user_dir.join(WANXIANG_GRAMMAR_FILE).is_file()
+        && std::fs::read(user_dir.join("build/wanxiang.schema.yaml"))
+            .ok()
+            .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|schema| {
+                schema["grammar"]["language"]
+                    .as_str()
+                    .is_some_and(|language| !language.is_empty())
+            })
+}
+
+/// Patch generated configs only; package sources and user overrides stay intact.
+// shortcut: Octagram still selects BeamSearch, so equal-weight sentences may reorder;
+// exact 1.2.7 tie parity needs a schema-aware C++ factory unavailable through RimeApi.
+fn patch_neutral_grammar(user_dir: &Path) {
+    if !wanxiang_grammar_enabled(user_dir) {
+        return;
+    }
+    let build = user_dir.join("build");
+    match std::fs::symlink_metadata(&build) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            eprintln!("KeyTao: warning: refuse symbolic link: {}", build.display());
+            return;
+        }
+        Err(error) => {
+            eprintln!("KeyTao: warning: inspect {}: {error}", build.display());
+            return;
+        }
+        Ok(_) => {}
+    }
+    for schema_id in configured_schema_list_from_dir(user_dir) {
+        if schema_id == "wanxiang" {
+            continue;
+        }
+        let result = (|| -> Result<(), String> {
+            if !valid_rime_build_id(&schema_id) {
+                return Err(format!("invalid schema id: {schema_id}"));
+            }
+            let path = build.join(format!("{schema_id}.schema.yaml"));
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+            };
+            if metadata.file_type().is_symlink() {
+                return Err(format!("refuse symbolic link: {}", path.display()));
+            }
+            let mut content = std::fs::read(&path)
+                .map_err(|error| format!("read {}: {error}", path.display()))?;
+            if content
+                .split(|byte| *byte == b'\n')
+                .any(|line| line.starts_with(b"grammar:"))
+            {
+                let recognized =
+                    serde_yaml::from_slice::<Value>(&content)
+                        .ok()
+                        .is_some_and(|schema| {
+                            let grammar = &schema["grammar"];
+                            grammar["language"]
+                                .as_str()
+                                .is_some_and(|language| !language.is_empty())
+                                || (grammar.as_mapping().is_some_and(|keys| keys.len() == 2)
+                                    && grammar["language"].as_str() == Some("")
+                                    && grammar["non_collocation_penalty"].as_f64()
+                                        == Some(NEUTRAL_GRAMMAR_PENALTY))
+                        });
+                return if recognized {
+                    Ok(())
+                } else {
+                    Err(format!("skip existing grammar block: {}", path.display()))
+                };
+            }
+            // Compiled YAML scalars must never pass through a serializer.
+            if !content.ends_with(b"\n") {
+                content.push(b'\n');
+            }
+            content.extend_from_slice(
+                format!("grammar:\n  language: \"\"\n  non_collocation_penalty: {NEUTRAL_GRAMMAR_PENALTY}\n")
+                    .as_bytes(),
+            );
+            write_file_atomic(&path, &content)
+                .map_err(|error| format!("write {}: {error}", path.display()))
+        })();
+        if let Err(error) = result {
+            eprintln!("KeyTao: warning: neutral grammar patch skipped: {error}");
+        }
+    }
 }
 
 // ── Native desktop engine (guarded at the module level) ──────────────────────
@@ -884,6 +983,11 @@ mod desktop {
         fn dlerror() -> *const c_char;
     }
 
+    #[cfg(target_os = "macos")]
+    extern "C" {
+        fn dlopen_preflight(filename: *const c_char) -> bool;
+    }
+
     #[cfg(target_os = "windows")]
     #[link(name = "kernel32")]
     extern "system" {
@@ -1030,6 +1134,7 @@ mod desktop {
                 deploy_desktop_schema_dependencies(user_dir).map_err(|error| {
                     deploy_log.failure_message(Some(&format!("依赖部署失败：{error}")))
                 })?;
+                patch_neutral_grammar(user_dir);
                 validate_deployed_schemas(user_dir).map_err(|error| {
                     deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
                 })?;
@@ -1193,6 +1298,7 @@ mod desktop {
 
     fn initialize_rime(user_data_dir: &str, shared_data_dir: &str, deployer_only: bool) {
         let user_dir = Path::new(user_data_dir);
+        patch_neutral_grammar(user_dir);
         let shared_dir = Path::new(shared_data_dir);
         let (staging_dir, prebuilt_dir) = rime_build_dirs(user_dir, shared_dir);
         let log_dir = rime_log_dir(user_dir);
@@ -1409,6 +1515,7 @@ mod desktop {
         deployer_only: bool,
     ) {
         let configured_log_dir = PathBuf::from(log_dir);
+        let use_octagram = !deployer_only && wanxiang_grammar_enabled(Path::new(user_data_dir));
         let user_data_dir = CString::new(user_data_dir).expect("valid user data dir");
         let shared_data_dir = CString::new(shared_data_dir).expect("valid shared data dir");
         let staging_dir = CString::new(staging_dir).expect("valid staging dir");
@@ -1419,15 +1526,12 @@ mod desktop {
         let distribution_version = CString::new("1.0.0").unwrap();
         let module_default = CString::new("default").unwrap();
         let module_lua = CString::new("lua").unwrap();
-        #[cfg(not(target_os = "ios"))]
         let module_octagram = CString::new("octagram").unwrap();
-        let mut modules = [
-            module_default.as_ptr(),
-            module_lua.as_ptr(),
-            #[cfg(not(target_os = "ios"))]
-            module_octagram.as_ptr(),
-            std::ptr::null::<c_char>(),
-        ];
+        let mut modules = vec![module_default.as_ptr(), module_lua.as_ptr()];
+        if use_octagram {
+            modules.push(module_octagram.as_ptr());
+        }
+        modules.push(std::ptr::null::<c_char>());
 
         librime_sys::rime_struct!(traits: RimeTraits);
         traits.user_data_dir = user_data_dir.as_ptr();
@@ -1452,7 +1556,9 @@ mod desktop {
                 require_levers_module();
                 require_lua_module();
                 #[cfg(not(target_os = "ios"))]
-                require_octagram_module();
+                if use_octagram {
+                    require_octagram_module();
+                }
             }
 
             let api = rime_get_api();
@@ -1543,6 +1649,50 @@ mod desktop {
     }
 
     #[cfg(target_os = "android")]
+    pub(super) unsafe fn octagram_available() -> bool {
+        // The Android runtime statically links octagram; requiring it would register it.
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) unsafe fn octagram_available() -> bool {
+        // Check architecture and dependencies without running plugin constructors.
+        octagram_module_registered()
+            || octagram_plugin_candidates().iter().any(|path| {
+                CString::new(path.to_string_lossy().as_bytes())
+                    .is_ok_and(|path| dlopen_preflight(path.as_ptr()))
+            })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(super) unsafe fn octagram_available() -> bool {
+        // Merged plugins are already registered; file presence is a fallback only.
+        octagram_module_registered()
+            || octagram_plugin_candidates()
+                .iter()
+                .any(|path| path.is_file())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn octagram_plugin_candidates() -> Vec<PathBuf> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let candidates = unix_lua_plugin_candidates();
+        #[cfg(target_os = "windows")]
+        let candidates = windows_lua_plugin_candidates();
+        #[cfg(target_os = "macos")]
+        let filenames = ["librime-octagram.dylib"];
+        #[cfg(target_os = "linux")]
+        let filenames = ["librime-octagram.so"];
+        #[cfg(target_os = "windows")]
+        let filenames = ["librime-octagram.dll", "rime-octagram.dll"];
+        candidates
+            .iter()
+            .filter_map(|candidate| candidate.parent())
+            .flat_map(|dir| filenames.iter().map(move |filename| dir.join(filename)))
+            .collect()
+    }
+
+    #[cfg(target_os = "android")]
     pub(super) unsafe fn require_octagram_module() -> bool {
         rime_require_module_octagram();
         octagram_module_registered()
@@ -1556,60 +1706,44 @@ mod desktop {
         static LOADED_PLUGINS: LazyLock<Mutex<HashSet<PathBuf>>> =
             LazyLock::new(|| Mutex::new(HashSet::new()));
         let mut loaded = lock_ignore_poison(&LOADED_PLUGINS);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let candidates = unix_lua_plugin_candidates();
-        #[cfg(target_os = "windows")]
-        let candidates = windows_lua_plugin_candidates();
-        for candidate in candidates {
-            let Some(dir) = candidate.parent() else {
+        for path in octagram_plugin_candidates() {
+            if loaded.contains(&path) || !path.is_file() {
                 continue;
-            };
-            #[cfg(target_os = "macos")]
-            let filenames = ["librime-octagram.dylib"];
-            #[cfg(target_os = "linux")]
-            let filenames = ["librime-octagram.so"];
-            #[cfg(target_os = "windows")]
-            let filenames = ["librime-octagram.dll", "rime-octagram.dll"];
-            for filename in filenames {
-                let path = dir.join(filename);
-                if loaded.contains(&path) || !path.is_file() {
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            let handle = {
+                let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
                     continue;
-                }
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
-                let handle = {
-                    let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
-                        continue;
-                    };
-                    #[cfg(target_os = "macos")]
-                    const RTLD_GLOBAL: i32 = 0x8;
-                    #[cfg(target_os = "linux")]
-                    const RTLD_GLOBAL: i32 = 0x100;
-                    dlopen(path.as_ptr(), 0x2 | RTLD_GLOBAL)
                 };
+                #[cfg(target_os = "macos")]
+                const RTLD_GLOBAL: i32 = 0x8;
+                #[cfg(target_os = "linux")]
+                const RTLD_GLOBAL: i32 = 0x100;
+                dlopen(path.as_ptr(), 0x2 | RTLD_GLOBAL)
+            };
+            #[cfg(target_os = "windows")]
+            let handle = LoadLibraryW(path_to_wide(&path).as_ptr());
+            if handle.is_null() {
+                continue;
+            }
+            loaded.insert(path);
+            if octagram_module_registered() {
+                return true;
+            }
+            for symbol in [
+                c"_Z28rime_require_module_octagramv",
+                c"?rime_require_module_octagram@@YAXXZ",
+                c"rime_require_module_octagram",
+            ] {
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                let require = dlsym(handle, symbol.as_ptr());
                 #[cfg(target_os = "windows")]
-                let handle = LoadLibraryW(path_to_wide(&path).as_ptr());
-                if handle.is_null() {
-                    continue;
-                }
-                loaded.insert(path);
-                if octagram_module_registered() {
-                    return true;
-                }
-                for symbol in [
-                    c"_Z28rime_require_module_octagramv",
-                    c"?rime_require_module_octagram@@YAXXZ",
-                    c"rime_require_module_octagram",
-                ] {
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
-                    let require = dlsym(handle, symbol.as_ptr());
-                    #[cfg(target_os = "windows")]
-                    let require = GetProcAddress(handle, symbol.as_ptr());
-                    if !require.is_null() {
-                        let require: unsafe extern "C" fn() = std::mem::transmute(require);
-                        require();
-                        if octagram_module_registered() {
-                            return true;
-                        }
+                let require = GetProcAddress(handle, symbol.as_ptr());
+                if !require.is_null() {
+                    let require: unsafe extern "C" fn() = std::mem::transmute(require);
+                    require();
+                    if octagram_module_registered() {
+                        return true;
                     }
                 }
             }
@@ -2067,7 +2201,10 @@ mod desktop {
                 .join("rime-plugins/librime-octagram.dylib")
                 .is_file()
             {
+                let _rime = rime_api_lock();
+                let registered = unsafe { octagram_module_registered() };
                 assert!(crate::octagram_available());
+                assert_eq!(unsafe { octagram_module_registered() }, registered);
             }
         }
     }
@@ -4603,6 +4740,11 @@ impl ImeRuntime {
                 dirs.user.to_string_lossy().into_owned(),
                 dirs.shared.clone(),
             )?;
+            // Deployment may have just enabled or disabled Wanxiang grammar.
+            desktop::reinitialize_rime(
+                dirs.user.to_string_lossy().into_owned(),
+                dirs.shared.clone(),
+            )?;
             deployed = true;
             *initialized = Some(dirs);
             Ok(())
@@ -4733,6 +4875,10 @@ impl ImeRuntime {
                 )?;
             }
             deploy(
+                dirs.user.to_string_lossy().into_owned(),
+                dirs.shared.clone(),
+            )?;
+            desktop::reinitialize_rime(
                 dirs.user.to_string_lossy().into_owned(),
                 dirs.shared.clone(),
             )
@@ -5676,6 +5822,7 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
     {
         return Err("managed primary schemas are not deployed".into());
     }
+    patch_neutral_grammar(user_data_dir);
     persist_standalone_addon_selection(user_data_dir)?;
     write_deployed_marker(user_data_dir, &schemas)?;
     let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
