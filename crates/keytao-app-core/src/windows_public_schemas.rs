@@ -449,6 +449,7 @@ fn checked_relative(path: &Path) -> Result<PathBuf, String> {
 fn is_public_asset(path: &Path) -> bool {
     if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
         || path == Path::new("lua/rime_ice/lunar.db")
+        || path == Path::new("zh-moqi.gram")
     {
         return true;
     }
@@ -1326,7 +1327,28 @@ mod tests {
                     "radical_pinyin.schema.yaml".into(),
                     b"schema: {schema_id: radical_pinyin}".to_vec(),
                 ),
-                ("lua/rime_ice/lunar.db".into(), b"public lunar database".to_vec()),
+                (
+                    "lua/rime_ice/lunar.db".into(),
+                    b"public lunar database".to_vec(),
+                ),
+                (
+                    "rime_mint.schema.yaml".into(),
+                    b"schema: {schema_id: rime_mint, dependencies: [rime_mint_melt_eng]}".to_vec(),
+                ),
+                (
+                    "rime_mint_melt_eng.schema.yaml".into(),
+                    b"schema: {schema_id: rime_mint_melt_eng}".to_vec(),
+                ),
+                (
+                    "rime_frost.schema.yaml".into(),
+                    b"schema: {schema_id: rime_frost, dependencies: [rime_frost_melt_eng]}"
+                        .to_vec(),
+                ),
+                (
+                    "rime_frost_melt_eng.schema.yaml".into(),
+                    b"schema: {schema_id: rime_frost_melt_eng}".to_vec(),
+                ),
+                ("zh-moqi.gram".into(), b"public grammar model".to_vec()),
             ],
             false,
         )
@@ -1335,15 +1357,21 @@ mod tests {
         let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
         assert_eq!(
             crate::scheme_files::parse_schema_list(config),
-            ["keytao", "rime_ice"]
+            ["keytao", "rime_ice", "rime_mint", "rime_frost"]
         );
-        for dependency in ["melt_eng.schema.yaml", "radical_pinyin.schema.yaml"] {
+        for dependency in [
+            "melt_eng.schema.yaml",
+            "radical_pinyin.schema.yaml",
+            "rime_mint_melt_eng.schema.yaml",
+            "rime_frost_melt_eng.schema.yaml",
+        ] {
             assert!(files.contains_key(Path::new(dependency)));
         }
         assert_eq!(
             files[Path::new("lua/rime_ice/lunar.db")],
             b"public lunar database"
         );
+        assert_eq!(files[Path::new("zh-moqi.gram")], b"public grammar model");
     }
 
     #[test]
@@ -1652,6 +1680,8 @@ mod tests {
             assert!(!is_public_asset(Path::new(path)), "{path}");
         }
         assert!(is_public_asset(Path::new("lua/english.lua")));
+        assert!(is_public_asset(Path::new("zh-moqi.gram")));
+        assert!(!is_public_asset(Path::new("private.gram")));
         assert!(is_public_asset(Path::new("build/keytao.table.bin")));
         assert!(is_public_asset(Path::new(
             keytao_core::SCHEMA_SWITCH_REQUEST_FILE

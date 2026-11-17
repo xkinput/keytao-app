@@ -470,6 +470,12 @@ Future<WanxiangGrammarStatusDto> manageWanxiangGrammar({
 Future<AddonStatusDto> rimeIceStatus() =>
     RustLib.instance.api.crateApiCoreRimeIceStatus();
 
+Future<AddonStatusDto> rimeMintStatus() =>
+    RustLib.instance.api.crateApiCoreRimeMintStatus();
+
+Future<AddonStatusDto> rimeFrostStatus() =>
+    RustLib.instance.api.crateApiCoreRimeFrostStatus();
+
 /// A failed upstream check leaves the locally installed status available.
 Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
     RustLib.instance.api.crateApiCoreCheckAddonUpdate(id: id);
@@ -492,6 +498,24 @@ Future<AddonStatusDto> manageRimeIce({
   required bool installed,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeIce(
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+Future<AddonStatusDto> manageRimeMint({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageRimeMint(
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+Future<AddonStatusDto> manageRimeFrost({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageRimeFrost(
   installed: installed,
   androidDeploy: androidDeploy,
 );
