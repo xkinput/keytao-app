@@ -58,6 +58,130 @@ fn type_code(session: &ImeRuntimeSession) -> ImeState {
 }
 
 #[test]
+fn chord_keys_accumulate_until_release_and_schema_switches_update_capability() {
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("chord-release");
+    smoke_fixture::write(&dir).expect("write the fixture");
+    let normal =
+        std::fs::read_to_string(dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID)))
+            .unwrap();
+    let chord = normal
+        .replace(smoke_fixture::SCHEMA_ID, "keytao_chord")
+        .replace("KeyTao Smoke", "KeyTao Chord")
+        .replace("    - speller", "    - chord_composer\n    - speller")
+        + "chord_composer:\n  alphabet: 'abs '\n  algebra:\n    - xform/^ab$/aa/\n";
+    std::fs::write(dir.join("keytao_chord.schema.yaml"), chord).unwrap();
+    let dictionary =
+        std::fs::read_to_string(dir.join(format!("{}.dict.yaml", smoke_fixture::SCHEMA_ID)))
+            .unwrap();
+    std::fs::write(
+        dir.join("keytao_chord.dict.yaml"),
+        dictionary.replace(smoke_fixture::SCHEMA_ID, "keytao_chord"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("default.custom.yaml"),
+        format!(
+            "patch:\n  schema_list:\n    - schema: {}\n    - schema: keytao_chord\n  switcher/hotkeys: [F4]\n",
+            smoke_fixture::SCHEMA_ID
+        ),
+    )
+    .unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    runtime.init().expect("deploy the chord fixture");
+    let session = runtime.create_session().expect("create a session");
+    session.select_schema("keytao_chord").unwrap();
+    let unmatched = session
+        .process_key_result(b'a' as u32, keytao_core::RIME_RELEASE_MASK)
+        .unwrap();
+    assert!(!unmatched.accepted);
+    assert!(unmatched.state.preedit.is_empty());
+    assert!(unmatched.state.candidates.is_empty());
+    assert!(unmatched.state.committed.is_none());
+    for key in [b'a', b'b'] {
+        let result = session.process_key_result(key as u32, 0).unwrap();
+        assert!(result.accepted);
+        assert!(result.state.committed.is_none());
+        assert!(result.state.candidates.is_empty());
+    }
+    for key in [b'a', b'b'] {
+        let state = session.state();
+        assert!(keytao_core::key_policy::should_forward_chord_release(
+            key as u32, 0, &state
+        ));
+        let result = session
+            .process_key_result(key as u32, keytao_core::RIME_RELEASE_MASK)
+            .unwrap();
+        assert!(result.accepted);
+        assert!(result.state.committed.is_none());
+        if key == b'a' {
+            assert!(result.state.candidates.is_empty());
+        }
+    }
+    assert_eq!(session.state().preedit, smoke_fixture::CODE);
+    assert_eq!(session.state().candidates.len(), smoke_fixture::PAGE_SIZE);
+    let committed = session.select_candidate_on_page(0).unwrap();
+    assert_eq!(
+        committed.committed.as_deref(),
+        Some(smoke_fixture::WORDS[0])
+    );
+    session.process_key_result(b'a' as u32, 0).unwrap();
+    let control_l = 0xffe3;
+    session
+        .process_key_result(control_l, keytao_core::RIME_MOD_CONTROL)
+        .unwrap();
+    assert!(keytao_core::key_policy::should_forward_chord_release(
+        b'a' as u32,
+        keytao_core::RIME_MOD_CONTROL,
+        &session.state(),
+    ));
+    let modified_release = session
+        .process_key_result(
+            b'a' as u32,
+            keytao_core::RIME_MOD_CONTROL | keytao_core::RIME_RELEASE_MASK,
+        )
+        .unwrap();
+    assert!(!modified_release.accepted);
+    assert!(modified_release.state.preedit.is_empty());
+    session
+        .process_key_result(control_l, keytao_core::RIME_RELEASE_MASK)
+        .unwrap();
+    let pressed = session.process_key_result(b's' as u32, 0).unwrap();
+    assert!(pressed.accepted);
+    let released = session
+        .process_key_result(b's' as u32, keytao_core::RIME_RELEASE_MASK)
+        .unwrap();
+    assert!(released.accepted);
+    assert_eq!(released.state.preedit, "s");
+    let normal = session.select_schema(smoke_fixture::SCHEMA_ID).unwrap();
+    assert!(!normal.chord_composer);
+    let chord = session.select_schema("keytao_chord").unwrap();
+    assert!(chord.chord_composer);
+    for (name, schema_id, has_chord) in [
+        ("KeyTao Smoke", smoke_fixture::SCHEMA_ID, false),
+        ("KeyTao Chord", "keytao_chord", true),
+    ] {
+        let menu = session
+            .process_key_result(keytao_core::key_policy::XK_F4, 0)
+            .unwrap();
+        assert!(menu.accepted);
+        let index = menu
+            .state
+            .candidates
+            .iter()
+            .position(|candidate| candidate.text == name)
+            .expect("schema appears in the Rime switcher");
+        let state = session.select_candidate_on_page(index).unwrap();
+        assert_eq!(state.schema_id, schema_id);
+        assert_eq!(state.chord_composer, has_chord);
+        assert_eq!(session.state().chord_composer, has_chord);
+    }
+    drop(session);
+    drop(runtime);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn panel_arrows_navigate_without_caret_motion_commits_or_wrapping() {
     use keytao_core::key_policy::{self, CandidatePanelLayout::*, *};
     let _serialized = serialized();

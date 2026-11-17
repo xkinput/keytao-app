@@ -34,6 +34,8 @@ final class KeyTaoInputController: IMKInputController {
     private var hasComposition = false
     private var isActive = false
     private var englishMode = false
+    private var asciiMode = false
+    private var chordComposer = false
     private var hasMarkedText = false
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
@@ -72,6 +74,7 @@ final class KeyTaoInputController: IMKInputController {
     override func recognizedEvents(_ sender: Any!) -> Int {
         Int(
             NSEvent.EventTypeMask.keyDown.rawValue
+                | NSEvent.EventTypeMask.keyUp.rawValue
                 | NSEvent.EventTypeMask.flagsChanged.rawValue
         )
     }
@@ -129,6 +132,20 @@ final class KeyTaoInputController: IMKInputController {
 
         if event.type == .flagsChanged {
             return handleFlagsChanged(event, client: sender as? IMKTextInput)
+        }
+        if event.type == .keyUp {
+            guard chordComposer else { return false }
+            let keyval = rimeKeyValue(from: event)
+            let modifiers = rimeModifiers(from: event.modifierFlags)
+            guard KeyTaoChordKeyPolicy.shouldForwardRelease(
+                chordComposer: chordComposer, asciiMode: asciiMode,
+                keyval: keyval, modifiers: modifiers
+            ), let session = ensureSession(),
+               let state = KeyTaoImeState.consuming(keytao_session_process_key_json(
+                   session, keyval, modifiers | rimeReleaseMask
+               )) else { return false }
+            apply(state, to: sender)
+            return state.accepted
         }
         guard event.type == .keyDown else { return false }
 
@@ -262,6 +279,8 @@ final class KeyTaoInputController: IMKInputController {
         }) else { return }
         hasComposition = state.hasComposition
         englishMode = state.englishMode
+        asciiMode = state.asciiMode
+        chordComposer = state.chordComposer
 
         if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || theme.ui.effectiveEmbeddedComposition) {
             hideCandidates()
@@ -590,6 +609,8 @@ final class KeyTaoInputController: IMKInputController {
         let theme = ImeThemeManager.shared.theme()
         hasComposition = state.hasComposition
         englishMode = state.englishMode
+        asciiMode = state.asciiMode
+        chordComposer = state.chordComposer
         if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || theme.ui.effectiveEmbeddedComposition) {
             hideCandidates()
         } else {

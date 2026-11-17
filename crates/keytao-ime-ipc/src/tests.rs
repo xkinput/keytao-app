@@ -30,6 +30,7 @@ fn state() -> ImeState {
         committed: Some("提交🐱".into()),
         select_keys: Some("12345".into()),
         ascii_mode: false,
+        chord_composer: true,
         schema_id: "xmjd6".into(),
         schema_name: "星猫键道".into(),
     }
@@ -90,7 +91,14 @@ fn every_request_variant_round_trips() {
         Request::CreateSession,
         Request::DropSession,
         Request::ProcessKeys {
-            keys: vec![(0xffe1, 0), (0xffe1, RIME_RELEASE_MASK)],
+            keys: vec![
+                (0xffe1, 0),
+                (0xffe1, RIME_RELEASE_MASK),
+                ('a' as u32, 0),
+                ('s' as u32, 0),
+                ('a' as u32, RIME_RELEASE_MASK),
+                ('s' as u32, RIME_RELEASE_MASK),
+            ],
         },
         Request::ProcessEnter,
         Request::SelectCandidate { index: 1 },
@@ -124,6 +132,14 @@ fn every_response_variant_round_trips() {
             message,
         });
     }
+}
+
+#[test]
+fn older_engine_states_default_to_no_chord_composer() {
+    let mut value = serde_json::to_value(state()).unwrap();
+    value.as_object_mut().unwrap().remove("chord_composer");
+    let decoded: ImeState = serde_json::from_value(value).unwrap();
+    assert!(!decoded.chord_composer);
 }
 
 #[test]

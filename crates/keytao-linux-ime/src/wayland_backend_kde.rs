@@ -666,6 +666,28 @@ impl App {
                 self.show_panel(result.state, qh);
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             }
+        } else if self.active && self.session.input_policy().composing {
+            let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
+            if key_policy::should_forward_chord_release(sym, self.mods, &self.session.state()) {
+                if let Some(result) = self
+                    .session
+                    .process_key_result(sym, self.mods | RIME_RELEASE_MASK)
+                {
+                    self.update_ascii_mode(result.state.is_english_mode(), qh);
+                    self.commit_state_to_context(&result.state);
+                    self.update_kimpanel(&result.state);
+                    self.show_panel(result.state, qh);
+                    runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+                    if result.accepted {
+                        self.forwarded_keys.remove(&evdev_keycode);
+                        return;
+                    }
+                }
+                // Rime may reject the release after consuming the chord press.
+                self.forwarded_keys.remove(&evdev_keycode);
+                self.forward_key(evdev_keycode, wl_keyboard::KeyState::Released as u32);
+                return;
+            }
         }
         // Only keys whose press reached the client may deliver a release, or
         // the client sees a release with no matching press.

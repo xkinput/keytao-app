@@ -45,8 +45,8 @@ use crate::{
     globals::DllActivityGuard,
     guard,
     key_map::{
-        ascii_mode_rejects_key, current_mod_mask, is_application_shortcut, is_enter_vk,
-        is_shift_vk, shift_keysym_for_vk, shift_pending_after_key_down,
+        ascii_mode_rejects_key, chord_keysym_for_vk, current_mod_mask, is_application_shortcut,
+        is_enter_vk, is_shift_vk, shift_keysym_for_vk, shift_pending_after_key_down,
         should_bypass_empty_composition, should_eat_key, vk_to_keysym, RIME_RELEASE_MASK,
     },
     panel_anchor::{start_panel_anchor, PanelAnchor},
@@ -2091,7 +2091,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         &self,
         pic: Option<&ITfContext>,
         wparam: WPARAM,
-        _lparam: LPARAM,
+        lparam: LPARAM,
     ) -> Result<BOOL> {
         guard(|| {
             let Some(state) = upgrade_state(&self.state) else {
@@ -2154,7 +2154,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     .as_ref()
                     .map_or(persisted_ascii_mode, |st| st.ascii_mode)
                 && ascii_mode_rejects_key(vk, mods);
-            let eat = !ascii_rejects && should_eat_key(vk, is_composing, mods);
+            let chord_key = cached_state
+                .as_ref()
+                .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, st).is_some());
+            let eat = !ascii_rejects && (chord_key || should_eat_key(vk, is_composing, mods));
             append_key_diagnostic!(
                 "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
             );
@@ -2167,32 +2170,41 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         &self,
         pic: Option<&ITfContext>,
         wparam: WPARAM,
-        _lparam: LPARAM,
+        lparam: LPARAM,
     ) -> Result<BOOL> {
         guard(|| {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
-            if !is_shift_vk(vk) {
+            let is_shift = is_shift_vk(vk);
+            if !is_shift
+                && !cached_ime_state(&state).is_some_and(|st| {
+                    st.chord_composer
+                        && chord_keysym_for_vk(vk, lparam.0, current_mod_mask(), &st).is_some()
+                })
+            {
                 return Ok(BOOL::from(false));
             }
-            if !state.borrow().shift_pressed_without_key
-                || is_application_shortcut(vk, current_mod_mask(), false)
+            if is_shift
+                && (!state.borrow().shift_pressed_without_key
+                    || is_application_shortcut(vk, current_mod_mask(), false))
             {
                 state.borrow_mut().shift_pressed_without_key = false;
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
             if input_is_blocked(&state, pic) {
-                append_key_diagnostic!("OnTestKeyUp modifier blocked=true eat=false");
+                append_key_diagnostic!("OnTestKeyUp shift={is_shift} blocked=true eat=false");
                 return Ok(BOOL::from(false));
             }
             let (should_eat, should_retry, should_reload) = {
                 let mut st = state.borrow_mut();
                 let reload_needed = st.reload_needed_cached();
                 (
-                    st.shift_pressed_without_key && st.engine_ready() && !reload_needed,
+                    (!is_shift || st.shift_pressed_without_key)
+                        && st.engine_ready()
+                        && !reload_needed,
                     !st.engine_ready(),
                     reload_needed,
                 )
@@ -2204,7 +2216,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 start_reload_if_needed(&state);
             }
             append_key_diagnostic!(
-                "OnTestKeyUp modifier pending={} ready={} reload={} eat={should_eat}",
+                "OnTestKeyUp shift={is_shift} pending={} ready={} reload={} eat={should_eat}",
                 state.borrow().shift_pressed_without_key,
                 !should_retry,
                 should_reload,
@@ -2255,7 +2267,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
 
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
 
-            if should_bypass_empty_composition(vk, mods, &before_state) {
+            if should_bypass_empty_composition(vk, mods, &before_state)
+                && chord_keysym_for_vk(vk, lparam.0, mods, &before_state).is_none()
+            {
                 hide_candidate_window(&state);
                 return Ok(BOOL::from(false));
             }
@@ -2337,17 +2351,30 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         .or(Ok(BOOL::from(false)))
     }
 
-    fn OnKeyUp(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnKeyUp(&self, pic: Option<&ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         guard(|| {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
-            let Some(keysym) = shift_keysym_for_vk(vk) else {
-                return Ok(BOOL::from(false));
+            let is_shift = is_shift_vk(vk);
+            let (keysym, mods) = if let Some(keysym) = shift_keysym_for_vk(vk) {
+                (keysym, 0)
+            } else {
+                let Some(before_state) =
+                    cached_ime_state(&state).filter(|st| st.chord_composer && !st.ascii_mode)
+                else {
+                    return Ok(BOOL::from(false));
+                };
+                let mods = current_mod_mask();
+                let Some(keysym) = chord_keysym_for_vk(vk, lparam.0, mods, &before_state) else {
+                    return Ok(BOOL::from(false));
+                };
+                (keysym, mods)
             };
-            if !state.borrow().shift_pressed_without_key
-                || is_application_shortcut(vk, current_mod_mask(), false)
+            if is_shift
+                && (!state.borrow().shift_pressed_without_key
+                    || is_application_shortcut(vk, current_mod_mask(), false))
             {
                 state.borrow_mut().shift_pressed_without_key = false;
                 return Ok(BOOL::from(false));
@@ -2359,10 +2386,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             }
             let prepared_engine = {
                 let mut st = state.borrow_mut();
-                if !st.shift_pressed_without_key {
+                if is_shift && !st.shift_pressed_without_key {
                     return Ok(BOOL::from(false));
                 }
-                st.shift_pressed_without_key = false;
+                if is_shift {
+                    st.shift_pressed_without_key = false;
+                }
                 st.key_context = Some(context.clone());
                 drop(st);
                 prepare_engine_for_key(&context, &state, "OnKeyUp")?
@@ -2373,26 +2402,33 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
 
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
+            if !is_shift && !key_policy::should_forward_chord_release(keysym, mods, &before_state) {
+                return Ok(BOOL::from(false));
+            }
             // ascii_composer only recognizes a release after seeing its press.
             // Both run here so test callbacks remain entirely outside librime.
             let result = runtime_session(&state).and_then(|session| {
-                session.process_keys(&[(keysym, 0), (keysym, RIME_RELEASE_MASK)])
+                if is_shift {
+                    session.process_keys(&[(keysym, 0), (keysym, RIME_RELEASE_MASK)])
+                } else {
+                    session.process_key(keysym, mods | RIME_RELEASE_MASK)
+                }
             });
             let Some(result) = result else {
-                append_key_diagnostic!("OnKeyUp modifier pending=true result=false");
+                append_key_diagnostic!("OnKeyUp shift={is_shift} result=false");
                 hide_candidate_window(&state);
                 return Ok(BOOL::from(false));
             };
             append_key_diagnostic!(
-                "OnKeyUp modifier pending={} accepted={} ascii={}->{}",
-                true,
+                "OnKeyUp shift={is_shift} accepted={} ascii={}->{}",
                 result.accepted,
                 before_state.ascii_mode,
                 result.state.ascii_mode,
             );
-            let consumed =
+            let processed =
                 should_consume_processed_state(result.accepted, &before_state, &result.state);
-            if should_apply_processed_state(consumed, &before_state, &result.state)
+            let consumed = result.accepted || (is_shift && processed);
+            if should_apply_processed_state(processed, &before_state, &result.state)
                 && apply_ime_state(&context, client_id, &state, result.state, true, false, None)
                     .is_err()
             {

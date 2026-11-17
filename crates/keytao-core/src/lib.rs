@@ -156,6 +156,8 @@ pub struct ImeState {
     pub select_keys: Option<String>,
     pub ascii_mode: bool,
     #[serde(default)]
+    pub chord_composer: bool,
+    #[serde(default)]
     pub schema_id: String,
     pub schema_name: String,
 }
@@ -419,6 +421,7 @@ impl ImeState {
             committed: None,
             select_keys: None,
             ascii_mode: false,
+            chord_composer: false,
             schema_id: String::new(),
             schema_name: String::new(),
         }
@@ -556,7 +559,7 @@ mod desktop {
         RimeContext, RimeLeversApi, RimeTraits, RimeUserDictIterator,
     };
     use rime_api::{create_session, KeyEvent, KeyStatus};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::mem::ManuallyDrop;
     use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -1848,13 +1851,15 @@ mod desktop {
     /// An active rime input session.
     pub struct Engine {
         session: ManuallyDrop<rime_api::Session>,
+        chord_schema: RefCell<(String, bool)>,
         user_data_dir: Option<PathBuf>,
         user_dictionary_source_available: bool,
     }
 
     // SAFETY: Session holds only a usize (session_id) and librime itself is not
     // thread-safe, so every method — including `Drop`, which destroys the
-    // session — serializes on `RIME_API_LOCK` before touching rime_api.
+    // session — serializes on `RIME_API_LOCK` before touching rime_api or the
+    // per-session chord cache.
     unsafe impl Send for Engine {}
     unsafe impl Sync for Engine {}
 
@@ -1942,6 +1947,7 @@ mod desktop {
             }
             Ok(Self {
                 session: ManuallyDrop::new(session),
+                chord_schema: RefCell::new((String::new(), false)),
                 user_data_dir: Some(user_data_dir.to_path_buf()),
                 user_dictionary_source_available,
             })
@@ -1951,7 +1957,7 @@ mod desktop {
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             let status = self.session.process_key(key_event(keycode, mask));
-            let state = extract_state_with_commit(&self.session);
+            let state = extract_state_with_commit(self);
             self.remember_committed_user_phrase(&state);
             drop(_rime);
             let result = KeyProcessResult {
@@ -1989,7 +1995,7 @@ mod desktop {
         /// query must never call it or the text would never reach the client.
         pub fn state(&self) -> ImeState {
             let _rime = rime_api_lock();
-            extract_state_readonly(&self.session)
+            extract_state_readonly(self)
         }
 
         /// Pick the `index`-th candidate of the current page through librime's
@@ -2008,7 +2014,7 @@ mod desktop {
             if handled.is_none() {
                 self.send_select_key(index);
             }
-            let state = extract_state_with_commit(&self.session);
+            let state = extract_state_with_commit(self);
             self.remember_committed_user_phrase(&state);
             drop(_rime);
             if let Some(started) = started {
@@ -2035,7 +2041,7 @@ mod desktop {
                     highlight(self.session.session_id, index);
                 }
             }
-            extract_state_with_commit(&self.session)
+            extract_state_with_commit(self)
         }
 
         /// Whether the `index`-th candidate on the current page is backed by an
@@ -2043,7 +2049,7 @@ mod desktop {
         pub fn candidate_is_user_phrase_on_page(&self, index: usize) -> bool {
             let candidate = {
                 let _rime = rime_api_lock();
-                let state = extract_state_readonly(&self.session);
+                let state = extract_state_readonly(self);
                 let Some(candidate) = state.candidates.get(index) else {
                     return false;
                 };
@@ -2081,7 +2087,7 @@ mod desktop {
         pub fn delete_candidate_on_page_result(&self, index: usize) -> (ImeState, bool) {
             let (before, candidate_text, dictionaries) = {
                 let _rime = rime_api_lock();
-                let before = extract_state_readonly(&self.session);
+                let before = extract_state_readonly(self);
                 let Some(candidate_text) = before
                     .candidates
                     .get(index)
@@ -2090,7 +2096,7 @@ mod desktop {
                     return (before, false);
                 };
                 let Ok(status) = self.session.status() else {
-                    return (extract_state_readonly(&self.session), false);
+                    return (extract_state_readonly(self), false);
                 };
                 let dictionaries = schema_user_dictionary_names_locked(status.schema_id());
                 (before, candidate_text, dictionaries)
@@ -2100,7 +2106,7 @@ mod desktop {
             }
 
             let _rime = rime_api_lock();
-            let current = extract_state_readonly(&self.session);
+            let current = extract_state_readonly(self);
             if current
                 .candidates
                 .get(index)
@@ -2128,7 +2134,7 @@ mod desktop {
                     }
                 }
             }
-            (extract_state_with_commit(&self.session), deleted)
+            (extract_state_with_commit(self), deleted)
         }
 
         /// Fallback for ABIs without `select_candidate_on_current_page`.
@@ -2176,7 +2182,7 @@ mod desktop {
                     select_candidate(self.session.session_id, index);
                 }
             }
-            let state = extract_state_with_commit(&self.session);
+            let state = extract_state_with_commit(self);
             self.remember_committed_user_phrase(&state);
             drop(_rime);
             if let Some(started) = started {
@@ -2214,7 +2220,7 @@ mod desktop {
                 let kc = if backward { b'-' as u32 } else { b'=' as u32 };
                 self.session.process_key(key_event(kc, 0));
             }
-            extract_state_with_commit(&self.session)
+            extract_state_with_commit(self)
         }
 
         /// Drop the composition without committing anything.
@@ -2251,9 +2257,9 @@ mod desktop {
                     .process_key(key_event(key_policy::XK_ESCAPE, 0));
             }
             if consume_commit {
-                extract_state_with_commit(&self.session)
+                extract_state_with_commit(self)
             } else {
-                extract_state_readonly(&self.session)
+                extract_state_readonly(self)
             }
         }
 
@@ -2273,7 +2279,7 @@ mod desktop {
                 self.session
                     .process_key(key_event(key_policy::XK_RETURN, 0));
             }
-            let state = extract_state_with_commit(&self.session);
+            let state = extract_state_with_commit(self);
             drop(_rime);
             if let Some(started) = started {
                 crate::rt_log!(
@@ -2313,7 +2319,7 @@ mod desktop {
             let _rime = rime_api_lock();
             let raw = self.raw_input_locked().unwrap_or_default();
             if raw.is_empty() {
-                return extract_state_with_commit(&self.session);
+                return extract_state_with_commit(self);
             }
             let mut state = self.clear_composition();
             let pending = state.committed.take();
@@ -2329,7 +2335,7 @@ mod desktop {
         /// raw input get committed (see [`Engine::commit_raw_input`]).
         pub fn process_enter(&self) -> KeyProcessResult {
             let _rime = rime_api_lock();
-            let composing = !extract_state_readonly(&self.session).preedit.is_empty();
+            let composing = !extract_state_readonly(self).preedit.is_empty();
             let result = self.process_key_result(key_policy::XK_RETURN, 0);
             if result.accepted || !composing {
                 return result;
@@ -2382,7 +2388,7 @@ mod desktop {
         pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
             let _rime = rime_api_lock();
             select_schema_checked(&self.session, schema_id)?;
-            Ok(extract_state_readonly(&self.session))
+            Ok(extract_state_readonly(self))
         }
 
         pub(crate) fn apply_switch_request(
@@ -2443,7 +2449,7 @@ mod desktop {
         pub fn set_ascii_mode(&self, enabled: bool) -> ImeState {
             let _rime = rime_api_lock();
             set_session_option(&self.session, "ascii_mode", enabled);
-            extract_state_with_commit(&self.session)
+            extract_state_with_commit(self)
         }
 
         pub fn get_option(&self, option_name: &str) -> bool {
@@ -2454,7 +2460,7 @@ mod desktop {
         pub fn set_option(&self, option_name: &str, enabled: bool) -> ImeState {
             let _rime = rime_api_lock();
             set_session_option(&self.session, option_name, enabled);
-            extract_state_readonly(&self.session)
+            extract_state_readonly(self)
         }
     }
 
@@ -2508,6 +2514,30 @@ mod desktop {
             rime_api_member!(api, get_option)
                 .map(|get_option| get_option(session.session_id, option.as_ptr()) != 0)
                 .unwrap_or(false)
+        }
+    }
+
+    fn schema_has_chord_composer_locked(schema_id: &str) -> bool {
+        let Ok(schema_id) = CString::new(schema_id) else {
+            return false;
+        };
+        unsafe {
+            let api = rime_get_api();
+            let Some(open) = rime_api_member!(api, schema_open) else {
+                return false;
+            };
+            let Some(close) = rime_api_member!(api, config_close) else {
+                return false;
+            };
+            let mut config: RimeConfig = std::mem::zeroed();
+            if open(schema_id.as_ptr(), &mut config) == 0 {
+                return false;
+            }
+            let has_chord = config_string_list_locked(&mut config, "engine/processors")
+                .iter()
+                .any(|processor| processor.split('@').next() == Some("chord_composer"));
+            close(&mut config);
+            has_chord
         }
     }
 
@@ -2983,15 +3013,15 @@ mod desktop {
     }
 
     /// Snapshot after a state-changing call: takes the pending commit with it.
-    fn extract_state_with_commit(session: &rime_api::Session) -> ImeState {
-        let committed = session.commit().map(|c| c.text().to_string());
-        extract_state(session, committed)
+    fn extract_state_with_commit(engine: &Engine) -> ImeState {
+        let committed = engine.session.commit().map(|c| c.text().to_string());
+        extract_state(engine, committed)
     }
 
     /// Snapshot for read-only queries: leaves the pending commit for the next
     /// key event so that no text is dropped on the floor.
-    fn extract_state_readonly(session: &rime_api::Session) -> ImeState {
-        extract_state(session, None)
+    fn extract_state_readonly(engine: &Engine) -> ImeState {
+        extract_state(engine, None)
     }
 
     fn session_select_keys(session: &rime_api::Session) -> Option<String> {
@@ -2999,7 +3029,8 @@ mod desktop {
         ctx.menu().select_keys.map(|keys: &str| keys.to_string())
     }
 
-    fn extract_state(session: &rime_api::Session, committed: Option<String>) -> ImeState {
+    fn extract_state(engine: &Engine, committed: Option<String>) -> ImeState {
+        let session = &engine.session;
         let status = session.status().ok();
         let ascii_mode = status.as_ref().map(|s| s.is_ascii_mode).unwrap_or(false);
         let schema_id = status
@@ -3010,10 +3041,21 @@ mod desktop {
             .as_ref()
             .map(|s| s.schema_name().to_string())
             .unwrap_or_default();
+        let chord_composer = {
+            let mut cached = engine.chord_schema.borrow_mut();
+            if cached.0 != schema_id {
+                *cached = (
+                    schema_id.clone(),
+                    schema_has_chord_composer_locked(&schema_id),
+                );
+            }
+            cached.1
+        };
         let Some(ctx) = session.context() else {
             return ImeState {
                 committed,
                 ascii_mode,
+                chord_composer,
                 schema_id,
                 schema_name,
                 ..ImeState::empty()
@@ -3051,6 +3093,7 @@ mod desktop {
             committed,
             select_keys: menu.select_keys.map(|s: &str| s.to_string()),
             ascii_mode,
+            chord_composer,
             schema_id,
             schema_name,
         }
@@ -3267,8 +3310,8 @@ pub const DEFAULT_SELECT_KEYS: &str = "1234567890";
 
 pub mod key_policy {
     use super::{
-        ImeState, RIME_MOD_CONTROL, RIME_MOD_HYPER, RIME_MOD_LOCK, RIME_MOD_META, RIME_MOD_SHIFT,
-        RIME_MOD_SUPER,
+        ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_HYPER, RIME_MOD_LOCK, RIME_MOD_META,
+        RIME_MOD_SHIFT, RIME_MOD_SUPER,
     };
 
     pub const XK_SPACE: u32 = 0x0020;
@@ -3409,7 +3452,15 @@ pub mod key_policy {
     /// switching, punctuation and the schema's bindings, and it reports the
     /// key as not accepted when the application should get it.
     pub fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-        should_bypass_empty_composition_key(is_nonstarter_key(sym), mods, state)
+        !(mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) == 0
+            && !is_system_reserved_modifier(mods)
+            && should_forward_chord_release(sym, mods, state))
+            && should_bypass_empty_composition_key(is_nonstarter_key(sym), mods, state)
+    }
+
+    /// Chord composers must see releases even if modifiers changed after the press.
+    pub fn should_forward_chord_release(sym: u32, _mods: u32, state: &ImeState) -> bool {
+        state.chord_composer && !state.ascii_mode && (0x20..=0x7e).contains(&sym)
     }
 
     pub fn should_bypass_empty_composition_key(
@@ -3579,6 +3630,84 @@ mod ime_runtime_tests {
         ];
         state.select_keys = select_keys.map(str::to_owned);
         state
+    }
+
+    #[test]
+    fn chord_releases_require_a_chord_schema_and_preserve_ascii_mode() {
+        let mut state = ImeState::empty();
+        assert!(!key_policy::should_forward_chord_release(
+            b'a' as u32,
+            0,
+            &state
+        ));
+        state.chord_composer = true;
+        for key in [b'a', b'Z', b'1', b';', b' '] {
+            for mods in [0, RIME_MOD_SHIFT, RIME_MOD_LOCK, RIME_RELEASE_MASK] {
+                assert!(key_policy::should_forward_chord_release(
+                    key as u32, mods, &state
+                ));
+                assert!(!key_policy::should_bypass_empty_composition(
+                    key as u32, mods, &state
+                ));
+            }
+        }
+        for mods in [
+            RIME_MOD_CONTROL,
+            RIME_MOD_ALT,
+            RIME_MOD_SUPER,
+            RIME_MOD_META,
+        ] {
+            for key in [b'a', b'Z', b'1', b';', b' '] {
+                assert!(key_policy::should_forward_chord_release(
+                    key as u32,
+                    mods | RIME_RELEASE_MASK,
+                    &state
+                ));
+            }
+        }
+        for key in [
+            key_policy::XK_RETURN,
+            key_policy::XK_BACK_SPACE,
+            0xffe1,
+            0x7f,
+        ] {
+            assert!(!key_policy::should_forward_chord_release(key, 0, &state));
+        }
+        state.ascii_mode = true;
+        assert!(!key_policy::should_forward_chord_release(
+            b'a' as u32,
+            0,
+            &state
+        ));
+        assert!(key_policy::should_bypass_empty_composition(
+            key_policy::XK_SPACE,
+            0,
+            &state
+        ));
+        let mut legacy = serde_json::to_value(state).unwrap();
+        legacy.as_object_mut().unwrap().remove("chord_composer");
+        let legacy: ImeState = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.chord_composer);
+    }
+
+    #[test]
+    fn chord_release_forwarding_preserves_shortcut_press_bypass() {
+        let mut state = ImeState::empty();
+        state.chord_composer = true;
+        for mods in [RIME_MOD_SUPER, RIME_MOD_META] {
+            assert!(key_policy::should_bypass_empty_composition(
+                b'a' as u32,
+                mods,
+                &state
+            ));
+        }
+        for mods in [RIME_MOD_CONTROL, RIME_MOD_ALT] {
+            assert!(key_policy::should_bypass_empty_composition(
+                key_policy::XK_SPACE,
+                mods,
+                &state
+            ));
+        }
     }
 
     #[test]

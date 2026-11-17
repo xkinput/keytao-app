@@ -716,8 +716,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
 
         let mods = u32::from(xev.state);
 
-        // KeyRelease is subscribed only so that librime's ascii_composer sees a
-        // solo Shift and can toggle Chinese/English; the client keeps the event.
+        // ascii_composer needs Shift releases; chord_composer needs printable ones.
         match xev.response_type & 0x7f {
             X_KEY_PRESS => {}
             X_KEY_RELEASE => {
@@ -730,6 +729,27 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
                         let applied = self.apply_ime_state(server, user_ic, result.state);
                         runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
                         applied?;
+                    }
+                } else if key_policy::should_forward_chord_release(
+                    keysym,
+                    mods,
+                    &user_ic.user_data.session.state(),
+                ) {
+                    // X11 Mod4 is bit 6; Rime's Super modifier is bit 26.
+                    let mods = if mods & (1 << 6) != 0 {
+                        mods | keytao_core::RIME_MOD_SUPER
+                    } else {
+                        mods
+                    };
+                    if let Some(result) = user_ic
+                        .user_data
+                        .session
+                        .process_key_result(keysym, mods | RIME_RELEASE_MASK)
+                    {
+                        let consumed = result.accepted;
+                        self.apply_ime_state(server, user_ic, result.state)?;
+                        runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+                        return Ok(consumed);
                     }
                 }
                 return Ok(false);
