@@ -17,20 +17,26 @@ pub(crate) enum Staging {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PackageFile {
-    path: String,
-    sha256: String,
-    size: u64,
+pub(crate) struct PackageFile {
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
 }
 
 #[derive(Serialize, Deserialize)]
-struct StoredPackage {
-    key: String,
-    origin: Option<String>,
-    installed_at: u64,
-    files: Vec<PackageFile>,
+pub(crate) struct StoredPackage {
+    pub(crate) key: String,
+    pub(crate) origin: Option<String>,
+    pub(crate) installed_at: u64,
+    pub(crate) files: Vec<PackageFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) grammar: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) addon_manifest: Option<serde_json::Value>,
     #[serde(flatten)]
-    meta: PackageMeta,
+    pub(crate) meta: PackageMeta,
 }
 
 struct PackageStage(PathBuf);
@@ -112,6 +118,61 @@ impl<'a> PackageStore<'a> {
 
     pub(crate) fn metadata_path(&self, key: &str) -> PathBuf {
         self.package_path(key).join("package.json")
+    }
+
+    pub(crate) fn addon_path(&self, id: &str) -> PathBuf {
+        self.root().join("addons").join(id)
+    }
+
+    pub(crate) fn checked_addon_path(&self, id: &str) -> Result<PathBuf, CoreError> {
+        if !crate::addon_store::IDS.contains(&id) {
+            return Err(CoreError::Other("Unknown add-on package".into()));
+        }
+        safe_path(&self.checked_root()?, &format!("addons/{id}")).map_err(CoreError::Other)?;
+        Ok(self.addon_path(id))
+    }
+
+    pub(crate) fn addon_stage(&self) -> Result<tempfile::TempDir, CoreError> {
+        Ok(tempfile::tempdir_in(self.staging_root()?)?)
+    }
+
+    pub(crate) fn recover_addon(&self, id: &str) -> Result<(), CoreError> {
+        let destination = self.checked_addon_path(id)?;
+        Self::recover_addon_at(&destination, id)
+    }
+
+    pub(crate) fn recover_addon_at(destination: &Path, id: &str) -> Result<(), CoreError> {
+        let old = destination.with_file_name(format!(".old-{id}"));
+        safe_path(destination.parent().unwrap(), &format!(".old-{id}"))
+            .map_err(CoreError::Other)?;
+        if !old.try_exists()? {
+            return Ok(());
+        }
+        if destination.try_exists()?
+            && crate::addon_store::validate_directory(&destination, id).is_ok()
+        {
+            fs::remove_dir_all(old)?;
+        } else {
+            if destination.try_exists()? {
+                fs::remove_dir_all(&destination)?;
+            }
+            fs::rename(old, destination)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_addon_at(
+        destination: &Path,
+        id: &str,
+        stage: &Path,
+    ) -> Result<(), CoreError> {
+        Self::recover_addon_at(destination, id)?;
+        crate::addon_store::validate_directory(stage, id)?;
+        sync_package_directories(stage)?;
+        fs::create_dir_all(destination.parent().unwrap())?;
+        publish_directory(destination, stage, |source, target| {
+            fs::rename(source, target)
+        })
     }
 
     fn checked_package_path(&self, key: &str) -> Result<PathBuf, CoreError> {
@@ -334,6 +395,9 @@ impl<'a> PackageStore<'a> {
             }),
             installed_at: meta.installed_at_unix,
             files,
+            variant: None,
+            grammar: None,
+            addon_manifest: None,
             meta: serde_json::from_value(serde_json::to_value(meta)?)?,
         };
         validate_metadata(&meta.scheme_key, &stored)?;
@@ -345,38 +409,7 @@ impl<'a> PackageStore<'a> {
         fs::create_dir_all(destination.parent().unwrap())?;
         sync_directory(&self.root())?;
         self.recover_old(&meta.scheme_key)?;
-        let old = destination.with_file_name(format!(".old-{}", meta.scheme_key));
-        let had_old = destination.exists();
-        if had_old {
-            fs::rename(&destination, &old)?;
-            if let Err(error) = sync_directory(destination.parent().unwrap()) {
-                fs::rename(&old, &destination)?;
-                return Err(error.into());
-            }
-        }
-        if let Err(error) = rename_new(&stage.0, &destination) {
-            if had_old {
-                fs::rename(&old, &destination).map_err(|rollback| {
-                    CoreError::Other(format!(
-                        "Package update failed: {error}; rollback failed: {rollback}"
-                    ))
-                })?;
-            }
-            return Err(error.into());
-        }
-        if let Err(error) = sync_directory(destination.parent().unwrap()) {
-            fs::remove_dir_all(&destination)?;
-            if had_old {
-                fs::rename(&old, &destination)?;
-            }
-            return Err(error.into());
-        }
-        if had_old {
-            if let Err(error) = fs::remove_dir_all(&old) {
-                tracing::warn!(%error, "Old package cleanup deferred until next launch");
-            }
-        }
-        Ok(())
+        publish_directory(&destination, &stage.0, rename_new)
     }
 
     fn recover_old(&self, key: &str) -> Result<(), CoreError> {
@@ -699,6 +732,46 @@ fn collect_files(
             );
         } else {
             return Err(CoreError::Other("Package contains a special file".into()));
+        }
+    }
+    Ok(())
+}
+
+fn publish_directory(
+    destination: &Path,
+    stage: &Path,
+    rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), CoreError> {
+    let name = destination.file_name().unwrap().to_string_lossy();
+    let old = destination.with_file_name(format!(".old-{name}"));
+    let had_old = destination.try_exists()?;
+    if had_old {
+        fs::rename(destination, &old)?;
+        if let Err(error) = sync_directory(destination.parent().unwrap()) {
+            fs::rename(&old, destination)?;
+            return Err(error.into());
+        }
+    }
+    if let Err(error) = rename_new(stage, destination) {
+        if had_old {
+            fs::rename(&old, destination).map_err(|rollback| {
+                CoreError::Other(format!(
+                    "Package update failed: {error}; rollback failed: {rollback}"
+                ))
+            })?;
+        }
+        return Err(error.into());
+    }
+    if let Err(error) = sync_directory(destination.parent().unwrap()) {
+        fs::remove_dir_all(destination)?;
+        if had_old {
+            fs::rename(&old, destination)?;
+        }
+        return Err(error.into());
+    }
+    if had_old {
+        if let Err(error) = fs::remove_dir_all(&old) {
+            tracing::warn!(%error, "Old package cleanup deferred until next launch");
         }
     }
     Ok(())

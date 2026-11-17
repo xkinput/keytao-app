@@ -197,6 +197,59 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
     );
 }
 
+#[tokio::test]
+async fn main_package_switch_preserves_each_addon_record_and_sources() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    for id in crate::addon_store::IDS {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Host::new(directory.path(), Arc::new(Sink));
+        store(&host, "keytao", files("alpha"));
+        store(&host, "xmjd", files("beta"));
+        activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+        let sources = directory.path().join("official");
+        fs::create_dir(&sources).unwrap();
+        let module = match *id {
+            "easy_en" => "lua/easy_en.lua".into(),
+            "wanxiang" => "wanxiang_algebra.yaml".into(),
+            _ => format!("lua/{id}/select_character.lua"),
+        };
+        let entries = [
+            (format!("{id}.schema.yaml"), format!("schema: {{schema_id: {id}}}\ntranslator: {{dictionary: {id}}}\n").into_bytes()),
+            (format!("{id}.dict.yaml"), format!("name: {id}\nversion: '1'\n...\n").into_bytes()),
+            (module, b"return true\n".to_vec()),
+        ];
+        let mut inventory = Vec::new();
+        for (path, bytes) in &entries {
+            write(&sources, path, bytes);
+            write(&host.root, path, bytes);
+            inventory.push(serde_json::json!({"path":path, "sha256":sha256_reader(bytes.as_slice()).unwrap(), "size":bytes.len()}));
+        }
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "format":1, "version":"fixture", "source":"fixture", "archive_sha256":"a".repeat(64), "files":inventory, "includes_grammar":false,
+        })).unwrap();
+        let addon = crate::addon_store::AddonStore::new(&host.core, &host.root, id).unwrap();
+        addon.commit(&sources, &manifest).unwrap();
+        let default = host.root.join("default.custom.yaml");
+        let content = crate::addon::update_addon_schema_list_content(&fs::read_to_string(&default).unwrap(), id, true).unwrap();
+        fs::write(&default, content).unwrap();
+        let record = fs::read(PackageStore::new(&host.core).addon_path(id).join("activation.json")).unwrap();
+        for key in ["xmjd", "keytao"] {
+            activate_scheme(&host.core, key, &host.root).await.unwrap();
+            for (path, bytes) in &entries {
+                assert_eq!(fs::read(host.root.join(path)).unwrap(), *bytes, "{id}: {path}");
+            }
+            assert_eq!(fs::read(PackageStore::new(&host.core).addon_path(id).join("activation.json")).unwrap(), record);
+            let report = crate::package_orphans::report(&host.core, &host.root).unwrap();
+            assert!(report.files.iter().all(|file| !entries.iter().any(|(path, _)| *path == file.path)));
+        }
+        remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+        for (path, bytes) in &entries {
+            assert_eq!(fs::read(host.root.join(path)).unwrap(), *bytes, "{id}: {path}");
+        }
+        assert!(crate::scheme_files::parse_schema_list(&fs::read_to_string(default).unwrap()).contains(&id.to_string()));
+    }
+}
+
 fn sync_legacy_package(host: &Host) {
     let entries = files("alpha");
     store(host, "keytao", entries.clone());

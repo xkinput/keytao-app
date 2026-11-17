@@ -582,6 +582,8 @@ fn smart_install_entries(
         .map_err(|e| e.to_string())?;
         // Validate the entire archive and manifest before deleting or writing files.
         let package_rime_lua = crate::packages::rime_lua_from_archive(&zip_bytes)?;
+        let addons = crate::package_activation::addon_ownership(core, &dest)
+            .map_err(|e| e.to_string())?;
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         let retained: std::collections::BTreeSet<_> =
             crate::package_activation::retained(&cleanup_logs)
@@ -676,7 +678,7 @@ fn smart_install_entries(
                 && !is_protected_user_file(relative)
             {
                 logs.push(format!("[KEPT] {relative}"));
-            } else if crate::package_activation::addon_owned(&dest, relative) {
+            } else if addons.contains_key(relative) {
                 logs.push(format!("[KEPT] Add-on file: {relative}"));
             } else {
                 let existing = crate::packages::safe_path(&dest, relative)?;
@@ -743,10 +745,11 @@ fn smart_install_entries(
                 activation.owned.push(crate::package_activation::OwnedFile {
                     path: file.path,
                     sha256,
+                    move_file: false,
                 });
             }
         }
-        crate::packages::refresh_generated(&dest, &mut activation).map_err(|e| e.to_string())?;
+        crate::packages::refresh_generated(core, &dest, &mut activation).map_err(|e| e.to_string())?;
         for name in ["default.custom.yaml", "default-custom.yaml"] {
             if let Ok(bytes) = std::fs::read(dest.join(name)) {
                 if let Ok(value) = serde_yaml::from_slice(&bytes) {

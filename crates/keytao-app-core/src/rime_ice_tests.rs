@@ -30,8 +30,7 @@ const UNDATED_ATOM_FIXTURE: &str = r#"<feed xmlns="http://www.w3.org/2005/Atom">
   <entry><id>tag:github.com,2008:Repository/334110599/nightly</id></entry>
   <entry><id>tag:github.com,2008:Repository/334110599/v1.0</id></entry>
 </feed>"#;
-const RELEASES_API_FIXTURE: &str =
-    r#"[{"tag_name":"2026.06.30","assets":[{"name":"full.zip"}]}]"#;
+const RELEASES_API_FIXTURE: &str = r#"[{"tag_name":"2026.06.30","assets":[{"name":"full.zip"}]}]"#;
 
 struct TestRoot {
     dir: tempfile::TempDir,
@@ -158,7 +157,9 @@ fn atom_discovers_newest_dated_release_and_builds_package_urls() {
 #[test]
 fn atom_without_dated_releases_returns_a_clear_error() {
     assert_eq!(
-        release_package_from_atom(UNDATED_ATOM_FIXTURE).err().unwrap(),
+        release_package_from_atom(UNDATED_ATOM_FIXTURE)
+            .err()
+            .unwrap(),
         "雾凇拼音发布订阅中没有 YYYY.MM.DD 版本"
     );
 }
@@ -460,8 +461,7 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
     let root = TestRoot::new();
     let host = AddonHost::new(root.path());
     fs::write(root.path().join("rime.lua"), "stale main lua").unwrap();
-    let status = manage_rime_ice_with(&host.core, true, &host, |root| async move {
-        let mut receipt = InstallReceipt::new(&root)?;
+    let status = manage_rime_ice_with(&host.core, true, &host, |mut receipt| async move {
         let package = package("2026.06.30");
         let files = stage(&receipt, &package);
         commit_files(&mut receipt, files, &package, ARCHIVE_HASH.into())?;
@@ -482,9 +482,30 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
         Some(SCHEMA_ID)
     );
     assert!(!root.path().join("rime.lua").exists());
+    assert!(!root.path().join(MANIFEST).exists());
+    let status = manage_rime_ice_with(&host.core, true, &host, |mut receipt| async move {
+        let package = package("2026.07.01");
+        let files = stage(&receipt, &package);
+        commit_files(&mut receipt, files, &package, ARCHIVE_HASH.into())?;
+        Ok(receipt)
+    })
+    .await
+    .unwrap();
+    assert_eq!(status.version, "2026.07.01");
+    fs::write(root.path().join("rime_ice.dict.yaml"), "private dictionary").unwrap();
+    fs::write(root.path().join("rime_ice.userdb"), "learned").unwrap();
     let status = manage_rime_ice(&host.core, false, &host).await.unwrap();
     assert!(!status.installed && !status.deployed);
-    assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
+    assert_eq!(host.deploys.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fs::read_to_string(root.path().join("rime_ice.dict.yaml")).unwrap(),
+        "private dictionary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("rime_ice.userdb")).unwrap(),
+        "learned"
+    );
+    assert!(crate::addon_store::public_files(&host.core, SCHEMA_ID).is_err());
     assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
     assert_eq!(keytao_core::deployed_schema_id_from_dir(root.path()), None);
     assert!(!root.path().join("default.yaml").exists());

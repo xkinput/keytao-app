@@ -163,9 +163,10 @@ void main() {
           version: '1',
           englishAvailable: false,
         );
-        c.addon = c.wanxiang = c.rimeIce = status;
+        c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost = status;
         c.addonLatestVersion = c.wanxiangLatestVersion =
-            c.rimeIceLatestVersion = latest;
+            c.rimeIceLatestVersion = c.rimeMintLatestVersion =
+                c.rimeFrostLatestVersion = latest;
         await tester.pumpWidget(
           KeyTaoTheme(
             platform: c.info.platform,
@@ -179,11 +180,11 @@ void main() {
           buttons
               .where((button) => button.primary)
               .map((button) => button.label),
-          label == null ? isEmpty : [label, label, label],
+          label == null ? isEmpty : List.filled(5, label),
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
-          hasLength(installed ? 3 : 0),
+          hasLength(installed ? 5 : 0),
         );
         expect(tester.takeException(), isNull);
       },
@@ -235,6 +236,7 @@ void main() {
       );
     c.addon = c.wanxiang;
     addTearDown(c.dispose);
+    _size(tester, const Size(1000, 1200));
     await tester.pumpWidget(
       KeyTaoTheme(
         platform: c.info.platform,
@@ -244,7 +246,7 @@ void main() {
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, AppStrings.install),
     );
-    expect(installs, hasLength(3));
+    expect(installs, hasLength(5));
     expect(installs.every((button) => button.onPress != null), isTrue);
     expect(tester.takeException(), isNull);
   });

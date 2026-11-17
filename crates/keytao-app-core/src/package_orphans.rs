@@ -47,6 +47,7 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         Err(error) => return Err(error.into()),
     }
     let mut owned = BTreeSet::new();
+    owned.extend(crate::addon_store::report_paths(core, root)?);
     owned.extend(crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?);
     let store = PackageStore::new(core);
     for key in core.state().installed_packages.keys() {
@@ -91,17 +92,23 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
             && name != keytao_core::ACTIVE_SCHEME_MANIFEST
         {
             let path = safe_path(root, &name).map_err(CoreError::Other)?;
-            let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&fs::read(path)?) else {
+                continue;
+            };
             if let Some(files) = value["files"].as_array() {
                 for file in files {
-                    if let Some(path) = file["path"].as_str() {
-                        safe_path(root, path).map_err(CoreError::Other)?;
+                    if let Some(path) = file["path"]
+                        .as_str()
+                        .filter(|p| safe_path(root, p).is_ok())
+                    {
                         owned.insert(path.into());
                     }
                 }
             }
-            if let Some(path) = value["grammar"]["path"].as_str() {
-                safe_path(root, path).map_err(CoreError::Other)?;
+            if let Some(path) = value["grammar"]["path"]
+                .as_str()
+                .filter(|p| safe_path(root, p).is_ok())
+            {
                 owned.insert(path.into());
             }
         }
@@ -173,7 +180,6 @@ fn collect(
             collect(root, &path, owned, files)?;
         } else if metadata.is_file()
             && !owned.contains(&relative)
-            && !package_activation::addon_owned(root, &relative)
             && !generated(&relative, &path)?
         {
             files.push(OrphanFile {
@@ -449,7 +455,11 @@ mod tests {
         .unwrap();
         fs::write(
             root.join(".keytao-easy-en.json"),
-            r#"{"files":[{"path":"easy_en.dict.yaml"}]}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "format": 1, "version": "fixture", "source": "fixture",
+                "archive_sha256": "a".repeat(64),
+                "files": [{"path":"easy_en.dict.yaml", "sha256":sha256_reader(b"patch: {}\n".as_slice()).unwrap(), "size":10}],
+            })).unwrap(),
         )
         .unwrap();
         fs::write(root.join(".keytao-rime-user-0.lua"), b"user lua").unwrap();
@@ -458,10 +468,12 @@ mod tests {
             owned: vec![package_activation::OwnedFile {
                 path: "owned.schema.yaml".into(),
                 sha256: "unused".into(),
+                move_file: false,
             }],
             generated: vec![package_activation::OwnedFile {
                 path: "generated.custom.yaml".into(),
                 sha256: "unused".into(),
+                move_file: false,
             }],
             kept_backups: vec![package_activation::Backup {
                 path: "kept-target.yaml".into(),

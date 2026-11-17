@@ -318,13 +318,18 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
 }
 
 pub(crate) fn refresh_generated(
+    core: &Core,
     root: &Path,
     activation: &mut crate::package_activation::Activation,
 ) -> Result<(), CoreError> {
     let mut paths = crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?;
+    let addons = crate::package_activation::addon_ownership(core, root)?;
     paths.extend(["default.custom.yaml", "default-custom.yaml"].map(str::to_owned));
     activation.generated.clear();
     for path in paths {
+        if addons.contains_key(&path) {
+            continue;
+        }
         if let Some(file) = crate::package_activation::fingerprint(root, &path)? {
             activation.generated.push(file);
         }
@@ -338,6 +343,7 @@ pub(crate) fn refresh_generated(
             .push(crate::package_activation::OwnedFile {
                 path: "rime.lua".into(),
                 sha256: sha256_reader(content.as_bytes())?,
+                move_file: false,
             });
     }
     Ok(())
@@ -351,7 +357,7 @@ pub fn sync_generated(core: &Core, root: &Path) -> Result<(), CoreError> {
         }
     });
     active.root = root.canonicalize()?.to_string_lossy().into_owned();
-    refresh_generated(root, &mut active)?;
+    refresh_generated(core, root, &mut active)?;
     crate::package_activation::write(core, &active)?;
     Ok(())
 }
@@ -669,7 +675,7 @@ pub(crate) fn finalize_pending(
         if let Some(previous) = core.state().active_scheme {
             let files = store.package_path(&previous).join("files");
             if files.is_dir() {
-                crate::windows_public_schemas::remove_package(&files, Path::new(&receipt.root))
+                crate::windows_public_schemas::remove_package(core, &files, Path::new(&receipt.root))
                     .map_err(CoreError::Other)?;
             }
         }
@@ -678,6 +684,7 @@ pub(crate) fn finalize_pending(
     #[cfg(target_os = "windows")]
     if publish_public {
         crate::windows_public_schemas::publish_activation(
+            core,
             &store.package_path(scheme_key).join("files"),
             None,
             Path::new(&receipt.root),
@@ -960,11 +967,12 @@ async fn remove_active_package(
     let files = PackageStore::new(core).read_files(scheme_key)?.0;
     let paths = crate::package_activation::transaction_paths(&root, &files, None)?;
     let transaction = crate::package_activation::Transaction::begin(core, &root, paths)?;
+    let addons = crate::package_activation::addon_ownership(core, &root)?;
     let protected: BTreeSet<_> = manifest
         .keys()
         .filter(|relative| {
             crate::package_activation::user_file(relative)
-                || crate::package_activation::addon_owned(&root, relative)
+                || addons.contains_key(*relative)
         })
         .cloned()
         .collect();
@@ -1014,6 +1022,7 @@ async fn remove_active_package(
         {
             if crate::windows_public_schemas::is_default_user_root(&root) {
                 crate::windows_public_schemas::remove_package(
+                    core,
                     &PackageStore::new(core).package_path(scheme_key).join("files"),
                     &root,
                 ).map_err(CoreError::Other)?;
@@ -1122,6 +1131,7 @@ async fn remove_owned_package(
     #[cfg(target_os = "windows")]
     if crate::windows_public_schemas::is_default_user_root(root) {
         crate::windows_public_schemas::remove_package(
+            core,
             &PackageStore::new(core).package_path(scheme_key).join("files"),
             root,
         ).map_err(CoreError::Other)?;
@@ -1142,7 +1152,7 @@ async fn remove_owned_package(
         kept_backups: activation.kept_backups,
         ..Default::default()
     };
-    refresh_generated(root, &mut inactive)?;
+    refresh_generated(core, root, &mut inactive)?;
     crate::package_activation::write(core, &inactive)?;
     let legacy = PackageStore::new(core).checked_active_manifest_path()?;
     if legacy.try_exists()? {
@@ -1310,10 +1320,12 @@ pub(crate) fn cleanup_previous(
     if Path::new(&meta.root) != actual_root {
         return Ok(Vec::new());
     }
+    let addons = crate::package_activation::addon_ownership(core, root)
+        .map_err(|e| e.to_string())?;
     let protected = meta
         .manifest
         .keys()
-        .filter(|path| crate::package_activation::addon_owned(root, path))
+        .filter(|path| addons.contains_key(*path))
         .cloned()
         .collect();
     let mut logs = cleanup_manifest(root, &meta.manifest, &protected)?;

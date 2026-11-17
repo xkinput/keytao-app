@@ -217,9 +217,8 @@ Future<void> dismissSchemeUpdate({
   version: version,
 );
 
-/// Android extraction must return the platform result as JSON and must not
-/// re-enter install/deploy bridge calls while the install lock is held.
-/// Other platforms ignore the callback. Activation does not deploy the IME.
+/// The extraction callback is retained for bridge compatibility; all platforms
+/// install store files in Core. Activation does not deploy the IME.
 Future<InstallResultDto> activateScheme({
   required String schemeKey,
   required FutureOr<String> Function(String) androidExtract,
@@ -342,8 +341,8 @@ Future<InstallResultDto> installSchemeFromUrl({
   version: version,
 );
 
-/// Call only after the Android channel confirms storage permission. Dart must
-/// serialize prepare -> smartExtractZipToPrivate -> finish as one installation.
+/// Call after storage permission. The Android channel resolves the destination;
+/// finish_android_install performs the transactional installation in Core.
 Future<String> prepareAndroidInstall({required String url}) =>
     RustLib.instance.api.crateApiCorePrepareAndroidInstall(url: url);
 
@@ -490,6 +489,12 @@ Future<WanxiangGrammarStatusDto> manageWanxiangGrammar({
 Future<AddonStatusDto> rimeIceStatus() =>
     RustLib.instance.api.crateApiCoreRimeIceStatus();
 
+Future<AddonStatusDto> rimeMintStatus() =>
+    RustLib.instance.api.crateApiCoreRimeMintStatus();
+
+Future<AddonStatusDto> rimeFrostStatus() =>
+    RustLib.instance.api.crateApiCoreRimeFrostStatus();
+
 /// A failed upstream check leaves the locally installed status available.
 Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
     RustLib.instance.api.crateApiCoreCheckAddonUpdate(id: id);
@@ -512,6 +517,24 @@ Future<AddonStatusDto> manageRimeIce({
   required bool installed,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeIce(
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+Future<AddonStatusDto> manageRimeMint({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageRimeMint(
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+Future<AddonStatusDto> manageRimeFrost({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageRimeFrost(
   installed: installed,
   androidDeploy: androidDeploy,
 );

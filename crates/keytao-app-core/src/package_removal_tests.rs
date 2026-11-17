@@ -90,6 +90,24 @@ fn fixture(key: &str, addons: bool) -> (tempfile::TempDir, AddonHost) {
     .unwrap();
     zip.write_all(config.as_bytes()).unwrap();
     let bytes = zip.finish().unwrap().into_inner();
+    if addons {
+        for (id, manifest, installable) in [
+            ("easy_en", ".keytao-easy-en.json", crate::addon::is_package_file as fn(&str) -> bool),
+            ("wanxiang", ".keytao-wanxiang.json", crate::wanxiang::installable as fn(&str) -> bool),
+            ("rime_ice", ".keytao-rime-ice.json", crate::rime_ice::installable as fn(&str) -> bool),
+        ] {
+            let files: Vec<_> = ADDON_FILES.iter().filter(|path| installable(path)).map(|path| {
+                serde_json::json!({"path":path, "sha256":sha256_reader(b"fixture".as_slice()).unwrap(), "size":7})
+            }).collect();
+            let mut value = serde_json::json!({"format":1, "version":"fixture", "source":"fixture", "archive_sha256":"a".repeat(64), "files":files});
+            if id == "wanxiang" {
+                value["variant"] = "base".into();
+                value["includes_grammar"] = true.into();
+                value["grammar"] = serde_json::json!({"version":"fixture", "sha256":sha256_reader(b"fixture".as_slice()).unwrap(), "size":7});
+            }
+            fs::write(root.join(manifest), serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+    }
     store_cloud_archive(&host.core, key, Some("v1"), "official", None, &bytes, &root).unwrap();
     let meta = PackageStore::new(&host.core)
         .read_meta(key)
@@ -153,11 +171,18 @@ async fn removing_active_package_preserves_addons_and_user_files() {
         Some("easy_en")
     );
     for name in ADDON_FILES {
+        if name.starts_with(".keytao-") {
+            assert!(!host.root.join(name).exists(), "{name}");
+            continue;
+        }
         assert_eq!(
             fs::read_to_string(host.root.join(name)).unwrap(),
             "fixture",
             "{name}"
         );
+    }
+    for id in ["easy_en", "wanxiang", "rime_ice"] {
+        assert!(PackageStore::new(&host.core).addon_path(id).join("activation.json").is_file());
     }
     assert_user_files_kept(&host.root);
     assert_eq!(host.deploys.load(Ordering::SeqCst), 1);

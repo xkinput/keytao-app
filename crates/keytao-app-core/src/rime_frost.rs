@@ -1,0 +1,118 @@
+//! Downloadable Frost Pinyin releases, discovered without GitHub's API.
+
+use crate::{
+    Core, CoreError, CoreEvent,
+    events::InstallProgress,
+    pinyin_addons::FROST,
+    scheme_host::SchemeHost,
+    wanxiang::{InstallReceipt, RemotePackage, Status},
+};
+use std::{path::Path, sync::Arc, time::Duration};
+
+pub const SCHEMA_ID: &str = "rime_frost";
+const RELEASE_LATEST: &str = "https://github.com/gaboolic/rime-frost/releases/latest";
+
+pub(crate) fn package_from_location(location: &str) -> Result<RemotePackage, String> {
+    let url = reqwest::Url::parse(RELEASE_LATEST)
+        .and_then(|base| base.join(location))
+        .map_err(|e| format!("白霜拼音发布地址无效：{e}"))?;
+    let tag = url
+        .path()
+        .strip_prefix("/gaboolic/rime-frost/releases/tag/")
+        .filter(|tag| {
+            !tag.is_empty()
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        })
+        .ok_or("白霜拼音发布地址缺少有效版本号")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("白霜拼音发布地址无效".into());
+    }
+    Ok(RemotePackage {
+        version: tag.into(),
+        source: url.as_str().into(),
+        download_url: format!(
+            "https://github.com/gaboolic/rime-frost/releases/download/{tag}/rime-frost-schemas.zip"
+        ),
+        download_bytes: None,
+    })
+}
+
+async fn latest_package() -> Result<RemotePackage, String> {
+    let response = reqwest::Client::builder()
+        .user_agent("KeyTao-Addon-Installer")
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(RELEASE_LATEST)
+        .send()
+        .await
+        .map_err(|e| format!("白霜拼音更新查询失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_redirection() {
+        return Err("白霜拼音发布地址未返回重定向".into());
+    }
+    package_from_location(
+        response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or("白霜拼音发布地址缺少重定向位置")?,
+    )
+}
+
+pub async fn latest_version() -> Result<String, String> {
+    Ok(latest_package().await?.version)
+}
+
+pub fn status_at(root: &Path) -> Status {
+    FROST.status_at(root)
+}
+
+pub fn rime_frost_status(core: &Core, root: &Path) -> Result<Status, CoreError> {
+    FROST.status(core, root)
+}
+
+pub async fn install(
+    root: &Path,
+    progress: impl Fn(u8, &str) + Send + Sync + 'static,
+) -> Result<InstallReceipt, String> {
+    FROST.install(root, latest_package(), progress).await
+}
+
+pub fn uninstall(root: &Path) -> Result<InstallReceipt, String> {
+    FROST.uninstall(root)
+}
+
+pub async fn manage_rime_frost(
+    core: &Arc<Core>,
+    installed: bool,
+    host: &impl SchemeHost,
+) -> Result<Status, CoreError> {
+    FROST
+        .manage(core, installed, host, |receipt| async move {
+            let core = core.clone();
+            FROST
+                .install_receipt(receipt, latest_package(), move |percent, message| {
+                    core.emit(CoreEvent::InstallProgress(InstallProgress {
+                        stage: "rime-frost-download".into(),
+                        percent: u32::from(percent),
+                        message: message.into(),
+                    }))
+                })
+                .await
+        })
+        .await
+}

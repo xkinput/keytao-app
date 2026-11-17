@@ -18,6 +18,9 @@ pub mod ime_status;
 pub mod download;
 pub mod install;
 mod package_store;
+mod addon_store;
+mod downloaded_addon;
+mod pinyin_addons;
 mod package_activation;
 mod package_artifacts;
 pub mod package_orphans;
@@ -35,6 +38,8 @@ mod candidate_page_size;
 mod managed_custom;
 pub mod wanxiang;
 pub mod rime_ice;
+pub mod rime_mint;
+pub mod rime_frost;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_public_schemas;
 pub use scheme_types::*;

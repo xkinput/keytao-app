@@ -69,6 +69,10 @@ abstract final class AppStrings {
   static const wanxiangGrammar = '语法模型';
   static const wanxiangGrammarUnavailable = '语法模型不可用';
   static const rimeIce = '雾凇拼音';
+  static const rimeMint = '薄荷拼音';
+  static const rimeMintEnglish = 'Mint Pinyin';
+  static const rimeFrost = '白霜拼音';
+  static const rimeFrostEnglish = 'Frost Pinyin';
   static const wanxiangVariant = '万象拼音版本';
   static const wanxiangVariants = {
     'base': '基础版',
@@ -108,6 +112,8 @@ abstract final class AppStrings {
   static const installEnglishTooltip = '安装并部署 Easy English';
   static const installWanxiangTooltip = '安装并部署万象拼音';
   static const installRimeIceTooltip = '安装并部署雾凇拼音';
+  static const installRimeMintTooltip = '安装并部署薄荷拼音';
+  static const installRimeFrostTooltip = '安装并部署白霜拼音';
   static const noSchemeForDeploy = '未安装方案，请先安装';
   static const componentMissing = '系统组件缺失';
   static const schemeMissing = '未安装方案';
@@ -232,6 +238,10 @@ abstract final class AppStrings {
   static const wanxiangGrammarRemoved = '[ADDON] 语法模型已删除并部署';
   static const rimeIceInstalled = '[ADDON] 雾凇拼音已安装并部署';
   static const rimeIceRemoved = '[ADDON] 雾凇拼音已卸载';
+  static const rimeMintInstalled = '[ADDON] 薄荷拼音已安装并部署';
+  static const rimeMintRemoved = '[ADDON] 薄荷拼音已卸载';
+  static const rimeFrostInstalled = '[ADDON] 白霜拼音已安装并部署';
+  static const rimeFrostRemoved = '[ADDON] 白霜拼音已卸载';
 
   // Existing Flutter fallbacks retained for callers of the original controller.
   static const systemFailure = '系统操作失败';

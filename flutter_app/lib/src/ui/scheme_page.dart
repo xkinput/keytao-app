@@ -1097,6 +1097,42 @@ class AddonCard extends StatelessWidget {
           ),
           error: c.rimeIceError,
         ),
+        addon(
+          title: AppStrings.rimeMint,
+          status: c.rimeMintStatusText,
+          label: c.rimeMintButtonLabel,
+          tooltip: c.rimeMintTooltip,
+          showInstall: c.showRimeMintInstall,
+          install: c.canInstallRimeMint ? () => c.manageRimeMint(true) : null,
+          installed: c.rimeMint?.installed == true,
+          uninstall: c.canUninstallRimeMint
+              ? () => c.manageRimeMint(false)
+              : null,
+          active: c.isManagingRimeMint,
+          progress: InstallProgressView(
+            active: c.isManagingRimeMint,
+            progress: c.rimeMintProgress,
+          ),
+          error: c.rimeMintError,
+        ),
+        addon(
+          title: AppStrings.rimeFrost,
+          status: c.rimeFrostStatusText,
+          label: c.rimeFrostButtonLabel,
+          tooltip: c.rimeFrostTooltip,
+          showInstall: c.showRimeFrostInstall,
+          install: c.canInstallRimeFrost ? () => c.manageRimeFrost(true) : null,
+          installed: c.rimeFrost?.installed == true,
+          uninstall: c.canUninstallRimeFrost
+              ? () => c.manageRimeFrost(false)
+              : null,
+          active: c.isManagingRimeFrost,
+          progress: InstallProgressView(
+            active: c.isManagingRimeFrost,
+            progress: c.rimeFrostProgress,
+          ),
+          error: c.rimeFrostError,
+        ),
       ],
     );
   }

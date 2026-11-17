@@ -14,6 +14,8 @@ use std::{
 pub(crate) struct OwnedFile {
     pub path: String,
     pub sha256: String,
+    #[serde(default, rename = "move", skip_serializing_if = "std::ops::Not::not")]
+    pub move_file: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -71,11 +73,8 @@ pub(crate) fn user_file(path: &str) -> bool {
         || matches!(path, "squirrel.custom.yaml" | "weasel.custom.yaml")
 }
 
-pub(crate) fn addon_owned(root: &Path, path: &str) -> bool {
-    (crate::addon::is_package_file(path) && root.join(".keytao-easy-en.json").is_file())
-        || ((crate::wanxiang::installable(path) || path == "wanxiang-lts-zh-hans.gram")
-            && root.join(".keytao-wanxiang.json").is_file())
-        || (crate::rime_ice::installable(path) && root.join(".keytao-rime-ice.json").is_file())
+pub(crate) fn addon_ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
+    crate::addon_store::ownership(core, root)
 }
 
 pub(crate) fn backup(
@@ -108,6 +107,7 @@ pub(crate) fn fingerprint(root: &Path, relative: &str) -> Result<Option<OwnedFil
         Ok(file) => Ok(Some(OwnedFile {
             path: relative.into(),
             sha256: sha256_reader(file)?,
+            move_file: false,
         })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -130,6 +130,7 @@ pub(crate) fn deactivate(
 ) -> Result<Vec<String>, CoreError> {
     let mut logs = Vec::new();
     let mut modified = BTreeSet::new();
+    let addons = addon_ownership(core, root)?;
     let package_files = PackageStore::new(core).read_files(&active.key)?.0;
     let mut custom_hashes = BTreeMap::new();
     for (path, bytes) in &package_files {
@@ -148,7 +149,7 @@ pub(crate) fn deactivate(
     for file in active.owned.iter().chain(&active.generated) {
         if !checked.insert(&file.path)
             || user_file(&file.path)
-            || addon_owned(root, &file.path)
+            || addons.contains_key(&file.path)
             || matches!(
                 file.path.as_str(),
                 "default.custom.yaml" | "default-custom.yaml" | "rime.lua"

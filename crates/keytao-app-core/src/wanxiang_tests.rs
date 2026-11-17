@@ -504,7 +504,10 @@ fn stage_variant_fixture(
 }
 
 fn install_variant_fixture(root: &Path, variant: &str) -> InstallReceipt {
-    let mut receipt = InstallReceipt::new(root).unwrap();
+    install_variant_receipt(InstallReceipt::new(root).unwrap(), variant)
+}
+
+fn install_variant_receipt(mut receipt: InstallReceipt, variant: &str) -> InstallReceipt {
     let files = stage_variant_fixture(&receipt, &[], variant);
     commit_files(
         &mut receipt,
@@ -532,7 +535,7 @@ async fn standalone_wanxiang_installs_deploys_and_uninstalls_without_a_main_sche
         true,
         "base".into(),
         &host,
-        |root, variant| async move { Ok(install_variant_fixture(&root, &variant)) },
+        |receipt, variant| async move { Ok(install_variant_receipt(receipt, &variant)) },
     )
     .await
     .unwrap();
@@ -595,7 +598,7 @@ async fn main_scheme_keeps_priority_when_installing_wanxiang() {
         true,
         "base".into(),
         &host,
-        |root, variant| async move { Ok(install_variant_fixture(&root, &variant)) },
+        |receipt, variant| async move { Ok(install_variant_receipt(receipt, &variant)) },
     )
     .await
     .unwrap();
@@ -609,6 +612,171 @@ async fn main_scheme_keeps_priority_when_installing_wanxiang() {
         fs::read_to_string(root.path.join("rime.lua")).unwrap(),
         "main lua"
     );
+}
+
+#[tokio::test]
+async fn stored_wanxiang_updates_and_rolls_back_grammar_without_copying_the_model() {
+    use crate::scheme_host::tests::AddonHost;
+    let root = TestRoot::new();
+    let host = AddonHost::new(&root.path);
+    for variant in ["flypy", "zrm"] {
+        manage_wanxiang_with(
+            &host.core,
+            true,
+            variant.into(),
+            &host,
+            |receipt, variant| async move { Ok(install_variant_receipt(receipt, &variant)) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            wanxiang_status(&host.core, &root.path).unwrap().variant,
+            variant
+        );
+        if variant == "flypy" {
+            assert!(
+                crate::addon_store::public_files(&host.core, SCHEMA_ID)
+                    .unwrap()
+                    .iter()
+                    .any(|(_, relative)| relative == Path::new(FLYPY_PATCH))
+            );
+        }
+        assert!(!root.path.join(MANIFEST).exists());
+    }
+    let store = crate::package_store::PackageStore::new(&host.core).addon_path(SCHEMA_ID);
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    receipt.attach_store(&host.core, SCHEMA_ID).unwrap();
+    receipt.seed_store_sources(&host.core, SCHEMA_ID).unwrap();
+    let (model, package) = grammar_fixture(&receipt);
+    commit_grammar(&mut receipt, Some((&model, &package)), true, true).unwrap();
+    receipt.commit_store(true).unwrap();
+    receipt.finish().unwrap();
+    assert_eq!(
+        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        b"tiny fake grammar fixture"
+    );
+    assert!(!store.join("files").join(GRAMMAR_FILE).exists());
+    assert!(
+        fs::read_to_string(store.join("files/wanxiang.schema.yaml"))
+            .unwrap()
+            .contains("language: \"\"")
+    );
+    let activation: crate::package_activation::Activation =
+        serde_json::from_slice(&fs::read(store.join("activation.json")).unwrap()).unwrap();
+    assert!(
+        activation
+            .owned
+            .iter()
+            .any(|file| file.path == GRAMMAR_FILE && file.move_file)
+    );
+    let stored_manifest = fs::read(store.join("package.json")).unwrap();
+    let live_schema = fs::read(root.path.join("wanxiang.schema.yaml")).unwrap();
+    {
+        let mut receipt = InstallReceipt::new(&root.path).unwrap();
+        receipt.attach_store(&host.core, SCHEMA_ID).unwrap();
+        receipt.seed_store_sources(&host.core, SCHEMA_ID).unwrap();
+        commit_grammar(&mut receipt, None, false, true).unwrap();
+        assert!(!root.path.join(GRAMMAR_FILE).exists());
+    }
+    assert_eq!(
+        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        b"tiny fake grammar fixture"
+    );
+    assert_eq!(
+        fs::read(root.path.join("wanxiang.schema.yaml")).unwrap(),
+        live_schema
+    );
+    assert_eq!(
+        fs::read(store.join("package.json")).unwrap(),
+        stored_manifest
+    );
+    host.fail_deploys
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        manage_wanxiang_with(
+            &host.core,
+            true,
+            "flypy".into(),
+            &host,
+            |receipt, variant| async move { Ok(install_variant_receipt(receipt, &variant)) },
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(store.join("package.json")).unwrap(),
+        stored_manifest
+    );
+    assert_eq!(
+        fs::read(root.path.join("wanxiang.schema.yaml")).unwrap(),
+        live_schema
+    );
+    assert_eq!(
+        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        b"tiny fake grammar fixture"
+    );
+    fs::write(
+        root.path.join("main.schema.yaml"),
+        "schema: {schema_id: main}\n",
+    )
+    .unwrap();
+    fs::write(root.path.join("main.dict.yaml"), "name: main\n").unwrap();
+    fs::create_dir_all(root.path.join("sync")).unwrap();
+    fs::write(root.path.join("sync/user.txt"), b"user sync").unwrap();
+    fs::write(root.path.join("wanxiang.userdb.txt"), b"user history").unwrap();
+    manage_wanxiang(&host.core, false, "zrm".into(), &host)
+        .await
+        .unwrap();
+    assert!(!store.exists());
+    assert!(!root.path.join(GRAMMAR_FILE).exists());
+    assert!(root.path.join("main.schema.yaml").exists());
+    assert!(root.path.join("main.dict.yaml").exists());
+    assert_eq!(
+        fs::read(root.path.join("sync/user.txt")).unwrap(),
+        b"user sync"
+    );
+    assert_eq!(
+        fs::read(root.path.join("wanxiang.userdb.txt")).unwrap(),
+        b"user history"
+    );
+}
+
+#[test]
+fn uninstall_preserves_a_modified_grammar_model() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "base")
+        .finish()
+        .unwrap();
+    install_grammar_fixture(&root.path).finish().unwrap();
+    fs::write(root.path.join(GRAMMAR_FILE), b"user model").unwrap();
+    uninstall(&root.path).unwrap().finish().unwrap();
+    assert_eq!(
+        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        b"user model"
+    );
+}
+
+#[test]
+fn identical_main_owned_sources_are_rejected_before_addon_changes() {
+    let root = TestRoot::new();
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    let files = stage_variant_fixture(&receipt, &[], "base");
+    let source = receipt.work.join("files/wanxiang.dict.yaml");
+    fs::copy(&source, root.path.join("wanxiang.dict.yaml")).unwrap();
+    receipt
+        .other_owners
+        .insert("wanxiang.dict.yaml".into(), "main".into());
+    let original = fs::read(root.path.join("wanxiang.dict.yaml")).unwrap();
+    assert!(
+        commit_fixture(&mut receipt, files)
+            .unwrap_err()
+            .contains("main")
+    );
+    assert_eq!(
+        fs::read(root.path.join("wanxiang.dict.yaml")).unwrap(),
+        original
+    );
+    assert!(!root.path.join("wanxiang.schema.yaml").exists());
 }
 
 #[test]

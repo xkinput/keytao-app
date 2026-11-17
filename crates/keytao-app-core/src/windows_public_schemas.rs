@@ -4,9 +4,7 @@
 #[cfg(target_os = "windows")]
 use crate::{
     Core, CoreEvent,
-    addon::{
-        EASY_EN_ADDON_ID, addon_schema_status_at, official_source_files, prepare_public_package,
-    },
+    addon::EASY_EN_ADDON_ID,
     events::InstallProgress,
     scheme::{build_client, fetch_scheme_release},
 };
@@ -466,8 +464,8 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
         bytes.extend_from_slice(&chunk);
     }
     publish_package(&bytes)?;
-    if addon_schema_status_at(&root, EASY_EN_ADDON_ID).installed {
-        prepare_public_package(&root, &core.env().data_dir.join("easy-en-public")).await?;
+    if crate::addon::addon_schema_status(core, || Ok(root.clone()), EASY_EN_ADDON_ID.into())
+        .map_err(|error| error.to_string())?.installed {
         publish_english_addon(core)?;
     }
     publish_english_settings(
@@ -485,7 +483,10 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub fn publish_english_addon(core: &Core) -> Result<(), String> {
-    let files = official_source_files(&core.env().data_dir.join("easy-en-public"))?;
+    let files = crate::addon_store::public_files(core, EASY_EN_ADDON_ID)?;
+    let files = files.into_iter().map(|(path, relative)| {
+        std::fs::read(path).map(|bytes| (relative, bytes)).map_err(|error| error.to_string())
+    }).collect::<Result<Vec<_>, _>>()?;
     publish_files(&files)
 }
 
@@ -524,6 +525,7 @@ fn is_public_asset(path: &Path) -> bool {
     if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
         || path == Path::new("build/.keytao-skipped-schemas.json")
         || path == Path::new("lua/rime_ice/lunar.db")
+        || path == Path::new("zh-moqi.gram")
     {
         return true;
     }
@@ -619,6 +621,7 @@ pub fn publish_source_files(files: &[(PathBuf, PathBuf)]) -> Result<(), String> 
 
 /// Both directories must be package-store sources, never the private Rime root.
 pub fn publish_activation(
+    core: &crate::Core,
     incoming: &Path,
     previous: Option<&Path>,
     private_root: &Path,
@@ -632,18 +635,21 @@ pub fn publish_activation(
         &public_root()?,
         Some(incoming),
         previous,
-        private_root,
+        &crate::package_activation::addon_ownership(core, private_root)
+            .map_err(|error| error.to_string())?,
         true,
     )
 }
 
-pub fn remove_package(directory: &Path, private_root: &Path) -> Result<(), String> {
+pub fn remove_package(core: &crate::Core, directory: &Path, private_root: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
     let _guard = PUBLISH_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    publish_activation_at(&public_root()?, None, Some(directory), private_root, true)
+    publish_activation_at(&public_root()?, None, Some(directory),
+        &crate::package_activation::addon_ownership(core, private_root)
+            .map_err(|error| error.to_string())?, true)
 }
 
 fn package_directory_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
@@ -697,7 +703,7 @@ fn publish_activation_at(
     root: &Path,
     incoming: Option<&Path>,
     previous: Option<&Path>,
-    private_root: &Path,
+    addons: &BTreeMap<String, String>,
     grant_access: bool,
 ) -> Result<(), String> {
     let mut files = read_snapshot(root)?;
@@ -706,10 +712,7 @@ fn publish_activation_at(
         let previous = package_directory_files(previous)?
             .into_iter()
             .filter(|(path, _)| {
-                !crate::package_activation::addon_owned(
-                    private_root,
-                    &path.to_string_lossy().replace('\\', "/"),
-                )
+                !addons.contains_key(&path.to_string_lossy().replace('\\', "/"))
             })
             .collect::<BTreeMap<_, _>>();
         let schemas: BTreeSet<_> = previous
@@ -776,10 +779,7 @@ fn publish_activation_at(
             .into_iter()
             .filter(|(path, _)| {
                 !crate::package_activation::user_file(&path.to_string_lossy().replace('\\', "/"))
-                    && !crate::package_activation::addon_owned(
-                        private_root,
-                        &path.to_string_lossy().replace('\\', "/"),
-                    )
+                    && !addons.contains_key(&path.to_string_lossy().replace('\\', "/"))
             })
             .collect::<Vec<_>>();
         merge_public_files(&mut files, &incoming)?;
@@ -1299,9 +1299,7 @@ mod tests {
     #[test]
     fn main_package_overlap_preserves_installed_addon_sources_and_generated_customs() {
         let root = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
         let package = tempfile::tempdir().unwrap();
-        std::fs::write(private.path().join(".keytao-easy-en.json"), "{}").unwrap();
         let addon = [
             (
                 "easy_en.schema.yaml".into(),
@@ -1310,6 +1308,10 @@ mod tests {
             ("easy_en.dict.yaml".into(), b"name: easy_en".to_vec()),
             ("lua/easy_en.lua".into(), b"-- official addon".to_vec()),
         ];
+        let ownership: BTreeMap<String, String> = addon.iter()
+            .map(|(path, _): &(PathBuf, Vec<u8>)| (path.to_string_lossy().into_owned(), "easy_en".into()))
+            .chain([("easy_en.custom.yaml".into(), "easy_en".into())])
+            .collect();
         publish_at(root.path(), &addon, false).unwrap();
         std::fs::create_dir(package.path().join("lua")).unwrap();
         for (path, _) in &addon {
@@ -1334,7 +1336,7 @@ mod tests {
             root.path(),
             Some(package.path()),
             None,
-            private.path(),
+            &ownership,
             false,
         )
         .unwrap();
@@ -1352,7 +1354,7 @@ mod tests {
             root.path(),
             None,
             Some(package.path()),
-            private.path(),
+            &ownership,
             false,
         )
         .unwrap();
@@ -1459,7 +1461,7 @@ mod tests {
             false,
         )
         .unwrap();
-        publish_activation_at(root.path(), Some(first.path()), None, root.path(), false).unwrap();
+        publish_activation_at(root.path(), Some(first.path()), None, &BTreeMap::new(), false).unwrap();
         let files = read_snapshot(root.path()).unwrap();
         for name in [
             "squirrel.custom.yaml",
@@ -1475,7 +1477,7 @@ mod tests {
             root.path(),
             Some(second.path()),
             Some(first.path()),
-            root.path(),
+            &BTreeMap::new(),
             false,
         )
         .unwrap();
@@ -1497,7 +1499,7 @@ mod tests {
         );
         assert!(!config.contains("menu/page_size"));
         assert!(files.contains_key(Path::new("easy_en.custom.yaml")));
-        publish_activation_at(root.path(), None, Some(second.path()), root.path(), false).unwrap();
+        publish_activation_at(root.path(), None, Some(second.path()), &BTreeMap::new(), false).unwrap();
         let files = read_snapshot(root.path()).unwrap();
         assert!(!files.contains_key(Path::new("other.schema.yaml")));
         let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
@@ -1513,7 +1515,7 @@ mod tests {
         std::fs::write(outside.path().join("outside.yaml"), "outside: true").unwrap();
         std::os::unix::fs::symlink(outside.path(), package.path().join("escape")).unwrap();
         assert!(
-            publish_activation_at(root.path(), Some(package.path()), None, root.path(), false)
+            publish_activation_at(root.path(), Some(package.path()), None, &BTreeMap::new(), false)
                 .is_err()
         );
         assert!(GenerationPointers::read(root.path()).unwrap() == GenerationPointers::default());
