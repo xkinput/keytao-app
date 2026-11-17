@@ -83,12 +83,13 @@ class AccentPicker extends StatelessWidget {
     final touch = context.platformVariant.touch;
     final size = touch ? 44.0 : 28.0;
     final gap = touch ? 8.0 : 4.0;
+    final presets = background ? themeBackgrounds : themeAccents;
     final accent = ChromeAccent.of(context);
     Widget swatch(String hex, {bool custom = false, bool reset = false}) {
       final isSelected = reset
           ? selected.isEmpty
           : custom
-          ? selected.isNotEmpty && !themeAccents.containsKey(selected)
+          ? selected.isNotEmpty && !presets.containsKey(selected)
           : selected == hex;
       final label = reset
           ? '恢复默认'
@@ -161,7 +162,7 @@ class AccentPicker extends StatelessWidget {
       controlAlignment: Alignment.centerLeft,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final count = themeAccents.length + (background ? 2 : 1);
+          final count = presets.length + (background ? 2 : 1);
           final capacity = ((constraints.maxWidth + gap) / (size + gap))
               .floor()
               .clamp(1, count);
@@ -175,7 +176,7 @@ class AccentPicker extends StatelessWidget {
                 spacing: gap,
                 runSpacing: 8,
                 children: [
-                  for (final hex in themeAccents.keys) swatch(hex),
+                  for (final hex in presets.keys) swatch(hex),
                   swatch(
                     selected.isEmpty ? defaultColor : selected,
                     custom: true,
