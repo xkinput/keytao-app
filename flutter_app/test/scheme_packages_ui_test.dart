@@ -71,6 +71,18 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> manageRimeMint(bool installed) async {
+    actions.add('mint:$installed');
+    return true;
+  }
+
+  @override
+  Future<bool> manageRimeFrost(bool installed) async {
+    actions.add('frost:$installed');
+    return true;
+  }
+
+  @override
   Future<bool> importLocalScheme({String? schemeKey}) async {
     actions.add('import:$schemeKey');
     return true;
@@ -137,6 +149,21 @@ Future<void> _pumpRow(
   await tester.pumpAndSettle();
 }
 
+Future<void> _pumpAddons(
+  WidgetTester tester,
+  _PackageController controller,
+) async {
+  await tester.pumpWidget(
+    KeyTaoTheme(
+      platform: controller.info.platform,
+      home: FScaffold(
+        child: SingleChildScrollView(child: AddonCard(controller: controller)),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 List<String> _actionLabels(WidgetTester tester) => tester
     .widgetList<ActionButton>(find.byType(ActionButton))
     .map((button) => button.label)
@@ -144,6 +171,48 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  for (final platform in [
+    BridgePlatform.windows,
+    BridgePlatform.macOs,
+    BridgePlatform.linux,
+  ]) {
+    testWidgets('${platform.name} missing scheme prompt opens scheme page', (
+      tester,
+    ) async {
+      final c = _PackageController(platform)
+        ..installedPackages = []
+        ..local = const LocalSchemaDto(
+          installed: false,
+          deployed: false,
+          schemas: [],
+        );
+      addTearDown(c.dispose);
+      _size(tester, const Size(1200, 1000));
+      await tester.pumpWidget(
+        KeyTaoApp(
+          controller: c,
+          initialOnboarding: const OnboardingDto(completed: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+      if (platform == BridgePlatform.windows) {
+        expect(c.activePage, AppPage.scheme);
+        expect(find.byType(SchemePage), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('nav-ime')));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('请先安装输入方案。'), findsOneWidget);
+      final button = find.widgetWithText(ActionButton, '前往安装方案');
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(c.activePage, AppPage.scheme);
+      expect(find.byType(SchemePage), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   for (final (installed, deployed, latest, label) in [
     (false, false, '2', AppStrings.install),
     (true, true, '1', null),
@@ -167,12 +236,7 @@ void main() {
         c.addonLatestVersion = c.wanxiangLatestVersion =
             c.rimeIceLatestVersion = c.rimeMintLatestVersion =
                 c.rimeFrostLatestVersion = latest;
-        await tester.pumpWidget(
-          KeyTaoTheme(
-            platform: c.info.platform,
-            home: FScaffold(child: AddonCard(controller: c)),
-          ),
-        );
+        await _pumpAddons(tester, c);
         final buttons = tester.widgetList<ActionButton>(
           find.byType(ActionButton),
         );
@@ -186,7 +250,55 @@ void main() {
           buttons.where((button) => button.label == AppStrings.uninstall),
           hasLength(installed ? 5 : 0),
         );
+        for (final (key, name) in [
+          ('addon-rime-mint', 'mint'),
+          ('addon-rime-frost', 'frost'),
+        ]) {
+          final card = find.byKey(ValueKey(key));
+          if (label != null) {
+            final install = find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, label),
+            );
+            await tester.ensureVisible(install);
+            await tester.tap(install);
+            await tester.pump(const Duration(seconds: 1));
+            expect(c.actions.last, '$name:true');
+          }
+          if (installed) {
+            final uninstall = find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, AppStrings.uninstall),
+            );
+            await tester.ensureVisible(uninstall);
+            await tester.tap(uninstall);
+            await tester.pump(const Duration(seconds: 1));
+            expect(c.actions.last, '$name:false');
+          }
+        }
+        c.busy = true;
+        await _pumpAddons(tester, c);
+        expect(
+          tester.widgetList<ActionButton>(find.byType(ActionButton)),
+          everyElement(
+            isA<ActionButton>().having(
+              (button) => button.onPress,
+              'onPress',
+              null,
+            ),
+          ),
+        );
+        expect(
+          tester
+              .widget<FSelect<String>>(
+                find.byWidgetPredicate((widget) => widget is FSelect<String>),
+              )
+              .enabled,
+          isFalse,
+        );
         expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
       },
     );
   }
@@ -207,12 +319,7 @@ void main() {
       addTearDown(c.dispose);
       _size(tester, const Size(1000, 1200));
       c.selectWanxiangVariant('pure');
-      await tester.pumpWidget(
-        KeyTaoTheme(
-          platform: c.info.platform,
-          home: FScaffold(child: AddonCard(controller: c)),
-        ),
-      );
+      await _pumpAddons(tester, c);
       expect(
         find.widgetWithText(ActionButton, AppStrings.replace),
         findsOneWidget,
@@ -236,13 +343,9 @@ void main() {
       );
     c.addon = c.wanxiang;
     addTearDown(c.dispose);
-    _size(tester, const Size(1000, 1200));
-    await tester.pumpWidget(
-      KeyTaoTheme(
-        platform: c.info.platform,
-        home: FScaffold(child: AddonCard(controller: c)),
-      ),
-    );
+    await _pumpAddons(tester, c);
+    expect(find.text(AppStrings.rimeMint), findsOneWidget);
+    expect(find.text(AppStrings.rimeFrost), findsOneWidget);
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, AppStrings.install),
     );
@@ -771,10 +874,15 @@ void main() {
     await tester.pumpAndSettle();
     final catalogue = find.byKey(const ValueKey('cloud-schemes'));
     final local = find.byKey(const ValueKey('local-schemes'));
+    final cleanup = find.widgetWithText(ActionButton, '清理残留文件');
     final active = find.byKey(const ValueKey('scheme-package-local-custom'));
     final deployment = find.byWidgetPredicate(
       (widget) => widget is Section && widget.title == '部署',
     );
+    for (final heading in ['方案列表', '键道方案', '附加方案']) {
+      expect(find.text(heading), findsOneWidget);
+    }
+    expect(find.text('云端方案'), findsNothing);
     expect(
       find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
       findsNWidgets(4),
@@ -792,6 +900,9 @@ void main() {
       findsNothing,
     );
     expect(find.text('Custom scheme'), findsOneWidget);
+    expect(find.descendant(of: local, matching: active), findsOneWidget);
+    expect(find.descendant(of: local, matching: cleanup), findsOneWidget);
+    expect(tester.widget<ActionButton>(cleanup).onPress, isNotNull);
     expect(
       find.descendant(of: active, matching: find.text('在用')),
       findsOneWidget,
@@ -808,7 +919,7 @@ void main() {
             find.ancestor(of: active, matching: find.byType(SchemePackageRow)),
           )
           .compact,
-      isTrue,
+      isFalse,
     );
     expect(
       find.descendant(of: active, matching: find.byType(SchemaLogo)),
@@ -828,6 +939,11 @@ void main() {
       findsNothing,
     );
     expect(find.descendant(of: local, matching: add), findsOneWidget);
+    expect(find.descendant(of: local, matching: cleanup), findsOneWidget);
+    c.busy = true;
+    c.rebuild();
+    await tester.pumpAndSettle();
+    expect(tester.widget<ActionButton>(cleanup).onPress, isNull);
     expect(tester.takeException(), isNull);
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 

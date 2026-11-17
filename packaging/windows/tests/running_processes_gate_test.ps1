@@ -22,26 +22,41 @@ if ($nsisCommand) {
     throw "NSIS was not found: $MakeNsis"
 }
 $testRoot = Join-Path $repoRoot ('target\keytao-windows-preflight-tests\nsis-gate-' + [Guid]::NewGuid().ToString('N'))
-$helperDirectory = Join-Path $testRoot 'packaging\windows'
-New-Item -ItemType Directory -Path $helperDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 $utf8 = New-Object System.Text.UTF8Encoding($true)
 $reportText = [Regex]::Unescape('\u5019\u9009\u7a97\u53e3\u5360\u7528\u68c0\u6d4b\uff1a\u6d4b\u8bd5\u62a5\u544a')
 
 # A missing report deliberately returns success: the gate must fail closed
 # when the helper exits normally but its expected output is unavailable.
 $helper = @'
-param([string]$InstallDir, [string]$ReportPath, [switch]$StopOwnedProcesses)
-$ErrorActionPreference = 'Stop'
-$invocation = if ($StopOwnedProcesses) { 'stop' } else { 'preview' }
-[IO.File]::AppendAllText((Join-Path $InstallDir 'helper-calls.txt'), $invocation + "`r`n")
-$mode = [IO.File]::ReadAllText((Join-Path $InstallDir 'helper-mode.txt')).Trim()
-if ($mode -eq 'missing-report') { exit 0 }
-$report = [Regex]::Unescape('\u5019\u9009\u7a97\u53e3\u5360\u7528\u68c0\u6d4b\uff1a\u6d4b\u8bd5\u62a5\u544a')
-$reportEncoding = New-Object System.Text.UnicodeEncoding($false, $false)
-[IO.File]::WriteAllText($ReportPath, $report + "`r`n", $reportEncoding)
-exit ([int]$mode)
+use std::{fs, io::Write, path::PathBuf, process::exit};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut arguments = std::env::args_os().skip(1);
+    let (mut install, mut report_path, mut stop) = (None, None, false);
+    while let Some(argument) = arguments.next() {
+        match argument.to_str() {
+            Some("--install-dir") => install = arguments.next().map(PathBuf::from),
+            Some("--report-path") => report_path = arguments.next().map(PathBuf::from),
+            Some("--stop-owned-processes") => stop = true,
+            _ => exit(20),
+        }
+    }
+    let (Some(install), Some(report_path)) = (install, report_path) else { exit(20) };
+    let mut calls = fs::OpenOptions::new().append(true).create(true).open(install.join("helper-calls.txt"))?;
+    writeln!(calls, "{}", if stop { "stop" } else { "preview" })?;
+    let mode = fs::read_to_string(install.join("helper-mode.txt"))?;
+    if mode.trim() == "missing-report" { exit(0) }
+    let report = "\u{5019}\u{9009}\u{7a97}\u{53e3}\u{5360}\u{7528}\u{68c0}\u{6d4b}\u{ff1a}\u{6d4b}\u{8bd5}\u{62a5}\u{544a}\r\n";
+    fs::write(report_path, report.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())?;
+    exit(mode.trim().parse()?);
+}
 '@
-[IO.File]::WriteAllText((Join-Path $helperDirectory 'check-running-processes.ps1'), $helper, $utf8)
+$helperSource = Join-Path $testRoot 'helper.rs'
+$helperExe = Join-Path $testRoot 'helper.exe'
+[IO.File]::WriteAllText($helperSource, $helper, $utf8)
+& rustc --edition=2021 -Copt-level=1 -o $helperExe $helperSource
+if ($LASTEXITCODE -ne 0) { throw "Unable to compile native helper fixture; artifacts: $testRoot" }
 
 # Both sections place their first mutation after the real gate. Each test
 # receives a separate /D= or _?= directory, so no cleanup can mask a failure.
@@ -49,7 +64,7 @@ $fixtureSource = @'
 Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
-!define REPO_ROOT "@FIXTURE_ROOT@"
+!define SETUP_HELPER "@HELPER_EXE@"
 Name "KeyTao preflight test fixture"
 OutFile "@FIXTURE_ROOT@\gate-fixture.exe"
 InstallDir "$EXEDIR\unused-default"
@@ -99,7 +114,7 @@ Section "Uninstall"
   FileClose $0
 SectionEnd
 '@
-$fixtureSource = $fixtureSource.Replace('@FIXTURE_ROOT@', $testRoot).Replace(
+$fixtureSource = $fixtureSource.Replace('@FIXTURE_ROOT@', $testRoot).Replace('@HELPER_EXE@', $helperExe).Replace(
     '@REAL_INCLUDE@', (Join-Path $repoRoot 'packaging\windows\running-processes.nsh'))
 $sourcePath = Join-Path $testRoot 'gate-fixture.nsi'
 [IO.File]::WriteAllText($sourcePath, $fixtureSource, $utf8)

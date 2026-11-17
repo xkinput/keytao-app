@@ -229,11 +229,19 @@ jobs:
         shell: bash
         run: scripts/build-linux.sh
 
+      - name: Build native Windows setup helper
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
+          cargo build --locked -p keytao-setup-helper --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Setup helper build failed" }
+
       - name: Test Windows installer process checks
         if: matrix.os_name == 'windows'
         shell: powershell
         run: |
-          ./packaging/windows/tests/check_running_processes_test.ps1
+          ./packaging/windows/tests/check_running_processes_test.ps1 -SetupHelper "target/x86_64-pc-windows-msvc/release/keytao-setup-helper.exe"
           ./packaging/windows/tests/running_processes_gate_test.ps1 -MakeNsis "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
           ./packaging/windows/tests/replace_payload_test.ps1 -MakeNsis "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
 

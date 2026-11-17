@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Type-check keytao-app-core and keytao_app_bridge for Linux and Windows from macOS.
+# Type-check the app core and bridge for Linux and Windows, plus the Windows setup helper.
 # zig (via cargo-zigbuild) supplies the C toolchain that ring and librime-sys build scripts need;
 # the Rime C API headers are platform independent, so bindgen can read the vendored ones.
 # windows-gnu stands in for windows-msvc: same Rust cfg(windows) code, no MSVC SDK required.
@@ -17,3 +17,4 @@ check() {
 
 check x86_64-unknown-linux-gnu "$PWD/vendor/librime/macos-universal/include"
 check x86_64-pc-windows-gnu "$PWD/vendor/librime/windows-x64/include"
+nix shell nixpkgs#zig nixpkgs#cargo-zigbuild -c cargo-zigbuild check -p keytao-setup-helper --all-targets --target x86_64-pc-windows-gnu

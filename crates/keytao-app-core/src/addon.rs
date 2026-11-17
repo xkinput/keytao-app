@@ -1167,6 +1167,8 @@ mod tests {
             EASY_EN_ADDON_ID,
             wanxiang::SCHEMA_ID,
             crate::rime_ice::SCHEMA_ID,
+            "rime_mint",
+            "rime_frost",
         ] {
             let root = TestRoot::new();
             std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
@@ -1190,6 +1192,8 @@ mod tests {
             EASY_EN_ADDON_ID,
             wanxiang::SCHEMA_ID,
             crate::rime_ice::SCHEMA_ID,
+            "rime_mint",
+            "rime_frost",
         ] {
             for edited in [false, true] {
                 let root = TestRoot::new();
@@ -1293,6 +1297,8 @@ mod tests {
             EASY_EN_ADDON_ID,
             wanxiang::SCHEMA_ID,
             crate::rime_ice::SCHEMA_ID,
+            "rime_mint",
+            "rime_frost",
         ] {
             let root = TestRoot::new();
             smoke_fixture::write(root.path()).unwrap();

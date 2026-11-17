@@ -11,6 +11,7 @@ members = [
   "crates/keytao-linux-ime",
   "crates/keytao-windows-ime",
   "crates/keytao-windows-ime-server",
+  "crates/keytao-setup-helper",
 ]
 
 [workspace.package]

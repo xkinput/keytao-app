@@ -827,17 +827,21 @@ fn resolve_theme_with_pending_settings(
         UiColorScheme::Dark => EffectiveColorScheme::Dark,
     };
 
-    let mut theme = ResolvedImeTheme::schema_base(ui.clone());
-    for partial in partials {
-        theme.apply(partial.clone());
-        if ui.effective_color_scheme == EffectiveColorScheme::Light {
-            if let Some(light) = partial.light {
-                theme.apply_variant(light);
+    let resolve_variant = |scheme| {
+        let mut theme = ResolvedImeTheme::schema_base(ui.clone());
+        for partial in &partials {
+            theme.apply(partial.clone());
+            if scheme == EffectiveColorScheme::Light {
+                if let Some(light) = partial.light.clone() {
+                    theme.apply_variant(light);
+                }
+            } else if let Some(dark) = partial.dark.clone() {
+                theme.apply_variant(dark);
             }
-        } else if let Some(dark) = partial.dark {
-            theme.apply_variant(dark);
         }
-    }
+        theme
+    };
+    let mut theme = resolve_variant(ui.effective_color_scheme);
     theme.ui = ui.clone();
     if let Some(radius) = ui.corner_radius {
         theme.panel.corner_radius = radius;
@@ -847,6 +851,37 @@ fn resolve_theme_with_pending_settings(
     }
     if let Some(background) = ui.background_color {
         theme.panel.background = with_alpha(background, theme.panel.background.alpha);
+        let alternate_scheme = match ui.effective_color_scheme {
+            EffectiveColorScheme::Light => EffectiveColorScheme::Dark,
+            EffectiveColorScheme::Dark => EffectiveColorScheme::Light,
+        };
+        let alternate = resolve_variant(alternate_scheme);
+        if contrast_ratio(background, alternate.candidate.foreground)
+            > contrast_ratio(background, theme.candidate.foreground)
+        {
+            // Keep text and its interaction surfaces paired without changing layout or panel alpha.
+            theme.panel.border_color = alternate.panel.border_color;
+            theme.candidate.background = alternate.candidate.background;
+            theme.candidate.hover_background = alternate.candidate.hover_background;
+            theme.candidate.pressed_background = alternate.candidate.pressed_background;
+            theme.candidate.pressed_foreground = alternate.candidate.pressed_foreground;
+            theme.candidate.selected_background = alternate.candidate.selected_background;
+            theme.candidate.foreground = alternate.candidate.foreground;
+            theme.candidate.selected_foreground = alternate.candidate.selected_foreground;
+            theme.candidate.label_color = alternate.candidate.label_color;
+            theme.candidate.selected_label_color = alternate.candidate.selected_label_color;
+            theme.candidate.comment_color = alternate.candidate.comment_color;
+            theme.candidate.selected_comment_color = alternate.candidate.selected_comment_color;
+            theme.candidate.border_color = alternate.candidate.border_color;
+            theme.candidate.selected_border_color = alternate.candidate.selected_border_color;
+            theme.candidate.separator_color = alternate.candidate.separator_color;
+            theme.navigation.foreground = alternate.navigation.foreground;
+            theme.navigation.disabled_foreground = alternate.navigation.disabled_foreground;
+            theme.navigation.hover_background = alternate.navigation.hover_background;
+            theme.mode_hint.background = alternate.mode_hint.background;
+            theme.mode_hint.foreground = alternate.mode_hint.foreground;
+            theme.mode_hint.border_color = alternate.mode_hint.border_color;
+        }
     }
     if let Some(accent_color) = ui.accent_color {
         theme.apply_accent_color(accent_color);
@@ -1041,7 +1076,8 @@ impl ResolvedImeTheme {
 
     fn apply_accent_color(&mut self, accent: RgbaColor) {
         let panel_background = self.panel.background;
-        let is_dark = self.ui.effective_color_scheme == EffectiveColorScheme::Dark;
+        // Follow the actual background, which a custom color may have flipped.
+        let is_dark = relative_luminance(panel_background) < 0.18;
         let selected_weight = if is_dark { 0.42 } else { 0.18 };
         let pressed_weight = if is_dark { 0.54 } else { 0.28 };
         let hover_weight = if is_dark { 0.22 } else { 0.09 };
@@ -1658,6 +1694,25 @@ fn command_output_scheme(
     parse(&format!("{stdout}\n{stderr}"))
 }
 
+fn relative_luminance(color: RgbaColor) -> f64 {
+    let linear = |channel: u8| {
+        let srgb = f64::from(channel) / 255.0;
+        if srgb <= 0.04045 {
+            srgb / 12.92
+        } else {
+            ((srgb + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
+}
+
+fn contrast_ratio(background: RgbaColor, foreground: RgbaColor) -> f64 {
+    let foreground = mix_color(background, foreground, f32::from(foreground.alpha) / 255.0);
+    let background = relative_luminance(background);
+    let foreground = relative_luminance(foreground);
+    (background.max(foreground) + 0.05) / (background.min(foreground) + 0.05)
+}
+
 fn mix_color(base: RgbaColor, accent: RgbaColor, accent_weight: f32) -> RgbaColor {
     let weight = accent_weight.clamp(0.0, 1.0);
     rgba(
@@ -1688,18 +1743,166 @@ mod tests {
 
     #[test]
     fn appearance_defaults_match_existing_light_and_dark_themes() {
-        for (scheme, background) in [
-            (EffectiveColorScheme::Light, rgba(0xf8, 0xfa, 0xff, 0xf2)),
-            (EffectiveColorScheme::Dark, rgba(0x17, 0x1a, 0x20, 0xf2)),
+        for (scheme, background, foreground) in [
+            (
+                EffectiveColorScheme::Light,
+                rgba(0xf8, 0xfa, 0xff, 0xf2),
+                rgba(0x26, 0x34, 0x42, 0xff),
+            ),
+            (
+                EffectiveColorScheme::Dark,
+                rgba(0x17, 0x1a, 0x20, 0xf2),
+                rgba(0xee, 0xf3, 0xf7, 0xff),
+            ),
         ] {
             let theme = resolve_theme_from_paths_with_system_scheme(None, None, scheme);
             assert_eq!(theme.ui.corner_radius, None);
             assert_eq!(theme.ui.background_color, None);
             assert_eq!(theme.panel.background, background);
+            assert_eq!(theme.candidate.foreground, foreground);
             assert_eq!(theme.panel.corner_radius, 16.0);
             assert_eq!(theme.candidate.corner_radius, 11.0);
             assert_eq!(theme.navigation.corner_radius, 10.0);
             assert_eq!(theme.mode_hint.corner_radius, 14.0);
+        }
+    }
+
+    #[test]
+    fn custom_background_uses_highest_contrast_variant_colors_without_changing_metrics() {
+        let partial: PartialTheme = serde_yaml::from_str(
+            "light:\n  font:\n    size: 25\n  panel:\n    background: '#FFFFFF80'\n  candidate:\n    foreground: '#102030'\n    paddingX: 7\n  modeHint:\n    foreground: '#112233'\ndark:\n  font:\n    size: 31\n  panel:\n    background: '#00000090'\n  candidate:\n    foreground: '#E0F0FF'\n    paddingX: 13\n  modeHint:\n    foreground: '#DDEEFF'\n",
+        )
+        .unwrap();
+        for (scheme, background, text_scheme) in [
+            (
+                EffectiveColorScheme::Light,
+                "#1C1D21",
+                EffectiveColorScheme::Dark,
+            ),
+            (
+                EffectiveColorScheme::Dark,
+                "#F6F5F2",
+                EffectiveColorScheme::Light,
+            ),
+        ] {
+            let original =
+                resolve_theme_with_pending_settings(None, None, scheme, Some(partial.clone()));
+            let expected =
+                resolve_theme_with_pending_settings(None, None, text_scheme, Some(partial.clone()));
+            let mut custom = partial.clone();
+            custom.ui = Some(PartialUiTheme {
+                background_color: Some(parse_color(background)),
+                ..Default::default()
+            });
+            let actual = resolve_theme_with_pending_settings(None, None, scheme, Some(custom));
+            assert_eq!(actual.ui.effective_color_scheme, scheme);
+            assert_eq!(
+                actual.panel.background,
+                with_alpha(
+                    parse_color(background).unwrap(),
+                    original.panel.background.alpha
+                )
+            );
+            assert_eq!(actual.font.size, original.font.size);
+            assert_eq!(actual.candidate.padding_x, original.candidate.padding_x);
+            assert_eq!(actual.panel.border_color, expected.panel.border_color);
+            let actual = serde_json::to_value(actual).unwrap();
+            let expected = serde_json::to_value(expected).unwrap();
+            for section in ["candidate", "navigation", "modeHint"] {
+                for (key, color) in expected[section].as_object().unwrap() {
+                    if color.get("red").is_some() {
+                        assert_eq!(actual[section][key], *color, "{section}.{key}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn custom_background_contrast_accounts_for_foreground_alpha() {
+        let theme = resolve_theme_with_pending_settings(
+            None,
+            None,
+            EffectiveColorScheme::Light,
+            Some(serde_yaml::from_str(
+                "ui:\n  backgroundColor: '#FFFFFF'\nlight:\n  candidate:\n    foreground: '#00000000'\ndark:\n  candidate:\n    foreground: '#555555'\n",
+            ).unwrap()),
+        );
+        assert_eq!(theme.candidate.foreground, rgba(0x55, 0x55, 0x55, 255));
+        assert_eq!(
+            contrast_ratio(theme.panel.background, rgba(0, 0, 0, 0)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn preset_backgrounds_have_accessible_text_in_runtime_and_preview() {
+        let options = include_str!("../../../flutter_app/lib/src/app/options.dart");
+        let presets = options
+            .split_once("const themeBackgrounds = {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        let backgrounds: Vec<_> = presets
+            .lines()
+            .filter_map(|line| line.split('\'').nth(1))
+            .collect();
+        assert_eq!(backgrounds.len(), 8);
+        assert_eq!(
+            contrast_ratio(rgba(0, 0, 0, 255), rgba(255, 255, 255, 255)),
+            21.0
+        );
+        for background in backgrounds {
+            for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+                let theme = resolve_theme_with_pending_settings(
+                    None,
+                    None,
+                    scheme,
+                    Some(
+                        serde_yaml::from_str(&format!(
+                            "ui:\n  backgroundColor: '{background}'\n  accentColor: '#3B73D9'\n"
+                        ))
+                        .unwrap(),
+                    ),
+                );
+                let preview = resolve_candidate_panel_preview_from_paths(
+                    None,
+                    None,
+                    scheme,
+                    UiColorScheme::Auto,
+                    "#3B73D9",
+                    20.0,
+                    None,
+                    background,
+                )
+                .unwrap();
+                let contrast = contrast_ratio(theme.panel.background, theme.candidate.foreground);
+                assert!(contrast >= 4.5, "{scheme:?} {background}: {contrast}");
+                assert_eq!(
+                    resolved_theme_json(&theme).unwrap(),
+                    resolved_theme_json(&preview).unwrap()
+                );
+                assert_eq!(theme.ui.accent_color, Some(rgba(0x3b, 0x73, 0xd9, 255)));
+                assert_eq!(
+                    theme.candidate.selected_label_color,
+                    rgba(0x3b, 0x73, 0xd9, 255)
+                );
+                let background = theme.panel.background;
+                let mobile_dark = (u32::from(background.red) * 299
+                    + u32::from(background.green) * 587
+                    + u32::from(background.blue) * 114)
+                    / 1000
+                    < 128;
+                let text_scheme = if mobile_dark {
+                    EffectiveColorScheme::Dark
+                } else {
+                    EffectiveColorScheme::Light
+                };
+                let expected = resolve_theme_from_paths_with_system_scheme(None, None, text_scheme);
+                assert_eq!(theme.candidate.foreground, expected.candidate.foreground);
+            }
         }
     }
 
@@ -1724,11 +1927,8 @@ mod tests {
                 0x90
             };
             assert_eq!(theme.panel.background, rgba(0x12, 0x34, 0x56, alpha));
-            let weight = if scheme == EffectiveColorScheme::Light {
-                0.18
-            } else {
-                0.42
-            };
+            // #123456 is dark, so the dark blend applies in either scheme.
+            let weight = 0.42;
             assert_eq!(
                 theme.candidate.selected_background,
                 mix_color(theme.panel.background, rgba(0xab, 0xcd, 0xef, 255), weight)
@@ -2255,7 +2455,8 @@ mod tests {
             theme.candidate.selected_label_color,
             rgba(0x12, 0x34, 0x56, 0xff)
         );
-        assert_eq!(theme.candidate.selected_background, rgba(16, 36, 55, 255));
+        // #102030 is dark, so the accent blends with the dark weights.
+        assert_eq!(theme.candidate.selected_background, rgba(17, 40, 64, 255));
     }
 
     #[test]
