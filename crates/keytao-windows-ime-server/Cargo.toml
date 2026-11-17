@@ -8,8 +8,10 @@ description = "Per-user-session KeyTao Windows IME engine server"
 keytao-ime-ipc = { path = "../keytao-ime-ipc" }
 
 [target.'cfg(windows)'.dependencies]
+keytao-app-core = { path = "../keytao-app-core" }
 keytao-core = { path = "../keytao-core" }
 keytao-ime-ipc = { path = "../keytao-ime-ipc" }
 keytao-windows-ime = { path = "../keytao-windows-ime" }
+serde_json = "1"
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading"] }
 

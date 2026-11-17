@@ -146,6 +146,91 @@ pub struct DeployResult {
     pub success: bool,
     pub message: String,
 }
+
+#[cfg(target_os = "macos")]
+fn macos_signing_team_id(output: &str) -> Result<&str, String> {
+    let mut teams = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("TeamIdentifier="));
+    let team = teams.next().ok_or("Code signature has no Team ID")?;
+    if teams.next().is_some()
+        || team.len() != 10
+        || !team
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Err("Code signature has an invalid Team ID".into());
+    }
+    Ok(team)
+}
+
+#[cfg(target_os = "macos")]
+fn verified_macos_signing_team(executable: &std::path::Path) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+
+    let display = Command::new("/usr/bin/codesign")
+        .args(["--display", "--verbose=4"])
+        .arg(executable)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            format!(
+                "Cannot read code signature for {}: {error}",
+                executable.display()
+            )
+        })?;
+    if !display.status.success() {
+        return Err(format!(
+            "Cannot read code signature for {}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&display.stderr).trim()
+        ));
+    }
+    let metadata = String::from_utf8(display.stderr)
+        .map_err(|error| format!("Invalid code signature metadata: {error}"))?;
+    let team = macos_signing_team_id(&metadata)?;
+    // Bind the reported Team ID to an Apple-issued signing certificate.
+    let requirement = format!("anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
+    let verify = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R", &format!("={requirement}")])
+        .arg(executable)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            format!(
+                "Cannot verify code signature for {}: {error}",
+                executable.display()
+            )
+        })?;
+    if !verify.status.success() {
+        return Err(format!(
+            "Code signature verification failed for {}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&verify.stderr).trim()
+        ));
+    }
+    Ok(team.to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn verified_macos_deploy_executable() -> Result<std::path::PathBuf, String> {
+    let executable =
+        std::path::PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME");
+    if !executable.is_file() {
+        return Err(
+            "KeyTao macOS input method is not installed; install it before deploying".into(),
+        );
+    }
+    let app = std::env::current_exe()
+        .map_err(|error| format!("Cannot determine the App executable: {error}"))?;
+    let app_team = verified_macos_signing_team(&app)?;
+    let ime_team = verified_macos_signing_team(&executable)?;
+    if app_team != ime_team {
+        return Err("KeyTao input method signature Team ID does not match the App".into());
+    }
+    Ok(executable)
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub async fn rime_deploy_default(
     core: &Core,
@@ -172,8 +257,9 @@ pub(crate) async fn rime_deploy_default_inner(
     crate::remove_filter::ensure_remove_filter(&dest)?;
     crate::ime_settings::prepare_candidate_page_size(&dest)?;
     record_result(core, &dest, false).map_err(|e| e.to_string())?;
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     let user = dest.to_string_lossy().into_owned();
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let shared = crate::ime_status::app_shared_data_dir(core);
     #[cfg(not(target_os = "windows"))]
     let logo_root = dest.clone();
@@ -194,20 +280,38 @@ pub(crate) async fn rime_deploy_default_inner(
     // rebuild the artifacts and keep serving the stale ones.
     #[cfg(target_os = "linux")]
     let runtime = { host.suspend_for_deploy(user, shared) };
+    #[cfg(target_os = "linux")]
+    let (mut deploy_command, deploy_executable) =
+        crate::ime_status::linux::resolve_keytao_ime_command(core);
 
     #[cfg(target_os = "windows")]
     let deploy_result =
         tokio::task::spawn_blocking(move || windows_deploy_rime_blocking(dest, shared)).await;
     #[cfg(target_os = "macos")]
     let deploy_result = tokio::task::spawn_blocking(move || {
-        keytao_core::deploy(user, shared)?;
+        let executable = verified_macos_deploy_executable()?;
+        keytao_core::deploy_child::run_deploy_child(
+            &executable,
+            std::time::Duration::from_secs(600),
+        )?;
         render_user_schema_logos(&logo_root);
         Ok::<(), String>(())
     })
     .await;
     #[cfg(target_os = "linux")]
     let (deploy_result, _deploy_lock) = match tokio::task::spawn_blocking(move || {
-        let result = runtime.reload();
+        keytao_core::deploy_child::inherit_linux_deploy_lock(&mut deploy_command, &_deploy_lock);
+        let result = keytao_core::deploy_child::run_deploy_child_command_with_progress(
+            &mut deploy_command,
+            std::time::Duration::from_secs(600),
+            |_| {},
+        )
+        .map_err(|error| {
+            format!(
+                "Cannot deploy with keytao-ime ({deploy_executable}); ensure the Linux input method is installed: {error}"
+            )
+        })
+        .and_then(|()| runtime.init_without_deploy());
         if result.is_ok() {
             render_user_schema_logos(&logo_root);
         }
@@ -305,6 +409,35 @@ pub async fn rime_deploy_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn signing_team_id_rejects_missing_ambiguous_or_injected_values() {
+        assert_eq!(
+            macos_signing_team_id("Executable=/example\nTeamIdentifier=AB12CD34EF\n"),
+            Ok("AB12CD34EF")
+        );
+        for output in [
+            "",
+            "TeamIdentifier=not set\n",
+            "TeamIdentifier=\n",
+            "TeamIdentifier=AB12CD34E\n",
+            "TeamIdentifier=ab12cd34ef\n",
+            "TeamIdentifier=AB12CD34EF\nTeamIdentifier=ZZ12CD34EF\n",
+            "TeamIdentifier=AB12CD34EF\" or true\n",
+        ] {
+            assert!(macos_signing_team_id(output).is_err(), "{output:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn signing_verification_rejects_unsigned_executable_without_running_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("untrusted-ime");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        assert!(verified_macos_signing_team(&executable).is_err());
+    }
 
     #[test]
     fn active_schema_logo_path_uses_rendered_schema_and_selected_schema() {

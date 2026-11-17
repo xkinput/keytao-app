@@ -1,5 +1,19 @@
 import Cocoa
 import InputMethodKit
+import CKeytaoCore
+
+if CommandLine.arguments.dropFirst().first == "--deploy" {
+  if let resources = Bundle.main.resourceURL {
+    for name in ["rime-data", "SharedSupport"] {
+      let path = resources.appendingPathComponent(name).path
+      if hasDefaultYaml(at: path) {
+        setenv("KEYTAO_RIME_SHARED_DATA_DIR", path, 1)
+        break
+      }
+    }
+  }
+  exit(keytao_run_deploy_child_main())
+}
 
 let installer = KeyTaoInputSourceInstaller()
 if CommandLine.arguments.count > 1 {

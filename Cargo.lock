@@ -1643,6 +1643,7 @@ name = "keytao-core"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "libc",
  "librime-sys",
  "rime-api",
  "serde",
@@ -1737,9 +1738,11 @@ dependencies = [
 name = "keytao-windows-ime-server"
 version = "1.2.5-alpha.19"
 dependencies = [
+ "keytao-app-core",
  "keytao-core",
  "keytao-ime-ipc",
  "keytao-windows-ime",
+ "serde_json",
  "windows",
 ]
 

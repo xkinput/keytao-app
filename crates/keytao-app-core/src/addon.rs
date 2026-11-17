@@ -690,25 +690,41 @@ pub async fn addon_schema_install(
             percent: 55,
             message: "正在部署键道方案与 English...".into(),
         }));
+        #[cfg(target_os = "windows")]
+        let mut public_update = None;
         let deployed = async {
+            #[cfg(target_os = "windows")]
+            let (cache, archive_sha256) = {
+                let manifest = read_manifest(&root)?.ok_or("English 安装记录缺失")?;
+                let cache = core.env().data_dir.join("easy-en-public");
+                cache_public_package(&cache, &receipt.work.join("files"), &manifest)?;
+                public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
+                    host.publish_wanxiang_sources(&receipt.public_source_files())
+                })?);
+                (cache, manifest.archive_sha256)
+            };
             host.deploy().await?;
             if !addon_schema_status_at(&root, id).deployed {
                 return Err("附加方案文件已安装，但部署产物缺失".to_string());
             }
             #[cfg(target_os = "windows")]
-            {
-                let manifest = read_manifest(&root)?.ok_or("English 安装记录缺失")?;
-                let cache = core.env().data_dir.join("easy-en-public");
-                cache_public_package(&cache, &receipt.work.join("files"), &manifest)?;
-                host.publish_wanxiang_sources(&receipt.public_source_files())?;
-                if let Err(error) = write_file_atomic(&cache.join("current.txt"), manifest.archive_sha256.as_bytes()) {
-                    tracing::warn!(%error, "English public cache selection will be rebuilt when needed");
-                }
+            if let Err(error) = write_file_atomic(&cache.join("current.txt"), archive_sha256.as_bytes()) {
+                tracing::warn!(%error, "English public cache selection will be rebuilt when needed");
             }
             Ok(())
         }.await;
         if let Err(error) = deployed {
-            receipt.rollback().map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
+            let rollback = receipt.rollback();
+            #[cfg(target_os = "windows")]
+            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
+            #[cfg(target_os = "windows")]
+            let error = match &public_rollback {
+                Ok(()) => error,
+                Err(restore) => format!("{error}；恢复公共方案失败：{restore}"),
+            };
+            rollback.map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
+            #[cfg(target_os = "windows")]
+            public_rollback.map_err(|_| error.clone())?;
             if let Err(restore) = host.deploy().await {
                 return Err(format!("{error}；已恢复文件，请重新部署：{restore}"));
             }
@@ -742,28 +758,40 @@ pub async fn addon_schema_uninstall(
         let mut receipt = uninstall_package(&root)?;
         write_schema_list_transaction(&mut receipt, false)?;
         let reset_english_mode = reset_english_mode_transaction(&mut receipt)?;
+        #[cfg(target_os = "windows")]
+        let mut public_update = None;
         let deployed = async {
-            if keytao_core::schema_install_state(&root).installed {
-                host.deploy().await?;
-            } else {
-                let _ = host.write_reload_stamp(&root)?;
-            }
             #[cfg(target_os = "windows")]
             {
                 let files = addon_schema_source_files(id)
                     .into_iter()
                     .map(|(_, relative)| PathBuf::from(relative))
                     .collect::<Vec<_>>();
-                host.remove_public_schema(id, &files)?;
-                host.publish_english_settings(false)?;
+                public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
+                    host.remove_public_schema(id, &files)?;
+                    host.publish_english_settings(false)
+                })?);
+            }
+            if keytao_core::schema_install_state(&root).installed {
+                host.deploy().await?;
+            } else {
+                let _ = host.write_reload_stamp(&root)?;
             }
             Ok::<_, String>(())
         }
         .await;
         if let Err(error) = deployed {
-            receipt
-                .rollback()
-                .map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
+            let rollback = receipt.rollback();
+            #[cfg(target_os = "windows")]
+            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
+            #[cfg(target_os = "windows")]
+            let error = match &public_rollback {
+                Ok(()) => error,
+                Err(restore) => format!("{error}；恢复公共方案失败：{restore}"),
+            };
+            rollback.map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
+            #[cfg(target_os = "windows")]
+            public_rollback.map_err(|_| error.clone())?;
             if let Err(restore) = host.deploy().await {
                 return Err(format!("{error}；已恢复文件，请重新部署：{restore}"));
             }

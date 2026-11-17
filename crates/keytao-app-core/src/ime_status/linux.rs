@@ -287,7 +287,7 @@ fn keytao_ime_command(core: &Core, program: impl AsRef<std::ffi::OsStr>) -> std:
     command
 }
 
-fn resolve_keytao_ime_command(core: &Core) -> (std::process::Command, String) {
+pub(crate) fn resolve_keytao_ime_command(core: &Core) -> (std::process::Command, String) {
     if let Ok(path) = std::env::var("KEYTAO_IME_BIN") {
         return (keytao_ime_command(core, &path), path);
     }
@@ -419,8 +419,10 @@ fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
 }
 
 fn is_upgrade_deploy_command_line(args: &[u8]) -> bool {
-    args.split(|byte| *byte == 0)
-        .any(|arg| arg == keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND.as_bytes())
+    args.split(|byte| *byte == 0).any(|arg| {
+        arg == keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND.as_bytes()
+            || arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND.as_bytes()
+    })
 }
 
 fn is_keytao_ime_executable(pid: u32) -> bool {
@@ -617,11 +619,15 @@ mod tests {
 
     #[test]
     fn upgrade_deploy_process_filter_matches_exact_argument() {
-        let subcommand = keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND;
-        let child_args = format!("/usr/bin/keytao-ime\0{subcommand}\0");
-        assert!(is_upgrade_deploy_command_line(child_args.as_bytes()));
+        for subcommand in [
+            keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND,
+            keytao_core::deploy_child::DEPLOY_SUBCOMMAND,
+        ] {
+            let child_args = format!("/nix/store/example/bin/keytao-ime\0{subcommand}\0");
+            assert!(is_upgrade_deploy_command_line(child_args.as_bytes()));
+            let other_args = format!("/usr/bin/keytao-ime\0{subcommand}-other\0");
+            assert!(!is_upgrade_deploy_command_line(other_args.as_bytes()));
+        }
         assert!(!is_upgrade_deploy_command_line(b"/usr/bin/keytao-ime\0"));
-        let other_args = format!("/usr/bin/keytao-ime\0{subcommand}-other\0");
-        assert!(!is_upgrade_deploy_command_line(other_args.as_bytes()));
     }
 }

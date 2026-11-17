@@ -1473,6 +1473,11 @@ pub fn windows_deploy_rime_blocking(
     _shared_data_dir: String,
 ) -> Result<(), String> {
     crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
+    crate::windows_public_schemas::publish_english_settings(
+        &user_dir,
+        keytao_core::english_mode::read_english_mode(&user_dir)
+            == keytao_core::english_mode::EnglishMode::Schema,
+    )?;
     keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     let deployed_by_server = server::deploy_if_available()?;
@@ -1482,11 +1487,6 @@ pub fn windows_deploy_rime_blocking(
             .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
         keytao_core::deploy_child::run_deploy_child(&exe, std::time::Duration::from_secs(600))?;
     }
-    crate::windows_public_schemas::publish_english_settings(
-        &user_dir,
-        keytao_core::english_mode::read_english_mode(&user_dir)
-            == keytao_core::english_mode::EnglishMode::Schema,
-    )?;
     crate::deploy::render_user_schema_logos(&user_dir);
     if !deployed_by_server {
         write_keytao_ime_reload_stamp()

@@ -134,12 +134,31 @@ final class KeyTaoRuntime {
 
     /// The input menu's explicit redeploy, which must reload even when the app
     /// wrote no stamp.
-    func reloadNow() -> Bool {
-        guard keytao_is_initialized() else {
-            requestInitialization()
-            return false
+    func reloadNow(completion: @escaping (Bool) -> Void) {
+        queue.async {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let defaultUserDir = (home as NSString).appendingPathComponent("Library/keytao")
+            guard resolveUserDataDir(home: home) == defaultUserDir else {
+                NSLog("KeyTao: manual redeployment requires the default user data directory; custom profiles are unsupported")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            let deployed = keytao_run_deploy_child()
+            var reloaded = false
+            if deployed {
+                if keytao_is_initialized() {
+                    reloaded = keytao_reload()
+                } else {
+                    initializeEngine()
+                    reloaded = keytao_is_initialized()
+                }
+            }
+            if reloaded {
+                self.postDidReload()
+            }
+            let succeeded = reloaded
+            DispatchQueue.main.async { completion(succeeded) }
         }
-        return keytao_reload()
     }
 
     // MARK: - Private

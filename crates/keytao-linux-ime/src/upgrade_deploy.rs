@@ -1,11 +1,8 @@
 use std::fs::File;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub use keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND as SUBCOMMAND;
-const LOCK_FD_ENV: &str = "KEYTAO_LIBRIME_UPGRADE_LOCK_FD";
 const VERSION_STAMP: &str = "keytao-librime.version";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -94,33 +91,12 @@ impl UpgradeDeploy {
             .spawn(move || {
                 let result = (|| {
                     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-                    let lock_fd = self.lock.as_raw_fd();
-                    let wayland_fd = std::env::var("WAYLAND_SOCKET")
-                        .ok()
-                        .and_then(|value| value.parse::<i32>().ok());
                     let mut command = Command::new(exe);
                     command
                         .arg(SUBCOMMAND)
-                        .env(LOCK_FD_ENV, lock_fd.to_string())
-                        .env_remove("WAYLAND_SOCKET")
                         .stdin(Stdio::null())
                         .stdout(Stdio::null());
-                    unsafe {
-                        command.pre_exec(move || {
-                            let flags = libc::fcntl(lock_fd, libc::F_GETFD);
-                            if flags == -1
-                                || libc::fcntl(lock_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC)
-                                    == -1
-                            {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                            // The deploy child must not keep KWin's private socket alive.
-                            if let Some(fd) = wayland_fd.filter(|fd| *fd > 2 && *fd != lock_fd) {
-                                libc::close(fd);
-                            }
-                            Ok(())
-                        });
-                    }
+                    keytao_core::deploy_child::inherit_linux_deploy_lock(&mut command, &self.lock);
                     let mut child = command.spawn().map_err(|error| error.to_string())?;
                     tracing::info!(pid = child.id(), "librime upgrade deployment started");
                     let status = child.wait().map_err(|error| error.to_string())?;
@@ -145,16 +121,7 @@ impl UpgradeDeploy {
 }
 
 pub fn run_child() -> Result<(), String> {
-    let lock_fd = std::env::var(LOCK_FD_ENV)
-        .ok()
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|fd| *fd > 2)
-        .ok_or("librime upgrade child requires an inherited deployment lock")?;
-    if unsafe { libc::fcntl(lock_fd, libc::F_GETFD) } == -1 {
-        return Err("librime upgrade child received an invalid deployment lock".into());
-    }
-    // Inheriting the same open file keeps the lock held if the daemon exits.
-    let _lock = unsafe { File::from_raw_fd(lock_fd) };
+    let _lock = keytao_core::deploy_child::inherited_linux_deploy_lock()?;
     let (user_dir, version) = upgrade_context()?;
     if decision_for(&user_dir, &version)? == UpgradeDecision::Deploy {
         keytao_core::deploy_for_upgrade(

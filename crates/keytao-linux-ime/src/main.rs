@@ -251,6 +251,14 @@ fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND)
+    {
+        std::process::exit(keytao_core::deploy_child::run_deploy_child_main());
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--version") {
