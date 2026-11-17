@@ -55,6 +55,52 @@ Future<void> _pump(WidgetTester tester, _GrammarController controller) async {
 void main() {
   const rowKey = ValueKey('wanxiang-grammar');
 
+  testWidgets('grammar size and action fit a narrow macOS card', (
+    tester,
+  ) async {
+    final c = _GrammarController(BridgePlatform.macOs);
+    addTearDown(c.dispose);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(220, 1200);
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    for (final installed in [false, true]) {
+      c.wanxiangGrammar = WanxiangGrammarStatusDto(
+        available: true,
+        installed: installed,
+        version: '',
+        size: BigInt.from(426770496),
+      );
+      await _pump(tester, c);
+      final row = find.byKey(rowKey);
+      final size = find.descendant(
+        of: row,
+        matching: find.text(c.wanxiangGrammarSize),
+      );
+      final action = find.descendant(
+        of: row,
+        matching: find.widgetWithText(ActionButton, installed ? '删除' : '下载'),
+      );
+      expect(size, findsOneWidget);
+      expect(action, findsOneWidget);
+      expect(
+        tester.getRect(size).intersect(tester.getRect(row)),
+        tester.getRect(size),
+      );
+      expect(
+        tester.getRect(action).intersect(tester.getRect(row)),
+        tester.getRect(action),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.ensureVisible(action);
+      await tester.tap(action);
+      expect(c.actions.last, 'grammar:${!installed}');
+      await tester.pumpAndSettle();
+    }
+  });
+
   testWidgets(
     'grammar row requires Wanxiang and runtime capability, never iOS',
     (tester) async {
