@@ -244,9 +244,9 @@ fn load_package_data(
         _ => scheme,
     };
     crate::scheme::validate_scheme_key(scheme).map_err(CoreError::Other)?;
-    let store = core.env().data_dir.join("scheme-packages");
-    let path = store.join(format!("{scheme}.zip"));
-    for candidate in [&store, &path] {
+    let store = crate::package_store::PackageStore::new(core);
+    let path = store.archive_path(scheme);
+    for candidate in [&store.root(), &path] {
         if fs::symlink_metadata(candidate).is_ok_and(|meta| meta.file_type().is_symlink()) {
             return Err(CoreError::Other(
                 "Stored package must not be a symlink".into(),
@@ -260,7 +260,7 @@ fn load_package_data(
             Some(PackageFingerprint {
                 length: metadata.len(),
                 modified: metadata.modified().ok(),
-                metadata: match fs::read(store.join(format!("{scheme}.json"))) {
+                metadata: match store.read_metadata_bytes(scheme) {
                     Ok(bytes) => bytes,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
                     Err(error) => return Err(error.into()),
@@ -282,7 +282,7 @@ fn load_package_data(
     let mut dictionaries = HashMap::new();
     let mut schemas = HashMap::new();
     if fingerprint.is_some() {
-        let mut archive = zip::ZipArchive::new(fs::File::open(&path)?)
+        let mut archive = zip::ZipArchive::new(store.open_archive_file(scheme)?)
             .map_err(|error| CoreError::Other(error.to_string()))?;
         for index in 0..archive.len() {
             let mut file = archive
@@ -1139,8 +1139,8 @@ mod tests {
     }
 
     fn package(core: &Core, scheme: &str, files: &[(&str, &str)]) {
-        let store = core.env().data_dir.join("scheme-packages");
-        fs::create_dir_all(&store).unwrap();
+        let store = crate::package_store::PackageStore::new(core);
+        fs::create_dir_all(store.root()).unwrap();
         let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, text) in files {
             archive
@@ -1149,7 +1149,7 @@ mod tests {
             archive.write_all(text.as_bytes()).unwrap();
         }
         fs::write(
-            store.join(format!("{scheme}.zip")),
+            store.archive_path(scheme),
             archive.finish().unwrap().into_inner(),
         )
         .unwrap();
@@ -2033,7 +2033,7 @@ mod tests {
             ],
         );
         fs::write(
-            core.env().data_dir.join("scheme-packages/keytao.json"),
+            crate::package_store::PackageStore::new(&core).metadata_path("keytao"),
             "{\"version\":\"v1\"}",
         )
         .unwrap();

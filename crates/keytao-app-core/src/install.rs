@@ -636,7 +636,8 @@ pub(crate) async fn smart_install_preserving_settings(
         )
         .map_err(|e| e.to_string())?;
         // Activation reads the permanent archive through this same pipeline.
-        if !std::path::Path::new(&zip_path).starts_with(core.env().data_dir.join("scheme-packages"))
+        if !std::path::Path::new(&zip_path)
+            .starts_with(crate::package_store::PackageStore::new(core).root())
         {
             std::fs::remove_file(&zip_path).ok();
         }

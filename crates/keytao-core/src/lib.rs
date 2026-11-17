@@ -8,6 +8,7 @@ mod deployment_log;
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+pub mod package_store;
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -5907,7 +5908,7 @@ fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
         return None;
     }
     let mut manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(data_dir.join("scheme-packages/active-manifest.json")).ok()?,
+        &std::fs::read(package_store::active_manifest(data_dir)).ok()?,
     )
     .ok()?;
     if manifest["scheme_key"]
@@ -7638,7 +7639,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("keytao-legacy-local-state-{suffix}"));
-        std::fs::create_dir_all(dir.join("scheme-packages")).unwrap();
+        std::fs::create_dir_all(super::package_store::root(&dir)).unwrap();
         let mut state = serde_json::json!({
             "active_scheme": "local-example", "installed_packages": {"local-example": {}}
         });
@@ -7648,7 +7649,7 @@ mod tests {
             "root": dir.canonicalize().unwrap(), "manifest": {"example.schema.yaml": "hash"}
         });
         std::fs::write(
-            dir.join("scheme-packages/active-manifest.json"),
+            super::package_store::active_manifest(&dir),
             manifest.to_string(),
         )
         .unwrap();

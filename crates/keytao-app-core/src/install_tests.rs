@@ -1,4 +1,6 @@
-use crate::{AppEnv, Core, CoreEvent, EventSink, Platform, install::smart_install};
+use crate::{
+    AppEnv, Core, CoreEvent, EventSink, Platform, install::smart_install, package_store::PackageStore,
+};
 use std::{
     fs,
     io::Write,
@@ -345,7 +347,7 @@ async fn smart_install_keeps_user_dictionary_and_verifies_it() {
     );
     crate::packages::record_package(&core, "keytao", Some("v1"), true).unwrap();
     let meta: serde_json::Value = serde_json::from_slice(
-        &fs::read(core.env().data_dir.join("scheme-packages/keytao.json")).unwrap(),
+        &fs::read(PackageStore::new(&core).metadata_path("keytao")).unwrap(),
     )
     .unwrap();
     assert!(meta["manifest"].as_object().unwrap().is_empty());
@@ -395,8 +397,8 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
     )
     .unwrap();
     crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
-    let store = core.env().data_dir.join("scheme-packages");
-    fs::create_dir_all(&store).unwrap();
+    let store = PackageStore::new(&core);
+    fs::create_dir_all(store.root()).unwrap();
     let active_root = dir.path().join("active");
     let custom_root = dir.path().join("custom");
     fs::create_dir_all(&active_root).unwrap();
@@ -404,7 +406,7 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
     fs::write(custom_root.join("obsolete.lua"), "abc").unwrap();
     let manifest = serde_json::json!({"obsolete.lua": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"});
     fs::write(
-        store.join("keytao.json"),
+        store.metadata_path("keytao"),
         serde_json::to_vec(&serde_json::json!({
             "scheme_key":"keytao", "version":"v1", "installed_at_unix":0,
             "source":"official", "manifest":manifest,
@@ -413,7 +415,7 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
     )
     .unwrap();
     fs::write(
-        store.join("active-manifest.json"),
+        store.active_manifest_path(),
         serde_json::to_vec(&serde_json::json!({
             "root":active_root, "manifest":manifest,
         }))
@@ -648,7 +650,7 @@ async fn custom_install_preserves_default_package_and_state() {
         let state = core.state();
         let state_path = core.env().data_dir.join("app-state.json");
         let saved_state = fs::read(&state_path).unwrap();
-        let store = core.env().data_dir.join("scheme-packages");
+        let store = PackageStore::new(&core).root();
         let saved_store: std::collections::BTreeMap<_, _> = fs::read_dir(&store)
             .unwrap()
             .map(|entry| {

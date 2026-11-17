@@ -1,3 +1,4 @@
+use crate::package_store::{PackageStore, Staging};
 use crate::{Core, CoreError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,7 +13,7 @@ use std::{
 mod local_import;
 pub use local_import::import_local_scheme;
 #[path = "package_logos.rs"]
-mod package_logos;
+pub(crate) mod package_logos;
 
 #[derive(Serialize, Deserialize)]
 pub struct PackageMeta {
@@ -216,47 +217,7 @@ pub(crate) struct PendingPackage {
     zip_sha256: String,
 }
 
-fn store_dir(core: &Core) -> PathBuf {
-    core.env().data_dir.join("scheme-packages")
-}
-
-fn checked_store_dir(core: &Core) -> Result<PathBuf, CoreError> {
-    let dir = store_dir(core);
-    if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err(CoreError::Other(
-            "Package store must not be a symlink".into(),
-        ));
-    }
-    Ok(dir)
-}
-
-pub(crate) fn stored_metadata(
-    core: &Core,
-    scheme_key: &str,
-) -> Result<Option<PackageMeta>, CoreError> {
-    let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-    let _store_guard = core
-        .pending_package
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let metadata = safe_path(&checked_store_dir(core)?, &format!("{scheme_key}.json"))
-        .map_err(CoreError::Other)?;
-    let bytes = match fs::read(metadata) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let meta: PackageMeta = serde_json::from_slice(&bytes)?;
-    if meta.scheme_key != scheme_key
-        || meta.zip_sha256.len() != 64
-        || !meta.zip_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(CoreError::Other("本地方案包信息无效".into()));
-    }
-    Ok(Some(meta))
-}
-
-fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
+pub(crate) fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -273,34 +234,12 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
     sha256_reader(BufReader::new(fs::File::open(path)?))
 }
 
-pub(crate) fn stored_archive_file(
-    core: &Core,
-    scheme_key: &str,
-) -> Result<(BufReader<fs::File>, PackageMeta), CoreError> {
-    let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-    let _store_guard = core
-        .pending_package
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let dir = checked_store_dir(core)?;
-    let archive = safe_path(&dir, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?;
-    let metadata = safe_path(&dir, &format!("{scheme_key}.json")).map_err(CoreError::Other)?;
-    // The upload size limit applies to the rebuilt dependency zip, not this distribution.
-    let mut archive = BufReader::new(fs::File::open(archive)?);
-    let meta: PackageMeta = serde_json::from_slice(&fs::read(metadata)?)?;
-    if meta.scheme_key != scheme_key || meta.zip_sha256 != sha256_reader(&mut archive)? {
-        return Err(CoreError::Other("本地方案包校验失败".into()));
-    }
-    archive.rewind()?;
-    Ok((archive, meta))
-}
-
 #[cfg(test)]
 pub(crate) fn stored_archive(
     core: &Core,
     scheme_key: &str,
 ) -> Result<(Vec<u8>, PackageMeta), CoreError> {
-    let (mut archive, meta) = stored_archive_file(core, scheme_key)?;
+    let (mut archive, meta) = PackageStore::new(core).open_archive(scheme_key)?;
     let mut bytes = Vec::new();
     archive.read_to_end(&mut bytes)?;
     Ok((bytes, meta))
@@ -338,7 +277,7 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
     let Some(scheme_key) = core.state().active_scheme else {
         return Ok(());
     };
-    let (archive, meta) = match stored_archive_file(core, &scheme_key) {
+    let (archive, meta) = match PackageStore::new(core).open_archive(&scheme_key) {
         Ok(archive) => archive,
         Err(error) => {
             tracing::warn!(%scheme_key, %error, "Skipping active rime.lua snapshot refresh: no verified stored archive");
@@ -387,7 +326,8 @@ pub(crate) fn store_cloud_archive_reader(
     user_root: &Path,
 ) -> Result<String, CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-    let dir = checked_store_dir(core)?;
+    let store = PackageStore::new(core);
+    let dir = store.checked_root()?;
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|error| CoreError::Other(error.to_string()))?;
     let mut manifest = BTreeMap::new();
@@ -443,11 +383,12 @@ pub(crate) fn store_cloud_archive_reader(
     let state = core.state();
     let occupied = |key: &str| {
         state.installed_packages.contains_key(key)
-            || dir.join(format!("{key}.zip")).exists()
-            || dir.join(format!("{key}.json")).exists()
+            || store.archive_path(key).exists()
+            || store.metadata_path(key).exists()
     };
     let mut key = scheme_key.to_owned();
-    let existing = fs::read(dir.join(format!("{scheme_key}.json")))
+    let existing = store
+        .read_metadata_bytes(scheme_key)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
         .filter(|meta| meta.zip_sha256.eq_ignore_ascii_case(&digest));
@@ -500,16 +441,12 @@ pub(crate) fn store_cloud_archive_reader(
         return Err(CoreError::Other("请先切换到其他方案".into()));
     }
     fs::create_dir_all(&dir)?;
-    let archive_path = safe_path(&dir, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?;
-    let meta_path = safe_path(&dir, &format!("{scheme_key}.json")).map_err(CoreError::Other)?;
-    let mut stored = tempfile::Builder::new()
-        .prefix(".cloud-")
-        .tempfile_in(&dir)?;
+    let archive_path = store.checked_archive_path(scheme_key)?;
+    let meta_path = store.checked_metadata_path(scheme_key)?;
+    let mut stored = store.staging_file(Staging::Cloud)?;
     std::io::copy(&mut reader, stored.as_file_mut())?;
     stored.as_file().sync_all()?;
-    let mut metadata = tempfile::Builder::new()
-        .prefix(".meta-")
-        .tempfile_in(&dir)?;
+    let mut metadata = store.staging_file(Staging::Metadata)?;
     serde_json::to_writer_pretty(metadata.as_file_mut(), &meta)?;
     metadata.as_file().sync_all()?;
     stored
@@ -549,11 +486,10 @@ pub(crate) fn stage_install(
     root: String,
 ) -> Result<(), CoreError> {
     use std::io::Write;
-    let dir = checked_store_dir(core)?;
+    let store = PackageStore::new(core);
+    let dir = store.checked_root()?;
     fs::create_dir_all(&dir)?;
-    let mut archive = tempfile::Builder::new()
-        .prefix(".pending-")
-        .tempfile_in(dir)?;
+    let mut archive = store.staging_file(Staging::Pending)?;
     archive.write_all(zip_bytes)?;
     archive.as_file().sync_all()?;
     *core
@@ -635,8 +571,10 @@ pub(crate) fn finalize_pending(
     let Some(receipt) = pending.as_ref() else {
         return Ok(());
     };
-    let dir = checked_store_dir(core)?;
-    let previous = fs::read(dir.join(format!("{scheme_key}.json")))
+    let store = PackageStore::new(core);
+    store.checked_root()?;
+    let previous = store
+        .read_metadata_bytes(scheme_key)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
         .filter(|meta| meta.zip_sha256 == receipt.zip_sha256);
@@ -655,16 +593,12 @@ pub(crate) fn finalize_pending(
         manifest: receipt.manifest.clone(),
         zip_sha256: receipt.zip_sha256.clone(),
     };
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".meta-")
-        .tempfile_in(&dir)?;
+    let mut temporary = store.staging_file(Staging::Metadata)?;
     serde_json::to_writer_pretty(temporary.as_file_mut(), &meta)?;
     temporary.as_file().sync_all()?;
     // Retain the staged receipt on failure so callers can retry finalization.
-    let archive_path = dir.join(format!("{scheme_key}.zip"));
-    let mut archive = tempfile::Builder::new()
-        .prefix(".archive-")
-        .tempfile_in(&dir)?;
+    let archive_path = store.archive_path(scheme_key);
+    let mut archive = store.staging_file(Staging::Archive)?;
     std::io::copy(&mut receipt.archive.reopen()?, archive.as_file_mut())?;
     archive.as_file().sync_all()?;
     archive
@@ -694,17 +628,15 @@ pub(crate) fn finalize_pending(
                 .persist(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST))
                 .map_err(|error| CoreError::from(error.error))?;
         }
-        let mut temporary = tempfile::Builder::new()
-            .prefix(".active-")
-            .tempfile_in(&dir)?;
+        let mut temporary = store.staging_file(Staging::ActiveManifest)?;
         serde_json::to_writer_pretty(temporary.as_file_mut(), &active_manifest)?;
         temporary.as_file().sync_all()?;
         temporary
-            .persist(dir.join("active-manifest.json"))
+            .persist(store.active_manifest_path())
             .map_err(|error| CoreError::from(error.error))?;
     }
     temporary
-        .persist(dir.join(format!("{scheme_key}.json")))
+        .persist(store.metadata_path(scheme_key))
         .map_err(|error| CoreError::from(error.error))?;
     *pending = None;
     if !preserve_cloud_id && core.state().scheme_cloud_ids.contains_key(scheme_key) {
@@ -778,7 +710,7 @@ pub fn record_package(
     let selection_base_version = if crate::scheme::is_local_scheme_key(scheme_key)
         && state.active_scheme.as_deref() == Some(scheme_key)
     {
-        stored_metadata(core, scheme_key)?.and_then(|meta| meta.selection_base_version)
+        PackageStore::new(core).read_meta(scheme_key)?.and_then(|meta| meta.selection_base_version)
     } else {
         None
     };
@@ -830,50 +762,7 @@ pub fn record_package(
 }
 
 pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>, CoreError> {
-    let dir = checked_store_dir(core)?;
-    let state = core.state();
-    Ok(state
-        .installed_packages
-        .into_iter()
-        .filter_map(|(scheme_key, package)| {
-            let has_package_zip = crate::scheme::validate_scheme_key(&scheme_key).is_ok()
-                && fs::symlink_metadata(dir.join(format!("{scheme_key}.zip")))
-                    .is_ok_and(|meta| meta.is_file());
-            let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
-                match stored_metadata(core, &scheme_key) {
-                    Ok(meta) => meta,
-                    Err(error) => {
-                        tracing::warn!(%scheme_key, %error, "Skipping unreadable package metadata");
-                        return None;
-                    }
-                }
-            } else {
-                None
-            };
-            Some(InstalledPackageInfo {
-                logo_path: if has_package_zip {
-                    package_logos::package_logo_path(core, &scheme_key)
-                        .map(|path| path.to_string_lossy().into_owned())
-                } else {
-                    None
-                },
-                active: state.active_scheme.as_deref() == Some(&scheme_key),
-                supports_user_words: crate::user_words::supports_user_words(core, &scheme_key)
-                    .unwrap_or_else(|error| {
-                        tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
-                        false
-                    }),
-                scheme_key,
-                version: package.version,
-                has_package_zip,
-                source: meta
-                    .as_ref()
-                    .map(|meta| meta.source.clone())
-                    .unwrap_or_else(|| "official".into()),
-                display_name: meta.and_then(|meta| meta.display_name),
-            })
-        })
-        .collect())
+    PackageStore::new(core).list_installed_packages()
 }
 
 pub async fn remove_scheme_package(
@@ -885,9 +774,13 @@ pub async fn remove_scheme_package(
     if core.state().active_scheme.as_deref() == Some(scheme_key) {
         remove_active_package(core, scheme_key, host).await?;
     }
-    let dir = checked_store_dir(core)?;
-    for extension in ["zip", "json"] {
-        match fs::remove_file(dir.join(format!("{scheme_key}.{extension}"))) {
+    let store = PackageStore::new(core);
+    store.checked_root()?;
+    for path in [
+        store.archive_path(scheme_key),
+        store.metadata_path(scheme_key),
+    ] {
+        match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -907,7 +800,7 @@ async fn remove_active_package(
     let mut active = None;
     for path in [
         safe_path(&root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?,
-        checked_store_dir(core)?.join("active-manifest.json"),
+        PackageStore::new(core).checked_active_manifest_path()?,
     ] {
         match fs::read(path) {
             Ok(bytes) => {
@@ -929,7 +822,7 @@ async fn remove_active_package(
     let (manifest, package_rime_lua) = match active {
         Some(active) => (active.manifest, active.rime_lua),
         None => {
-            let manifest = stored_metadata(core, scheme_key)?
+            let manifest = PackageStore::new(core).read_meta(scheme_key)?
                 .ok_or_else(|| CoreError::Other("Active scheme file manifest is missing".into()))?
                 .manifest;
             (manifest, None)
@@ -1064,7 +957,7 @@ async fn remove_active_package(
         return Err(error);
     }
     receipt.finish().map_err(CoreError::Other)?;
-    let store_manifest = checked_store_dir(core)?.join("active-manifest.json");
+    let store_manifest = PackageStore::new(core).checked_active_manifest_path()?;
     match fs::remove_file(store_manifest) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1123,13 +1016,15 @@ pub async fn activate_scheme(
     let package = state.installed_packages.get(scheme_key).ok_or_else(|| {
         CoreError::Other("Scheme package is not installed; re-download it first".into())
     })?;
-    let archive = checked_store_dir(core)?.join(format!("{scheme_key}.zip"));
+    let store = PackageStore::new(core);
+    store.checked_root()?;
+    let archive = store.archive_path(scheme_key);
     if !fs::symlink_metadata(&archive).is_ok_and(|meta| meta.is_file()) {
         return Err(CoreError::Other(
             "Stored package zip is missing; re-download this scheme before activation".into(),
         ));
     }
-    let meta: PackageMeta = serde_json::from_slice(&fs::read(archive.with_extension("json"))?)?;
+    let meta: PackageMeta = serde_json::from_slice(&store.read_metadata_bytes(scheme_key)?)?;
     if meta.scheme_key != scheme_key
         || meta.version != package.version
         || meta.zip_sha256 != sha256_file(&archive)?
@@ -1202,9 +1097,9 @@ pub(crate) fn cleanup_previous(
         return Ok(Vec::new());
     };
     crate::scheme::validate_scheme_key(&active)?;
-    let path = checked_store_dir(core)
-        .map_err(|e| e.to_string())?
-        .join("active-manifest.json");
+    let path = PackageStore::new(core)
+        .checked_active_manifest_path()
+        .map_err(|e| e.to_string())?;
     let meta: ActiveManifest = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1412,7 +1307,7 @@ mod tests {
 
         let manifest_path = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
         let manifest_before = fs::read(&manifest_path).unwrap();
-        let archive_path = store_dir(&core).join("keytao.zip");
+        let archive_path = PackageStore::new(&core).archive_path("keytao");
         for archive_exists in [true, false] {
             if archive_exists {
                 fs::write(&archive_path, b"corrupt archive").unwrap();
@@ -1564,10 +1459,10 @@ mod tests {
     fn list_packages_skips_corrupt_and_unreadable_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let core = open_core(dir.path());
-        let store = checked_store_dir(&core).unwrap();
-        fs::create_dir_all(&store).unwrap();
-        fs::write(store.join("local-corrupt.json"), "invalid json").unwrap();
-        fs::create_dir(store.join("local-unreadable.json")).unwrap();
+        let store = PackageStore::new(&core);
+        fs::create_dir_all(store.checked_root().unwrap()).unwrap();
+        fs::write(store.metadata_path("local-corrupt"), "invalid json").unwrap();
+        fs::create_dir(store.metadata_path("local-unreadable")).unwrap();
         core.update_state(|state| {
             for key in ["local-corrupt", "local-unreadable", "keytao"] {
                 state
@@ -1726,11 +1621,13 @@ mod tests {
                 .as_deref(),
             Some("20261105")
         );
-        let meta: PackageMeta =
-            serde_json::from_slice(&fs::read(store_dir(&core).join("xmjd.json")).unwrap()).unwrap();
+        let meta: PackageMeta = serde_json::from_slice(
+            &fs::read(PackageStore::new(&core).metadata_path("xmjd")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(meta.version.as_deref(), Some("20261105"));
         assert_eq!(meta.manifest.len(), 1);
-        assert!(!store_dir(&core).join("active-manifest.json").exists());
+        assert!(!PackageStore::new(&core).active_manifest_path().exists());
     }
 
     #[tokio::test]
@@ -1783,7 +1680,7 @@ mod tests {
             let original = user_words_package();
             store_cloud_archive(&core, "txjx", Some("v1"), "cloud", None, &original, &root)
                 .unwrap();
-            let metadata_path = store_dir(&core).join("txjx.json");
+            let metadata_path = PackageStore::new(&core).metadata_path("txjx");
             let mut previous: PackageMeta =
                 serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
             previous.display_name = Some("Existing name".into());
@@ -1870,7 +1767,7 @@ mod tests {
 
             assert_eq!(error.to_string(), expected);
             assert!(core.state().installed_packages.is_empty());
-            assert!(!store_dir(&core).join("txjx.zip").exists());
+            assert!(!PackageStore::new(&core).archive_path("txjx").exists());
         }
     }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::package_store::PackageStore;
 use crate::scheme_host::tests::AddonHost;
 use std::{io::Write, sync::atomic::Ordering};
 
@@ -90,7 +91,7 @@ fn fixture(key: &str, addons: bool) -> (tempfile::TempDir, AddonHost) {
     zip.write_all(config.as_bytes()).unwrap();
     let bytes = zip.finish().unwrap().into_inner();
     store_cloud_archive(&host.core, key, Some("v1"), "official", None, &bytes, &root).unwrap();
-    let meta = stored_metadata(&host.core, key).unwrap().unwrap();
+    let meta = PackageStore::new(&host.core).read_meta(key).unwrap().unwrap();
     stage_install(
         &host.core,
         &bytes,
@@ -172,12 +173,13 @@ fn assert_removed(host: &AddonHost, key: &str) {
     }
     assert!(host.core.state().active_scheme.is_none());
     assert!(!host.core.state().installed_packages.contains_key(key));
-    for name in [
-        format!("{key}.zip"),
-        format!("{key}.json"),
-        "active-manifest.json".into(),
+    let store = PackageStore::new(&host.core);
+    for path in [
+        store.archive_path(key),
+        store.metadata_path(key),
+        store.active_manifest_path(),
     ] {
-        assert!(!store_dir(&host.core).join(name).exists());
+        assert!(!path.exists());
     }
 }
 
@@ -234,9 +236,10 @@ async fn removing_inactive_package_only_removes_its_cache_and_state() {
     );
     assert!(host.root.join("keytao.schema.yaml").is_file());
     assert!(host.root.join("build/.keytao-deployed").is_file());
-    assert!(store_dir(&host.core).join("keytao.zip").is_file());
-    assert!(!store_dir(&host.core).join("xmjd.zip").exists());
-    assert!(!store_dir(&host.core).join("xmjd.json").exists());
+    let store = PackageStore::new(&host.core);
+    assert!(store.archive_path("keytao").is_file());
+    assert!(!store.archive_path("xmjd").exists());
+    assert!(!store.metadata_path("xmjd").exists());
     assert_user_files_kept(&host.root);
     assert_eq!(host.deploys.load(Ordering::SeqCst), 0);
     assert_eq!(host.reloads.load(Ordering::SeqCst), 0);
@@ -262,7 +265,7 @@ async fn failed_removal_deploy_restores_active_sources_and_state() {
     assert!(host.root.join("keytao.schema.yaml").is_file());
     assert!(host.root.join("build/keytao.schema.yaml").is_file());
     assert_eq!(host.deploys.load(Ordering::SeqCst), 2);
-    assert!(store_dir(&host.core).join("keytao.zip").is_file());
+    assert!(PackageStore::new(&host.core).archive_path("keytao").is_file());
     assert_user_files_kept(&host.root);
 }
 

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 
-const PACKAGES_PATH: &str = "/api/user/scheme-packages";
+const PACKAGES_PATH: &str = concat!("/api/user/scheme", "-packages");
 const MAX_PACKAGE_SIZE: u64 = 30 * 1024 * 1024;
 
 fn cloud_error(error: CoreError) -> CoreError {
@@ -32,7 +32,7 @@ fn record_reference(
     id: &str,
     stored_sha256: &str,
 ) -> Result<(), CoreError> {
-    if !crate::packages::stored_archive_file(core, scheme_key)?
+    if !crate::package_store::PackageStore::new(core).open_archive(scheme_key)?
         .1
         .zip_sha256
         .eq_ignore_ascii_case(stored_sha256)
@@ -173,7 +173,7 @@ fn prepare_with_smoke(
     smoke: impl FnMut(&str, u32) -> Result<(), String>,
 ) -> Result<PreparedUpload, CoreError> {
     eligible(core, scheme_key, root)?;
-    let (stored, meta) = crate::packages::stored_archive_file(core, scheme_key)?;
+    let (stored, meta) = crate::package_store::PackageStore::new(core).open_archive(scheme_key)?;
     let ids = package_schema_ids(stored, &meta)?;
     let bundle = if cfg!(target_os = "android") {
         // Android validates Kotlin's deploy result and artifacts, without in-process Rime.

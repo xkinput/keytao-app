@@ -1,5 +1,5 @@
 use super::*;
-use crate::{AppEnv, CoreEvent, EventSink, Platform};
+use crate::{AppEnv, CoreEvent, EventSink, Platform, package_store::PackageStore};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -145,9 +145,9 @@ fn account_change_clears_private_package_references_but_token_refresh_preserves_
 #[test]
 fn cloud_package_without_reference_keeps_its_source_in_the_profile() {
     let (_dir, core) = fixture();
-    let store = core.env().data_dir.join("scheme-packages");
-    std::fs::create_dir_all(&store).unwrap();
-    std::fs::write(store.join("xmjd.json"),json!({"scheme_key":"xmjd","version":"v1","installed_at_unix":0,"source":"cloud","manifest":{},"zip_sha256":"a".repeat(64)}).to_string()).unwrap();
+    let store = PackageStore::new(&core);
+    std::fs::create_dir_all(store.root()).unwrap();
+    std::fs::write(store.metadata_path("xmjd"),json!({"scheme_key":"xmjd","version":"v1","installed_at_unix":0,"source":"cloud","manifest":{},"zip_sha256":"a".repeat(64)}).to_string()).unwrap();
     core.update_state(|state| {
         state.installed_packages.insert(
             "xmjd".into(),
