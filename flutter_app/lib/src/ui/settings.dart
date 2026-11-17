@@ -269,43 +269,8 @@ class _SettingsCardState extends State<SettingsCard> {
         _mobile(context),
       ] else
         _desktop(context),
-      if (controller.local?.deployed == true &&
-          controller.schemaSwitches.isNotEmpty) ...[
-        HairlineGridCell(child: _schemaSwitches()),
-      ],
     ],
   );
-
-  Widget _schemaSwitches() {
-    final c = controller;
-    return Section(
-      title: '方案开关',
-      icon: FLucideIcons.slidersHorizontal,
-      children: [
-        for (final entry in c.schemaSwitches)
-          if (entry.options.isEmpty)
-            SwitchSetting(
-              entry.states[1],
-              value: entry.value == 1,
-              onChanged: c.busy
-                  ? null
-                  : (value) => c.saveSchemaSwitch(entry, value ? 1 : 0),
-            )
-          else
-            ChoiceSetting<int>(
-              label: entry.states.join(' / '),
-              value: entry.value,
-              options: {
-                for (var index = 0; index < entry.states.length; index++)
-                  index: entry.states[index],
-              },
-              onChanged: c.busy
-                  ? null
-                  : (value) => c.saveSchemaSwitch(entry, value),
-            ),
-      ],
-    );
-  }
 
   Widget _candidatePageSize() {
     final c = controller;
@@ -1044,6 +1009,44 @@ class AccountCard extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// The deployed scheme's own switches, shown on the scheme page.
+class SchemaSwitchesSection extends StatelessWidget {
+  const SchemaSwitchesSection({super.key, required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    return Section(
+      title: '方案开关',
+      icon: FLucideIcons.slidersHorizontal,
+      children: [
+        for (final entry in c.schemaSwitches)
+          if (entry.options.isEmpty)
+            SwitchSetting(
+              entry.states[1],
+              value: entry.value == 1,
+              onChanged: c.busy
+                  ? null
+                  : (value) => c.saveSchemaSwitch(entry, value ? 1 : 0),
+            )
+          else
+            ChoiceSetting<int>(
+              label: entry.states.join(' / '),
+              value: entry.value,
+              options: {
+                for (var index = 0; index < entry.states.length; index++)
+                  index: entry.states[index],
+              },
+              onChanged: c.busy
+                  ? null
+                  : (value) => c.saveSchemaSwitch(entry, value),
+            ),
+      ],
     );
   }
 }

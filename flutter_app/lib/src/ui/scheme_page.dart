@@ -4,7 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
-import 'settings.dart' show showCloudPackageTransfer;
+import 'settings.dart' show SchemaSwitchesSection, showCloudPackageTransfer;
 import 'theme.dart';
 import 'user_words.dart';
 import 'widgets.dart';
@@ -252,6 +252,8 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ],
         ),
+        if (c.local?.deployed == true && c.schemaSwitches.isNotEmpty)
+          HairlineGridCell(child: SchemaSwitchesSection(controller: c)),
         HairlineGridCell(child: AddonCard(controller: c)),
         HairlineGridCell(
           child: const FTextField(

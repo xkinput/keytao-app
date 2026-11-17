@@ -177,10 +177,14 @@ void main() {
     for (final key in 'qwertyuiopasdfghjkl'.split('')) {
       expect(find.text(key), findsOneWidget);
     }
+    // The preview shows only the toolbar and the top two letter rows.
+    for (final key in 'zxcvbnm'.split('')) {
+      expect(find.text(key), findsNothing);
+    }
     for (final label in ['⇧', '⌫', '123', '，', '键道6', '。', '↵']) {
       expect(
         find.byKey(ValueKey('keyboard-preview-key-$label')),
-        findsOneWidget,
+        findsNothing,
       );
     }
     expect(find.text('1'), findsOneWidget);
