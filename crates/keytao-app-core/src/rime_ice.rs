@@ -2,16 +2,16 @@
 
 use crate::{
     Core, CoreError, CoreEvent,
-    addon::write_schema_list_transaction,
+    downloaded_addon::Addon,
     events::InstallProgress,
     scheme_host::SchemeHost,
     wanxiang::{self, InstallReceipt, InstalledFile, RemotePackage, Status},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(test)]
+use crate::addon::write_schema_list_transaction;
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::Read,
     path::Path,
     sync::Arc,
 };
@@ -22,7 +22,6 @@ const RELEASES: &str = "https://api.github.com/repos/iDvel/rime-ice/releases?per
 const MANIFEST: &str = ".keytao-rime-ice.json";
 const NOTICE: &str = "rime_ice-NOTICE.txt";
 const LICENSE: &str = "rime_ice-LICENSE.txt";
-const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 128 * 1024 * 1024;
 const REQUIRED: &[&str] = &[
     "rime_ice.schema.yaml",
@@ -41,14 +40,14 @@ const REQUIRED: &[&str] = &[
     LICENSE,
 ];
 
-#[derive(Serialize, Deserialize)]
-struct Manifest {
-    format: u32,
-    version: String,
-    source: String,
-    archive_sha256: String,
-    files: Vec<InstalledFile>,
-}
+static ADDON: Addon = Addon {
+    id: SCHEMA_ID,
+    name: "雾凇拼音",
+    manifest: MANIFEST,
+    required: REQUIRED,
+    installable,
+    extract,
+};
 
 fn valid_version(tag: &str) -> bool {
     let bytes = tag.as_bytes();
@@ -194,64 +193,8 @@ pub(crate) fn installable(name: &str) -> bool {
             .is_some_and(|name| package_destination(&format!("lua/{name}")).is_some())
 }
 
-fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
-    let path = wanxiang::safe_target(root, MANIFEST)?;
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut bytes = Vec::new();
-    file.take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("雾凇拼音安装记录过大".into());
-    }
-    let manifest: Manifest =
-        serde_json::from_slice(&bytes).map_err(|e| format!("雾凇拼音安装记录损坏：{e}"))?;
-    let mut seen = BTreeSet::new();
-    if manifest.format != 1
-        || manifest.files.len() > 4096
-        || manifest.archive_sha256.len() != 64
-        || !manifest
-            .archive_sha256
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
-    {
-        return Err("雾凇拼音安装记录无效".into());
-    }
-    for file in &manifest.files {
-        wanxiang::safe_target(root, &file.path)?;
-        if !installable(&file.path)
-            || !seen.insert(file.path.to_ascii_lowercase())
-            || file.sha256.len() != 64
-            || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err("雾凇拼音安装记录含无效文件".into());
-        }
-    }
-    Ok(Some(manifest))
-}
-
 pub fn status_at(root: &Path) -> Status {
-    let manifest = read_manifest(root).ok().flatten();
-    let installed = manifest.as_ref().is_some_and(|manifest| {
-        manifest
-            .files
-            .iter()
-            .map(|file| file.path.as_str())
-            .chain(REQUIRED.iter().copied())
-            .all(|name| wanxiang::safe_target(root, name).is_ok_and(|path| path.is_file()))
-    });
-    Status {
-        installed,
-        deployed: installed
-            && root.join("build/rime_ice.schema.yaml").is_file()
-            && root.join("build/rime_ice.table.bin").is_file(),
-        version: manifest.map_or_else(String::new, |manifest| manifest.version),
-        variant: String::new(),
-    }
+    ADDON.status_at(root)
 }
 
 fn adapt_source(name: &str, path: &Path) -> Result<(), String> {
@@ -393,136 +336,25 @@ fn extract(
     Ok(files)
 }
 
+#[cfg(test)]
 fn commit_files(
     receipt: &mut InstallReceipt,
     files: Vec<InstalledFile>,
     package: &RemotePackage,
     archive_sha256: String,
 ) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
-    }
-    let previous: BTreeMap<_, _> = read_manifest(&receipt.root)?
-        .into_iter()
-        .flat_map(|manifest| manifest.files)
-        .map(|file| (file.path.clone(), file))
-        .collect();
-    let mut owned = Vec::new();
-    let mut replacements = Vec::new();
-    for file in files {
-        let destination = wanxiang::safe_target(&receipt.root, &file.path)?;
-        if destination.exists() {
-            let hash = wanxiang::fingerprint(&destination)?.0;
-            if hash == file.sha256 {
-                if previous.contains_key(&file.path) {
-                    owned.push(file);
-                }
-                continue;
-            }
-            if previous
-                .get(&file.path)
-                .is_none_or(|old| old.sha256 != hash)
-            {
-                return Err(format!(
-                    "已有文件 {} 与雾凇拼音冲突，已保留原文件；请先备份并移走该文件",
-                    file.path
-                ));
-            }
-        }
-        owned.push(file.clone());
-        replacements.push(file);
-    }
-    for (name, old) in previous {
-        if !owned.iter().any(|file| file.path == name) {
-            let path = wanxiang::safe_target(&receipt.root, &name)?;
-            if path.is_file() && wanxiang::fingerprint(&path)?.0 == old.sha256 {
-                receipt.move_original(&name)?;
-            }
-        }
-    }
-    for file in replacements {
-        let source = receipt.work.join("files").join(&file.path);
-        #[cfg(windows)]
-        let source = {
-            let copy = receipt.work.join("commit").join(&file.path);
-            fs::create_dir_all(copy.parent().unwrap()).map_err(|e| e.to_string())?;
-            fs::copy(&source, &copy).map_err(|e| e.to_string())?;
-            copy
-        };
-        receipt.replace(&file.path, &source, file.sha256)?;
-    }
-    let manifest = Manifest {
-        format: 1,
-        version: package.version.clone(),
-        source: package.source.clone(),
-        archive_sha256,
-        files: owned,
-    };
-    let source = receipt.work.join("manifest.json");
-    fs::write(
-        &source,
-        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let hash = wanxiang::fingerprint(&source)?.0;
-    receipt.replace(MANIFEST, &source, hash)
+    ADDON.commit_files(receipt, files, package, archive_sha256)
 }
 
 pub async fn install(
     root: &Path,
     progress: impl Fn(u8, &str) + Send + Sync + 'static,
 ) -> Result<InstallReceipt, String> {
-    let receipt = InstallReceipt::new(root)?;
-    read_manifest(&receipt.root)?;
-    let package = latest_package().await?;
-    progress(5, "正在下载雾凇拼音…");
-    let archive = receipt.work.join("download.zip");
-    wanxiang::download_with_limit(&package, &archive, &progress, MAX_DOWNLOAD_BYTES).await?;
-    progress(52, "正在校验并解压雾凇拼音…");
-    tokio::task::spawn_blocking(move || {
-        let mut receipt = receipt;
-        let files = extract(&archive, &receipt.work.join("files"), &package)?;
-        progress(60, "正在安装雾凇拼音…");
-        commit_files(
-            &mut receipt,
-            files,
-            &package,
-            wanxiang::fingerprint(&archive)?.0,
-        )?;
-        Ok(receipt)
-    })
-    .await
-    .map_err(|e| format!("雾凇拼音安装任务失败：{e}"))?
+    ADDON.install(root, latest_package(), progress).await
 }
 
 pub fn uninstall(root: &Path) -> Result<InstallReceipt, String> {
-    let mut receipt = InstallReceipt::new(root)?;
-    if let Some(manifest) = read_manifest(&receipt.root)? {
-        for file in manifest.files {
-            let path = wanxiang::safe_target(&receipt.root, &file.path)?;
-            if path.is_file() && wanxiang::fingerprint(&path)?.0 == file.sha256 {
-                receipt.move_original(&file.path)?;
-            }
-        }
-        receipt.move_original(MANIFEST)?;
-    }
-    Ok(receipt)
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Default)]
-struct PublicRollback(Option<crate::windows_public_schemas::PublicSchemaUpdate>);
-
-#[cfg(target_os = "windows")]
-impl Drop for PublicRollback {
-    fn drop(&mut self) {
-        if let Some(update) = self.0.take() {
-            if let Err(error) = update.rollback() {
-                tracing::error!(%error, "Rime Ice public source rollback failed");
-            }
-        }
-    }
+    ADDON.uninstall(root)
 }
 
 pub async fn manage_rime_ice(
@@ -548,75 +380,7 @@ where
     Install: FnOnce(std::path::PathBuf) -> InstallFuture,
     InstallFuture: std::future::Future<Output = Result<InstallReceipt, String>>,
 {
-    let result: Result<_, String> = async {
-        let root = host.user_root()?;
-        #[cfg(target_os = "windows")]
-        let package_paths = read_manifest(&root)?.into_iter().flat_map(|manifest| manifest.files)
-            .map(|file| std::path::PathBuf::from(file.path)).collect::<Vec<_>>();
-        let mut receipt = if installed {
-            install_package(root.clone()).await?
-        } else { uninstall(&root)? };
-        #[cfg(target_os = "windows")]
-        let mut public_update = PublicRollback::default();
-        let deployed = async {
-            write_schema_list_transaction(
-                &mut receipt, SCHEMA_ID, installed, &crate::addon::shared_data_dir(core, &root),
-            )?;
-            #[cfg(target_os = "windows")]
-            let public_source_warning = {
-                match crate::windows_public_schemas::update_public_schemas(|| {
-                    if installed { host.publish_wanxiang_sources(&receipt.public_source_files()) }
-                    else { host.remove_public_schema(SCHEMA_ID, &package_paths) }
-                }) {
-                    Ok(update) => {
-                        public_update.0 = Some(update);
-                        None
-                    }
-                    Err(error) => Some(crate::windows_public_schemas::public_warning(
-                        "rime-ice-public-sources", &error,
-                    )),
-                }
-            };
-            if installed || keytao_core::schema_install_state(&root).installed {
-                host.deploy().await?;
-            } else {
-                let _ = host.write_reload_stamp(&root)?;
-            }
-            #[cfg(target_os = "windows")]
-            if let Some(warning) = public_source_warning {
-                core.emit(CoreEvent::DeployProgress(format!("系统搜索框方案未更新：{warning}")));
-            }
-            if installed && !status_at(&root).deployed { return Err("雾凇拼音部署产物缺失".to_string()); }
-            Ok(())
-        }.await;
-        if let Err(error) = deployed {
-            let rollback = receipt.rollback();
-            #[cfg(target_os = "windows")]
-            let public_rollback = public_update.0.take().map_or(Ok(()), |update| update.rollback());
-            rollback.map_err(|restore| format!("{error}；恢复词库失败：{restore}"))?;
-            #[cfg(target_os = "windows")]
-            public_rollback.map_err(|restore| format!("{error}；恢复公共方案失败：{restore}"))?;
-            host.deploy().await.map_err(|restore| format!("{error}；已恢复文件，请重新部署：{restore}"))?;
-            return Err(error);
-        }
-        #[cfg(target_os = "windows")]
-        public_update.0.take();
-        receipt.finish()?;
-        if !installed {
-            for extension in ["schema.yaml", "table.bin", "prism.bin", "reverse.bin"] {
-                let path = root.join("build").join(format!("rime_ice.{extension}"));
-                if let Err(error) = fs::remove_file(&path) {
-                    if error.kind() != std::io::ErrorKind::NotFound {
-                        tracing::info!(%error, path = %path.display(), "unused Rime Ice build cache remains locked");
-                    }
-                }
-            }
-        }
-        core.emit(CoreEvent::InstallProgress(InstallProgress { stage: "done".into(), percent: 100,
-            message: if installed { "雾凇拼音已安装并部署" } else { "雾凇拼音已卸载，保留用户自定义和学习记录" }.into() }));
-        Ok(status_at(&root))
-    }.await;
-    result.map_err(CoreError::Other)
+    ADDON.manage(core, installed, host, install_package).await
 }
 
 pub fn rime_ice_status(_core: &Core, root: &Path) -> Result<Status, CoreError> {

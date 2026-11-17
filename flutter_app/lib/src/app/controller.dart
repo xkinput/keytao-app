@@ -29,6 +29,8 @@ enum OperationKind {
   wanxiang,
   wanxiangGrammar,
   rimeIce,
+  rimeMint,
+  rimeFrost,
   customDirectory,
 }
 
@@ -193,6 +195,8 @@ class AppController extends ChangeNotifier {
   String? wanxiangError;
   String? wanxiangGrammarError;
   String? rimeIceError;
+  String? rimeMintError;
+  String? rimeFrostError;
   String? macosImeError;
   String? windowsImeError;
   String? linuxImeError;
@@ -205,6 +209,8 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? wanxiangProgress;
   InstallProgressDto? wanxiangGrammarProgress;
   InstallProgressDto? rimeIceProgress;
+  InstallProgressDto? rimeMintProgress;
+  InstallProgressDto? rimeFrostProgress;
   InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
   core.AddonStatusDto? wanxiang;
@@ -213,6 +219,10 @@ class AppController extends ChangeNotifier {
   String? wanxiangLatestVersion;
   core.AddonStatusDto? rimeIce;
   String? rimeIceLatestVersion;
+  core.AddonStatusDto? rimeMint;
+  String? rimeMintLatestVersion;
+  core.AddonStatusDto? rimeFrost;
+  String? rimeFrostLatestVersion;
   String? addonLatestVersion;
   final _addonUpdateChecks = <String, Object>{};
   DebugLogsDto? systemLogs;
@@ -309,6 +319,8 @@ class AppController extends ChangeNotifier {
                 'easy_en' => 'easy_en',
                 'wanxiang' => 'wanxiang',
                 'rime_ice' => 'rime_ice',
+                'rime_mint' => 'rime_mint',
+                'rime_frost' => 'rime_frost',
                 _ => scheme,
               };
   }
@@ -435,13 +447,19 @@ class AppController extends ChangeNotifier {
       ? formatLogBytes(wanxiangGrammar!.size)
       : '407 MB';
   bool get isManagingRimeIce => operation == OperationKind.rimeIce;
+  bool get isManagingRimeMint => operation == OperationKind.rimeMint;
+  bool get isManagingRimeFrost => operation == OperationKind.rimeFrost;
   bool get isInstallingCustom => operation == OperationKind.customDirectory;
   bool get canInstallAddon => !busy;
   bool get canInstallWanxiang => canInstallAddon;
   bool get canInstallRimeIce => canInstallAddon;
+  bool get canInstallRimeMint => canInstallAddon;
+  bool get canInstallRimeFrost => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
   bool get canUninstallRimeIce => !busy && rimeIce?.installed == true;
+  bool get canUninstallRimeMint => !busy && rimeMint?.installed == true;
+  bool get canUninstallRimeFrost => !busy && rimeFrost?.installed == true;
   String get installedWanxiangVariant =>
       wanxiang?.installed == true ? wanxiang?.variant ?? 'base' : 'base';
   String get selectedWanxiangVariant =>
@@ -471,6 +489,24 @@ class AppController extends ChangeNotifier {
       rimeIce?.installed != true ||
       rimeIce?.deployed != true ||
       rimeIceHasUpdate;
+  bool get rimeMintHasUpdate =>
+      rimeMint?.installed == true &&
+      rimeMintLatestVersion != null &&
+      _normalizedVersion(rimeMintLatestVersion!) !=
+          _normalizedVersion(rimeMint!.version);
+  bool get showRimeMintInstall =>
+      rimeMint?.installed != true ||
+      rimeMint?.deployed != true ||
+      rimeMintHasUpdate;
+  bool get rimeFrostHasUpdate =>
+      rimeFrost?.installed == true &&
+      rimeFrostLatestVersion != null &&
+      _normalizedVersion(rimeFrostLatestVersion!) !=
+          _normalizedVersion(rimeFrost!.version);
+  bool get showRimeFrostInstall =>
+      rimeFrost?.installed != true ||
+      rimeFrost?.deployed != true ||
+      rimeFrostHasUpdate;
   bool get canInstallCustom => canInstall && selectedDirectory != null;
   int get operationLogCount => operationLogs.length;
   int get customVerifyFailureCount =>
@@ -493,6 +529,8 @@ class AppController extends ChangeNotifier {
   String get addonTooltip => AppStrings.installEnglishTooltip;
   String get wanxiangTooltip => AppStrings.installWanxiangTooltip;
   String get rimeIceTooltip => AppStrings.installRimeIceTooltip;
+  String get rimeMintTooltip => AppStrings.installRimeMintTooltip;
+  String get rimeFrostTooltip => AppStrings.installRimeFrostTooltip;
   String get addonButtonLabel => addonHasUpdate
       ? AppStrings.update
       : addon?.installed == true
@@ -516,6 +554,20 @@ class AppController extends ChangeNotifier {
       : AppStrings.install;
   String get rimeIceStatusText =>
       _addonStatus(rimeIce?.installed, rimeIce?.deployed, rimeIce?.version);
+  String get rimeMintButtonLabel => rimeMintHasUpdate
+      ? AppStrings.update
+      : rimeMint?.installed == true
+      ? AppStrings.deploy
+      : AppStrings.install;
+  String get rimeMintStatusText =>
+      _addonStatus(rimeMint?.installed, rimeMint?.deployed, rimeMint?.version);
+  String get rimeFrostButtonLabel => rimeFrostHasUpdate
+      ? AppStrings.update
+      : rimeFrost?.installed == true
+      ? AppStrings.deploy
+      : AppStrings.install;
+  String get rimeFrostStatusText =>
+      _addonStatus(rimeFrost?.installed, rimeFrost?.deployed, rimeFrost?.version);
   String get wanxiangStatusText {
     final status = _addonStatus(
       wanxiang?.installed,
@@ -654,6 +706,8 @@ class AppController extends ChangeNotifier {
     wanxiangError,
     wanxiangGrammarError,
     rimeIceError,
+    rimeMintError,
+    rimeFrostError,
     customError,
     macosImeError,
     windowsImeError,
@@ -741,7 +795,9 @@ class AppController extends ChangeNotifier {
                 ((isManagingAddon ||
                         isManagingWanxiang ||
                         isManagingWanxiangGrammar ||
-                        isManagingRimeIce) &&
+                        isManagingRimeIce ||
+                        isManagingRimeMint ||
+                        isManagingRimeFrost) &&
                     (value.startsWith('系统搜索框方案未更新：') ||
                         value.contains('编译失败，已跳过：')))) {
           progress = value;
@@ -818,6 +874,8 @@ class AppController extends ChangeNotifier {
     if (isManagingWanxiang) wanxiangProgress = value;
     if (isManagingWanxiangGrammar) wanxiangGrammarProgress = value;
     if (isManagingRimeIce) rimeIceProgress = value;
+    if (isManagingRimeMint) rimeMintProgress = value;
+    if (isManagingRimeFrost) rimeFrostProgress = value;
     _changed();
   }
 
@@ -1007,6 +1065,22 @@ class AppController extends ChangeNotifier {
         }
       }),
       read(() async {
+        try {
+          rimeMint = await core.rimeMintStatus();
+          rimeMintError = null;
+        } catch (failure) {
+          rimeMintError = errorText(failure);
+        }
+      }),
+      read(() async {
+        try {
+          rimeFrost = await core.rimeFrostStatus();
+          rimeFrostError = null;
+        } catch (failure) {
+          rimeFrostError = errorText(failure);
+        }
+      }),
+      read(() async {
         versions = await core.getComponentVersions();
       }),
       if (!isAndroid || storageReady)
@@ -1109,6 +1183,10 @@ class AppController extends ChangeNotifier {
         _checkAddonUpdate('wanxiang', wanxiang!.version),
       if (rimeIce?.installed == true)
         _checkAddonUpdate('rime_ice', rimeIce!.version),
+      if (rimeMint?.installed == true)
+        _checkAddonUpdate('rime_mint', rimeMint!.version),
+      if (rimeFrost?.installed == true)
+        _checkAddonUpdate('rime_frost', rimeFrost!.version),
     ]);
   }
 
@@ -1121,6 +1199,8 @@ class AppController extends ChangeNotifier {
       final current = switch (id) {
         'easy_en' => addon,
         'rime_ice' => rimeIce,
+        'rime_mint' => rimeMint,
+        'rime_frost' => rimeFrost,
         _ => wanxiang,
       };
       if (_disposed ||
@@ -1133,6 +1213,10 @@ class AppController extends ChangeNotifier {
         addonLatestVersion = status.latestVersion;
       } else if (id == 'rime_ice') {
         rimeIceLatestVersion = status.latestVersion;
+      } else if (id == 'rime_mint') {
+        rimeMintLatestVersion = status.latestVersion;
+      } else if (id == 'rime_frost') {
+        rimeFrostLatestVersion = status.latestVersion;
       } else {
         wanxiangLatestVersion = status.latestVersion;
       }
@@ -2687,6 +2771,72 @@ class AppController extends ChangeNotifier {
       rimeIceError = errorText(failure);
       try {
         rimeIce = await core.rimeIceStatus();
+      } catch (_) {}
+      try {
+        await _readLocal();
+      } catch (_) {}
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<bool> manageRimeMint(bool installed) => run(() async {
+    _addonUpdateChecks['rime_mint'] = Object();
+    _startOperation(
+      OperationKind.rimeMint,
+      installed ? AppStrings.installing : AppStrings.uninstall,
+    );
+    rimeMintError = null;
+    rimeMintProgress = null;
+    try {
+      if (isAndroid) await _requireStorage();
+      rimeMint = await core.manageRimeMint(
+        installed: installed,
+        androidDeploy: _androidDeploy,
+      );
+      if (installed) rimeMintLatestVersion = rimeMint!.version;
+      await _readLocal();
+      addOperationLogs([
+        installed ? AppStrings.rimeMintInstalled : AppStrings.rimeMintRemoved,
+      ]);
+    } catch (failure) {
+      rimeMintError = errorText(failure);
+      try {
+        rimeMint = await core.rimeMintStatus();
+      } catch (_) {}
+      try {
+        await _readLocal();
+      } catch (_) {}
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<bool> manageRimeFrost(bool installed) => run(() async {
+    _addonUpdateChecks['rime_frost'] = Object();
+    _startOperation(
+      OperationKind.rimeFrost,
+      installed ? AppStrings.installing : AppStrings.uninstall,
+    );
+    rimeFrostError = null;
+    rimeFrostProgress = null;
+    try {
+      if (isAndroid) await _requireStorage();
+      rimeFrost = await core.manageRimeFrost(
+        installed: installed,
+        androidDeploy: _androidDeploy,
+      );
+      if (installed) rimeFrostLatestVersion = rimeFrost!.version;
+      await _readLocal();
+      addOperationLogs([
+        installed ? AppStrings.rimeFrostInstalled : AppStrings.rimeFrostRemoved,
+      ]);
+    } catch (failure) {
+      rimeFrostError = errorText(failure);
+      try {
+        rimeFrost = await core.rimeFrostStatus();
       } catch (_) {}
       try {
         await _readLocal();

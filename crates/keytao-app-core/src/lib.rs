@@ -29,6 +29,10 @@ mod remove_filter;
 mod candidate_page_size;
 pub mod wanxiang;
 pub mod rime_ice;
+mod downloaded_addon;
+mod pinyin_addons;
+pub mod rime_mint;
+pub mod rime_frost;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_public_schemas;
 pub use scheme_types::*;

@@ -93,6 +93,8 @@ class FakeCore implements RustLibApi {
     size: BigInt.zero,
   );
   AddonStatusDto rimeIceStatus = missingAddon;
+  AddonStatusDto rimeMintStatus = missingAddon;
+  AddonStatusDto rimeFrostStatus = missingAddon;
   bool delayAddonUpdates = false;
   bool addonUpdateFails = false;
   bool delayReleases = false;
@@ -189,6 +191,10 @@ class FakeCore implements RustLibApi {
   }
   @override
   Future<AddonStatusDto> crateApiCoreRimeIceStatus() async => rimeIceStatus;
+  @override
+  Future<AddonStatusDto> crateApiCoreRimeMintStatus() async => rimeMintStatus;
+  @override
+  Future<AddonStatusDto> crateApiCoreRimeFrostStatus() async => rimeFrostStatus;
   @override
   Future<AddonStatusDto> crateApiCoreCheckAddonUpdate({required String id}) async {
     calls.add('addonUpdate:$id');
@@ -382,6 +388,32 @@ class FakeCore implements RustLibApi {
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeIceStatus = installed ? installedAddon : missingAddon;
+  }
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeMint({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('rimeMint:$installed');
+    await emitAddonDeployProgress();
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    return rimeMintStatus = installed ? installedAddon : missingAddon;
+  }
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeFrost({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('rimeFrost:$installed');
+    await emitAddonDeployProgress();
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    return rimeFrostStatus = installed ? installedAddon : missingAddon;
   }
 
   @override
@@ -653,6 +685,10 @@ void main() {
           () => controller.manageWanxiang(false),
           () => controller.manageRimeIce(true),
           () => controller.manageRimeIce(false),
+          () => controller.manageRimeMint(true),
+          () => controller.manageRimeMint(false),
+          () => controller.manageRimeFrost(true),
+          () => controller.manageRimeFrost(false),
         ]) {
           controller.clearOperationLogs();
           expect(await action(), isTrue);
@@ -689,6 +725,10 @@ void main() {
       () => controller.manageWanxiang(false),
       () => controller.manageRimeIce(true),
       () => controller.manageRimeIce(false),
+      () => controller.manageRimeMint(true),
+      () => controller.manageRimeMint(false),
+      () => controller.manageRimeFrost(true),
+      () => controller.manageRimeFrost(false),
     ]) {
       controller.deploySteps.clear();
       controller.clearOperationLogs();
@@ -718,6 +758,8 @@ void main() {
         OperationKind.wanxiang,
         OperationKind.wanxiangGrammar,
         OperationKind.rimeIce,
+        OperationKind.rimeMint,
+        OperationKind.rimeFrost,
       ]) {
         controller.operation = operation;
         const progress = InstallProgressDto(
@@ -749,6 +791,12 @@ void main() {
         }
         if (operation == OperationKind.rimeIce) {
           expect(controller.rimeIceProgress, same(progress));
+        }
+        if (operation == OperationKind.rimeMint) {
+          expect(controller.rimeMintProgress, same(progress));
+        }
+        if (operation == OperationKind.rimeFrost) {
+          expect(controller.rimeFrostProgress, same(progress));
         }
       }
       var changes = 0;
@@ -957,6 +1005,23 @@ void main() {
     );
     expect(controller.rimeIceLatestVersion, '2');
     expect(controller.rimeIceHasUpdate, isTrue);
+    core.rimeMintStatus = installedAddon;
+    core.rimeFrostStatus = installedAddon;
+    await controller.refreshState();
+    core.addonUpdateRequests['rime_mint']!.complete(addonUpdate);
+    core.addonUpdateRequests['rime_frost']!.complete(addonUpdate);
+    await settle();
+    await controller.refreshState();
+    for (final id in ['rime_mint', 'rime_frost']) {
+      expect(
+        core.calls.where((call) => call == 'addonUpdate:$id'),
+        hasLength(1),
+      );
+    }
+    expect(controller.rimeMintLatestVersion, '2');
+    expect(controller.rimeMintHasUpdate, isTrue);
+    expect(controller.rimeFrostLatestVersion, '2');
+    expect(controller.rimeFrostHasUpdate, isTrue);
   });
 
   test('add-on update check failures remain nonblocking for the session', () async {
@@ -965,21 +1030,33 @@ void main() {
     core.addonStatus = installedAddon;
     core.wanxiangStatus = installedAddon;
     core.rimeIceStatus = installedAddon;
+    core.rimeMintStatus = installedAddon;
+    core.rimeFrostStatus = installedAddon;
     core.addonUpdateFails = true;
     expect(await controller.refreshState(), isTrue);
     expect(await controller.refreshState(), isTrue);
     await settle();
     expect(
       core.calls.where((call) => call.startsWith('addonUpdate:')),
-      ['addonUpdate:easy_en', 'addonUpdate:wanxiang', 'addonUpdate:rime_ice'],
+      [
+        'addonUpdate:easy_en',
+        'addonUpdate:wanxiang',
+        'addonUpdate:rime_ice',
+        'addonUpdate:rime_mint',
+        'addonUpdate:rime_frost',
+      ],
     );
     expect(controller.error, isNull);
     expect(controller.addonError, isNull);
     expect(controller.wanxiangError, isNull);
     expect(controller.rimeIceError, isNull);
+    expect(controller.rimeMintError, isNull);
+    expect(controller.rimeFrostError, isNull);
     expect(controller.addonLatestVersion, isNull);
     expect(controller.wanxiangLatestVersion, isNull);
     expect(controller.rimeIceLatestVersion, isNull);
+    expect(controller.rimeMintLatestVersion, isNull);
+    expect(controller.rimeFrostLatestVersion, isNull);
   });
 
   test('add-on update checks discard results across install and uninstall', () async {
@@ -989,11 +1066,15 @@ void main() {
       core.addonStatus = installedAddon;
       core.wanxiangStatus = installedAddon;
       core.rimeIceStatus = installedAddon;
+      core.rimeMintStatus = installedAddon;
+      core.rimeFrostStatus = installedAddon;
       core.delayAddonUpdates = true;
       await controller.refreshState();
       final easyEnRequest = core.addonUpdateRequests['easy_en']!;
       final wanxiangRequest = core.addonUpdateRequests['wanxiang']!;
       final rimeIceRequest = core.addonUpdateRequests['rime_ice']!;
+      final rimeMintRequest = core.addonUpdateRequests['rime_mint']!;
+      final rimeFrostRequest = core.addonUpdateRequests['rime_frost']!;
       expect(
         await (installed
             ? controller.installAddon()
@@ -1001,13 +1082,19 @@ void main() {
         isTrue,
       );
       expect(await controller.manageRimeIce(installed), isTrue);
+      expect(await controller.manageRimeMint(installed), isTrue);
+      expect(await controller.manageRimeFrost(installed), isTrue);
       easyEnRequest.complete(addonUpdate);
       wanxiangRequest.complete(addonUpdate);
       rimeIceRequest.complete(addonUpdate);
+      rimeMintRequest.complete(addonUpdate);
+      rimeFrostRequest.complete(addonUpdate);
       await settle();
       expect(controller.addonLatestVersion, installed ? '1' : null);
       expect(controller.wanxiangLatestVersion, '2');
       expect(controller.rimeIceLatestVersion, installed ? '1' : null);
+      expect(controller.rimeMintLatestVersion, installed ? '1' : null);
+      expect(controller.rimeFrostLatestVersion, installed ? '1' : null);
     }
   });
 
@@ -1142,7 +1229,11 @@ void main() {
     expect(controller.canInstallAddon, isTrue);
     expect(controller.canInstallWanxiang, isTrue);
     expect(controller.canInstallRimeIce, isTrue);
+    expect(controller.canInstallRimeMint, isTrue);
+    expect(controller.canInstallRimeFrost, isTrue);
     expect(await controller.manageRimeIce(true), isTrue);
+    expect(await controller.manageRimeMint(true), isTrue);
+    expect(await controller.manageRimeFrost(true), isTrue);
     expect(await controller.manageWanxiang(true), isTrue);
     core.calls.clear();
     expect(await controller.installAddon(), isTrue);
@@ -1161,12 +1252,20 @@ void main() {
     expect(controller.wanxiangError, 'deploy failed');
     expect(await controller.manageRimeIce(true), isFalse);
     expect(controller.rimeIceError, 'deploy failed');
+    expect(await controller.manageRimeMint(true), isFalse);
+    expect(controller.rimeMintError, 'deploy failed');
+    expect(await controller.manageRimeFrost(true), isFalse);
+    expect(controller.rimeFrostError, 'deploy failed');
     android.failDeploy = false;
     android.deployed = false;
     expect(await controller.manageWanxiang(true), isFalse);
     expect(core.calls, contains('callback:部署未完成'));
     expect(await controller.manageRimeIce(true), isFalse);
     expect(controller.rimeIceError, '部署未完成');
+    expect(await controller.manageRimeMint(true), isFalse);
+    expect(controller.rimeMintError, '部署未完成');
+    expect(await controller.manageRimeFrost(true), isFalse);
+    expect(controller.rimeFrostError, '部署未完成');
     controller.dispose();
     controller = create(mobile: false)
       ..desktopEnglishMode = EnglishModeDto.schema;

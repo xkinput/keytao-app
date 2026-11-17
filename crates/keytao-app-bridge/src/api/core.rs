@@ -1201,17 +1201,37 @@ pub fn rime_ice_status() -> Result<AddonStatusDto, String> {
     )
 }
 
+pub fn rime_mint_status() -> Result<AddonStatusDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::rime_mint::rime_mint_status(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn rime_frost_status() -> Result<AddonStatusDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::rime_frost::rime_frost_status(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
 /// A failed upstream check leaves the locally installed status available.
 pub async fn check_addon_update(id: String) -> Result<AddonStatusDto, String> {
     let mut status = match id.as_str() {
         "easy_en" => addon_schema_status(id.clone())?,
         "wanxiang" => wanxiang_status()?,
         "rime_ice" => rime_ice_status()?,
+        "rime_mint" => rime_mint_status()?,
+        "rime_frost" => rime_frost_status()?,
         _ => return Err(format!("Unsupported add-on: {id}")),
     };
     status.latest_version = match id.as_str() {
         "easy_en" => keytao_app_core::addon::latest_version().await.ok(),
         "rime_ice" => keytao_app_core::rime_ice::latest_version().await.ok(),
+        "rime_mint" => keytao_app_core::rime_mint::latest_version().await.ok(),
+        "rime_frost" => keytao_app_core::rime_frost::latest_version().await.ok(),
         _ => keytao_app_core::wanxiang::latest_version().await.ok(),
     };
     Ok(status)
@@ -1245,6 +1265,36 @@ pub async fn manage_rime_ice(
     let host = InstallHost::new(state.host.clone(), android_deploy);
     runtime::dto(
         keytao_app_core::rime_ice::manage_rime_ice(&state.core, installed, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+pub async fn manage_rime_mint(
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<AddonStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::rime_mint::manage_rime_mint(&state.core, installed, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+pub async fn manage_rime_frost(
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<AddonStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::rime_frost::manage_rime_frost(&state.core, installed, &host)
             .await
             .map_err(|error| error.to_string())?,
     )
