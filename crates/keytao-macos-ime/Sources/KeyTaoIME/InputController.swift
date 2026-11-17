@@ -36,6 +36,9 @@ final class KeyTaoInputController: IMKInputController {
     private var englishMode = false
     private var asciiMode = false
     private var chordComposer = false
+    private var chordReleases = KeyTaoChordReleaseTracker()
+    private var chordReleaseTimer: Timer?
+    private let chordEventSource = CGEventSource(stateID: .combinedSessionState)
     private var hasMarkedText = false
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
@@ -61,6 +64,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     deinit {
+        chordReleaseTimer?.invalidate()
         if let reloadObserver {
             NotificationCenter.default.removeObserver(reloadObserver)
         }
@@ -81,6 +85,7 @@ final class KeyTaoInputController: IMKInputController {
 
     override func activateServer(_ sender: Any!) {
         inputContextGeneration.invalidate()
+        clearPendingChordReleases()
         let client = sender as? IMKTextInput
         isActive = true
         KeyTaoRuntime.shared.checkForReload()
@@ -91,6 +96,7 @@ final class KeyTaoInputController: IMKInputController {
     override func deactivateServer(_ sender: Any!) {
         defer { keytao_log_drain_key_stats() }
         let generation = inputContextGeneration.invalidate()
+        clearPendingChordReleases()
         isActive = false
         // The composition belongs to the client that is going away, so it has to
         // be handed back before the session is dropped; otherwise the client
@@ -135,8 +141,10 @@ final class KeyTaoInputController: IMKInputController {
         }
         if event.type == .keyUp {
             guard chordComposer else { return false }
-            let keyval = rimeKeyValue(from: event)
-            let modifiers = rimeModifiers(from: event.modifierFlags)
+            let pressedKeyval = chordReleases.takeRelease(keyCode: event.keyCode)
+            let keyval = pressedKeyval ?? rimeKeyValue(from: event)
+            if chordReleases.isEmpty { clearPendingChordReleases() }
+            let modifiers = pressedKeyval == nil ? rimeModifiers(from: event.modifierFlags) : 0
             guard KeyTaoChordKeyPolicy.shouldForwardRelease(
                 chordComposer: chordComposer, asciiMode: asciiMode,
                 keyval: keyval, modifiers: modifiers
@@ -193,15 +201,60 @@ final class KeyTaoInputController: IMKInputController {
             )
         guard let state = KeyTaoImeState.consuming(json) else { return false }
 
+        chordReleases.record(
+            keyCode: event.keyCode, keyval: keyval,
+            chordComposer: state.chordComposer, asciiMode: state.asciiMode,
+            accepted: state.accepted, now: ProcessInfo.processInfo.systemUptime,
+            isPressed: chordEventSource != nil
+                && CGEventSource.keyState(.combinedSessionState, key: event.keyCode)
+        )
+        if !chordReleases.isEmpty && chordReleaseTimer == nil {
+            // IMKit does not reliably deliver printable keyUp events.
+            let timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] _ in
+                self?.pollPendingChordReleases()
+            }
+            chordReleaseTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
         apply(state, to: sender)
         keytao_log_keystroke(Double(DispatchTime.now().uptimeNanoseconds - keyStarted) / 1_000_000)
         return state.accepted
+    }
+
+    private func pollPendingChordReleases() {
+        guard Self.keyHandlingDepth == 0 else { return }
+        Self.keyHandlingDepth += 1
+        defer { Self.keyHandlingDepth -= 1 }
+        guard isActive, chordComposer, !asciiMode, let session, let client = client() else {
+            clearPendingChordReleases()
+            return
+        }
+        let generation = inputContextGeneration.current
+        let released = chordReleases.poll(now: ProcessInfo.processInfo.systemUptime) { keyCode in
+            guard chordEventSource != nil else { return nil }
+            return CGEventSource.keyState(.combinedSessionState, key: keyCode)
+        }
+        if chordReleases.isEmpty { clearPendingChordReleases() }
+        for keyval in released {
+            guard inputContextGeneration.isCurrent(generation), isActive, chordComposer, !asciiMode else { return }
+            guard let state = KeyTaoImeState.consuming(
+                keytao_session_process_key_json(session, keyval, rimeReleaseMask)
+            ) else { continue }
+            apply(state, to: client)
+        }
+    }
+
+    private func clearPendingChordReleases() {
+        chordReleaseTimer?.invalidate()
+        chordReleaseTimer = nil
+        chordReleases.clear()
     }
 
     // MARK: Commit / cancel
 
     override func commitComposition(_ sender: Any!) {
         let generation = inputContextGeneration.invalidate()
+        clearPendingChordReleases()
         guard hasComposition else {
             hideCandidates()
             hideModeIndicator()
@@ -224,6 +277,7 @@ final class KeyTaoInputController: IMKInputController {
     /// Ends the composition session in both directions: librime forgets it and
     /// the client is left without marked text.
     private func endComposition(commit: Bool, client: IMKTextInput?) {
+        clearPendingChordReleases()
         let generation = inputContextGeneration.current
         guard let session else {
             clearMarkedText(client: client)
@@ -281,6 +335,7 @@ final class KeyTaoInputController: IMKInputController {
         englishMode = state.englishMode
         asciiMode = state.asciiMode
         chordComposer = state.chordComposer
+        if !chordComposer || asciiMode { clearPendingChordReleases() }
 
         if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || theme.ui.effectiveEmbeddedComposition) {
             hideCandidates()
@@ -585,6 +640,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func runtimeDidReload() {
         let generation = inputContextGeneration.invalidate()
+        clearPendingChordReleases()
         guard isActive else {
             hasComposition = false
             hideCandidates()
