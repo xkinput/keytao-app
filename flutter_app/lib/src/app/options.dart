@@ -26,6 +26,8 @@ const xmjdVariantSchemes = {
 String schemeDisplayName(String key) => switch (key) {
   'xmjd' => '星猫键道 · 顶功',
   'xmjd-feiding' => '星猫键道 · 非顶',
+  'easy_en' => 'Easy English',
+  'wanxiang' => AppStrings.wanxiang,
   _ => schemes[key] ?? key,
 };
 const logoAsset = 'assets/logo.png';

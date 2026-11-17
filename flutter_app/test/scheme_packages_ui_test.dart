@@ -6,7 +6,9 @@ import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart'
     show DeployStep, DeployStepState;
 import 'package:keytao/src/app/options.dart';
+import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/login.dart' show showAccountDialog;
 import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/settings.dart' show showCloudPackageTransfer;
@@ -141,6 +143,75 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  testWidgets('add-on install controls work without a main scheme', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..local = const LocalSchemaDto(
+        installed: false,
+        deployed: false,
+        schemas: [],
+      );
+    c.addon = c.wanxiang;
+    addTearDown(c.dispose);
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: FScaffold(child: AddonCard(controller: c)),
+      ),
+    );
+    final installs = tester.widgetList<ActionButton>(
+      find.widgetWithText(ActionButton, AppStrings.install),
+    );
+    expect(installs, hasLength(2));
+    expect(installs.every((button) => button.onPress != null), isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'input hero identifies standalone add-ons and keeps main priority',
+    (tester) async {
+      final c = _PackageController();
+      addTearDown(c.dispose);
+      _size(tester, const Size(1200, 1000));
+      for (final (schema, name) in [
+        ('easy_en', 'Easy English'),
+        ('wanxiang', AppStrings.wanxiang),
+      ]) {
+        c.local = LocalSchemaDto(
+          installed: true,
+          deployed: true,
+          schemas: [schema],
+        );
+        const status = AddonStatusDto(
+          installed: true,
+          deployed: true,
+          englishAvailable: true,
+          version: 'standalone',
+        );
+        c.addon = status;
+        c.wanxiang = status;
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: c.info.platform,
+            home: FScaffold(child: InputPage(controller: c)),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(c.activeSchemeKey, schema);
+        expect(find.text(name), findsOneWidget);
+        expect(find.text('vstandalone'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+      c.local = const LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        schemas: ['wanxiang', 'keytao', 'easy_en'],
+      );
+      expect(c.activeSchemeKey, 'keytao');
+    },
+  );
+
   testWidgets('scheme page avoids overflow above a tall landscape keyboard', (
     tester,
   ) async {

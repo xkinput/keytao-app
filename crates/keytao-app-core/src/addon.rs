@@ -249,7 +249,14 @@ pub fn update_addon_schema_list_content(
     let mut schemas = parse_schema_list(&existing);
     schemas.retain(|schema| schema != id);
     if installed {
-        schemas.push(id.to_string());
+        if schemas
+            .iter()
+            .all(|schema| keytao_core::is_addon_schema(schema))
+        {
+            schemas.insert(0, id.to_string());
+        } else {
+            schemas.push(id.to_string());
+        }
     }
     let schema_list = serde_yaml::Value::Sequence(
         schemas
@@ -275,16 +282,25 @@ pub fn update_addon_schema_list_content(
 }
 
 pub fn write_addon_schema_list(root: &Path, id: &str, installed: bool) -> Result<(), String> {
-    let path = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .find(|path| path.is_file())
-        .ok_or("请先安装键道方案")?;
-    let existing = std::fs::read_to_string(&path)
-        .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
+    let (relative, existing) = addon_default_custom(root)?;
+    let path = root.join(relative);
     let content = update_addon_schema_list_content(&existing, id, installed)?;
     write_file_atomic(&path, content.as_bytes())
         .map_err(|error| format!("写入附加方案列表失败: {error}"))
+}
+
+fn addon_default_custom(root: &Path) -> Result<(&'static str, String), String> {
+    let relative = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find(|name| root.join(name).is_file())
+        .unwrap_or("default.custom.yaml");
+    let path = wanxiang::safe_target(root, relative)?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "patch: {}\n".into(),
+        Err(error) => return Err(format!("读取 {} 失败: {error}", path.display())),
+    };
+    Ok((relative, existing))
 }
 
 pub fn addon_schema_status(
@@ -518,20 +534,81 @@ pub(crate) async fn prepare_public_package(root: &Path, cache: &Path) -> Result<
     receipt.finish()
 }
 
-fn write_schema_list_transaction(
+pub(crate) fn shared_data_dir(core: &Core, root: &Path) -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        let _ = core;
+        root.join("rime-data")
+    }
+    #[cfg(target_os = "ios")]
+    {
+        crate::deploy::ios_app_shared_data_dir(core, root)
+            .unwrap_or_else(keytao_core::default_shared_data_dir)
+            .into()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = root;
+        crate::ime_status::app_shared_data_dir(core).into()
+    }
+}
+
+pub(crate) fn owned_addon_default(root: &Path) -> Result<Option<PathBuf>, String> {
+    let path = wanxiang::safe_target(root, "default.yaml")?;
+    match std::fs::read(&path) {
+        Ok(content) => Ok((content == include_bytes!("addon-default.yaml")).then_some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取 {} 失败: {error}", path.display())),
+    }
+}
+
+pub(crate) fn write_schema_list_transaction(
     receipt: &mut InstallReceipt,
+    id: &str,
     installed: bool,
+    shared: &Path,
 ) -> Result<(), String> {
-    let relative = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .find(|name| receipt.root.join(name).is_file())
-        .ok_or("请先安装键道方案")?;
-    let existing =
-        std::fs::read_to_string(receipt.root.join(relative)).map_err(|e| e.to_string())?;
-    let updated = update_addon_schema_list_content(&existing, EASY_EN_ADDON_ID, installed)?;
+    let (relative, existing) = addon_default_custom(&receipt.root)?;
+    let updated = update_addon_schema_list_content(&existing, id, installed)?;
     let path = receipt.work.join("default.custom.yaml");
-    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
-    receipt.replace(relative, &path, wanxiang::fingerprint(&path)?.0)
+    std::fs::write(&path, &updated).map_err(|e| e.to_string())?;
+    receipt.replace(relative, &path, wanxiang::fingerprint(&path)?.0)?;
+    let schemas = parse_schema_list(&updated);
+    let addon_only = schemas
+        .iter()
+        .all(|schema| keytao_core::is_addon_schema(schema));
+    if schemas.is_empty() || !addon_only {
+        if owned_addon_default(&receipt.root)?.is_some() {
+            receipt.move_original("default.yaml")?;
+        }
+    } else if !wanxiang::safe_target(&receipt.root, "default.yaml")?.is_file()
+        && !shared.join("default.yaml").is_file()
+    {
+        let path = receipt.work.join("default.yaml");
+        std::fs::write(&path, include_str!("addon-default.yaml")).map_err(|e| e.to_string())?;
+        receipt.replace("default.yaml", &path, wanxiang::fingerprint(&path)?.0)?;
+    }
+    if addon_only {
+        let path = receipt.work.join("active.json");
+        let manifest = serde_json::json!({
+            "root": receipt.root,
+            "scheme_key": schemas.first().map(String::as_str).unwrap_or(""),
+            "manifest": {},
+            "rime_lua": null,
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        receipt.replace(
+            keytao_core::ACTIVE_SCHEME_MANIFEST,
+            &path,
+            wanxiang::fingerprint(&path)?.0,
+        )?;
+        receipt.move_original("rime.lua")?;
+    }
+    Ok(())
 }
 
 fn remove_path_if_present(path: &Path) -> Result<(), String> {
@@ -665,26 +742,39 @@ pub async fn addon_schema_install(
     id: String,
     host: &impl SchemeHost,
 ) -> Result<AddonSchemaStatus, CoreError> {
-    let result: Result<_, String> = async {
-        let id = validate_addon_schema_id(&id)?;
-        let root = host.user_root()?;
-        let base = keytao_core::schema_install_state(&root);
-        if !base.installed {
-            return Err("请先安装键道方案".into());
-        }
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "addon-download".into(),
-            percent: 5,
-            message: "正在下载附加方案 English...".into(),
-        }));
-        let mut receipt = install_package(&root, |percent, message| {
+    addon_schema_install_with(core, id, host, |root| async move {
+        install_package(&root, |percent, message| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
                 stage: "addon-download".into(),
                 percent: u32::from(percent),
                 message: message.into(),
             }));
-        }).await?;
-        write_schema_list_transaction(&mut receipt, true)?;
+        })
+        .await
+    })
+    .await
+}
+
+async fn addon_schema_install_with<Install, InstallFuture>(
+    core: &Core,
+    id: String,
+    host: &impl SchemeHost,
+    install: Install,
+) -> Result<AddonSchemaStatus, CoreError>
+where
+    Install: FnOnce(PathBuf) -> InstallFuture,
+    InstallFuture: std::future::Future<Output = Result<InstallReceipt, String>>,
+{
+    let result: Result<_, String> = async {
+        let id = validate_addon_schema_id(&id)?;
+        let root = host.user_root()?;
+        core.emit(CoreEvent::InstallProgress(InstallProgress {
+            stage: "addon-download".into(),
+            percent: 5,
+            message: "正在下载附加方案 English...".into(),
+        }));
+        let mut receipt = install(root.clone()).await?;
+        write_schema_list_transaction(&mut receipt, id, true, &shared_data_dir(core, &root))?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "addon-deploy".into(),
             percent: 55,
@@ -772,7 +862,7 @@ pub async fn addon_schema_uninstall(
             message: "正在卸载附加方案 English...".into(),
         }));
         let mut receipt = uninstall_package(&root)?;
-        write_schema_list_transaction(&mut receipt, false)?;
+        write_schema_list_transaction(&mut receipt, id, false, &shared_data_dir(core, &root))?;
         let reset_english_mode = reset_english_mode_transaction(&mut receipt)?;
         #[cfg(target_os = "windows")]
         let mut public_update = None;
@@ -849,6 +939,10 @@ pub async fn addon_schema_uninstall(
 }
 
 #[cfg(test)]
+#[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
+mod smoke_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -900,15 +994,333 @@ mod tests {
         archive.finish().unwrap();
     }
 
-    fn install_fixture(root: &Path, sha: char, content: &str) -> InstallReceipt {
+    fn commit_fixture_package(root: &Path, sha: char, content: &str) -> InstallReceipt {
         let mut receipt = InstallReceipt::new(root).unwrap();
         let archive = receipt.work.join("fixture.zip");
         fixture_archive(&archive, content, &[]);
         let sha = sha.to_string().repeat(40);
         let package = package_from_commit(&sha).unwrap();
         commit_package(&mut receipt, &archive, &package).unwrap();
-        write_schema_list_transaction(&mut receipt, true).unwrap();
         receipt
+    }
+
+    fn install_fixture(root: &Path, sha: char, content: &str) -> InstallReceipt {
+        let mut receipt = commit_fixture_package(root, sha, content);
+        write_schema_list_transaction(&mut receipt, EASY_EN_ADDON_ID, true, root).unwrap();
+        receipt
+    }
+
+    #[tokio::test]
+    async fn standalone_english_installs_deploys_and_uninstalls_without_a_main_scheme() {
+        use crate::scheme_host::tests::AddonHost;
+        use std::sync::atomic::Ordering;
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("default.custom.yaml"),
+            "patch:\n  menu/page_size: 9\n  key_binder/bindings: []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("rime.lua"),
+            "stale = require('old_main')\n",
+        )
+        .unwrap();
+        let host = AddonHost::new(root.path());
+        let shared_default_available = shared_data_dir(&host.core, root.path())
+            .join("default.yaml")
+            .is_file();
+        let status = addon_schema_install_with(
+            &host.core,
+            EASY_EN_ADDON_ID.into(),
+            &host,
+            |root| async move { Ok(commit_fixture_package(&root, 'a', "upstream")) },
+        )
+        .await
+        .unwrap();
+        assert!(status.installed && status.deployed);
+        assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
+        let config = std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap();
+        assert_eq!(parse_schema_list(&config), [EASY_EN_ADDON_ID]);
+        let config: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        assert_eq!(config["patch"]["menu/page_size"], 9);
+        assert!(config["patch"]["key_binder/bindings"].is_sequence());
+        assert_eq!(
+            root.path().join("default.yaml").is_file(),
+            !shared_default_available
+        );
+        assert!(!root.path().join("rime.lua").exists());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.path().join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["scheme_key"], EASY_EN_ADDON_ID);
+        assert!(manifest["rime_lua"].is_null());
+        let status = addon_schema_uninstall(&host.core, EASY_EN_ADDON_ID.into(), &host)
+            .await
+            .unwrap();
+        assert!(!status.installed && !status.deployed);
+        assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
+        assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
+        assert!(
+            parse_schema_list(
+                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
+            )
+            .is_empty()
+        );
+        assert_eq!(keytao_core::deployed_schema_id_from_dir(root.path()), None);
+        assert!(!root.path().join("default.yaml").exists());
+    }
+
+    #[test]
+    fn standalone_addons_use_shared_defaults_without_shadowing_them() {
+        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID] {
+            let root = TestRoot::new();
+            std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
+            let shared = root.path().join("rime-data");
+            std::fs::create_dir_all(&shared).unwrap();
+            std::fs::write(shared.join("default.yaml"), "config_version: shared\n").unwrap();
+            let mut receipt = InstallReceipt::new(root.path()).unwrap();
+            write_schema_list_transaction(&mut receipt, id, true, &shared).unwrap();
+            receipt.finish().unwrap();
+            assert!(!root.path().join("default.yaml").exists());
+            assert_eq!(
+                std::fs::read_to_string(shared.join("default.yaml")).unwrap(),
+                "config_version: shared\n"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_fallback_cleanup_preserves_edits_and_rolls_back() {
+        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID] {
+            for edited in [false, true] {
+                let root = TestRoot::new();
+                std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
+                let mut receipt = InstallReceipt::new(root.path()).unwrap();
+                write_schema_list_transaction(&mut receipt, id, true, root.path()).unwrap();
+                receipt.finish().unwrap();
+                let path = root.path().join("default.yaml");
+                let mut original = std::fs::read_to_string(&path).unwrap();
+                if edited {
+                    original.push_str("# User edit\n");
+                    std::fs::write(&path, &original).unwrap();
+                }
+                let mut receipt = InstallReceipt::new(root.path()).unwrap();
+                write_schema_list_transaction(&mut receipt, id, false, root.path()).unwrap();
+                assert_eq!(path.exists(), edited);
+                drop(receipt);
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+                let mut receipt = InstallReceipt::new(root.path()).unwrap();
+                write_schema_list_transaction(&mut receipt, id, false, root.path()).unwrap();
+                receipt.finish().unwrap();
+                assert_eq!(path.exists(), edited);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_setup_rolls_back_on_failed_deploy() {
+        use crate::scheme_host::tests::AddonHost;
+        use std::sync::atomic::Ordering;
+        let root = TestRoot::new();
+        std::fs::remove_file(root.path().join("default.custom.yaml")).unwrap();
+        std::fs::write(root.path().join("rime.lua"), "old lua").unwrap();
+        let host = AddonHost::new(root.path());
+        host.fail_deploys.store(1, Ordering::SeqCst);
+        assert!(
+            addon_schema_install_with(
+                &host.core,
+                EASY_EN_ADDON_ID.into(),
+                &host,
+                |root| async move { Ok(commit_fixture_package(&root, 'a', "upstream")) }
+            )
+            .await
+            .is_err()
+        );
+        for name in [
+            "default.yaml",
+            "default.custom.yaml",
+            keytao_core::ACTIVE_SCHEME_MANIFEST,
+            "easy_en.schema.yaml",
+            MANIFEST,
+        ] {
+            assert!(!root.path().join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("rime.lua")).unwrap(),
+            "old lua"
+        );
+    }
+
+    #[tokio::test]
+    async fn main_scheme_keeps_priority_when_installing_english() {
+        use crate::scheme_host::tests::AddonHost;
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("keytao.schema.yaml"),
+            "schema: {schema_id: keytao}\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("rime.lua"), "main lua").unwrap();
+        let host = AddonHost::new(root.path());
+        addon_schema_install_with(
+            &host.core,
+            EASY_EN_ADDON_ID.into(),
+            &host,
+            |root| async move { Ok(commit_fixture_package(&root, 'a', "upstream")) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            parse_schema_list(
+                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
+            ),
+            ["keytao", EASY_EN_ADDON_ID]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("rime.lua")).unwrap(),
+            "main lua"
+        );
+        assert!(
+            !root
+                .path()
+                .join(keytao_core::ACTIVE_SCHEME_MANIFEST)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn standalone_defaults_compile_and_input_with_librime() {
+        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID] {
+            let root = TestRoot::new();
+            smoke_fixture::write(root.path()).unwrap();
+            for suffix in ["schema.yaml", "dict.yaml"] {
+                let source = root
+                    .path()
+                    .join(format!("{}.{suffix}", smoke_fixture::SCHEMA_ID));
+                let content = std::fs::read_to_string(&source)
+                    .unwrap()
+                    .replace(smoke_fixture::SCHEMA_ID, id);
+                let content = if suffix == "schema.yaml" {
+                    format!(
+                        "{content}\npunctuator:\n  import_preset: default\nkey_binder:\n  import_preset: default\nrecognizer:\n  import_preset: default\n"
+                    )
+                } else {
+                    content
+                };
+                std::fs::write(root.path().join(format!("{id}.{suffix}")), content).unwrap();
+                std::fs::remove_file(source).unwrap();
+            }
+            if id == wanxiang::SCHEMA_ID {
+                std::fs::write(
+                    root.path().join("wanxiang.schema.yaml"),
+                    include_str!("wanxiang-basic.schema.yaml"),
+                )
+                .unwrap();
+                std::fs::write(
+                    root.path().join("wanxiang_algebra.yaml"),
+                    "base: {全拼: {__append: []}}\n",
+                )
+                .unwrap();
+                let mut dictionary = "---\nname: wanxiang\nversion: '1'\nsort: by_weight\nuse_preset_vocabulary: false\n...\n".to_string();
+                for (index, word) in [
+                    "你好", "你号", "拟好", "逆好", "腻好", "妮好", "匿好", "泥好",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    dictionary.push_str(&format!("{word}\tnihao\t{}\n", 100 - index));
+                }
+                std::fs::write(root.path().join("wanxiang.dict.yaml"), dictionary).unwrap();
+            }
+            std::fs::remove_file(root.path().join("default.yaml")).unwrap();
+            std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
+            let mut receipt = InstallReceipt::new(root.path()).unwrap();
+            write_schema_list_transaction(&mut receipt, id, true, root.path()).unwrap();
+            let runtime = keytao_core::ImeRuntime::with_dirs(
+                root.path(),
+                root.path().to_string_lossy().into_owned(),
+            );
+            runtime.init().unwrap();
+            assert!(keytao_core::schema_install_state(root.path()).deployed);
+            let session = runtime.create_session().unwrap();
+            session.select_schema(id).unwrap();
+            let code = if id == wanxiang::SCHEMA_ID {
+                "nihao"
+            } else {
+                smoke_fixture::CODE
+            };
+            for character in code.chars() {
+                session.process_key_result(character as u32, 0).unwrap();
+            }
+            assert!(!session.state().candidates.is_empty());
+            if id == wanxiang::SCHEMA_ID {
+                assert_eq!(session.state().candidates.len(), 5);
+                assert_eq!(
+                    session
+                        .process_key_result(b'=' as u32, 0)
+                        .unwrap()
+                        .state
+                        .page,
+                    1
+                );
+                assert_eq!(
+                    session
+                        .process_key_result(b'-' as u32, 0)
+                        .unwrap()
+                        .state
+                        .page,
+                    0
+                );
+                assert_eq!(
+                    session
+                        .process_key_result(b' ' as u32, 0)
+                        .unwrap()
+                        .state
+                        .committed
+                        .as_deref(),
+                    Some("你好")
+                );
+                assert_eq!(
+                    session
+                        .process_key_result(b',' as u32, 0)
+                        .unwrap()
+                        .state
+                        .committed
+                        .as_deref(),
+                    Some("，")
+                );
+            }
+            receipt.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn installing_another_standalone_addon_preserves_the_first_and_uninstall_keeps_it() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
+        install_fixture(root.path(), 'a', "upstream")
+            .finish()
+            .unwrap();
+        let mut receipt = InstallReceipt::new(root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, wanxiang::SCHEMA_ID, true, root.path()).unwrap();
+        assert_eq!(
+            parse_schema_list(
+                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
+            ),
+            [wanxiang::SCHEMA_ID, EASY_EN_ADDON_ID]
+        );
+        receipt.finish().unwrap();
+        let mut receipt = InstallReceipt::new(root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, wanxiang::SCHEMA_ID, false, root.path()).unwrap();
+        receipt.finish().unwrap();
+        assert_eq!(
+            parse_schema_list(
+                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
+            ),
+            [EASY_EN_ADDON_ID]
+        );
+        assert!(addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
     }
 
     #[test]
@@ -1006,7 +1418,7 @@ mod tests {
             "cccccccccccc"
         );
         let mut receipt = uninstall_package(root.path()).unwrap();
-        write_schema_list_transaction(&mut receipt, false).unwrap();
+        write_schema_list_transaction(&mut receipt, EASY_EN_ADDON_ID, false, root.path()).unwrap();
         receipt.finish().unwrap();
         assert!(!addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
         assert!(!root.path().join(MANIFEST).exists());
@@ -1023,7 +1435,7 @@ mod tests {
         }
         write_addon_schema_list(root.path(), EASY_EN_ADDON_ID, true).unwrap();
         let mut receipt = uninstall_package(root.path()).unwrap();
-        write_schema_list_transaction(&mut receipt, false).unwrap();
+        write_schema_list_transaction(&mut receipt, EASY_EN_ADDON_ID, false, root.path()).unwrap();
         receipt.finish().unwrap();
         assert!(!addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
         for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
@@ -1203,7 +1615,7 @@ mod tests {
         let original = b"{\"englishMode\":\"schema\",\"other\":7}";
         std::fs::write(root.path().join(SETTINGS_FILE), original).unwrap();
         let mut receipt = uninstall_package(root.path()).unwrap();
-        write_schema_list_transaction(&mut receipt, false).unwrap();
+        write_schema_list_transaction(&mut receipt, EASY_EN_ADDON_ID, false, root.path()).unwrap();
         assert!(reset_english_mode_transaction(&mut receipt).unwrap());
         assert_eq!(read_english_mode(root.path()), EnglishMode::Ascii);
         drop(receipt);
@@ -1315,7 +1727,7 @@ mod tests {
         let archive = receipt.work.join("fixture.zip");
         fixture_archive(&archive, "upstream", &[]);
         commit_package(&mut receipt, &archive, &package).unwrap();
-        write_schema_list_transaction(&mut receipt, true).unwrap();
+        write_schema_list_transaction(&mut receipt, EASY_EN_ADDON_ID, true, root.path()).unwrap();
         receipt.finish().unwrap();
         let status = addon_schema_status_at(root.path(), EASY_EN_ADDON_ID);
         assert!(status.installed);

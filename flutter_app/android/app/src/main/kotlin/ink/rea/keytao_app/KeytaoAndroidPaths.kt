@@ -237,9 +237,9 @@ object KeytaoAndroidPaths {
             }
         }.getOrDefault(emptySet())
         return runCatching {
-            parseSchemas(config.readText()).filter {
-                isSafeSchemaId(it) && (isManagedSchema(it) || it in localSchemas)
-            }
+            val schemas = parseSchemas(config.readText()).filter(::isSafeSchemaId)
+            schemas.filter { isManagedSchema(it) || it in localSchemas }
+                .ifEmpty { schemas.filter(::isAddonSchema) }
         }
             .getOrDefault(emptyList())
     }

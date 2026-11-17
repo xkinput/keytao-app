@@ -287,7 +287,12 @@ class AppController extends ChangeNotifier {
     }
     return local == null
         ? scheme
-        : installedSchemeKey(local!.schemas, local!.installedScheme) ?? scheme;
+        : installedSchemeKey(local!.schemas, local!.installedScheme) ??
+              switch (local!.schemas.firstOrNull) {
+                'easy_en' => 'easy_en',
+                'wanxiang' => 'wanxiang',
+                _ => scheme,
+              };
   }
 
   void markUserWordsChanged(String key) {
@@ -397,7 +402,7 @@ class AppController extends ChangeNotifier {
   bool get isManagingAddon => operation == OperationKind.addon;
   bool get isManagingWanxiang => operation == OperationKind.wanxiang;
   bool get isInstallingCustom => operation == OperationKind.customDirectory;
-  bool get canInstallAddon => !busy && local?.installed == true;
+  bool get canInstallAddon => !busy;
   bool get canInstallWanxiang => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
@@ -434,12 +439,8 @@ class AppController extends ChangeNotifier {
   String get deployTooltip => local?.installed == true
       ? AppStrings.deployCurrent
       : AppStrings.installFirst;
-  String get addonTooltip => local?.installed == true
-      ? AppStrings.installEnglishTooltip
-      : AppStrings.installKeytaoFirst;
-  String get wanxiangTooltip => local?.installed == true
-      ? AppStrings.installWanxiangTooltip
-      : AppStrings.installMainFirst;
+  String get addonTooltip => AppStrings.installEnglishTooltip;
+  String get wanxiangTooltip => AppStrings.installWanxiangTooltip;
   String get addonButtonLabel => addonHasUpdate
       ? AppStrings.update
       : addon?.installed == true
@@ -2396,9 +2397,6 @@ class AppController extends ChangeNotifier {
     addonError = null;
     addonProgress = null;
     try {
-      if (installed && local?.installed != true) {
-        throw StateError(AppStrings.installKeytaoFirst);
-      }
       if (isAndroid) {
         await _requireStorage();
       }
@@ -2446,9 +2444,6 @@ class AppController extends ChangeNotifier {
     wanxiangError = null;
     wanxiangProgress = null;
     try {
-      if (installed && local?.installed != true) {
-        throw StateError(AppStrings.installMainFirst);
-      }
       if (isAndroid) await _requireStorage();
       wanxiang = await core.manageWanxiang(
         installed: installed,

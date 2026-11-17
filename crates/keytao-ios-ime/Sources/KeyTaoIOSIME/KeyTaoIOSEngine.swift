@@ -300,7 +300,7 @@ enum KeyTaoIOSPaths {
             return []
         }
 
-        return content.split(separator: "\n").compactMap { rawLine in
+        let schemas: [String] = content.split(separator: "\n").compactMap { rawLine in
             let line = rawLine.split(separator: "#", maxSplits: 1).first?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard line.hasPrefix("- schema:") else {
@@ -316,9 +316,13 @@ enum KeyTaoIOSPaths {
                 return nil
             }
             return schema
-        }.filter { schema in
+        }
+        let primarySchemas = schemas.filter { schema in
             ["keytao", "txjx", "xmjd6", "keydo"].contains { schema.hasPrefix($0) }
         }
+        return primarySchemas.isEmpty
+            ? schemas.filter { ["easy_en", "wanxiang"].contains($0) }
+            : primarySchemas
     }
 
     private static func hasDefaultYaml(at url: URL) -> Bool {

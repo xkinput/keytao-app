@@ -1,0 +1,42 @@
+config_version: '1.0'
+schema_list: []
+menu:
+  page_size: 5
+switcher:
+  hotkeys: [F4, Control+grave]
+  save_options: [ascii_punct, full_shape]
+ascii_composer:
+  good_old_caps_lock: true
+  switch_key:
+    Shift_L: commit_code
+    Shift_R: commit_code
+    Control_L: noop
+    Control_R: noop
+punctuator:
+  full_shape:
+    ',': '，'
+    '.': '。'
+    '?': '？'
+    '!': '！'
+    ':': '：'
+    ';': '；'
+    '(': '（'
+    ')': '）'
+  half_shape:
+    ',': '，'
+    '.': '。'
+    '?': '？'
+    '!': '！'
+    ':': '：'
+    ';': '；'
+    '(': '（'
+    ')': '）'
+key_binder:
+  bindings:
+    - {when: has_menu, accept: minus, send: Page_Up}
+    - {when: has_menu, accept: equal, send: Page_Down}
+recognizer:
+  patterns:
+    email: '^[A-Za-z][-_.0-9A-Za-z]*@.*$'
+    uppercase: '[A-Z][-_+.0-9A-Za-z]*$'
+    url: '^(www[.]|https?:|ftp[.:]|mailto:|file:).*$|^[a-z]+[.].+$'
