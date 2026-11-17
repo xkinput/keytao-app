@@ -1077,6 +1077,7 @@ class KeytaoAndroidChannel(
                                 put("path", result.path)
                                 put("schemaName", result.schemaName)
                                 put("deployed", result.deployed)
+                                put("warning", result.warning)
                             })
                         } else {
                             reply.error(result.error.ifBlank { "Android RIME 部署失败" })

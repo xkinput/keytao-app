@@ -742,7 +742,8 @@ class AppController extends ChangeNotifier {
                         isManagingWanxiang ||
                         isManagingWanxiangGrammar ||
                         isManagingRimeIce) &&
-                    value.startsWith('系统搜索框方案未更新：'))) {
+                    (value.startsWith('系统搜索框方案未更新：') ||
+                        value.contains('编译失败，已跳过：')))) {
           progress = value;
           _deployStep(value, DeployStepState.neutral);
           if (!isDeploying) addOperationLogs(['[WARN] $value']);
@@ -1773,6 +1774,7 @@ class AppController extends ChangeNotifier {
         }
         await core.recordAndroidDeploy(success: true);
         message = result['message'] as String? ?? AppStrings.deployDone;
+        warning = result['warning'] as String?;
       } else {
         final result = imeActionId == null
             ? await core.deployDefault()
@@ -1786,12 +1788,11 @@ class AppController extends ChangeNotifier {
         throw StateError(AppStrings.deployCheckFailed);
       }
       _deployStep(message, DeployStepState.ok);
-      if (warning != null) {
-        final warningMessage = '系统搜索框方案未更新：$warning';
-        if (!deploySteps.any((step) => step.message == warningMessage)) {
-          _deployStep(warningMessage, DeployStepState.neutral);
+      if (warning != null && warning.isNotEmpty) {
+        if (!deploySteps.any((step) => step.message == warning)) {
+          _deployStep(warning, DeployStepState.neutral);
         }
-        addOperationLogs(['[WARN] $warningMessage']);
+        addOperationLogs(['[WARN] $warning']);
       }
       userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
@@ -2519,7 +2520,13 @@ class AppController extends ChangeNotifier {
   Future<String> _androidDeploy() async {
     try {
       final result = await android.deployImeData();
-      if (result['deployed'] == true) return '';
+      if (result['deployed'] == true) {
+        if (result['warning'] case final String warning when warning.isNotEmpty) {
+          _deployStep(warning, DeployStepState.neutral);
+          addOperationLogs(['[WARN] $warning']);
+        }
+        return '';
+      }
       final message = result['message'] as String?;
       return message == null || message.isEmpty
           ? AppStrings.deployIncomplete

@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
+import org.json.JSONObject
 import java.io.File
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
@@ -17,6 +18,7 @@ object KeytaoRimeDeployClient {
         val schemaName: String = "",
         val deployed: Boolean = false,
         val error: String = "",
+        val warning: String = "",
     )
 
     private val deploymentRunning = AtomicBoolean(false)
@@ -169,13 +171,7 @@ object KeytaoRimeDeployClient {
                 val schema = pending.removeFirst()
                 if (!processed.add(schema.id)) continue
                 val source = File(userRoot, "${schema.id}.schema.yaml")
-                if (!source.isFile) {
-                    if (schema.required) {
-                        finish(Result(success = false, error = "缺少方案文件：${source.name}"))
-                        return
-                    }
-                    continue
-                }
+                if (!source.isFile && !schema.required) continue
                 startStep(schema)
                 return
             }
@@ -185,15 +181,25 @@ object KeytaoRimeDeployClient {
         private fun completeDeployment() {
             try {
                 val stamp = KeytaoAndroidPaths.reloadStampFile(context)
-                val schemaId = initialSchemas.first()
+                check(KeytaoNativeBridge.completeDeployment(userRoot.absolutePath)) {
+                    "Android RIME 部署未生成方案产物"
+                }
+                val schemas = parseSchemas(File(userRoot, "build/default.yaml").readText())
+                    .filter(::isSafeSchemaId)
+                val selected = runCatching {
+                    Regex("""(?m)^\s*previously_selected_schema:\s*["']?([A-Za-z0-9_.-]+)["']?\s*(?:#.*)?$""")
+                        .find(File(userRoot, "user.yaml").readText())?.groupValues?.get(1)
+                }.getOrNull()
+                val schemaId = selected?.takeIf { it in schemas } ?: schemas.first()
                 val schemaName = RimeSchemaNameResolver.resolveDisplayName(
                     userRoot,
                     KeytaoAndroidPaths.rimeDataDir(context),
                     schemaId,
                 )
-                check(KeytaoNativeBridge.completeDeployment(userRoot.absolutePath)) {
-                    "Android RIME 部署未生成方案产物"
-                }
+                val warning = runCatching {
+                    val skipped = JSONObject(File(userRoot, "build/.keytao-skipped-schemas.json").readText())
+                    skipped.keys().asSequence().sorted().joinToString("\n") { skipped.getString(it) }
+                }.getOrDefault("")
                 stamp.parentFile?.mkdirs()
                 stamp.writeText(System.nanoTime().toString())
                 finish(
@@ -202,6 +208,7 @@ object KeytaoRimeDeployClient {
                         path = stamp.absolutePath,
                         schemaName = schemaName,
                         deployed = true,
+                        warning = warning,
                     )
                 )
             } catch (error: Throwable) {

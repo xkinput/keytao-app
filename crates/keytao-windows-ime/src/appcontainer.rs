@@ -114,7 +114,9 @@ fn checked_relative(text: &str) -> std::result::Result<PathBuf, String> {
 }
 
 pub(crate) fn public_asset(path: &Path) -> bool {
-    if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE) {
+    if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
+        || path == Path::new("build/.keytao-skipped-schemas.json")
+    {
         return true;
     }
     !path.components().any(|part| {
@@ -438,6 +440,55 @@ mod tests {
         std::fs::write(root.join("keytao.schema.yaml"), b"public schema").unwrap();
         std::fs::write(root.join("build/keytao.schema.yaml"), b"compiled schema").unwrap();
         std::fs::write(root.join("build/keytao.table.bin"), b"compiled dictionary").unwrap();
+    }
+
+    #[test]
+    fn sandbox_preserves_skipped_schemas_from_public_prebuilt_data() {
+        let root = tempfile::tempdir().unwrap();
+        let public = root.path().join("public");
+        let private = root.path().join("private");
+        let generation = "a".repeat(64);
+        let source = public.join(&generation);
+        seed(&source);
+        std::fs::write(
+            source.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keytao_broken\n    - schema: keytao\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("keytao_broken.schema.yaml"), b"broken schema").unwrap();
+        std::fs::write(
+            source.join("build/default.yaml"),
+            "schema_list:\n  - schema: keytao\n",
+        )
+        .unwrap();
+        let skipped = r#"{"keytao_broken":"方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit"}"#;
+        std::fs::write(source.join("build/.keytao-skipped-schemas.json"), skipped).unwrap();
+        std::fs::write(source.join("build/.private.json"), b"must not copy").unwrap();
+        std::fs::write(source.join(".private.json"), b"must not copy").unwrap();
+        std::fs::write(public.join("current.txt"), &generation).unwrap();
+        validate_prebuilt(&source, VERSION).unwrap();
+
+        let prepared = prepare_at(&public, &private, VERSION).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(private.join("build/.keytao-skipped-schemas.json")).unwrap(),
+            skipped
+        );
+        assert!(!private.join("build/.private.json").exists());
+        assert!(!private.join(".private.json").exists());
+        assert!(!private.join("build/keytao_broken.schema.yaml").exists());
+        let state = keytao_core::schema_install_state(&private);
+        assert!(state.deployed);
+        assert_eq!(state.schemas, ["keytao"]);
+        assert_eq!(
+            keytao_core::deployed_schema_id_from_dir(&private).as_deref(),
+            Some("keytao")
+        );
+        assert!(keytao_core::deployment_warning(&private)
+            .unwrap()
+            .contains("keytao_broken"));
+        validate_prebuilt(&private, VERSION).unwrap();
+        prepared.mark_loaded().unwrap();
+        assert!(!prepare_at(&public, &private, VERSION).unwrap().changed);
     }
 
     #[test]

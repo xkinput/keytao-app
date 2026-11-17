@@ -448,6 +448,7 @@ fn checked_relative(path: &Path) -> Result<PathBuf, String> {
 
 fn is_public_asset(path: &Path) -> bool {
     if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
+        || path == Path::new("build/.keytao-skipped-schemas.json")
         || path == Path::new("lua/rime_ice/lunar.db")
     {
         return true;
@@ -1007,6 +1008,75 @@ fn grant_appcontainer_read(_root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_build_preserves_skipped_schemas_for_prebuilt_validation() {
+        let root = tempfile::tempdir().unwrap();
+        publish_at(
+            root.path(),
+            &[
+                (
+                    "default.custom.yaml".into(),
+                    b"patch: {schema_list: [{schema: keytao_broken}, {schema: keytao_good}]}"
+                        .to_vec(),
+                ),
+                (
+                    "keytao_broken.schema.yaml".into(),
+                    b"schema: {schema_id: keytao_broken}".to_vec(),
+                ),
+                (
+                    "keytao_good.schema.yaml".into(),
+                    b"schema: {schema_id: keytao_good}".to_vec(),
+                ),
+            ],
+            false,
+        )
+        .unwrap();
+        let warning = "方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit";
+        deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+            std::fs::create_dir(stage.join("build")).unwrap();
+            std::fs::write(
+                stage.join("build/keytao_good.schema.yaml"),
+                "schema: {schema_id: keytao_good}",
+            )
+            .unwrap();
+            std::fs::write(
+                stage.join("build/default.yaml"),
+                "schema_list: [{schema: keytao_good}]",
+            )
+            .unwrap();
+            std::fs::write(
+                stage.join("build/.keytao-skipped-schemas.json"),
+                serde_json::to_vec(&serde_json::json!({ "keytao_broken": warning })).unwrap(),
+            )
+            .unwrap();
+            keytao_core::complete_deployment(stage)
+        })
+        .unwrap();
+        let generation = read_generation(root.path()).unwrap().unwrap();
+        let snapshot = root.path().join(generation);
+        assert_eq!(
+            keytao_core::deployment_warning(&snapshot).as_deref(),
+            Some(warning)
+        );
+        let state = keytao_core::schema_install_state(&snapshot);
+        assert!(state.installed);
+        assert_eq!(state.schemas, ["keytao_good"]);
+        keytao_core::complete_deployment(&snapshot).unwrap();
+        assert!(keytao_core::schema_install_state(&snapshot).deployed);
+        assert_eq!(
+            keytao_core::deployed_schema_id_from_dir(&snapshot).as_deref(),
+            Some("keytao_good")
+        );
+        for path in [
+            "build/.other.json",
+            ".private/build/.keytao-skipped-schemas.json",
+            "user.yaml",
+            "log/errors.txt",
+        ] {
+            assert!(!is_public_asset(Path::new(path)), "{path}");
+        }
+    }
 
     #[test]
     fn removing_package_clears_public_sources_and_activates_an_empty_schema_list() {
