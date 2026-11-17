@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 
 import '../platform/android_host.dart';
@@ -50,6 +51,15 @@ LogLineKind operationLogKind(String line) {
     return LogLineKind.merged;
   }
   return LogLineKind.normal;
+}
+
+({String? time, String message}) parseOperationLog(String line) {
+  final match = RegExp(
+    r'^\[((?:[01]\d|2[0-3]):[0-5]\d)(?::[0-5]\d)?\]\s+\[[^\]\r\n]+\]\s+(.+)$',
+  ).firstMatch(line);
+  return match == null
+      ? (time: null, message: line)
+      : (time: match[1], message: match[2]!);
 }
 
 String formatLogBytes(BigInt bytes) {
@@ -198,6 +208,8 @@ class AppController extends ChangeNotifier {
   final List<String> operationLogs = [];
   List<VerifyEntryDto> verification = [];
   LocalSchemaDto? local;
+  String? activeSchemaLogoPath;
+  int activeSchemaLogoRevision = 0;
   String? _localSchemaError;
   core.AddonStatusDto? addon;
   Map<String, dynamic>? storage;
@@ -799,6 +811,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readLocal() async {
     _localSchemaError = null;
+    activeSchemaLogoPath = null;
     try {
       local = await core.checkLocalSchema();
     } catch (failure) {
@@ -824,6 +837,11 @@ class AppController extends ChangeNotifier {
       addonError = errorText(failure);
     }
     await _readSchemaSwitches();
+    activeSchemaLogoPath = await core.activeSchemaLogoPath();
+    if (activeSchemaLogoPath case final path?) {
+      await FileImage(File(path)).evict();
+    }
+    activeSchemaLogoRevision++;
   }
 
   Future<void> _readSchemaSwitches() async {

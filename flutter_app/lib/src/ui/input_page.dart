@@ -79,14 +79,7 @@ class InputPage extends StatelessWidget {
                                 line.contains('[DEPLOY ERROR]'),
                           )
                           .take(4))
-                    Text(
-                      line,
-                      style: context.theme.typography.body.sm.copyWith(
-                        color: line.contains('[DEPLOY ERROR]')
-                            ? AppPalette.of(context).error
-                            : AppPalette.of(context).success,
-                      ),
-                    ),
+                    _RecentOperation(line),
                 ],
               ),
             ),
@@ -131,6 +124,38 @@ class InputPage extends StatelessWidget {
       ),
     ],
   );
+}
+
+class _RecentOperation extends StatelessWidget {
+  const _RecentOperation(this.line);
+  final String line;
+
+  @override
+  Widget build(BuildContext context) {
+    final log = parseOperationLog(line);
+    final palette = AppPalette.of(context);
+    final failed = operationLogKind(line) == LogLineKind.error;
+    final style = context.theme.typography.body.sm.copyWith(
+      color: failed ? palette.error : palette.success,
+    );
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 12,
+      children: [
+        if (log.time case final time?)
+          SizedBox(
+            width: 44,
+            child: Text(
+              time,
+              style: style.copyWith(
+                color: failed ? palette.error : palette.muted,
+              ),
+            ),
+          ),
+        Expanded(child: Text(log.message, style: style)),
+      ],
+    );
+  }
 }
 
 class _CurrentSchemeHero extends StatelessWidget {
@@ -192,12 +217,7 @@ class _CurrentSchemeHero extends StatelessWidget {
           Row(
             spacing: 16,
             children: [
-              if (desktop)
-                Icon(
-                  FLucideIcons.star,
-                  size: 52,
-                  color: ChromeAccent.of(context),
-                ),
+              SchemaLogo(controller: c, size: desktop ? 52 : 36),
               Expanded(
                 child: Text(
                   title,

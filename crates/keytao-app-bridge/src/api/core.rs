@@ -42,6 +42,12 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
     })
 }
 
+pub fn active_schema_logo_path() -> Result<Option<String>, String> {
+    let state = runtime::state()?;
+    Ok(keytao_app_core::deploy::active_schema_logo_path(&state.host.user_root()?)
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
 pub fn onboarding() -> Result<OnboardingDto, String> {
     Ok(OnboardingDto {
         completed: runtime::state()?.core.onboarding().completed,

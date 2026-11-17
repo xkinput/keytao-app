@@ -176,7 +176,9 @@ impl BridgeHost {
                 keytao_core::deploy(
                     user.to_string_lossy().into_owned(),
                     shared.to_string_lossy().into_owned(),
-                )
+                )?;
+                keytao_app_core::deploy::render_user_schema_logos(&user);
+                Ok::<(), String>(())
             })
             .await
             .map_err(|error| error.to_string())??;

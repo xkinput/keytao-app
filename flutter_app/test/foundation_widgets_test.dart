@@ -3,9 +3,13 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
+import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
+
+import 'view_fixture.dart';
 
 final _tappables = find.byWidgetPredicate((widget) => widget is FTappable);
 
@@ -30,6 +34,57 @@ void _setViewport(WidgetTester tester, double width) {
 }
 
 void main() {
+  test('operation log summaries preserve messages and malformed lines', () {
+    expect(parseOperationLog('[14:21:05] [DEPLOY] 部署完成'), (
+      time: '14:21',
+      message: '部署完成',
+    ));
+    expect(parseOperationLog('[09:02] [DEPLOY ERROR] Failed [retry]'), (
+      time: '09:02',
+      message: 'Failed [retry]',
+    ));
+    for (final line in [
+      '[25:21:05] [DEPLOY] bad time',
+      '[14:61:05] [DEPLOY ERROR] bad minute',
+      '[14:21:99] [DEPLOY] bad second',
+      '[DEPLOY ERROR] missing timestamp',
+      '[14:21:05] [DEPLOY]',
+      'raw message',
+    ]) {
+      expect(parseOperationLog(line), (time: null, message: line));
+    }
+  });
+
+  testWidgets('accent swatches fit desktop and balance narrow rows', (
+    tester,
+  ) async {
+    final controller = ViewController(BridgePlatform.macOs);
+    addTearDown(controller.dispose);
+    for (final layout in [
+      (width: 356.0, rows: [11]),
+      (width: 300.0, rows: [6, 5]),
+      (width: 180.0, rows: [4, 4, 3]),
+    ]) {
+      await _pump(
+        tester,
+        SizedBox(
+          width: layout.width,
+          child: AccentPicker(controller: controller),
+        ),
+      );
+      final rowCounts = <double, int>{};
+      for (final element in _tappables.evaluate()) {
+        final y = tester
+            .getTopLeft(find.byElementPredicate((e) => e == element))
+            .dy;
+        rowCounts.update(y, (count) => count + 1, ifAbsent: () => 1);
+      }
+      expect(rowCounts.values, layout.rows);
+      expect(tester.takeException(), isNull);
+    }
+    await _finish(tester);
+  });
+
   testWidgets('text radios expose exclusive checked and disabled semantics', (
     tester,
   ) async {

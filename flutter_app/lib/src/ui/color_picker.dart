@@ -41,6 +41,8 @@ class AccentPicker extends StatelessWidget {
   Widget build(BuildContext context) {
     final selected = controller.uiSettings!.accentColor.toUpperCase();
     final touch = context.platformVariant.touch;
+    final size = touch ? 44.0 : 28.0;
+    final gap = touch ? 8.0 : 4.0;
     final accent = ChromeAccent.of(context);
     Widget swatch(String hex, {bool custom = false}) {
       final isSelected = custom
@@ -67,8 +69,8 @@ class AccentPicker extends StatelessWidget {
                   ? Duration.zero
                   : const Duration(milliseconds: 150),
               curve: Curves.easeOutCubic,
-              width: touch ? 44 : 32,
-              height: touch ? 44 : 32,
+              width: size,
+              height: size,
               decoration: BoxDecoration(
                 color: isSelected
                     ? accent.withValues(alpha: .12)
@@ -80,8 +82,8 @@ class AccentPicker extends StatelessWidget {
               ),
               child: Center(
                 child: Container(
-                  width: touch ? 32 : 28,
-                  height: touch ? 32 : 28,
+                  width: touch ? 32 : 24,
+                  height: touch ? 32 : 24,
                   decoration: BoxDecoration(
                     color: parseAccentColor(hex),
                     borderRadius: BorderRadius.circular(custom ? 8 : 16),
@@ -108,13 +110,29 @@ class AccentPicker extends StatelessWidget {
     return SettingRow(
       AppStrings.accentColor,
       controlAlignment: Alignment.centerLeft,
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (final hex in themeAccents.keys) swatch(hex),
-          swatch(selected, custom: true),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final count = themeAccents.length + 1;
+          final capacity = ((constraints.maxWidth + gap) / (size + gap))
+              .floor()
+              .clamp(1, count);
+          final rows = (count / capacity).ceil();
+          final columns = (count / rows).ceil();
+          return Align(
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              width: columns * (size + gap) - gap,
+              child: Wrap(
+                spacing: gap,
+                runSpacing: 8,
+                children: [
+                  for (final hex in themeAccents.keys) swatch(hex),
+                  swatch(selected, custom: true),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }

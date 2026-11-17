@@ -11,6 +11,7 @@ import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/shell.dart';
 import 'package:keytao/src/ui/theme.dart';
+import 'package:keytao/src/ui/widgets.dart';
 
 import '../view_fixture.dart';
 
@@ -19,9 +20,11 @@ const _directory =
     '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/redesign-shots';
 const _cjkFamily = 'SettingsScreenshotCjk';
 const _captureKey = ValueKey('settings-screenshot');
+const _schemaLogoPath = '$_directory/schema-logo.png';
 
 class _ScreenshotController extends ViewController {
   _ScreenshotController(super.platform) {
+    activeSchemaLogoPath = _schemaLogoPath;
     candidatePageSize = 6;
     appUpdate = null;
     installedPackages = [
@@ -81,11 +84,43 @@ Future<void> _loadFonts() async {
   throw StateError('No macOS CJK font could be loaded for screenshots.');
 }
 
+Future<void> _writeSchemaLogo() async {
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder);
+  final text = TextPainter(
+    text: const TextSpan(
+      text: '键道',
+      style: TextStyle(
+        fontFamily: _cjkFamily,
+        fontSize: 82,
+        fontWeight: FontWeight.w700,
+        color: Color(0xFF3B73D9),
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout();
+  text.paint(canvas, Offset((192 - text.width) / 2, (192 - text.height) / 2));
+  text.dispose();
+  final picture = recorder.endRecording();
+  final image = await picture.toImage(192, 192);
+  try {
+    final png = (await image.toByteData(format: ui.ImageByteFormat.png))!;
+    await Directory(_directory).create(recursive: true);
+    await File(_schemaLogoPath).writeAsBytes(png.buffer.asUint8List());
+  } finally {
+    image.dispose();
+    picture.dispose();
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final enabled = Platform.environment['SCREENSHOTS'] == '1';
   setUpAll(() async {
-    if (enabled) await _loadFonts();
+    if (enabled) {
+      await _loadFonts();
+      await _writeSchemaLogo();
+    }
   });
 
   for (final device in [
@@ -116,6 +151,15 @@ void main() {
             tester.platformDispatcher.clearPlatformBrightnessTestValue,
           );
 
+          await tester.pumpWidget(const SizedBox(key: _captureKey));
+          await tester.runAsync(
+            () => precacheImage(
+              FileImage(File(_schemaLogoPath)),
+              tester.element(find.byKey(_captureKey)),
+              onError: (error, stack) =>
+                  Error.throwWithStackTrace(error, stack!),
+            ),
+          );
           await tester.pumpWidget(
             RepaintBoundary(
               key: _captureKey,
@@ -147,6 +191,17 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
+          final logo = find.byType(SchemaLogo);
+          expect(logo, findsOneWidget);
+          final logoImage = tester.widget<Image>(
+            find.descendant(of: logo, matching: find.byType(Image)),
+          );
+          expect(logoImage.image, isA<FileImage>());
+          final renderedLogo = tester.widget<RawImage>(
+            find.descendant(of: logo, matching: find.byType(RawImage)),
+          );
+          expect(renderedLogo.image?.width, 192);
+          expect(renderedLogo.image?.height, 192);
           expect(tester.getSize(find.byKey(_captureKey)), device.size);
 
           if (device.name == 'phone') {

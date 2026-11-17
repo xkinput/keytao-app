@@ -16,15 +16,13 @@ zip = { version = "2", default-features = false, features = ["deflate", "time"] 
 tokio.workspace = true
 keytao-core = { path = "../keytao-core" }
 keytao-theme = { path = "../keytao-theme" }
+keytao-schema-logo = { path = "../keytao-schema-logo" }
 tracing = "0.1"
 dirs.workspace = true
 time = { version = "0.3", features = ["parsing"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
-
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-keytao-schema-logo = { path = "../keytao-schema-logo" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keytao-ime-ipc = { path = "../keytao-ime-ipc" }

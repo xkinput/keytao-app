@@ -428,7 +428,15 @@ void main() {
             .variant,
         FButtonVariant.ghost,
       );
-      expect(tester.getTopLeft(title).dx, tester.getTopLeft(row).dx);
+      if (entry.package?.active == true) {
+        final logo = find.descendant(of: row, matching: find.byType(SchemaLogo));
+        expect(logo, findsOneWidget);
+        expect(tester.getTopLeft(logo).dx, tester.getTopLeft(row).dx);
+        expect(tester.getTopLeft(title).dx, tester.getTopRight(logo).dx + 6);
+        expect(tester.getCenter(title).dy, tester.getCenter(logo).dy);
+      } else {
+        expect(tester.getTopLeft(title).dx, tester.getTopLeft(row).dx);
+      }
       expect(
         find.descendant(of: row, matching: find.byType(ActionRow)),
         findsOneWidget,
@@ -599,6 +607,19 @@ void main() {
       find.descendant(of: deployment, matching: find.text('检查本地')),
       findsOneWidget,
     );
+    tester.view.physicalSize = const Size(1440, 1000);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SchemePackageRow>(
+        find.ancestor(of: active, matching: find.byType(SchemePackageRow)),
+      ).compact,
+      isTrue,
+    );
+    expect(
+      find.descendant(of: active, matching: find.byType(SchemaLogo)),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
     final add = find.widgetWithText(ActionButton, '添加本地方案');
     expect(find.descendant(of: local, matching: add), findsOneWidget);
     await tester.ensureVisible(add);

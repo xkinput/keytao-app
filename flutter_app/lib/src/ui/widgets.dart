@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
@@ -6,6 +8,33 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'theme.dart';
+
+class SchemaLogo extends StatelessWidget {
+  const SchemaLogo({super.key, required this.controller, required this.size});
+  final AppController controller;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget fallback() => Image.asset(
+      logoAsset,
+      width: size,
+      height: size,
+      excludeFromSemantics: true,
+    );
+    final path = controller.activeSchemaLogoPath;
+    return path == null
+        ? fallback()
+        : Image.file(
+            File(path),
+            key: ValueKey((path, controller.activeSchemaLogoRevision)),
+            width: size,
+            height: size,
+            excludeFromSemantics: true,
+            errorBuilder: (_, _, _) => fallback(),
+          );
+  }
+}
 
 class AppSystemBars extends StatelessWidget {
   const AppSystemBars({super.key, required this.child});

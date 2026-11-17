@@ -54,6 +54,10 @@ class PackageCore extends FakeCore {
   Completer<List<SchemeUpdateDto>>? updateGate;
 
   @override
+  Future<String?> crateApiCoreActiveSchemaLogoPath() async =>
+      local.deployed ? '/isolated/logos/${local.schemas.first}.png' : null;
+
+  @override
   Future<List<InstalledPackageDto>> crateApiCoreListInstalledPackages() async =>
       List.of(packages);
 
@@ -312,6 +316,8 @@ void main() {
     expect(controller.installedPackageFor('xmjd')!.active, isTrue);
     expect(controller.installedPackageFor('keytao')!.active, isFalse);
     expect(controller.local!.deployed, isTrue);
+    expect(controller.activeSchemaLogoPath, '/isolated/logos/xmjd6.png');
+    expect(controller.activeSchemaLogoRevision, 2);
     expect(controller.busy, isFalse);
   });
 

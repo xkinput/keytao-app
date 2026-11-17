@@ -4883,7 +4883,7 @@ fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> 
     deployed_schema_id_from_dir(user_data_dir).map(|schema| (user_data_dir.to_path_buf(), schema))
 }
 
-fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
+pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
     let deployed = std::fs::read_to_string(dir.join("build/default.yaml"))
         .ok()
         .map(|content| parse_schema_list(&content))

@@ -24,6 +24,9 @@ Stream<BridgeEvent> coreEvents() =>
 Future<LocalSchemaDto> checkLocalSchema() =>
     RustLib.instance.api.crateApiCoreCheckLocalSchema();
 
+Future<String?> activeSchemaLogoPath() =>
+    RustLib.instance.api.crateApiCoreActiveSchemaLogoPath();
+
 Future<OnboardingDto> onboarding() =>
     RustLib.instance.api.crateApiCoreOnboarding();
 

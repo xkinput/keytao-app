@@ -556,6 +556,7 @@ class SchemePackageRow extends StatelessWidget {
         : Row(
             spacing: 6,
             children: [
+              if (active) SchemaLogo(controller: c, size: desktop ? 52 : 36),
               Flexible(child: title),
               ?state,
               if (update != null)
@@ -601,6 +602,10 @@ class SchemePackageRow extends StatelessWidget {
         if (compact)
           Row(
             children: [
+              if (active) ...[
+                SchemaLogo(controller: c, size: 36),
+                const SizedBox(width: 8),
+              ],
               Expanded(flex: 3, child: heading),
               const SizedBox(width: 8),
               Flexible(flex: 4, child: actions),

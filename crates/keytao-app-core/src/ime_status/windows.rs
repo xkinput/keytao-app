@@ -1424,6 +1424,7 @@ pub fn windows_deploy_rime_blocking(
         keytao_core::english_mode::read_english_mode(&user_dir)
             == keytao_core::english_mode::EnglishMode::Schema,
     )?;
+    crate::deploy::render_user_schema_logos(&user_dir);
     if !deployed_by_server {
         write_keytao_ime_reload_stamp()
             .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
