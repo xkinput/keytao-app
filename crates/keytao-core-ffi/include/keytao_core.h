@@ -77,9 +77,9 @@ void keytao_log_flush(uint32_t timeout_ms);
 
 /**
  * Run the macOS executable's `--deploy` entry without initializing a session.
- * The executable must exit with the returned status.
+ * Terminates the process without running librime's static destructors.
  */
-int32_t keytao_run_deploy_child_main(void);
+void keytao_run_deploy_child_main(void);
 
 /**
  * Redeploy through the macOS executable itself, with a 600-second timeout.

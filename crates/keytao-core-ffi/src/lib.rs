@@ -368,13 +368,14 @@ pub extern "C" fn keytao_log_flush(timeout_ms: u32) {
 }
 
 /// Run the macOS executable's `--deploy` entry without initializing a session.
-/// The executable must exit with the returned status.
+/// Terminates the process without running librime's static destructors.
 #[cfg(target_os = "macos")]
 #[no_mangle]
-pub extern "C" fn keytao_run_deploy_child_main() -> i32 {
-    guard("keytao_run_deploy_child_main", 1, || {
+pub extern "C" fn keytao_run_deploy_child_main() -> ! {
+    let code = guard("keytao_run_deploy_child_main", 1, || {
         keytao_core::deploy_child::run_deploy_child_main()
-    })
+    });
+    keytao_core::deploy_child::exit_deploy_child(code)
 }
 
 /// Redeploy through the macOS executable itself, with a 600-second timeout.

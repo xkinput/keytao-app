@@ -12,7 +12,7 @@ if CommandLine.arguments.dropFirst().first == "--deploy" {
       }
     }
   }
-  exit(keytao_run_deploy_child_main())
+  keytao_run_deploy_child_main()
 }
 
 let installer = KeyTaoInputSourceInstaller()
