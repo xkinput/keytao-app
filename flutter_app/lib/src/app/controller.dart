@@ -21,7 +21,7 @@ import 'options.dart'
         xmjdVariantSchemes;
 import 'strings.dart';
 
-enum OperationKind { install, deploy, addon, wanxiang, customDirectory }
+enum OperationKind { install, deploy, addon, wanxiang, rimeIce, customDirectory }
 
 enum LogLineKind { normal, error, warning, deploy, merged }
 
@@ -177,6 +177,7 @@ class AppController extends ChangeNotifier {
   String? installError;
   String? addonError;
   String? wanxiangError;
+  String? rimeIceError;
   String? macosImeError;
   String? windowsImeError;
   String? linuxImeError;
@@ -187,11 +188,14 @@ class AppController extends ChangeNotifier {
   String? installingSchemeKey;
   InstallProgressDto? addonProgress;
   InstallProgressDto? wanxiangProgress;
+  InstallProgressDto? rimeIceProgress;
   InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
   core.AddonStatusDto? wanxiang;
   String? _selectedWanxiangVariant;
   String? wanxiangLatestVersion;
+  core.AddonStatusDto? rimeIce;
+  String? rimeIceLatestVersion;
   String? addonLatestVersion;
   final _addonUpdateChecks = <String, Object>{};
   DebugLogsDto? systemLogs;
@@ -392,11 +396,14 @@ class AppController extends ChangeNotifier {
   bool get isDeploying => operation == OperationKind.deploy;
   bool get isManagingAddon => operation == OperationKind.addon;
   bool get isManagingWanxiang => operation == OperationKind.wanxiang;
+  bool get isManagingRimeIce => operation == OperationKind.rimeIce;
   bool get isInstallingCustom => operation == OperationKind.customDirectory;
   bool get canInstallAddon => !busy && local?.installed == true;
   bool get canInstallWanxiang => canInstallAddon;
+  bool get canInstallRimeIce => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
+  bool get canUninstallRimeIce => !busy && rimeIce?.installed == true;
   String get installedWanxiangVariant =>
       wanxiang?.installed == true ? wanxiang?.variant ?? 'base' : 'base';
   String get selectedWanxiangVariant =>
@@ -411,6 +418,11 @@ class AppController extends ChangeNotifier {
       _normalizedVersion(wanxiangLatestVersion!) !=
           _normalizedVersion(wanxiang!.version);
   bool get showAddonInstall => addon?.deployed != true || addonHasUpdate;
+  bool get rimeIceHasUpdate =>
+      rimeIce?.installed == true &&
+      rimeIceLatestVersion != null &&
+      _normalizedVersion(rimeIceLatestVersion!) !=
+          _normalizedVersion(rimeIce!.version);
   bool get canInstallCustom => canInstall && selectedDirectory != null;
   int get operationLogCount => operationLogs.length;
   int get customVerifyFailureCount =>
@@ -436,6 +448,9 @@ class AppController extends ChangeNotifier {
   String get wanxiangTooltip => local?.installed == true
       ? AppStrings.installWanxiangTooltip
       : AppStrings.installMainFirst;
+  String get rimeIceTooltip => local?.installed == true
+      ? AppStrings.installRimeIceTooltip
+      : AppStrings.installMainFirst;
   String get addonButtonLabel => addonHasUpdate
       ? AppStrings.update
       : addon?.installed == true
@@ -452,6 +467,13 @@ class AppController extends ChangeNotifier {
       : AppStrings.install;
   String get addonStatusText =>
       _addonStatus(addon?.installed, addon?.deployed, addon?.version);
+  String get rimeIceButtonLabel => rimeIceHasUpdate
+      ? AppStrings.update
+      : rimeIce?.installed == true
+      ? AppStrings.redeploy
+      : AppStrings.install;
+  String get rimeIceStatusText =>
+      _addonStatus(rimeIce?.installed, rimeIce?.deployed, rimeIce?.version);
   String get wanxiangStatusText {
     final status = _addonStatus(
       wanxiang?.installed,
@@ -588,6 +610,7 @@ class AppController extends ChangeNotifier {
     installError,
     addonError,
     wanxiangError,
+    rimeIceError,
     customError,
     macosImeError,
     windowsImeError,
@@ -742,6 +765,7 @@ class AppController extends ChangeNotifier {
     if (isInstallingCustom) customProgress = value;
     if (isManagingAddon) addonProgress = value;
     if (isManagingWanxiang) wanxiangProgress = value;
+    if (isManagingRimeIce) rimeIceProgress = value;
     _changed();
   }
 
@@ -921,6 +945,14 @@ class AppController extends ChangeNotifier {
         }
       }),
       read(() async {
+        try {
+          rimeIce = await core.rimeIceStatus();
+          rimeIceError = null;
+        } catch (failure) {
+          rimeIceError = errorText(failure);
+        }
+      }),
+      read(() async {
         versions = await core.getComponentVersions();
       }),
       if (!isAndroid || storageReady)
@@ -1017,6 +1049,8 @@ class AppController extends ChangeNotifier {
         _checkAddonUpdate('easy_en', addon!.version),
       if (wanxiang?.installed == true)
         _checkAddonUpdate('wanxiang', wanxiang!.version),
+      if (rimeIce?.installed == true)
+        _checkAddonUpdate('rime_ice', rimeIce!.version),
     ]);
   }
 
@@ -1026,7 +1060,11 @@ class AppController extends ChangeNotifier {
     _addonUpdateChecks[id] = check;
     try {
       final status = await core.checkAddonUpdate(id: id);
-      final current = id == 'easy_en' ? addon : wanxiang;
+      final current = switch (id) {
+        'easy_en' => addon,
+        'rime_ice' => rimeIce,
+        _ => wanxiang,
+      };
       if (_disposed ||
           !identical(_addonUpdateChecks[id], check) ||
           current?.installed != true ||
@@ -1035,6 +1073,8 @@ class AppController extends ChangeNotifier {
       }
       if (id == 'easy_en') {
         addonLatestVersion = status.latestVersion;
+      } else if (id == 'rime_ice') {
+        rimeIceLatestVersion = status.latestVersion;
       } else {
         wanxiangLatestVersion = status.latestVersion;
       }
@@ -2447,6 +2487,42 @@ class AppController extends ChangeNotifier {
       wanxiangError = errorText(failure);
       try {
         wanxiang = await core.wanxiangStatus();
+      } catch (_) {}
+      try {
+        await _readLocal();
+      } catch (_) {}
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<bool> manageRimeIce(bool installed) => run(() async {
+    _addonUpdateChecks['rime_ice'] = Object();
+    _startOperation(
+      OperationKind.rimeIce,
+      installed ? AppStrings.installing : AppStrings.uninstall,
+    );
+    rimeIceError = null;
+    rimeIceProgress = null;
+    try {
+      if (installed && local?.installed != true) {
+        throw StateError(AppStrings.installMainFirst);
+      }
+      if (isAndroid) await _requireStorage();
+      rimeIce = await core.manageRimeIce(
+        installed: installed,
+        androidDeploy: _androidDeploy,
+      );
+      if (installed) rimeIceLatestVersion = rimeIce!.version;
+      await _readLocal();
+      addOperationLogs([
+        installed ? AppStrings.rimeIceInstalled : AppStrings.rimeIceRemoved,
+      ]);
+    } catch (failure) {
+      rimeIceError = errorText(failure);
+      try {
+        rimeIce = await core.rimeIceStatus();
       } catch (_) {}
       try {
         await _readLocal();

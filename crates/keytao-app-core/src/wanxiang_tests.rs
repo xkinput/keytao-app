@@ -8,6 +8,8 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 const VERSION: &str = "fixture-version";
 const SOURCE_URL: &str = "https://github.com/amzxyz/rime-wanxiang/releases/tag/fixture-version";
 const DOWNLOAD_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ALGEBRA: &str =
+    "pro:\n  直接辅助:\n    __append:\n      - abbrev/^([a-z◯]+)(\\d?);([a-z])([a-z]).*$/$1$3$4/\n";
 
 fn fixture_package() -> RemotePackage {
     RemotePackage {
@@ -35,6 +37,8 @@ fn download_requires_complete_bounded_bytes_without_pinning_a_release_hash() {
     for size in [0, 41, 43, MAX_DOWNLOAD_BYTES + 1] {
         assert!(verify_download(size, Some(42)).is_err());
     }
+    assert!(verify_download_with_limit(42, None, 42).is_ok());
+    assert!(verify_download_with_limit(43, None, 42).is_err());
 }
 
 #[test]
@@ -238,6 +242,8 @@ fn stage_variant_fixture(
             name,
             if name == dictionary_name {
                 dictionary.as_str()
+            } else if name == "wanxiang_algebra.yaml" {
+                ALGEBRA
             } else {
                 "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n"
             },
@@ -294,6 +300,10 @@ fn flypy_installs_own_double_pinyin_patch_transactionally() {
         serde_yaml::from_str(&fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap())
             .unwrap();
     assert_eq!(schema["__patch"], "keytao_wanxiang_flypy:/patch?");
+    assert_eq!(schema["translator"]["spelling_hints"], 50);
+    let algebra = fs::read_to_string(root.path.join("wanxiang_algebra.yaml")).unwrap();
+    assert!(!algebra.contains(FLYPY_TWO_LETTER_AUX));
+    assert!(algebra.contains(&FLYPY_TWO_LETTER_AUX.replacen("abbrev/", "derive/", 1)));
     drop(receipt);
     assert!(!custom_path.exists());
     assert!(!root.path.join(MANIFEST).exists());
@@ -307,6 +317,27 @@ fn flypy_installs_own_double_pinyin_patch_transactionally() {
     assert_eq!(fs::read_to_string(&custom_path).unwrap(), custom);
     uninstall(&root.path).unwrap().finish().unwrap();
     assert!(!custom_path.exists());
+}
+
+#[test]
+fn changed_flypy_auxiliary_rule_leaves_previous_installation_intact() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "flypy")
+        .finish()
+        .unwrap();
+    let manifest = fs::read(root.path.join(MANIFEST)).unwrap();
+    let algebra_path = root.path.join("wanxiang_algebra.yaml");
+    let algebra = fs::read(&algebra_path).unwrap();
+    for content in ["changed upstream algebra".into(), ALGEBRA.repeat(2)] {
+        let receipt = InstallReceipt::new(&root.path).unwrap();
+        let staged = receipt.work.join("changed-algebra.yaml");
+        fs::write(&staged, content).unwrap();
+        let error = adapt_source("wanxiang_algebra.yaml", &staged, "flypy").unwrap_err();
+        assert!(error.contains("规则已变更"), "{error}");
+        drop(receipt);
+        assert_eq!(fs::read(&algebra_path).unwrap(), algebra);
+        assert_eq!(fs::read(root.path.join(MANIFEST)).unwrap(), manifest);
+    }
 }
 
 #[test]
@@ -326,6 +357,16 @@ fn non_flypy_variants_do_not_install_a_layout_patch() {
         )
         .unwrap();
         assert!(schema.get("__patch").is_none(), "variant: {variant}");
+        let expected_hints = if matches!(variant, "base" | "lite") {
+            0
+        } else {
+            50
+        };
+        assert_eq!(schema["translator"]["spelling_hints"], expected_hints);
+        assert_eq!(
+            fs::read_to_string(root.path.join("wanxiang_algebra.yaml")).unwrap(),
+            ALGEBRA
+        );
         assert!(status_at(&root.path).installed);
     }
 }
@@ -480,7 +521,7 @@ fn variant_archive_profiles_preserve_dictionary_imports_and_matching_algebra() {
             &[
                 (&schema_name, "upstream schema fixture"),
                 (&dictionary_name, &dictionary),
-                ("wanxiang_algebra.yaml", "upstream algebra fixture"),
+                ("wanxiang_algebra.yaml", ALGEBRA),
                 (&character_name, "character fixture"),
                 (&phrase_name, "phrase fixture"),
                 ("dicts/private.pro.dict.yaml", "excluded private table"),
@@ -1075,6 +1116,14 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
             ("vsgo", "中国"),
             ("wjan", "晚安"),
             ("xnhe", "小鹤"),
+            ("uuv", "书"),
+            ("uui", "输"),
+            ("uuvd", "书"),
+            ("uuid", "输"),
+            ("uuvd/", "书"),
+            ("uuVd", "书"),
+            ("yilx", "意"),
+            ("yilxyidx", "意义"),
         ]
     } else if variant_source(&variant).unwrap() == "wanxiang_pro" {
         vec![("nihk", "你好"), ("vsgo", "中国"), ("wjan", "晚安")]
@@ -1102,6 +1151,9 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
             candidates.contains(&expected),
             "missing {expected}: {candidates:?}"
         );
+        if variant == "flypy" && matches!(input, "uuvd" | "uuid" | "yilx" | "yilxyidx") {
+            assert_eq!(candidates.first().copied(), Some(expected));
+        }
     }
     assert!(status_at(&root.path).deployed);
     assert_eq!(status_at(&root.path).variant, variant);

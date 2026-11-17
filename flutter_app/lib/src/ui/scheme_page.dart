@@ -1016,6 +1016,22 @@ class AddonCard extends StatelessWidget {
           ),
           error: c.wanxiangError,
         ),
+        addon(
+          title: AppStrings.rimeIce,
+          status: c.rimeIceStatusText,
+          label: c.rimeIceButtonLabel,
+          tooltip: c.rimeIceTooltip,
+          showInstall: true,
+          install: c.canInstallRimeIce ? () => c.manageRimeIce(true) : null,
+          installed: c.rimeIce?.installed == true,
+          uninstall: c.canUninstallRimeIce ? () => c.manageRimeIce(false) : null,
+          active: c.isManagingRimeIce,
+          progress: InstallProgressView(
+            active: c.isManagingRimeIce,
+            progress: c.rimeIceProgress,
+          ),
+          error: c.rimeIceError,
+        ),
       ],
     );
   }

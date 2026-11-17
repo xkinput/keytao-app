@@ -70,6 +70,12 @@ class ViewController extends AppController {
       version: '',
       englishAvailable: false,
     );
+    rimeIce = const AddonStatusDto(
+      installed: false,
+      deployed: false,
+      version: '',
+      englishAvailable: false,
+    );
     macosIme = const MacosImeStatusDto(
       installed: true,
       appPath: '/Library/Input Methods/KeyTao.app',

@@ -5532,7 +5532,7 @@ fn is_keytao_managed_schema(schema: &str) -> bool {
 }
 
 pub fn is_addon_schema(schema: &str) -> bool {
-    matches!(schema, "easy_en" | "wanxiang")
+    matches!(schema, "easy_en" | "wanxiang" | "rime_ice")
 }
 
 fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -5894,7 +5894,7 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
     Ok(changed)
 }
 
-/// easy_en and wanxiang currently register without root rime.lua lines.
+/// Add-ons use built-in components or lazy Lua modules, without root rime.lua lines.
 pub fn installed_addon_rime_lua_lines(_user_data_dir: &Path) -> &'static [&'static str] {
     &[]
 }
@@ -7027,21 +7027,28 @@ mod tests {
 
     #[test]
     fn merge_default_custom_preserves_addon_after_package_schemas() {
-        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: wanxiang\n    - schema: keydo\n";
-        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: wanxiang\n    - schema: keytao-dz\n";
+        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: wanxiang\n    - schema: rime_ice\n    - schema: keydo\n";
+        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: wanxiang\n    - schema: rime_ice\n    - schema: keytao-dz\n";
         let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
         let schemas = parse_schema_list(&merged);
 
         assert_eq!(user, vec!["user_schema"]);
         assert_eq!(
             schemas,
-            vec!["user_schema", "keytao", "keytao-dz", "easy_en", "wanxiang"]
+            vec![
+                "user_schema",
+                "keytao",
+                "keytao-dz",
+                "easy_en",
+                "wanxiang",
+                "rime_ice"
+            ]
         );
     }
 
     #[test]
     fn preferred_schema_never_uses_addon_as_startup_schema() {
-        for addon in ["easy_en", "wanxiang"] {
+        for addon in ["easy_en", "wanxiang", "rime_ice"] {
             assert_eq!(
                 preferred_schema_from_list(vec![addon.into(), "user_schema".into()]),
                 Some("user_schema".into())

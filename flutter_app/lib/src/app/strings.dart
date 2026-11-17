@@ -64,6 +64,7 @@ abstract final class AppStrings {
   static const customInstallDone = '安装完成，请手动重新部署输入法';
   static const easyEnglish = 'Easy English · 英文单词输入';
   static const wanxiang = '万象拼音';
+  static const rimeIce = '雾凇拼音';
   static const wanxiangVariant = '万象拼音版本';
   static const wanxiangVariants = {
     'base': '基础版',
@@ -102,6 +103,7 @@ abstract final class AppStrings {
   static const installMainFirst = '请先安装主方案';
   static const installEnglishTooltip = '安装并部署 Easy English';
   static const installWanxiangTooltip = '安装并部署万象拼音';
+  static const installRimeIceTooltip = '安装并部署雾凇拼音';
   static const noSchemeForDeploy = '未安装方案，请先安装';
   static const componentMissing = '系统组件缺失';
   static const schemeMissing = '未安装方案';
@@ -222,6 +224,8 @@ abstract final class AppStrings {
   static const easyEnglishRemoved = '[ADDON] Easy English 已卸载';
   static const wanxiangInstalled = '[ADDON] 万象拼音已安装并部署';
   static const wanxiangRemoved = '[ADDON] 万象拼音已卸载';
+  static const rimeIceInstalled = '[ADDON] 雾凇拼音已安装并部署';
+  static const rimeIceRemoved = '[ADDON] 雾凇拼音已卸载';
 
   // Existing Flutter fallbacks retained for callers of the original controller.
   static const systemFailure = '系统操作失败';

@@ -14,7 +14,7 @@ use crate::{
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::Mutex,
@@ -561,6 +561,27 @@ fn publish_at(
     let has_schema_list = incoming.iter().any(|(path, _)| {
         path == Path::new("default.custom.yaml") || path == Path::new("default-custom.yaml")
     });
+    let mut dependency_schemas = BTreeSet::new();
+    if !has_schema_list {
+        for (path, content) in incoming {
+            if path.components().count() == 1 && path.to_string_lossy().ends_with(".schema.yaml") {
+                let schema: serde_yaml::Value =
+                    serde_yaml::from_slice(content).map_err(|error| error.to_string())?;
+                if let Some(dependencies) = schema
+                    .get("schema")
+                    .and_then(|schema| schema.get("dependencies"))
+                    .and_then(serde_yaml::Value::as_sequence)
+                {
+                    dependency_schemas.extend(
+                        dependencies
+                            .iter()
+                            .filter_map(serde_yaml::Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+    }
     let mut addon_schemas = Vec::new();
     for (path, content) in incoming {
         let relative = checked_relative(path)?;
@@ -589,6 +610,7 @@ fn publish_at(
                     .and_then(serde_yaml::Value::as_str)
                 {
                     if !id.is_empty()
+                        && !dependency_schemas.contains(id)
                         && id
                             .bytes()
                             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
@@ -772,6 +794,49 @@ fn grant_appcontainer_read(_root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishing_addon_dependencies_registers_only_the_main_schema() {
+        let root = tempfile::tempdir().unwrap();
+        publish_at(
+            root.path(),
+            &[(
+                "keytao.schema.yaml".into(),
+                b"schema: {schema_id: keytao}".to_vec(),
+            )],
+            false,
+        )
+        .unwrap();
+        publish_at(
+            root.path(),
+            &[
+                (
+                    "rime_ice.schema.yaml".into(),
+                    b"schema: {schema_id: rime_ice, dependencies: [melt_eng, radical_pinyin]}"
+                        .to_vec(),
+                ),
+                (
+                    "melt_eng.schema.yaml".into(),
+                    b"schema: {schema_id: melt_eng}".to_vec(),
+                ),
+                (
+                    "radical_pinyin.schema.yaml".into(),
+                    b"schema: {schema_id: radical_pinyin}".to_vec(),
+                ),
+            ],
+            false,
+        )
+        .unwrap();
+        let files = read_snapshot(root.path()).unwrap();
+        let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
+        assert_eq!(
+            crate::scheme_files::parse_schema_list(config),
+            ["keytao", "rime_ice"]
+        );
+        for dependency in ["melt_eng.schema.yaml", "radical_pinyin.schema.yaml"] {
+            assert!(files.contains_key(Path::new(dependency)));
+        }
+    }
 
     #[test]
     fn repeated_deploys_reuse_generation_and_prune_old_snapshots() {

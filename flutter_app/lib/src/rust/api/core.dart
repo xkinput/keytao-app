@@ -452,6 +452,9 @@ Future<AddonStatusDto> addonSchemaUninstall({
 Future<AddonStatusDto> wanxiangStatus() =>
     RustLib.instance.api.crateApiCoreWanxiangStatus();
 
+Future<AddonStatusDto> rimeIceStatus() =>
+    RustLib.instance.api.crateApiCoreRimeIceStatus();
+
 /// A failed upstream check leaves the locally installed status available.
 Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
     RustLib.instance.api.crateApiCoreCheckAddonUpdate(id: id);
@@ -466,6 +469,15 @@ Future<AddonStatusDto> manageWanxiang({
 }) => RustLib.instance.api.crateApiCoreManageWanxiang(
   installed: installed,
   variant: variant,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
+Future<AddonStatusDto> manageRimeIce({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageRimeIce(
+  installed: installed,
   androidDeploy: androidDeploy,
 );
 
