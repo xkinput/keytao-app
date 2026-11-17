@@ -128,6 +128,7 @@ impl PanelRenderer {
         model: &CandidatePanelModel,
         scale: f32,
         theme: ResolvedImeTheme,
+        available_width: f32,
     ) -> RenderedPanel {
         let mut theme = scaled_candidate_panel(&theme);
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
@@ -208,8 +209,8 @@ impl PanelRenderer {
             .min_width
             .max(content_width + panel_pad_x * 2.0)
             .max(preedit_width)
-            .min(theme.panel.max_width)
-            .ceil() as u32;
+            .ceil()
+            .min(available_width.floor().max(1.0)) as u32;
         let height = (content_height + panel_pad_y * 2.0)
             .min(theme.panel.max_height)
             .ceil()
@@ -586,7 +587,6 @@ fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
     theme.panel.gap *= scale;
     theme.panel.preedit_gap *= scale;
     theme.panel.min_width *= scale;
-    theme.panel.max_width *= scale;
     theme.panel.max_height *= scale;
     theme.panel.screen_margin *= scale;
 
@@ -596,7 +596,6 @@ fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
     theme.candidate.padding_y *= scale;
     theme.candidate.inline_gap *= scale;
     theme.candidate.min_height *= scale;
-    theme.candidate.max_width *= scale;
 
     theme.navigation.button_size *= scale;
     theme.navigation.corner_radius *= scale;
@@ -762,6 +761,49 @@ mod tests {
     };
 
     #[test]
+    fn long_candidates_and_comments_are_limited_only_by_available_width() {
+        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
+            let mut theme = ResolvedImeTheme::default();
+            theme.panel.orientation = orientation;
+            for candidate in [
+                ThemeCandidate {
+                    text: "long candidate ".repeat(6),
+                    comment: None,
+                },
+                ThemeCandidate {
+                    text: "word".into(),
+                    comment: Some("reverse_lookup_code ".repeat(6)),
+                },
+            ] {
+                let model = theme.candidate_panel_model(
+                    CandidatePanelInput {
+                        preedit: String::new(),
+                        candidates: vec![candidate],
+                        highlighted_candidate_index: 0,
+                        page: 0,
+                        is_last_page: true,
+                        select_keys: None,
+                    },
+                    &UiCapabilities::full_custom(),
+                );
+                for scale in [1.0, 2.0] {
+                    let panel = renderer.render(&model, scale, theme.clone(), 1920.0);
+                    assert!(panel.width > 320);
+                    assert_eq!(
+                        panel.pixels.len(),
+                        (panel.width * panel.height * 4) as usize
+                    );
+                    let offset = ((panel.height / 2 * panel.width + 321) * 4) as usize;
+                    assert!(panel.pixels[offset + 3] > 0);
+                    let constrained = renderer.render(&model, scale, theme.clone(), 480.0);
+                    assert_eq!(constrained.width, 480);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn candidate_hit_areas_scale_with_font_size_and_dpi_in_both_orientations() {
         let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
         let default_theme = ResolvedImeTheme::default();
@@ -788,11 +830,11 @@ mod tests {
                 },
                 &UiCapabilities::full_custom(),
             );
-            let baseline = renderer.render(&model, 1.0, theme.clone());
+            let baseline = renderer.render(&model, 1.0, theme.clone(), 1920.0);
             for font_size in [10.0, 20.0, 36.0] {
                 for dpi_scale in [1.0, 2.0] {
                     theme.font.size = font_size;
-                    let rendered = renderer.render(&model, dpi_scale, theme.clone());
+                    let rendered = renderer.render(&model, dpi_scale, theme.clone(), 1920.0);
                     let ratio = font_size / default_theme.font.size * dpi_scale;
                     let original = baseline
                         .hit_areas
@@ -844,7 +886,7 @@ mod tests {
                 },
                 &UiCapabilities::full_custom(),
             );
-            renderer.render(&model, 1.0, theme)
+            renderer.render(&model, 1.0, theme, 1920.0)
         };
         let rounded = render();
         keytao_theme::write_ime_ui_settings_to_path(
