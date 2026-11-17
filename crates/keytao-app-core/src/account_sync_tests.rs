@@ -24,6 +24,14 @@ impl ImeHost for Host {
     fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
         Ok(None)
     }
+    #[cfg(target_os = "windows")]
+    fn publish_english_settings(&self, _: bool) -> Result<(), String> {
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    fn publish_schema_switches(&self) -> Result<(), String> {
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     fn managed_helper(&self) -> &crate::ime_status::linux::ManagedImeHelper {
         &self.1

@@ -473,9 +473,15 @@ async fn downloaded_cloud_package_can_activate_without_losing_cloud_source_or_id
     download_at(&core, "21", &root, &mock.url).await.unwrap();
     mock.finish().await;
     assert!(core.state().active_scheme.is_none());
-    crate::packages::activate_scheme(&core, "xmjd", &root)
-        .await
-        .unwrap();
+    crate::packages::activate_scheme(
+        &core,
+        "xmjd",
+        &root,
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await
+    .unwrap();
     let meta = crate::packages::stored_archive(&core, "xmjd").unwrap().1;
     assert_eq!(meta.source, "cloud");
     assert_eq!(core.state().scheme_cloud_ids["xmjd"], "21");
@@ -846,6 +852,8 @@ async fn installing_into_another_directory_preserves_active_deploy_receipt() {
         &core,
         zip.to_string_lossy().into_owned(),
         dest.to_string_lossy().into_owned(),
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
     )
     .await
     .unwrap();

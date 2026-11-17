@@ -694,22 +694,38 @@ pub async fn addon_schema_install(
         let mut public_update = None;
         let deployed = async {
             #[cfg(target_os = "windows")]
-            let (cache, archive_sha256) = {
+            let mut public_source_warning = None;
+            #[cfg(target_os = "windows")]
+            let public_cache = match (|| -> Result<_, String> {
                 let manifest = read_manifest(&root)?.ok_or("English 安装记录缺失")?;
                 let cache = core.env().data_dir.join("easy-en-public");
                 cache_public_package(&cache, &receipt.work.join("files"), &manifest)?;
                 public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
                     host.publish_wanxiang_sources(&receipt.public_source_files())
                 })?);
-                (cache, manifest.archive_sha256)
+                Ok((cache, manifest.archive_sha256))
+            })() {
+                Ok(cache) => Some(cache),
+                Err(error) => {
+                    public_source_warning = Some(crate::windows_public_schemas::public_warning(
+                        "english-public-prepare", &error,
+                    ));
+                    None
+                }
             };
             host.deploy().await?;
+            #[cfg(target_os = "windows")]
+            if let Some(warning) = public_source_warning {
+                core.emit(CoreEvent::DeployProgress(format!("系统搜索框方案未更新：{warning}")));
+            }
             if !addon_schema_status_at(&root, id).deployed {
                 return Err("附加方案文件已安装，但部署产物缺失".to_string());
             }
             #[cfg(target_os = "windows")]
-            if let Err(error) = write_file_atomic(&cache.join("current.txt"), archive_sha256.as_bytes()) {
-                tracing::warn!(%error, "English public cache selection will be rebuilt when needed");
+            if let Some((cache, archive_sha256)) = public_cache {
+                if let Err(error) = write_file_atomic(&cache.join("current.txt"), archive_sha256.as_bytes()) {
+                    tracing::warn!(%error, "English public cache selection will be rebuilt when needed");
+                }
             }
             Ok(())
         }.await;
@@ -762,20 +778,35 @@ pub async fn addon_schema_uninstall(
         let mut public_update = None;
         let deployed = async {
             #[cfg(target_os = "windows")]
-            {
+            let public_source_warning = {
                 let files = addon_schema_source_files(id)
                     .into_iter()
                     .map(|(_, relative)| PathBuf::from(relative))
                     .collect::<Vec<_>>();
-                public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
+                match crate::windows_public_schemas::update_public_schemas(|| {
                     host.remove_public_schema(id, &files)?;
                     host.publish_english_settings(false)
-                })?);
-            }
+                }) {
+                    Ok(update) => {
+                        public_update = Some(update);
+                        None
+                    }
+                    Err(error) => Some(crate::windows_public_schemas::public_warning(
+                        "english-public-remove",
+                        &error,
+                    )),
+                }
+            };
             if keytao_core::schema_install_state(&root).installed {
                 host.deploy().await?;
             } else {
                 let _ = host.write_reload_stamp(&root)?;
+            }
+            #[cfg(target_os = "windows")]
+            if let Some(warning) = public_source_warning {
+                core.emit(CoreEvent::DeployProgress(format!(
+                    "系统搜索框方案未更新：{warning}"
+                )));
             }
             Ok::<_, String>(())
         }

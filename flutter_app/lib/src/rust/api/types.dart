@@ -438,11 +438,16 @@ class DebugLogsDto {
 class DeployResultDto {
   final bool success;
   final String message;
+  final String? warning;
 
-  const DeployResultDto({required this.success, required this.message});
+  const DeployResultDto({
+    required this.success,
+    required this.message,
+    this.warning,
+  });
 
   @override
-  int get hashCode => success.hashCode ^ message.hashCode;
+  int get hashCode => success.hashCode ^ message.hashCode ^ warning.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -450,7 +455,8 @@ class DeployResultDto {
       other is DeployResultDto &&
           runtimeType == other.runtimeType &&
           success == other.success &&
-          message == other.message;
+          message == other.message &&
+          warning == other.warning;
 }
 
 class DownloadUrlsDto {

@@ -85,42 +85,44 @@ fn write_message(output: &mut impl Write, message: &Message) -> Result<(), Strin
 /// Handle exactly `--deploy`; binaries must exit with the returned code.
 /// No engine session or caller-supplied data paths are accepted.
 pub fn run_deploy_child_main() -> i32 {
-    run_deploy_child_main_with_post_deploy(|| Ok(()))
+    run_deploy_child_main_with_action(DEPLOY_SUBCOMMAND, || {
+        #[cfg(target_os = "linux")]
+        let _lock = inherited_linux_deploy_lock()?;
+        let user_dir = crate::default_user_data_dir()
+            .ok_or("cannot determine the librime user data directory")?;
+        let shared_dir = crate::default_shared_data_dir();
+        #[cfg(target_os = "windows")]
+        {
+            crate::clear_windows_rime_build_repair_marker(&user_dir)?;
+            crate::invalidate_active_windows_rime_build(&user_dir)?;
+        }
+        crate::deploy(user_dir.to_string_lossy().into_owned(), shared_dir)?;
+        #[cfg(target_os = "windows")]
+        crate::mark_windows_rime_build_repair_complete(&user_dir)?;
+        Ok(())
+    })
 }
 
-/// Publish platform artifacts before acknowledging a successful deployment.
-pub fn run_deploy_child_main_with_post_deploy(
-    post_deploy: impl FnOnce() -> Result<(), String>,
+/// Handle exactly one trusted subcommand without running the private deployment.
+pub fn run_deploy_child_main_with_action(
+    subcommand: &str,
+    action: impl FnOnce() -> Result<(), String>,
 ) -> i32 {
     child_main(
         std::env::args_os().skip(1),
         &mut io::stdout().lock(),
-        || {
-            #[cfg(target_os = "linux")]
-            let _lock = inherited_linux_deploy_lock()?;
-            let user_dir = crate::default_user_data_dir()
-                .ok_or("cannot determine the librime user data directory")?;
-            let shared_dir = crate::default_shared_data_dir();
-            #[cfg(target_os = "windows")]
-            {
-                crate::clear_windows_rime_build_repair_marker(&user_dir)?;
-                crate::invalidate_active_windows_rime_build(&user_dir)?;
-            }
-            crate::deploy(user_dir.to_string_lossy().into_owned(), shared_dir)?;
-            post_deploy()?;
-            #[cfg(target_os = "windows")]
-            crate::mark_windows_rime_build_repair_complete(&user_dir)?;
-            Ok(())
-        },
+        subcommand,
+        action,
     )
 }
 
 fn child_main(
     args: impl Iterator<Item = OsString>,
     output: &mut impl Write,
-    deploy: impl FnOnce() -> Result<(), String>,
+    subcommand: &str,
+    action: impl FnOnce() -> Result<(), String>,
 ) -> i32 {
-    let valid_args = args.eq([OsString::from(DEPLOY_SUBCOMMAND)]);
+    let valid_args = args.eq([OsString::from(subcommand)]);
     let result = if valid_args {
         write_message(
             output,
@@ -128,9 +130,9 @@ fn child_main(
                 progress: "Deploying librime...".into(),
             },
         )
-        .and_then(|()| deploy())
+        .and_then(|()| action())
     } else {
-        Err("usage: --deploy (no additional arguments)".to_string())
+        Err(format!("usage: {subcommand} (no additional arguments)"))
     };
     let exit_code = if !valid_args {
         2
@@ -201,6 +203,15 @@ pub fn run_deploy_child(exe: &Path, timeout: Duration) -> Result<(), String> {
     run_deploy_child_with_progress(exe, timeout, |_| {})
 }
 
+/// Execute a trusted binary with one subcommand, using the deployment protocol.
+pub fn run_deploy_child_with_subcommand(
+    exe: &Path,
+    subcommand: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    run_deploy_child_command_with_subcommand(&mut Command::new(exe), subcommand, timeout, |_| {})
+}
+
 /// Like [`run_deploy_child`], forwarding progress on the calling thread.
 /// The callback must return promptly so the timeout can be enforced.
 pub fn run_deploy_child_with_progress(
@@ -215,10 +226,19 @@ pub fn run_deploy_child_with_progress(
 pub fn run_deploy_child_command_with_progress(
     command: &mut Command,
     timeout: Duration,
+    progress: impl FnMut(&str),
+) -> Result<(), String> {
+    run_deploy_child_command_with_subcommand(command, DEPLOY_SUBCOMMAND, timeout, progress)
+}
+
+fn run_deploy_child_command_with_subcommand(
+    command: &mut Command,
+    subcommand: &str,
+    timeout: Duration,
     mut progress: impl FnMut(&str),
 ) -> Result<(), String> {
     let mut child = command
-        .arg(DEPLOY_SUBCOMMAND)
+        .arg(subcommand)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -401,9 +421,12 @@ mod tests {
         ] {
             let mut output = Vec::new();
             assert_eq!(
-                child_main(args.into_iter().map(OsString::from), &mut output, || {
-                    panic!("invalid arguments must not deploy")
-                }),
+                child_main(
+                    args.into_iter().map(OsString::from),
+                    &mut output,
+                    DEPLOY_SUBCOMMAND,
+                    || panic!("invalid arguments must not deploy"),
+                ),
                 2
             );
             assert_eq!(
@@ -420,6 +443,7 @@ mod tests {
             let code = child_main(
                 [OsString::from(DEPLOY_SUBCOMMAND)].into_iter(),
                 &mut output,
+                DEPLOY_SUBCOMMAND,
                 || result.clone(),
             );
             let mut protocol = Protocol::default();
@@ -431,6 +455,45 @@ mod tests {
             }
             assert_eq!(code, if result.is_ok() { 0 } else { 1 });
             assert_eq!(protocol.final_result, Some(result));
+        }
+    }
+
+    #[test]
+    fn action_child_runs_only_requested_action_and_rejects_extra_arguments() {
+        for args in [
+            vec!["--deploy-public"],
+            vec!["--deploy-public", "/tmp/data"],
+            vec!["--deploy"],
+        ] {
+            let valid = args.len() == 1 && args[0] == "--deploy-public";
+            let mut output = Vec::new();
+            let mut action_ran = false;
+            let code = child_main(
+                args.into_iter().map(OsString::from),
+                &mut output,
+                "--deploy-public",
+                || {
+                    action_ran = true;
+                    Ok(())
+                },
+            );
+            assert_eq!(action_ran, valid);
+            assert_eq!(code, if valid { 0 } else { 2 });
+            let mut protocol = Protocol::default();
+            for line in output
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                protocol.line(line).unwrap();
+            }
+            assert_eq!(
+                protocol.final_result,
+                Some(if valid {
+                    Ok(())
+                } else {
+                    Err("usage: --deploy-public (no additional arguments)".into())
+                })
+            );
         }
     }
 
