@@ -26,6 +26,10 @@ class MobileKeyboardPreview extends StatelessWidget {
   static const _width = 400.0;
   static const _toolbarHeight = 52.0;
   static const _keyboardHeight = 266.0;
+  // The preview shows only the top two letter rows; the full keyboard is in the IME.
+  static const _previewRows = 2;
+  static const _previewHeight =
+      _verticalGap + _previewRows * (_keyHeight + _verticalGap) + 2; // + border
   static const _keyHeight = 54.0;
   static const _horizontalGap = 4.0;
   static const _verticalGap = (_keyboardHeight - _keyHeight * 4) / 5;
@@ -164,13 +168,13 @@ class MobileKeyboardPreview extends StatelessWidget {
       child: ExcludeSemantics(
         child: IgnorePointer(
           child: AspectRatio(
-            aspectRatio: _width / (_toolbarHeight + _keyboardHeight),
+            aspectRatio: _width / (_toolbarHeight + _previewHeight),
             child: FittedBox(
               fit: BoxFit.contain,
               child: Container(
                 key: const ValueKey('mobile-keyboard-preview'),
                 width: _width,
-                height: _toolbarHeight + _keyboardHeight,
+                height: _toolbarHeight + _previewHeight,
                 clipBehavior: Clip.antiAlias,
                 decoration: BoxDecoration(
                   color: background,
@@ -212,7 +216,7 @@ class MobileKeyboardPreview extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: _verticalGap),
-                    for (var row = 0; row < _letterRows.length; row++) ...[
+                    for (var row = 0; row < _previewRows; row++) ...[
                       Padding(
                         padding: EdgeInsets.symmetric(
                           horizontal: row == 1 ? 24 : 5,
@@ -243,24 +247,6 @@ class MobileKeyboardPreview extends StatelessWidget {
                       ),
                       const SizedBox(height: _verticalGap),
                     ],
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 5),
-                      child: Row(
-                        spacing: _horizontalGap,
-                        children: [
-                          key('123', weight: 115, accented: true),
-                          key('，', hint: '!', accented: true),
-                          key(schemeName, weight: 460, accented: true),
-                          key('。', hint: '?', accented: true),
-                          key(
-                            '↵',
-                            weight: 145,
-                            accented: true,
-                            icon: FLucideIcons.cornerDownLeft,
-                          ),
-                        ],
-                      ),
-                    ),
                   ],
                 ),
               ),
