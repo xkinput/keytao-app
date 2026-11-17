@@ -322,6 +322,17 @@ fn rime_lua_from_reader(reader: impl Read + Seek) -> Result<Option<String>, Stri
 }
 
 pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let addon_only = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find_map(|name| fs::read_to_string(root.join(name)).ok())
+        .is_some_and(|content| {
+            crate::scheme_files::parse_schema_list(&content)
+                .iter()
+                .all(|schema| keytao_core::is_addon_schema(schema))
+        });
+    if addon_only {
+        return keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other);
+    }
     let Some(scheme_key) = core.state().active_scheme else {
         return Ok(());
     };
@@ -459,7 +470,9 @@ pub(crate) fn store_cloud_archive_reader(
             .unwrap_or_default()
             .as_secs(),
         source: if source == "official" {
-            existing.as_ref().map_or(source, |meta| meta.source.as_str())
+            existing
+                .as_ref()
+                .map_or(source, |meta| meta.source.as_str())
         } else if crate::scheme::is_local_scheme_key(scheme_key) {
             "local"
         } else {
@@ -552,6 +565,60 @@ pub(crate) fn stage_install(
     Ok(())
 }
 
+fn select_main_schema_after_addon(root: &Path) -> Result<(), CoreError> {
+    let manifest =
+        safe_path(root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?;
+    let previous: serde_json::Value = match fs::read(manifest) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !previous["scheme_key"]
+        .as_str()
+        .is_some_and(keytao_core::is_addon_schema)
+    {
+        return Ok(());
+    }
+    let mut schemas = Vec::new();
+    for name in ["default.custom.yaml", "default-custom.yaml"] {
+        let path = safe_path(root, name).map_err(CoreError::Other)?;
+        match fs::read_to_string(path) {
+            Ok(content) => {
+                schemas = crate::scheme_files::parse_schema_list(&content);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let schema = schemas
+        .into_iter()
+        .find(|schema| !keytao_core::is_addon_schema(schema))
+        .ok_or_else(|| CoreError::Other("Active package has no primary schema".into()))?;
+    let path = safe_path(root, "user.yaml").map_err(CoreError::Other)?;
+    let mut value = match fs::read_to_string(&path) {
+        Ok(content) => serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .map_err(|error| CoreError::Other(format!("Invalid user.yaml: {error}")))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or_else(|| CoreError::Other("user.yaml must be a YAML mapping".into()))?;
+    let vars = mapping
+        .entry(serde_yaml::Value::String("var".into()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        .as_mapping_mut()
+        .ok_or_else(|| CoreError::Other("user.yaml var must be a YAML mapping".into()))?;
+    vars.insert("previously_selected_schema".into(), schema.into());
+    let content =
+        serde_yaml::to_string(&value).map_err(|error| CoreError::Other(error.to_string()))?;
+    crate::scheme_files::write_file_atomic(&path, content.as_bytes())?;
+    Ok(())
+}
+
 pub(crate) fn finalize_pending(
     core: &Core,
     scheme_key: &str,
@@ -613,6 +680,10 @@ pub(crate) fn finalize_pending(
         };
         if !receipt.root.is_empty() {
             let root = Path::new(&receipt.root);
+            select_main_schema_after_addon(root)?;
+            if let Some(path) = crate::addon::owned_addon_default(root).map_err(CoreError::Other)? {
+                fs::remove_file(path)?;
+            }
             let mut marker = tempfile::Builder::new()
                 .prefix(".active-")
                 .tempfile_in(root)?;
@@ -1005,15 +1076,15 @@ mod tests {
             .unwrap();
         zip.write_all(package_lua.as_bytes()).unwrap();
         let bytes = zip.finish().unwrap().into_inner();
-        store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &bytes, &root)
-            .unwrap();
+        store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &bytes, &root).unwrap();
         record_package(&core, "keytao", Some("v1"), true).unwrap();
         fs::write(
             root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
             serde_json::json!({
                 "root": root.canonicalize().unwrap(),
                 "scheme_key": "keytao", "manifest": {},
-            }).to_string(),
+            })
+            .to_string(),
         )
         .unwrap();
         fs::write(
@@ -1052,6 +1123,137 @@ mod tests {
                 package_lua
             );
             assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn active_package_selects_main_schema_only_after_standalone_addon() {
+        for (previous, existing_user) in [("easy_en", true), ("wanxiang", false), ("keytao", true)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let core = open_core(dir.path());
+            let root = dir.path().join("rime");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
+                serde_json::json!({"scheme_key": previous}).to_string(),
+            )
+            .unwrap();
+            let addon = if previous == "keytao" {
+                "easy_en"
+            } else {
+                previous
+            };
+            let existing_schemas = if previous == "keytao" {
+                "    - schema: keytao\n    - schema: easy_en\n".into()
+            } else {
+                format!("    - schema: {addon}\n")
+            };
+            fs::write(
+                root.join("default.custom.yaml"),
+                format!("patch:\n  schema_list:\n{existing_schemas}"),
+            )
+            .unwrap();
+            fs::write(root.join(format!("{addon}.schema.yaml")), "schema: {}\n").unwrap();
+            let defaults = if previous == "keytao" {
+                "config_version: user\n"
+            } else {
+                include_str!("addon-default.yaml")
+            };
+            fs::write(root.join("default.yaml"), defaults).unwrap();
+            let user =
+                "custom_key: keep\nvar:\n  previously_selected_schema: easy_en\n  option: true\n";
+            if existing_user {
+                fs::write(root.join("user.yaml"), user).unwrap();
+            }
+            let archive = dir.path().join("main.zip");
+            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+            for (name, content) in [
+                (
+                    "default.custom.yaml",
+                    "patch:\n  schema_list:\n    - schema: txjx\n",
+                ),
+                ("txjx.schema.yaml", "schema:\n  schema_id: txjx\n"),
+            ] {
+                zip.start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(content.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+            crate::install::smart_install(
+                &core,
+                archive.to_string_lossy().into_owned(),
+                root.to_string_lossy().into_owned(),
+                #[cfg(target_os = "windows")]
+                |_, _, _, _| Ok(Vec::new()),
+            )
+            .await
+            .unwrap();
+            record_package(&core, "txjx", Some("v1"), true).unwrap();
+            let content = fs::read_to_string(root.join("user.yaml")).unwrap();
+            let value: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+            assert_eq!(
+                value["var"]["previously_selected_schema"].as_str(),
+                Some(if previous == "keytao" {
+                    "easy_en"
+                } else {
+                    "txjx"
+                })
+            );
+            if existing_user {
+                assert_eq!(value["custom_key"].as_str(), Some("keep"));
+                assert_eq!(value["var"]["option"].as_bool(), Some(true));
+            }
+            if previous == "keytao" {
+                assert_eq!(content, user);
+            }
+            assert_eq!(
+                crate::scheme_files::parse_schema_list(
+                    &fs::read_to_string(root.join("default.custom.yaml")).unwrap()
+                ),
+                ["txjx", addon]
+            );
+            assert!(root.join(format!("{addon}.schema.yaml")).is_file());
+            assert_eq!(core.state().active_scheme.as_deref(), Some("txjx"));
+            if previous == "keytao" {
+                assert_eq!(
+                    fs::read_to_string(root.join("default.yaml")).unwrap(),
+                    defaults
+                );
+            } else {
+                assert!(!root.join("default.yaml").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_transition_preserves_invalid_user_settings_and_pending_receipt() {
+        for content in ["[invalid", "scalar", "var: scalar\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let core = open_core(dir.path());
+            let root = dir.path().join("rime");
+            fs::create_dir_all(&root).unwrap();
+            let manifest = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
+            let previous = "{\"scheme_key\":\"easy_en\"}";
+            fs::write(&manifest, previous).unwrap();
+            fs::write(
+                root.join("default.custom.yaml"),
+                "patch:\n  schema_list:\n    - schema: txjx\n    - schema: easy_en\n",
+            )
+            .unwrap();
+            fs::write(root.join("user.yaml"), content).unwrap();
+            stage_install(
+                &core,
+                &user_words_package(),
+                BTreeMap::new(),
+                root.to_string_lossy().into_owned(),
+            )
+            .unwrap();
+            assert!(record_package(&core, "txjx", Some("v1"), true).is_err());
+            assert_eq!(fs::read_to_string(root.join("user.yaml")).unwrap(), content);
+            assert_eq!(fs::read_to_string(manifest).unwrap(), previous);
+            assert!(core.pending_package.lock().unwrap().is_some());
+            assert!(core.state().active_scheme.is_none());
         }
     }
 
@@ -1290,8 +1492,7 @@ mod tests {
             let bytes = if identical {
                 original.clone()
             } else {
-                let mut zip =
-                    zip::ZipWriter::new_append(std::io::Cursor::new(original)).unwrap();
+                let mut zip = zip::ZipWriter::new_append(std::io::Cursor::new(original)).unwrap();
                 zip.set_comment("Changed archive");
                 zip.finish().unwrap().into_inner()
             };
@@ -1311,13 +1512,19 @@ mod tests {
             let (stored, metadata) = stored_archive(&core, "txjx").unwrap();
             assert_eq!(stored, bytes);
             assert_eq!(metadata.version.as_deref(), Some("v2"));
-            assert_eq!(metadata.source, if identical { "cloud" } else { "official" });
+            assert_eq!(
+                metadata.source,
+                if identical { "cloud" } else { "official" }
+            );
             assert_eq!(
                 metadata.display_name.as_deref(),
                 identical.then_some("Existing name")
             );
             assert_eq!(
-                core.state().scheme_cloud_ids.get("txjx").map(String::as_str),
+                core.state()
+                    .scheme_cloud_ids
+                    .get("txjx")
+                    .map(String::as_str),
                 identical.then_some("21")
             );
         }
@@ -1339,7 +1546,10 @@ mod tests {
                 .unwrap();
         }
         let many_files = zip.finish().unwrap().into_inner();
-        for (bytes, expected) in [(oversized, "方案包解压后过大"), (many_files, "方案包文件过多")] {
+        for (bytes, expected) in [
+            (oversized, "方案包解压后过大"),
+            (many_files, "方案包文件过多"),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let core = open_core(dir.path());
             let archive = dir.path().join("download.zip");

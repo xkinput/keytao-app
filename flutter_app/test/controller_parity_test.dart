@@ -975,12 +975,16 @@ void main() {
     },
   );
 
-  test('add-ons gate main scheme and return callback failures as text', () async {
-    expect(await controller.installAddon(), isFalse);
-    expect(controller.addonError, '请先安装键道方案');
-    expect(await controller.manageWanxiang(true), isFalse);
-    expect(controller.wanxiangError, '请先安装主方案');
-    controller.local = installedLocal;
+  test('add-ons install without a main scheme and report callback failures', () async {
+    core.local = const LocalSchemaDto(
+      installed: false,
+      deployed: false,
+      schemas: [],
+    );
+    expect(controller.local, isNull);
+    expect(controller.canInstallAddon, isTrue);
+    expect(controller.canInstallWanxiang, isTrue);
+    expect(await controller.manageWanxiang(true), isTrue);
     core.calls.clear();
     expect(await controller.installAddon(), isTrue);
     expect(

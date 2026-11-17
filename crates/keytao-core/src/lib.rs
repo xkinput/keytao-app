@@ -668,6 +668,99 @@ mod desktop {
 
         #[cfg(not(target_os = "android"))]
         #[test]
+        fn deployment_validation_restores_the_intended_schema() {
+            const CASE_ENV: &str = "KEYTAO_DEPLOY_SELECTION_TEST_CASE";
+            const ROOT_ENV: &str = "KEYTAO_DEPLOY_SELECTION_TEST_ROOT";
+            let cases: &[(&[&str], &str, &str)] = &[
+                (&["wanxiang", "easy_en"], "easy_en", "wanxiang"),
+                (&["keytao", "easy_en", "wanxiang"], "easy_en", "easy_en"),
+                (&["keytao", "easy_en", "wanxiang"], "keytao", "keytao"),
+            ];
+            if let Ok(case) = std::env::var(CASE_ENV) {
+                let root = std::path::PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
+                let (schemas, selected, expected) = cases[case.parse::<usize>().unwrap()];
+                let entries = schemas
+                    .iter()
+                    .map(|schema| format!("  - schema: {schema}\n"))
+                    .collect::<String>();
+                std::fs::write(
+                    root.join("default.yaml"),
+                    format!("config_version: '1.0'\nschema_list:\n{entries}"),
+                )
+                .unwrap();
+                std::fs::write(
+                    root.join("default.custom.yaml"),
+                    format!(
+                        "patch:\n  schema_list:\n  {}",
+                        entries.replace('\n', "\n  ")
+                    ),
+                )
+                .unwrap();
+                for schema in schemas {
+                    std::fs::write(
+                        root.join(format!("{schema}.schema.yaml")),
+                        format!("schema:\n  schema_id: {schema}\n  name: {schema}\n  version: '1.0'\nengine:\n  processors: [ascii_composer, express_editor]\n  segmentors: [ascii_segmentor]\n  translators: [echo_translator]\n"),
+                    )
+                    .unwrap();
+                }
+                std::fs::write(
+                    root.join("user.yaml"),
+                    format!("var:\n  previously_selected_schema: {selected}\n"),
+                )
+                .unwrap();
+                super::deploy(
+                    root.to_string_lossy().into_owned(),
+                    root.to_string_lossy().into_owned(),
+                )
+                .unwrap();
+                let _rime = super::rime_api_lock();
+                unsafe {
+                    (librime_sys::rime_get_api()
+                        .as_ref()
+                        .unwrap()
+                        .finalize
+                        .unwrap())()
+                };
+                let user: serde_yaml::Value =
+                    serde_yaml::from_slice(&std::fs::read(root.join("user.yaml")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    user["var"]["previously_selected_schema"].as_str(),
+                    Some(expected)
+                );
+                assert_eq!(
+                    crate::deployed_schema_id_from_dir(&root).as_deref(),
+                    Some(expected)
+                );
+                return;
+            }
+
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("keytao-deploy-selection-{suffix}"));
+            for index in 0..cases.len() {
+                let directory = root.join(index.to_string());
+                std::fs::create_dir_all(&directory).unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "desktop::api_member_tests::deployment_validation_restores_the_intended_schema"])
+                    .env(CASE_ENV, index.to_string())
+                    .env(ROOT_ENV, &directory)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "case {index}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        #[cfg(not(target_os = "android"))]
+        #[test]
         fn deployment_file_validation_requires_all_selected_schemas() {
             let suffix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1140,13 +1233,23 @@ mod desktop {
     #[cfg(not(target_os = "android"))]
     fn validate_deployed_schemas(user_dir: &Path) -> Result<(), String> {
         let schemas = validate_deployed_schema_files(user_dir)?;
+        let selected = if schemas.iter().all(|schema| is_addon_schema(schema)) {
+            schemas.first().cloned()
+        } else {
+            deployed_schema_id_from_dir(user_dir)
+                .filter(|schema| schemas.contains(schema))
+                .or_else(|| schemas.first().cloned())
+        };
         let _rime = rime_api_lock();
         let session =
             create_session().map_err(|error| format!("create validation session: {error:?}"))?;
-        for schema_id in &schemas {
-            select_schema_checked(&session, schema_id)?;
-        }
-        Ok(())
+        let validation = schemas
+            .iter()
+            .try_for_each(|schema_id| select_schema_checked(&session, schema_id));
+        let restored = selected
+            .map(|schema_id| select_schema_checked(&session, &schema_id))
+            .unwrap_or(Ok(()));
+        validation.and(restored)
     }
 
     #[cfg(target_os = "android")]
@@ -4886,14 +4989,15 @@ fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> 
 }
 
 pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
+    let configured = configured_schema_list_from_dir(dir);
+    if configured.is_empty() {
+        return None;
+    }
     let deployed = std::fs::read_to_string(dir.join("build/default.yaml"))
         .ok()
         .map(|content| parse_schema_list(&content))
         .filter(|schemas| !schemas.is_empty());
-    let schemas = deployed
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| configured_schema_list_from_dir(dir));
+    let schemas = deployed.as_ref().cloned().unwrap_or(configured);
     let selected = std::fs::read_to_string(dir.join("user.yaml"))
         .ok()
         .and_then(|content| serde_yaml::from_str::<Value>(&content).ok())
@@ -4919,24 +5023,20 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
 }
 
 fn preferred_schema_id_from_dir(dir: &Path) -> Option<String> {
-    [
-        dir.join("default.custom.yaml"),
-        dir.join("default-custom.yaml"),
-        dir.join("build/default.yaml"),
-        dir.join("default.yaml"),
-    ]
-    .into_iter()
-    .filter_map(|path| std::fs::read_to_string(path).ok())
-    .find_map(|content| preferred_schema_from_list(parse_schema_list(&content)))
+    preferred_schema_from_list(configured_schema_list_from_dir(dir))
 }
 
 fn preferred_schema_from_list(schemas: Vec<String>) -> Option<String> {
     let mut first_schema = None;
+    let mut first_addon = None;
     for schema in schemas {
         if schema.trim().is_empty() {
             continue;
         }
         if is_addon_schema(&schema) {
+            if first_addon.is_none() {
+                first_addon = Some(schema);
+            }
             continue;
         }
         if first_schema.is_none() {
@@ -4946,7 +5046,7 @@ fn preferred_schema_from_list(schemas: Vec<String>) -> Option<String> {
             return Some(schema);
         }
     }
-    first_schema
+    first_schema.or(first_addon)
 }
 
 #[cfg(any(
@@ -5104,8 +5204,17 @@ fn configured_schema_list_from_dir(user_data_dir: &Path) -> Vec<String> {
     ]
     .into_iter()
     .filter_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
-    .map(|content| parse_schema_list(&content))
-    .find(|schemas| !schemas.is_empty())
+    .find_map(|content| {
+        let schemas = parse_schema_list(&content);
+        let has_empty_schema_list = serde_yaml::from_str::<Value>(&content).is_ok_and(|value| {
+            value
+                .get("patch")
+                .and_then(|patch| patch.get("schema_list"))
+                .or_else(|| value.get("schema_list"))
+                .is_some_and(|list| list.is_null() || list.as_sequence().is_some_and(Vec::is_empty))
+        });
+        (!schemas.is_empty() || has_empty_schema_list).then_some(schemas)
+    })
     .unwrap_or_default()
 }
 
@@ -5193,14 +5302,24 @@ fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
 
 fn managed_primary_schemas(user_data_dir: &Path) -> Vec<String> {
     let local_schemas = active_local_schema_ids(user_data_dir);
-    ["default.custom.yaml", "default-custom.yaml"]
+    let schemas: Vec<_> = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
         .map(|content| parse_schema_list(&content))
         .unwrap_or_default()
         .into_iter()
         .filter(|schema| valid_rime_build_id(schema))
-        .filter(|schema| is_keytao_managed_schema(schema) || local_schemas.contains(schema))
+        .collect();
+    let has_primary = schemas
+        .iter()
+        .any(|schema| is_keytao_managed_schema(schema) || local_schemas.contains(schema));
+    schemas
+        .into_iter()
+        .filter(|schema| {
+            is_keytao_managed_schema(schema)
+                || local_schemas.contains(schema)
+                || (!has_primary && is_addon_schema(schema))
+        })
         .collect()
 }
 
@@ -5235,6 +5354,48 @@ fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(),
         .map_err(|error| format!("publish deployment marker: {error}"))
 }
 
+fn persist_standalone_addon_selection(user_data_dir: &Path) -> Result<(), String> {
+    let schemas = configured_schema_list_from_dir(user_data_dir);
+    let Some(schema) = schemas
+        .first()
+        .filter(|_| schemas.iter().all(|schema| is_addon_schema(schema)))
+    else {
+        return Ok(());
+    };
+    let path = user_data_dir.join("user.yaml");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!("refuse symbolic link: {}", path.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+    }
+    let mut value = match std::fs::read(&path) {
+        Ok(bytes) => serde_yaml::from_slice::<Value>(&bytes)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Value::Mapping(Mapping::new())
+        }
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or("user.yaml must be a YAML mapping")?;
+    let vars = mapping
+        .entry(Value::String("var".into()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .ok_or("user.yaml var must be a YAML mapping")?;
+    vars.insert(
+        Value::String("previously_selected_schema".into()),
+        Value::String(schema.clone()),
+    );
+    let content = serde_yaml::to_string(&value).map_err(|error| error.to_string())?;
+    write_file_atomic(&path, content.as_bytes())
+        .map_err(|error| format!("save {}: {error}", path.display()))
+}
+
 /// Publish readiness only after every deployment step has succeeded.
 pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
     let schemas = managed_primary_schemas(user_data_dir);
@@ -5251,6 +5412,7 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
     {
         return Err("managed primary schemas are not deployed".into());
     }
+    persist_standalone_addon_selection(user_data_dir)?;
     write_deployed_marker(user_data_dir, &schemas)?;
     let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
     match std::fs::remove_file(&sentinel) {
@@ -6617,6 +6779,120 @@ mod tests {
     }
 
     #[test]
+    fn schema_install_state_tracks_standalone_addons_until_main_scheme_is_installed() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-addon-schema-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        for addon in ["easy_en", "wanxiang"] {
+            std::fs::write(
+                dir.join("default.custom.yaml"),
+                format!("patch:\n  schema_list:\n    - schema: {addon}\n"),
+            )
+            .unwrap();
+            std::fs::write(dir.join(format!("{addon}.schema.yaml")), "schema: {}\n").unwrap();
+            let installed = schema_install_state(&dir);
+            assert!(installed.installed);
+            assert!(!installed.deployed);
+            assert_eq!(installed.schemas, [addon]);
+            std::fs::write(
+                dir.join(format!("build/{addon}.schema.yaml")),
+                "schema: {}\n",
+            )
+            .unwrap();
+            super::complete_deployment(&dir).unwrap();
+            assert!(schema_install_state(&dir).deployed);
+
+            std::fs::write(
+                dir.join("default.custom.yaml"),
+                format!("patch:\n  schema_list:\n    - schema: keytao\n    - schema: {addon}\n"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("keytao.schema.yaml"), "schema: {}\n").unwrap();
+            std::fs::write(dir.join("build/keytao.schema.yaml"), "schema: {}\n").unwrap();
+            std::fs::remove_file(dir.join(format!("{addon}.schema.yaml"))).unwrap();
+            super::complete_deployment(&dir).unwrap();
+            let main = schema_install_state(&dir);
+            assert!(main.installed);
+            assert!(main.deployed);
+            assert_eq!(main.schemas, ["keytao"]);
+        }
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list: []\n",
+        )
+        .unwrap();
+        let empty = schema_install_state(&dir);
+        assert!(!empty.installed);
+        assert!(!empty.deployed);
+        assert!(empty.schemas.is_empty());
+        assert!(super::complete_deployment(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn complete_deployment_persists_standalone_default_without_changing_main_selection() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-addon-selection-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        for schema in ["wanxiang", "easy_en", "keytao"] {
+            std::fs::write(dir.join(format!("{schema}.schema.yaml")), "schema: {}\n").unwrap();
+            std::fs::write(
+                dir.join(format!("build/{schema}.schema.yaml")),
+                "schema: {}\n",
+            )
+            .unwrap();
+        }
+        let standalone = "patch:\n  schema_list:\n    - schema: wanxiang\n    - schema: easy_en\n";
+        std::fs::write(dir.join("default.custom.yaml"), standalone).unwrap();
+        let user_path = dir.join("user.yaml");
+        let user =
+            "custom_key: keep\nvar:\n  previously_selected_schema: easy_en\n  option: true\n";
+        std::fs::write(&user_path, user).unwrap();
+        super::complete_deployment(&dir).unwrap();
+        let selected: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(&user_path).unwrap()).unwrap();
+        assert_eq!(
+            selected["var"]["previously_selected_schema"].as_str(),
+            Some("wanxiang")
+        );
+        assert_eq!(selected["var"]["option"].as_bool(), Some(true));
+        assert_eq!(selected["custom_key"].as_str(), Some("keep"));
+
+        std::fs::write(dir.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: keytao\n    - schema: easy_en\n    - schema: wanxiang\n").unwrap();
+        std::fs::write(&user_path, user).unwrap();
+        super::complete_deployment(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&user_path).unwrap(), user);
+
+        std::fs::write(dir.join("default.custom.yaml"), standalone).unwrap();
+        for invalid in ["[invalid", "scalar", "var: scalar\n"] {
+            std::fs::write(&user_path, invalid).unwrap();
+            super::begin_deployment(&dir).unwrap();
+            assert!(super::complete_deployment(&dir).is_err());
+            assert_eq!(std::fs::read_to_string(&user_path).unwrap(), invalid);
+            assert!(!dir.join("build").join(super::DEPLOYED_FILE).exists());
+            assert!(dir.join("build").join(super::DEPLOYING_FILE).exists());
+        }
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&user_path).unwrap();
+            let target = dir.join("original-user.yaml");
+            std::fs::write(&target, user).unwrap();
+            std::os::unix::fs::symlink(&target, &user_path).unwrap();
+            assert!(super::complete_deployment(&dir)
+                .unwrap_err()
+                .contains("symbolic link"));
+            assert_eq!(std::fs::read_to_string(target).unwrap(), user);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn schema_install_state_accepts_legacy_installed_local_manifest() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7013,6 +7289,38 @@ mod tests {
     }
 
     #[test]
+    fn cleared_schema_list_does_not_restore_stale_compiled_addon() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-empty-schema-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(
+            dir.join("build/default.yaml"),
+            "schema_list:\n  - schema: easy_en\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("build/easy_en.schema.yaml"), "").unwrap();
+        std::fs::write(
+            dir.join("user.yaml"),
+            "var:\n  previously_selected_schema: easy_en\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::deployed_schema_id_from_dir(&dir).as_deref(),
+            Some("easy_en")
+        );
+        for content in ["patch:\n  schema_list: []\n", "patch:\n  schema_list:\n"] {
+            std::fs::write(dir.join("default.custom.yaml"), content).unwrap();
+            assert!(preferred_schema_id_from_dir(&dir).is_none());
+            assert!(super::deployed_schema_id_from_dir(&dir).is_none());
+            assert!(super::configured_schema_list_from_dir(&dir).is_empty());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn merge_default_custom_keeps_user_schemas() {
         let existing =
             "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao_old\n    - schema: txjx\n";
@@ -7040,14 +7348,25 @@ mod tests {
     }
 
     #[test]
-    fn preferred_schema_never_uses_addon_as_startup_schema() {
+    fn preferred_schema_uses_addon_only_without_other_schemas() {
         for addon in ["easy_en", "wanxiang"] {
             assert_eq!(
                 preferred_schema_from_list(vec![addon.into(), "user_schema".into()]),
                 Some("user_schema".into())
             );
-            assert_eq!(preferred_schema_from_list(vec![addon.into()]), None);
+            assert_eq!(
+                preferred_schema_from_list(vec![addon.into(), "keytao".into()]),
+                Some("keytao".into())
+            );
+            assert_eq!(
+                preferred_schema_from_list(vec![addon.into()]),
+                Some(addon.into())
+            );
         }
+        assert_eq!(
+            preferred_schema_from_list(vec!["wanxiang".into(), "easy_en".into()]),
+            Some("wanxiang".into())
+        );
     }
 
     #[test]

@@ -223,7 +223,12 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
     let root =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     let installed = keytao_core::schema_install_state(&root);
-    if !installed.installed {
+    if !installed.installed
+        || installed
+            .schemas
+            .iter()
+            .all(|id| keytao_core::is_addon_schema(id))
+    {
         return Ok(());
     }
     // Infer the public distribution from schema IDs only. Personal source and

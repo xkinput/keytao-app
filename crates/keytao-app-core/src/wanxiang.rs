@@ -944,8 +944,8 @@ pub fn uninstall(root: &Path) -> Result<InstallReceipt, String> {
 mod tests;
 
 use crate::{
-    Core, CoreError, CoreEvent, addon::write_addon_schema_list, events::InstallProgress,
-    scheme_files::write_file_atomic, scheme_host::SchemeHost,
+    Core, CoreError, CoreEvent, addon::write_schema_list_transaction, events::InstallProgress,
+    scheme_host::SchemeHost,
 };
 
 pub async fn manage_wanxiang(
@@ -954,16 +954,7 @@ pub async fn manage_wanxiang(
     variant: String,
     host: &impl SchemeHost,
 ) -> Result<Status, CoreError> {
-    let result: Result<_, String> = async {
-    variant_source(&variant)?;
-    let root = host.user_root()?;
-    let config_path = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .find(|path| path.is_file())
-        .ok_or("请先安装主方案")?;
-    let previous_config = std::fs::read(&config_path).map_err(|e| e.to_string())?;
-    let receipt = if installed {
+    manage_wanxiang_with(core, installed, variant, host, |root, variant| async move {
         let progress_core = core.clone();
         install(&root, &variant, move |percent, message| {
             progress_core.emit(CoreEvent::InstallProgress(InstallProgress {
@@ -971,14 +962,40 @@ pub async fn manage_wanxiang(
                 percent: u32::from(percent),
                 message: message.into(),
             }));
-        }).await?
+        })
+        .await
+    })
+    .await
+}
+
+async fn manage_wanxiang_with<Install, InstallFuture>(
+    core: &std::sync::Arc<Core>,
+    installed: bool,
+    variant: String,
+    host: &impl SchemeHost,
+    install_package: Install,
+) -> Result<Status, CoreError>
+where
+    Install: FnOnce(PathBuf, String) -> InstallFuture,
+    InstallFuture: std::future::Future<Output = Result<InstallReceipt, String>>,
+{
+    let result: Result<_, String> = async {
+    variant_source(&variant)?;
+    let root = host.user_root()?;
+    let mut receipt = if installed {
+        install_package(root.clone(), variant).await?
     } else {
         uninstall(&root)?
     };
     #[cfg(target_os = "windows")]
     let mut public_update = None;
     let deploy_result = async {
-        write_addon_schema_list(&root, SCHEMA_ID, installed)?;
+        write_schema_list_transaction(
+            &mut receipt,
+            SCHEMA_ID,
+            installed,
+            &crate::addon::shared_data_dir(core, &root),
+        )?;
         #[cfg(target_os = "windows")]
         {
             public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
@@ -989,7 +1006,11 @@ pub async fn manage_wanxiang(
                 }
             })?);
         }
-        host.deploy().await?;
+        if installed || keytao_core::schema_install_state(&root).installed {
+            host.deploy().await?;
+        } else {
+            let _ = host.write_reload_stamp(&root)?;
+        }
         if installed && !status_at(&root).deployed {
             return Err("万象拼音部署产物缺失".to_string());
         }
@@ -997,7 +1018,6 @@ pub async fn manage_wanxiang(
     }.await;
     if let Err(error) = deploy_result {
         let rollback = receipt.rollback();
-        let restore = write_file_atomic(&config_path, &previous_config);
         #[cfg(target_os = "windows")]
         let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
         #[cfg(target_os = "windows")]
@@ -1008,7 +1028,6 @@ pub async fn manage_wanxiang(
         if let Err(rollback_error) = rollback {
             return Err(format!("{error}；恢复词库失败：{rollback_error}"));
         }
-        restore.map_err(|e| format!("{error}；恢复方案列表失败：{e}"))?;
         #[cfg(target_os = "windows")]
         public_rollback.map_err(|_| error.clone())?;
         if let Err(restore_error) = host.deploy().await {

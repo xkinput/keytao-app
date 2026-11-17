@@ -275,6 +275,100 @@ fn install_variant_fixture(root: &Path, variant: &str) -> InstallReceipt {
     receipt
 }
 
+#[tokio::test]
+async fn standalone_wanxiang_installs_deploys_and_uninstalls_without_a_main_scheme() {
+    use crate::scheme_host::tests::AddonHost;
+    use std::sync::atomic::Ordering;
+    let root = TestRoot::new();
+    let host = AddonHost::new(&root.path);
+    let shared_default_available = crate::addon::shared_data_dir(&host.core, &root.path)
+        .join("default.yaml")
+        .is_file();
+    fs::write(root.path.join("rime.lua"), "stale main lua").unwrap();
+    let status = manage_wanxiang_with(
+        &host.core,
+        true,
+        "base".into(),
+        &host,
+        |root, variant| async move { Ok(install_variant_fixture(&root, &variant)) },
+    )
+    .await
+    .unwrap();
+    assert!(status.installed && status.deployed);
+    assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        crate::scheme_files::parse_schema_list(
+            &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
+        ),
+        [SCHEMA_ID]
+    );
+    assert_eq!(
+        keytao_core::deployed_schema_id_from_dir(&root.path).as_deref(),
+        Some(SCHEMA_ID)
+    );
+    assert_eq!(
+        root.path.join("default.yaml").is_file(),
+        !shared_default_available
+    );
+    assert!(!root.path.join("rime.lua").exists());
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.path.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["scheme_key"], SCHEMA_ID);
+    let status = manage_wanxiang(&host.core, false, "base".into(), &host)
+        .await
+        .unwrap();
+    assert!(!status.installed && !status.deployed);
+    assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
+    assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
+    assert!(
+        crate::scheme_files::parse_schema_list(
+            &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
+        )
+        .is_empty()
+    );
+    assert_eq!(keytao_core::deployed_schema_id_from_dir(&root.path), None);
+    assert!(!root.path.join("default.yaml").exists());
+}
+
+#[tokio::test]
+async fn main_scheme_keeps_priority_when_installing_wanxiang() {
+    use crate::scheme_host::tests::AddonHost;
+    let root = TestRoot::new();
+    fs::write(
+        root.path.join("default.custom.yaml"),
+        "patch:\n  schema_list:\n    - schema: keytao\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path.join("keytao.schema.yaml"),
+        "schema: {schema_id: keytao}\n",
+    )
+    .unwrap();
+    fs::write(root.path.join("rime.lua"), "main lua").unwrap();
+    let host = AddonHost::new(&root.path);
+    manage_wanxiang_with(
+        &host.core,
+        true,
+        "base".into(),
+        &host,
+        |root, variant| async move { Ok(install_variant_fixture(&root, &variant)) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        crate::scheme_files::parse_schema_list(
+            &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
+        ),
+        ["keytao", SCHEMA_ID]
+    );
+    assert_eq!(
+        fs::read_to_string(root.path.join("rime.lua")).unwrap(),
+        "main lua"
+    );
+}
+
 #[test]
 fn flypy_installs_own_double_pinyin_patch_transactionally() {
     let root = TestRoot::new();

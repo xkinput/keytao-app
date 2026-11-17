@@ -138,4 +138,32 @@ class KeytaoAndroidPathsTest {
         root.resolve("keydo.schema.yaml").writeText("schema: {}\n")
         assertTrue(KeytaoAndroidPaths.hasInstalledSchema(root))
     }
+
+    @Test fun `standalone addons require their configured source files`() {
+        for (schema in listOf("easy_en", "wanxiang")) {
+            temporary.resolve("default.custom.yaml").writeText("patch:\n  schema_list:\n    - schema: $schema\n")
+            assertEquals(listOf(schema), KeytaoAndroidPaths.configuredSchemas(temporary))
+            assertFalse(KeytaoAndroidPaths.hasInstalledSchema(temporary))
+            temporary.resolve("$schema.schema.yaml").writeText("schema: {}\n")
+            assertTrue(KeytaoAndroidPaths.hasInstalledSchema(temporary))
+            temporary.resolve("$schema.schema.yaml").delete()
+        }
+    }
+
+    @Test fun `main scheme readiness keeps addons optional`() {
+        temporary.resolve("default.custom.yaml").writeText(
+            "patch:\n  schema_list:\n    - schema: keydo\n    - schema: easy_en\n    - schema: wanxiang\n",
+        )
+        temporary.resolve("keydo.schema.yaml").writeText("schema: {}\n")
+        assertEquals(listOf("keydo"), KeytaoAndroidPaths.configuredSchemas(temporary))
+        assertTrue(KeytaoAndroidPaths.hasInstalledSchema(temporary))
+    }
+
+    @Test fun `standalone fallback does not claim similarly named user schemas`() {
+        temporary.resolve("default.custom.yaml").writeText(
+            "patch:\n  schema_list:\n    - schema: wanxiang_pro\n    - schema: easy_en_personal\n",
+        )
+        assertTrue(KeytaoAndroidPaths.configuredSchemas(temporary).isEmpty())
+        assertFalse(KeytaoAndroidPaths.hasInstalledSchema(temporary))
+    }
 }

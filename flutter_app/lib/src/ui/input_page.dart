@@ -168,9 +168,15 @@ class _CurrentSchemeHero extends StatelessWidget {
     final desktop = MediaQuery.sizeOf(context).width >= 720;
     final palette = AppPalette.of(context);
     final package = c.installedPackageFor(c.activeSchemeKey);
+    final addon = switch (c.activeSchemeKey) {
+      'easy_en' => c.addon,
+      'wanxiang' => c.wanxiang,
+      _ => null,
+    };
     final local = c.local;
     final version =
         package?.version ??
+        addon?.version ??
         (local == null
             ? null
             : displayedSchemeVersion(
