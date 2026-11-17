@@ -164,7 +164,7 @@ public struct KeyTaoImeTheme: Codable {
             background: KeyTaoThemeColor(red: 0xF8, green: 0xFA, blue: 0xFF, alpha: 0xF2),
             borderColor: KeyTaoThemeColor(red: 0xD8, green: 0xE2, blue: 0xF1, alpha: 0xFF),
             borderWidth: 1,
-            cornerRadius: 14,
+            cornerRadius: 16,
             paddingX: 8,
             paddingY: 7,
             gap: 6,
@@ -189,7 +189,7 @@ public struct KeyTaoImeTheme: Codable {
             borderColor: KeyTaoThemeColor(red: 0, green: 0, blue: 0, alpha: 0),
             selectedBorderColor: KeyTaoThemeColor(red: 0xA8, green: 0xC7, blue: 0xFA, alpha: 0xFF),
             borderWidth: 0,
-            cornerRadius: 9,
+            cornerRadius: 11,
             paddingX: 11,
             paddingY: 6,
             inlineGap: 5,
@@ -204,7 +204,7 @@ public struct KeyTaoImeTheme: Codable {
             disabledForeground: KeyTaoThemeColor(red: 0xA5, green: 0xB0, blue: 0xB8, alpha: 0xFF),
             hoverBackground: KeyTaoThemeColor(red: 0xF1, green: 0xF6, blue: 0xFF, alpha: 0xFF),
             buttonSize: 28,
-            cornerRadius: 8
+            cornerRadius: 10
         ),
         modeHint: ModeHint(
             background: KeyTaoThemeColor(red: 0xE6, green: 0xF0, blue: 0xFF, alpha: 0xF2),

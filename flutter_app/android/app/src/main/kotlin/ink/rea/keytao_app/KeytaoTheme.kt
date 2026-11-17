@@ -118,8 +118,8 @@ data class KeytaoImeTheme(
             labelSizeSp = 14f,
             commentSizeSp = 13f,
             preeditSizeSp = 15f,
-            panelCornerRadiusDp = 14f,
-            keyCornerRadiusDp = 9f,
+            panelCornerRadiusDp = 16f,
+            keyCornerRadiusDp = 11f,
             panelGapDp = 6f,
             candidatePaddingXDp = 11f,
             candidatePaddingYDp = 6f,
@@ -177,9 +177,9 @@ data class KeytaoImeTheme(
                         ?: fallback.commentSizeSp,
                     preeditSizeSp = font?.optDouble("preeditSize", fallback.preeditSizeSp.toDouble())?.toFloat()?.coerceIn(9f, 28f)
                         ?: fallback.preeditSizeSp,
-                    panelCornerRadiusDp = panel?.optDouble("cornerRadius", fallback.panelCornerRadiusDp.toDouble())?.toFloat()?.coerceIn(0f, 28f)
+                    panelCornerRadiusDp = panel?.optDouble("cornerRadius", fallback.panelCornerRadiusDp.toDouble())?.toFloat()?.takeIf { it.isFinite() && it in 0f..28f }
                         ?: fallback.panelCornerRadiusDp,
-                    keyCornerRadiusDp = candidate?.optDouble("cornerRadius", fallback.keyCornerRadiusDp.toDouble())?.toFloat()?.coerceIn(0f, 24f)
+                    keyCornerRadiusDp = candidate?.optDouble("cornerRadius", fallback.keyCornerRadiusDp.toDouble())?.toFloat()?.takeIf { it.isFinite() && it in 0f..24f }
                         ?: fallback.keyCornerRadiusDp,
                     panelGapDp = panel?.optDouble("gap", fallback.panelGapDp.toDouble())?.toFloat()?.coerceIn(0f, 24f)
                         ?: fallback.panelGapDp,

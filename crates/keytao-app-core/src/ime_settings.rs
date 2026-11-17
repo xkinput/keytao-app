@@ -63,7 +63,10 @@ pub struct ImeUiSettings {
     pub show_tray_mode_indicator: bool,
     pub effective_embedded_composition: bool,
     pub accent_color: String,
+    pub accent_color_override: Option<String>,
     pub font_size: f32,
+    pub corner_radius: Option<f32>,
+    pub background_color: String,
     pub theme_path: Option<String>,
     pub theme_exists: bool,
     pub reload_stamp_path: Option<String>,
@@ -101,7 +104,14 @@ fn ime_ui_settings_from_paths(
         show_tray_mode_indicator: theme.ui.show_tray_mode_indicator,
         effective_embedded_composition: theme.ui.effective_embedded_composition(),
         accent_color: color_to_hex(accent_color),
+        accent_color_override: theme.ui.accent_color.map(color_to_hex),
         font_size: theme.font.size,
+        corner_radius: theme.ui.corner_radius,
+        background_color: theme
+            .ui
+            .background_color
+            .map(color_to_hex)
+            .unwrap_or_default(),
         theme_exists: theme_path.is_file(),
         theme_path: Some(path_string(theme_path)),
         reload_stamp_path,
@@ -121,8 +131,10 @@ fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String
 fn write_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
-    accent_color: String,
+    accent_color: Option<String>,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<(), String> {
     let theme_path = ime_theme_path()?;
     keytao_theme::write_ime_ui_settings_to_path(
@@ -131,6 +143,8 @@ fn write_ime_ui_settings(
         orientation,
         accent_color,
         font_size,
+        corner_radius,
+        background_color,
     )
 }
 
@@ -998,11 +1012,20 @@ pub fn set_ime_show_tray_mode_indicator(show: bool) -> Result<ImeUiSettings, Cor
 pub fn set_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
-    accent_color: String,
+    accent_color: Option<String>,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
-        write_ime_ui_settings(color_scheme, orientation, accent_color, font_size)?;
+        write_ime_ui_settings(
+            color_scheme,
+            orientation,
+            accent_color,
+            font_size,
+            corner_radius,
+            background_color,
+        )?;
         let reload_message = match write_keytao_ime_reload_stamp() {
             Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
             Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
@@ -1017,8 +1040,10 @@ pub fn set_ime_ui_settings(
     host: impl ImeHost,
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
-    accent_color: String,
+    accent_color: Option<String>,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         let root = host.user_root()?;
@@ -1029,6 +1054,8 @@ pub fn set_ime_ui_settings(
             orientation,
             accent_color,
             font_size,
+            corner_radius,
+            background_color,
         )?;
         let reload_message = match write_android_reload_stamp(&root) {
             Ok(path) => format!(
@@ -1051,8 +1078,10 @@ pub fn set_ime_ui_settings(
     host: impl ImeHost,
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
-    accent_color: String,
+    accent_color: Option<String>,
     font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
 ) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         let root = host.user_root()?;
@@ -1063,6 +1092,8 @@ pub fn set_ime_ui_settings(
             orientation,
             accent_color,
             font_size,
+            corner_radius,
+            background_color,
         )?;
         let reload_message = match write_ios_reload_stamp(&root) {
             Ok(path) => format!(
@@ -1334,8 +1365,10 @@ mod tests {
                 &path,
                 keytao_theme::UiColorScheme::Dark,
                 keytao_theme::PanelOrientation::Horizontal,
-                "#123456".into(),
+                Some("#123456".into()),
                 24.0,
+                None,
+                String::new(),
             )
             .unwrap();
             let root: serde_yaml::Value =
@@ -1392,6 +1425,37 @@ mod tests {
     }
 
     #[test]
+    fn appearance_edits_preserve_unset_and_explicit_accents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.yaml");
+        for accent in [None, Some("#123456".to_string())] {
+            keytao_theme::write_theme_ui_to_path(
+                &path,
+                keytao_theme::UiColorScheme::Auto,
+                accent.clone(),
+            )
+            .unwrap();
+            keytao_theme::write_ime_ui_settings_to_path(
+                &path,
+                keytao_theme::UiColorScheme::Auto,
+                keytao_theme::PanelOrientation::Horizontal,
+                None,
+                20.0,
+                Some(24.0),
+                "#654321".into(),
+            )
+            .unwrap();
+            let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+            assert_eq!(settings.accent_color_override, accent);
+            assert_eq!(settings.corner_radius, Some(24.0));
+            assert_eq!(settings.background_color, "#654321");
+            let written: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(written["ui"]["accentColor"].as_str(), accent.as_deref());
+        }
+    }
+
+    #[test]
     fn test_write_ime_ui_settings_persists_candidate_font_size() {
         let dir = std::env::temp_dir().join(format!(
             "keytao-ime-ui-settings-test-{}",
@@ -1406,8 +1470,10 @@ mod tests {
             &theme_path,
             keytao_theme::UiColorScheme::Dark,
             keytao_theme::PanelOrientation::Horizontal,
-            "#123456".into(),
+            Some("#123456".into()),
             27.0,
+            Some(24.0),
+            "#654321".into(),
         )
         .expect("write IME UI settings");
 
@@ -1423,6 +1489,9 @@ mod tests {
             .expect("read IME UI settings");
         assert_eq!(settings.font_size, 27.0);
         assert_eq!(settings.accent_color, "#123456");
+        assert_eq!(settings.accent_color_override.as_deref(), Some("#123456"));
+        assert_eq!(settings.corner_radius, Some(24.0));
+        assert_eq!(settings.background_color, "#654321");
 
         std::fs::remove_dir_all(dir).ok();
     }

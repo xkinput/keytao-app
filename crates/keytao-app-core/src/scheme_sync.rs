@@ -115,7 +115,7 @@ fn sanitize_settings(input: &Value) -> Value {
                 "hide_candidate_panel",
                 "show_tray_mode_indicator",
             ][..],
-            &[("font_size", 10.0, 36.0)][..],
+            &[("font_size", 10.0, 36.0), ("corner_radius", 0.0, 28.0)][..],
             &[
                 ("color_scheme", &["auto", "light", "dark"][..]),
                 ("orientation", &["horizontal", "vertical"][..]),
@@ -147,12 +147,23 @@ fn sanitize_settings(input: &Value) -> Value {
                 settings[key] = input[group][key].clone();
             }
         }
-        if group == "ime_ui"
-            && input[group]["accent_color"].as_str().is_some_and(|v| {
-                v.len() == 7 && v.starts_with('#') && v[1..].bytes().all(|b| b.is_ascii_hexdigit())
-            })
-        {
-            settings["accent_color"] = input[group]["accent_color"].clone();
+        if group == "ime_ui" {
+            if input[group]
+                .get("corner_radius")
+                .is_some_and(Value::is_null)
+            {
+                settings["corner_radius"] = Value::Null;
+            }
+            for key in ["accent_color", "background_color"] {
+                if input[group][key].as_str().is_some_and(|v| {
+                    (key == "background_color" && v.is_empty())
+                        || (v.len() == 7
+                            && v.starts_with('#')
+                            && v[1..].bytes().all(|b| b.is_ascii_hexdigit()))
+                }) {
+                    settings[key] = input[group][key].clone();
+                }
+            }
         }
         if group == "android"
             && input[group]["phrases"]

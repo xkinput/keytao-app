@@ -901,7 +901,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             baseKeyboardConfig = next
             applyKeyboardPresentation(config: next, force: true)
             let configWritten = engine.persistSettings(patch: patch)
-            let themeWritten = engine.persistThemeUi(colorScheme: "auto", accentHex: "")
+            let themeWritten = engine.persistThemeUi(colorScheme: "auto", accentHex: "", resetAppearance: true)
             engine.releaseCaches()
             updateThemeForCurrentAppearance()
             if !configWritten || !themeWritten { showMessage("键盘内设置恢复失败") }
@@ -2591,7 +2591,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         button.accessibilityLabel = destination == .left ? "切换到左侧单手键盘" : "切换到右侧单手键盘"
         button.tintColor = currentTheme.candidate.labelColor.uiColor
         button.backgroundColor = currentTheme.panel.background.uiColor.withAlphaComponent(0.82)
-        button.layer.cornerRadius = min(8, size * 0.24)
+        button.layer.cornerRadius = min(8, size * 0.24) * currentTheme.panel.cornerRadius / 16
         button.layer.borderWidth = max(0.5, currentTheme.panel.borderWidth)
         button.layer.borderColor = currentTheme.panel.borderColor.uiColor.cgColor
         button.isHidden = false

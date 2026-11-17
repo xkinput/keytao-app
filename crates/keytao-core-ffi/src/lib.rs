@@ -1031,28 +1031,74 @@ pub extern "C" fn keytao_write_theme_ui(
     accent_hex: *const c_char,
 ) -> bool {
     guard("keytao_write_theme_ui", false, || {
-        let Some(path) = optional_path_arg(path) else {
-            return false;
-        };
-        let Ok(color_scheme) = c_string_arg(color_scheme, "color_scheme") else {
-            return false;
-        };
-        let color_scheme = match color_scheme.trim().to_ascii_lowercase().as_str() {
-            "auto" => keytao_theme::UiColorScheme::Auto,
-            "light" => keytao_theme::UiColorScheme::Light,
-            "dark" => keytao_theme::UiColorScheme::Dark,
-            _ => return false,
-        };
-        let accent_hex = if accent_hex.is_null() {
-            None
-        } else {
-            let Ok(accent_hex) = c_string_arg(accent_hex, "accent_hex") else {
-                return false;
-            };
-            Some(accent_hex)
-        };
-        keytao_theme::write_theme_ui_to_path(&path, color_scheme, accent_hex).is_ok()
+        write_theme_appearance(path, color_scheme, accent_hex, None, std::ptr::null())
     })
+}
+
+/// Persist mobile appearance. A negative radius clears the override; non-finite
+/// radii are rejected. Null colors preserve their keys; empty colors clear them.
+#[no_mangle]
+pub extern "C" fn keytao_write_theme_appearance(
+    path: *const c_char,
+    color_scheme: *const c_char,
+    accent_hex: *const c_char,
+    corner_radius: f32,
+    background_hex: *const c_char,
+) -> bool {
+    guard("keytao_write_theme_appearance", false, || {
+        if !corner_radius.is_finite() {
+            return false;
+        }
+        write_theme_appearance(
+            path,
+            color_scheme,
+            accent_hex,
+            Some((corner_radius >= 0.0).then_some(corner_radius)),
+            background_hex,
+        )
+    })
+}
+
+fn write_theme_appearance(
+    path: *const c_char,
+    color_scheme: *const c_char,
+    accent_hex: *const c_char,
+    corner_radius: Option<Option<f32>>,
+    background_hex: *const c_char,
+) -> bool {
+    let Some(path) = optional_path_arg(path) else {
+        return false;
+    };
+    let Ok(color_scheme) = c_string_arg(color_scheme, "color_scheme") else {
+        return false;
+    };
+    let color_scheme = match color_scheme.trim().to_ascii_lowercase().as_str() {
+        "auto" => keytao_theme::UiColorScheme::Auto,
+        "light" => keytao_theme::UiColorScheme::Light,
+        "dark" => keytao_theme::UiColorScheme::Dark,
+        _ => return false,
+    };
+    let color = |value: *const c_char, name| {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            c_string_arg(value, name).map(Some)
+        }
+    };
+    let (Ok(accent_hex), Ok(background_hex)) = (
+        color(accent_hex, "accent_hex"),
+        color(background_hex, "background_hex"),
+    ) else {
+        return false;
+    };
+    keytao_theme::write_theme_appearance_to_path(
+        &path,
+        color_scheme,
+        accent_hex,
+        corner_radius,
+        background_hex,
+    )
+    .is_ok()
 }
 
 #[no_mangle]
@@ -1519,6 +1565,56 @@ mod smoke_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_ffi_round_trip_preserves_old_writes_and_resets_overrides() {
+        let dir = smoke_fixture::scratch_dir("ffi-appearance");
+        let path = dir.join("theme.yaml");
+        let path_arg = CString::new(path.to_string_lossy().as_ref()).unwrap();
+        let scheme = CString::new("dark").unwrap();
+        let accent = CString::new("#123456").unwrap();
+        let background = CString::new("#654321").unwrap();
+        let empty = CString::new("").unwrap();
+        assert!(keytao_write_theme_appearance(
+            path_arg.as_ptr(),
+            scheme.as_ptr(),
+            accent.as_ptr(),
+            24.0,
+            background.as_ptr(),
+        ));
+        assert!(keytao_write_theme_ui(
+            path_arg.as_ptr(),
+            scheme.as_ptr(),
+            std::ptr::null(),
+        ));
+        let theme = resolve_theme_from_paths(None, Some(&path));
+        assert_eq!(theme.ui.corner_radius, Some(24.0));
+        assert_eq!(theme.panel.background.red, 0x65);
+        assert_eq!(theme.panel.background.alpha, 0xF2);
+        let before = std::fs::read(&path).unwrap();
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!keytao_write_theme_appearance(
+                path_arg.as_ptr(),
+                scheme.as_ptr(),
+                accent.as_ptr(),
+                invalid,
+                background.as_ptr(),
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        assert!(keytao_write_theme_appearance(
+            path_arg.as_ptr(),
+            scheme.as_ptr(),
+            empty.as_ptr(),
+            -1.0,
+            empty.as_ptr(),
+        ));
+        let theme = resolve_theme_from_paths(None, Some(&path));
+        assert_eq!(theme.ui.corner_radius, None);
+        assert_eq!(theme.ui.background_color, None);
+        assert_eq!(theme.ui.accent_color, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn an_uninstalled_directory_does_not_retire_the_working_runtime() {

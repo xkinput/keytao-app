@@ -6,6 +6,7 @@ import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/settings/android_settings.dart';
+import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
@@ -20,6 +21,9 @@ class _EditingController extends ViewController {
     PanelOrientationDto? orientation,
     bool? hideCandidatePanel,
     String? accentColor,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+    String? backgroundColor,
     double? fontSize,
   }) async {
     savedAccent = accentColor;
@@ -101,7 +105,10 @@ void main() {
   ) async {
     final c = _EditingController(BridgePlatform.macOs);
     await _pump(tester, c, const Size(720, 520));
-    final picker = find.byIcon(FLucideIcons.pipette);
+    final picker = find.descendant(
+      of: find.byType(AccentPicker),
+      matching: find.byIcon(FLucideIcons.pipette),
+    );
     await tester.ensureVisible(picker);
     await tester.tap(picker);
     await tester.pumpAndSettle();

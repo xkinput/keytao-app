@@ -86,6 +86,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogFileDto dco_decode_box_autoadd_debug_log_file_dto(dynamic raw);
 
   @protected
+  double dco_decode_box_autoadd_f_32(dynamic raw);
+
+  @protected
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw);
 
   @protected
@@ -244,6 +247,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
+
+  @protected
+  double? dco_decode_opt_box_autoadd_f_32(dynamic raw);
 
   @protected
   InstallProgressDto? dco_decode_opt_box_autoadd_install_progress_dto(
@@ -420,6 +426,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogFileDto sse_decode_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  double sse_decode_box_autoadd_f_32(SseDeserializer deserializer);
 
   @protected
   InstallProgressDto sse_decode_box_autoadd_install_progress_dto(
@@ -616,6 +625,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  double? sse_decode_opt_box_autoadd_f_32(SseDeserializer deserializer);
 
   @protected
   InstallProgressDto? sse_decode_opt_box_autoadd_install_progress_dto(
@@ -846,6 +858,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DebugLogFileDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_f_32(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_install_progress_dto(
@@ -1101,6 +1116,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DebugLogFileDto? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_f_32(double? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_install_progress_dto(

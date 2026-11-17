@@ -2726,6 +2726,8 @@ fn wire__crate__api__core__resolve_candidate_panel_preview_impl(
             let api_accent_color = <String>::sse_decode(&mut deserializer);
             let api_font_size = <f32>::sse_decode(&mut deserializer);
             let api_system_dark = <bool>::sse_decode(&mut deserializer);
+            let api_corner_radius = <Option<f32>>::sse_decode(&mut deserializer);
+            let api_background_color = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, String>((move || {
                 let output_ok = crate::api::core::resolve_candidate_panel_preview(
@@ -2733,6 +2735,8 @@ fn wire__crate__api__core__resolve_candidate_panel_preview_impl(
                     api_accent_color,
                     api_font_size,
                     api_system_dark,
+                    api_corner_radius,
+                    api_background_color,
                 )?;
                 std::result::Result::Ok(output_ok)
             })())
@@ -3042,8 +3046,10 @@ fn wire__crate__api__core__set_ime_ui_settings_impl(
                 <crate::api::types::UiColorSchemeDto>::sse_decode(&mut deserializer);
             let api_orientation =
                 <crate::api::types::PanelOrientationDto>::sse_decode(&mut deserializer);
-            let api_accent_color = <String>::sse_decode(&mut deserializer);
+            let api_accent_color = <Option<String>>::sse_decode(&mut deserializer);
             let api_font_size = <f32>::sse_decode(&mut deserializer);
+            let api_corner_radius = <Option<f32>>::sse_decode(&mut deserializer);
+            let api_background_color = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -3052,6 +3058,8 @@ fn wire__crate__api__core__set_ime_ui_settings_impl(
                         api_orientation,
                         api_accent_color,
                         api_font_size,
+                        api_corner_radius,
+                        api_background_color,
                     )?;
                     std::result::Result::Ok(output_ok)
                 })())
@@ -4146,7 +4154,10 @@ impl SseDecode for crate::api::types::ImeUiSettingsDto {
         let mut var_showTrayModeIndicator = <bool>::sse_decode(deserializer);
         let mut var_effectiveEmbeddedComposition = <bool>::sse_decode(deserializer);
         let mut var_accentColor = <String>::sse_decode(deserializer);
+        let mut var_accentColorOverride = <Option<String>>::sse_decode(deserializer);
         let mut var_fontSize = <f32>::sse_decode(deserializer);
+        let mut var_cornerRadius = <Option<f32>>::sse_decode(deserializer);
+        let mut var_backgroundColor = <String>::sse_decode(deserializer);
         let mut var_themePath = <Option<String>>::sse_decode(deserializer);
         let mut var_themeExists = <bool>::sse_decode(deserializer);
         let mut var_reloadStampPath = <Option<String>>::sse_decode(deserializer);
@@ -4161,7 +4172,10 @@ impl SseDecode for crate::api::types::ImeUiSettingsDto {
             show_tray_mode_indicator: var_showTrayModeIndicator,
             effective_embedded_composition: var_effectiveEmbeddedComposition,
             accent_color: var_accentColor,
+            accent_color_override: var_accentColorOverride,
             font_size: var_fontSize,
+            corner_radius: var_cornerRadius,
+            background_color: var_backgroundColor,
             theme_path: var_themePath,
             theme_exists: var_themeExists,
             reload_stamp_path: var_reloadStampPath,
@@ -4523,6 +4537,17 @@ impl SseDecode for Option<crate::api::types::DebugLogFileDto> {
             return Some(<crate::api::types::DebugLogFileDto>::sse_decode(
                 deserializer,
             ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<f32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<f32>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -5697,7 +5722,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ImeUiSettingsDto {
                 .into_into_dart()
                 .into_dart(),
             self.accent_color.into_into_dart().into_dart(),
+            self.accent_color_override.into_into_dart().into_dart(),
             self.font_size.into_into_dart().into_dart(),
+            self.corner_radius.into_into_dart().into_dart(),
+            self.background_color.into_into_dart().into_dart(),
             self.theme_path.into_into_dart().into_dart(),
             self.theme_exists.into_into_dart().into_dart(),
             self.reload_stamp_path.into_into_dart().into_dart(),
@@ -6688,7 +6716,10 @@ impl SseEncode for crate::api::types::ImeUiSettingsDto {
         <bool>::sse_encode(self.show_tray_mode_indicator, serializer);
         <bool>::sse_encode(self.effective_embedded_composition, serializer);
         <String>::sse_encode(self.accent_color, serializer);
+        <Option<String>>::sse_encode(self.accent_color_override, serializer);
         <f32>::sse_encode(self.font_size, serializer);
+        <Option<f32>>::sse_encode(self.corner_radius, serializer);
+        <String>::sse_encode(self.background_color, serializer);
         <Option<String>>::sse_encode(self.theme_path, serializer);
         <bool>::sse_encode(self.theme_exists, serializer);
         <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
@@ -6955,6 +6986,16 @@ impl SseEncode for Option<crate::api::types::DebugLogFileDto> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::types::DebugLogFileDto>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<f32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <f32>::sse_encode(value, serializer);
         }
     }
 }

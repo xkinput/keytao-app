@@ -31,6 +31,36 @@ fn fixture() -> (tempfile::TempDir, Arc<Core>) {
 }
 
 #[test]
+fn appearance_sync_round_trip_preserves_overrides_and_explicit_defaults() {
+    let (_dir, core) = fixture();
+    for appearance in [
+        json!({"corner_radius": 0.0, "background_color": "#112233"}),
+        json!({"corner_radius": 28.0, "background_color": "#ABCDEF"}),
+        json!({"corner_radius": null, "background_color": ""}),
+    ] {
+        let settings = json!({"ime_ui": appearance});
+        assert_eq!(sanitize_settings(&settings), settings);
+        core.update_state(|state| state.scheme_sync_settings = settings.clone())
+            .unwrap();
+        let profile = export_profile(&core).unwrap();
+        let parsed: SchemeProfile = serde_json::from_value(profile).unwrap();
+        assert_eq!(sanitize_settings(&parsed.settings), settings);
+    }
+    for radius in [json!(-1), json!(29), json!("16"), json!(true)] {
+        assert_eq!(
+            sanitize_settings(&json!({"ime_ui": {"corner_radius": radius}})),
+            json!({"ime_ui": {}})
+        );
+    }
+    for background in ["#12345678", "#GGGGGG", "red", "123456"] {
+        assert_eq!(
+            sanitize_settings(&json!({"ime_ui": {"background_color": background}})),
+            json!({"ime_ui": {}})
+        );
+    }
+}
+
+#[test]
 fn clipboard_sync_preserves_explicit_values_and_clamps_limits() {
     let settings = json!({"android": {
         "clipboard_history_enabled": false,

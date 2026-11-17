@@ -309,6 +309,8 @@ abstract class RustLibApi extends BaseApi {
     required String accentColor,
     required double fontSize,
     required bool systemDark,
+    double? cornerRadius,
+    required String backgroundColor,
   });
 
   Future<AddonStatusDto> crateApiCoreRimeIceStatus();
@@ -343,8 +345,10 @@ abstract class RustLibApi extends BaseApi {
   Future<ImeUiSettingsDto> crateApiCoreSetImeUiSettings({
     required UiColorSchemeDto colorScheme,
     required PanelOrientationDto orientation,
-    required String accentColor,
+    String? accentColor,
     required double fontSize,
+    double? cornerRadius,
+    required String backgroundColor,
   });
 
   Future<void> crateApiCoreSetRuntimeLogSettings({
@@ -2691,6 +2695,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String accentColor,
     required double fontSize,
     required bool systemDark,
+    double? cornerRadius,
+    required String backgroundColor,
   }) {
     return handler.executeSync(
       SyncTask(
@@ -2700,6 +2706,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(accentColor, serializer);
           sse_encode_f_32(fontSize, serializer);
           sse_encode_bool(systemDark, serializer);
+          sse_encode_opt_box_autoadd_f_32(cornerRadius, serializer);
+          sse_encode_String(backgroundColor, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 75)!;
         },
         codec: SseCodec(
@@ -2707,7 +2715,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreResolveCandidatePanelPreviewConstMeta,
-        argValues: [colorScheme, accentColor, fontSize, systemDark],
+        argValues: [
+          colorScheme,
+          accentColor,
+          fontSize,
+          systemDark,
+          cornerRadius,
+          backgroundColor,
+        ],
         apiImpl: this,
       ),
     );
@@ -2716,7 +2731,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreResolveCandidatePanelPreviewConstMeta =>
       const TaskConstMeta(
         debugName: "resolve_candidate_panel_preview",
-        argNames: ["colorScheme", "accentColor", "fontSize", "systemDark"],
+        argNames: [
+          "colorScheme",
+          "accentColor",
+          "fontSize",
+          "systemDark",
+          "cornerRadius",
+          "backgroundColor",
+        ],
       );
 
   @override
@@ -2984,8 +3006,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<ImeUiSettingsDto> crateApiCoreSetImeUiSettings({
     required UiColorSchemeDto colorScheme,
     required PanelOrientationDto orientation,
-    required String accentColor,
+    String? accentColor,
     required double fontSize,
+    double? cornerRadius,
+    required String backgroundColor,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -2993,8 +3017,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_ui_color_scheme_dto(colorScheme, serializer);
           sse_encode_panel_orientation_dto(orientation, serializer);
-          sse_encode_String(accentColor, serializer);
+          sse_encode_opt_String(accentColor, serializer);
           sse_encode_f_32(fontSize, serializer);
+          sse_encode_opt_box_autoadd_f_32(cornerRadius, serializer);
+          sse_encode_String(backgroundColor, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -3007,7 +3033,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreSetImeUiSettingsConstMeta,
-        argValues: [colorScheme, orientation, accentColor, fontSize],
+        argValues: [
+          colorScheme,
+          orientation,
+          accentColor,
+          fontSize,
+          cornerRadius,
+          backgroundColor,
+        ],
         apiImpl: this,
       ),
     );
@@ -3016,7 +3049,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreSetImeUiSettingsConstMeta =>
       const TaskConstMeta(
         debugName: "set_ime_ui_settings",
-        argNames: ["colorScheme", "orientation", "accentColor", "fontSize"],
+        argNames: [
+          "colorScheme",
+          "orientation",
+          "accentColor",
+          "fontSize",
+          "cornerRadius",
+          "backgroundColor",
+        ],
       );
 
   @override
@@ -3812,6 +3852,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  double dco_decode_box_autoadd_f_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_install_progress_dto(raw);
@@ -4038,8 +4084,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ImeUiSettingsDto dco_decode_ime_ui_settings_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 14)
-      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
     return ImeUiSettingsDto(
       colorScheme: dco_decode_ui_color_scheme_dto(arr[0]),
       effectiveColorScheme: dco_decode_effective_color_scheme_dto(arr[1]),
@@ -4049,12 +4095,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       showTrayModeIndicator: dco_decode_bool(arr[5]),
       effectiveEmbeddedComposition: dco_decode_bool(arr[6]),
       accentColor: dco_decode_String(arr[7]),
-      fontSize: dco_decode_f_32(arr[8]),
-      themePath: dco_decode_opt_String(arr[9]),
-      themeExists: dco_decode_bool(arr[10]),
-      reloadStampPath: dco_decode_opt_String(arr[11]),
-      reloadStampSignature: dco_decode_opt_String(arr[12]),
-      message: dco_decode_String(arr[13]),
+      accentColorOverride: dco_decode_opt_String(arr[8]),
+      fontSize: dco_decode_f_32(arr[9]),
+      cornerRadius: dco_decode_opt_box_autoadd_f_32(arr[10]),
+      backgroundColor: dco_decode_String(arr[11]),
+      themePath: dco_decode_opt_String(arr[12]),
+      themeExists: dco_decode_bool(arr[13]),
+      reloadStampPath: dco_decode_opt_String(arr[14]),
+      reloadStampSignature: dco_decode_opt_String(arr[15]),
+      message: dco_decode_String(arr[16]),
     );
   }
 
@@ -4293,6 +4342,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_debug_log_file_dto(raw);
+  }
+
+  @protected
+  double? dco_decode_opt_box_autoadd_f_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_f_32(raw);
   }
 
   @protected
@@ -4875,6 +4930,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  double sse_decode_box_autoadd_f_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_f_32(deserializer));
+  }
+
+  @protected
   InstallProgressDto sse_decode_box_autoadd_install_progress_dto(
     SseDeserializer deserializer,
   ) {
@@ -5126,7 +5187,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_showTrayModeIndicator = sse_decode_bool(deserializer);
     var var_effectiveEmbeddedComposition = sse_decode_bool(deserializer);
     var var_accentColor = sse_decode_String(deserializer);
+    var var_accentColorOverride = sse_decode_opt_String(deserializer);
     var var_fontSize = sse_decode_f_32(deserializer);
+    var var_cornerRadius = sse_decode_opt_box_autoadd_f_32(deserializer);
+    var var_backgroundColor = sse_decode_String(deserializer);
     var var_themePath = sse_decode_opt_String(deserializer);
     var var_themeExists = sse_decode_bool(deserializer);
     var var_reloadStampPath = sse_decode_opt_String(deserializer);
@@ -5141,7 +5205,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       showTrayModeIndicator: var_showTrayModeIndicator,
       effectiveEmbeddedComposition: var_effectiveEmbeddedComposition,
       accentColor: var_accentColor,
+      accentColorOverride: var_accentColorOverride,
       fontSize: var_fontSize,
+      cornerRadius: var_cornerRadius,
+      backgroundColor: var_backgroundColor,
       themePath: var_themePath,
       themeExists: var_themeExists,
       reloadStampPath: var_reloadStampPath,
@@ -5502,6 +5569,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_debug_log_file_dto(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  double? sse_decode_opt_box_autoadd_f_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_f_32(deserializer));
     } else {
       return null;
     }
@@ -6164,6 +6242,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_f_32(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_f_32(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_install_progress_dto(
     InstallProgressDto self,
     SseSerializer serializer,
@@ -6393,7 +6477,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.showTrayModeIndicator, serializer);
     sse_encode_bool(self.effectiveEmbeddedComposition, serializer);
     sse_encode_String(self.accentColor, serializer);
+    sse_encode_opt_String(self.accentColorOverride, serializer);
     sse_encode_f_32(self.fontSize, serializer);
+    sse_encode_opt_box_autoadd_f_32(self.cornerRadius, serializer);
+    sse_encode_String(self.backgroundColor, serializer);
     sse_encode_opt_String(self.themePath, serializer);
     sse_encode_bool(self.themeExists, serializer);
     sse_encode_opt_String(self.reloadStampPath, serializer);
@@ -6697,6 +6784,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_debug_log_file_dto(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_f_32(double? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_f_32(self, serializer);
     }
   }
 

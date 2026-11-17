@@ -249,6 +249,16 @@ char *keytao_resolve_theme_json_with_system_scheme(const char *default_theme_pat
  */
 bool keytao_write_theme_ui(const char *path, const char *color_scheme, const char *accent_hex);
 
+/**
+ * Persist mobile appearance. A negative radius clears the override; non-finite
+ * radii are rejected. Null colors preserve their keys; empty colors clear them.
+ */
+bool keytao_write_theme_appearance(const char *path,
+                                   const char *color_scheme,
+                                   const char *accent_hex,
+                                   float corner_radius,
+                                   const char *background_hex);
+
 char *keytao_default_keyboard_yaml(void);
 
 char *keytao_resolve_keyboard_json(const char *default_keyboard_path,
