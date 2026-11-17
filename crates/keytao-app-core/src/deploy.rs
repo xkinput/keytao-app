@@ -145,6 +145,7 @@ pub(crate) fn ios_app_shared_data_dir(core: &Core, user_root: &Path) -> Option<S
 pub struct DeployResult {
     pub success: bool,
     pub message: String,
+    pub warning: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -333,8 +334,11 @@ pub(crate) async fn rime_deploy_default_inner(
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
+    let deploy_result = deploy_result.map(|result| result.map(|()| None::<String>));
+
     match deploy_result {
-        Ok(Ok(())) => {
+        Ok(Ok(warning)) => {
             let root = keytao_core::default_user_data_dir()
                 .ok_or("Cannot determine keytao data directory")?;
             record_result(core, &root, true).map_err(|e| e.to_string())?;
@@ -354,6 +358,11 @@ pub(crate) async fn rime_deploy_default_inner(
             }
             #[cfg(target_os = "windows")]
             core.emit(CoreEvent::DeployProgress("已通知系统输入法重载".into()));
+            if let Some(warning) = &warning {
+                core.emit(CoreEvent::DeployProgress(format!(
+                    "系统搜索框方案未更新：{warning}"
+                )));
+            }
             #[cfg(target_os = "linux")]
             match launch_keytao_ime(core, &host, true) {
                 Ok(status) => {
@@ -368,6 +377,7 @@ pub(crate) async fn rime_deploy_default_inner(
             Ok(DeployResult {
                 success: true,
                 message: "部署成功".into(),
+                warning,
             })
         }
         Ok(Err(e)) => Err(format!("部署失败: {e}")),
@@ -400,6 +410,7 @@ pub async fn rime_deploy_default(
         Ok(DeployResult {
             success: true,
             message,
+            warning: None,
         })
     }
     .await;
@@ -524,6 +535,7 @@ pub async fn rime_deploy_default(
                         Ok(DeployResult {
                             success: true,
                             message,
+                            warning: None,
                         })
                     }
                     Err(e) => {
@@ -532,6 +544,7 @@ pub async fn rime_deploy_default(
                         Ok(DeployResult {
                             success: true,
                             message,
+                            warning: None,
                         })
                     }
                 }

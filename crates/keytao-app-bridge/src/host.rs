@@ -191,6 +191,7 @@ impl BridgeHost {
             Ok(keytao_app_core::deploy::DeployResult {
                 success: true,
                 message: "部署成功".into(),
+                warning: None,
             })
         }
         #[cfg(not(any(

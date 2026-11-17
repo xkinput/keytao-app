@@ -90,11 +90,13 @@ class FakeCore implements RustLibApi {
   bool delayReleases = false;
   bool updateFails = false;
   bool addonDeployProgress = false;
+  String? addonPublicWarning;
   String? installFailure;
   final logFailures = <String>{};
   Completer<void>? deployGate;
   final deployStarted = Completer<void>();
   String? deployFailure;
+  String? deployWarning;
   EnglishModeDto english = EnglishModeDto.schema;
   int onboardingWrites = 0;
 
@@ -105,6 +107,14 @@ class FakeCore implements RustLibApi {
         BridgeEvent(
           kind: BridgeEventKind.deployProgress,
           deployProgress: message,
+        ),
+      );
+    }
+    if (addonPublicWarning case final warning?) {
+      events.add(
+        BridgeEvent(
+          kind: BridgeEventKind.deployProgress,
+          deployProgress: '系统搜索框方案未更新：$warning',
         ),
       );
     }
@@ -332,7 +342,11 @@ class FakeCore implements RustLibApi {
     await deployGate?.future;
     if (deployFailure != null) throw StateError(deployFailure!);
     local = deployedLocal;
-    return const DeployResultDto(success: true, message: 'done');
+    return DeployResultDto(
+      success: true,
+      message: 'done',
+      warning: deployWarning,
+    );
   }
 
   @override
@@ -605,6 +619,35 @@ void main() {
       }
     },
   );
+
+  test('implicit deployments retain nonblocking public schema warnings', () async {
+    controller.dispose();
+    controller = create(mobile: false)..local = installedLocal;
+    await controller.connectEvents();
+    await settle();
+    core.addonDeployProgress = true;
+    core.addonPublicWarning = 'publish public schemas: access denied';
+    const warningMessage =
+        '系统搜索框方案未更新：publish public schemas: access denied';
+    for (final action in [
+      controller.installAddon,
+      controller.uninstallAddon,
+      () => controller.manageWanxiang(true),
+      () => controller.manageWanxiang(false),
+    ]) {
+      controller.deploySteps.clear();
+      controller.clearOperationLogs();
+      expect(await action(), isTrue);
+      expect(controller.error, isNull);
+      expect(controller.deploySteps, hasLength(1));
+      expect(controller.deploySteps.single.message, warningMessage);
+      expect(controller.deploySteps.single.state, DeployStepState.neutral);
+      expect(
+        controller.operationLogs.where((line) => line.contains('[WARN]')),
+        [contains(warningMessage)],
+      );
+    }
+  });
 
   test(
     'install progress updates state without appending operation logs',
@@ -1052,6 +1095,45 @@ void main() {
       expect(controller.operationLogs.first, contains('earlier'));
     },
   );
+
+  test('public schema warning preserves private deployment success', () async {
+    const warningMessage =
+        '系统搜索框方案未更新：compile public schema: invalid dictionary';
+    for (final withProgress in [false, true]) {
+      controller.dispose();
+      controller = create(mobile: false)..local = installedLocal;
+      core.deployWarning = 'compile public schema: invalid dictionary';
+      core.deployGate = Completer<void>();
+      await controller.connectEvents();
+      await settle();
+      final deploying = controller.deploy();
+      if (withProgress) {
+        core.events.add(
+          const BridgeEvent(
+            kind: BridgeEventKind.deployProgress,
+            deployProgress: warningMessage,
+          ),
+        );
+        await settle();
+      }
+      core.deployGate!.complete();
+
+      expect(await deploying, isTrue);
+      expect(controller.error, isNull);
+      expect(controller.local?.deployed, isTrue);
+      expect(
+        controller.deploySteps.where((step) => step.state == DeployStepState.ok),
+        hasLength(1),
+      );
+      final warnings = controller.deploySteps.where(
+        (step) => step.message == warningMessage,
+      );
+      expect(warnings, hasLength(1));
+      expect(warnings.single.state, DeployStepState.neutral);
+      expect(controller.progress, 'done');
+      expect(controller.operationLogs, contains(contains('[WARN] $warningMessage')));
+    }
+  });
 
   test(
     'each debug read survives failures in the other sources on every visit',

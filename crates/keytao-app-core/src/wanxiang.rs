@@ -980,16 +980,28 @@ pub async fn manage_wanxiang(
     let deploy_result = async {
         write_addon_schema_list(&root, SCHEMA_ID, installed)?;
         #[cfg(target_os = "windows")]
-        {
-            public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
+        let public_source_warning = {
+            match crate::windows_public_schemas::update_public_schemas(|| {
                 if installed {
                     host.publish_wanxiang_sources(&receipt.public_source_files())
                 } else {
                     host.remove_public_schema(SCHEMA_ID, &[])
                 }
-            })?);
-        }
+            }) {
+                Ok(update) => {
+                    public_update = Some(update);
+                    None
+                }
+                Err(error) => Some(crate::windows_public_schemas::public_warning(
+                    "wanxiang-public-sources", &error,
+                )),
+            }
+        };
         host.deploy().await?;
+        #[cfg(target_os = "windows")]
+        if let Some(warning) = public_source_warning {
+            core.emit(CoreEvent::DeployProgress(format!("系统搜索框方案未更新：{warning}")));
+        }
         if installed && !status_at(&root).deployed {
             return Err("万象拼音部署产物缺失".to_string());
         }

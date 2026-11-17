@@ -1083,12 +1083,15 @@ fn windows_repair_ime_data_blocking(core: &Core) -> Result<WindowsImeStatus, Str
         ));
     }
 
-    windows_deploy_rime_blocking(
+    let warning = windows_deploy_rime_blocking(
         user_dir,
         windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir),
     )?;
 
-    let message = "Windows 输入法词典修复完成，已重建旧构建产物".into();
+    let mut message = "Windows 输入法词典修复完成，已重建旧构建产物".to_owned();
+    if let Some(warning) = warning {
+        message.push_str(&format!("\n系统搜索框方案未更新：{warning}"));
+    }
     Ok(windows_ime_status_with_message(core, message))
 }
 
@@ -1471,13 +1474,8 @@ pub async fn windows_ime_ensure_registered(core: Arc<Core>) -> Result<WindowsIme
 pub fn windows_deploy_rime_blocking(
     user_dir: PathBuf,
     _shared_data_dir: String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
-    crate::windows_public_schemas::publish_english_settings(
-        &user_dir,
-        keytao_core::english_mode::read_english_mode(&user_dir)
-            == keytao_core::english_mode::EnglishMode::Schema,
-    )?;
     keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     let deployed_by_server = server::deploy_if_available()?;
@@ -1493,5 +1491,34 @@ pub fn windows_deploy_rime_blocking(
             .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
     }
     keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
-    profile_guard.resume()
+    profile_guard.resume()?;
+    keytao_core::runtime_log::init_for_engine(&user_dir);
+    crate::windows_public_schemas::after_private_deploy(Ok(()), || {
+        let update = crate::windows_public_schemas::update_public_schemas(|| {
+            crate::windows_public_schemas::publish_english_settings(
+                &user_dir,
+                keytao_core::english_mode::read_english_mode(&user_dir)
+                    == keytao_core::english_mode::EnglishMode::Schema,
+            )
+            .map_err(|error| format!("publish-settings: {error}"))?;
+            Ok(())
+        })?;
+        // Release the engine-init mutex before starting another guarded process.
+        let result = (|| {
+            let exe = server::installed_server_exe()
+                .map_err(|error| format!("resolve-public-child: {error}"))?;
+            keytao_core::deploy_child::run_deploy_child_with_subcommand(
+                &exe,
+                "--deploy-public",
+                std::time::Duration::from_secs(600),
+            )
+        })();
+        if let Err(error) = result {
+            update
+                .rollback()
+                .map_err(|rollback| format!("{error}；恢复公共方案失败：{rollback}"))?;
+            return Err(error);
+        }
+        Ok(())
+    })
 }

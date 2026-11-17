@@ -3793,11 +3793,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DeployResultDto dco_decode_deploy_result_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return DeployResultDto(
       success: dco_decode_bool(arr[0]),
       message: dco_decode_String(arr[1]),
+      warning: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -4854,7 +4855,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_success = sse_decode_bool(deserializer);
     var var_message = sse_decode_String(deserializer);
-    return DeployResultDto(success: var_success, message: var_message);
+    var var_warning = sse_decode_opt_String(deserializer);
+    return DeployResultDto(
+      success: var_success,
+      message: var_message,
+      warning: var_warning,
+    );
   }
 
   @protected
@@ -6105,6 +6111,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.success, serializer);
     sse_encode_String(self.message, serializer);
+    sse_encode_opt_String(self.warning, serializer);
   }
 
   @protected

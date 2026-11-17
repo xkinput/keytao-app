@@ -670,9 +670,13 @@ class AppController extends ChangeNotifier {
           _changed();
           return;
         }
-        if (event.deployProgress case final value? when isDeploying) {
+        if (event.deployProgress case final value?
+            when isDeploying ||
+                ((isManagingAddon || isManagingWanxiang) &&
+                    value.startsWith('系统搜索框方案未更新：'))) {
           progress = value;
           _deployStep(value, DeployStepState.neutral);
+          if (!isDeploying) addOperationLogs(['[WARN] $value']);
         }
         if (isWindows) {
           if (event.windowsImeStatus case final status?) {
@@ -1626,6 +1630,7 @@ class AppController extends ChangeNotifier {
       }
       _deployStep(AppStrings.deployingLibrime, DeployStepState.neutral);
       final String message;
+      String? warning;
       if (isAndroid) {
         await _requireStorage();
         await core.recordAndroidDeploy(success: false);
@@ -1641,12 +1646,20 @@ class AppController extends ChangeNotifier {
             : await core.windowsRedeployImeAction(id: imeActionId);
         if (!result.success) throw StateError(result.message);
         message = result.message;
+        warning = result.warning;
       }
       await _readState();
       if (local?.deployed != true) {
         throw StateError(AppStrings.deployCheckFailed);
       }
       _deployStep(message, DeployStepState.ok);
+      if (warning != null) {
+        final warningMessage = '系统搜索框方案未更新：$warning';
+        if (!deploySteps.any((step) => step.message == warningMessage)) {
+          _deployStep(warningMessage, DeployStepState.neutral);
+        }
+        addOperationLogs(['[WARN] $warningMessage']);
+      }
       userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
       progress = message;

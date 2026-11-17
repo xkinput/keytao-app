@@ -3869,9 +3869,11 @@ impl SseDecode for crate::api::types::DeployResultDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_success = <bool>::sse_decode(deserializer);
         let mut var_message = <String>::sse_decode(deserializer);
+        let mut var_warning = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::DeployResultDto {
             success: var_success,
             message: var_message,
+            warning: var_warning,
         };
     }
 }
@@ -5368,6 +5370,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::DeployResultDto {
         [
             self.success.into_into_dart().into_dart(),
             self.message.into_into_dart().into_dart(),
+            self.warning.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6362,6 +6365,7 @@ impl SseEncode for crate::api::types::DeployResultDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.success, serializer);
         <String>::sse_encode(self.message, serializer);
+        <Option<String>>::sse_encode(self.warning, serializer);
     }
 }
 

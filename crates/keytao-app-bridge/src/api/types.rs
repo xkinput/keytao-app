@@ -184,6 +184,7 @@ pub struct BridgeEvent {
 pub struct DeployResultDto {
     pub success: bool,
     pub message: String,
+    pub warning: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
