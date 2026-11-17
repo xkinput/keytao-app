@@ -246,7 +246,6 @@ pub(crate) fn stored_archive(
     Ok((archive_from_files(&files)?, meta))
 }
 
-#[cfg(any(not(target_os = "android"), test))]
 pub(crate) fn archive_from_files(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, CoreError> {
     use std::io::Write;
     let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -661,7 +660,29 @@ pub(crate) fn finalize_pending(
             .map_err(CoreError::Other)?;
         transaction.snapshot_package(scheme_key, &paths)?;
     }
+    #[cfg(target_os = "windows")]
+    let publish_public = active
+        && receipt.transaction.is_some()
+        && crate::windows_public_schemas::is_default_user_root(Path::new(&receipt.root));
+    #[cfg(target_os = "windows")]
+    if publish_public {
+        if let Some(previous) = core.state().active_scheme {
+            let files = store.package_path(&previous).join("files");
+            if files.is_dir() {
+                crate::windows_public_schemas::remove_package(&files, Path::new(&receipt.root))
+                    .map_err(CoreError::Other)?;
+            }
+        }
+    }
     store.write_archive(BufReader::new(receipt.archive.reopen()?), &meta, None)?;
+    #[cfg(target_os = "windows")]
+    if publish_public {
+        crate::windows_public_schemas::publish_activation(
+            &store.package_path(scheme_key).join("files"),
+            None,
+            Path::new(&receipt.root),
+        ).map_err(CoreError::Other)?;
+    }
     if active {
         let active_manifest = ActiveManifest {
             root: receipt.root.clone(),
@@ -867,7 +888,13 @@ pub async fn remove_scheme_package(
 ) -> Result<Vec<String>, CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     let retained = if core.state().active_scheme.as_deref() == Some(scheme_key) {
-        remove_active_package(core, scheme_key, host).await?
+        match remove_active_package(core, scheme_key, host).await {
+            Ok(retained) => retained,
+            Err(error) => {
+                *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
+                return Err(error);
+            }
+        }
     } else {
         Vec::new()
     };
@@ -930,6 +957,9 @@ async fn remove_active_package(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+    let files = PackageStore::new(core).read_files(scheme_key)?.0;
+    let paths = crate::package_activation::transaction_paths(&root, &files, None)?;
+    let transaction = crate::package_activation::Transaction::begin(core, &root, paths)?;
     let protected: BTreeSet<_> = manifest
         .keys()
         .filter(|relative| {
@@ -964,8 +994,6 @@ async fn remove_active_package(
     .map_err(CoreError::Other)?;
     let previous = core.state();
     let empty = crate::scheme_files::parse_schema_list(&config).is_empty();
-    #[cfg(target_os = "windows")]
-    let mut public_update = None;
     let result: Result<(), CoreError> = async {
         for marker in ["build/.keytao-deployed", "build/.keytao-deploying"] {
             match fs::remove_file(safe_path(&root, marker).map_err(CoreError::Other)?) {
@@ -974,7 +1002,6 @@ async fn remove_active_package(
                 Err(error) => return Err(error.into()),
             }
         }
-        let files = PackageStore::new(core).read_files(scheme_key)?.0;
         let remaining = crate::scheme_files::parse_schema_list(&config)
             .into_iter()
             .collect();
@@ -985,54 +1012,29 @@ async fn remove_active_package(
         }
         #[cfg(target_os = "windows")]
         {
-            let files = manifest
-                .keys()
-                .filter(|relative| {
-                    !protected.contains(*relative) && !excluded_from_manifest(relative)
-                })
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
-            public_update = Some(
-                crate::windows_public_schemas::update_public_schemas(|| {
-                    for schema in &schema_ids {
-                        host.remove_public_schema(schema, &files)?;
-                    }
-                    Ok(())
-                })
-                .map_err(CoreError::Other)?,
-            );
+            if crate::windows_public_schemas::is_default_user_root(&root) {
+                crate::windows_public_schemas::remove_package(
+                    &PackageStore::new(core).package_path(scheme_key).join("files"),
+                    &root,
+                ).map_err(CoreError::Other)?;
+            }
         }
         if empty {
             host.write_reload_stamp(&root).map_err(CoreError::Other)?;
         } else {
             host.deploy().await.map_err(CoreError::Other)?;
         }
-        core.update_state(|state| {
-            state.active_scheme = None;
-            if empty {
-                state.last_deploy = None;
-            } else if let Some(deploy) = state.last_deploy.as_mut() {
-                deploy.scheme_key = None;
-            }
-        })
+        Ok(())
     }
     .await;
     if let Err(error) = result {
         let rollback = receipt.rollback();
-        #[cfg(target_os = "windows")]
-        let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
         let restore_state = core.update_state(|state| {
             state.active_scheme = previous.active_scheme;
             state.last_deploy = previous.last_deploy;
         });
         rollback.map_err(|restore| {
             CoreError::Other(format!("{error}; restoring sources failed: {restore}"))
-        })?;
-        #[cfg(target_os = "windows")]
-        public_rollback.map_err(|restore| {
-            CoreError::Other(format!(
-                "{error}; restoring public schemas failed: {restore}"
-            ))
         })?;
         restore_state?;
         let restore_deploy = host.deploy().await;
@@ -1055,6 +1057,18 @@ async fn remove_active_package(
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
+    }
+    core.update_state(|state| {
+        state.active_scheme = None;
+        if empty {
+            state.last_deploy = None;
+        } else if let Some(deploy) = state.last_deploy.as_mut() {
+            deploy.scheme_key = None;
+        }
+    })?;
+    if let Err(error) = transaction.commit() {
+        *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
+        return Err(error);
     }
     Ok(crate::package_activation::retained(&logs))
 }
@@ -1106,27 +1120,12 @@ async fn remove_owned_package(
         &serde_json::to_vec_pretty(&marker)?,
     )?;
     #[cfg(target_os = "windows")]
-    let public_update = {
-        let public_files: Vec<_> = activation
-            .owned
-            .iter()
-            .filter(|f| !crate::package_activation::addon_owned(root, &f.path))
-            .map(|f| PathBuf::from(&f.path))
-            .collect();
-        Some(
-            crate::windows_public_schemas::update_public_schemas(|| {
-                for schema in activation
-                    .manifest
-                    .keys()
-                    .filter_map(|p| p.strip_suffix(".schema.yaml"))
-                {
-                    host.remove_public_schema(schema, &public_files)?;
-                }
-                Ok(())
-            })
-            .map_err(CoreError::Other)?,
-        )
-    };
+    if crate::windows_public_schemas::is_default_user_root(root) {
+        crate::windows_public_schemas::remove_package(
+            &PackageStore::new(core).package_path(scheme_key).join("files"),
+            root,
+        ).map_err(CoreError::Other)?;
+    }
     let deployment = if remaining.is_empty() {
         host.write_reload_stamp(root)
             .map(|_| ())
@@ -1135,10 +1134,6 @@ async fn remove_owned_package(
         host.deploy().await.map_err(CoreError::Other)
     };
     if let Err(error) = deployment {
-        #[cfg(target_os = "windows")]
-        if let Some(update) = public_update {
-            update.rollback().map_err(CoreError::Other)?;
-        }
         drop(transaction);
         return Err(error);
     }
@@ -1202,7 +1197,7 @@ pub async fn activate_scheme(
     core: &Core,
     scheme_key: &str,
     root: &Path,
-    #[cfg(target_os = "android")] android_extract: impl FnOnce(
+    #[cfg(target_os = "android")] _android_extract: impl FnOnce(
         String,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>,
@@ -1221,17 +1216,13 @@ pub async fn activate_scheme(
             "Stored package directory is missing; re-download this scheme before activation".into(),
         ));
     }
-    #[cfg(not(target_os = "android"))]
     let (files, meta) = store.read_files(scheme_key)?;
-    #[cfg(target_os = "android")]
-    let (archive, meta) = store.export_archive(scheme_key)?;
     if meta.scheme_key != scheme_key || meta.version != package.version {
         return Err(CoreError::Other(
             "Stored package metadata is inconsistent; re-download this scheme before activation"
                 .into(),
         ));
     }
-    #[cfg(not(target_os = "android"))]
     let result = crate::install::smart_install_files(
         core,
         files,
@@ -1241,17 +1232,6 @@ pub async fn activate_scheme(
         finish_windows,
     )
     .await?;
-    #[cfg(target_os = "android")]
-    let result = {
-        let bytes = fs::read(archive.path())?;
-        let logs = cleanup_previous(core, root, &bytes).map_err(CoreError::Other)?;
-        let value = android_extract(archive.path().to_string_lossy().into_owned())
-            .await
-            .map_err(CoreError::Other)?;
-        let mut result = crate::install::finish_android_install(core, &value)?;
-        result.logs.splice(0..0, logs);
-        result
-    };
     if let Some(receipt) = core
         .pending_package
         .lock()

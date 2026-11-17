@@ -32,6 +32,10 @@ struct Host {
 
 impl Host {
     fn new(directory: &Path, sink: Arc<dyn EventSink>) -> Self {
+        Self::for_platform(directory, sink, Platform::MacOs)
+    }
+
+    fn for_platform(directory: &Path, sink: Arc<dyn EventSink>, platform: Platform) -> Self {
         let root = directory.join("rime");
         fs::create_dir_all(&root).unwrap();
         let resources = directory.join("resources");
@@ -43,13 +47,83 @@ impl Host {
                 cache_dir: directory.join("cache"),
                 resource_dir: resources,
                 app_version: "test".into(),
-                platform: Platform::MacOs,
+                platform,
             },
             sink,
         )
         .unwrap();
         Self { root, core }
     }
+}
+
+#[tokio::test]
+async fn mobile_install_switch_and_delete_share_owned_generated_transactions() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    for platform in [Platform::Android, Platform::Ios] {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Host::for_platform(directory.path(), Arc::new(Sink), platform);
+        write(&host.root, "shared.txt", b"user original");
+        let original = package_state(&host.root);
+        for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
+            let entries = files(schema);
+            if platform == Platform::Android {
+                let archive = directory.path().join("download.zip");
+                fs::write(&archive, archive_from_files(&entries).unwrap()).unwrap();
+                let result = crate::install::finish_android_install(&host.core, &serde_json::json!({
+                    "coreInstall": true,
+                    "packageZipPath": archive,
+                    "packageRoot": host.root,
+                })).unwrap();
+                assert!(result.verify.iter().all(|entry| entry.ok));
+            } else {
+                crate::install::smart_install_files(
+                    &host.core, entries, host.root.to_string_lossy().into_owned(), false,
+                ).await.unwrap();
+            }
+            {
+                let pending = host.core.pending_package.lock().unwrap();
+                let receipt = pending.as_ref().unwrap();
+                assert!(receipt.transaction.is_some());
+                assert!(receipt.activation.is_some());
+            }
+            crate::packages::record_package(&host.core, key, Some("v1"), true).unwrap();
+            let active = package_activation::read(&host.core, &host.root).unwrap().unwrap();
+            assert_eq!(active.key, key);
+            assert!(active.owned.iter().any(|file| file.path == format!("{schema}.custom.yaml")));
+            assert!(!active.generated.is_empty());
+            assert!(!host.root.join("squirrel.custom.yaml").exists());
+            assert!(!host.root.join("weasel.custom.yaml").exists());
+        }
+        for path in ["alpha.schema.yaml", "alpha.custom.yaml", "lua/alpha.lua"] {
+            assert!(!host.root.join(path).exists(), "{platform:?}: {path}");
+        }
+        activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+        assert!(!host.root.join("beta.custom.yaml").exists());
+        remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+        assert_eq!(package_state(&host.root), original, "{platform:?}");
+    }
+}
+
+#[tokio::test]
+async fn android_core_install_failure_restores_previous_activation() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::for_platform(directory.path(), Arc::new(Sink), Platform::Android);
+    store(&host, "keytao", files("alpha"));
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    let before = snapshot(&host.root);
+    let mut entries = files("beta");
+    entries.iter_mut().find(|(path, _)| path == "beta.custom.yaml").unwrap().1 = vec![0xff];
+    let archive = directory.path().join("download.zip");
+    fs::write(&archive, archive_from_files(&entries).unwrap()).unwrap();
+    assert!(crate::install::finish_android_install(&host.core, &serde_json::json!({
+        "coreInstall": true,
+        "packageZipPath": archive,
+        "packageRoot": host.root,
+    })).is_err());
+    assert_eq!(snapshot(&host.root), before);
+    assert_eq!(host.core.state().active_scheme.as_deref(), Some("keytao"));
+    assert_eq!(package_activation::read(&host.core, &host.root).unwrap().unwrap().key, "keytao");
 }
 
 impl SchemeHost for Host {

@@ -386,12 +386,11 @@ pub fn finish_windows_scheme_install(
     dest: &Path,
     package_schema_ids: &[String],
     package_dictionary_ids: &[String],
-    zip_bytes: &[u8],
+    _zip_bytes: &[u8],
 ) -> Result<Vec<String>, String> {
     use crate::{
         ime_paths::write_keytao_ime_reload_stamp,
         ime_status::windows::{WindowsImeEngineInitGuard, WindowsImeProfileDeploymentGuard},
-        windows_public_schemas,
     };
 
     let mut logs = Vec::new();
@@ -427,12 +426,6 @@ pub fn finish_windows_scheme_install(
             .into_iter()
             .map(|path| format!("[INVALIDATED] {path}")),
     );
-    if keytao_core::default_user_data_dir().as_ref() == Some(&dest.to_path_buf()) {
-        // Publish the original package, before any user customizations were merged.
-        windows_public_schemas::publish_package(&zip_bytes)?;
-        logs.push("[WINDOWS] 已更新系统搜索框使用的公共方案".into());
-    }
-
     Ok(logs)
 }
 
@@ -450,10 +443,9 @@ pub async fn smart_install(
         #[cfg(target_os = "windows")]
         finish_windows,
     )
-    .await
 }
 
-async fn smart_install_preserving_settings(
+fn smart_install_preserving_settings(
     core: &Core,
     zip_path: String,
     dest_path: String,
@@ -486,15 +478,13 @@ async fn smart_install_preserving_settings(
         preserve_default_settings,
         #[cfg(target_os = "windows")]
         finish_windows,
-    )
-    .await;
+    );
     if result.is_ok() {
         std::fs::remove_file(zip_path).ok();
     }
     result
 }
 
-#[cfg(not(target_os = "android"))]
 pub(crate) async fn smart_install_files(
     core: &Core,
     files: Vec<(String, Vec<u8>)>,
@@ -513,10 +503,9 @@ pub(crate) async fn smart_install_files(
         #[cfg(target_os = "windows")]
         finish_windows,
     )
-    .await
 }
 
-async fn smart_install_entries(
+fn smart_install_entries(
     core: &Core,
     files: Vec<(String, Vec<u8>)>,
     zip_bytes: Vec<u8>,
@@ -524,7 +513,7 @@ async fn smart_install_entries(
     preserve_default_settings: bool,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
-    let result: Result<_, String> = async {
+    let result: Result<_, String> = (|| {
         let emit = |stage: &str, percent: u32, message: &str| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
                 stage: stage.to_string(),
@@ -833,8 +822,7 @@ async fn smart_install_entries(
             logs,
             verify,
         })
-    }
-    .await;
+    })();
     if result.is_err() {
         *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
     }
@@ -852,46 +840,32 @@ pub async fn prepare_android_install(
     crate::download::download_to_temp(core, url).await
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub fn finish_android_install(
     core: &Core,
     result: &serde_json::Value,
 ) -> Result<InstallResult, CoreError> {
-    let archive = result["packageZipPath"].as_str().ok_or_else(|| {
-        CoreError::Other("Android extraction did not return its package archive".into())
-    })?;
-    let manifest: std::collections::BTreeMap<String, String> =
-        serde_json::from_value(result["packageManifest"].clone())?;
-    for relative in manifest.keys() {
-        crate::packages::validate_relative(relative).map_err(CoreError::Other)?;
+    if result["coreInstall"].as_bool() == Some(true) {
+        let archive = result["packageZipPath"]
+            .as_str()
+            .ok_or_else(|| CoreError::Other("Android installation is missing its archive".into()))?;
+        let root = result["packageRoot"]
+            .as_str()
+            .ok_or_else(|| CoreError::Other("Android installation is missing its root".into()))?;
+        if !std::path::Path::new(root).is_absolute() {
+            return Err(CoreError::Other("Android installation requires an absolute root".into()));
+        }
+        return smart_install_preserving_settings(
+            core, archive.into(), root.into(), false,
+            #[cfg(target_os = "windows")]
+            finish_windows_scheme_install,
+        );
     }
-    let manifest = manifest
-        .into_iter()
-        .filter(|(relative, _)| !crate::packages::excluded_from_manifest(relative))
-        .collect();
-    let root = result["packageRoot"].as_str().ok_or_else(|| {
-        CoreError::Other("Android extraction did not return its destination".into())
-    })?;
-    let root = std::fs::canonicalize(root)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| root.to_owned());
-    let zip_bytes = std::fs::read(archive)?;
-    let package_rime_lua =
-        crate::packages::rime_lua_from_archive(&zip_bytes).map_err(CoreError::Other)?;
-    install_rime_lua(std::path::Path::new(&root), package_rime_lua.as_deref())
-        .map_err(CoreError::Other)?;
-    crate::remove_filter::ensure_remove_filter(std::path::Path::new(&root))
-        .map_err(CoreError::Other)?;
-    crate::packages::stage_install(core, &zip_bytes, manifest, root)?;
-    core.emit(CoreEvent::InstallProgress(InstallProgress {
-        stage: "done".into(),
-        percent: 100,
-        message: "安装完成！".into(),
-    }));
+    // SAF exports are outside the live root and do not create an activation.
     Ok(install_result_from_value(result))
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 fn install_result_from_value(result: &serde_json::Value) -> InstallResult {
     let merged_schemas = result["mergedSchemas"]
         .as_array()

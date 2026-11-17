@@ -437,7 +437,7 @@ impl<'a> PackageStore<'a> {
         Ok(())
     }
 
-    #[cfg(any(target_os = "android", test))]
+    #[cfg(test)]
     pub(crate) fn export_archive(
         &self,
         key: &str,

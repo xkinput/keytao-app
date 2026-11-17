@@ -416,9 +416,8 @@ pub fn dismiss_scheme_update(scheme_key: String, version: String) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
-/// Android extraction must return the platform result as JSON and must not
-/// re-enter install/deploy bridge calls while the install lock is held.
-/// Other platforms ignore the callback. Activation does not deploy the IME.
+/// The extraction callback is retained for bridge compatibility; all platforms
+/// install store files in Core. Activation does not deploy the IME.
 pub async fn activate_scheme(
     scheme_key: String,
     android_extract: impl Fn(String) -> DartFnFuture<String> + Send + Sync + 'static,
@@ -817,8 +816,8 @@ fn install_result_dto(result: keytao_app_core::scheme_types::InstallResult) -> I
     }
 }
 
-/// Call only after the Android channel confirms storage permission. Dart must
-/// serialize prepare -> smartExtractZipToPrivate -> finish as one installation.
+/// Call after storage permission. The Android channel resolves the destination;
+/// finish_android_install performs the transactional installation in Core.
 pub async fn prepare_android_install(url: String) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
@@ -856,6 +855,9 @@ pub fn finish_android_install(
             .and_then(|root| std::path::Path::new(root).canonicalize().ok())
             .zip(state.host.user_root()?.canonicalize().ok())
             .is_some_and(|(root, default_root)| root == default_root);
+        if result["coreInstall"].as_bool() == Some(true) && !active {
+            return Err("Android private installation must target the IME root".into());
+        }
         let result = keytao_app_core::install::finish_android_install(&state.core, &result)
             .map_err(|error| error.to_string())?;
         keytao_app_core::packages::record_package(

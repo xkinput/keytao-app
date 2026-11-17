@@ -371,6 +371,11 @@ struct Snapshot {
 struct Journal {
     root: PathBuf,
     snapshots: Vec<Snapshot>,
+    #[serde(default)]
+    build_paths: Option<BTreeSet<String>>,
+    #[cfg(any(target_os = "windows", test))]
+    #[serde(default)]
+    public_schemas: Option<crate::windows_public_schemas::PublicSchemaCheckpoint>,
     committed: bool,
     state: Option<Vec<u8>>,
 }
@@ -386,11 +391,13 @@ impl Transaction {
     pub(crate) fn begin(
         core: &Core,
         root: &Path,
-        paths: BTreeSet<String>,
+        mut paths: BTreeSet<String>,
     ) -> Result<Self, CoreError> {
         let store = PackageStore::new(core).checked_root()?;
         fs::create_dir_all(root)?;
         fs::create_dir_all(&store)?;
+        let build_paths = build_files(root)?;
+        paths.extend(build_paths.iter().cloned());
         let directory = safe_path(&store, ".activation-transaction").map_err(CoreError::Other)?;
         if directory.try_exists()? {
             return Err(CoreError::Other(
@@ -409,6 +416,9 @@ impl Transaction {
             journal: Journal {
                 root: root.canonicalize()?,
                 snapshots: Vec::new(),
+                build_paths: Some(build_paths),
+                #[cfg(any(target_os = "windows", test))]
+                public_schemas: None,
                 committed: false,
                 state,
             },
@@ -419,6 +429,15 @@ impl Transaction {
         }
         for path in ["activation.json", "active-manifest.json"] {
             transaction.snapshot(path, true)?;
+        }
+        #[cfg(target_os = "windows")]
+        if crate::windows_public_schemas::is_default_user_root(root) {
+            transaction.journal.public_schemas = Some(
+                crate::windows_public_schemas::checkpoint(
+                    &transaction.directory.join("public-schemas"),
+                )
+                .map_err(CoreError::Other)?,
+            );
         }
         transaction.persist()?;
         Ok(transaction)
@@ -512,7 +531,10 @@ impl Transaction {
 
     pub(crate) fn commit(mut self) -> Result<(), CoreError> {
         self.journal.committed = true;
-        self.persist()?;
+        if let Err(error) = self.persist() {
+            self.journal.committed = false;
+            return Err(error);
+        }
         self.finished = true;
         if let Err(error) = fs::remove_dir_all(&self.directory) {
             tracing::warn!(%error, "Committed activation cleanup deferred until startup");
@@ -521,35 +543,102 @@ impl Transaction {
     }
 
     fn rollback(&self) -> Result<(), CoreError> {
-        for (index, snapshot) in self.journal.snapshots.iter().enumerate().rev() {
-            let root = if snapshot.store {
-                &self.store
-            } else {
-                &self.journal.root
-            };
-            let path = safe_path(root, &snapshot.path).map_err(CoreError::Other)?;
-            if snapshot.existed {
-                fs::create_dir_all(path.parent().unwrap())?;
-                crate::scheme_files::write_file_atomic(
-                    &path,
-                    &fs::read(self.directory.join(index.to_string()))?,
-                )?;
-            } else if path.try_exists()? {
-                fs::remove_file(&path)?;
+        self.rollback_with_remove(|path| fs::remove_file(path))
+    }
+
+    fn rollback_with_remove(
+        &self,
+        mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<(), CoreError> {
+        let mut errors = Vec::new();
+        let mut attempt = |step: &str, result: Result<(), CoreError>| {
+            if let Err(error) = result {
+                errors.push(format!("{step}: {error}"));
             }
-            let mut parent = path.parent();
-            while let Some(dir) = parent.filter(|dir| *dir != root) {
-                if fs::remove_dir(dir).is_err() {
-                    break;
+        };
+        if let Some(original) = &self.journal.build_paths {
+            match build_files(&self.journal.root) {
+                Ok(current) => {
+                    for relative in current.difference(original) {
+                        attempt(
+                            relative,
+                            (|| {
+                                let path = safe_path(&self.journal.root, relative)
+                                    .map_err(CoreError::Other)?;
+                                remove_file(&path)?;
+                                let mut parent = path.parent();
+                                while let Some(directory) =
+                                    parent.filter(|dir| *dir != self.journal.root)
+                                {
+                                    if fs::remove_dir(directory).is_err() {
+                                        break;
+                                    }
+                                    parent = directory.parent();
+                                }
+                                Ok(())
+                            })(),
+                        );
+                    }
                 }
-                parent = dir.parent();
+                Err(error) => attempt("List build outputs", Err(error)),
             }
         }
-        let state = self.store.parent().unwrap().join("app-state.json");
-        if let Some(bytes) = &self.journal.state {
-            crate::scheme_files::write_file_atomic(&state, bytes)?;
-        } else if state.try_exists()? {
-            fs::remove_file(state)?;
+        for (index, snapshot) in self.journal.snapshots.iter().enumerate().rev() {
+            attempt(
+                &snapshot.path,
+                (|| {
+                    let root = if snapshot.store {
+                        &self.store
+                    } else {
+                        &self.journal.root
+                    };
+                    let path = safe_path(root, &snapshot.path).map_err(CoreError::Other)?;
+                    if snapshot.existed {
+                        fs::create_dir_all(path.parent().unwrap())?;
+                        crate::scheme_files::write_file_atomic(
+                            &path,
+                            &fs::read(self.directory.join(index.to_string()))?,
+                        )?;
+                    } else if path.try_exists()? {
+                        remove_file(&path)?;
+                    }
+                    let mut parent = path.parent();
+                    while let Some(dir) = parent.filter(|dir| *dir != root) {
+                        if fs::remove_dir(dir).is_err() {
+                            break;
+                        }
+                        parent = dir.parent();
+                    }
+                    Ok(())
+                })(),
+            );
+        }
+        attempt(
+            "Restore app state",
+            (|| {
+                let state = self.store.parent().unwrap().join("app-state.json");
+                if let Some(bytes) = &self.journal.state {
+                    crate::scheme_files::write_file_atomic(&state, bytes)?;
+                } else if state.try_exists()? {
+                    remove_file(&state)?;
+                }
+                Ok(())
+            })(),
+        );
+        #[cfg(any(target_os = "windows", test))]
+        if let Some(checkpoint) = &self.journal.public_schemas {
+            attempt(
+                "Restore public schemas",
+                checkpoint
+                    .restore(&self.directory.join("public-schemas"))
+                    .map_err(CoreError::Other),
+            );
+        }
+        if !errors.is_empty() {
+            return Err(CoreError::Other(format!(
+                "Activation rollback failed: {}",
+                errors.join("; ")
+            )));
         }
         fs::remove_dir_all(&self.directory)?;
         Ok(())
@@ -607,8 +696,8 @@ pub(crate) fn transaction_paths(
         .map(|(p, _)| p.clone())
         .collect();
     paths.extend(crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?);
-    for schema in crate::managed_custom::active_schema_ids_from_default(root)
-        .map_err(CoreError::Other)?
+    for schema in
+        crate::managed_custom::active_schema_ids_from_default(root).map_err(CoreError::Other)?
     {
         paths.insert(format!("{schema}.custom.yaml"));
     }
@@ -648,7 +737,11 @@ pub(crate) fn transaction_paths(
         .into_iter()
         .map(str::to_owned),
     );
-    fn build_files(
+    Ok(paths)
+}
+
+fn build_files(root: &Path) -> Result<BTreeSet<String>, CoreError> {
+    fn collect(
         root: &Path,
         directory: &Path,
         paths: &mut BTreeSet<String>,
@@ -664,23 +757,298 @@ pub(crate) fn transaction_paths(
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            let path = safe_path(root, &relative).map_err(CoreError::Other)?;
-            if user_file(&relative) {
+            if relative
+                .split('/')
+                .any(|part| part == "sync" || part.contains(".userdb"))
+            {
                 continue;
             }
+            let path = safe_path(root, &relative).map_err(CoreError::Other)?;
             if entry.file_type()?.is_dir() {
-                build_files(root, &path, paths)?;
+                collect(root, &path, paths)?;
             } else {
                 paths.insert(relative);
             }
         }
         Ok(())
     }
-    // shortcut: rollback covers existing build files; track new outputs when deployment joins activation.
-    build_files(
+    let mut paths = BTreeSet::new();
+    collect(
         root,
         &safe_path(root, "build").map_err(CoreError::Other)?,
         &mut paths,
     )?;
     Ok(paths)
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use crate::{AppEnv, CoreEvent, EventSink, Platform};
+    use std::sync::Arc;
+
+    struct Sink;
+    impl EventSink for Sink {
+        fn emit(&self, _: CoreEvent) {}
+    }
+
+    fn core(directory: &Path) -> Arc<Core> {
+        Core::new(
+            AppEnv {
+                data_dir: directory.join("app"),
+                cache_dir: directory.join("cache"),
+                resource_dir: directory.join("resources"),
+                app_version: "test".into(),
+                platform: Platform::MacOs,
+            },
+            Arc::new(Sink),
+        )
+        .unwrap()
+    }
+
+    fn write(root: &Path, relative: &str, bytes: &[u8]) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn rollback_restores_build_and_removes_new_outputs_after_failure_or_crash() {
+        for crashed in [false, true] {
+            for existing_build in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let core = core(directory.path());
+                let root = directory.path().join("rime");
+                fs::create_dir(&root).unwrap();
+                if existing_build {
+                    write(&root, "build/alpha.schema.yaml", b"previous schema");
+                    write(&root, "build/.keytao-deployed", b"previous stamp");
+                    write(&root, "build/alpha.userdb/data", b"learned words");
+                }
+                let transaction = Transaction::begin(&core, &root, BTreeSet::new()).unwrap();
+                write(&root, "build/alpha.schema.yaml", b"new schema");
+                write(&root, "build/.keytao-deployed", b"new stamp");
+                write(&root, "build/nested/beta.table.bin", b"compiled output");
+                write(&root, "build/beta.userdb/data", b"new learned words");
+                write(&root, "build/sync/user.yaml", b"synchronized data");
+                if crashed {
+                    std::mem::forget(transaction);
+                    recover(&core).unwrap();
+                } else {
+                    drop(transaction);
+                }
+                assert!(!root.join("build/nested").exists());
+                assert_eq!(
+                    root.join("build/alpha.schema.yaml").exists(),
+                    existing_build
+                );
+                assert_eq!(root.join("build/.keytao-deployed").exists(), existing_build);
+                if existing_build {
+                    assert_eq!(
+                        fs::read(root.join("build/alpha.schema.yaml")).unwrap(),
+                        b"previous schema"
+                    );
+                    assert_eq!(
+                        fs::read(root.join("build/.keytao-deployed")).unwrap(),
+                        b"previous stamp"
+                    );
+                    assert_eq!(
+                        fs::read(root.join("build/alpha.userdb/data")).unwrap(),
+                        b"learned words"
+                    );
+                }
+                assert_eq!(
+                    fs::read(root.join("build/beta.userdb/data")).unwrap(),
+                    b"new learned words"
+                );
+                assert_eq!(
+                    fs::read(root.join("build/sync/user.yaml")).unwrap(),
+                    b"synchronized data"
+                );
+                assert!(
+                    !PackageStore::new(&core)
+                        .root()
+                        .join(".activation-transaction")
+                        .exists()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn committed_build_outputs_survive_startup_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let root = directory.path().join("rime");
+        let transaction = Transaction::begin(&core, &root, BTreeSet::new()).unwrap();
+        write(&root, "build/beta.table.bin", b"compiled output");
+        transaction.commit().unwrap();
+        recover(&core).unwrap();
+        assert_eq!(
+            fs::read(root.join("build/beta.table.bin")).unwrap(),
+            b"compiled output"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_snapshots_state_and_public_after_removal_failure() {
+        for fail_snapshot_removal in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let core = core(directory.path());
+            let root = directory.path().join("rime");
+            let public = directory.path().join("public");
+            let previous = "a".repeat(64);
+            let published = "b".repeat(64);
+            core.update_state(|state| state.active_scheme = Some("keytao".into()))
+                .unwrap();
+            write(&root, "alpha.schema.yaml", b"previous source");
+            let root = root.canonicalize().unwrap();
+            let store = PackageStore::new(&core).root();
+            write(&store, "activation.json", b"previous activation");
+            write(
+                &public,
+                &format!("{previous}/alpha.schema.yaml"),
+                b"previous public schema",
+            );
+            write(&public, "current.txt", previous.as_bytes());
+            let mut transaction = Transaction::begin(
+                &core,
+                &root,
+                BTreeSet::from(["alpha.schema.yaml".into(), "new.txt".into()]),
+            )
+            .unwrap();
+            transaction.journal.public_schemas = Some(
+                crate::windows_public_schemas::checkpoint_at(
+                    public.clone(),
+                    &transaction.directory.join("public-schemas"),
+                )
+                .unwrap(),
+            );
+            transaction.persist().unwrap();
+            write(&root, "alpha.schema.yaml", b"new source");
+            write(&root, "new.txt", b"new source");
+            write(&root, "build/beta.prism.bin", b"mapped output");
+            write(&root, "build/zeta.table.bin", b"new output");
+            write(&store, "activation.json", b"new activation");
+            core.update_state(|state| state.active_scheme = Some("xmjd".into()))
+                .unwrap();
+            fs::remove_dir_all(public.join(&previous)).unwrap();
+            write(
+                &public,
+                &format!("{published}/beta.schema.yaml"),
+                b"new public schema",
+            );
+            write(&public, "current.txt", published.as_bytes());
+
+            let error = transaction
+                .rollback_with_remove(|path| {
+                    if path == root.join("build/beta.prism.bin")
+                        || (fail_snapshot_removal && path == root.join("new.txt"))
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "injected sharing violation",
+                        ));
+                    }
+                    fs::remove_file(path)
+                })
+                .unwrap_err()
+                .to_string();
+            transaction.finished = true;
+            assert!(error.contains("build/beta.prism.bin"));
+            assert_eq!(error.contains("new.txt"), fail_snapshot_removal);
+            assert!(root.join("build/beta.prism.bin").exists());
+            assert!(!root.join("build/zeta.table.bin").exists());
+            assert_eq!(root.join("new.txt").exists(), fail_snapshot_removal);
+            assert_eq!(
+                fs::read(root.join("alpha.schema.yaml")).unwrap(),
+                b"previous source"
+            );
+            assert_eq!(
+                fs::read(store.join("activation.json")).unwrap(),
+                b"previous activation"
+            );
+            assert_eq!(
+                crate::AppState::load(&core.env().data_dir)
+                    .unwrap()
+                    .active_scheme
+                    .as_deref(),
+                Some("keytao")
+            );
+            assert_eq!(
+                fs::read_to_string(public.join("current.txt")).unwrap(),
+                previous
+            );
+            assert_eq!(
+                fs::read(public.join(&previous).join("alpha.schema.yaml")).unwrap(),
+                b"previous public schema"
+            );
+            assert!(!public.join(published).exists());
+            assert!(transaction.directory.exists());
+            recover(&core).unwrap();
+            assert!(!root.join("build/beta.prism.bin").exists());
+            assert!(!transaction.directory.exists());
+        }
+    }
+
+    #[test]
+    fn public_checkpoint_is_restored_after_failure_crash_and_failed_commit() {
+        for failure in ["drop", "crash", "commit"] {
+            let directory = tempfile::tempdir().unwrap();
+            let core = core(directory.path());
+            let root = directory.path().join("rime");
+            let public = directory.path().join("public");
+            let previous = "a".repeat(64);
+            let published = "b".repeat(64);
+            write(
+                &public,
+                &format!("{previous}/alpha.schema.yaml"),
+                b"previous public schema",
+            );
+            write(&public, "current.txt", previous.as_bytes());
+            let mut transaction = Transaction::begin(&core, &root, BTreeSet::new()).unwrap();
+            transaction.journal.public_schemas = Some(
+                crate::windows_public_schemas::checkpoint_at(
+                    public.clone(),
+                    &transaction.directory.join("public-schemas"),
+                )
+                .unwrap(),
+            );
+            transaction.persist().unwrap();
+            fs::remove_dir_all(public.join(&previous)).unwrap();
+            write(
+                &public,
+                &format!("{published}/beta.schema.yaml"),
+                b"new public schema",
+            );
+            write(&public, "current.txt", published.as_bytes());
+            match failure {
+                "crash" => {
+                    std::mem::forget(transaction);
+                    Core::new(core.env().clone(), Arc::new(Sink)).unwrap();
+                }
+                "commit" => {
+                    fs::remove_file(transaction.directory.join("journal.json")).unwrap();
+                    fs::create_dir(transaction.directory.join("journal.json")).unwrap();
+                    assert!(transaction.commit().is_err());
+                }
+                _ => drop(transaction),
+            }
+            assert_eq!(
+                fs::read_to_string(public.join("current.txt")).unwrap(),
+                previous
+            );
+            assert_eq!(
+                fs::read(public.join(previous).join("alpha.schema.yaml")).unwrap(),
+                b"previous public schema"
+            );
+            assert!(!public.join(published).exists());
+            assert!(
+                !PackageStore::new(&core)
+                    .root()
+                    .join(".activation-transaction")
+                    .exists()
+            );
+        }
+    }
 }

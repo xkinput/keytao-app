@@ -908,151 +908,16 @@ class KeytaoAndroidChannel(
 
     private fun smartExtractZipToPrivate(call: MethodCall, reply: Reply) {
         val zipPath = call.argument<String>("zipPath") ?: return reply.error("Missing zipPath")
-
-        Thread {
-            try {
-                val root = KeytaoAndroidPaths.requireRoot(activity)
-                if (!KeytaoAndroidPaths.isWritable(root)) {
-                    return@Thread reply.error("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
-                }
-                val zipFile = File(zipPath)
-                val logs = mutableListOf<String>()
-                val packageManifest = linkedMapOf<String, String>()
-                val protectedPaths = linkedSetOf<String>()
-
-                JZipFile(zipFile).use { zip ->
-                    val allEntries = zip.entries().toList()
-                    allEntries.forEach {
-                        val relative = validateZipRelativePath(it.name)
-                        safePrivateFile(root, relative)
-                    }
-                    val zipLuaFilenames = mutableSetOf<String>()
-                    var dcEntry: java.util.zip.ZipEntry? = null
-                    var rimeLuaEntry: java.util.zip.ZipEntry? = null
-
-                    for (entry in allEntries) {
-                        val relative = entry.name.trimEnd('/')
-                        val filename = relative.substringAfterLast('/')
-                        when {
-                            !entry.isDirectory && isDefaultCustom(filename) && dcEntry == null -> dcEntry = entry
-                            !entry.isDirectory && filename == "rime.lua" && !relative.contains('/') && rimeLuaEntry == null -> rimeLuaEntry = entry
-                            !entry.isDirectory && relative.startsWith("lua/") && !relative.substring(4).contains('/') -> zipLuaFilenames.add(filename)
-                        }
-                    }
-
-                    val dcMergeResult = dcEntry?.let { entry ->
-                        val zipContent = zip.getInputStream(entry).bufferedReader().readText()
-                        val existing = readPrivateText(root, "default.custom.yaml")
-                            ?: readPrivateText(root, "default-custom.yaml")
-                        if (zipFile.name.startsWith("local-")) {
-                            KeytaoNativeBridge.mergeLocalDefaultCustom(existing, zipContent)
-                        } else {
-                            KeytaoNativeBridge.mergeDefaultCustom(existing, zipContent)
-                        }
-                    }
-
-                    val zipRimeLuaContent = rimeLuaEntry?.let { entry ->
-                        zip.getInputStream(entry).bufferedReader().readText()
-                    }
-                    val rimeLuaMergeResult = KeytaoNativeBridge.prepareRimeLuaInstall(
-                        readPrivateText(root, "rime.lua"),
-                        zipRimeLuaContent,
-                        zipLuaFilenames,
-                    )
-
-                    val renamedLuaFiles = rimeLuaMergeResult?.renames?.mapNotNull { (oldName, newName) ->
-                        val oldFile = File(root, "lua/$oldName.lua")
-                        if (oldFile.isFile) newName to oldFile.readBytes() else null
-                    } ?: emptyList()
-
-                    for (entry in allEntries) {
-                        val relative = entry.name.trimEnd('/')
-                        if (relative.isEmpty()) continue
-                        val filename = relative.substringAfterLast('/')
-                        val output = safePrivateFile(root, relative)
-                        if (entry.isDirectory) {
-                            output.mkdirs()
-                            continue
-                        }
-                        output.parentFile?.mkdirs()
-                        when {
-                            isDefaultCustom(filename) && dcMergeResult != null -> {
-                                output.writeText(dcMergeResult.mergedContent)
-                                logs.add("[MERGED] $relative")
-                            }
-                            filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
-                                output.writeText(rimeLuaMergeResult.mergedContent)
-                                logs.add("[MERGED] $relative")
-                            }
-                            else -> {
-                                val decision = preparePackageFileWrite(relative, logs, existingBytes = {
-                                    if (output.exists()) output.readBytes() else null
-                                }, backup = { backupName ->
-                                    val backup = File(output.parentFile, backupName)
-                                    check(!backupPathExists(backup)) { "Backup already exists: $backupName" }
-                                    check(output.renameTo(backup)) { "Failed to rename: $relative" }
-                                })
-                                if (decision.isProtected) protectedPaths.add(relative)
-                                if (!decision.write) continue
-                                val digest = MessageDigest.getInstance("SHA-256")
-                                zip.getInputStream(entry).use { input ->
-                                    DigestOutputStream(FileOutputStream(output), digest).buffered(65536).use { out ->
-                                        input.copyTo(out, 65536)
-                                    }
-                                }
-                                if (!decision.isProtected && isPackageManifestPath(relative)) {
-                                    packageManifest[relative] = digest.digest().joinToString("") { "%02x".format(it) }
-                                }
-                                logs.add("[OK] $relative")
-                            }
-                        }
-                    }
-
-                    if (rimeLuaEntry == null && rimeLuaMergeResult != null) {
-                        File(root, "rime.lua").writeText(rimeLuaMergeResult.mergedContent)
-                        logs.add("[MERGED] rime.lua")
-                    }
-
-                    if (renamedLuaFiles.isNotEmpty()) {
-                        val luaDir = File(root, "lua").apply { mkdirs() }
-                        for ((newName, bytes) in renamedLuaFiles) {
-                            File(luaDir, "$newName.lua").writeBytes(bytes)
-                            packageManifest.remove("lua/$newName.lua")
-                            logs.add("[RENAMED] lua/$newName.lua")
-                        }
-                    }
-
-                    if (!KeytaoAndroidPaths.invalidateDeployment(root)) {
-                        return@Thread reply.error("无法清理旧的 Android RIME 部署产物")
-                    }
-                    logs.add("[INVALIDATED] build")
-
-                    val mergedArray = dcMergeResult?.userSchemas.orEmpty()
-                    val logsArray = logs.toList()
-
-                    val verifyArray = mutableListOf<Map<String, Any?>>()
-                    fun addVerify(path: String, ok: Boolean, note: String) {
-                        verifyArray.add(mapOf("path" to path, "ok" to ok, "note" to note))
-                    }
-                    addVerify("*.schema.yaml", root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true, "Rime schema")
-                    for (relative in protectedPaths) {
-                        val exists = safePrivateFile(root, relative).isFile
-                        addVerify(relative, exists, if (exists) "文件存在" else "文件不存在")
-                    }
-
-                    reply.success(mutableMapOf<String, Any?>().apply {
-                        put("mergedSchemas", mergedArray)
-                        put("logs", logsArray)
-                        put("verify", verifyArray)
-                        put("packageZipPath", zipFile.absolutePath)
-                        put("packageManifest", packageManifest)
-                        put("packageRoot", root.absolutePath)
-                    })
-                }
-            } catch (ex: Exception) {
-                reply.error(ex.message ?: "Private extraction failed")
-            }
-        }.start()
+        val root = KeytaoAndroidPaths.requireRoot(activity)
+        if (!KeytaoAndroidPaths.isWritable(root)) {
+            return reply.error("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
+        }
+        // Core owns extraction, generated files, and rollback as one transaction.
+        reply.success(mapOf(
+            "coreInstall" to true,
+            "packageZipPath" to zipPath,
+            "packageRoot" to root.absolutePath,
+        ))
     }
 
     private fun deployImeData(reply: Reply) {

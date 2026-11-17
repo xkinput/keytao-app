@@ -77,10 +77,70 @@ pub struct PublicSchemaUpdate {
     published_sources: String,
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct GenerationPointers {
     current: Option<String>,
     pending: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PublicSchemaCheckpoint {
+    root: PathBuf,
+    previous: GenerationPointers,
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn checkpoint(backup: &Path) -> Result<PublicSchemaCheckpoint, String> {
+    #[cfg(target_os = "windows")]
+    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let _guard = PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    checkpoint_at(public_root()?, backup)
+}
+
+pub(crate) fn checkpoint_at(
+    root: PathBuf,
+    backup: &Path,
+) -> Result<PublicSchemaCheckpoint, String> {
+    let previous = GenerationPointers::read(&root)?;
+    std::fs::create_dir_all(backup).map_err(|error| error.to_string())?;
+    for generation in previous.generations() {
+        if !backup.join(generation).exists() {
+            link_snapshot(&root.join(generation), &backup.join(generation))?;
+        }
+    }
+    Ok(PublicSchemaCheckpoint { root, previous })
+}
+
+impl PublicSchemaCheckpoint {
+    pub(crate) fn restore(&self, backup: &Path) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+        let _guard = PUBLISH_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::fs::create_dir_all(&self.root).map_err(|error| error.to_string())?;
+        for generation in self.previous.generations() {
+            if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("invalid public schema checkpoint identifier".into());
+            }
+            if !self.root.join(generation).exists() {
+                let stage = tempfile::Builder::new()
+                    .prefix(".restore-")
+                    .tempdir_in(&self.root)
+                    .map_err(|error| error.to_string())?;
+                link_snapshot(&backup.join(generation), &stage.path().join(generation))?;
+                std::fs::rename(stage.path().join(generation), self.root.join(generation))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        grant_appcontainer_read(&self.root)?;
+        self.previous.write(&self.root)?;
+        prune_snapshots(&self.root);
+        Ok(())
+    }
 }
 
 impl GenerationPointers {
@@ -224,8 +284,10 @@ fn link_snapshot(source: &Path, target: &Path) -> Result<(), String> {
         if kind.is_dir() {
             link_snapshot(&entry.path(), &output)?;
         } else if kind.is_file() {
-            // Keep rollback artifacts without duplicating large dictionaries in memory or on disk.
-            std::fs::hard_link(entry.path(), output).map_err(|error| error.to_string())?;
+            // Redirected app data can put the durable transaction on a different volume.
+            std::fs::hard_link(entry.path(), &output)
+                .or_else(|_| std::fs::copy(entry.path(), output).map(|_| ()))
+                .map_err(|error| error.to_string())?;
         } else {
             return Err("unsupported file in public schema snapshot".into());
         }
@@ -433,6 +495,18 @@ fn public_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "LOCALAPPDATA is unavailable for public input schemas".into())
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn is_default_user_root(root: &Path) -> bool {
+    keytao_core::default_user_data_dir().is_some_and(|default| same_directory(&default, root))
+}
+
+fn same_directory(left: &Path, right: &Path) -> bool {
+    left.canonicalize()
+        .ok()
+        .zip(right.canonicalize().ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
 fn checked_relative(path: &Path) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty()
         || path.to_string_lossy().starts_with('\\')
@@ -541,6 +615,192 @@ pub fn publish_source_files(files: &[(PathBuf, PathBuf)]) -> Result<(), String> 
         ));
     }
     publish_files(&contents)
+}
+
+/// Both directories must be package-store sources, never the private Rime root.
+pub fn publish_activation(
+    incoming: &Path,
+    previous: Option<&Path>,
+    private_root: &Path,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let _guard = PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    publish_activation_at(
+        &public_root()?,
+        Some(incoming),
+        previous,
+        private_root,
+        true,
+    )
+}
+
+pub fn remove_package(directory: &Path, private_root: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let _guard = PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    publish_activation_at(&public_root()?, None, Some(directory), private_root, true)
+}
+
+fn package_directory_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+    fn collect(
+        base: &Path,
+        directory: &Path,
+        files: &mut BTreeMap<PathBuf, Vec<u8>>,
+        total: &mut u64,
+    ) -> Result<(), String> {
+        if std::fs::symlink_metadata(directory)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("symbolic link in public package directory".into());
+        }
+        for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let relative = checked_relative(entry.path().strip_prefix(base).unwrap())?;
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_symlink() {
+                return Err("symbolic link in public package directory".into());
+            }
+            if kind.is_dir() {
+                collect(base, &entry.path(), files, total)?;
+            } else if kind.is_file() && is_public_asset(&relative) && !relative.starts_with("build")
+            {
+                *total = total
+                    .checked_add(metadata.len())
+                    .ok_or("public package is too large")?;
+                if *total > MAX_PACKAGE_BYTES {
+                    return Err("public package is too large".into());
+                }
+                files.insert(
+                    relative,
+                    std::fs::read(entry.path()).map_err(|error| error.to_string())?,
+                );
+            } else if !kind.is_file() {
+                return Err("unsupported file in public package directory".into());
+            }
+        }
+        Ok(())
+    }
+    let mut files = BTreeMap::new();
+    collect(directory, directory, &mut files, &mut 0)?;
+    Ok(files)
+}
+
+fn publish_activation_at(
+    root: &Path,
+    incoming: Option<&Path>,
+    previous: Option<&Path>,
+    private_root: &Path,
+    grant_access: bool,
+) -> Result<(), String> {
+    let mut files = read_snapshot(root)?;
+    let before = snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path)));
+    if let Some(previous) = previous {
+        let previous = package_directory_files(previous)?
+            .into_iter()
+            .filter(|(path, _)| {
+                !crate::package_activation::addon_owned(
+                    private_root,
+                    &path.to_string_lossy().replace('\\', "/"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let schemas: BTreeSet<_> = previous
+            .keys()
+            .filter_map(|path| {
+                path.to_str()?
+                    .strip_suffix(".schema.yaml")
+                    .map(str::to_owned)
+            })
+            .collect();
+        for path in previous.keys() {
+            if path != Path::new("default.custom.yaml") && path != Path::new("default-custom.yaml")
+            {
+                files.remove(path);
+            }
+        }
+        for schema in &schemas {
+            files.remove(&PathBuf::from(format!("{schema}.custom.yaml")));
+        }
+        if let Some(content) = files.get_mut(Path::new("default.custom.yaml")) {
+            let mut document: serde_yaml::Value =
+                serde_yaml::from_slice(content).map_err(|error| error.to_string())?;
+            if let Some(patch) = document
+                .get_mut("patch")
+                .and_then(serde_yaml::Value::as_mapping_mut)
+            {
+                for name in ["default.custom.yaml", "default-custom.yaml"] {
+                    if let Some(bytes) = previous.get(Path::new(name)) {
+                        let original: serde_yaml::Value =
+                            serde_yaml::from_slice(bytes).map_err(|error| error.to_string())?;
+                        if let Some(original) = original
+                            .get("patch")
+                            .and_then(serde_yaml::Value::as_mapping)
+                        {
+                            for (key, value) in original {
+                                if key.as_str() != Some("schema_list")
+                                    && patch.get(key) == Some(value)
+                                {
+                                    patch.remove(key);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(list) = patch
+                    .get_mut("schema_list")
+                    .and_then(serde_yaml::Value::as_sequence_mut)
+                {
+                    list.retain(|entry| {
+                        entry
+                            .get("schema")
+                            .and_then(serde_yaml::Value::as_str)
+                            .is_none_or(|id| !schemas.contains(id))
+                    });
+                }
+            }
+            *content = serde_yaml::to_string(&document)
+                .map_err(|error| error.to_string())?
+                .into_bytes();
+        }
+    }
+    if let Some(incoming) = incoming {
+        let incoming = package_directory_files(incoming)?
+            .into_iter()
+            .filter(|(path, _)| {
+                !crate::package_activation::user_file(&path.to_string_lossy().replace('\\', "/"))
+                    && !crate::package_activation::addon_owned(
+                        private_root,
+                        &path.to_string_lossy().replace('\\', "/"),
+                    )
+            })
+            .collect::<Vec<_>>();
+        merge_public_files(&mut files, &incoming)?;
+    }
+    // Reuse the private activation's generators on an isolated, package-only stage.
+    let stage = tempfile::tempdir().map_err(|error| error.to_string())?;
+    for (path, content) in files.iter().filter(|(path, _)| !path.starts_with("build")) {
+        let output = stage.path().join(path);
+        std::fs::create_dir_all(output.parent().unwrap()).map_err(|error| error.to_string())?;
+        std::fs::write(output, content).map_err(|error| error.to_string())?;
+    }
+    let schemas = crate::managed_custom::active_schema_ids_from_default(stage.path())?;
+    crate::managed_custom::regenerate(stage.path(), &schemas)?;
+    let mut generated = BTreeMap::new();
+    read_snapshot_files(stage.path(), stage.path(), &mut generated)?;
+    files.retain(|path, _| path.starts_with("build"));
+    files.extend(generated);
+    if before != snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path))) {
+        files.retain(|path, _| !path.starts_with("build"));
+    }
+    store_snapshot(root, &files, grant_access)
 }
 
 pub fn has_schemas() -> bool {
@@ -701,13 +961,25 @@ fn compilation_inputs(path: &Path) -> bool {
         && path != Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
 }
 
-fn publish_at(
+pub(crate) fn publish_at(
     root: &Path,
     incoming: &[(PathBuf, Vec<u8>)],
     grant_access: bool,
 ) -> Result<(), String> {
     let mut files = read_snapshot(root)?;
     let previous_sources = snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path)));
+    merge_public_files(&mut files, incoming)?;
+    if previous_sources != snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path)))
+    {
+        files.retain(|path, _| !path.starts_with("build"));
+    }
+    store_snapshot(root, &files, grant_access)
+}
+
+fn merge_public_files(
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+    incoming: &[(PathBuf, Vec<u8>)],
+) -> Result<(), String> {
     let has_schema_list = incoming.iter().any(|(path, _)| {
         path == Path::new("default.custom.yaml") || path == Path::new("default-custom.yaml")
     });
@@ -836,11 +1108,7 @@ fn publish_at(
             }
         }
     }
-    if previous_sources != snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path)))
-    {
-        files.retain(|path, _| !path.starts_with("build"));
-    }
-    store_snapshot(root, &files, grant_access)
+    Ok(())
 }
 
 fn snapshot_hash<'a>(files: impl Iterator<Item = (&'a PathBuf, &'a Vec<u8>)>) -> String {
@@ -1008,6 +1276,248 @@ fn grant_appcontainer_read(_root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_identity_compares_resolved_paths_and_rejects_missing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        assert!(same_directory(directory.path(), &child.join("..")));
+        assert!(!same_directory(directory.path(), &child));
+        assert!(!same_directory(
+            directory.path(),
+            &directory.path().join("missing")
+        ));
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("alias");
+            std::os::unix::fs::symlink(&child, &link).unwrap();
+            assert!(same_directory(&child, &link));
+        }
+    }
+
+    #[test]
+    fn main_package_overlap_preserves_installed_addon_sources_and_generated_customs() {
+        let root = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        std::fs::write(private.path().join(".keytao-easy-en.json"), "{}").unwrap();
+        let addon = [
+            (
+                "easy_en.schema.yaml".into(),
+                b"schema: {schema_id: easy_en, version: official}".to_vec(),
+            ),
+            ("easy_en.dict.yaml".into(), b"name: easy_en".to_vec()),
+            ("lua/easy_en.lua".into(), b"-- official addon".to_vec()),
+        ];
+        publish_at(root.path(), &addon, false).unwrap();
+        std::fs::create_dir(package.path().join("lua")).unwrap();
+        for (path, _) in &addon {
+            std::fs::write(package.path().join(path), "bundled: obsolete").unwrap();
+        }
+        std::fs::write(
+            package.path().join("easy_en.custom.yaml"),
+            "patch: {bundled: obsolete}",
+        )
+        .unwrap();
+        std::fs::write(
+            package.path().join("keytao.schema.yaml"),
+            "schema: {schema_id: keytao}",
+        )
+        .unwrap();
+        std::fs::write(
+            package.path().join("default.custom.yaml"),
+            "patch: {schema_list: [{schema: keytao}, {schema: easy_en}]}",
+        )
+        .unwrap();
+        publish_activation_at(
+            root.path(),
+            Some(package.path()),
+            None,
+            private.path(),
+            false,
+        )
+        .unwrap();
+        let installed = read_snapshot(root.path()).unwrap();
+        for (path, bytes) in &addon {
+            assert_eq!(installed[path], *bytes);
+        }
+        let generated = installed[Path::new("easy_en.custom.yaml")].clone();
+        assert!(
+            !std::str::from_utf8(&generated)
+                .unwrap()
+                .contains("obsolete")
+        );
+        publish_activation_at(
+            root.path(),
+            None,
+            Some(package.path()),
+            private.path(),
+            false,
+        )
+        .unwrap();
+        let remaining = read_snapshot(root.path()).unwrap();
+        for (path, bytes) in &addon {
+            assert_eq!(remaining[path], *bytes);
+        }
+        assert_eq!(remaining[Path::new("easy_en.custom.yaml")], generated);
+        assert!(!remaining.contains_key(Path::new("keytao.schema.yaml")));
+        assert_eq!(
+            crate::scheme_files::parse_schema_list(
+                std::str::from_utf8(&remaining[Path::new("default.custom.yaml")]).unwrap()
+            ),
+            ["easy_en"]
+        );
+    }
+
+    #[test]
+    fn durable_checkpoint_restores_pruned_generations_after_a_crash() {
+        for initially_empty in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let transaction = tempfile::tempdir().unwrap();
+            if !initially_empty {
+                let initial = BTreeMap::from([
+                    (
+                        "keytao.schema.yaml".into(),
+                        b"schema: {schema_id: keytao}".to_vec(),
+                    ),
+                    ("build/keytao.schema.yaml".into(), b"compiled".to_vec()),
+                    (LIBRIME_VERSION_FILE.into(), b"1.0".to_vec()),
+                ]);
+                store_snapshot(root.path(), &initial, false).unwrap();
+                publish_at(
+                    root.path(),
+                    &[("extra.yaml".into(), b"pending: true".to_vec())],
+                    false,
+                )
+                .unwrap();
+            }
+            let original = read_snapshot(root.path()).unwrap();
+            let pointers = GenerationPointers::read(root.path()).unwrap();
+            let checkpoint = checkpoint_at(root.path().into(), transaction.path()).unwrap();
+            let journal = serde_json::to_vec(&checkpoint).unwrap();
+            let replacement = BTreeMap::from([
+                (
+                    "replacement.schema.yaml".into(),
+                    b"schema: {schema_id: replacement}".to_vec(),
+                ),
+                (LIBRIME_VERSION_FILE.into(), b"2.0".to_vec()),
+            ]);
+            store_snapshot(root.path(), &replacement, false).unwrap();
+            prune_snapshots(root.path());
+            assert!(
+                pointers
+                    .generations()
+                    .all(|generation| !root.path().join(generation).exists())
+            );
+            let recovered: PublicSchemaCheckpoint = serde_json::from_slice(&journal).unwrap();
+            recovered.restore(transaction.path()).unwrap();
+            assert!(GenerationPointers::read(root.path()).unwrap() == pointers);
+            assert_eq!(read_snapshot(root.path()).unwrap(), original);
+            recovered.restore(transaction.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_switch_and_delete_remove_all_package_sources_and_generated_customs() {
+        let root = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            (
+                "default.custom.yaml",
+                "patch: {schema_list: [{schema: keytao_a}], menu/page_size: 6}",
+            ),
+            (
+                "keytao_a.schema.yaml",
+                "schema: {schema_id: keytao_a}\nengine: {filters: [lua_filter@*existing]}",
+            ),
+            ("keytao_a.dict.yaml", "name: keytao_a"),
+            (
+                "keytao_a.custom.yaml",
+                "patch: {translator/dictionary: keytao_a}",
+            ),
+            ("unused.custom.yaml", "patch: {menu/page_size: 9}"),
+            ("squirrel.custom.yaml", "frontend: macos"),
+            ("weasel.custom.yaml", "frontend: windows"),
+            ("keytao_a.user.yaml", "private: true"),
+            ("rime.lua", "-- first package"),
+        ] {
+            std::fs::write(first.path().join(path), content).unwrap();
+        }
+        std::fs::write(
+            second.path().join("other.schema.yaml"),
+            "schema: {schema_id: other}",
+        )
+        .unwrap();
+        publish_at(
+            root.path(),
+            &[(
+                "easy_en.schema.yaml".into(),
+                b"schema: {schema_id: easy_en}".to_vec(),
+            )],
+            false,
+        )
+        .unwrap();
+        publish_activation_at(root.path(), Some(first.path()), None, root.path(), false).unwrap();
+        let files = read_snapshot(root.path()).unwrap();
+        for name in [
+            "squirrel.custom.yaml",
+            "weasel.custom.yaml",
+            "keytao_a.user.yaml",
+        ] {
+            assert!(!files.contains_key(Path::new(name)), "{name}");
+        }
+        let custom = std::str::from_utf8(&files[Path::new("keytao_a.custom.yaml")]).unwrap();
+        assert!(custom.contains("# keytao-generated begin v1"));
+        assert!(files.contains_key(Path::new(crate::remove_filter::SCRIPT_PATH)));
+        publish_activation_at(
+            root.path(),
+            Some(second.path()),
+            Some(first.path()),
+            root.path(),
+            false,
+        )
+        .unwrap();
+        let files = read_snapshot(root.path()).unwrap();
+        for name in [
+            "keytao_a.schema.yaml",
+            "keytao_a.dict.yaml",
+            "keytao_a.custom.yaml",
+            "unused.custom.yaml",
+            "rime.lua",
+            crate::remove_filter::SCRIPT_PATH,
+        ] {
+            assert!(!files.contains_key(Path::new(name)), "{name}");
+        }
+        let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
+        assert_eq!(
+            crate::scheme_files::parse_schema_list(config),
+            ["easy_en", "other"]
+        );
+        assert!(!config.contains("menu/page_size"));
+        assert!(files.contains_key(Path::new("easy_en.custom.yaml")));
+        publish_activation_at(root.path(), None, Some(second.path()), root.path(), false).unwrap();
+        let files = read_snapshot(root.path()).unwrap();
+        assert!(!files.contains_key(Path::new("other.schema.yaml")));
+        let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
+        assert_eq!(crate::scheme_files::parse_schema_list(config), ["easy_en"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_publication_rejects_symbolic_links_without_changing_pointers() {
+        let root = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("outside.yaml"), "outside: true").unwrap();
+        std::os::unix::fs::symlink(outside.path(), package.path().join("escape")).unwrap();
+        assert!(
+            publish_activation_at(root.path(), Some(package.path()), None, root.path(), false)
+                .is_err()
+        );
+        assert!(GenerationPointers::read(root.path()).unwrap() == GenerationPointers::default());
+    }
 
     #[test]
     fn public_build_preserves_skipped_schemas_for_prebuilt_validation() {
@@ -1484,7 +1994,10 @@ mod tests {
                     "radical_pinyin.schema.yaml".into(),
                     b"schema: {schema_id: radical_pinyin}".to_vec(),
                 ),
-                ("lua/rime_ice/lunar.db".into(), b"public lunar database".to_vec()),
+                (
+                    "lua/rime_ice/lunar.db".into(),
+                    b"public lunar database".to_vec(),
+                ),
             ],
             false,
         )
