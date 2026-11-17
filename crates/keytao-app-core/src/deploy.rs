@@ -65,8 +65,7 @@ pub fn record_android_result(
     record_result(core, root, true)
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
-pub(crate) fn render_user_schema_logos(user_dir: &std::path::Path) {
+pub fn render_user_schema_logos(user_dir: &std::path::Path) {
     let mut schemas = std::collections::BTreeMap::new();
     for dir in [user_dir.join("build"), user_dir.to_path_buf()] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -100,6 +99,13 @@ pub(crate) fn render_user_schema_logos(user_dir: &std::path::Path) {
         &schemas.into_iter().collect::<Vec<_>>(),
         192,
     );
+}
+
+pub fn active_schema_logo_path(user_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let schema_id = keytao_core::deployed_schema_id_from_dir(user_dir)?;
+    let output = user_dir.canonicalize().ok()?.join(".keytao-logo");
+    let path = output.join(format!("{schema_id}.png")).canonicalize().ok()?;
+    (path.starts_with(&output) && path.is_file()).then_some(path)
 }
 
 #[cfg(target_os = "ios")]
@@ -168,6 +174,8 @@ pub(crate) async fn rime_deploy_default_inner(
     #[cfg(not(target_os = "windows"))]
     let user = dest.to_string_lossy().into_owned();
     let shared = crate::ime_status::app_shared_data_dir(core);
+    #[cfg(not(target_os = "windows"))]
+    let logo_root = dest.clone();
 
     core.emit(CoreEvent::DeployProgress("正在部署 librime...".into()));
 
@@ -190,11 +198,18 @@ pub(crate) async fn rime_deploy_default_inner(
     let deploy_result =
         tokio::task::spawn_blocking(move || windows_deploy_rime_blocking(dest, shared)).await;
     #[cfg(target_os = "macos")]
-    let deploy_result =
-        tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await;
+    let deploy_result = tokio::task::spawn_blocking(move || {
+        keytao_core::deploy(user, shared)?;
+        render_user_schema_logos(&logo_root);
+        Ok::<(), String>(())
+    })
+    .await;
     #[cfg(target_os = "linux")]
     let (deploy_result, _deploy_lock) = match tokio::task::spawn_blocking(move || {
         let result = runtime.reload();
+        if result.is_ok() {
+            render_user_schema_logos(&logo_root);
+        }
         (result, _deploy_lock)
     })
     .await
@@ -284,6 +299,63 @@ pub async fn rime_deploy_default(
     }
     .await;
     result.map_err(CoreError::Other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_schema_logo_path_uses_rendered_schema_and_selected_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(
+            root.join("build/default.yaml"),
+            "schema_list:\n  - schema: xmjd6\n  - schema: custom_schema\n",
+        )
+        .unwrap();
+        for (id, name) in [("xmjd6", "Xingmao"), ("custom_schema", "Custom")] {
+            std::fs::write(
+                root.join("build").join(format!("{id}.schema.yaml")),
+                format!("schema:\n  schema_id: {id}\n  name: {name}\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join(format!("{name}.svg")),
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#84cc16"/></svg>"##,
+            )
+            .unwrap();
+        }
+        assert!(active_schema_logo_path(root).is_none());
+        render_user_schema_logos(root);
+        let output = root.canonicalize().unwrap().join(".keytao-logo");
+        assert_eq!(active_schema_logo_path(root), Some(output.join("xmjd6.png")));
+        std::fs::write(
+            root.join("user.yaml"),
+            "var:\n  previously_selected_schema: custom_schema\n",
+        )
+        .unwrap();
+        let selected = output.join("custom_schema.png");
+        assert_eq!(active_schema_logo_path(root), Some(selected.clone()));
+        assert!(std::fs::read(&selected).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+        std::fs::remove_file(selected).unwrap();
+        assert!(active_schema_logo_path(root).is_none());
+    }
+
+    #[test]
+    fn active_schema_logo_path_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("user");
+        std::fs::create_dir_all(root.join(".keytao-logo")).unwrap();
+        std::fs::write(root.join("outside.png"), b"outside").unwrap();
+        std::fs::write(
+            root.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: ../outside\n",
+        )
+        .unwrap();
+        assert!(active_schema_logo_path(&root).is_none());
+    }
 }
 
 #[cfg(target_os = "ios")]

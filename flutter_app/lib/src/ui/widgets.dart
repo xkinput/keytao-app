@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
@@ -6,6 +8,33 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'theme.dart';
+
+class SchemaLogo extends StatelessWidget {
+  const SchemaLogo({super.key, required this.controller, required this.size});
+  final AppController controller;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget fallback() => Image.asset(
+      logoAsset,
+      width: size,
+      height: size,
+      excludeFromSemantics: true,
+    );
+    final path = controller.activeSchemaLogoPath;
+    return path == null
+        ? fallback()
+        : Image.file(
+            File(path),
+            key: ValueKey((path, controller.activeSchemaLogoRevision)),
+            width: size,
+            height: size,
+            excludeFromSemantics: true,
+            errorBuilder: (_, _, _) => fallback(),
+          );
+  }
+}
 
 class AppSystemBars extends StatelessWidget {
   const AppSystemBars({super.key, required this.child});
@@ -26,6 +55,305 @@ class AppSystemBars extends StatelessWidget {
     value: styleOf(context),
     child: child,
   );
+}
+
+class EyebrowLabel extends StatelessWidget {
+  const EyebrowLabel(this.label, {super.key});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    header: true,
+    child: Text(
+      label,
+      style: context.theme.typography.body.sm.copyWith(
+        color: AppPalette.of(context).muted,
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        letterSpacing: .52,
+      ),
+    ),
+  );
+}
+
+class BigTextRadioGroup<T> extends StatelessWidget {
+  const BigTextRadioGroup({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.options,
+    this.onChanged,
+    this.disabled = const {},
+    this.semanticLabels = const {},
+  });
+  final String label;
+  final T value;
+  final Map<T, String> options;
+  final ValueChanged<T>? onChanged;
+  final Set<T> disabled;
+  final Map<T, String> semanticLabels;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: label,
+    child: RadioGroup<T>(
+      groupValue: value,
+      onChanged: (selected) {
+        if (selected case final T option) onChanged?.call(option);
+      },
+      child: Wrap(
+        spacing: MediaQuery.sizeOf(context).width >= 720 ? 20 : 18,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final entry in options.entries)
+            _BigTextRadio<T>(
+              key: ValueKey(entry.key),
+              value: entry.key,
+              label: entry.value,
+              semanticLabel: semanticLabels[entry.key] ?? entry.value,
+              selected: entry.key == value,
+              enabled: onChanged != null && !disabled.contains(entry.key),
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _BigTextRadio<T> extends StatefulWidget {
+  const _BigTextRadio({
+    super.key,
+    required this.value,
+    required this.label,
+    required this.semanticLabel,
+    required this.selected,
+    required this.enabled,
+  });
+  final T value;
+  final String label;
+  final String semanticLabel;
+  final bool selected;
+  final bool enabled;
+
+  @override
+  State<_BigTextRadio<T>> createState() => _BigTextRadioState<T>();
+}
+
+class _BigTextRadioState<T> extends State<_BigTextRadio<T>>
+    with RadioClient<T> {
+  @override
+  final focusNode = FocusNode();
+  @override
+  bool get tristate => false;
+  @override
+  T get radioValue => widget.value;
+  @override
+  bool get enabled => widget.enabled;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    registry = RadioGroup.maybeOf<T>(context);
+  }
+
+  @override
+  void dispose() {
+    registry = null;
+    focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final color = widget.selected ? palette.ink : palette.unselected;
+    return FTappable(
+      focusNode: focusNode,
+      semanticsLabel: widget.semanticLabel,
+      semanticsButton: false,
+      semanticsChecked: widget.selected,
+      semanticsInMutuallyExclusiveGroup: true,
+      excludeSemantics: true,
+      focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
+        color: ChromeAccent.of(context),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+      },
+      onPress: enabled
+          ? () {
+              if (!widget.selected) registry?.onChanged(widget.value);
+            }
+          : null,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            widget.label,
+            style: context.theme.typography.body.sm.copyWith(
+              color: enabled ? color : context.theme.colors.disable(color),
+              fontSize: MediaQuery.sizeOf(context).width >= 720 ? 36 : 24,
+              fontWeight: FontWeight.w700,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class HairlineGridSection extends StatelessWidget {
+  const HairlineGridSection({
+    super.key,
+    required this.children,
+    this.minCellWidth = 320,
+  }) : assert(minCellWidth > 0);
+  final List<Widget> children;
+  final double minCellWidth;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      if (children.isEmpty) return const SizedBox.shrink();
+      final columns =
+          MediaQuery.sizeOf(context).width >= 720 && constraints.hasBoundedWidth
+          ? (constraints.maxWidth / minCellWidth).floor().clamp(
+              1,
+              children.length,
+            )
+          : 1;
+      final border = BorderSide(color: AppPalette.of(context).hairline);
+      return Table(
+        defaultColumnWidth: constraints.hasBoundedWidth
+            ? const FlexColumnWidth()
+            : const IntrinsicColumnWidth(),
+        border: TableBorder(
+          bottom: border,
+          horizontalInside: border,
+          verticalInside: border,
+        ),
+        children: [
+          for (var start = 0; start < children.length; start += columns)
+            TableRow(
+              children: [
+                for (var column = 0; column < columns; column++)
+                  start + column < children.length
+                      ? children[start + column]
+                      : const SizedBox.shrink(),
+              ],
+            ),
+        ],
+      );
+    },
+  );
+}
+
+class HairlineGridCell extends StatelessWidget {
+  const HairlineGridCell({
+    super.key,
+    required this.child,
+    this.padding,
+    this.color,
+  });
+  final Widget child;
+  final EdgeInsetsGeometry? padding;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    color: color ?? Colors.transparent,
+    child: Padding(
+      padding:
+          padding ??
+          (MediaQuery.sizeOf(context).width >= 720
+              ? const EdgeInsets.symmetric(horizontal: 32, vertical: 28)
+              : const EdgeInsets.symmetric(vertical: 16)),
+      child: child,
+    ),
+  );
+}
+
+class StatusPill extends StatelessWidget {
+  const StatusPill(this.label, {super.key, this.color});
+  final String label;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final desktop = MediaQuery.sizeOf(context).width >= 720;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: palette.controlSurface,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: desktop ? 14 : 12,
+          vertical: desktop ? 6 : 4,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          spacing: desktop ? 8 : 6,
+          children: [
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: color ?? palette.success,
+                shape: BoxShape.circle,
+              ),
+              child: const SizedBox.square(dimension: 8),
+            ),
+            Text(
+              label,
+              style: context.theme.typography.body.sm.copyWith(
+                color: palette.ink,
+                fontSize: desktop ? 15 : 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class AppBadge extends StatelessWidget {
+  const AppBadge(this.label, {super.key, this.background, this.foreground});
+  final String label;
+  final Color? background;
+  final Color? foreground;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final desktop = MediaQuery.sizeOf(context).width >= 720;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: background ?? palette.successBackground,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: desktop ? 10 : 9,
+          vertical: desktop ? 2 : 1,
+        ),
+        child: Text(
+          label,
+          style: context.theme.typography.body.sm.copyWith(
+            color: foreground ?? palette.successForeground,
+            fontSize: desktop ? 13 : 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class Section extends StatelessWidget {
@@ -57,43 +385,24 @@ class Section extends StatelessWidget {
               ),
               const SizedBox(width: 8),
             ],
-            Expanded(
-              child: Text(
-                title,
-                style: context.theme.typography.body.sm.copyWith(
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
+            Expanded(child: EyebrowLabel(title)),
             ?trailing,
           ],
         ),
       ),
       if (children.isNotEmpty)
-        FTileGroup(
-          style: FTileGroupStyleDelta.delta(
-            decoration: DecorationDelta.value(
-              ShapeDecoration(
-                shape: RoundedRectangleBorder(
-                  side: BorderSide(color: context.theme.colors.border),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-            ),
-          ),
-          divider: FItemDivider.full,
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (final child in children)
-              FTile.raw(
-                style: const FItemStyleDelta.delta(
-                  padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
-                  rawContentStyle: FRawItemContentStyleDelta.delta(
-                    padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: BorderSide(color: AppPalette.of(context).hairline),
                   ),
                 ),
                 child: Padding(
                   padding: EdgeInsets.symmetric(
-                    horizontal: 16,
                     vertical: context.platformVariant.touch ? 16 : 12,
                   ),
                   child: DefaultTextStyle.merge(
@@ -478,10 +787,73 @@ class ActionButton extends StatelessWidget {
   final String? tooltip;
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final colors = context.theme.colors;
+    final background = primary ? ChromeAccent.of(context) : Colors.transparent;
+    final foreground = primary ? Colors.white : palette.ink;
+    ShapeDecoration decoration(Color fill, Color stroke) => ShapeDecoration(
+      color: fill,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(999),
+        side: primary ? BorderSide.none : BorderSide(color: stroke, width: 1.5),
+      ),
+    );
     final button = FButton(
       onPress: onPress,
       variant: primary ? FButtonVariant.primary : FButtonVariant.outline,
       mainAxisSize: MainAxisSize.min,
+      style: FButtonStyleDelta.delta(
+        decoration: FVariants.from(
+          decoration(background, palette.ink),
+          variants: {
+            [
+              FTappableVariant.hovered,
+              FTappableVariant.pressed,
+            ]: DecorationDelta.value(
+              decoration(
+                primary ? colors.hover(background) : palette.controlSurface,
+                palette.ink,
+              ),
+            ),
+            [FTappableVariant.disabled]: DecorationDelta.value(
+              decoration(
+                primary ? colors.disable(background) : Colors.transparent,
+                colors.disable(palette.ink),
+              ),
+            ),
+          },
+        ),
+        focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
+          color: ChromeAccent.of(context),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        contentStyle: FButtonContentStyleDelta.delta(
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          padding: const EdgeInsetsGeometryDelta.value(
+            EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          ),
+          textStyle: FVariants.from(
+            context.theme.typography.body.sm.copyWith(
+              color: foreground,
+              fontWeight: FontWeight.w600,
+              height: 1.2,
+            ),
+            variants: {
+              [FTappableVariant.disabled]: TextStyleDelta.delta(
+                color: colors.disable(foreground),
+              ),
+            },
+          ),
+          iconStyle: FVariants.from(
+            IconThemeData(color: foreground),
+            variants: {
+              [FTappableVariant.disabled]: IconThemeDataDelta.delta(
+                color: colors.disable(foreground),
+              ),
+            },
+          ),
+        ),
+      ),
       prefix: icon == null
           ? null
           : Icon(icon, size: context.platformVariant.touch ? 18 : 16),
@@ -535,24 +907,32 @@ class AppPageBody extends StatelessWidget {
     required this.controller,
     required this.page,
     required this.children,
+    this.fullWidth = false,
+    this.spacing = 32,
   });
   final AppController controller;
   final AppPage page;
   final List<Widget> children;
+  final bool fullWidth;
+  final double spacing;
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
     key: PageStorageKey(page.id),
     primary: false,
-    padding: context.platformVariant.touch
+    padding: fullWidth
+        ? MediaQuery.sizeOf(context).width >= 720
+              ? EdgeInsets.zero
+              : const EdgeInsets.fromLTRB(16, 0, 16, 24)
+        : context.platformVariant.touch
         ? const EdgeInsets.fromLTRB(16, 8, 16, 24)
         : const EdgeInsets.fromLTRB(32, 8, 32, 32),
     child: Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 760),
+        constraints: BoxConstraints(maxWidth: fullWidth ? 1440 : 760),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: 32,
+          spacing: spacing,
           children: [
             if (controller.appUpdate?.hasUpdate == true)
               AppUpdateBanner(controller: controller),
@@ -718,10 +1098,7 @@ class AppBrand extends StatelessWidget {
   );
 }
 
-Color successColor(BuildContext context) =>
-    context.theme.colors.brightness == Brightness.dark
-    ? const Color(0xFF86EFAC)
-    : const Color(0xFF166534);
+Color successColor(BuildContext context) => AppPalette.of(context).success;
 Color warningColor(BuildContext context) =>
     context.theme.colors.brightness == Brightness.dark
     ? const Color(0xFFFCD34D)

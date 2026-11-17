@@ -155,6 +155,40 @@ void main() {
     }
   });
 
+  testWidgets('phone preview renders keyboard rows without desktop settings', (
+    tester,
+  ) async {
+    _narrowScreen(tester);
+    final controller = ViewController(BridgePlatform.android)
+      ..uiSettings = null
+      ..candidatePageSize = 3;
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: BridgePlatform.android,
+        home: FScaffold(
+          child: SingleChildScrollView(
+            child: SettingsCard(controller: controller),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final key in 'qwertyuiopasdfghjkl'.split('')) {
+      expect(find.text(key), findsOneWidget);
+    }
+    expect(
+      find.byKey(const ValueKey('candidate-preview-text-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('candidate-preview-text-3')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
   for (final orientation in PanelOrientationDto.values) {
     testWidgets('candidate count updates live in ${orientation.name}', (
       tester,

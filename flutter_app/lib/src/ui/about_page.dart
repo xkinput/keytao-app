@@ -3,6 +3,7 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import 'theme.dart';
 import 'widgets.dart';
 
 class AboutPage extends StatelessWidget {
@@ -25,13 +26,27 @@ class AboutPage extends StatelessWidget {
                 Text(
                   AppStrings.title,
                   style: context.theme.typography.display.xl2.copyWith(
-                    fontWeight: FontWeight.w600,
+                    fontSize: MediaQuery.sizeOf(context).width >= 720 ? 40 : 32,
+                    color: AppPalette.of(context).ink,
+                    fontWeight: FontWeight.w700,
+                    height: 1.1,
                   ),
                 ),
-                const SizedBox(height: 6),
-                Text('v${c.info.appVersion}'),
+                const SizedBox(height: 8),
+                Text(
+                  'v${c.info.appVersion}',
+                  style: context.theme.typography.body.sm.copyWith(
+                    color: AppPalette.of(context).muted,
+                  ),
+                ),
                 const SizedBox(height: 12),
-                const Text(AppStrings.tagline, textAlign: TextAlign.center),
+                Text(
+                  AppStrings.tagline,
+                  textAlign: TextAlign.center,
+                  style: context.theme.typography.body.sm.copyWith(
+                    color: AppPalette.of(context).muted,
+                  ),
+                ),
               ],
             ),
           ),
