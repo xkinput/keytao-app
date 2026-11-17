@@ -149,24 +149,32 @@ pub struct DeployResult {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_signing_team_id(output: &str) -> Result<&str, String> {
+fn macos_signing_team_id(output: &str) -> Result<Option<&str>, String> {
     let mut teams = output
         .lines()
         .filter_map(|line| line.strip_prefix("TeamIdentifier="));
     let team = teams.next().ok_or("Code signature has no Team ID")?;
-    if teams.next().is_some()
-        || team.len() != 10
+    if teams.next().is_some() {
+        return Err("Code signature has an invalid Team ID".into());
+    }
+    if team == "not set" {
+        return Ok(None);
+    }
+    if team.len() != 10
         || !team
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
         return Err("Code signature has an invalid Team ID".into());
     }
-    Ok(team)
+    Ok(Some(team))
 }
 
 #[cfg(target_os = "macos")]
-fn verified_macos_signing_team(executable: &std::path::Path) -> Result<String, String> {
+fn verified_macos_signing_team(
+    executable: &std::path::Path,
+    require_apple_anchor: bool,
+) -> Result<Option<String>, String> {
     use std::process::{Command, Stdio};
 
     let display = Command::new("/usr/bin/codesign")
@@ -190,10 +198,16 @@ fn verified_macos_signing_team(executable: &std::path::Path) -> Result<String, S
     let metadata = String::from_utf8(display.stderr)
         .map_err(|error| format!("Invalid code signature metadata: {error}"))?;
     let team = macos_signing_team_id(&metadata)?;
-    // Bind the reported Team ID to an Apple-issued signing certificate.
-    let requirement = format!("anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
-    let verify = Command::new("/usr/bin/codesign")
-        .args(["--verify", "--strict", "-R", &format!("={requirement}")])
+    let mut verify = Command::new("/usr/bin/codesign");
+    verify.args(["--verify", "--strict"]);
+    if let (true, Some(team)) = (require_apple_anchor, team) {
+        // Bind the reported Team ID to an Apple-issued signing certificate.
+        verify.args([
+            "-R",
+            &format!("=anchor apple generic and certificate leaf[subject.OU] = \"{team}\""),
+        ]);
+    }
+    let verify = verify
         .arg(executable)
         .stdin(Stdio::null())
         .output()
@@ -210,11 +224,24 @@ fn verified_macos_signing_team(executable: &std::path::Path) -> Result<String, S
             String::from_utf8_lossy(&verify.stderr).trim()
         ));
     }
-    Ok(team.to_owned())
+    Ok(team.map(str::to_owned))
 }
 
 #[cfg(target_os = "macos")]
-fn verified_macos_deploy_executable() -> Result<std::path::PathBuf, String> {
+fn validate_macos_deploy_signature(
+    app_team: Option<&str>,
+    ime_signature: Result<Option<String>, String>,
+) -> Result<(), String> {
+    let ime_team = ime_signature
+        .map_err(|error| format!("KeyTao input method signature is invalid: {error}"))?;
+    if app_team.is_some() && ime_team.as_deref() != app_team {
+        return Err("KeyTao input method signature Team ID does not match the App".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verified_macos_deploy_executable(app: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let executable =
         std::path::PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME");
     if !executable.is_file() {
@@ -222,13 +249,16 @@ fn verified_macos_deploy_executable() -> Result<std::path::PathBuf, String> {
             "KeyTao macOS input method is not installed; install it before deploying".into(),
         );
     }
-    let app = std::env::current_exe()
-        .map_err(|error| format!("Cannot determine the App executable: {error}"))?;
-    let app_team = verified_macos_signing_team(&app)?;
-    let ime_team = verified_macos_signing_team(&executable)?;
-    if app_team != ime_team {
-        return Err("KeyTao input method signature Team ID does not match the App".into());
+    let canonical = executable
+        .canonicalize()
+        .map_err(|error| format!("Cannot resolve KeyTao input method path: {error}"))?;
+    if canonical != executable {
+        return Err("KeyTao input method path must not contain symlinks".into());
     }
+    let app_team = verified_macos_signing_team(app, true)
+        .map_err(|error| format!("KeyTao App signature is invalid: {error}"))?;
+    let ime_signature = verified_macos_signing_team(&executable, app_team.is_some());
+    validate_macos_deploy_signature(app_team.as_deref(), ime_signature)?;
     Ok(executable)
 }
 
@@ -290,7 +320,9 @@ pub(crate) async fn rime_deploy_default_inner(
         tokio::task::spawn_blocking(move || windows_deploy_rime_blocking(dest, shared)).await;
     #[cfg(target_os = "macos")]
     let deploy_result = tokio::task::spawn_blocking(move || {
-        let executable = verified_macos_deploy_executable()?;
+        let app = std::env::current_exe()
+            .map_err(|error| format!("Cannot determine the App executable: {error}"))?;
+        let executable = verified_macos_deploy_executable(&app)?;
         keytao_core::deploy_child::run_deploy_child(
             &executable,
             std::time::Duration::from_secs(600),
@@ -426,15 +458,16 @@ mod tests {
     fn signing_team_id_rejects_missing_ambiguous_or_injected_values() {
         assert_eq!(
             macos_signing_team_id("Executable=/example\nTeamIdentifier=AB12CD34EF\n"),
-            Ok("AB12CD34EF")
+            Ok(Some("AB12CD34EF"))
         );
         for output in [
             "",
-            "TeamIdentifier=not set\n",
             "TeamIdentifier=\n",
+            "TeamIdentifier=not Set\n",
             "TeamIdentifier=AB12CD34E\n",
             "TeamIdentifier=ab12cd34ef\n",
             "TeamIdentifier=AB12CD34EF\nTeamIdentifier=ZZ12CD34EF\n",
+            "TeamIdentifier=not set\nTeamIdentifier=AB12CD34EF\n",
             "TeamIdentifier=AB12CD34EF\" or true\n",
         ] {
             assert!(macos_signing_team_id(output).is_err(), "{output:?}");
@@ -443,11 +476,58 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn signing_team_id_parses_not_set_as_no_team() {
+        assert_eq!(macos_signing_team_id("TeamIdentifier=not set\n"), Ok(None));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_deploy_signature_policy() {
+        for (app_team, ime_team, allowed) in [
+            (None, None, true),
+            (None, Some("AB12CD34EF"), true),
+            (Some("AB12CD34EF"), Some("AB12CD34EF"), true),
+            (Some("AB12CD34EF"), None, false),
+            (Some("AB12CD34EF"), Some("ZZ12CD34EF"), false),
+        ] {
+            assert_eq!(
+                validate_macos_deploy_signature(app_team, Ok(ime_team.map(str::to_owned))).is_ok(),
+                allowed,
+                "App: {app_team:?}, IME: {ime_team:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_deploy_signature_policy_rejects_failed_verification() {
+        assert_eq!(
+            validate_macos_deploy_signature(None, Err("strict verification failed".into())),
+            Err("KeyTao input method signature is invalid: strict verification failed".into())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn signing_verification_rejects_unsigned_executable_without_running_it() {
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("untrusted-ime");
         std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
-        assert!(verified_macos_signing_team(&executable).is_err());
+        assert!(verified_macos_signing_team(&executable, true).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Read-only signature check requiring the installed KeyTao App and input method"]
+    fn installed_macos_deploy_signature_check() {
+        let executable = verified_macos_deploy_executable(std::path::Path::new(
+            "/Applications/KeyTao.app/Contents/MacOS/KeyTao",
+        ))
+        .expect("Installed KeyTao deploy signature check failed");
+        assert_eq!(
+            executable,
+            std::path::Path::new("/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME")
+        );
     }
 
     #[test]
