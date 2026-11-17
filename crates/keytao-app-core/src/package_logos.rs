@@ -1,20 +1,20 @@
-use super::{safe_path, stored_archive, validate_relative};
+use super::{safe_path, stored_archive_file, validate_relative};
 use crate::Core;
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Cursor, Read},
+    io::{Read, Seek},
     path::{Path, PathBuf},
 };
 
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 
 pub(super) fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
-    let (bytes, meta) = stored_archive(core, scheme_key).ok()?;
-    render_archive_logo(&core.env().cache_dir, &bytes, &meta.zip_sha256, scheme_key)
+    let (archive, meta) = stored_archive_file(core, scheme_key).ok()?;
+    render_archive_logo(&core.env().cache_dir, archive, &meta.zip_sha256, scheme_key)
 }
 
-fn read_entry(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<Vec<u8>> {
+fn read_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<Vec<u8>> {
     validate_relative(name).ok()?;
     let file = archive.by_name(name).ok()?;
     if file.is_dir()
@@ -32,13 +32,13 @@ fn read_entry(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Optio
     (bytes.len() as u64 <= MAX_SOURCE_BYTES).then_some(bytes)
 }
 
-fn render_archive_logo(
+fn render_archive_logo<R: Read + Seek>(
     cache_root: &Path,
-    bytes: &[u8],
+    reader: R,
     archive_sha: &str,
     scheme_key: &str,
 ) -> Option<PathBuf> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    let mut archive = zip::ZipArchive::new(reader).ok()?;
     if archive.len() > 10_000 {
         return None;
     }
@@ -112,7 +112,7 @@ mod tests {
     use std::io::Write;
 
     fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, bytes) in files {
             zip.start_file(*name, zip::write::SimpleFileOptions::default())
                 .unwrap();
@@ -124,7 +124,7 @@ mod tests {
     fn render(cache: &Path, bytes: &[u8]) -> Option<PathBuf> {
         render_archive_logo(
             cache,
-            bytes,
+            std::io::Cursor::new(bytes),
             &format!("{:x}", Sha256::digest(bytes)),
             "package",
         )
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn symlink_icon_and_cache_escape_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         zip.start_file("id.schema.yaml", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(b"schema:\n  schema_id: id\n  icon: own.svg\n")
