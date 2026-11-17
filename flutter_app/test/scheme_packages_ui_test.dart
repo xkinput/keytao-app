@@ -144,6 +144,48 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  for (final platform in [
+    BridgePlatform.windows,
+    BridgePlatform.macOs,
+    BridgePlatform.linux,
+  ]) {
+    testWidgets('${platform.name} missing scheme prompt opens scheme page', (
+      tester,
+    ) async {
+      final c = _PackageController(platform)
+        ..installedPackages = []
+        ..local = const LocalSchemaDto(
+          installed: false,
+          deployed: false,
+          schemas: [],
+        );
+      addTearDown(c.dispose);
+      _size(tester, const Size(1200, 1000));
+      await tester.pumpWidget(
+        KeyTaoApp(
+          controller: c,
+          initialOnboarding: const OnboardingDto(completed: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+      if (platform == BridgePlatform.windows) {
+        expect(c.activePage, AppPage.scheme);
+        expect(find.byType(SchemePage), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('nav-ime')));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('请先安装输入方案。'), findsOneWidget);
+      final button = find.widgetWithText(ActionButton, '前往安装方案');
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(c.activePage, AppPage.scheme);
+      expect(find.byType(SchemePage), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   for (final (installed, deployed, latest, label) in [
     (false, false, '2', AppStrings.install),
     (true, true, '1', null),

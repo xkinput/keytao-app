@@ -6,6 +6,7 @@ import '../ui/onboarding.dart';
 import '../ui/shell.dart';
 import '../ui/theme.dart';
 import 'controller.dart';
+import 'options.dart';
 
 class KeyTaoApp extends StatefulWidget {
   const KeyTaoApp({
@@ -25,6 +26,12 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
   @override
   void initState() {
     super.initState();
+    final c = widget.controller;
+    if (c.isWindows &&
+        c.local?.installed == false &&
+        c.activePage == AppPage.input) {
+      c.selectPage(AppPage.scheme);
+    }
     _lifecycle = AppLifecycleListener(
       onResume: widget.controller.onResume,
       onHide: widget.controller.onPause,

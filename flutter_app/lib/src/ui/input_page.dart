@@ -174,6 +174,7 @@ class _CurrentSchemeHero extends StatelessWidget {
       _ => null,
     };
     final local = c.local;
+    final needsScheme = !c.isMobile && local?.installed == false;
     final version =
         package?.version ??
         addon?.version ??
@@ -257,15 +258,21 @@ class _CurrentSchemeHero extends StatelessWidget {
               if (source != null) Text('来自 $source'),
             ],
           ),
+          if (needsScheme) const Text('请先安装输入方案。'),
           ActionRow(
             children: [
+              if (!needsScheme)
+                ActionButton(
+                  c.isDeploying ? AppStrings.deploying : AppStrings.redeploy,
+                  primary: true,
+                  tooltip: c.deployTooltip,
+                  onPress: c.canDeploy ? c.deploy : null,
+                ),
               ActionButton(
-                c.isDeploying ? AppStrings.deploying : AppStrings.redeploy,
-                primary: true,
-                tooltip: c.deployTooltip,
-                onPress: c.canDeploy ? c.deploy : null,
+                needsScheme ? '前往安装方案' : '切换方案',
+                primary: needsScheme,
+                onPress: () => c.selectPage(AppPage.scheme),
               ),
-              ActionButton('切换方案', onPress: () => c.selectPage(AppPage.scheme)),
             ],
           ),
         ],

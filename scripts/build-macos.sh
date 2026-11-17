@@ -258,6 +258,17 @@ xattr -dr com.apple.provenance "/Library/Input Methods/KeyTao.app" 2>/dev/null |
 "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --enable-input-source || true
 "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --select-input-source || true
 "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --list-input-sources || true
+if [[ -z "${CI:-}" && -z "${COMMAND_LINE_INSTALL:-}" && "${3:-/}" == "/" ]]; then
+    console_uid="$(/usr/bin/stat -f %u /dev/console 2>/dev/null || true)"
+    if [[ "$console_uid" =~ ^[0-9]+$ && "$console_uid" -ne 0 ]]; then
+        console_user="$(/usr/bin/id -nu "$console_uid" 2>/dev/null || true)"
+        case "$console_user" in
+            ''|root|loginwindow|_mbsetupuser) ;;
+            *) /bin/launchctl asuser "$console_uid" /usr/bin/sudo -u "$console_user" \
+                /usr/bin/open -a "/Applications/KeyTao.app" || true ;;
+        esac
+    fi
+fi
 exit 0
 SCRIPTEOF
 chmod +x "$PKG_SCRIPTS/postinstall"
