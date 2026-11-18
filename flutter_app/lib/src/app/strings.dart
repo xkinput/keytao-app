@@ -8,7 +8,6 @@ abstract final class AppStrings {
   static const appUpdate = 'KeyTao 有新版本可用';
   static const ime = '输入法';
   static const scheme = '方案';
-  static const extension = '扩展安装';
   static const about = '关于';
   static const debug = '调试';
   static const schemeTitle = '键道方案';
@@ -52,18 +51,7 @@ abstract final class AppStrings {
   static const iosKeyboardStatusRefresh = '打开一次 KeyTao 键盘即可刷新状态。';
   static const iosKeyboardReady = '已启用 · 已允许完全访问';
   static const mobileKeyboard = '移动端键盘';
-  static const customDirectory = '安装到自定义目录';
-  static const customDirectoryDescription = '将方案安装到指定的输入法数据目录，安装完成后请手动重新部署输入法。';
-  static const selectDirectory = '选择目录';
-  static const reselectDirectory = '重新选择目录';
   static const openDirectory = '打开目录';
-  static const opening = '打开中…';
-  static const installNow = '立即安装';
-  static const noDefaultCustom = '未检测到 default.custom.yaml，将自动创建';
-  static const detectedSchemas = '检测到本地方案：';
-  static const directoryEmpty = '目录为空';
-  static const reading = '读取中…';
-  static const customInstallDone = '安装完成，请手动重新部署输入法';
   static const easyEnglish = 'Easy English · 英文单词输入';
   static const wanxiang = '万象拼音';
   static const wanxiangGrammar = '语法模型';
@@ -290,9 +278,6 @@ abstract final class AppStrings {
   static String downloadAppUpdate(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '前往下载' : 'Download';
   static String changelogTitle(String release) => '$release 更新内容';
-  static String itemCount(int count) => '$count 个项目';
-  static String verifyFailures(int count) => '⚠ 有 $count 个文件校验失败';
-  static String installLogCount(int count) => '安装日志（$count 条）';
   static String operationLogCount(int count) => '日志 ($count)';
   static String useColor(String hex) => '使用颜色 $hex';
   static String toggle(String label) => '切换$label';

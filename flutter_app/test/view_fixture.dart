@@ -181,25 +181,6 @@ class ViewController extends AppController {
       openccVersion: '1.1.9',
       dataDir: defaultDir,
     );
-    selectedDirectory = isAndroid ? '主存储空间/Rime' : '/Users/rea/Documents/Rime';
-    selectedTreeUri = isAndroid
-        ? 'content://com.android.externalstorage.documents/tree/primary%3ARime'
-        : null;
-    customSchemas = const LocalSchemasDto(
-      hasDefaultCustom: true,
-      schemas: ['keytao', 'english'],
-    );
-    customFiles = const [
-      FileItemDto(name: 'build', isDir: true),
-      FileItemDto(name: 'default.custom.yaml', isDir: false),
-      FileItemDto(name: 'keytao.schema.yaml', isDir: false),
-      FileItemDto(name: 'keytao.dict.yaml', isDir: false),
-    ];
-    customResult = const InstallResultDto(
-      mergedSchemas: ['keytao'],
-      logs: ['[MERGED] default.custom.yaml', '安装完成'],
-      verify: [],
-    );
     operationLogs.addAll([
       '[14:21:03] [MERGED] default.custom.yaml',
       '[14:21:05] [DEPLOY] 部署完成',

@@ -310,17 +310,6 @@ class FakeCore implements RustLibApi {
   }
 
   @override
-  Future<InstallResultDto> crateApiCoreInstallSchemeToDir({
-    required String url,
-    required String dir,
-    required String schemeKey,
-    String? version,
-  }) async {
-    calls.add('installTo:$url:$dir');
-    return result;
-  }
-
-  @override
   Future<InstallResultDto> crateApiCoreInstallSchemeFromUrl({
     required String url,
     required String schemeKey,
@@ -331,14 +320,6 @@ class FakeCore implements RustLibApi {
     return result;
   }
 
-  @override
-  Future<List<FileItemDto>> crateApiCoreListDir({required String dir}) async =>
-      [const FileItemDto(name: 'default.custom.yaml', isDir: false)];
-  @override
-  Future<LocalSchemasDto> crateApiCoreReadLocalSchemas({
-    required String dir,
-  }) async =>
-      const LocalSchemasDto(hasDefaultCustom: true, schemas: ['custom']);
   @override
   Future<AddonStatusDto> crateApiCoreAddonSchemaInstall({
     required String id,
@@ -492,7 +473,6 @@ class FakeAndroid extends AndroidHost {
   final List<String> calls;
   final progress = StreamController<InstallProgressDto>.broadcast();
   Map<String, dynamic> permission = {'granted': true, 'writable': true};
-  Completer<Map<String, dynamic>>? extraction;
   bool failDeploy = false;
   bool deployed = true;
   @override
@@ -514,30 +494,6 @@ class FakeAndroid extends AndroidHost {
   }
 
   @override
-  Future<String?> pickDirectory() async {
-    calls.add('pick');
-    return 'content://tree/tree/primary%3ACustom';
-  }
-
-  @override
-  Future<Map<String, dynamic>> listFiles(String treeUri) async => {
-    'files': [
-      {'name': 'default.custom.yaml', 'isDir': false},
-    ],
-  };
-  @override
-  Future<Map<String, dynamic>> readLocalSchemas(String treeUri) async => {
-    'schemas': ['custom'],
-    'installed': true,
-    'deployed': false,
-  };
-  @override
-  Future<Map<String, dynamic>> smartExtractZip(String zipPath, String treeUri) {
-    calls.add('extract:$zipPath:$treeUri');
-    return extraction?.future ?? Future.value(extracted);
-  }
-
-  @override
   Future<Map<String, dynamic>> deployImeData() async {
     calls.add('deployImeData');
     if (failDeploy) {
@@ -554,17 +510,13 @@ void main() {
   late FakeCore core;
   late FakeAndroid android;
   late AppController controller;
-  AppController create({
-    bool mobile = true,
-    Future<String?> Function()? pickDesktopDirectory,
-  }) => AppController(
+  AppController create({bool mobile = true}) => AppController(
     info: BridgeInfo(
       platform: mobile ? BridgePlatform.android : BridgePlatform.macOs,
       appVersion: 'test',
       userRoot: '/isolated/key tao',
     ),
     android: android,
-    pickDesktopDirectory: pickDesktopDirectory ?? () async => null,
   );
 
   setUp(() {
@@ -776,7 +728,6 @@ void main() {
       final logs = List<String>.of(controller.operationLogs);
       for (final operation in [
         OperationKind.install,
-        OperationKind.customDirectory,
         OperationKind.addon,
         OperationKind.wanxiang,
         OperationKind.wanxiangGrammar,
@@ -801,9 +752,6 @@ void main() {
         expect(controller.installProgress, same(progress));
         expect(controller.installFraction, .42);
         expect(controller.operationLogs, logs);
-        if (operation == OperationKind.customDirectory) {
-          expect(controller.customProgress, same(progress));
-        }
         if (operation == OperationKind.addon) {
           expect(controller.addonProgress, same(progress));
         }
@@ -872,6 +820,17 @@ void main() {
       'cancelWanxiangGrammar',
     ]);
     expect(await controller.manageWanxiangGrammar(true), isFalse);
+  });
+
+  test('obsolete last-page settings leave startup on the input page', () async {
+    controller.dispose();
+    controller = create(mobile: false);
+    core.schemeSettings['last_page'] = 'extension';
+    expect(await controller.refreshState(), isTrue);
+    await settle();
+    expect(controller.activePage, AppPage.input);
+    expect(controller.error, isNull);
+    expect(controller.schemeSyncError, isNull);
   });
 
   test(
@@ -1159,68 +1118,6 @@ void main() {
     }
     expect(core.calls.where((call) => call.startsWith('install:')), hasLength(2));
     expect(core.calls, isNot(contains('deployDefault')));
-  });
-
-  test('SAF export is serialized, preserves live state, finishes and always cleans up', () async {
-    controller.local = installedLocal;
-    controller.latestRelease = release;
-    await controller.connectEvents();
-    expect(await controller.pickCustomDirectory(), isTrue);
-    expect(controller.local, same(installedLocal));
-    expect(controller.customSchemas!.schemas, ['custom']);
-    android.extraction = Completer<Map<String, dynamic>>();
-    final install = controller.installCustomDirectory();
-    await settle();
-    expect(await controller.installAddon(), isFalse);
-    expect(await controller.install(), isFalse);
-    android.progress.add(
-      const InstallProgressDto(
-        stage: 'extracting',
-        percent: 80,
-        message: 'file',
-      ),
-    );
-    await settle();
-    expect(controller.customProgress!.stage, 'extracting');
-    expect(controller.installFraction, .8);
-    android.extraction!.complete(extracted);
-    expect(await install, isTrue);
-    expect(controller.customVerifyFailureCount, 1);
-    expect(controller.local, same(installedLocal));
-    expect(
-      core.calls,
-      containsAllInOrder([
-        'download:offline-ge',
-        'extract:/cache/archive.zip:content://tree/tree/primary%3ACustom',
-        'finish',
-        'remove:/cache/archive.zip',
-      ]),
-    );
-    expect(core.calls, isNot(contains('deployImeData')));
-    final logCount = controller.operationLogCount;
-    android.extraction = Completer<Map<String, dynamic>>();
-    final failed = controller.installCustomDirectory();
-    await settle();
-    android.extraction!.completeError(StateError('extraction failed'));
-    expect(await failed, isFalse);
-    expect(core.calls.last, 'remove:/cache/archive.zip');
-    expect(controller.customError, 'extraction failed');
-    expect(controller.operationLogCount, logCount);
-    expect(controller.operationLogs.first, matches(r'^\[\d\d:\d\d:\d\d\] '));
-    controller.clearOperationLogs();
-    expect(controller.operationLogCount, 0);
-  });
-
-  test('macOS export uses the selected release and does not deploy', () async {
-    controller.dispose();
-    controller = create(
-      mobile: false,
-      pickDesktopDirectory: () async => '/isolated/custom',
-    )..latestRelease = release;
-    await controller.pickCustomDirectory();
-    expect(await controller.installCustomDirectory(), isTrue);
-    expect(core.calls, contains('installTo:offline-ge:/isolated/custom'));
-    expect(core.calls, isNot(contains('deployImeData')));
   });
 
   test(

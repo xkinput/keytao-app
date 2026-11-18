@@ -32,7 +32,6 @@ enum OperationKind {
   rimeMint,
   rimeFrost,
   rimeLssp,
-  customDirectory,
 }
 
 enum LogLineKind { normal, error, warning, deploy, merged }
@@ -134,14 +133,9 @@ String formatWindowTitle(String pageTitle, Locale locale) =>
     '$pageTitle · KeyTao ${locale.languageCode.startsWith('zh') ? '输入法' : 'Input Method'}';
 
 class AppController extends ChangeNotifier {
-  AppController({
-    required this.info,
-    this.android = const AndroidHost(),
-    this.pickDesktopDirectory = getDirectoryPath,
-  });
+  AppController({required this.info, this.android = const AndroidHost()});
   final BridgeInfo info;
   final AndroidHost android;
-  final Future<String?> Function() pickDesktopDirectory;
   bool get isAndroid => info.platform == BridgePlatform.android;
   bool get isWindows => info.platform == BridgePlatform.windows;
   bool get isLinux => info.platform == BridgePlatform.linux;
@@ -174,8 +168,6 @@ class AppController extends ChangeNotifier {
   bool checkingStorage = false;
   bool releaseLoading = false;
   bool logsLoading = false;
-  bool filesLoading = false;
-  bool isOpeningCustomDirectory = false;
   bool onboardingCompleted = false;
   AppUpdateDto? appUpdate;
   bool checkingAppUpdate = false;
@@ -215,7 +207,6 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? rimeMintProgress;
   InstallProgressDto? rimeFrostProgress;
   InstallProgressDto? rimeLsspProgress;
-  InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
@@ -232,13 +223,6 @@ class AppController extends ChangeNotifier {
   String? addonLatestVersion;
   final _addonUpdateChecks = <String, Object>{};
   DebugLogsDto? systemLogs;
-  String? selectedDirectory;
-  String? selectedTreeUri;
-  List<FileItemDto> customFiles = [];
-  LocalSchemasDto? customSchemas;
-  LocalSchemaDto? customLocal;
-  InstallResultDto? customResult;
-  String? customError;
   String? error;
   String progress = '';
   double? installFraction;
@@ -466,7 +450,6 @@ class AppController extends ChangeNotifier {
   bool get isManagingRimeMint => operation == OperationKind.rimeMint;
   bool get isManagingRimeFrost => operation == OperationKind.rimeFrost;
   bool get isManagingRimeLssp => operation == OperationKind.rimeLssp;
-  bool get isInstallingCustom => operation == OperationKind.customDirectory;
   bool get canInstallAddon => !busy;
   bool get canInstallWanxiang => canInstallAddon;
   bool get canInstallRimeIce => canInstallAddon;
@@ -535,10 +518,7 @@ class AppController extends ChangeNotifier {
       rimeLssp?.installed != true ||
       rimeLssp?.deployed != true ||
       rimeLsspHasUpdate;
-  bool get canInstallCustom => canInstall && selectedDirectory != null;
   int get operationLogCount => operationLogs.length;
-  int get customVerifyFailureCount =>
-      customResult?.verify.where((v) => !v.ok).length ?? 0;
   String get installButtonLabel => checkingStorage
       ? AppStrings.checkingPermission
       : isInstalling
@@ -748,7 +728,6 @@ class AppController extends ChangeNotifier {
     rimeMintError,
     rimeFrostError,
     rimeLsspError,
-    customError,
     macosImeError,
     windowsImeError,
     linuxImeError,
@@ -910,7 +889,6 @@ class AppController extends ChangeNotifier {
     installProgress = value;
     progress = value.message;
     installFraction = value.percent.clamp(0, 100) / 100;
-    if (isInstallingCustom) customProgress = value;
     if (isManagingAddon) addonProgress = value;
     if (isManagingWanxiang) wanxiangProgress = value;
     if (isManagingWanxiangGrammar) wanxiangGrammarProgress = value;
@@ -1577,17 +1555,14 @@ class AppController extends ChangeNotifier {
     storage = await android.storagePermissionStatus();
   }
 
-  Future<void> _requireStorage({
-    bool redirect = false,
-    bool customDirectory = false,
-  }) async {
+  Future<void> _requireStorage({bool redirect = false}) async {
     checkingStorage = true;
     _changed();
     try {
       await _readStorage();
-      if (storage?['granted'] != true || (!customDirectory && !storageReady)) {
+      if (!storageReady) {
         final message = storage?['message'] as String?;
-        final failure = customDirectory || message == null || message.isEmpty
+        final failure = message == null || message.isEmpty
             ? AppStrings.storagePermission
             : message;
         if (redirect) {
@@ -3021,166 +2996,6 @@ class AppController extends ChangeNotifier {
     }
   });
 
-  Future<bool> pickCustomDirectory() => run(() async {
-    customError = null;
-    try {
-      final selected = isAndroid
-          ? await android.pickDirectory()
-          : await pickDesktopDirectory();
-      if (selected == null || selected.isEmpty) return;
-      selectedTreeUri = isAndroid ? selected : null;
-      selectedDirectory = isAndroid ? _safDisplayPath(selected) : selected;
-      customResult = null;
-      customSchemas = null;
-      customLocal = null;
-      customFiles = [];
-      await _readCustomDirectory();
-    } catch (failure) {
-      customError = errorText(failure);
-      rethrow;
-    }
-  });
-
-  String _safDisplayPath(String uri) {
-    try {
-      final tree = Uri.decodeComponent(uri.split('/tree/')[1]);
-      return '/${tree.replaceFirst('primary:', 'sdcard/')}';
-    } catch (_) {
-      return uri;
-    }
-  }
-
-  Future<void> _readCustomDirectory() async {
-    if (selectedDirectory == null) return;
-    filesLoading = true;
-    _changed();
-    final failures = <String>[];
-    Future<void> read(Future<void> Function() action) async {
-      try {
-        await action();
-      } catch (failure) {
-        failures.add(errorText(failure));
-      }
-    }
-
-    try {
-      if (isAndroid) {
-        await Future.wait([
-          read(() async {
-            final result = await android.listFiles(selectedTreeUri!);
-            customFiles = [
-              for (final item in result['files'] as List)
-                FileItemDto(
-                  name: item['name'] as String,
-                  isDir: item['isDir'] as bool,
-                ),
-            ];
-          }),
-          read(() async {
-            final result = await android.readLocalSchemas(selectedTreeUri!);
-            final schemas = List<String>.from(result['schemas'] as List);
-            customLocal = LocalSchemaDto(
-              installed: result['installed'] == true,
-              deployed: result['deployed'] == true,
-              version: result['version'] as String?,
-              schemas: schemas,
-            );
-          }),
-        ]);
-        customSchemas = customLocal == null
-            ? null
-            : LocalSchemasDto(
-                hasDefaultCustom: customFiles.any(
-                  (file) =>
-                      !file.isDir &&
-                      (file.name == 'default.custom.yaml' ||
-                          file.name == 'default-custom.yaml'),
-                ),
-                schemas: customLocal!.schemas,
-              );
-      } else {
-        await Future.wait([
-          read(() async {
-            customFiles = await core.listDir(dir: selectedDirectory!);
-          }),
-          read(() async {
-            customSchemas = await core.readLocalSchemas(
-              dir: selectedDirectory!,
-            );
-          }),
-        ]);
-      }
-      if (failures.isNotEmpty) throw StateError(failures.join('；'));
-    } finally {
-      filesLoading = false;
-      _changed();
-    }
-  }
-
-  Future<bool> refreshCustomDirectory() => run(() async {
-    customError = null;
-    try {
-      await _readCustomDirectory();
-    } catch (failure) {
-      customError = errorText(failure);
-      rethrow;
-    }
-  });
-
-  Future<bool> installCustomDirectory() {
-    if (!canInstallCustom) return Future.value(false);
-    final url = downloadUrl!;
-    final installing = scheme;
-    final installingVersion = releaseVersion;
-    return run(() async {
-      _startOperation(OperationKind.customDirectory, AppStrings.installing);
-      customResult = null;
-      customProgress = null;
-      customError = null;
-      try {
-        if (isAndroid) {
-          await _requireStorage(customDirectory: true);
-          final archive = await core.downloadSchemeArchive(url: url);
-          try {
-            _receiveInstallProgress(
-              const InstallProgressDto(
-                stage: 'extracting',
-                percent: 61,
-                message: '正在解压...',
-              ),
-            );
-            final result = await android.smartExtractZip(
-              archive,
-              selectedTreeUri!,
-            );
-            customResult = await core.finishAndroidInstall(
-              resultJson: jsonEncode(result),
-              schemeKey: installing,
-              version: installingVersion,
-            );
-          } finally {
-            await core.removeDownloadedArchive(path: archive);
-          }
-        } else {
-          customResult = await core.installSchemeToDir(
-            url: url,
-            dir: selectedDirectory!,
-            schemeKey: installing,
-            version: installingVersion,
-          );
-        }
-        addOperationLogs(customResult!.logs);
-        progress = AppStrings.customInstallDone;
-        await _readCustomDirectory();
-      } catch (failure) {
-        customError = errorText(failure);
-        rethrow;
-      } finally {
-        operation = null;
-      }
-    });
-  }
-
   Future<bool> finishOnboarding() => run(() async {
     await _readState();
     if (!setupReady) throw StateError(AppStrings.finishSetupFirst);
@@ -3415,22 +3230,6 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> openDefaultDirectory() => open(defaultDir);
-  Future<bool> openCustomDirectory() async {
-    if (selectedDirectory == null || isOpeningCustomDirectory) return false;
-    isOpeningCustomDirectory = true;
-    _changed();
-    try {
-      await _open(selectedTreeUri ?? selectedDirectory!);
-      return true;
-    } catch (failure) {
-      addOperationLogs(['[OPEN DIR ERROR] ${errorText(failure)}']);
-      return false;
-    } finally {
-      isOpeningCustomDirectory = false;
-      _changed();
-    }
-  }
-
   Future<bool> openTheme() => uiSettings?.themePath == null
       ? Future.value(false)
       : open(uiSettings!.themePath!);

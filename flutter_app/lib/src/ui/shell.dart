@@ -8,7 +8,6 @@ import '../rust/api/types.dart';
 import 'about_page.dart';
 import 'color_picker.dart';
 import 'debug_page.dart';
-import 'extension_page.dart';
 import 'input_page.dart';
 import 'login.dart';
 import 'scheme_page.dart';
@@ -16,12 +15,9 @@ import 'theme.dart';
 import 'widgets.dart';
 
 extension PageIcon on AppPage {
-  String get navigationLabel => this == AppPage.extension ? '扩展' : title;
-
   IconData get icon => switch (this) {
     AppPage.input => FLucideIcons.keyboard,
     AppPage.scheme => FLucideIcons.download,
-    AppPage.extension => FLucideIcons.settings,
     AppPage.about => FLucideIcons.info,
     AppPage.debug => FLucideIcons.scrollText,
   };
@@ -310,10 +306,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
                             icon: _navigationIcon(page, c, 22),
-                            label: Text(
-                              page.navigationLabel,
-                              semanticsLabel: page.title,
-                            ),
+                            label: Text(page.title, semanticsLabel: page.title),
                           ),
                       ],
                     ),
@@ -323,7 +316,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               children: [
                 InputPage(controller: c),
                 SchemePage(controller: c),
-                ExtensionPage(controller: c),
                 AboutPage(controller: c),
                 DebugPage(controller: c),
               ],
@@ -390,7 +382,7 @@ class _DesktopNavigation extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          page.navigationLabel,
+                          page.title,
                           semanticsLabel: page.title,
                           style: context.theme.typography.body.sm.copyWith(
                             fontSize: 15,
