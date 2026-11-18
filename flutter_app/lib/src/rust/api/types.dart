@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 class AccountUserDto {
   final PlatformInt64 id;
@@ -1020,6 +1020,42 @@ class RuntimeLogSettingsDto {
           files == other.files &&
           fileCount == other.fileCount &&
           totalBytes == other.totalBytes;
+}
+
+class SchemaDto {
+  final String id;
+  final String name;
+
+  const SchemaDto({required this.id, required this.name});
+
+  @override
+  int get hashCode => id.hashCode ^ name.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SchemaDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name;
+}
+
+class SchemaListDto {
+  final String? current;
+  final List<SchemaDto> schemas;
+
+  const SchemaListDto({this.current, required this.schemas});
+
+  @override
+  int get hashCode => current.hashCode ^ schemas.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SchemaListDto &&
+          runtimeType == other.runtimeType &&
+          current == other.current &&
+          schemas == other.schemas;
 }
 
 class SchemaSwitchDto {

@@ -168,20 +168,23 @@ impl InProcEngine {
     }
 
     /// Load externally deployed artifacts without running deployment in this process.
-    pub fn reload_server(&self) -> Result<(), String> {
+    /// Returns whether existing sessions were invalidated.
+    pub fn reload_server(&self) -> Result<bool, String> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _init_guard = EngineInitGuard::acquire(false)?;
         let signature = inner
             .reload_stamp_path
             .as_ref()
             .and_then(|path| ReloadStamp::signature_at(path));
-        inner
+        let runtime = inner
             .runtime
             .as_ref()
-            .ok_or("server runtime is not ready")?
-            .reload_without_deploy()?;
+            .ok_or("server runtime is not ready")?;
+        let generation = runtime.generation();
+        runtime.reload_without_deploy()?;
+        let rebuilt = generation != runtime.generation();
         inner.reload_stamp_signature = signature;
-        Ok(())
+        Ok(rebuilt)
     }
 
     /// Release mapped dictionaries before the child invalidates their files on Windows.
@@ -317,7 +320,7 @@ impl InProcEngine {
             || !keytao_core::schema_install_state(&user_dir).deployed
             || crate::appcontainer::validate_prebuilt(&user_dir, &version).is_err()
             || keytao_core::windows_rime_build_repair_required(&user_dir);
-        let runtime = ImeRuntime::with_dirs(&user_dir, bundled);
+        let runtime = ImeRuntime::with_dirs(&user_dir, bundled).with_ime_host();
         if stale {
             std::fs::create_dir_all(&user_dir).map_err(|error| error.to_string())?;
             copy_fallback_data(&deployed, &user_dir)?;

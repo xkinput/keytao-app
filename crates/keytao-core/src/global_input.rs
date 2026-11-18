@@ -32,6 +32,7 @@ impl InputState {
         engine.apply_switch_request(
             &SchemaSwitchRequest {
                 generation: 0,
+                schema_id: None,
                 options: self.options.clone(),
             },
             false,
@@ -64,11 +65,26 @@ impl GlobalInput {
             crate::english_mode::read_english_mode(root),
             engine.list_schemas(),
         );
+        let state = InputState::read(engine);
+        if !state.is_switcher() {
+            crate::publish_current_schema(root, &state.schema_id);
+        }
         Self {
             version: 1,
             root: root.to_path_buf(),
-            state: InputState::read(engine),
+            state,
             english_mode,
+        }
+    }
+
+    pub fn request_schema(&mut self, id: &str) {
+        if self.state.schema_id != id {
+            self.english_mode
+                .remember_chinese(&self.state.schema_id, &self.state.options);
+            self.state.schema_id = id.to_owned();
+            self.state.options.clear();
+            self.version += 1;
+            crate::publish_current_schema(&self.root, id);
         }
     }
 
@@ -111,6 +127,7 @@ impl GlobalInput {
         engine.apply_switch_request(
             &SchemaSwitchRequest {
                 generation: 0,
+                schema_id: None,
                 options: self.state.options.clone(),
             },
             false,
@@ -118,6 +135,9 @@ impl GlobalInput {
         engine.apply_ascii_mode(self.state.ascii_mode);
         let applied = InputState::read(engine);
         if self.state != applied {
+            if self.state.schema_id != applied.schema_id {
+                crate::publish_current_schema(root, &applied.schema_id);
+            }
             self.state = applied;
             self.version += 1;
         }
@@ -147,6 +167,9 @@ impl GlobalInput {
             }
         }
         if self.state != previous {
+            if self.state.schema_id != previous.schema_id {
+                crate::publish_current_schema(&self.root, &self.state.schema_id);
+            }
             self.version += 1;
         }
     }
@@ -165,6 +188,11 @@ mod tests {
 
     #[test]
     fn versions_track_changes_and_merge_only_the_fields_a_session_changed() {
+        let root = std::env::temp_dir().join(format!(
+            "keytao-global-input-version-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
         let first = InputState {
             schema_id: "chinese".into(),
             ascii_mode: false,
@@ -172,7 +200,7 @@ mod tests {
         };
         let mut global = GlobalInput {
             version: 1,
-            root: PathBuf::new(),
+            root: root.clone(),
             state: first.clone(),
             english_mode: EnglishModeController::default(),
         };
@@ -198,5 +226,6 @@ mod tests {
         global.publish(&first, &stale);
         assert_eq!(global.version, 4);
         assert!(global.state.options.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

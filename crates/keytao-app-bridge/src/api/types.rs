@@ -232,6 +232,18 @@ pub struct ReleaseInfoDto {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SchemaDto {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SchemaListDto {
+    pub current: Option<String>,
+    pub schemas: Vec<SchemaDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaSwitchDto {
     pub schema_id: String,

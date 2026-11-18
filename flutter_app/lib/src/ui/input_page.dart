@@ -195,6 +195,7 @@ class _CurrentSchemeHero extends StatelessWidget {
         ? AppStrings.deployed
         : AppStrings.pendingDeploy;
     final title =
+        c.currentSchemaName ??
         package?.displayName ??
         (local?.installed == true
             ? schemeDisplayName(c.activeSchemeKey)
@@ -226,14 +227,63 @@ class _CurrentSchemeHero extends StatelessWidget {
             children: [
               SchemaLogo(controller: c, size: desktop ? 52 : 36),
               Expanded(
-                child: Text(
-                  title,
-                  style: context.theme.typography.body.sm.copyWith(
-                    color: palette.ink,
-                    fontSize: desktop ? 56 : 32,
-                    fontWeight: FontWeight.w700,
-                    height: 1.05,
-                    letterSpacing: desktop ? -1.12 : -.32,
+                child: FPopoverMenu(
+                  menuAnchor: Alignment.topLeft,
+                  childAnchor: Alignment.bottomLeft,
+                  menuBuilder: (_, popover, _) => [
+                    FItemGroup(
+                      enabled: !c.busy,
+                      children: [
+                        for (final schema in c.schemas)
+                          FItem(
+                            title: Text(schema.name),
+                            semanticsChecked: schema.id == c.currentSchemaId,
+                            suffix: schema.id == c.currentSchemaId
+                                ? const Icon(FLucideIcons.check)
+                                : null,
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    c.selectSchema(schema.id);
+                                  },
+                          ),
+                      ],
+                    ),
+                  ],
+                  builder: (_, popover, _) => FButton.raw(
+                    key: const ValueKey('current-schema-selector'),
+                    variant: FButtonVariant.ghost,
+                    onPress: c.busy || c.schemas.isEmpty
+                        ? null
+                        : () {
+                            c.refreshSchemas();
+                            popover.toggle();
+                          },
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      spacing: 12,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            title,
+                            style: context.theme.typography.body.sm.copyWith(
+                              color: palette.ink,
+                              fontSize: desktop ? 56 : 32,
+                              fontWeight: FontWeight.w700,
+                              height: 1.05,
+                              letterSpacing: desktop ? -1.12 : -.32,
+                            ),
+                          ),
+                        ),
+                        if (c.schemas.isNotEmpty)
+                          Icon(
+                            FLucideIcons.chevronDown,
+                            size: desktop ? 24 : 20,
+                            color: palette.muted,
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),

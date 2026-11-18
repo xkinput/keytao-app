@@ -877,6 +877,30 @@ pub fn get_desktop_english_mode(
     result.map_err(CoreError::Other)
 }
 
+#[derive(Serialize)]
+pub struct SchemaList {
+    pub current: Option<String>,
+    pub schemas: Vec<keytao_core::SchemaInfo>,
+}
+
+pub fn get_schemas(host: impl ImeHost) -> Result<SchemaList, CoreError> {
+    let root = host.user_root().map_err(CoreError::Other)?;
+    Ok(SchemaList {
+        current: keytao_core::current_schema_id_from_dir(&root),
+        schemas: keytao_core::deployed_schemas(&root),
+    })
+}
+
+pub fn select_schema(host: impl ImeHost, schema_id: &str) -> Result<(), CoreError> {
+    let root = host.user_root().map_err(CoreError::Other)?;
+    keytao_core::request_schema(&root, schema_id).map_err(CoreError::Other)?;
+    keytao_core::write_current_schema(&root, schema_id).map_err(CoreError::Other)?;
+    #[cfg(target_os = "windows")]
+    host.publish_schema_switches().map_err(CoreError::Other)?;
+    keytao_core::ReloadStamp::write_schema(&root).map_err(CoreError::Other)?;
+    Ok(())
+}
+
 pub fn get_schema_switches(
     host: impl ImeHost,
 ) -> Result<Vec<keytao_core::SchemaSwitchSetting>, CoreError> {
@@ -1116,6 +1140,76 @@ pub fn set_ime_ui_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_schema_updates_current_schema_without_an_ime() {
+        struct Host(PathBuf);
+        impl ImeHost for Host {
+            fn user_root(&self) -> Result<PathBuf, String> {
+                Ok(self.0.clone())
+            }
+            fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
+                unreachable!()
+            }
+            #[cfg(target_os = "windows")]
+            fn publish_english_settings(&self, _: bool) -> Result<(), String> {
+                unreachable!()
+            }
+            #[cfg(target_os = "windows")]
+            fn publish_schema_switches(&self) -> Result<(), String> {
+                Ok(())
+            }
+            #[cfg(target_os = "android")]
+            fn deploy_ime_data(&self) -> Result<serde_json::Value, String> {
+                unreachable!()
+            }
+            #[cfg(target_os = "linux")]
+            fn managed_helper(&self) -> &crate::ime_status::linux::ManagedImeHelper {
+                unreachable!()
+            }
+            #[cfg(target_os = "linux")]
+            fn suspend_for_deploy(&self, _: String, _: String) -> keytao_core::ImeRuntime {
+                unreachable!()
+            }
+            #[cfg(target_os = "linux")]
+            fn resume_after_deploy(&self) -> Result<(), String> {
+                unreachable!()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(
+            root.join("build/default.yaml"),
+            "schema_list:\n  - schema: first\n  - schema: second\n",
+        )
+        .unwrap();
+        for id in ["first", "second"] {
+            std::fs::write(
+                root.join(format!("build/{id}.schema.yaml")),
+                format!("schema:\n  schema_id: {id}\n  name: {id}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("user.yaml"),
+            "var:\n  previously_selected_schema: first\n",
+        )
+        .unwrap();
+        keytao_core::write_current_schema(root, "first").unwrap();
+        assert_eq!(
+            get_schemas(Host(root.into())).unwrap().current.as_deref(),
+            Some("first")
+        );
+
+        select_schema(Host(root.into()), "second").unwrap();
+
+        assert_eq!(
+            get_schemas(Host(root.into())).unwrap().current.as_deref(),
+            Some("second")
+        );
+    }
 
     #[test]
     fn clipboard_preferences_default_and_round_trip_without_overwriting_explicit_values() {

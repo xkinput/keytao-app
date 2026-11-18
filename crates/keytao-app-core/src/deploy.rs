@@ -109,7 +109,7 @@ pub fn render_user_schema_logos(user_dir: &std::path::Path) {
 }
 
 pub fn active_schema_logo_path(user_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let schema_id = keytao_core::deployed_schema_id_from_dir(user_dir)?;
+    let schema_id = keytao_core::current_schema_id_from_dir(user_dir)?;
     render_user_schema_logos(user_dir);
     let output = user_dir.canonicalize().ok()?.join(".keytao-logo");
     let path = output.join(format!("{schema_id}.png")).canonicalize().ok()?;

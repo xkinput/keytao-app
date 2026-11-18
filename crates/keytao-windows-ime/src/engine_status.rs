@@ -43,7 +43,11 @@ pub fn write_status(user_dir: &Path, error: Option<&str>, schema: Option<&str>) 
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result
+    result?;
+    if let Some(schema) = schema {
+        keytao_core::write_current_schema(user_dir, schema).map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -74,6 +78,10 @@ mod tests {
         assert!(ready["error"].is_null());
         assert_eq!(ready["pid"], std::process::id());
         assert!(ready["ts"].as_u64().unwrap() > 0);
+        assert_eq!(
+            fs::read_to_string(dir.join(".keytao-current-schema")).unwrap(),
+            "keytao"
+        );
 
         let error = "missing \"C:\\词库\\keytao\"\ninit timed out";
         write_status(&dir, Some(error), None).unwrap();
@@ -81,11 +89,19 @@ mod tests {
         assert_eq!(failed["ok"], false);
         assert_eq!(failed["error"], error);
         assert!(failed["schema"].is_null());
+        assert_eq!(
+            fs::read_to_string(dir.join(".keytao-current-schema")).unwrap(),
+            "keytao"
+        );
 
         write_status(&dir, None, Some("pinyin_simp")).unwrap();
         assert_eq!(read()["ok"], true);
         assert_eq!(read()["schema"], "pinyin_simp");
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.join(".keytao-current-schema")).unwrap(),
+            "pinyin_simp"
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
         fs::remove_dir_all(dir).unwrap();
     }
 

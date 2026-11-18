@@ -258,6 +258,10 @@ class AppController extends ChangeNotifier {
   int _candidatePreviewRequest = 0;
   Future<void>? _candidatePreviewRefresh;
   List<SchemaSwitchDto> schemaSwitches = [];
+  List<SchemaDto> schemas = [];
+  String? currentSchemaId;
+  String? get currentSchemaName =>
+      schemas.where((schema) => schema.id == currentSchemaId).firstOrNull?.name;
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
   ComponentVersionsDto? versions;
   RuntimeLogSettingsDto? logSettings;
@@ -300,6 +304,7 @@ class AppController extends ChangeNotifier {
   Future<void>? _schemeSettingsWrite;
   StreamSubscription<BridgeEvent>? _events;
   StreamSubscription<InstallProgressDto>? _androidProgress;
+  StreamSubscription<FileSystemEvent>? _currentSchemaEvents;
 
   bool get canInstall =>
       !busy && !releaseLoading && downloadUrl?.isNotEmpty == true;
@@ -921,7 +926,10 @@ class AppController extends ChangeNotifier {
       }
     }
     if (page == AppPage.scheme) unawaited(refreshSchemeUpdates());
-    if (page == AppPage.input) unawaited(refreshCandidatePreview());
+    if (page == AppPage.input) {
+      unawaited(refreshSchemas());
+      unawaited(refreshCandidatePreview());
+    }
     _changed();
   }
 
@@ -978,12 +986,69 @@ class AppController extends ChangeNotifier {
     } catch (failure) {
       addonError = errorText(failure);
     }
+    await _readSchemas();
     await _readSchemaSwitches();
     activeSchemaLogoPath = await core.activeSchemaLogoPath();
     if (activeSchemaLogoPath case final path?) {
       await FileImage(File(path)).evict();
     }
     activeSchemaLogoRevision++;
+    _watchCurrentSchema();
+  }
+
+  void _watchCurrentSchema() {
+    if (_disposed || _currentSchemaEvents != null) return;
+    try {
+      _currentSchemaEvents = Directory(info.userRoot)
+          .watch(
+            events:
+                FileSystemEvent.create |
+                FileSystemEvent.modify |
+                FileSystemEvent.move,
+          )
+          .listen(
+            (event) {
+              final suffix = '${Platform.pathSeparator}.keytao-current-schema';
+              if (_foreground &&
+                  (event.path.endsWith(suffix) ||
+                      (event is FileSystemMoveEvent &&
+                          event.destination?.endsWith(suffix) == true))) {
+                unawaited(refreshSchemas());
+              }
+            },
+            onError: (Object _) => _currentSchemaEvents = null,
+            cancelOnError: true,
+          );
+    } on FileSystemException {
+      // Resume refresh remains available when the directory cannot be watched.
+    } on UnsupportedError {
+      // Some platforms cannot watch shared input-method directories.
+    }
+  }
+
+  Future<void> _readSchemas() async {
+    if (local?.deployed != true) {
+      schemas = [];
+      currentSchemaId = null;
+      return;
+    }
+    final result = await core.getSchemas();
+    schemas = result.schemas;
+    currentSchemaId = result.current;
+  }
+
+  Future<void> refreshSchemas() async {
+    if (_disposed) return;
+    if (busy) {
+      _refreshWhenIdle = true;
+      return;
+    }
+    try {
+      await _readSchemas();
+      _changed();
+    } catch (_) {
+      // Keep the last schema visible if a foreground refresh is unavailable.
+    }
   }
 
   Future<void> _readSchemaSwitches() async {
@@ -3077,6 +3142,13 @@ class AppController extends ChangeNotifier {
         unawaited(refreshCandidatePreview());
       });
 
+  Future<bool> selectSchema(String schemaId) => run(() async {
+    if (isAndroid) await _requireStorage();
+    await core.selectSchema(schemaId: schemaId);
+    await _readLocal();
+    unawaited(refreshCandidatePreview());
+  });
+
   Future<bool> saveCandidatePageSize(int? size) => run(() async {
     if (isAndroid) await _requireStorage();
     candidatePageSize = await core.setCandidatePageSize(size: size);
@@ -3419,6 +3491,7 @@ class AppController extends ChangeNotifier {
     }
     unawaited(_events?.cancel());
     unawaited(_androidProgress?.cancel());
+    unawaited(_currentSchemaEvents?.cancel());
     super.dispose();
   }
 }

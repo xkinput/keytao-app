@@ -375,16 +375,17 @@ impl Runtime {
             .as_ref()
             .is_some_and(|engine| engine.reload_needed());
         if self.engine.is_some() && (changed || !self.ready) {
-            // Invalidate every old connection before librime can tear its sessions down.
-            if self.ready {
-                self.generation = self.generation.wrapping_add(1);
-                self.ready = false;
-            }
+            let was_ready = self.ready;
+            self.ready = false;
             let engine = self.engine.as_ref().unwrap();
             let result = engine.reload_server();
+            // Schema-only requests preserve sessions, including their composition.
+            if was_ready && !matches!(&result, Ok(false)) {
+                self.generation = self.generation.wrapping_add(1);
+            }
             self.write_status(
                 result.as_ref().err().map(String::as_str),
-                result.as_ref().ok().map(|()| engine.state().schema_id),
+                result.as_ref().ok().map(|_| engine.state().schema_id),
             );
             result?;
             self.ready = true;
@@ -745,16 +746,7 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
             let Ok(runtime) = runtime.try_lock() else {
                 return Response::Err(EngineError::Busy);
             };
-            // The watcher reloads in the background; do not wait for it on a key deadline.
-            let changed = runtime
-                .engine
-                .as_ref()
-                .is_some_and(|engine| engine.reload_needed());
-            Response::Generation(
-                runtime
-                    .generation
-                    .wrapping_add(u64::from(changed && runtime.ready)),
-            )
+            Response::Generation(runtime.generation)
         }
         Request::Hello { .. } => Response::HelloErr("connection is already initialized".into()),
         // Privileged requests are authorized against the authenticated process in serve.

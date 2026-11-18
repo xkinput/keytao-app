@@ -147,6 +147,9 @@ class FakeCore implements RustLibApi {
   @override
   Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => [];
   @override
+  Future<SchemaListDto> crateApiCoreGetSchemas() async =>
+      const SchemaListDto(current: null, schemas: []);
+  @override
   Future<int?> crateApiCoreGetCandidatePageSize() async => null;
   @override
   Future<int?> crateApiCoreSetCandidatePageSize({int? size}) async => size;

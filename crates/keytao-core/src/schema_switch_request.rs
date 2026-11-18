@@ -12,6 +12,8 @@ pub const SCHEMA_SWITCH_APPLIED_FILE: &str = ".keytao-schema-switches.applied";
 pub struct SchemaSwitchRequest {
     pub generation: u64,
     pub options: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
 }
 
 pub fn read_schema_switch_request(root: &Path) -> Result<SchemaSwitchRequest, String> {
@@ -83,13 +85,32 @@ pub(crate) fn merge(
     values: impl IntoIterator<Item = (String, bool)>,
 ) -> Result<(), String> {
     let mut request = read_schema_switch_request(root)?;
+    if request.generation <= schema_switch_applied_generation(root)? {
+        request.schema_id = None;
+    }
+    request.options.extend(values);
+    save_request(root, &mut request)
+}
+
+pub fn request_schema(root: &Path, id: &str) -> Result<(), String> {
+    if !crate::deployed_schemas(root)
+        .iter()
+        .any(|schema| schema.id == id)
+    {
+        return Err(format!("schema {id} is not deployed"));
+    }
+    let mut request = read_schema_switch_request(root)?;
+    request.schema_id = Some(id.to_owned());
+    save_request(root, &mut request)
+}
+
+fn save_request(root: &Path, request: &mut SchemaSwitchRequest) -> Result<(), String> {
     request.generation = request
         .generation
         .max(schema_switch_applied_generation(root)?)
         .checked_add(1)
         .ok_or("schema switch generation exhausted")?;
-    request.options.extend(values);
-    let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec(request).map_err(|error| error.to_string())?;
     write_file_atomic(&root.join(SCHEMA_SWITCH_REQUEST_FILE), &bytes)
         .map_err(|error| format!("save schema switch request: {error}"))
 }
@@ -126,6 +147,111 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_requests_validate_deployed_order_and_option_writes_clear_selection() {
+        let root =
+            std::env::temp_dir().join(format!("keytao-schema-requests-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(
+            root.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: first\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build/default.yaml"),
+            "schema_list:\n  - schema: second\n  - schema: first\n",
+        )
+        .unwrap();
+        for (id, name) in [("first", "First schema"), ("second", "Second schema")] {
+            std::fs::write(
+                root.join("build").join(format!("{id}.schema.yaml")),
+                format!("schema:\n  schema_id: {id}\n  name: {name}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("second.schema.yaml"),
+            "schema:\n  name: Undeployed name\n",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::deployed_schemas(&root)
+                .into_iter()
+                .map(|schema| (schema.id, schema.name))
+                .collect::<Vec<_>>(),
+            [
+                ("second".into(), "Second schema".into()),
+                ("first".into(), "First schema".into())
+            ]
+        );
+        std::fs::write(
+            root.join(SCHEMA_SWITCH_REQUEST_FILE),
+            br#"{"generation":2,"options":{"full_shape":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_schema_switch_request(&root).unwrap().schema_id, None);
+        let before = std::fs::read(root.join(SCHEMA_SWITCH_REQUEST_FILE)).unwrap();
+        assert!(request_schema(&root, "unknown").is_err());
+        assert_eq!(
+            std::fs::read(root.join(SCHEMA_SWITCH_REQUEST_FILE)).unwrap(),
+            before
+        );
+        request_schema(&root, "second").unwrap();
+        let request = read_schema_switch_request(&root).unwrap();
+        assert_eq!(request.schema_id.as_deref(), Some("second"));
+        assert_eq!(request.generation, 3);
+        crate::ReloadStamp::write_schema(&root).unwrap();
+        assert!(std::fs::read_to_string(crate::ReloadStamp::path(&root))
+            .unwrap()
+            .starts_with("schema:3:"));
+        crate::ReloadStamp::write(&root).unwrap();
+        assert!(!std::fs::read_to_string(crate::ReloadStamp::path(&root))
+            .unwrap()
+            .starts_with("schema:"));
+        crate::write_current_schema(&root, "second").unwrap();
+        assert_eq!(
+            crate::current_schema_id_from_dir(&root).as_deref(),
+            Some("second")
+        );
+        crate::write_current_schema(&root, "unknown").unwrap();
+        assert_ne!(
+            crate::current_schema_id_from_dir(&root).as_deref(),
+            Some("unknown")
+        );
+        acknowledge(&root, request.generation).unwrap();
+        merge(&root, [("full_shape".into(), false)]).unwrap();
+        let request = read_schema_switch_request(&root).unwrap();
+        assert_eq!(request.schema_id, None);
+        assert_eq!(request.generation, 4);
+        assert!(!request.options["full_shape"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn option_merges_preserve_pending_schema_and_clear_applied_schema() {
+        let root = std::env::temp_dir().join(format!("keytao-schema-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(SCHEMA_SWITCH_REQUEST_FILE),
+            br#"{"generation":1,"options":{},"schema_id":"second"}"#,
+        )
+        .unwrap();
+
+        merge(&root, [("full_shape".into(), true)]).unwrap();
+        let request = read_schema_switch_request(&root).unwrap();
+        assert_eq!(request.schema_id.as_deref(), Some("second"));
+        assert_eq!(request.generation, 2);
+        assert!(request.options["full_shape"]);
+
+        acknowledge(&root, request.generation).unwrap();
+        merge(&root, [("full_shape".into(), false)]).unwrap();
+        let request = read_schema_switch_request(&root).unwrap();
+        assert_eq!(request.schema_id, None);
+        assert_eq!(request.generation, 3);
+        assert!(!request.options["full_shape"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_slower_process_cannot_decrease_the_applied_generation() {

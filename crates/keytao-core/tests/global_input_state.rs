@@ -169,3 +169,112 @@ fn secure_and_host_context_overrides_never_change_global_input() {
     drop((first, second));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn app_schema_requests_apply_on_the_next_key_without_interrupting_composition() {
+    let _serial = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let (runtime, dir) = fixture("app-schema-selection");
+    let first = runtime.create_session().unwrap();
+    let second = runtime.create_session().unwrap();
+    for key in smoke_fixture::CODE.chars() {
+        second.process_key_result(key as u32, 0).unwrap();
+    }
+    let composing = second.state();
+    assert!(!composing.preedit.is_empty());
+    let generation = runtime.generation();
+    keytao_core::request_schema(&dir, "keytao_other").unwrap();
+    keytao_core::ReloadStamp::write_schema(&dir).unwrap();
+    first
+        .process_key_result(keytao_core::key_policy::XK_ESCAPE, 0)
+        .unwrap();
+    assert_eq!(first.state().schema_id, "keytao_other");
+    assert_eq!(second.state().preedit, composing.preedit);
+    assert_eq!(second.state().schema_id, composing.schema_id);
+    assert_eq!(
+        keytao_core::schema_switch_applied_generation(&dir).unwrap(),
+        1
+    );
+    // A late platform watcher sees the same request after next-key consumption.
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(runtime.generation(), generation);
+    assert_eq!(second.state().preedit, composing.preedit);
+    second.select_candidate_on_page(0).unwrap();
+    second.process_key_result(b'a' as u32, 0).unwrap();
+    assert_eq!(second.state().schema_id, "keytao_other");
+    let fresh = runtime.create_session().unwrap();
+    assert_eq!(fresh.state().schema_id, "keytao_other");
+    assert_eq!(
+        keytao_core::current_schema_id_from_dir(&dir).as_deref(),
+        Some("keytao_other")
+    );
+    let user: serde_yaml::Value =
+        serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
+    assert_eq!(
+        user["var"]["previously_selected_schema"].as_str(),
+        Some("keytao_other")
+    );
+    // A later unrelated notification still reloads, with the persisted selection.
+    keytao_core::ReloadStamp::write(&dir).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert!(runtime.generation() > generation);
+    assert_eq!(fresh.state().schema_id, "keytao_other");
+    drop((first, second, fresh));
+    keytao_core::runtime_log::flush_blocking(std::time::Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn app_english_schema_selection_remembers_the_current_chinese_schema_and_options() {
+    let _serial = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let (runtime, dir) = fixture("app-schema-english-return");
+    let session = runtime.create_session().unwrap();
+    session.select_schema("keytao_other").unwrap();
+    session.set_option("full_shape", true).unwrap();
+    keytao_core::request_schema(&dir, "easy_en").unwrap();
+    keytao_core::ReloadStamp::write_schema(&dir).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(session.state().schema_id, "easy_en");
+    session.set_english_mode(false).unwrap();
+    assert_eq!(session.state().schema_id, "keytao_other");
+    assert!(session.get_option("full_shape"));
+    drop(session);
+    keytao_core::runtime_log::flush_blocking(std::time::Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn f4_schema_changes_publish_the_current_schema_and_durable_selection() {
+    let _serial = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let (runtime, dir) = fixture("f4-schema-selection");
+    let first = runtime.create_session().unwrap();
+    keytao_core::request_schema(&dir, smoke_fixture::SCHEMA_ID).unwrap();
+    keytao_core::ReloadStamp::write_schema(&dir).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    let menu = first
+        .process_key_result(keytao_core::key_policy::XK_F4, 0)
+        .unwrap();
+    let other = menu
+        .state
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "Other Chinese")
+        .unwrap();
+    first.select_candidate_global(other).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(first.state().schema_id, "keytao_other");
+    assert_eq!(
+        keytao_core::current_schema_id_from_dir(&dir).as_deref(),
+        Some("keytao_other")
+    );
+    let user: serde_yaml::Value =
+        serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
+    assert_eq!(
+        user["var"]["previously_selected_schema"].as_str(),
+        Some("keytao_other")
+    );
+    let fresh = runtime.create_session().unwrap();
+    assert_eq!(fresh.state().schema_id, "keytao_other");
+    drop((first, fresh));
+    keytao_core::runtime_log::flush_blocking(std::time::Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -952,6 +952,18 @@ pub async fn set_android_ime_input_settings(
     )
 }
 
+pub fn get_schemas() -> Result<SchemaListDto, String> {
+    runtime::dto(
+        keytao_app_core::ime_settings::get_schemas(runtime::state()?.host.clone())
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn select_schema(schema_id: String) -> Result<(), String> {
+    keytao_app_core::ime_settings::select_schema(runtime::state()?.host.clone(), &schema_id)
+        .map_err(|error| error.to_string())
+}
+
 pub fn get_schema_switches() -> Result<Vec<SchemaSwitchDto>, String> {
     keytao_app_core::ime_settings::get_schema_switches(runtime::state()?.host.clone())
         .map(|switches| switches.into_iter().map(Into::into).collect())

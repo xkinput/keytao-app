@@ -31,8 +31,8 @@ pub mod runtime_log;
 pub use reload_stamp_cache::ReloadStampCache;
 mod schema_switch_request;
 pub use schema_switch_request::{
-    read_schema_switch_request, schema_switch_applied_generation, write_file_atomic,
-    SchemaSwitchRequest, SCHEMA_SWITCH_APPLIED_FILE, SCHEMA_SWITCH_REQUEST_FILE,
+    read_schema_switch_request, request_schema, schema_switch_applied_generation,
+    write_file_atomic, SchemaSwitchRequest, SCHEMA_SWITCH_APPLIED_FILE, SCHEMA_SWITCH_REQUEST_FILE,
 };
 
 use runtime_log::Level;
@@ -2447,11 +2447,26 @@ mod desktop {
             root: &Path,
         ) -> Result<Option<SchemaSwitchRequest>, String> {
             let request = schema_switch_request::pending_for_process(root)?;
-            if let (Some(request), Some(schema_id)) =
-                (request.as_ref(), deployed_schema_id_from_dir(root))
-            {
+            if let Some(requested) = request.as_ref() {
+                let schema_id = requested
+                    .schema_id
+                    .clone()
+                    .or_else(|| deployed_schema_id_from_dir(root));
+                let Some(schema_id) = schema_id else {
+                    return Ok(request);
+                };
+                if requested.schema_id.is_some()
+                    && !deployed_schemas(root)
+                        .iter()
+                        .any(|schema| schema.id == schema_id)
+                {
+                    return Err(format!("schema {schema_id} is not deployed"));
+                }
                 let _rime = rime_api_lock();
-                persist_requested_switches_locked(&schema_id, request)?;
+                persist_requested_switches_locked(&schema_id, requested)?;
+                if let Some(schema_id) = requested.schema_id.as_deref() {
+                    persist_selected_schema(root, schema_id)?;
+                }
             }
             Ok(request)
         }
@@ -2889,13 +2904,7 @@ mod desktop {
             let Some(user_data_dir) = self.user_data_dir.as_deref() else {
                 return Vec::new();
             };
-            effective_schema_list(user_data_dir, parse_schema_list_from_dir(user_data_dir))
-                .into_iter()
-                .map(|id| SchemaInfo {
-                    name: schema_name_from_dir(user_data_dir, &id).unwrap_or_else(|| id.clone()),
-                    id,
-                })
-                .collect()
+            deployed_schemas(user_data_dir)
         }
 
         pub fn current_schema(&self) -> Option<SchemaInfo> {
@@ -2968,7 +2977,6 @@ mod desktop {
                 .unwrap_or(false)
         }
 
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         pub(crate) fn is_composing(&self) -> bool {
             let _rime = rime_api_lock();
             self.session
@@ -3220,6 +3228,12 @@ mod desktop {
             .into_iter()
             .flat_map(|switch| switch.name.into_iter().chain(switch.options))
             .collect();
+        let selected_schema = request
+            .schema_id
+            .as_deref()
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| "invalid Rime schema id")?;
         unsafe {
             let api = rime_get_api();
             let open =
@@ -3230,6 +3244,14 @@ mod desktop {
                 .ok_or("librime config close API is unavailable")?;
             let set = rime_api_member!(api, config_set_bool)
                 .ok_or("librime config bool setter is unavailable")?;
+            let set_string = if selected_schema.is_some() {
+                Some(
+                    rime_api_member!(api, config_set_string)
+                        .ok_or("librime config string setter is unavailable")?,
+                )
+            } else {
+                None
+            };
             let mut config: RimeConfig = std::mem::zeroed();
             if open(c"default".as_ptr(), &mut config) == 0 {
                 return Err("cannot open Rime switcher config".into());
@@ -3245,15 +3267,22 @@ mod desktop {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| "invalid Rime switch name")?;
-            if values.is_empty() {
+            if values.is_empty() && request.schema_id.is_none() {
                 return Ok(());
             }
             if user_open(c"user".as_ptr(), &mut config) == 0 {
                 return Err("cannot open Rime user config".into());
             }
-            let result = values
+            let mut result = values
                 .iter()
                 .all(|(key, value)| set(&mut config, key.as_ptr(), i32::from(*value)) != 0);
+            if let (Some(schema_id), Some(set_string)) = (selected_schema, set_string) {
+                result &= set_string(
+                    &mut config,
+                    c"var/previously_selected_schema".as_ptr(),
+                    schema_id.as_ptr(),
+                ) != 0;
+            }
             let closed = close(&mut config) != 0;
             if !result || !closed {
                 return Err("cannot persist IME switch request".into());
@@ -4760,6 +4789,9 @@ impl ProcessRimeState {
                 {
                     let mut global = lock_ignore_poison(&self.global_input);
                     let global = global_input::GlobalInput::get(&mut global, engine, root);
+                    if let Some(id) = request.schema_id.as_deref() {
+                        global.request_schema(id);
+                    }
                     if !engine.is_composing() {
                         global.apply(engine, root)?;
                     }
@@ -4781,12 +4813,28 @@ impl ProcessRimeState {
             ImeRuntimeSession::rebuild_engine(&mut inner, root)?;
             if let Some(engine) = inner.engine.as_ref() {
                 apply(engine)?;
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                if let Some(id) = request.and_then(|request| request.schema_id.as_deref()) {
+                    if engine.is_composing() {
+                        inner.pending_schema_id = Some(id.to_owned());
+                    } else {
+                        engine.select_schema(id)?;
+                        engine.apply_reset_switch_request(root)?;
+                        publish_current_schema(root, id);
+                    }
+                }
                 inner.applied_input_version = 0;
                 applied = true;
             }
         }
         if let Some(engine) = extra {
             apply(engine)?;
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if let Some(id) = request.and_then(|request| request.schema_id.as_deref()) {
+                engine.select_schema(id)?;
+                engine.apply_reset_switch_request(root)?;
+                publish_current_schema(root, id);
+            }
             applied = true;
         }
         if applied {
@@ -4872,8 +4920,9 @@ struct ImeRuntimeSessionInner {
     carried_ascii_mode: Option<bool>,
     carried_english_mode: Option<bool>,
     english_mode: english_mode::EnglishModeController,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pending_schema_id: Option<String>,
     applied_input_version: u64,
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     last_input_state: Option<global_input::InputState>,
 }
 
@@ -5075,6 +5124,20 @@ impl ImeRuntime {
             }
 
             let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+            if self.0.ime_host && initialized.as_ref() == Some(&dirs) {
+                let request = read_schema_switch_request(&dirs.user)?;
+                let schema_stamp = std::fs::read_to_string(ReloadStamp::path(&dirs.user))
+                    .ok()
+                    .is_some_and(|stamp| {
+                        stamp.starts_with(&format!("schema:{}:", request.generation))
+                    });
+                if request.schema_id.is_some()
+                    && (schema_stamp
+                        || schema_switch_request::pending_for_process(&dirs.user)?.is_some())
+                {
+                    return self.apply_pending_switch_request(&dirs.user);
+                }
+            }
             PROCESS_RIME.drop_live_engines();
             let result = desktop::reinitialize_rime(
                 dirs.user.to_string_lossy().into_owned(),
@@ -5097,6 +5160,10 @@ impl ImeRuntime {
             );
         }
         result
+    }
+
+    pub fn generation(&self) -> u64 {
+        PROCESS_RIME.generation.load(Ordering::SeqCst)
     }
 
     pub fn reload(&self) -> Result<(), String> {
@@ -5211,8 +5278,9 @@ impl ImeRuntime {
                 carried_ascii_mode: None,
                 carried_english_mode: None,
                 english_mode,
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                pending_schema_id: None,
                 applied_input_version: 0,
-                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 last_input_state: None,
             }));
             PROCESS_RIME.register(&inner);
@@ -5640,20 +5708,47 @@ impl ImeRuntimeSession {
         if initialized.as_ref() != Some(&self.dirs) {
             return None;
         }
+        if self
+            .inner
+            .try_lock()
+            .ok()
+            .is_some_and(|inner| inner.ime_host)
+            && schema_switch_request::pending_for_process(&self.dirs.user)
+                .ok()
+                .flatten()
+                .is_some_and(|request| request.schema_id.is_some())
+        {
+            if let Ok(_barrier) = PROCESS_RIME.reload_barrier.try_write() {
+                PROCESS_RIME
+                    .apply_pending_switch_request(&self.dirs.user)
+                    .ok()?;
+            }
+        }
         // A reload may compile dictionaries for many seconds. No synchronous
         // host key/focus callback may wait for that worker's write lock.
         let _barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)?;
         drop(initialized);
         let mut inner = try_lock_ignore_poison(&self.inner)?;
         self.refresh_if_needed(&mut inner).ok()?;
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Some(id) = inner.pending_schema_id.clone() {
+            let engine = inner.engine.as_ref()?;
+            if !engine.is_composing() {
+                engine.select_schema(&id).ok()?;
+                engine.apply_reset_switch_request(&self.dirs.user).ok()?;
+                publish_current_schema(&self.dirs.user, &id);
+                inner.pending_schema_id = None;
+            }
+        }
         let ime_host = inner.ime_host;
         let (policy, clear_composition) = self.policy.take_for_engine();
         let ImeRuntimeSessionInner {
             engine,
             english_mode,
             applied_input_version,
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             last_input_state,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            pending_schema_id,
             ..
         } = &mut *inner;
         let engine = engine.as_ref()?;
@@ -5713,14 +5808,31 @@ impl ImeRuntimeSession {
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let _ = (publish, invalidate_peers, applied_input_version);
-        let before = (ime_host && publish).then(|| global_input::InputState::read(engine));
-        Some(action(
-            engine,
-            policy,
-            english_mode,
-            ime_host,
-            before.as_ref(),
-        ))
+        let before = (ime_host && publish)
+            .then(|| global_input::InputState::read(engine))
+            .and_then(|state| {
+                if state.is_switcher() {
+                    last_input_state.clone()
+                } else {
+                    Some(state)
+                }
+            });
+        if let Some(before) = &before {
+            *last_input_state = Some(before.clone());
+        }
+        let result = action(engine, policy, english_mode, ime_host, before.as_ref());
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Some(before) = before {
+            let after = global_input::InputState::read(engine);
+            if !after.is_switcher() {
+                if before.schema_id != after.schema_id {
+                    *pending_schema_id = None;
+                    publish_current_schema(&self.dirs.user, &after.schema_id);
+                }
+                *last_input_state = Some(after);
+            }
+        }
+        Some(result)
     }
 
     fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
@@ -5776,10 +5888,7 @@ impl ImeRuntimeSession {
             inner.engine = Some(engine);
             inner.generation = current;
             inner.applied_input_version = 0;
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            {
-                inner.last_input_state = None;
-            }
+            inner.last_input_state = None;
             Ok(())
         })();
         if let Some(started) = started {
@@ -5797,6 +5906,86 @@ impl ImeRuntimeSession {
 
 fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> {
     deployed_schema_id_from_dir(user_data_dir).map(|schema| (user_data_dir.to_path_buf(), schema))
+}
+
+pub fn deployed_schemas(root: &Path) -> Vec<SchemaInfo> {
+    let schemas = std::fs::read_to_string(root.join("build/default.yaml"))
+        .ok()
+        .map(|content| parse_schema_list(&content))
+        .filter(|schemas| !schemas.is_empty())
+        .unwrap_or_else(|| configured_schema_list_from_dir(root));
+    effective_schema_list(root, schemas)
+        .into_iter()
+        .map(|id| SchemaInfo {
+            name: schema_name_from_dir(root, &id).unwrap_or_else(|| id.clone()),
+            id,
+        })
+        .collect()
+}
+
+pub fn current_schema_id_from_dir(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(".keytao-current-schema"))
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| deployed_schemas(root).iter().any(|schema| &schema.id == id))
+        .or_else(|| deployed_schema_id_from_dir(root))
+}
+
+pub fn write_current_schema(root: &Path, id: &str) -> Result<(), String> {
+    if id == ".default" || !valid_rime_build_id(id) {
+        return Err(format!("invalid current schema id: {id}"));
+    }
+    write_file_atomic(&root.join(".keytao-current-schema"), id.as_bytes())
+        .map_err(|error| format!("save current schema: {error}"))
+}
+
+fn persist_selected_schema(root: &Path, id: &str) -> Result<(), String> {
+    let path = root.join("user.yaml");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!("refuse symbolic link: {}", path.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+    }
+    let mut value = match std::fs::read(&path) {
+        Ok(bytes) => serde_yaml::from_slice::<Value>(&bytes)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Value::Mapping(Mapping::new())
+        }
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let vars = value
+        .as_mapping_mut()
+        .ok_or("user.yaml must be a YAML mapping")?
+        .entry(Value::String("var".into()))
+        .or_insert_with(|| Value::Mapping(Mapping::new()))
+        .as_mapping_mut()
+        .ok_or("user.yaml var must be a YAML mapping")?;
+    if vars
+        .get(Value::String("previously_selected_schema".into()))
+        .and_then(Value::as_str)
+        == Some(id)
+    {
+        return Ok(());
+    }
+    vars.insert(
+        Value::String("previously_selected_schema".into()),
+        Value::String(id.into()),
+    );
+    let content = serde_yaml::to_string(&value).map_err(|error| error.to_string())?;
+    write_file_atomic(&path, content.as_bytes())
+        .map_err(|error| format!("save {}: {error}", path.display()))
+}
+
+fn publish_current_schema(root: &Path, id: &str) {
+    if let Err(error) =
+        persist_selected_schema(root, id).and_then(|()| write_current_schema(root, id))
+    {
+        crate::rt_log!(Level::Info, "error", "schema_selection_save", msg = error);
+    }
 }
 
 pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
@@ -5936,10 +6125,10 @@ fn parse_schema_name(content: &str) -> Option<String> {
 
 fn schema_name_from_dir(user_data_dir: &Path, schema_id: &str) -> Option<String> {
     [
-        user_data_dir.join(format!("{schema_id}.schema.yaml")),
         user_data_dir
             .join("build")
             .join(format!("{schema_id}.schema.yaml")),
+        user_data_dir.join(format!("{schema_id}.schema.yaml")),
     ]
     .into_iter()
     .filter_map(|path| std::fs::read_to_string(path).ok())
@@ -6048,10 +6237,9 @@ fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
     if !key.starts_with("local-") || !state["installed_packages"].as_object()?.contains_key(key) {
         return None;
     }
-    let mut manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(package_store::active_manifest(data_dir)).ok()?,
-    )
-    .ok()?;
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(package_store::active_manifest(data_dir)).ok()?)
+            .ok()?;
     if manifest["scheme_key"]
         .as_str()
         .is_some_and(|actual| actual != key)
@@ -7423,6 +7611,24 @@ impl ReloadStamp {
             .unwrap_or(0);
         std::fs::write(&stamp, format!("{now}\n"))
             .map_err(|error| format!("failed to write {}: {error}", stamp.display()))?;
+        Ok(stamp)
+    }
+
+    pub fn write_schema(user_data_dir: &Path) -> Result<PathBuf, String> {
+        let request = read_schema_switch_request(user_data_dir)?;
+        if request.schema_id.is_none() {
+            return Err("no schema selection request".into());
+        }
+        let stamp = Self::path(user_data_dir);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        write_file_atomic(
+            &stamp,
+            format!("schema:{}:{now}\n", request.generation).as_bytes(),
+        )
+        .map_err(|error| format!("failed to write {}: {error}", stamp.display()))?;
         Ok(stamp)
     }
 
