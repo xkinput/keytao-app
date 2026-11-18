@@ -220,6 +220,14 @@ void main() {
       for (final heading in ['键道方案', '附加方案']) {
         expect(find.text(heading), findsNothing);
       }
+      if (device.platform == BridgePlatform.macOs) {
+        final expand = find.bySemanticsLabel('展开全部方案');
+        await tester.ensureVisible(expand);
+        await tester.tap(expand);
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('方案列表'));
+        await tester.pumpAndSettle();
+      }
       final cards = [
         for (final key in ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'])
           find
