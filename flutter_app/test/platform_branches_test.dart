@@ -473,8 +473,58 @@ void main() {
     }
   });
 
+  for (final platform in [BridgePlatform.ios, BridgePlatform.android]) {
+    test(
+      '${platform.name} opens links while busy without changing busy',
+      () async {
+        final c = create(platform)..busy = true;
+        final channel = platform == BridgePlatform.ios
+            ? IosHost.channel
+            : const MethodChannel('keytao/android');
+        final calls = <MethodCall>[];
+        var failOpen = false;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          if (failOpen) {
+            throw PlatformException(
+              code: 'open_failed',
+              message: 'Browser unavailable',
+            );
+          }
+          return null;
+        });
+
+        expect(await c.open('https://example.com/keytao'), isTrue);
+        expect(c.busy, isTrue);
+        expect(c.error, isNull);
+        expect(calls.single.method, 'openUrl');
+        expect(calls.single.arguments, {'url': 'https://example.com/keytao'});
+
+        failOpen = true;
+        expect(await c.open('https://example.com/keytao'), isFalse);
+        expect(c.busy, isTrue);
+        expect(c.error, 'Browser unavailable');
+        expect(calls, hasLength(2));
+
+        c.dispose();
+        controller = null;
+        expect(await c.open('https://example.com/keytao'), isFalse);
+        expect(calls, hasLength(2));
+      },
+    );
+  }
+
   test('iOS detects keyboard prerequisites at startup and after resume', () async {
     final c = create(BridgePlatform.ios);
+    Future<void> resumeAndWait() async {
+      c.onResume();
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (c.busy && DateTime.now().isBefore(deadline)) {
+        await settle();
+      }
+      expect(c.busy, isFalse);
+    }
+
     iosKeyboardStatus = {'enabled': false, 'fullAccess': true};
     expect(await c.refreshState(), isTrue);
     expect(c.iosKeyboardEnabled, isFalse);
@@ -495,15 +545,13 @@ void main() {
     }
 
     iosKeyboardStatus = {'enabled': true, 'fullAccess': true};
-    c.onResume();
-    await settle();
+    await resumeAndWait();
     expect(c.iosKeyboardEnabled, isTrue);
     expect(c.iosKeyboardFullAccess, isTrue);
     expect(SetupStep.fullAccess.isComplete(c), isTrue);
 
     iosKeyboardStatus = {'enabled': false, 'fullAccess': null};
-    c.onResume();
-    await settle();
+    await resumeAndWait();
     expect(c.iosKeyboardEnabled, isFalse);
     expect(c.iosKeyboardFullAccess, isNull);
     expect(SetupStep.enable.isComplete(c), isFalse);

@@ -22,6 +22,21 @@ static PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
 
+// LSSP contains repeated patch keys outside this metadata; preserve them verbatim.
+#[derive(serde::Deserialize, Default)]
+struct SchemaMetadata {
+    #[serde(default)]
+    schema: SchemaInfo,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SchemaInfo {
+    #[serde(default)]
+    schema_id: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
 pub fn public_warning(stage: &str, error: &str) -> String {
     #[cfg(target_os = "windows")]
     if let Some(root) = keytao_core::default_user_data_dir() {
@@ -363,9 +378,22 @@ fn trim_missing_dependencies(stage: &Path) -> Result<(), String> {
         if !path.to_string_lossy().ends_with(".schema.yaml") {
             continue;
         }
-        let mut schema: serde_yaml::Value =
-            serde_yaml::from_slice(&std::fs::read(&path).map_err(|error| error.to_string())?)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
+        let content = std::fs::read(&path).map_err(|error| error.to_string())?;
+        let metadata: SchemaMetadata = serde_yaml::from_slice(&content)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        for dependency in &metadata.schema.dependencies {
+            checked_relative(Path::new(&format!("{dependency}.schema.yaml")))?;
+        }
+        if metadata
+            .schema
+            .dependencies
+            .iter()
+            .all(|id| stage.join(format!("{id}.schema.yaml")).is_file())
+        {
+            continue;
+        }
+        let mut schema: serde_yaml::Value = serde_yaml::from_slice(&content)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         let Some(dependencies) = schema
             .get_mut("schema")
             .and_then(|schema| schema.get_mut("dependencies"))
@@ -984,23 +1012,14 @@ fn merge_public_files(
         path == Path::new("default.custom.yaml") || path == Path::new("default-custom.yaml")
     });
     let mut dependency_schemas = BTreeSet::new();
+    let mut has_official_addon = false;
     if !has_schema_list {
         for (path, content) in incoming {
             if path.components().count() == 1 && path.to_string_lossy().ends_with(".schema.yaml") {
-                let schema: serde_yaml::Value =
+                let schema: SchemaMetadata =
                     serde_yaml::from_slice(content).map_err(|error| error.to_string())?;
-                if let Some(dependencies) = schema
-                    .get("schema")
-                    .and_then(|schema| schema.get("dependencies"))
-                    .and_then(serde_yaml::Value::as_sequence)
-                {
-                    dependency_schemas.extend(
-                        dependencies
-                            .iter()
-                            .filter_map(serde_yaml::Value::as_str)
-                            .map(str::to_owned),
-                    );
-                }
+                has_official_addon |= keytao_core::is_addon_schema(&schema.schema.schema_id);
+                dependency_schemas.extend(schema.schema.dependencies);
             }
         }
     }
@@ -1024,21 +1043,17 @@ fn merge_public_files(
                 && relative.components().count() == 1
                 && relative.to_string_lossy().ends_with(".schema.yaml")
             {
-                let schema: serde_yaml::Value =
+                let schema: SchemaMetadata =
                     serde_yaml::from_slice(content).map_err(|error| error.to_string())?;
-                if let Some(id) = schema
-                    .get("schema")
-                    .and_then(|value| value.get("schema_id"))
-                    .and_then(serde_yaml::Value::as_str)
+                let id = schema.schema.schema_id;
+                if !id.is_empty()
+                    && !dependency_schemas.contains(&id)
+                    && (!has_official_addon || keytao_core::is_addon_schema(&id))
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
                 {
-                    if !id.is_empty()
-                        && !dependency_schemas.contains(id)
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-                    {
-                        addon_schemas.push(id.to_owned());
-                    }
+                    addon_schemas.push(id);
                 }
             }
             files.insert(relative, content.clone());
@@ -1969,6 +1984,16 @@ mod tests {
     }
 
     #[test]
+    fn lssp_repeated_patch_keys_survive_public_dependency_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "schema: {schema_id: triple_pinyin_lssp, dependencies: [lssp_stroke]}\npreedit:\n  __patch: {__append: [one]}\n  __patch: {__append: [two]}\n";
+        std::fs::write(root.path().join("triple_pinyin_lssp.schema.yaml"), source).unwrap();
+        std::fs::write(root.path().join("lssp_stroke.schema.yaml"), "schema: {schema_id: lssp_stroke}").unwrap();
+        trim_missing_dependencies(root.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(root.path().join("triple_pinyin_lssp.schema.yaml")).unwrap(), source);
+    }
+
+    #[test]
     fn publishing_addon_dependencies_registers_only_the_main_schema() {
         let root = tempfile::tempdir().unwrap();
         publish_at(
@@ -2018,6 +2043,28 @@ mod tests {
                     b"schema: {schema_id: rime_frost_melt_eng}".to_vec(),
                 ),
                 ("zh-moqi.gram".into(), b"public grammar model".to_vec()),
+                (
+                    "snow_jiandao.schema.yaml".into(),
+                    b"schema: {schema_id: snow_jiandao, dependencies: [snow_pinyin, snow_radical_pinyin, snow_jiandao_bihua, snow_jiandao_jianpin, snow_jiandao_chaifen]}".to_vec(),
+                ),
+                (
+                    "snow_pinyin.schema.yaml".into(),
+                    b"schema: {schema_id: snow_pinyin, dependencies: [snow_bihua, snow_radical_pinyin]}".to_vec(),
+                ),
+                ("snow_bihua.schema.yaml".into(), b"schema: {schema_id: snow_bihua}".to_vec()),
+                ("snow_radical_pinyin.schema.yaml".into(), b"schema: {schema_id: snow_radical_pinyin}".to_vec()),
+                ("snow_jiandao_bihua.schema.yaml".into(), b"schema: {schema_id: snow_jiandao_bihua}".to_vec()),
+                ("snow_jiandao_jianpin.schema.yaml".into(), b"schema: {schema_id: snow_jiandao_jianpin}".to_vec()),
+                ("snow_jiandao_chaifen.schema.yaml".into(), b"schema: {schema_id: snow_jiandao_chaifen}".to_vec()),
+                ("snow_sanpin.schema.yaml".into(), b"schema: {schema_id: snow_sanpin}".to_vec()),
+                (
+                    "triple_pinyin_lssp.schema.yaml".into(),
+                    b"schema: {schema_id: triple_pinyin_lssp, dependencies: [lssp_stroke]}\npreedit:\n  __patch: {__append: [one]}\n  __patch: {__append: [two]}\n".to_vec(),
+                ),
+                (
+                    "lssp_stroke.schema.yaml".into(),
+                    b"schema: {schema_id: lssp_stroke}".to_vec(),
+                ),
             ],
             false,
         )
@@ -2026,13 +2073,28 @@ mod tests {
         let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
         assert_eq!(
             crate::scheme_files::parse_schema_list(config),
-            ["keytao", "rime_ice", "rime_mint", "rime_frost"]
+            [
+                "keytao",
+                "rime_ice",
+                "rime_mint",
+                "rime_frost",
+                "snow_jiandao",
+                "triple_pinyin_lssp"
+            ]
         );
         for dependency in [
             "melt_eng.schema.yaml",
             "radical_pinyin.schema.yaml",
             "rime_mint_melt_eng.schema.yaml",
             "rime_frost_melt_eng.schema.yaml",
+            "snow_pinyin.schema.yaml",
+            "snow_bihua.schema.yaml",
+            "snow_radical_pinyin.schema.yaml",
+            "snow_jiandao_bihua.schema.yaml",
+            "snow_jiandao_jianpin.schema.yaml",
+            "snow_jiandao_chaifen.schema.yaml",
+            "snow_sanpin.schema.yaml",
+            "lssp_stroke.schema.yaml",
         ] {
             assert!(files.contains_key(Path::new(dependency)));
         }

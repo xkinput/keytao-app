@@ -76,6 +76,7 @@ class _SchemePageState extends State<SchemePage> {
     final desktop = MediaQuery.sizeOf(context).width >= 720;
     final palette = AppPalette.of(context);
     final cloudKeys = schemeKeys.where((key) => !c.isLocalScheme(key));
+    final addons = _addonCells(context, c);
     final activeKey = c.installedPackages
         .where((package) => package.active)
         .map((package) => package.schemeKey)
@@ -127,7 +128,10 @@ class _SchemePageState extends State<SchemePage> {
                 color: key == activeKey ? palette.surface : null,
                 child: _package(key),
               ),
-            ..._addonCells(context, c),
+            // 冰雪键道 follows the 键道 family; 李氏三拼 goes last.
+            addons[addons.length - 2],
+            ...addons.take(addons.length - 2),
+            addons.last,
           ],
         ),
         HairlineGridSection(
@@ -249,6 +253,65 @@ class _SchemePageState extends State<SchemePage> {
   }
 }
 
+class _SchemeCardMenu extends StatefulWidget {
+  const _SchemeCardMenu({super.key, required this.builder});
+
+  final Widget Function(BuildContext, FPopoverController) builder;
+
+  @override
+  State<_SchemeCardMenu> createState() => _SchemeCardMenuState();
+}
+
+class _SchemeCardMenuState extends State<_SchemeCardMenu>
+    with SingleTickerProviderStateMixin {
+  late final _popover = FPopoverController(vsync: this);
+
+  @override
+  void dispose() {
+    _popover.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onSecondaryTap: _popover.show,
+    child: widget.builder(context, _popover),
+  );
+}
+
+class _SchemeMoreButton extends StatelessWidget {
+  const _SchemeMoreButton({required this.onPress});
+
+  final VoidCallback onPress;
+
+  @override
+  Widget build(BuildContext context) => FTooltip(
+    tipBuilder: (_, _) => const Text('更多操作'),
+    child: FButton.icon(
+      variant: FButtonVariant.outline,
+      onPress: onPress,
+      style: FButtonStyleDelta.delta(
+        decoration: FVariants.all(
+          ShapeDecoration(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(999),
+              side: BorderSide(
+                color: AppPalette.of(context).hairline,
+                width: 1.5,
+              ),
+            ),
+          ),
+        ),
+        contentStyle: const FButtonContentStyleDelta.delta(
+          constraints: BoxConstraints(minWidth: 44, minHeight: 44),
+        ),
+      ),
+      child: const Icon(FLucideIcons.ellipsis, semanticLabel: '更多操作'),
+    ),
+  );
+}
+
 class SchemePackageRow extends StatelessWidget {
   const SchemePackageRow({
     super.key,
@@ -267,7 +330,10 @@ class SchemePackageRow extends StatelessWidget {
   final bool showSource;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      _SchemeCardMenu(key: ValueKey(schemeKey), builder: _build);
+
+  Widget _build(BuildContext context, FPopoverController menu) {
     final c = controller;
     final palette = AppPalette.of(context);
     final desktop = MediaQuery.sizeOf(context).width >= 720;
@@ -333,6 +399,7 @@ class SchemePackageRow extends StatelessWidget {
                     c.accountUser != null ||
                     !active)))
           FPopoverMenu(
+            control: FPopoverControl.managed(controller: menu),
             menuAnchor: Alignment.topRight,
             childAnchor: Alignment.bottomRight,
             menuBuilder: (_, popover, _) => [
@@ -354,12 +421,11 @@ class SchemePackageRow extends StatelessWidget {
                     FItem(
                       title: const Text('仓库地址'),
                       prefix: const Icon(FLucideIcons.externalLink),
-                      onPress: c.busy
-                          ? null
-                          : () {
-                              popover.hide();
-                              c.open(url);
-                            },
+                      enabled: true,
+                      onPress: () {
+                        popover.hide();
+                        c.open(url);
+                      },
                     ),
                   if (package != null) ...[
                     if (package.supportsUserWords)
@@ -433,27 +499,8 @@ class SchemePackageRow extends StatelessWidget {
                 ],
               ),
             ],
-            builder: (_, popover, _) => FTooltip(
-              tipBuilder: (_, _) => const Text('更多操作'),
-              child: FButton.icon(
-                variant: FButtonVariant.outline,
-                onPress: popover.toggle,
-                style: FButtonStyleDelta.delta(
-                  decoration: FVariants.all(
-                    ShapeDecoration(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(999),
-                        side: BorderSide(color: palette.hairline, width: 1.5),
-                      ),
-                    ),
-                  ),
-                  contentStyle: const FButtonContentStyleDelta.delta(
-                    constraints: BoxConstraints(minWidth: 44, minHeight: 44),
-                  ),
-                ),
-                child: const Icon(FLucideIcons.ellipsis, semanticLabel: '更多操作'),
-              ),
-            ),
+            builder: (_, popover, _) =>
+                _SchemeMoreButton(onPress: popover.toggle),
           ),
       ],
     );
@@ -470,6 +517,7 @@ class SchemePackageRow extends StatelessWidget {
           ),
         ),
         onPress: c.busy ? null : () => c.selectScheme(schemeKey),
+        onSecondaryPress: menu.show,
         child: Flexible(
           child: Text(
             schemeKey.startsWith('xmjd') && package?.displayName == null
@@ -907,6 +955,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
   Widget addon({
     required String key,
     required String title,
+    required String repositoryUrl,
     required String status,
     required String label,
     required String tooltip,
@@ -921,50 +970,77 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     Widget? extra,
   }) => HairlineGridCell(
     key: ValueKey(key),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          title,
-          style: context.theme.typography.body.sm.copyWith(
-            fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 30,
-            height: 1.1,
-            fontWeight: FontWeight.w700,
+    child: _SchemeCardMenu(
+      builder: (context, menu) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            title,
+            style: context.theme.typography.body.sm.copyWith(
+              fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 30,
+              height: 1.1,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          status,
-          style: context.theme.typography.body.xs.copyWith(
-            color: context.theme.colors.mutedForeground,
+          const SizedBox(height: 4),
+          Text(
+            status,
+            style: context.theme.typography.body.xs.copyWith(
+              color: context.theme.colors.mutedForeground,
+            ),
           ),
-        ),
-        if (variant != null) ...[const SizedBox(height: 12), variant],
-        const SizedBox(height: 12),
-        ActionRow(
-          children: [
-            if (showInstall)
-              ActionButton(
-                label,
-                primary: true,
-                icon: FLucideIcons.download,
-                tooltip: tooltip,
-                onPress: install,
+          if (variant != null) ...[const SizedBox(height: 12), variant],
+          const SizedBox(height: 12),
+          ActionRow(
+            children: [
+              if (showInstall)
+                ActionButton(
+                  label,
+                  primary: true,
+                  icon: FLucideIcons.download,
+                  tooltip: tooltip,
+                  onPress: install,
+                ),
+              if (installed)
+                ActionButton(AppStrings.uninstall, onPress: uninstall),
+              FPopoverMenu(
+                control: FPopoverControl.managed(controller: menu),
+                menuAnchor: Alignment.topRight,
+                childAnchor: Alignment.bottomRight,
+                menuBuilder: (_, popover, _) => [
+                  FItemGroup(
+                    children: [
+                      FItem(
+                        title: const Text('仓库地址'),
+                        prefix: const Icon(FLucideIcons.externalLink),
+                        onPress: () {
+                          popover.hide();
+                          c.open(repositoryUrl);
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+                builder: (_, popover, _) =>
+                    _SchemeMoreButton(onPress: popover.toggle),
               ),
-            if (installed)
-              ActionButton(AppStrings.uninstall, onPress: uninstall),
+            ],
+          ),
+          if (active) ...[const SizedBox(height: 12), progress],
+          if (error != null) ...[
+            const SizedBox(height: 8),
+            ErrorMessage(error),
           ],
-        ),
-        if (active) ...[const SizedBox(height: 12), progress],
-        if (error != null) ...[const SizedBox(height: 8), ErrorMessage(error)],
-        if (extra != null) ...[const SizedBox(height: 16), extra],
-      ],
+          if (extra != null) ...[const SizedBox(height: 16), extra],
+        ],
+      ),
     ),
   );
   return [
     addon(
       key: 'addon-easy-en',
       title: AppStrings.easyEnglish,
+      repositoryUrl: schemeRepositoryUrls['easy_en']!,
       status: c.addonStatusText,
       label: c.addonButtonLabel,
       tooltip: c.addonTooltip,
@@ -982,6 +1058,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     addon(
       key: 'addon-wanxiang',
       title: AppStrings.wanxiang,
+      repositoryUrl: schemeRepositoryUrls['wanxiang']!,
       variant: Align(
         alignment: Alignment.centerLeft,
         child: SizedBox(
@@ -1071,6 +1148,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     addon(
       key: 'addon-rime-ice',
       title: AppStrings.rimeIce,
+      repositoryUrl: schemeRepositoryUrls['rime_ice']!,
       status: c.rimeIceStatusText,
       label: c.rimeIceButtonLabel,
       tooltip: c.rimeIceTooltip,
@@ -1088,6 +1166,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     addon(
       key: 'addon-rime-mint',
       title: AppStrings.rimeMint,
+      repositoryUrl: schemeRepositoryUrls['rime_mint']!,
       status: c.rimeMintStatusText,
       label: c.rimeMintButtonLabel,
       tooltip: c.rimeMintTooltip,
@@ -1105,6 +1184,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     addon(
       key: 'addon-rime-frost',
       title: AppStrings.rimeFrost,
+      repositoryUrl: schemeRepositoryUrls['rime_frost']!,
       status: c.rimeFrostStatusText,
       label: c.rimeFrostButtonLabel,
       tooltip: c.rimeFrostTooltip,
@@ -1120,6 +1200,42 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
         progress: c.rimeFrostProgress,
       ),
       error: c.rimeFrostError,
+    ),
+    addon(
+      key: 'addon-rime-snow',
+      repositoryUrl: schemeRepositoryUrls['rime_snow']!,
+      title: AppStrings.rimeSnow,
+      status: c.rimeSnowStatusText,
+      label: c.rimeSnowButtonLabel,
+      tooltip: c.rimeSnowTooltip,
+      showInstall: c.showRimeSnowInstall,
+      install: c.canInstallRimeSnow ? () => c.manageRimeSnow(true) : null,
+      installed: c.rimeSnow?.installed == true,
+      uninstall: c.canUninstallRimeSnow ? () => c.manageRimeSnow(false) : null,
+      active: c.isManagingRimeSnow,
+      progress: InstallProgressView(
+        active: c.isManagingRimeSnow,
+        progress: c.rimeSnowProgress,
+      ),
+      error: c.rimeSnowError,
+    ),
+    addon(
+      key: 'addon-rime-lssp',
+      repositoryUrl: schemeRepositoryUrls['rime_lssp']!,
+      title: AppStrings.rimeLssp,
+      status: c.rimeLsspStatusText,
+      label: c.rimeLsspButtonLabel,
+      tooltip: c.rimeLsspTooltip,
+      showInstall: c.showRimeLsspInstall,
+      install: c.canInstallRimeLssp ? () => c.manageRimeLssp(true) : null,
+      installed: c.rimeLssp?.installed == true,
+      uninstall: c.canUninstallRimeLssp ? () => c.manageRimeLssp(false) : null,
+      active: c.isManagingRimeLssp,
+      progress: InstallProgressView(
+        active: c.isManagingRimeLssp,
+        progress: c.rimeLsspProgress,
+      ),
+      error: c.rimeLsspError,
     ),
   ];
 }

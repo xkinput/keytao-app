@@ -73,6 +73,10 @@ abstract final class AppStrings {
   static const rimeMintEnglish = 'Mint Pinyin';
   static const rimeFrost = '白霜拼音';
   static const rimeFrostEnglish = 'Frost Pinyin';
+  static const rimeSnow = '冰雪键道';
+  static const rimeSnowEnglish = 'Snow Jiandao';
+  static const rimeLssp = '李氏三拼';
+  static const rimeLsspEnglish = 'LSSP Triple Pinyin';
   static const wanxiangVariant = '万象拼音版本';
   static const wanxiangVariants = {
     'base': '基础版',
@@ -114,6 +118,8 @@ abstract final class AppStrings {
   static const installRimeIceTooltip = '安装并部署雾凇拼音';
   static const installRimeMintTooltip = '安装并部署薄荷拼音';
   static const installRimeFrostTooltip = '安装并部署白霜拼音';
+  static const installRimeSnowTooltip = '安装并部署冰雪键道';
+  static const installRimeLsspTooltip = '安装并部署李氏三拼';
   static const noSchemeForDeploy = '未安装方案，请先安装';
   static const componentMissing = '系统组件缺失';
   static const schemeMissing = '未安装方案';
@@ -242,6 +248,10 @@ abstract final class AppStrings {
   static const rimeMintRemoved = '[ADDON] 薄荷拼音已卸载';
   static const rimeFrostInstalled = '[ADDON] 白霜拼音已安装并部署';
   static const rimeFrostRemoved = '[ADDON] 白霜拼音已卸载';
+  static const rimeSnowInstalled = '[ADDON] 冰雪键道已安装并部署';
+  static const rimeSnowRemoved = '[ADDON] 冰雪键道已卸载';
+  static const rimeLsspInstalled = '[ADDON] 李氏三拼已安装并部署';
+  static const rimeLsspRemoved = '[ADDON] 李氏三拼已卸载';
 
   // Existing Flutter fallbacks retained for callers of the original controller.
   static const systemFailure = '系统操作失败';

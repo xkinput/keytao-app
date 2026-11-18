@@ -1,7 +1,7 @@
 <h1><img src="packaging/icons/icon.png" width="40" height="40" align="left" alt="">&nbsp;键道 KeyTao</h1>
 
 <p align="center">
-  <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS 与手机上的新版设置界面">
+  <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS（浅色/深色）与手机上的设置界面、候选框和键盘">
 </p>
 
 ## 特性

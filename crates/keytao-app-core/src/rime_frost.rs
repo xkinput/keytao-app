@@ -10,22 +10,32 @@ use crate::{
 use std::{path::Path, sync::Arc, time::Duration};
 
 pub const SCHEMA_ID: &str = "rime_frost";
-const RELEASE_LATEST: &str = "https://github.com/gaboolic/rime-frost/releases/latest";
 
+#[cfg(test)]
 pub(crate) fn package_from_location(location: &str) -> Result<RemotePackage, String> {
-    let url = reqwest::Url::parse(RELEASE_LATEST)
+    release_package_from_location(location, "gaboolic/rime-frost", "rime-frost-schemas.zip")
+}
+
+pub(crate) fn release_package_from_location(
+    location: &str,
+    repo: &str,
+    asset: &str,
+) -> Result<RemotePackage, String> {
+    let latest = format!("https://github.com/{repo}/releases/latest");
+    let prefix = format!("/{repo}/releases/tag/");
+    let url = reqwest::Url::parse(&latest)
         .and_then(|base| base.join(location))
-        .map_err(|e| format!("白霜拼音发布地址无效：{e}"))?;
+        .map_err(|e| format!("方案发布地址无效：{e}"))?;
     let tag = url
         .path()
-        .strip_prefix("/gaboolic/rime-frost/releases/tag/")
+        .strip_prefix(&prefix)
         .filter(|tag| {
             !tag.is_empty()
                 && tag
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
         })
-        .ok_or("白霜拼音发布地址缺少有效版本号")?;
+        .ok_or("方案发布地址缺少有效版本号")?;
     if url.scheme() != "https"
         || url.host_str() != Some("github.com")
         || !url.username().is_empty()
@@ -34,19 +44,21 @@ pub(crate) fn package_from_location(location: &str) -> Result<RemotePackage, Str
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("白霜拼音发布地址无效".into());
+        return Err("方案发布地址无效".into());
     }
     Ok(RemotePackage {
         version: tag.into(),
         source: url.as_str().into(),
-        download_url: format!(
-            "https://github.com/gaboolic/rime-frost/releases/download/{tag}/rime-frost-schemas.zip"
-        ),
+        download_url: format!("https://github.com/{repo}/releases/download/{tag}/{asset}"),
         download_bytes: None,
     })
 }
 
 async fn latest_package() -> Result<RemotePackage, String> {
+    latest_release("gaboolic/rime-frost", "rime-frost-schemas.zip").await
+}
+
+pub(crate) async fn latest_release(repo: &str, asset: &str) -> Result<RemotePackage, String> {
     let response = reqwest::Client::builder()
         .user_agent("KeyTao-Addon-Installer")
         .connect_timeout(Duration::from_secs(30))
@@ -55,21 +67,23 @@ async fn latest_package() -> Result<RemotePackage, String> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?
-        .get(RELEASE_LATEST)
+        .get(format!("https://github.com/{repo}/releases/latest"))
         .send()
         .await
-        .map_err(|e| format!("白霜拼音更新查询失败：{e}"))?
+        .map_err(|e| format!("方案更新查询失败：{e}"))?
         .error_for_status()
         .map_err(|e| e.to_string())?;
     if !response.status().is_redirection() {
-        return Err("白霜拼音发布地址未返回重定向".into());
+        return Err("方案发布地址未返回重定向".into());
     }
-    package_from_location(
+    release_package_from_location(
         response
             .headers()
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .ok_or("白霜拼音发布地址缺少重定向位置")?,
+            .ok_or("方案发布地址缺少重定向位置")?,
+        repo,
+        asset,
     )
 }
 

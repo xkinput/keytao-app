@@ -10,6 +10,8 @@ use std::{
     path::Path,
 };
 
+pub(crate) use crate::shape_addons::{LSSP, SNOW};
+
 #[derive(Clone, Copy)]
 pub(crate) enum Package {
     Mint,
@@ -97,17 +99,21 @@ const FROST_LUA: &[&str] = &[
 
 pub(crate) static MINT: Addon = Addon {
     id: "rime_mint",
+    dictionary: "rime_mint",
     name: "薄荷拼音",
     manifest: ".keytao-rime-mint.json",
     required: MINT_REQUIRED,
+    extra_archives: &[],
     installable: |name| Package::Mint.installable(name),
     extract: |archive, stage, package| Package::Mint.extract(archive, stage, package),
 };
 pub(crate) static FROST: Addon = Addon {
     id: "rime_frost",
+    dictionary: "rime_frost",
     name: "白霜拼音",
     manifest: ".keytao-rime-frost.json",
     required: FROST_REQUIRED,
+    extra_archives: &[],
     installable: |name| Package::Frost.installable(name),
     extract: |archive, stage, package| Package::Frost.extract(archive, stage, package),
 };

@@ -22,6 +22,7 @@ mod package_fs;
 mod addon_store;
 mod downloaded_addon;
 mod pinyin_addons;
+mod shape_addons;
 mod package_activation;
 mod package_artifacts;
 pub mod package_orphans;
@@ -41,6 +42,8 @@ pub mod wanxiang;
 pub mod rime_ice;
 pub mod rime_mint;
 pub mod rime_frost;
+pub mod rime_snow;
+pub mod rime_lssp;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_public_schemas;
 pub use scheme_types::*;

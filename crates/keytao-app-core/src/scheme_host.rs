@@ -91,8 +91,13 @@ pub(crate) mod tests {
                     self.root.join(format!("build/{schema}.schema.yaml")),
                 )
                 .map_err(|e| e.to_string())?;
+                let dictionary = match schema.as_str() {
+                    "snow_jiandao" => "snow_pinyin",
+                    "triple_pinyin_lssp" => "triple_pinyin",
+                    _ => &schema,
+                };
                 std::fs::write(
-                    self.root.join(format!("build/{schema}.table.bin")),
+                    self.root.join(format!("build/{dictionary}.table.bin")),
                     b"fixture",
                 )
                 .map_err(|e| e.to_string())?;
