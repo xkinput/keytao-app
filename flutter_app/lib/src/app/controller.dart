@@ -31,7 +31,6 @@ enum OperationKind {
   rimeIce,
   rimeMint,
   rimeFrost,
-  rimeSnow,
   rimeLssp,
   customDirectory,
 }
@@ -90,6 +89,7 @@ String? schemeKeyFromSchemas(List<String> schemas) {
       'xmjd6': 'xmjd',
       'txjx': 'txjx',
       'keydo': 'keydo',
+      'snow_jiandao': 'snow_jiandao',
       'keytao': 'keytao',
     }.entries) {
       if (name.startsWith(entry.key)) return entry.value;
@@ -199,7 +199,6 @@ class AppController extends ChangeNotifier {
   String? rimeIceError;
   String? rimeMintError;
   String? rimeFrostError;
-  String? rimeSnowError;
   String? rimeLsspError;
   String? macosImeError;
   String? windowsImeError;
@@ -215,7 +214,6 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? rimeIceProgress;
   InstallProgressDto? rimeMintProgress;
   InstallProgressDto? rimeFrostProgress;
-  InstallProgressDto? rimeSnowProgress;
   InstallProgressDto? rimeLsspProgress;
   InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
@@ -229,8 +227,6 @@ class AppController extends ChangeNotifier {
   String? rimeMintLatestVersion;
   core.AddonStatusDto? rimeFrost;
   String? rimeFrostLatestVersion;
-  core.AddonStatusDto? rimeSnow;
-  String? rimeSnowLatestVersion;
   core.AddonStatusDto? rimeLssp;
   String? rimeLsspLatestVersion;
   String? addonLatestVersion;
@@ -340,7 +336,6 @@ class AppController extends ChangeNotifier {
                 'rime_ice' => 'rime_ice',
                 'rime_mint' => 'rime_mint',
                 'rime_frost' => 'rime_frost',
-                'snow_jiandao' => 'snow_jiandao',
                 'triple_pinyin_lssp' => 'triple_pinyin_lssp',
                 _ => scheme,
               };
@@ -470,7 +465,6 @@ class AppController extends ChangeNotifier {
   bool get isManagingRimeIce => operation == OperationKind.rimeIce;
   bool get isManagingRimeMint => operation == OperationKind.rimeMint;
   bool get isManagingRimeFrost => operation == OperationKind.rimeFrost;
-  bool get isManagingRimeSnow => operation == OperationKind.rimeSnow;
   bool get isManagingRimeLssp => operation == OperationKind.rimeLssp;
   bool get isInstallingCustom => operation == OperationKind.customDirectory;
   bool get canInstallAddon => !busy;
@@ -478,14 +472,12 @@ class AppController extends ChangeNotifier {
   bool get canInstallRimeIce => canInstallAddon;
   bool get canInstallRimeMint => canInstallAddon;
   bool get canInstallRimeFrost => canInstallAddon;
-  bool get canInstallRimeSnow => canInstallAddon;
   bool get canInstallRimeLssp => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
   bool get canUninstallRimeIce => !busy && rimeIce?.installed == true;
   bool get canUninstallRimeMint => !busy && rimeMint?.installed == true;
   bool get canUninstallRimeFrost => !busy && rimeFrost?.installed == true;
-  bool get canUninstallRimeSnow => !busy && rimeSnow?.installed == true;
   bool get canUninstallRimeLssp => !busy && rimeLssp?.installed == true;
   String get installedWanxiangVariant =>
       wanxiang?.installed == true ? wanxiang?.variant ?? 'base' : 'base';
@@ -534,15 +526,6 @@ class AppController extends ChangeNotifier {
       rimeFrost?.installed != true ||
       rimeFrost?.deployed != true ||
       rimeFrostHasUpdate;
-  bool get rimeSnowHasUpdate =>
-      rimeSnow?.installed == true &&
-      rimeSnowLatestVersion != null &&
-      _normalizedVersion(rimeSnowLatestVersion!) !=
-          _normalizedVersion(rimeSnow!.version);
-  bool get showRimeSnowInstall =>
-      rimeSnow?.installed != true ||
-      rimeSnow?.deployed != true ||
-      rimeSnowHasUpdate;
   bool get rimeLsspHasUpdate =>
       rimeLssp?.installed == true &&
       rimeLsspLatestVersion != null &&
@@ -576,7 +559,6 @@ class AppController extends ChangeNotifier {
   String get rimeIceTooltip => AppStrings.installRimeIceTooltip;
   String get rimeMintTooltip => AppStrings.installRimeMintTooltip;
   String get rimeFrostTooltip => AppStrings.installRimeFrostTooltip;
-  String get rimeSnowTooltip => AppStrings.installRimeSnowTooltip;
   String get rimeLsspTooltip => AppStrings.installRimeLsspTooltip;
   String get addonButtonLabel => addonHasUpdate
       ? AppStrings.update
@@ -618,13 +600,6 @@ class AppController extends ChangeNotifier {
     rimeFrost?.deployed,
     rimeFrost?.version,
   );
-  String get rimeSnowButtonLabel => rimeSnowHasUpdate
-      ? AppStrings.update
-      : rimeSnow?.installed == true
-      ? AppStrings.deploy
-      : AppStrings.install;
-  String get rimeSnowStatusText =>
-      _addonStatus(rimeSnow?.installed, rimeSnow?.deployed, rimeSnow?.version);
   String get rimeLsspButtonLabel => rimeLsspHasUpdate
       ? AppStrings.update
       : rimeLssp?.installed == true
@@ -772,7 +747,6 @@ class AppController extends ChangeNotifier {
     rimeIceError,
     rimeMintError,
     rimeFrostError,
-    rimeSnowError,
     rimeLsspError,
     customError,
     macosImeError,
@@ -864,7 +838,6 @@ class AppController extends ChangeNotifier {
                         isManagingRimeIce ||
                         isManagingRimeMint ||
                         isManagingRimeFrost ||
-                        isManagingRimeSnow ||
                         isManagingRimeLssp) &&
                     (value.startsWith('系统搜索框方案未更新：') ||
                         value.contains('编译失败，已跳过：')))) {
@@ -944,7 +917,6 @@ class AppController extends ChangeNotifier {
     if (isManagingRimeIce) rimeIceProgress = value;
     if (isManagingRimeMint) rimeMintProgress = value;
     if (isManagingRimeFrost) rimeFrostProgress = value;
-    if (isManagingRimeSnow) rimeSnowProgress = value;
     if (isManagingRimeLssp) rimeLsspProgress = value;
     _changed();
   }
@@ -1213,14 +1185,6 @@ class AppController extends ChangeNotifier {
       }),
       read(() async {
         try {
-          rimeSnow = await core.rimeSnowStatus();
-          rimeSnowError = null;
-        } catch (failure) {
-          rimeSnowError = errorText(failure);
-        }
-      }),
-      read(() async {
-        try {
           rimeLssp = await core.rimeLsspStatus();
           rimeLsspError = null;
         } catch (failure) {
@@ -1335,8 +1299,6 @@ class AppController extends ChangeNotifier {
         _checkAddonUpdate('rime_mint', rimeMint!.version),
       if (rimeFrost?.installed == true)
         _checkAddonUpdate('rime_frost', rimeFrost!.version),
-      if (rimeSnow?.installed == true)
-        _checkAddonUpdate('snow_jiandao', rimeSnow!.version),
       if (rimeLssp?.installed == true)
         _checkAddonUpdate('triple_pinyin_lssp', rimeLssp!.version),
     ]);
@@ -1353,7 +1315,6 @@ class AppController extends ChangeNotifier {
         'rime_ice' => rimeIce,
         'rime_mint' => rimeMint,
         'rime_frost' => rimeFrost,
-        'snow_jiandao' => rimeSnow,
         'triple_pinyin_lssp' => rimeLssp,
         _ => wanxiang,
       };
@@ -1371,8 +1332,6 @@ class AppController extends ChangeNotifier {
         rimeMintLatestVersion = status.latestVersion;
       } else if (id == 'rime_frost') {
         rimeFrostLatestVersion = status.latestVersion;
-      } else if (id == 'snow_jiandao') {
-        rimeSnowLatestVersion = status.latestVersion;
       } else if (id == 'triple_pinyin_lssp') {
         rimeLsspLatestVersion = status.latestVersion;
       } else {
@@ -3019,39 +2978,6 @@ class AppController extends ChangeNotifier {
       rimeFrostError = errorText(failure);
       try {
         rimeFrost = await core.rimeFrostStatus();
-      } catch (_) {}
-      try {
-        await _readLocal();
-      } catch (_) {}
-      rethrow;
-    } finally {
-      operation = null;
-    }
-  });
-
-  Future<bool> manageRimeSnow(bool installed) => run(() async {
-    _addonUpdateChecks['snow_jiandao'] = Object();
-    _startOperation(
-      OperationKind.rimeSnow,
-      installed ? AppStrings.installing : AppStrings.uninstall,
-    );
-    rimeSnowError = null;
-    rimeSnowProgress = null;
-    try {
-      if (isAndroid) await _requireStorage();
-      rimeSnow = await core.manageRimeSnow(
-        installed: installed,
-        androidDeploy: _androidDeploy,
-      );
-      if (installed) rimeSnowLatestVersion = rimeSnow!.version;
-      await _readLocal();
-      addOperationLogs([
-        installed ? AppStrings.rimeSnowInstalled : AppStrings.rimeSnowRemoved,
-      ]);
-    } catch (failure) {
-      rimeSnowError = errorText(failure);
-      try {
-        rimeSnow = await core.rimeSnowStatus();
       } catch (_) {}
       try {
         await _readLocal();

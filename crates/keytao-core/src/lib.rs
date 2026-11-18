@@ -714,6 +714,7 @@ mod desktop {
     /// and initializes again so that a redeploy is not served from the caches
     /// above.
     static RIME_INITIALIZED: Mutex<bool> = Mutex::new(false);
+    static RIME_DEPLOYMENT_SIGNATURE: Mutex<Option<String>> = Mutex::new(None);
     /// `RimeSetup` configures process-wide librime logging and modules. In
     /// particular, calling it again reaches glog's one-time initializer and
     /// aborts the process. Finalizing the Rime service does not undo setup, so
@@ -1399,6 +1400,8 @@ mod desktop {
 
     fn initialize_rime(user_data_dir: &str, shared_data_dir: &str, deployer_only: bool) {
         let user_dir = Path::new(user_data_dir);
+        *lock_ignore_poison(&RIME_DEPLOYMENT_SIGNATURE) =
+            ReloadStamp::signature_at(&user_dir.join("build").join(DEPLOYED_FILE));
         patch_neutral_grammar(user_dir);
         let shared_dir = Path::new(shared_data_dir);
         let (staging_dir, prebuilt_dir) = rime_build_dirs(user_dir, shared_dir);
@@ -1417,6 +1420,11 @@ mod desktop {
             deployer_only,
             user_dir,
         );
+    }
+
+    pub(super) fn loaded_deployment_is_current(user_dir: &Path) -> bool {
+        let current = ReloadStamp::signature_at(&user_dir.join("build").join(DEPLOYED_FILE));
+        current.is_some() && *lock_ignore_poison(&RIME_DEPLOYMENT_SIGNATURE) == current
     }
 
     #[cfg(not(target_os = "android"))]
@@ -5124,7 +5132,11 @@ impl ImeRuntime {
             }
 
             let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
-            if self.0.ime_host && initialized.as_ref() == Some(&dirs) {
+            // A schema signal can replace a deployment signal before the IME sees it.
+            if self.0.ime_host
+                && initialized.as_ref() == Some(&dirs)
+                && desktop::loaded_deployment_is_current(&dirs.user)
+            {
                 let request = read_schema_switch_request(&dirs.user)?;
                 let schema_stamp = std::fs::read_to_string(ReloadStamp::path(&dirs.user))
                     .ok()
@@ -6757,9 +6769,10 @@ fn make_schema_list_value(schemas: &[String]) -> Value {
 }
 
 fn is_keytao_managed_schema(schema: &str) -> bool {
-    ["keytao", "txjx", "xmjd6", "keydo"]
-        .iter()
-        .any(|prefix| schema.starts_with(prefix))
+    schema == "snow_jiandao"
+        || ["keytao", "txjx", "xmjd6", "keydo"]
+            .iter()
+            .any(|prefix| schema.starts_with(prefix))
 }
 
 pub fn is_addon_schema(schema: &str) -> bool {
@@ -6770,7 +6783,6 @@ pub fn is_addon_schema(schema: &str) -> bool {
             | "rime_ice"
             | "rime_mint"
             | "rime_frost"
-            | "snow_jiandao"
             | "triple_pinyin_lssp"
     )
 }
@@ -7940,7 +7952,6 @@ mod tests {
             "rime_ice",
             "rime_mint",
             "rime_frost",
-            "snow_jiandao",
             "triple_pinyin_lssp",
         ] {
             std::fs::write(
@@ -8502,13 +8513,13 @@ mod tests {
             vec![
                 "user_schema",
                 "keytao",
+                "snow_jiandao",
                 "keytao-dz",
                 "easy_en",
                 "wanxiang",
                 "rime_ice",
                 "rime_mint",
                 "rime_frost",
-                "snow_jiandao",
                 "triple_pinyin_lssp"
             ]
         );
@@ -8522,7 +8533,6 @@ mod tests {
             "rime_ice",
             "rime_mint",
             "rime_frost",
-            "snow_jiandao",
             "triple_pinyin_lssp",
         ] {
             assert_eq!(

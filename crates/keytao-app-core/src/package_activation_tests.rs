@@ -200,7 +200,10 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
 #[tokio::test]
 async fn main_package_switch_preserves_each_addon_record_and_sources() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
-    for id in crate::addon_store::IDS {
+    for id in crate::addon_store::IDS
+        .iter()
+        .filter(|id| keytao_core::is_addon_schema(id))
+    {
         let directory = tempfile::tempdir().unwrap();
         let host = Host::new(directory.path(), Arc::new(Sink));
         store(&host, "keytao", files("alpha"));
@@ -211,12 +214,10 @@ async fn main_package_switch_preserves_each_addon_record_and_sources() {
         let module = match *id {
             "easy_en" => "lua/easy_en.lua".into(),
             "wanxiang" => "wanxiang_algebra.yaml".into(),
-            "snow_jiandao" => "lua/snow/snow.lua".into(),
             "triple_pinyin_lssp" => "lua/lssp/limited.lua".into(),
             _ => format!("lua/{id}/select_character.lua"),
         };
         let dictionary = match *id {
-            "snow_jiandao" => "snow_pinyin",
             "triple_pinyin_lssp" => "triple_pinyin",
             _ => id,
         };

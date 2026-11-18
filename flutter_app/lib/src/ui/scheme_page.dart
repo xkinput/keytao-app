@@ -128,10 +128,7 @@ class _SchemePageState extends State<SchemePage> {
                 color: key == activeKey ? palette.surface : null,
                 child: _package(key),
               ),
-            // 冰雪键道 follows the 键道 family; 李氏三拼 goes last.
-            addons[addons.length - 2],
-            ...addons.take(addons.length - 2),
-            addons.last,
+            ...addons,
           ],
         ),
         HairlineGridSection(
@@ -820,19 +817,22 @@ class SchemeSelection extends StatelessWidget {
                           onPress: c.busy || (c.isAndroid && c.releaseLoading)
                               ? null
                               : () => c.selectSchemeFamily(entry.key),
-                          child: Column(
-                            children: [
-                              Text(entry.value),
-                              const SizedBox(height: 3),
-                              Text(
-                                c.schemeFamily == entry.key
-                                    ? c.releaseVersion ?? c.selectedSchemeAsset
-                                    : schemeAssets[entry.key]!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 11),
-                              ),
-                            ],
+                          child: Flexible(
+                            child: Column(
+                              children: [
+                                Text(entry.value),
+                                const SizedBox(height: 3),
+                                Text(
+                                  c.schemeFamily == entry.key
+                                      ? c.releaseVersion ??
+                                            c.selectedSchemeAsset
+                                      : schemeAssets[entry.key]!,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 11),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -1200,24 +1200,6 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
         progress: c.rimeFrostProgress,
       ),
       error: c.rimeFrostError,
-    ),
-    addon(
-      key: 'addon-rime-snow',
-      repositoryUrl: schemeRepositoryUrls['rime_snow']!,
-      title: AppStrings.rimeSnow,
-      status: c.rimeSnowStatusText,
-      label: c.rimeSnowButtonLabel,
-      tooltip: c.rimeSnowTooltip,
-      showInstall: c.showRimeSnowInstall,
-      install: c.canInstallRimeSnow ? () => c.manageRimeSnow(true) : null,
-      installed: c.rimeSnow?.installed == true,
-      uninstall: c.canUninstallRimeSnow ? () => c.manageRimeSnow(false) : null,
-      active: c.isManagingRimeSnow,
-      progress: InstallProgressView(
-        active: c.isManagingRimeSnow,
-        progress: c.rimeSnowProgress,
-      ),
-      error: c.rimeSnowError,
     ),
     addon(
       key: 'addon-rime-lssp',

@@ -171,7 +171,6 @@ class _CurrentSchemeHero extends StatelessWidget {
     final addon = switch (c.activeSchemeKey) {
       'easy_en' => c.addon,
       'wanxiang' => c.wanxiang,
-      'snow_jiandao' => c.rimeSnow,
       'triple_pinyin_lssp' => c.rimeLssp,
       _ => null,
     };

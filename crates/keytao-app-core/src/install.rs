@@ -544,6 +544,7 @@ fn smart_install_entries(
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        crate::addon_store::migrate(core, &dest).map_err(|e| e.to_string())?;
         let previous = crate::package_activation::read(core, &dest).map_err(|e| e.to_string())?;
         let mut removed_files = previous
             .as_ref()
@@ -579,10 +580,39 @@ fn smart_install_entries(
         } else {
             None
         };
-        let paths = crate::package_activation::transaction_paths(&dest, &files, previous.as_ref())
+        let mut paths =
+            crate::package_activation::transaction_paths(&dest, &files, previous.as_ref())
+                .map_err(|e| e.to_string())?;
+        let snow = files
+            .iter()
+            .any(|(path, _)| path == "snow_jiandao-NOTICE.txt");
+        if snow {
+            if let Some(active) =
+                crate::addon_store::snow_activation(core, &dest).map_err(|e| e.to_string())?
+            {
+                paths.extend(
+                    active
+                        .owned
+                        .into_iter()
+                        .chain(active.generated)
+                        .map(|file| file.path),
+                );
+            }
+        }
+        let mut transaction = crate::package_activation::Transaction::begin(core, &dest, paths)
             .map_err(|e| e.to_string())?;
-        let transaction = crate::package_activation::Transaction::begin(core, &dest, paths)
-            .map_err(|e| e.to_string())?;
+        let mut legacy_logs = Vec::new();
+        if snow
+            && crate::addon_store::snow_activation(core, &dest)
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            transaction
+                .snapshot_store_file("addons/snow_jiandao/activation.json")
+                .map_err(|e| e.to_string())?;
+            legacy_logs =
+                crate::addon_store::take_over_snow(core, &dest).map_err(|e| e.to_string())?;
+        }
         let replacing_root = dest.canonicalize().ok();
         core.update_state(|state| {
             if state
@@ -596,9 +626,10 @@ fn smart_install_entries(
         .map_err(|e| e.to_string())?;
         // Validate the entire archive and manifest before deleting or writing files.
         let package_rime_lua = crate::packages::rime_lua_from_archive(&zip_bytes)?;
-        let addons = crate::package_activation::addon_ownership(core, &dest)
-            .map_err(|e| e.to_string())?;
+        let addons =
+            crate::package_activation::addon_ownership(core, &dest).map_err(|e| e.to_string())?;
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
+        cleanup_logs.extend(legacy_logs);
         let retained: std::collections::BTreeSet<_> =
             crate::package_activation::retained(&cleanup_logs)
                 .into_iter()

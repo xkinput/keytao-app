@@ -186,6 +186,7 @@ pub fn validate_scheme_key(scheme: &str) -> Result<&str, String> {
         "xmjd-feiding" => Ok("xmjd-feiding"),
         "txjx" => Ok("txjx"),
         "keydo" => Ok("keydo"),
+        "snow_jiandao" => Ok("snow_jiandao"),
         _ if is_local_scheme_key(scheme) => Ok(scheme),
         _ => Err("不支持的方案".into()),
     }
@@ -207,6 +208,19 @@ pub async fn fetch_scheme_release(
         let scheme = validate_scheme_key(scheme.trim())?;
         if is_local_scheme_key(scheme) {
             return Err("本地方案请重新导入".into());
+        }
+        if scheme == crate::rime_snow::SCHEMA_ID {
+            let package = crate::rime_snow::latest_package().await?;
+            return Ok(SchemeReleaseInfo {
+                scheme: scheme.into(),
+                source_type: Some("github".into()),
+                label: "冰雪键道".into(),
+                version: package.version.clone(),
+                name: package.version,
+                published_at: None,
+                download_url: package.download_url,
+                asset_name: "snow-pinyin.zip".into(),
+            });
         }
         let client = build_client(core)?;
         let url = format!("{API_BASE}/api/practice/scheme-release?scheme={scheme}");

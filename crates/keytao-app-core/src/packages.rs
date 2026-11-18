@@ -758,6 +758,9 @@ pub(crate) fn finalize_pending(
     if let Some(transaction) = receipt.transaction.take() {
         transaction.commit()?;
     }
+    if scheme_key == crate::rime_snow::SCHEMA_ID && !receipt.root.is_empty() {
+        crate::addon_store::finish_snow_takeover(core, Path::new(&receipt.root))?;
+    }
     Ok(())
 }
 
@@ -889,6 +892,7 @@ pub fn record_package(
 }
 
 pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>, CoreError> {
+    crate::addon_store::migrate_snow_package(core)?;
     PackageStore::new(core).list_installed_packages()
 }
 
@@ -898,6 +902,9 @@ pub async fn remove_scheme_package(
     host: &impl crate::scheme_host::SchemeHost,
 ) -> Result<Vec<String>, CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
+    if scheme_key == crate::rime_snow::SCHEMA_ID {
+        crate::rime_snow::remove_legacy(core, host).await?;
+    }
     let retained = if core.state().active_scheme.as_deref() == Some(scheme_key) {
         match remove_active_package(core, scheme_key, host).await {
             Ok(retained) => retained,
@@ -1574,8 +1581,6 @@ mod tests {
             ("rime_mint", false),
             ("rime_frost", true),
             ("rime_frost", false),
-            ("snow_jiandao", true),
-            ("snow_jiandao", false),
             ("triple_pinyin_lssp", true),
             ("triple_pinyin_lssp", false),
             ("keytao", true),

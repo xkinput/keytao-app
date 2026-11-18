@@ -39,6 +39,51 @@ fn put(root: &Path, relative: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn snow_migration_releases_addon_lock_before_waiting_for_package_lock() {
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().unwrap();
+    let core = core(directory.path());
+    let root = directory.path().join("rime");
+    let source = directory.path().join("source");
+    fs::create_dir(&root).unwrap();
+    let schema = "snow_jiandao.schema.yaml";
+    put(&source, schema, b"schema: {schema_id: snow_jiandao}");
+    put(&root, schema, b"schema: {schema_id: snow_jiandao}");
+    AddonStore::new(&core, &root, crate::rime_snow::SCHEMA_ID)
+        .unwrap()
+        .commit(
+            &source,
+            &manifest_bytes(&[(schema, b"schema: {schema_id: snow_jiandao}")]),
+        )
+        .unwrap();
+    let metadata = PackageStore::new(&core).metadata_path(crate::rime_snow::SCHEMA_ID);
+    let pending = core.pending_package.lock().unwrap();
+    let migrating = core.clone();
+    let worker = std::thread::spawn(move || migrate_snow_package(&migrating));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !metadata.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let published = metadata.is_file();
+    let mut addon_lock_available = false;
+    while published && Instant::now() < deadline {
+        if STORE_OPERATION.try_lock().is_ok() {
+            addon_lock_available = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(pending);
+    worker.join().unwrap().unwrap();
+    assert!(published, "migration did not publish package metadata");
+    assert!(
+        addon_lock_available,
+        "migration must not hold the addon lock while waiting for the package lock"
+    );
+}
+
+#[test]
 fn invalid_wanxiang_metadata_is_isolated_and_retained_for_retry() {
     for invalid in ["variant", "grammar", "json", "path", "oversized"] {
         let directory = tempfile::tempdir().unwrap();

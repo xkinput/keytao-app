@@ -490,6 +490,11 @@ impl Transaction {
         Ok(())
     }
 
+    pub(crate) fn snapshot_store_file(&mut self, relative: &str) -> Result<(), CoreError> {
+        self.snapshot(relative, true)?;
+        self.persist()
+    }
+
     pub(crate) fn snapshot_package(
         &mut self,
         key: &str,

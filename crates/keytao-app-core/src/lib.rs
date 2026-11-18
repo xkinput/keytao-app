@@ -113,6 +113,9 @@ impl Core {
         if let Err(error) = package_store::PackageStore::new(&core).migrate() {
             tracing::warn!(%error, "Package store migration will retry at next startup");
         }
+        if let Err(error) = addon_store::migrate_snow_package(&core) {
+            tracing::warn!(%error, "Snow package migration will retry at next startup");
+        }
         Ok(core)
     }
 

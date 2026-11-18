@@ -504,9 +504,6 @@ Future<AddonStatusDto> rimeMintStatus() =>
 Future<AddonStatusDto> rimeFrostStatus() =>
     RustLib.instance.api.crateApiCoreRimeFrostStatus();
 
-Future<AddonStatusDto> rimeSnowStatus() =>
-    RustLib.instance.api.crateApiCoreRimeSnowStatus();
-
 Future<AddonStatusDto> rimeLsspStatus() =>
     RustLib.instance.api.crateApiCoreRimeLsspStatus();
 
@@ -550,15 +547,6 @@ Future<AddonStatusDto> manageRimeFrost({
   required bool installed,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeFrost(
-  installed: installed,
-  androidDeploy: androidDeploy,
-);
-
-/// Holds the install lock through deployment and rollback.
-Future<AddonStatusDto> manageRimeSnow({
-  required bool installed,
-  required FutureOr<String> Function() androidDeploy,
-}) => RustLib.instance.api.crateApiCoreManageRimeSnow(
   installed: installed,
   androidDeploy: androidDeploy,
 );

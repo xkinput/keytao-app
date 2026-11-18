@@ -1,6 +1,9 @@
 use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme::build_client};
 use futures_util::StreamExt;
-use std::{io::Write, time::Duration};
+use std::{
+    io::{Seek, Write},
+    time::Duration,
+};
 
 pub const DOWNLOAD_CANCELLED: &str = "下载已取消";
 
@@ -61,6 +64,18 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
             }
         }
 
+        if url.starts_with("https://github.com/rimeinn/rime-snow-pinyin/releases/download/")
+            && url.ends_with("/snow-pinyin.zip")
+        {
+            let bytes = crate::rime_snow::prepare_archive(
+                core,
+                std::fs::read(temp.path()).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            temp.as_file_mut().set_len(0).map_err(|e| e.to_string())?;
+            temp.as_file_mut().rewind().map_err(|e| e.to_string())?;
+            temp.write_all(&bytes).map_err(|e| e.to_string())?;
+        }
         let temp_path = cache_dir.join("keytao_download.zip");
         temp.persist(&temp_path)
             .map_err(|e| format!("保存临时文件失败: {e}"))?;

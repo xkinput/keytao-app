@@ -1169,7 +1169,6 @@ mod tests {
             crate::rime_ice::SCHEMA_ID,
             "rime_mint",
             "rime_frost",
-            "snow_jiandao",
             "triple_pinyin_lssp",
         ] {
             let root = TestRoot::new();
@@ -1196,7 +1195,6 @@ mod tests {
             crate::rime_ice::SCHEMA_ID,
             "rime_mint",
             "rime_frost",
-            "snow_jiandao",
             "triple_pinyin_lssp",
         ] {
             for edited in [false, true] {
@@ -1303,7 +1301,6 @@ mod tests {
             crate::rime_ice::SCHEMA_ID,
             "rime_mint",
             "rime_frost",
-            "snow_jiandao",
             "triple_pinyin_lssp",
         ] {
             let root = TestRoot::new();

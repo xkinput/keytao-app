@@ -19,7 +19,7 @@ import '../view_fixture.dart';
 
 const _directory =
     '/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/'
-    '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/scheme-page';
+    '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/snowfix/scheme-page';
 const _cjkFamily = 'SchemeScreenshotCjk';
 const _captureKey = ValueKey('scheme-page-screenshot');
 
@@ -86,7 +86,7 @@ class _SchemeScreenshotController extends ViewController {
       version: '',
       size: BigInt.zero,
     );
-    rimeMint = rimeFrost = rimeSnow = rimeLssp = rimeIce;
+    rimeMint = rimeFrost = rimeLssp = rimeIce;
   }
 }
 
@@ -221,7 +221,7 @@ void main() {
         expect(find.text(heading), findsNothing);
       }
       final cards = [
-        for (final key in ['keytao', 'xmjd', 'txjx', 'keydo'])
+        for (final key in ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'])
           find
               .ancestor(
                 of: find.byKey(ValueKey('scheme-package-$key')),

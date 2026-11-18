@@ -550,7 +550,7 @@ fn fallback_dict(scheme: &str) -> Result<Option<&'static str>, CoreError> {
     Ok(match scheme {
         "xmjd" | "xmjd-feiding" => Some("xmjd6.user"),
         "txjx" => Some("txjx.user"),
-        "keydo" => None,
+        "keydo" | "snow_jiandao" => None,
         _ => Some("keytao.user"),
     })
 }

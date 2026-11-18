@@ -536,7 +536,117 @@ pub(crate) fn public_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBu
 
 pub(crate) fn migrate(core: &Core, root: &Path) -> Result<(), CoreError> {
     let _guard = operation();
-    migrate_inner(core, root)
+    migrate_inner(core, root)?;
+    drop(_guard);
+    migrate_snow_package(core)
+}
+
+pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
+    let _guard = operation();
+    let store = PackageStore::new(core);
+    let destination = store.checked_addon_path(crate::rime_snow::SCHEMA_ID)?;
+    store.recover_addon(crate::rime_snow::SCHEMA_ID)?;
+    if !destination.try_exists()? {
+        return Ok(());
+    }
+    validate_directory(&destination, crate::rime_snow::SCHEMA_ID)?;
+    let stored = read_stored(&destination, crate::rime_snow::SCHEMA_ID)?;
+    let key = crate::rime_snow::SCHEMA_ID;
+    if !store.metadata_path(key).try_exists()? {
+        let source = safe_path(&destination, "files").map_err(CoreError::Other)?;
+        let mut files = stored
+            .files
+            .iter()
+            .map(|file| {
+                Ok((
+                    file.path.clone(),
+                    fs::read(safe_path(&source, &file.path).map_err(CoreError::Other)?)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+        files.push(crate::rime_snow::default_custom());
+        let bytes = crate::packages::archive_from_files(&files)?;
+        let meta = PackageMeta {
+            scheme_key: key.into(),
+            version: stored.meta.version.clone(),
+            installed_at_unix: stored.meta.installed_at_unix,
+            source: "official".into(),
+            display_name: None,
+            selection_base_version: None,
+            manifest: files
+                .iter()
+                .filter(|(path, _)| !crate::packages::excluded_from_manifest(path))
+                .map(|(path, bytes)| Ok((path.clone(), sha256_reader(bytes.as_slice())?)))
+                .collect::<Result<_, CoreError>>()?,
+            zip_sha256: sha256_reader(bytes.as_slice())?,
+        };
+        store.write_archive(std::io::Cursor::new(bytes), &meta, stored.origin.as_deref())?;
+    }
+    // Package finalization can hold pending_package while entering the addon store.
+    drop(_guard);
+    let meta = store
+        .read_meta(key)?
+        .ok_or_else(|| CoreError::Other("Snow package metadata is missing".into()))?;
+    core.update_state(|state| {
+        state.installed_packages.insert(
+            key.into(),
+            crate::state::InstalledPackage {
+                version: meta.version,
+            },
+        );
+    })?;
+    Ok(())
+}
+
+pub(crate) fn snow_activation(core: &Core, root: &Path) -> Result<Option<Activation>, CoreError> {
+    let _guard = operation();
+    let store = PackageStore::new(core);
+    store.recover_addon(crate::rime_snow::SCHEMA_ID)?;
+    if !store
+        .checked_addon_path(crate::rime_snow::SCHEMA_ID)?
+        .try_exists()?
+    {
+        return Ok(None);
+    }
+    let addon =
+        AddonStore::new_inner(core, root, crate::rime_snow::SCHEMA_ID).map_err(CoreError::Other)?;
+    addon.activation().map_err(CoreError::Other)
+}
+
+pub(crate) fn take_over_snow(core: &Core, root: &Path) -> Result<Vec<String>, CoreError> {
+    let Some(mut active) = snow_activation(core, root)? else {
+        return Ok(Vec::new());
+    };
+    let mut logs = Vec::new();
+    for file in active.owned.iter().chain(&active.generated) {
+        let path = safe_path(root, &file.path).map_err(CoreError::Other)?;
+        if let Some(current) = crate::package_activation::fingerprint(root, &file.path)? {
+            if current.sha256 == file.sha256 {
+                crate::package_fs::remove_file(&path)?;
+            } else {
+                logs.push(format!("[KEPT] User-modified file: {}", file.path));
+            }
+        }
+    }
+    active.owned.clear();
+    active.generated.clear();
+    let path = PackageStore::new(core)
+        .checked_addon_path(crate::rime_snow::SCHEMA_ID)?
+        .join("activation.json");
+    crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec_pretty(&active)?)?;
+    Ok(logs)
+}
+
+pub(crate) fn finish_snow_takeover(core: &Core, root: &Path) -> Result<(), CoreError> {
+    if snow_activation(core, root)?
+        .is_some_and(|active| active.owned.is_empty() && active.generated.is_empty())
+    {
+        AddonStore::new(core, root, crate::rime_snow::SCHEMA_ID)
+            .map_err(CoreError::Other)?
+            .remove()
+            .map_err(CoreError::Other)?;
+    }
+    Ok(())
 }
 
 fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
@@ -549,7 +659,7 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
     for id in IDS {
         store.recover_addon(id)?;
     }
-    if marker.try_exists()? {
+    if marker.try_exists()? && !root.join(".keytao-rime-snow.json").try_exists()? {
         return Ok(());
     }
     fs::create_dir_all(&addons)?;

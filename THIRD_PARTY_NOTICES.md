@@ -40,6 +40,6 @@ Its stroke lookup is a package-owned copy from
 renamed to `lssp_stroke`. Punctuation uses the runtime's default preset, and the
 vocabulary reference uses the runtime's bundled `essay` data.
 
-These add-ons are downloaded at runtime and are not bundled with KeyTao. Their
+These packages are downloaded at runtime and are not bundled with KeyTao. Their
 installed notices retain source and license attribution. Uninstall preserves
 user customizations and learned dictionaries, including Snow's user database.

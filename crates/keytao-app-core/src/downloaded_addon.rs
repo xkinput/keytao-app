@@ -13,7 +13,6 @@ use std::{
     fs::{self, File},
     io::Read,
     path::Path,
-    sync::Arc,
 };
 
 pub(crate) struct Addon {
@@ -278,7 +277,7 @@ impl Addon {
 
     pub(crate) async fn manage<Install, InstallFuture>(
         &self,
-        core: &Arc<Core>,
+        core: &Core,
         installed: bool,
         host: &impl SchemeHost,
         install_package: Install,

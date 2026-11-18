@@ -64,7 +64,14 @@ fn sanitize_settings(input: &Value) -> Value {
         ("download_source", &["github", "gitee"][..]),
         (
             "selected_scheme",
-            &["keytao", "xmjd", "xmjd-feiding", "txjx", "keydo"][..],
+            &[
+                "keytao",
+                "xmjd",
+                "xmjd-feiding",
+                "txjx",
+                "keydo",
+                "snow_jiandao",
+            ][..],
         ),
         ("desktop_english_mode", &["ascii", "schema"][..]),
     ] {

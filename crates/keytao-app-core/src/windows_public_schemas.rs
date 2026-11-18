@@ -459,6 +459,8 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
                 Some("txjx")
             } else if id.starts_with("keydo") {
                 Some("keydo")
+            } else if id == crate::rime_snow::SCHEMA_ID {
+                Some(crate::rime_snow::SCHEMA_ID)
             } else if id.starts_with("keytao") {
                 Some("keytao")
             } else {
@@ -491,6 +493,11 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
         }
         bytes.extend_from_slice(&chunk);
     }
+    let bytes = if scheme == crate::rime_snow::SCHEMA_ID {
+        crate::rime_snow::prepare_archive(core, bytes).map_err(|error| error.to_string())?
+    } else {
+        bytes
+    };
     publish_package(&bytes)?;
     if crate::addon::addon_schema_status(core, || Ok(root.clone()), EASY_EN_ADDON_ID.into())
         .map_err(|error| error.to_string())?.installed {
@@ -849,7 +856,7 @@ pub fn has_schemas() -> bool {
     crate::scheme_files::parse_schema_list(&config)
         .iter()
         .any(|schema| {
-            ["keytao", "xmjd", "txjx", "keydo"]
+            ["keytao", "xmjd", "txjx", "keydo", "snow_jiandao"]
                 .iter()
                 .any(|prefix| schema.starts_with(prefix))
                 && !schema.contains(['/', '\\', ':'])
@@ -2044,20 +2051,6 @@ mod tests {
                 ),
                 ("zh-moqi.gram".into(), b"public grammar model".to_vec()),
                 (
-                    "snow_jiandao.schema.yaml".into(),
-                    b"schema: {schema_id: snow_jiandao, dependencies: [snow_pinyin, snow_radical_pinyin, snow_jiandao_bihua, snow_jiandao_jianpin, snow_jiandao_chaifen]}".to_vec(),
-                ),
-                (
-                    "snow_pinyin.schema.yaml".into(),
-                    b"schema: {schema_id: snow_pinyin, dependencies: [snow_bihua, snow_radical_pinyin]}".to_vec(),
-                ),
-                ("snow_bihua.schema.yaml".into(), b"schema: {schema_id: snow_bihua}".to_vec()),
-                ("snow_radical_pinyin.schema.yaml".into(), b"schema: {schema_id: snow_radical_pinyin}".to_vec()),
-                ("snow_jiandao_bihua.schema.yaml".into(), b"schema: {schema_id: snow_jiandao_bihua}".to_vec()),
-                ("snow_jiandao_jianpin.schema.yaml".into(), b"schema: {schema_id: snow_jiandao_jianpin}".to_vec()),
-                ("snow_jiandao_chaifen.schema.yaml".into(), b"schema: {schema_id: snow_jiandao_chaifen}".to_vec()),
-                ("snow_sanpin.schema.yaml".into(), b"schema: {schema_id: snow_sanpin}".to_vec()),
-                (
                     "triple_pinyin_lssp.schema.yaml".into(),
                     b"schema: {schema_id: triple_pinyin_lssp, dependencies: [lssp_stroke]}\npreedit:\n  __patch: {__append: [one]}\n  __patch: {__append: [two]}\n".to_vec(),
                 ),
@@ -2078,7 +2071,6 @@ mod tests {
                 "rime_ice",
                 "rime_mint",
                 "rime_frost",
-                "snow_jiandao",
                 "triple_pinyin_lssp"
             ]
         );
@@ -2087,13 +2079,6 @@ mod tests {
             "radical_pinyin.schema.yaml",
             "rime_mint_melt_eng.schema.yaml",
             "rime_frost_melt_eng.schema.yaml",
-            "snow_pinyin.schema.yaml",
-            "snow_bihua.schema.yaml",
-            "snow_radical_pinyin.schema.yaml",
-            "snow_jiandao_bihua.schema.yaml",
-            "snow_jiandao_jianpin.schema.yaml",
-            "snow_jiandao_chaifen.schema.yaml",
-            "snow_sanpin.schema.yaml",
             "lssp_stroke.schema.yaml",
         ] {
             assert!(files.contains_key(Path::new(dependency)));
