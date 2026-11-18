@@ -130,6 +130,7 @@ pub struct TsfState {
     pub composition_context: Option<ITfContext>,
     pub panel_anchor: Option<PanelAnchor>,
     pub input_generation: u64,
+    pub(crate) ime_update_generation: u64,
     pub panel_context: Option<ITfContext>,
     pub embedded_mode_cached: bool,
     pub layout_reposition_pending: bool,
@@ -287,6 +288,7 @@ impl TsfState {
             composition_context: None,
             panel_anchor: None,
             input_generation: 0,
+            ime_update_generation: 0,
             panel_context: None,
             embedded_mode_cached: false,
             layout_reposition_pending: false,
@@ -1642,6 +1644,11 @@ pub(crate) fn terminate_input_now(shared_state: &SharedState) {
     if let Some((context, composition, client_id)) = active_composition {
         end_composition_now(shared_state, &context, composition, client_id);
     }
+    // The thread may stop pumping the committed compositions' queued ends too.
+    for pending in &mut shared_state.borrow_mut().pending_composition_ends {
+        pending.queued = false;
+    }
+    crate::key_event_sink::flush_pending_composition_ends(shared_state);
     hide_ime_windows(shared_state);
 }
 

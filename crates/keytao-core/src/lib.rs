@@ -4559,6 +4559,28 @@ mod ime_runtime_tests {
     }
 
     #[test]
+    fn multiline_offsets_preserve_newlines_and_surrogate_pairs() {
+        for text in [
+            "甲😀尾\n乙末\n丙终",
+            "甲😀尾\r\n乙末\r\n丙终",
+            "甲😀尾\r乙末\r丙终",
+        ] {
+            let mut bytes = 0;
+            let mut units = 0;
+            for (chars, ch) in text.chars().enumerate() {
+                assert_eq!(char_offset_from_utf8(text, bytes), chars);
+                assert_eq!(utf16_offset_from_chars(text, chars), units);
+                bytes += ch.len_utf8();
+                units += ch.len_utf16();
+            }
+            assert_eq!(
+                utf16_offset_from_chars(text, usize::MAX),
+                text.encode_utf16().count()
+            );
+        }
+    }
+
+    #[test]
     fn key_policy_forward_consumed_ctrl_grave() {
         assert!(key_policy::should_forward_consumed_shortcut(
             b'`' as u32,
