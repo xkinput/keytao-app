@@ -554,66 +554,67 @@ class AppController extends ChangeNotifier {
       ? AppStrings.update
       : addon?.installed == true
       ? AppStrings.deploy
-      : AppStrings.install;
+      : AppStrings.download;
   String get wanxiangButtonLabel =>
       wanxiang?.installed == true &&
           selectedWanxiangVariant != installedWanxiangVariant
-      ? AppStrings.replace
+      ? AppStrings.download
       : wanxiangHasUpdate
       ? AppStrings.update
       : wanxiang?.installed == true
       ? AppStrings.deploy
-      : AppStrings.install;
-  String get addonStatusText =>
-      _addonStatus(addon?.installed, addon?.deployed, addon?.version);
+      : AppStrings.download;
+  String get addonStatusText => _addonStatus('easy_en', addon, addonHasUpdate);
   String get rimeIceButtonLabel => rimeIceHasUpdate
       ? AppStrings.update
       : rimeIce?.installed == true
       ? AppStrings.deploy
-      : AppStrings.install;
+      : AppStrings.download;
   String get rimeIceStatusText =>
-      _addonStatus(rimeIce?.installed, rimeIce?.deployed, rimeIce?.version);
+      _addonStatus('rime_ice', rimeIce, rimeIceHasUpdate);
   String get rimeMintButtonLabel => rimeMintHasUpdate
       ? AppStrings.update
       : rimeMint?.installed == true
       ? AppStrings.deploy
-      : AppStrings.install;
+      : AppStrings.download;
   String get rimeMintStatusText =>
-      _addonStatus(rimeMint?.installed, rimeMint?.deployed, rimeMint?.version);
+      _addonStatus('rime_mint', rimeMint, rimeMintHasUpdate);
   String get rimeFrostButtonLabel => rimeFrostHasUpdate
       ? AppStrings.update
       : rimeFrost?.installed == true
       ? AppStrings.deploy
-      : AppStrings.install;
-  String get rimeFrostStatusText => _addonStatus(
-    rimeFrost?.installed,
-    rimeFrost?.deployed,
-    rimeFrost?.version,
-  );
+      : AppStrings.download;
+  String get rimeFrostStatusText =>
+      _addonStatus('rime_frost', rimeFrost, rimeFrostHasUpdate);
   String get rimeLsspButtonLabel => rimeLsspHasUpdate
       ? AppStrings.update
       : rimeLssp?.installed == true
       ? AppStrings.deploy
-      : AppStrings.install;
+      : AppStrings.download;
   String get rimeLsspStatusText =>
-      _addonStatus(rimeLssp?.installed, rimeLssp?.deployed, rimeLssp?.version);
+      _addonStatus('triple_pinyin_lssp', rimeLssp, rimeLsspHasUpdate);
   String get wanxiangStatusText {
-    final status = _addonStatus(
-      wanxiang?.installed,
-      wanxiang?.deployed,
-      wanxiang?.version,
-    );
+    final status = _addonStatus('wanxiang', wanxiang, wanxiangHasUpdate);
     return wanxiang?.installed == true
         ? '$status · ${AppStrings.wanxiangVariants[installedWanxiangVariant] ?? installedWanxiangVariant}'
         : status;
   }
 
-  String _addonStatus(bool? installed, bool? deployed, String? version) =>
-      installed == null
-      ? AppStrings.checking
-      : !installed
-      ? AppStrings.notInstalled
-      : '${deployed == true ? AppStrings.deployed : AppStrings.installedNotDeployed} · ${version == null || version.isEmpty ? AppStrings.unknownVersion : version}';
+  String _addonStatus(String key, core.AddonStatusDto? addon, bool hasUpdate) {
+    if (addon == null) return AppStrings.checking;
+    if (!addon.installed) return AppStrings.notInstalled;
+    final state = activeSchemeKey == key
+        ? addon.deployed
+              ? '使用中'
+              : AppStrings.pendingDeploy
+        : hasUpdate
+        ? '可更新'
+        : addon.deployed
+        ? '已安装'
+        : AppStrings.pendingDeploy;
+    return '$state · ${addon.version.isEmpty ? AppStrings.unknownVersion : addon.version}';
+  }
+
   String? get localStatusLine => local == null
       ? null
       : AppStrings.localStatus(

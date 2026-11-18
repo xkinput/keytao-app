@@ -1253,15 +1253,18 @@ class AppDialog extends StatelessWidget {
     required this.actions,
     required this.animation,
     this.scrollable = true,
+    this.constraints = const BoxConstraints(minWidth: 280, maxWidth: 560),
   });
   final String title;
   final Widget child;
   final List<Widget> actions;
   final Animation<double> animation;
   final bool scrollable;
+  final BoxConstraints constraints;
   @override
   Widget build(BuildContext context) => FDialog(
     animation: animation,
+    constraints: constraints,
     builder: (context, _) => Padding(
       padding: EdgeInsets.symmetric(
         horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,

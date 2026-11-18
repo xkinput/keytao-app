@@ -11,6 +11,60 @@ import 'theme.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
+const _homeSchemeKeys = {'keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'};
+const _homeAddonKeys = ['rime_ice', 'easy_en'];
+
+void _showAddonSchemes(BuildContext context, AppController c) {
+  showFDialog<void>(
+    context: context,
+    builder: (context, _, animation) => ListenableBuilder(
+      listenable: c,
+      builder: (context, _) {
+        final addons = _addonCells(context, c, compact: true);
+        return AppDialog(
+          title: AppStrings.addonTitle,
+          animation: animation,
+          constraints: const BoxConstraints(minWidth: 280, maxWidth: 1120),
+          actions: [
+            ActionButton(
+              AppStrings.close,
+              onPress: () => Navigator.pop(context),
+            ),
+          ],
+          child: SizedBox(
+            width: 1056,
+            child: HairlineGridSection(
+              key: const ValueKey('addon-schemes'),
+              minCellWidth: 180,
+              children: [
+                for (final entry in addons.entries)
+                  if (!_homeAddonKeys.contains(entry.key)) entry.value,
+                for (final key in {
+                  ...schemes.keys,
+                  for (final package in c.installedPackages) package.schemeKey,
+                })
+                  if (!_homeSchemeKeys.contains(key) &&
+                      key != 'xmjd-feiding' &&
+                      !addons.containsKey(key) &&
+                      !c.isLocalScheme(key))
+                    HairlineGridCell(
+                      padding: const EdgeInsets.all(12),
+                      child: SchemePackageRow(
+                        controller: c,
+                        schemeKey: key,
+                        compact: true,
+                        showSource: false,
+                      ),
+                    ),
+              ],
+            ),
+          ),
+        );
+      },
+    ),
+  );
+}
+
 void showChangelog(BuildContext context, AppController c, String body) {
   showFDialog<void>(
     context: context,
@@ -102,14 +156,21 @@ class _SchemePageState extends State<SchemePage> {
   @override
   Widget build(BuildContext context) {
     final c = widget.controller;
-    final xmjdScheme = c.schemeFamily == 'xmjd' ? c.scheme : 'xmjd';
+    final xmjdScheme = c.schemeFamily == 'xmjd'
+        ? c.scheme
+        : c.activeSchemeKey == 'xmjd-feiding'
+        ? 'xmjd-feiding'
+        : 'xmjd';
     final schemeKeys = <String>{
       for (final key in schemes.keys) key == 'xmjd' ? xmjdScheme : key,
       for (final package in c.installedPackages) package.schemeKey,
     };
     final desktop = MediaQuery.sizeOf(context).width >= 720;
     final palette = AppPalette.of(context);
-    final cloudKeys = schemeKeys.where((key) => !c.isLocalScheme(key)).toList();
+    final cloudKeys = [
+      for (final key in _homeSchemeKeys)
+        if (!c.isLocalScheme(key)) key == 'xmjd' ? xmjdScheme : key,
+    ];
     final addons = _addonCells(context, c);
     final activeKey = c.installedPackages
         .where((package) => package.active)
@@ -132,21 +193,35 @@ class _SchemePageState extends State<SchemePage> {
             12,
           ),
           child: Row(
+            spacing: 8,
             children: [
-              const Expanded(child: EyebrowLabel('方案列表')),
-              _SchemeSource(controller: c),
-              FTooltip(
-                tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
-                child: FButton.icon(
-                  variant: FButtonVariant.ghost,
-                  onPress: c.busy || c.schemeUpdatesLoading
-                      ? null
-                      : c.refreshSchemeUpdates,
-                  child: const Icon(
-                    FLucideIcons.refreshCw,
-                    size: 16,
-                    semanticLabel: AppStrings.checkUpdate,
-                  ),
+              const EyebrowLabel('方案列表'),
+              Expanded(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  spacing: 8,
+                  children: [
+                    Flexible(child: _SchemeSource(controller: c)),
+                    ActionButton(
+                      AppStrings.addonTitle,
+                      key: const ValueKey('addon-schemes-button'),
+                      onPress: () => _showAddonSchemes(context, c),
+                    ),
+                    FTooltip(
+                      tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
+                      child: FButton.icon(
+                        variant: FButtonVariant.ghost,
+                        onPress: c.busy || c.schemeUpdatesLoading
+                            ? null
+                            : c.refreshSchemeUpdates,
+                        child: const Icon(
+                          FLucideIcons.refreshCw,
+                          size: 16,
+                          semanticLabel: AppStrings.checkUpdate,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -162,7 +237,7 @@ class _SchemePageState extends State<SchemePage> {
                   color: key == activeKey ? palette.surface : null,
                   child: _package(key),
                 ),
-              ...addons,
+              for (final key in _homeAddonKeys) addons[key]!,
             ];
             final columns = desktop && constraints.hasBoundedWidth
                 ? (constraints.maxWidth / minCellWidth).floor().clamp(
@@ -177,12 +252,9 @@ class _SchemePageState extends State<SchemePage> {
               final activeScheme = c.activeSchemeKey;
               var activeIndex = cloudKeys.indexOf(activeScheme);
               if (activeIndex < 0) {
-                final addonKey = activeScheme == 'triple_pinyin_lssp'
-                    ? 'addon-rime-lssp'
-                    : 'addon-${activeScheme.replaceAll('_', '-')}';
-                activeIndex = cells.indexWhere(
-                  (cell) => cell.key == ValueKey(addonKey),
-                );
+                activeIndex = _homeAddonKeys.contains(activeScheme)
+                    ? cloudKeys.length + _homeAddonKeys.indexOf(activeScheme)
+                    : -1;
               }
               if (activeIndex >= visibleCount) {
                 cells[visibleCount - 1] = cells[activeIndex];
@@ -429,7 +501,7 @@ class SchemePackageRow extends StatelessWidget {
           ),
         if (!isLocal && (package == null || activeLegacy))
           ActionButton(
-            activeLegacy ? '重新下载' : '下载',
+            '下载',
             primary: false,
             icon: FLucideIcons.download,
             onPress: c.busy ? null : () => c.installSchemePackage(schemeKey),
@@ -438,7 +510,7 @@ class SchemePackageRow extends StatelessWidget {
             !active &&
             (package.hasPackageZip || !isLocal))
           ActionButton(
-            package.hasPackageZip ? '启用' : '重新下载',
+            package.hasPackageZip ? '启用' : '下载',
             primary: update == null,
             icon: package.hasPackageZip
                 ? FLucideIcons.play
@@ -555,7 +627,7 @@ class SchemePackageRow extends StatelessWidget {
                               },
                       ),
                     FItem(
-                      title: const Text('删除'),
+                      title: const Text(AppStrings.uninstall),
                       variant: FItemVariant.destructive,
                       prefix: const Icon(FLucideIcons.trash2),
                       enabled: !c.busy,
@@ -747,22 +819,13 @@ class SchemePackageRow extends StatelessWidget {
           ),
           const SizedBox(height: 14),
         ],
-        if (compact)
-          Row(
-            children: [
-              Expanded(flex: 3, child: heading),
-              const SizedBox(width: 8),
-              Flexible(flex: 4, child: actions),
-            ],
-          )
-        else
-          heading,
+        heading,
         if (active && !deploying)
           for (final step in failedDeploySteps) ...[
             const SizedBox(height: 8),
             ErrorMessage(step.message),
           ],
-        if (schemeKey == (c.schemeFamily == 'xmjd' ? c.scheme : 'xmjd')) ...[
+        if (schemeKey == 'xmjd' || schemeKey == 'xmjd-feiding') ...[
           const SizedBox(height: 8),
           BigTextRadioGroup<String>(
             label: '${schemes['xmjd']} 变体',
@@ -774,22 +837,20 @@ class SchemePackageRow extends StatelessWidget {
           const SizedBox(height: 14),
           const SizedBox(height: 44),
         ],
-        if (!compact) ...[
-          const SizedBox(height: 10),
-          if (!desktop && active && !showSource)
-            Row(
-              spacing: 8,
-              children: [
-                for (final action in actions.children)
-                  if (action is ActionButton)
-                    Expanded(child: action)
-                  else
-                    SizedBox(width: 44, child: action),
-              ],
-            )
-          else
-            actions,
-        ],
+        const SizedBox(height: 10),
+        if (!compact && !desktop && active && !showSource)
+          Row(
+            spacing: 8,
+            children: [
+              for (final action in actions.children)
+                if (action is ActionButton)
+                  Expanded(child: action)
+                else
+                  SizedBox(width: 44, child: action),
+            ],
+          )
+        else
+          actions,
         if (installing || deploying) ...[
           const SizedBox(height: 8),
           InstallProgressView(
@@ -848,8 +909,15 @@ class _SchemeSource extends StatelessWidget {
         ],
         builder: (_, popover, _) => FButton(
           variant: FButtonVariant.ghost,
+          mainAxisSize: MainAxisSize.min,
           onPress: popover.toggle,
-          child: Text('来源 · ${downloadSources[c.source] ?? c.source}'),
+          child: Flexible(
+            child: Text(
+              '来源 · ${downloadSources[c.source] ?? c.source}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ),
       ),
     );
@@ -1021,11 +1089,15 @@ class AddonCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) => HairlineGridSection(
     minCellWidth: 320,
-    children: _addonCells(context, controller),
+    children: _addonCells(context, controller).values.toList(),
   );
 }
 
-List<Widget> _addonCells(BuildContext context, AppController c) {
+Map<String, Widget> _addonCells(
+  BuildContext context,
+  AppController c, {
+  bool compact = false,
+}) {
   Widget addon({
     required String key,
     required String packageKey,
@@ -1043,95 +1115,171 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     required String? error,
     Widget? variant,
     Widget? extra,
-  }) => HairlineGridCell(
-    key: ValueKey(key),
-    child: _SchemeCardMenu(
-      builder: (context, menu) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            title,
-            style: context.theme.typography.body.sm.copyWith(
-              fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 30,
-              height: 1.1,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            status,
-            style: context.theme.typography.body.xs.copyWith(
-              color: context.theme.colors.mutedForeground,
-            ),
-          ),
-          if (variant != null) ...[const SizedBox(height: 12), variant],
-          const SizedBox(height: 12),
-          ActionRow(
-            children: [
-              if (showInstall)
-                ActionButton(
-                  label,
-                  primary: true,
-                  icon: FLucideIcons.download,
-                  tooltip: tooltip,
-                  onPress: install,
-                ),
-              if (installed)
-                ActionButton(AppStrings.uninstall, onPress: uninstall),
-              FPopoverMenu(
-                control: FPopoverControl.managed(controller: menu),
-                menuAnchor: Alignment.topRight,
-                childAnchor: Alignment.bottomRight,
-                menuBuilder: (_, popover, _) => [
-                  FItemGroup(
-                    children: [
-                      if (installed)
-                        FItem(
-                          title: const Text(AppStrings.selectSchemas),
-                          prefix: const Icon(FLucideIcons.listChecks),
-                          enabled: !c.busy,
-                          onPress: c.busy
-                              ? null
-                              : () {
-                                  popover.hide();
-                                  showPackageSchemaSelection(
-                                    context,
-                                    c,
-                                    packageKey,
-                                  );
-                                },
-                        ),
-                      FItem(
-                        title: const Text('仓库地址'),
-                        prefix: const Icon(FLucideIcons.externalLink),
-                        onPress: () {
-                          popover.hide();
-                          c.open(repositoryUrl);
-                        },
+  }) {
+    final cloudCard = !compact && _homeAddonKeys.contains(packageKey);
+    final info = packageKey == 'easy_en' ? c.addon : c.rimeIce;
+    final hasUpdate = packageKey == 'easy_en'
+        ? c.addonHasUpdate
+        : c.rimeIceHasUpdate;
+    final inUse = installed && c.activeSchemeKey == packageKey;
+    final palette = AppPalette.of(context);
+    final titleStyle = context.theme.typography.body.sm.copyWith(
+      fontSize: compact
+          ? 20
+          : MediaQuery.sizeOf(context).width >= 720
+          ? 34
+          : 30,
+      height: 1.1,
+      fontWeight: FontWeight.w700,
+      letterSpacing: cloudCard ? -.34 : null,
+    );
+    final name = Text(
+      title,
+      maxLines: cloudCard ? 1 : null,
+      overflow: cloudCard ? TextOverflow.ellipsis : null,
+      strutStyle: cloudCard
+          ? StrutStyle.fromTextStyle(titleStyle, forceStrutHeight: true)
+          : null,
+      style: cloudCard && title.length > 10
+          ? titleStyle.copyWith(fontSize: 28)
+          : titleStyle,
+    );
+    return HairlineGridCell(
+      key: ValueKey(key),
+      padding: compact ? const EdgeInsets.all(12) : null,
+      child: _SchemeCardMenu(
+        builder: (context, menu) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (cloudCard) ...[
+              Row(
+                children: [
+                  EyebrowLabel(inUse ? '在用' : '云端'),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      installed ? info!.version : '',
+                      textAlign: TextAlign.end,
+                      style: context.theme.typography.body.sm.copyWith(
+                        color: inUse
+                            ? palette.successForeground
+                            : palette.muted,
+                        fontSize: 13,
+                        fontWeight: inUse ? FontWeight.w600 : FontWeight.w400,
                       ),
-                    ],
+                    ),
                   ),
                 ],
-                builder: (_, popover, _) =>
-                    _SchemeMoreButton(onPress: popover.toggle),
               ),
+              const SizedBox(height: 14),
+              Row(
+                spacing: 6,
+                children: [
+                  Flexible(child: name),
+                  if (inUse)
+                    AppBadge(info!.deployed ? '使用中' : AppStrings.pendingDeploy)
+                  else
+                    StatusPill(
+                      info == null
+                          ? AppStrings.checking
+                          : !installed
+                          ? '未安装'
+                          : hasUpdate
+                          ? '可更新'
+                          : info.deployed
+                          ? '已安装'
+                          : AppStrings.pendingDeploy,
+                      color: hasUpdate
+                          ? ChromeAccent.of(context)
+                          : installed
+                          ? palette.success
+                          : palette.muted,
+                    ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              const SizedBox(height: 44),
+              const SizedBox(height: 10),
+            ] else ...[
+              name,
+              const SizedBox(height: 4),
+              Text(
+                status,
+                style: context.theme.typography.body.xs.copyWith(
+                  color: context.theme.colors.mutedForeground,
+                ),
+              ),
+              if (variant != null) ...[const SizedBox(height: 12), variant],
+              const SizedBox(height: 12),
             ],
-          ),
-          if (active) ...[const SizedBox(height: 12), progress],
-          if (error != null) ...[
-            const SizedBox(height: 8),
-            ErrorMessage(error),
+            ActionRow(
+              children: [
+                if (showInstall)
+                  ActionButton(
+                    label,
+                    primary: true,
+                    icon: FLucideIcons.download,
+                    tooltip: tooltip,
+                    onPress: install,
+                  ),
+                if (installed)
+                  ActionButton(AppStrings.uninstall, onPress: uninstall),
+                FPopoverMenu(
+                  control: FPopoverControl.managed(controller: menu),
+                  menuAnchor: Alignment.topRight,
+                  childAnchor: Alignment.bottomRight,
+                  menuBuilder: (_, popover, _) => [
+                    FItemGroup(
+                      children: [
+                        if (installed)
+                          FItem(
+                            title: const Text(AppStrings.selectSchemas),
+                            prefix: const Icon(FLucideIcons.listChecks),
+                            enabled: !c.busy,
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    showPackageSchemaSelection(
+                                      context,
+                                      c,
+                                      packageKey,
+                                    );
+                                  },
+                          ),
+                        FItem(
+                          title: const Text('仓库地址'),
+                          prefix: const Icon(FLucideIcons.externalLink),
+                          onPress: () {
+                            popover.hide();
+                            c.open(repositoryUrl);
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                  builder: (_, popover, _) =>
+                      _SchemeMoreButton(onPress: popover.toggle),
+                ),
+              ],
+            ),
+            if (active) ...[const SizedBox(height: 12), progress],
+            if (error != null) ...[
+              const SizedBox(height: 8),
+              ErrorMessage(error),
+            ],
+            if (extra != null) ...[const SizedBox(height: 16), extra],
           ],
-          if (extra != null) ...[const SizedBox(height: 16), extra],
-        ],
+        ),
       ),
-    ),
-  );
-  return [
-    addon(
+    );
+  }
+
+  return {
+    'easy_en': addon(
       key: 'addon-easy-en',
       packageKey: 'easy_en',
-      title: AppStrings.easyEnglish,
+      title: schemeDisplayName('easy_en'),
       repositoryUrl: schemeRepositoryUrls['easy_en']!,
       status: c.addonStatusText,
       label: c.addonButtonLabel,
@@ -1147,7 +1295,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
       ),
       error: c.addonError,
     ),
-    addon(
+    'wanxiang': addon(
       key: 'addon-wanxiang',
       packageKey: 'wanxiang',
       title: AppStrings.wanxiang,
@@ -1210,7 +1358,9 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
                         )
                       else
                         ActionButton(
-                          c.wanxiangGrammar?.installed == true ? '删除' : '下载',
+                          c.wanxiangGrammar?.installed == true
+                              ? AppStrings.uninstall
+                              : '下载',
                           icon: c.wanxiangGrammar?.installed == true
                               ? FLucideIcons.trash2
                               : FLucideIcons.download,
@@ -1238,7 +1388,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
             )
           : null,
     ),
-    addon(
+    'rime_ice': addon(
       key: 'addon-rime-ice',
       packageKey: 'rime_ice',
       title: AppStrings.rimeIce,
@@ -1257,7 +1407,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
       ),
       error: c.rimeIceError,
     ),
-    addon(
+    'rime_mint': addon(
       key: 'addon-rime-mint',
       packageKey: 'rime_mint',
       title: AppStrings.rimeMint,
@@ -1276,7 +1426,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
       ),
       error: c.rimeMintError,
     ),
-    addon(
+    'rime_frost': addon(
       key: 'addon-rime-frost',
       packageKey: 'rime_frost',
       title: AppStrings.rimeFrost,
@@ -1297,7 +1447,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
       ),
       error: c.rimeFrostError,
     ),
-    addon(
+    'triple_pinyin_lssp': addon(
       key: 'addon-rime-lssp',
       packageKey: 'triple_pinyin_lssp',
       repositoryUrl: schemeRepositoryUrls['rime_lssp']!,
@@ -1316,5 +1466,5 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
       ),
       error: c.rimeLsspError,
     ),
-  ];
+  };
 }

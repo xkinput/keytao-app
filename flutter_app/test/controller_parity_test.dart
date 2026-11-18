@@ -532,6 +532,51 @@ void main() {
     RustLib.dispose();
   });
 
+  test('every managed scheme uses the download action label', () {
+    controller.addon = controller.wanxiang = controller.rimeIce =
+        controller.rimeMint = controller.rimeFrost = controller.rimeLssp =
+            missingAddon;
+    expect([
+      controller.installButtonLabel,
+      controller.addonButtonLabel,
+      controller.wanxiangButtonLabel,
+      controller.rimeIceButtonLabel,
+      controller.rimeMintButtonLabel,
+      controller.rimeFrostButtonLabel,
+      controller.rimeLsspButtonLabel,
+    ], everyElement(AppStrings.download));
+    controller.wanxiang = installedAddon;
+    controller.selectWanxiangVariant('pure');
+    expect(controller.wanxiangButtonLabel, AppStrings.download);
+  });
+
+  test('add-on status uses the same installed and active vocabulary', () {
+    expect(controller.rimeIceStatusText, AppStrings.checking);
+    controller.rimeIce = missingAddon;
+    expect(controller.rimeIceStatusText, AppStrings.notInstalled);
+    controller.rimeIce = installedAddon;
+    controller.local = deployedLocal;
+    expect(controller.rimeIceStatusText, '已安装 · 1');
+    controller.rimeIceLatestVersion = '2';
+    expect(controller.rimeIceStatusText, '可更新 · 1');
+    controller.local = const LocalSchemaDto(
+      installed: true,
+      deployed: true,
+      schemas: ['rime_ice'],
+    );
+    expect(controller.rimeIceStatusText, '使用中 · 1');
+    controller.rimeIce = const AddonStatusDto(
+      installed: true,
+      deployed: false,
+      version: '1',
+      englishAvailable: false,
+    );
+    expect(controller.rimeIceStatusText, '待部署 · 1');
+    controller.local = deployedLocal;
+    controller.rimeIceLatestVersion = null;
+    expect(controller.rimeIceStatusText, '待部署 · 1');
+  });
+
   Future<File> prepareIosUpgrade() async {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;

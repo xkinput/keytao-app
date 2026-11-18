@@ -5,9 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart'
-    show DeployStep, DeployStepState;
+    show DeployStep, DeployStepState, OperationKind;
 import 'package:keytao/src/app/options.dart';
-import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
+import 'package:keytao/src/rust/api/core.dart'
+    show AddonStatusDto, WanxiangGrammarStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/login.dart' show showAccountDialog;
@@ -86,6 +87,36 @@ class _PackageController extends ViewController {
   @override
   Future<bool> removeSchemePackage(String key) async {
     actions.add('remove:$key');
+    return true;
+  }
+
+  @override
+  Future<bool> installAddon() async {
+    actions.add('easy:true');
+    return true;
+  }
+
+  @override
+  Future<bool> uninstallAddon() async {
+    actions.add('easy:false');
+    return true;
+  }
+
+  @override
+  Future<bool> manageWanxiang(bool installed) async {
+    actions.add('wanxiang:$installed');
+    return true;
+  }
+
+  @override
+  Future<bool> manageWanxiangGrammar(bool installed) async {
+    actions.add('grammar:$installed');
+    return true;
+  }
+
+  @override
+  Future<bool> manageRimeIce(bool installed) async {
+    actions.add('ice:$installed');
     return true;
   }
 
@@ -207,10 +238,18 @@ Future<void> _pumpSchemePage(
   await tester.pumpAndSettle();
 }
 
+Future<void> _openAddons(WidgetTester tester) async {
+  final button = find.byKey(const ValueKey('addon-schemes-button'));
+  await tester.ensureVisible(button);
+  await tester.tap(button);
+  await tester.pumpAndSettle();
+  expect(find.byType(AppDialog), findsOneWidget);
+}
+
 List<String> _actionLabels(WidgetTester tester) => tester
     .widgetList<ActionButton>(find.byType(ActionButton))
     .map((button) => button.label)
-    .where((label) => const {'下载', '重新下载', '更新', '启用', '删除'}.contains(label))
+    .where((label) => const {'下载', '重新下载', '更新', '启用', '卸载'}.contains(label))
     .toList();
 
 void main() {
@@ -220,7 +259,11 @@ void main() {
       final c = _PackageController();
       addTearDown(c.dispose);
       _size(tester, const Size(1100, 1200));
-      Future<void> select(String key, Finder menu) async {
+      Future<void> select(
+        String key,
+        Finder menu, {
+        bool inDialog = false,
+      }) async {
         await tester.ensureVisible(menu);
         await tester.tap(menu);
         await tester.pumpAndSettle();
@@ -248,7 +291,10 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(c.actions.last, 'schemas:$key:beta');
-        expect(find.byType(AppDialog), findsNothing);
+        expect(
+          find.byType(AppDialog),
+          inDialog ? findsOneWidget : findsNothing,
+        );
         expect(tester.takeException(), isNull);
       }
 
@@ -280,10 +326,28 @@ void main() {
       c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost = c.rimeLssp =
           installed;
       await _pumpAddons(tester, c);
+      await select(
+        'rime_ice',
+        find.descendant(
+          of: find.byKey(const ValueKey('addon-rime-ice')),
+          matching: find.byIcon(FLucideIcons.ellipsis),
+        ),
+      );
+      await _pumpSchemePage(tester, c);
+      final expand = find.bySemanticsLabel('展开全部方案');
+      await tester.ensureVisible(expand);
+      await tester.tap(expand);
+      await tester.pumpAndSettle();
+      await select(
+        'easy_en',
+        find.descendant(
+          of: find.byKey(const ValueKey('addon-easy-en')),
+          matching: find.byIcon(FLucideIcons.ellipsis),
+        ),
+      );
+      await _openAddons(tester);
       for (final (card, key) in [
-        ('addon-easy-en', 'easy_en'),
         ('addon-wanxiang', 'wanxiang'),
-        ('addon-rime-ice', 'rime_ice'),
         ('addon-rime-mint', 'rime_mint'),
         ('addon-rime-frost', 'rime_frost'),
         ('addon-rime-lssp', 'triple_pinyin_lssp'),
@@ -294,6 +358,7 @@ void main() {
             of: find.byKey(ValueKey(card)),
             matching: find.byIcon(FLucideIcons.ellipsis),
           ),
+          inDialog: true,
         );
       }
     },
@@ -342,18 +407,18 @@ void main() {
   }
 
   for (final (installed, deployed, latest, label) in [
-    (false, false, '2', AppStrings.install),
+    (false, false, '2', '下载'),
     (true, true, '1', null),
     (true, false, '1', AppStrings.deploy),
     (true, true, '2', AppStrings.update),
     (true, false, '2', AppStrings.update),
   ]) {
     testWidgets(
-      'add-on actions for installed=$installed deployed=$deployed latest=$latest',
+      'dialog actions for installed=$installed deployed=$deployed latest=$latest',
       (tester) async {
         final c = _PackageController();
         addTearDown(c.dispose);
-        _size(tester, const Size(1000, 1200));
+        _size(tester, const Size(1200, 1200));
         final status = AddonStatusDto(
           installed: installed,
           deployed: deployed,
@@ -365,21 +430,24 @@ void main() {
         c.addonLatestVersion = c.wanxiangLatestVersion =
             c.rimeIceLatestVersion = c.rimeMintLatestVersion =
                 c.rimeFrostLatestVersion = c.rimeLsspLatestVersion = latest;
-        await _pumpAddons(tester, c);
+        await _pumpSchemePage(tester, c);
+        await _openAddons(tester);
+        final grid = find.byKey(const ValueKey('addon-schemes'));
         final buttons = tester.widgetList<ActionButton>(
-          find.byType(ActionButton),
+          find.descendant(of: grid, matching: find.byType(ActionButton)),
         );
         expect(
           buttons
               .where((button) => button.primary)
               .map((button) => button.label),
-          label == null ? isEmpty : List.filled(6, label),
+          label == null ? isEmpty : List.filled(4, label),
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
-          hasLength(installed ? 6 : 0),
+          hasLength(installed ? 4 : 0),
         );
         for (final (key, name) in [
+          ('addon-wanxiang', 'wanxiang'),
           ('addon-rime-mint', 'mint'),
           ('addon-rime-frost', 'frost'),
           ('addon-rime-lssp', 'lssp'),
@@ -407,9 +475,12 @@ void main() {
           }
         }
         c.busy = true;
-        await _pumpAddons(tester, c);
+        c.rebuild();
+        await tester.pumpAndSettle();
         expect(
-          tester.widgetList<ActionButton>(find.byType(ActionButton)),
+          tester.widgetList<ActionButton>(
+            find.descendant(of: grid, matching: find.byType(ActionButton)),
+          ),
           everyElement(
             isA<ActionButton>().having(
               (button) => button.onPress,
@@ -441,17 +512,17 @@ void main() {
     _size(tester, const Size(1000, 1200));
     for (final busy in [false, true]) {
       c.busy = busy;
-      await _pumpAddons(tester, c);
+      await _pumpSchemePage(tester, c);
+      await _openAddons(tester);
       for (final (key, title, url) in const [
-        (
-          'addon-easy-en',
-          AppStrings.easyEnglish,
-          'https://github.com/BlindingDark/rime-easy-en',
-        ),
         ('addon-wanxiang', '万象拼音', 'https://github.com/amzxyz/rime-wanxiang'),
-        ('addon-rime-ice', '雾凇拼音', 'https://github.com/iDvel/rime-ice'),
         ('addon-rime-mint', '薄荷拼音', 'https://github.com/Mintimate/oh-my-rime'),
         ('addon-rime-frost', '白霜拼音', 'https://github.com/gaboolic/rime-frost'),
+        (
+          'addon-rime-lssp',
+          AppStrings.rimeLssp,
+          'https://github.com/arsenali/rime-triple-pinyin-lssp',
+        ),
       ]) {
         final card = find.byKey(ValueKey(key));
         final more = find.descendant(
@@ -485,6 +556,8 @@ void main() {
         await tester.pumpAndSettle();
         expect(c.actions, ['open:$url']);
       }
+      Navigator.of(tester.element(find.byType(AppDialog))).pop();
+      await tester.pumpAndSettle();
     }
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -555,7 +628,10 @@ void main() {
       c.selectWanxiangVariant('pure');
       await _pumpAddons(tester, c);
       expect(
-        find.widgetWithText(ActionButton, AppStrings.replace),
+        find.descendant(
+          of: find.byKey(const ValueKey('addon-wanxiang')),
+          matching: find.widgetWithText(ActionButton, '下载'),
+        ),
         findsOneWidget,
       );
       expect(
@@ -583,7 +659,7 @@ void main() {
     expect(find.text(AppStrings.rimeSnow), findsNothing);
     expect(find.text(AppStrings.rimeLssp), findsOneWidget);
     final installs = tester.widgetList<ActionButton>(
-      find.widgetWithText(ActionButton, AppStrings.install),
+      find.widgetWithText(ActionButton, '下载'),
     );
     expect(installs, hasLength(6));
     expect(installs.every((button) => button.onPress != null), isTrue);
@@ -890,7 +966,7 @@ void main() {
           hasPackageZip: true,
         ),
         update: false,
-        labels: ['删除'],
+        labels: ['卸载'],
         calls: ['remove:keytao'],
       ),
       (
@@ -901,7 +977,7 @@ void main() {
           hasPackageZip: false,
         ),
         update: false,
-        labels: ['重新下载', '删除'],
+        labels: ['下载', '卸载'],
         calls: ['install:keytao', 'remove:keytao'],
       ),
       (
@@ -912,7 +988,7 @@ void main() {
           hasPackageZip: true,
         ),
         update: false,
-        labels: ['启用', '删除'],
+        labels: ['启用', '卸载'],
         calls: ['activate:keytao', 'remove:keytao'],
       ),
       (
@@ -923,7 +999,7 @@ void main() {
           hasPackageZip: false,
         ),
         update: false,
-        labels: ['重新下载', '删除'],
+        labels: ['下载', '卸载'],
         calls: ['download:keytao', 'remove:keytao'],
       ),
       (
@@ -934,7 +1010,7 @@ void main() {
           hasPackageZip: true,
         ),
         update: true,
-        labels: ['更新', '启用', '删除'],
+        labels: ['更新', '启用', '卸载'],
         calls: ['update:keytao', 'activate:keytao', 'remove:keytao'],
       ),
       (
@@ -945,7 +1021,7 @@ void main() {
           hasPackageZip: true,
         ),
         update: true,
-        labels: ['更新', '删除'],
+        labels: ['更新', '卸载'],
         calls: ['update:keytao', 'remove:keytao'],
       ),
       (
@@ -956,7 +1032,7 @@ void main() {
           hasPackageZip: false,
         ),
         update: true,
-        labels: ['更新', '删除'],
+        labels: ['更新', '卸载'],
         calls: ['update:keytao', 'remove:keytao'],
       ),
     ];
@@ -988,10 +1064,10 @@ void main() {
       );
       expect(
         _actionLabels(tester),
-        entry.labels.where((label) => label != '删除'),
+        entry.labels.where((label) => label != '卸载'),
       );
       expect(find.text('自造词'), findsNothing);
-      expect(find.text('删除'), findsNothing);
+      expect(find.text('卸载'), findsNothing);
       expect(
         find.text('使用中'),
         entry.package?.active == true ? findsOneWidget : findsNothing,
@@ -1017,7 +1093,7 @@ void main() {
         );
       }
       for (final label in entry.labels) {
-        if (label == '删除') {
+        if (label == '卸载') {
           await tester.tap(find.byIcon(FLucideIcons.ellipsis));
           await tester.pumpAndSettle();
           await tester.tap(find.widgetWithText(FItem, label));
@@ -1031,7 +1107,7 @@ void main() {
         await tester.tap(find.byIcon(FLucideIcons.ellipsis));
         await tester.pumpAndSettle();
         expect(find.text('自造词'), findsOneWidget);
-        expect(find.text('删除'), findsOneWidget);
+        expect(find.text('卸载'), findsOneWidget);
         await tester.tap(find.byIcon(FLucideIcons.ellipsis));
         await tester.pumpAndSettle();
       }
@@ -1149,12 +1225,384 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+  for (final (width, platform) in [
+    (1200.0, BridgePlatform.macOs),
+    (760.0, BridgePlatform.macOs),
+    (360.0, BridgePlatform.macOs),
+    (360.0, BridgePlatform.android),
+  ]) {
+    testWidgets(
+      'add-on dialog header and responsive grid at $width on ${platform.name}',
+      (tester) async {
+        final c = _PackageController(platform);
+        c.addon = c.rimeIce;
+        addTearDown(c.dispose);
+        _size(tester, Size(width, 1200));
+        await _pumpSchemePage(tester, c);
+        final source = find.byKey(const ValueKey('scheme-source'));
+        final button = find.byKey(const ValueKey('addon-schemes-button'));
+        final refresh = find.byWidgetPredicate(
+          (widget) =>
+              widget is Icon && widget.semanticLabel == AppStrings.checkUpdate,
+        );
+        expect(tester.widget<ActionButton>(button).label, '附加方案');
+        expect(
+          tester.getRect(source).right,
+          lessThanOrEqualTo(tester.getRect(button).left),
+        );
+        expect(
+          tester.getRect(button).left -
+              tester
+                  .getRect(
+                    find.descendant(
+                      of: source,
+                      matching: find.textContaining('来源 ·'),
+                    ),
+                  )
+                  .right,
+          inInclusiveRange(8, 32),
+        );
+        expect(
+          tester.getRect(button).right,
+          lessThanOrEqualTo(tester.getRect(refresh).left),
+        );
+        expect(tester.getCenter(button).dy, tester.getCenter(refresh).dy);
+        expect(tester.getCenter(source).dy, tester.getCenter(button).dy);
+        if (width == 1200) {
+          final expand = find.bySemanticsLabel('展开全部方案');
+          await tester.ensureVisible(expand);
+          await tester.tap(expand);
+          await tester.pumpAndSettle();
+          for (final key in [
+            'keytao',
+            'xmjd',
+            'txjx',
+            'keydo',
+            'snow_jiandao',
+          ]) {
+            expect(
+              find.descendant(
+                of: find.byKey(ValueKey('scheme-package-$key')),
+                matching: find.widgetWithText(ActionButton, '下载'),
+              ),
+              findsOneWidget,
+            );
+          }
+          for (final key in ['rime-ice', 'easy-en']) {
+            expect(
+              find.descendant(
+                of: find.byKey(ValueKey('addon-$key')),
+                matching: find.widgetWithText(ActionButton, '下载'),
+              ),
+              findsOneWidget,
+            );
+          }
+        }
+        await _openAddons(tester);
+        final grid = find.byKey(const ValueKey('addon-schemes'));
+        final cards = [
+          for (final key in [
+            'wanxiang',
+            'rime-mint',
+            'rime-frost',
+            'rime-lssp',
+          ])
+            find.descendant(
+              of: grid,
+              matching: find.byKey(ValueKey('addon-$key')),
+            ),
+        ];
+        expect(tester.widget<HairlineGridSection>(grid).children, hasLength(4));
+        for (final card in cards) {
+          expect(
+            find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, '下载'),
+            ),
+            findsOneWidget,
+          );
+        }
+        for (final key in ['rime-ice', 'easy-en']) {
+          expect(
+            find.descendant(
+              of: grid,
+              matching: find.byKey(ValueKey('addon-$key')),
+            ),
+            findsNothing,
+          );
+        }
+        final rows = tester
+            .widget<Table>(
+              find.descendant(of: grid, matching: find.byType(Table)),
+            )
+            .children;
+        if (width == 1200) {
+          expect(rows, hasLength(1));
+          expect(rows.single.children, hasLength(4));
+          for (var index = 1; index < cards.length; index++) {
+            expect(
+              tester.getTopLeft(cards[index]).dy,
+              tester.getTopLeft(cards.first).dy,
+            );
+            expect(
+              tester.getTopLeft(cards[index]).dx,
+              greaterThan(tester.getTopLeft(cards[index - 1]).dx),
+            );
+          }
+        } else {
+          expect(rows.length, greaterThan(1));
+          expect(rows.first.children.length, lessThan(5));
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  for (final (key, title, action, operation) in [
+    ('rime-ice', AppStrings.rimeIce, 'ice', OperationKind.rimeIce),
+    ('easy-en', 'Easy English', 'easy', OperationKind.addon),
+  ]) {
+    testWidgets('home $key card uses package badges and retains operations', (
+      tester,
+    ) async {
+      final c = _PackageController();
+      addTearDown(c.dispose);
+      _size(tester, const Size(1400, 1000));
+      final card = find.byKey(ValueKey('addon-$key'));
+      final scheme = key == 'easy-en' ? 'easy_en' : 'rime_ice';
+      for (final (installed, deployed, active, latest, status) in [
+        (false, false, false, '1', '未安装'),
+        (true, true, false, '1', '已安装'),
+        (true, false, false, '1', AppStrings.pendingDeploy),
+        (true, true, false, '2', '可更新'),
+        (true, false, true, '2', AppStrings.pendingDeploy),
+        (true, true, true, '2', '使用中'),
+      ]) {
+        final info = AddonStatusDto(
+          installed: installed,
+          deployed: deployed,
+          version: installed ? '1' : '',
+          englishAvailable: false,
+        );
+        if (key == 'easy-en') {
+          c.addon = info;
+          c.addonLatestVersion = latest;
+        } else {
+          c.rimeIce = info;
+          c.rimeIceLatestVersion = latest;
+        }
+        c.local = LocalSchemaDto(
+          installed: true,
+          deployed: true,
+          schemas: [active ? scheme : 'keytao'],
+        );
+        await _pumpSchemePage(tester, c);
+        expect(
+          find.descendant(of: card, matching: find.text(active ? '在用' : '云端')),
+          findsOneWidget,
+        );
+        final badge = find.descendant(
+          of: card,
+          matching: find.byType(active ? AppBadge : StatusPill),
+        );
+        expect(
+          find.descendant(of: badge, matching: find.text(status)),
+          findsOneWidget,
+        );
+        expect(
+          tester.getCenter(badge).dy,
+          tester
+              .getCenter(find.descendant(of: card, matching: find.text(title)))
+              .dy,
+        );
+        expect(
+          find.descendant(of: card, matching: find.text('$status · 1')),
+          findsNothing,
+        );
+        expect(
+          find.descendant(of: card, matching: find.text('1')),
+          installed ? findsOneWidget : findsNothing,
+        );
+      }
+      await tester.ensureVisible(card);
+      await tester.tap(
+        find.descendant(
+          of: card,
+          matching: find.widgetWithText(ActionButton, '更新'),
+        ),
+      );
+      await tester.tap(
+        find.descendant(
+          of: card,
+          matching: find.widgetWithText(ActionButton, '卸载'),
+        ),
+      );
+      expect(c.actions, ['$action:true', '$action:false']);
+      c
+        ..busy = true
+        ..operation = operation;
+      const progress = InstallProgressDto(
+        stage: 'download',
+        percent: 40,
+        message: 'Downloading 40%',
+      );
+      if (key == 'easy-en') {
+        c.addonProgress = progress;
+        c.addonError = 'Download failed';
+      } else {
+        c.rimeIceProgress = progress;
+        c.rimeIceError = 'Download failed';
+      }
+      c.rebuild();
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(of: card, matching: find.byType(FDeterminateProgress)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: card, matching: find.text('Download failed')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('future cloud add-ons appear only in the dialog', (tester) async {
+    final c = _PackageController()
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: 'future-addon',
+          source: 'cloud',
+          displayName: 'Future add-on',
+          active: false,
+          hasPackageZip: true,
+        ),
+        InstalledPackageDto(
+          schemeKey: 'future-addon-2',
+          source: 'cloud',
+          displayName: 'Future add-on 2',
+          active: false,
+          hasPackageZip: true,
+        ),
+      ];
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 1000));
+    await _pumpSchemePage(tester, c);
+    expect(
+      find.byKey(const ValueKey('scheme-package-future-addon')),
+      findsNothing,
+    );
+    expect(
+      tester
+          .widget<HairlineGridSection>(
+            find.byKey(const ValueKey('cloud-schemes')),
+          )
+          .children,
+      hasLength(6),
+    );
+    await _openAddons(tester);
+    final rows = tester
+        .widget<Table>(
+          find.descendant(
+            of: find.byKey(const ValueKey('addon-schemes')),
+            matching: find.byType(Table),
+          ),
+        )
+        .children;
+    expect(rows, hasLength(2));
+    expect(rows.first.children, hasLength(5));
+    expect(
+      find.byKey(const ValueKey('scheme-package-future-addon-2')),
+      findsOneWidget,
+    );
+    final card = find.byKey(const ValueKey('scheme-package-future-addon'));
+    expect(card, findsOneWidget);
+    await tester.ensureVisible(card);
+    await tester.tap(find.descendant(of: card, matching: find.text('启用')));
+    await tester.pumpAndSettle();
+    expect(c.actions, ['activate:future-addon']);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('dialog retains variants, grammar, progress and errors', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..wanxiang = const AddonStatusDto(
+        installed: true,
+        deployed: true,
+        version: '1',
+        variant: 'base',
+        englishAvailable: false,
+      )
+      ..wanxiangGrammar = WanxiangGrammarStatusDto(
+        available: true,
+        installed: false,
+        version: '',
+        size: BigInt.from(1024),
+      );
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 1000));
+    await _pumpSchemePage(tester, c);
+    await _openAddons(tester);
+    final variant = find.byWidgetPredicate(
+      (widget) => widget is FSelect<String>,
+    );
+    expect(find.text('基础版'), findsOneWidget);
+    await tester.tap(variant);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('纯净').last);
+    await tester.pumpAndSettle();
+    expect(c.selectedWanxiangVariant, 'pure');
+    final grammar = find.byKey(const ValueKey('wanxiang-grammar'));
+    await tester.tap(find.descendant(of: grammar, matching: find.text('下载')));
+    await tester.pumpAndSettle();
+    expect(c.actions, ['grammar:true']);
+    const progress = InstallProgressDto(
+      stage: 'download',
+      percent: 40,
+      message: 'Downloading 40%',
+    );
+    c
+      ..busy = true
+      ..wanxiangProgress = progress
+      ..rimeMintProgress = progress
+      ..rimeFrostProgress = progress
+      ..rimeLsspProgress = progress
+      ..wanxiangError = 'Download failed'
+      ..rimeMintError = 'Download failed'
+      ..rimeFrostError = 'Download failed'
+      ..rimeLsspError = 'Download failed';
+    for (final (operation, key) in [
+      (OperationKind.wanxiang, 'wanxiang'),
+      (OperationKind.rimeMint, 'rime-mint'),
+      (OperationKind.rimeFrost, 'rime-frost'),
+      (OperationKind.rimeLssp, 'rime-lssp'),
+    ]) {
+      c.operation = operation;
+      c.rebuild();
+      await tester.pumpAndSettle();
+      final card = find.byKey(ValueKey('addon-$key'));
+      expect(
+        find.descendant(of: card, matching: find.byType(FDeterminateProgress)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: card, matching: find.text('Download failed')),
+        findsOneWidget,
+      );
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   for (final layout in [
+    (width: 1400.0, columns: 4),
     (width: 1200.0, columns: 3),
     (width: 900.0, columns: 2),
     (width: 360.0, columns: 1),
   ]) {
-    testWidgets('scheme grid collapses to two rows at ${layout.width}', (
+    testWidgets('home scheme grid fits or collapses at ${layout.width}', (
       tester,
     ) async {
       final c = _PackageController();
@@ -1167,12 +1615,16 @@ void main() {
         matching: find.byType(Table),
       );
       final expand = find.bySemanticsLabel('展开全部方案');
-      if (layout.columns == 1) {
+      final collapsible = layout.columns > 1 && 7 > layout.columns * 2;
+      if (!collapsible) {
         expect(
           tester.widget<HairlineGridSection>(catalogue).children,
-          hasLength(11),
+          hasLength(7),
         );
-        expect(tester.widget<Table>(table).children, hasLength(11));
+        expect(
+          tester.widget<Table>(table).children,
+          hasLength((7 / layout.columns).ceil()),
+        );
         expect(expand, findsNothing);
       } else {
         final visibleCount = layout.columns * 2;
@@ -1181,7 +1633,7 @@ void main() {
           hasLength(visibleCount),
         );
         expect(tester.widget<Table>(table).children, hasLength(2));
-        expect(find.text('+${11 - visibleCount + 1}'), findsOneWidget);
+        expect(find.text('+${7 - visibleCount + 1}'), findsOneWidget);
         expect(find.byKey(const ValueKey('addon-rime-lssp')), findsNothing);
         expect(
           tester.getSize(expand).width,
@@ -1192,28 +1644,34 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           tester.widget<HairlineGridSection>(catalogue).children,
-          hasLength(12),
+          hasLength(8),
         );
         expect(
           tester.widget<Table>(table).children,
-          hasLength((12 / layout.columns).ceil()),
+          hasLength((8 / layout.columns).ceil()),
         );
       }
       expect(
         find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
         findsNWidgets(5),
       );
-      for (final key in [
-        'easy-en',
-        'wanxiang',
-        'rime-ice',
-        'rime-mint',
-        'rime-frost',
-        'rime-lssp',
-      ]) {
-        expect(find.byKey(ValueKey('addon-$key')), findsOneWidget);
+      for (final key in ['wanxiang', 'rime-mint', 'rime-frost', 'rime-lssp']) {
+        expect(find.byKey(ValueKey('addon-$key')), findsNothing);
       }
-      if (layout.columns > 1) {
+      expect(find.byKey(const ValueKey('addon-rime-ice')), findsOneWidget);
+      expect(find.byKey(const ValueKey('addon-easy-en')), findsOneWidget);
+      expect(
+        tester
+            .widgetList<SchemePackageRow>(
+              find.descendant(
+                of: catalogue,
+                matching: find.byType(SchemePackageRow),
+              ),
+            )
+            .map((row) => row.schemeKey),
+        ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'],
+      );
+      if (collapsible) {
         final collapse = find.bySemanticsLabel('收起');
         expect(collapse, findsOneWidget);
         await tester.ensureVisible(collapse);
@@ -1232,13 +1690,13 @@ void main() {
     final c = _PackageController()
       ..installedPackages = const [
         InstalledPackageDto(
-          schemeKey: 'xmjd-feiding',
+          schemeKey: 'snow_jiandao',
           active: true,
           hasPackageZip: true,
         ),
       ];
     addTearDown(c.dispose);
-    _size(tester, const Size(1200, 1000));
+    _size(tester, const Size(900, 1000));
     await _pumpSchemePage(tester, c);
     final catalogue = find.byKey(const ValueKey('cloud-schemes'));
     final rows = find.descendant(
@@ -1247,20 +1705,17 @@ void main() {
     );
     expect(
       tester.widgetList<SchemePackageRow>(rows).map((row) => row.schemeKey),
-      ['keytao', 'xmjd', 'txjx', 'keydo', 'xmjd-feiding'],
+      ['keytao', 'xmjd', 'snow_jiandao'],
     );
-    expect(
-      find.byKey(const ValueKey('scheme-package-snow_jiandao')),
-      findsNothing,
-    );
-    expect(find.text('+7'), findsOneWidget);
+    expect(find.byKey(const ValueKey('scheme-package-txjx')), findsNothing);
+    expect(find.text('+4'), findsOneWidget);
     final expand = find.bySemanticsLabel('展开全部方案');
     await tester.ensureVisible(expand);
     await tester.tap(expand);
     await tester.pumpAndSettle();
     expect(
       tester.widgetList<SchemePackageRow>(rows).map((row) => row.schemeKey),
-      ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao', 'xmjd-feiding'],
+      ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'],
     );
     final collapse = find.bySemanticsLabel('收起');
     expect(tester.getSize(collapse).height, greaterThan(0));
@@ -1268,23 +1723,57 @@ void main() {
     await tester.tap(collapse);
     await tester.pumpAndSettle();
     expect(
-      find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
+      find.byKey(const ValueKey('scheme-package-snow_jiandao')),
       findsOneWidget,
     );
-    expect(
-      find.byKey(const ValueKey('scheme-package-snow_jiandao')),
-      findsNothing,
-    );
+    expect(find.byKey(const ValueKey('scheme-package-txjx')), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('collapsed scheme grid keeps standalone active add-ons visible', (
+  for (final (width, hiddenCount) in [(1200.0, 2), (900.0, 4)]) {
+    for (final (scheme, key) in [
+      ('rime_ice', 'rime-ice'),
+      ('easy_en', 'easy-en'),
+    ]) {
+      testWidgets('collapsed grid keeps active $scheme visible at $width', (
+        tester,
+      ) async {
+        final c = _PackageController()
+          ..local = LocalSchemaDto(
+            installed: true,
+            deployed: true,
+            schemas: [scheme],
+          );
+        addTearDown(c.dispose);
+        _size(tester, Size(width, 1000));
+        await _pumpSchemePage(tester, c);
+        final card = find.byKey(ValueKey('addon-$key'));
+        expect(card, findsOneWidget);
+        expect(find.text('+$hiddenCount'), findsOneWidget);
+        final expand = find.bySemanticsLabel('展开全部方案');
+        await tester.ensureVisible(expand);
+        await tester.tap(expand);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('addon-rime-ice')), findsOneWidget);
+        expect(find.byKey(const ValueKey('addon-easy-en')), findsOneWidget);
+        final collapse = find.bySemanticsLabel('收起');
+        await tester.ensureVisible(collapse);
+        await tester.tap(collapse);
+        await tester.pumpAndSettle();
+        expect(card, findsOneWidget);
+        expect(find.text('+$hiddenCount'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  testWidgets('active add-ons stay in their assigned home or dialog grid', (
     tester,
   ) async {
     final c = _PackageController();
     addTearDown(c.dispose);
-    _size(tester, const Size(1200, 1000));
+    _size(tester, const Size(1400, 1000));
     for (final (schema, addon) in [
       ('easy_en', 'easy-en'),
       ('wanxiang', 'wanxiang'),
@@ -1303,10 +1792,22 @@ void main() {
       final grid = tester.widget<HairlineGridSection>(
         find.byKey(const ValueKey('cloud-schemes')),
       );
-      expect(grid.children, hasLength(6));
-      expect(grid.children[4].key, ValueKey('addon-$addon'));
-      expect(find.byKey(ValueKey('addon-$addon')), findsOneWidget);
-      expect(find.text('+6'), findsOneWidget);
+      expect(grid.children, hasLength(7));
+      expect(
+        find.byKey(ValueKey('addon-$addon')),
+        ['rime-ice', 'easy-en'].contains(addon) ? findsOneWidget : findsNothing,
+      );
+      expect(find.bySemanticsLabel('展开全部方案'), findsNothing);
+      await _openAddons(tester);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('addon-schemes')),
+          matching: find.byKey(ValueKey('addon-$addon')),
+        ),
+        ['rime-ice', 'easy-en'].contains(addon) ? findsNothing : findsOneWidget,
+      );
+      Navigator.of(tester.element(find.byType(AppDialog))).pop();
+      await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     }
     await tester.pumpWidget(const SizedBox.shrink());
@@ -1353,9 +1854,8 @@ void main() {
       (widget) => widget is Section && widget.title == '部署',
     );
     expect(find.text('方案列表'), findsOneWidget);
-    for (final heading in ['键道方案', '附加方案']) {
-      expect(find.text(heading), findsNothing);
-    }
+    expect(find.text('键道方案'), findsNothing);
+    expect(find.byKey(const ValueKey('addon-schemes-button')), findsOneWidget);
     expect(find.text('云端方案'), findsNothing);
     expect(
       find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
@@ -1375,21 +1875,33 @@ void main() {
     expect(find.byKey(const ValueKey('addon-rime-snow')), findsNothing);
     expect(
       tester.widget<HairlineGridSection>(catalogue).children,
-      hasLength(11),
+      hasLength(7),
     );
     for (final key in [
-      'addon-easy-en',
       'addon-wanxiang',
-      'addon-rime-ice',
       'addon-rime-mint',
       'addon-rime-frost',
       'addon-rime-lssp',
     ]) {
       expect(
         find.descendant(of: catalogue, matching: find.byKey(ValueKey(key))),
-        findsOneWidget,
+        findsNothing,
       );
     }
+    expect(
+      find.descendant(
+        of: catalogue,
+        matching: find.byKey(const ValueKey('addon-rime-ice')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: catalogue,
+        matching: find.byKey(const ValueKey('addon-easy-en')),
+      ),
+      findsOneWidget,
+    );
     expect(
       find.descendant(of: active, matching: find.text('Custom scheme')),
       findsOneWidget,
@@ -1470,12 +1982,12 @@ void main() {
       await _pumpRow(tester, c, 'local-custom');
       expect(find.text('重新导入'), findsNothing);
       expect(find.text('随账号同步'), findsNothing);
-      expect(find.text('删除'), findsNothing);
+      expect(find.text('卸载'), findsNothing);
       final more = find.byIcon(FLucideIcons.ellipsis);
       await tester.tap(more);
       await tester.pumpAndSettle();
       expect(find.text('上传'), active ? findsOneWidget : findsNothing);
-      expect(find.text('删除'), findsOneWidget);
+      expect(find.text('卸载'), findsOneWidget);
       expect(
         tester
             .widget<FItem>(find.widgetWithText(FItem, '随账号同步'))
@@ -1498,14 +2010,14 @@ void main() {
       expect(c.actions.last, 'import:local-custom');
       await tester.tap(more);
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FItem, '删除'));
+      await tester.tap(find.widgetWithText(FItem, '卸载'));
       await tester.pumpAndSettle();
       expect(c.actions.last, 'remove:local-custom');
       expect(tester.takeException(), isNull);
     }
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  testWidgets('both installed xmjd variants remain distinct in one list', (
+  testWidgets('installed xmjd variants share a switchable home card', (
     tester,
   ) async {
     final c = _PackageController()
@@ -1524,7 +2036,7 @@ void main() {
         ),
       ];
     addTearDown(c.dispose);
-    _size(tester, const Size(1000, 900));
+    _size(tester, const Size(1200, 900));
     await tester.pumpWidget(
       KeyTaoTheme(
         platform: c.info.platform,
@@ -1536,10 +2048,6 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
-    final expand = find.bySemanticsLabel('展开全部方案');
-    await tester.ensureVisible(expand);
-    await tester.tap(expand);
     await tester.pumpAndSettle();
     final catalogue = find.byKey(const ValueKey('cloud-schemes'));
     expect(
@@ -1558,10 +2066,10 @@ void main() {
           (widget) => widget is Text && widget.semanticsLabel == '星猫键道 · 非顶',
         ),
       ),
-      findsOneWidget,
+      findsNothing,
     );
     expect(find.text('20261104'), findsOneWidget);
-    expect(find.text('20261103'), findsOneWidget);
+    expect(find.text('20261103'), findsNothing);
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd')),
@@ -1573,11 +2081,13 @@ void main() {
     await tester.tap(find.text('非顶'));
     await tester.pumpAndSettle();
     expect(c.scheme, 'xmjd-feiding');
-    expect(find.byKey(const ValueKey('scheme-package-xmjd')), findsOneWidget);
+    expect(find.byKey(const ValueKey('scheme-package-xmjd')), findsNothing);
     expect(
       find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
       findsOneWidget,
     );
+    expect(find.text('20261104'), findsNothing);
+    expect(find.text('20261103'), findsOneWidget);
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd-feiding')),

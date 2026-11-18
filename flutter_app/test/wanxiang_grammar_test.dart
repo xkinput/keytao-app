@@ -81,7 +81,7 @@ void main() {
       );
       final action = find.descendant(
         of: row,
-        matching: find.widgetWithText(ActionButton, installed ? '删除' : '下载'),
+        matching: find.widgetWithText(ActionButton, installed ? '卸载' : '下载'),
       );
       expect(size, findsOneWidget);
       expect(action, findsOneWidget);
@@ -149,7 +149,7 @@ void main() {
     );
     await _pump(tester, c);
     expect(action('1.0 KB'), findsOneWidget);
-    await tester.tap(action('删除'));
+    await tester.tap(action('卸载'));
     expect(c.actions.last, 'grammar:false');
 
     c.busy = true;

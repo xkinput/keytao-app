@@ -217,17 +217,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getSize(find.byKey(_captureKey)), device.size);
       expect(find.text('方案列表'), findsOneWidget);
-      for (final heading in ['键道方案', '附加方案']) {
-        expect(find.text(heading), findsNothing);
-      }
-      if (device.platform == BridgePlatform.macOs) {
-        final expand = find.bySemanticsLabel('展开全部方案');
-        await tester.ensureVisible(expand);
-        await tester.tap(expand);
-        await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('方案列表'));
-        await tester.pumpAndSettle();
-      }
+      expect(find.text('键道方案'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('addon-schemes-button')),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel('展开全部方案'), findsNothing);
       final cards = [
         for (final key in ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'])
           find
@@ -236,14 +231,8 @@ void main() {
                 matching: find.byType(HairlineGridCell),
               )
               .first,
-        for (final key in [
-          'easy-en',
-          'wanxiang',
-          'rime-ice',
-          'rime-mint',
-          'rime-frost',
-        ])
-          find.byKey(ValueKey('addon-$key')),
+        find.byKey(const ValueKey('addon-rime-ice')),
+        find.byKey(const ValueKey('addon-easy-en')),
       ];
       expect(
         tester.getTopLeft(cards.first).dy -
@@ -256,6 +245,59 @@ void main() {
       if (device.platform == BridgePlatform.macOs) {
         expect(tester.getTopLeft(cards[0]).dy, tester.getTopLeft(cards[1]).dy);
         expect(tester.getTopLeft(cards[4]).dy, tester.getTopLeft(cards[5]).dy);
+        for (final (card, title) in [
+          (cards[5], AppStrings.rimeIce),
+          (cards[6], schemeDisplayName('easy_en')),
+        ]) {
+          if (screenshots) {
+            final paragraph = tester.renderObject<RenderParagraph>(
+              find.descendant(of: card, matching: find.text(title)),
+            );
+            expect(paragraph.didExceedMaxLines, isFalse, reason: title);
+          }
+          expect(
+            tester
+                    .getTopLeft(
+                      find.descendant(of: card, matching: find.text(title)),
+                    )
+                    .dy -
+                tester.getTopLeft(card).dy,
+            closeTo(
+              tester
+                      .getTopLeft(
+                        find.descendant(
+                          of: cards[4],
+                          matching: find.text(AppStrings.rimeSnow),
+                        ),
+                      )
+                      .dy -
+                  tester.getTopLeft(cards[4]).dy,
+              .01,
+            ),
+          );
+          for (final type in [EyebrowLabel, StatusPill, ActionRow]) {
+            expect(
+              tester
+                      .getCenter(
+                        find.descendant(of: card, matching: find.byType(type)),
+                      )
+                      .dy -
+                  tester.getTopLeft(card).dy,
+              closeTo(
+                tester
+                        .getCenter(
+                          find.descendant(
+                            of: cards[4],
+                            matching: find.byType(type),
+                          ),
+                        )
+                        .dy -
+                    tester.getTopLeft(cards[4]).dy,
+                .01,
+              ),
+            );
+          }
+        }
         expect(
           tester.getTopLeft(cards[1]).dx,
           greaterThan(tester.getTopLeft(cards[0]).dx),
@@ -283,11 +325,37 @@ void main() {
       final position = tester.state<ScrollableState>(scrollable).position;
       position.jumpTo(position.maxScrollExtent);
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('wanxiang-grammar')), findsOneWidget);
+      expect(find.byKey(const ValueKey('wanxiang-grammar')), findsNothing);
       expect(tester.takeException(), isNull);
       if (screenshots && device.platform == BridgePlatform.macOs) {
         await _capture(tester, '${device.name}-scrolled');
       }
+      final addons = find.byKey(const ValueKey('addon-schemes-button'));
+      await tester.ensureVisible(addons);
+      await tester.tap(addons);
+      await tester.pumpAndSettle();
+      expect(find.byType(AppDialog), findsOneWidget);
+      for (final key in ['wanxiang', 'rime-mint', 'rime-frost', 'rime-lssp']) {
+        expect(
+          find.descendant(
+            of: find.byType(AppDialog),
+            matching: find.byKey(ValueKey('addon-$key')),
+          ),
+          findsOneWidget,
+        );
+      }
+      for (final key in ['rime-ice', 'easy-en']) {
+        expect(
+          find.descendant(
+            of: find.byType(AppDialog),
+            matching: find.byKey(ValueKey('addon-$key')),
+          ),
+          findsNothing,
+        );
+      }
+      expect(find.byKey(const ValueKey('wanxiang-grammar')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      if (screenshots) await _capture(tester, '${device.name}-addons');
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
