@@ -70,6 +70,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         fun onVoiceInputRequested(): Boolean
         fun onBeforeDirectInsertPage()
         fun onKeyCommand(command: KeyCommand)
+        fun allowsChordInput(): Boolean
+        fun onChordKey(text: String, released: Boolean)
         fun onCandidate(index: Int, global: Boolean)
         fun onCandidateIsUserPhrase(index: Int): Boolean
         fun onDeleteCandidate(index: Int): Boolean
@@ -105,6 +107,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         var backspaceGestureConsumed: Boolean = false,
         var alternatePanel: AlternatePanel? = null,
         var cursorGesture: CursorGestureTracker? = null,
+        var chordCommand: KeyCommand? = null,
     )
     private data class AlternateOption(val label: String, val command: KeyCommand)
     private data class AlternatePanel(
@@ -410,6 +413,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         removeCallbacks = { runnable -> longPressHandler.removeCallbacks(runnable) },
     )
     private val touchBounceTracker = PerPointerBounceTracker<Int>()
+    private val chordTouches = KeytaoChordTouches()
     private var panelGesturePointerId: Int? = null
     private val repeatRunnablesByPointerId = mutableMapOf<Int, Runnable>()
     private var pressedExpandedCandidate: CandidateRect? = null
@@ -4488,11 +4492,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun applyShift(command: KeyCommand): KeyCommand {
-        val value = command.value
-        if (isShiftActive() && command.type == KeyCommandTypes.INPUT && value != null && value.length == 1 && value[0].isLetter()) {
-            return command.copy(value = value.uppercase())
-        }
-        return command
+        return command.applyingShift(isShiftActive(), state.chordComposer)
     }
 
     private fun displayLabel(key: KeySpec): String {
@@ -4534,9 +4534,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun clearOneShotShiftAfter(command: KeyCommand) {
         if (shiftState != KeyboardShiftState.ONCE) return
-        val value = command.value ?: return
-        val consumesShift = command.type == KeyCommandTypes.INPUT && value.length == 1 && value[0].isLetter()
-        if (!consumesShift) return
+        if (!command.consumesOneShotShift(state.chordComposer)) return
         shiftState = KeyboardShiftState.OFF
         lastShiftTapTimeMs = 0L
     }
@@ -6421,7 +6419,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 null
             },
         )
-        performConfiguredKeyPress(actionForMode(key.spec))
+        val command = actionForMode(key.spec)
+        performConfiguredKeyPress(command)
+        val chordInput = state.chordComposer && !state.asciiMode && listener?.allowsChordInput() == true
+        val chordCommand = if (chordInput) resolveCommand(key.spec, 0f, key.rect, y) else command
+        // chord_composer rejects shifted letters; keep their normal tap fallback and Shift consumption.
+        chordTouches.begin(pointerId, chordCommand, chordInput, state.asciiMode, isShiftActive())?.let { event ->
+            touch.chordCommand = chordCommand
+            activeKeyTouches.begin(pointerId, touch)
+            animateKeyPress(keyIndex, pressed = true)
+            listener?.onChordKey(event.text, event.released)
+            return true
+        }
         if (isBackspaceKey(key.spec)) {
             if (usesSelectionBackspaceGesture()) {
                 touch.backspaceGestureUnits = 0
@@ -6495,6 +6504,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         for (pointerIndex in 0 until event.pointerCount) {
             val pointerId = event.getPointerId(pointerIndex)
             val touch = activeKeyTouches[pointerId] ?: continue
+            if (chordTouches.contains(pointerId)) continue
             val x = event.getX(pointerIndex)
             val y = event.getY(pointerIndex)
             touch.currentX = x
@@ -6539,6 +6549,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val touch = activeKeyTouches.finish(pointerId) ?: return false
         if (activeKeyTouches.values.none { it.keyIndex == touch.keyIndex }) {
             animateKeyPress(touch.keyIndex, pressed = false)
+        }
+        chordTouches.finish(pointerId)?.let { event ->
+            listener?.onChordKey(event.text, event.released)
+            touch.chordCommand?.let(::clearOneShotShiftAfter)
+            return true
         }
         touch.alternatePanel?.let { panel ->
             updateAlternateSelection(touch, x, y)
@@ -6647,7 +6662,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         clearOneShotShiftAfter(command)
     }
 
-    private fun clearActiveKeyTouches() {
+    internal fun clearActiveKeyTouches() {
         activeKeyTouches.values
             .filter { it.backspaceGestureConsumed && usesSelectionBackspaceGesture() }
             .forEach { listener?.onKeyCommand(backspaceGestureCommand("cancelSelection")) }
@@ -6656,6 +6671,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             animateKeyPress(index, pressed = false)
         }
         activeKeyTouches.clear()
+        chordTouches.releaseAll().forEach { event -> listener?.onChordKey(event.text, event.released) }
+    }
+
+    internal fun releaseChordTouches() {
+        chordTouches.releaseAll { pointerId -> cancelKeyTouch(pointerId) }
+            .forEach { event -> listener?.onChordKey(event.text, event.released) }
     }
 
     private fun cancelKeyTouch(pointerId: Int?) {
@@ -6668,6 +6689,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (activeKeyTouches.values.none { it.keyIndex == touch.keyIndex }) {
             animateKeyPress(touch.keyIndex, pressed = false)
         }
+        chordTouches.finish(resolvedPointerId)?.let { event -> listener?.onChordKey(event.text, event.released) }
     }
 
     private fun stopLongPressAndRepeat(pointerId: Int? = null) {

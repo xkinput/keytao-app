@@ -79,6 +79,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var commandCounts: [String: UInt64] = [:]
     private var applyHistogram = KeyTaoDurationHistogram()
     private var pendingKeystrokeStarted: TimeInterval?
+    private var resettingInputContext = false
     private var runtimeMetricsEnabled = true
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -285,6 +286,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         super.viewWillDisappear(animated)
         if let clipboardChangeObserver { NotificationCenter.default.removeObserver(clipboardChangeObserver) }
         clipboardChangeObserver = nil
+        keyboardView?.clearActiveTouches()
         // Equivalent of macOS deactivateServer / Android onFinishInput: the
         // input context is over, so nothing may survive into the next one.
         resetInputContextCaches(resetNavigation: true)
@@ -470,7 +472,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// composition, the host marked text, the backspace restore stack and the
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches(resetNavigation: Bool = false) {
-        defer { releaseMemoryIfNeeded() }
+        resettingInputContext = true
+        defer {
+            resettingInputContext = false
+            releaseMemoryIfNeeded()
+        }
+        keyboardView?.releaseChordTouches()
         inputContextGeneration &+= 1
         inputDocumentIdentifier = currentDocumentIdentifier()
         // Cold-start keystrokes belong to the context where they were queued.
@@ -522,6 +529,24 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             commandCounts[KeyTaoLog.commandType(command.type), default: 0] += 1
         }
         performCommand(command)
+    }
+
+    func keyboardViewWillBeginChord(_ view: KeyTaoIOSKeyboardView) -> Bool {
+        _ = refreshInputDocumentIfNeeded()
+        return inputAvailable && engine.nativeReady && !runtimeStarting
+            && currentState.chordComposer && !currentState.asciiMode && !hostTraits.bypassesRime
+    }
+
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, didTriggerChordKey event: KeyTaoChordKeyEvent) {
+        // Release before a context reset: the ending touch has already left the view's held-key store.
+        let result = engine.processKey(event.key, modifiers: event.modifiers)
+        if !resettingInputContext, refreshInputDocumentIfNeeded() {
+            if !event.released, !result.accepted, let character = UnicodeScalar(event.key) {
+                applyRejectedKeyFallback(result, text: String(character))
+            } else {
+                apply(result)
+            }
+        }
     }
 
     private func performCommand(_ command: KeyTaoKeyCommand) {

@@ -2,7 +2,9 @@ import UIKit
 
 protocol KeyTaoIOSKeyboardViewDelegate: AnyObject {
     func keyboardViewWillEnterDirectInputPage(_ view: KeyTaoIOSKeyboardView) -> Bool
+    func keyboardViewWillBeginChord(_ view: KeyTaoIOSKeyboardView) -> Bool
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didTrigger command: KeyTaoKeyCommand)
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, didTriggerChordKey event: KeyTaoChordKeyEvent)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didSelectCandidate index: Int, global: Bool)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, candidateIsUserPhrase index: Int) -> Bool
     func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteCandidate index: Int) -> Bool
@@ -372,6 +374,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var scrollIndicatorAlpha: CGFloat = 0
     private var scrollIndicatorHoldRemaining: TimeInterval = 0
     private var activeTouches = KeyTaoTouchRolloverStateMachine<ActiveTouch>()
+    private var chordTouches = KeyTaoChordTouchStateMachine<ObjectIdentifier>()
     private let touchBounceTracker = KeyTaoPerPointerBounceTracker<Int>()
     private var pointerSlotsByTouchIdentifier: [ObjectIdentifier: Int] = [:]
     private var candidateGestureTouchIdentifier: ObjectIdentifier?
@@ -703,7 +706,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         guard shiftState == .once else {
             return
         }
-        guard command.type == KeyTaoCommandType.input,
+        guard command.type == KeyTaoCommandType.input || (state.chordComposer && command.type == KeyTaoCommandType.rimeInput),
               let value = command.value,
               value.count == 1,
               value.range(of: "[A-Za-z]", options: .regularExpression) != nil else {
@@ -818,6 +821,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         for touch in touches {
             let identifier = ObjectIdentifier(touch)
             let point = touch.location(in: self)
+            if chordTouches.contains(identifier) {
+                continue
+            }
             if identifier == candidateGestureTouchIdentifier {
                 updateCandidateOrPanelTouchMove(at: point)
                 continue
@@ -1557,6 +1563,15 @@ final class KeyTaoIOSKeyboardView: UIView {
         keyIndex: Int,
         point: CGPoint
     ) {
+        let chordEnabled: Bool
+        // chord_composer rejects shifted letters; keep Shift on the normal input path.
+        if state.chordComposer && !state.asciiMode && shiftState == .off && !hostTraits.bypassesRime && !isEmojiSearching {
+            let command = resolveCommand(key.spec, deltaY: 0, rect: key.rect, releaseY: point.y)
+            chordEnabled = [KeyTaoCommandType.input, KeyTaoCommandType.rimeInput].contains(command.type)
+                && delegate?.keyboardViewWillBeginChord(self) == true
+        } else {
+            chordEnabled = false
+        }
         let pressedStackIndex = key.spec.stack?.isEmpty == false && key.rect.contains(point)
             ? stackIndex(in: key.rect, count: key.spec.stack?.count ?? 0, y: point.y)
             : nil
@@ -1582,6 +1597,17 @@ final class KeyTaoIOSKeyboardView: UIView {
         )
         animateKeyPress(keyIndex: keyIndex, pressed: true)
         performPressFeedback()
+        if chordEnabled {
+            let command = resolveCommand(key.spec, deltaY: 0, rect: key.rect, releaseY: point.y)
+            if let event = chordTouches.begin(
+                identifier,
+                text: command.value,
+                enabled: [KeyTaoCommandType.input, KeyTaoCommandType.rimeInput].contains(command.type)
+            ) {
+                delegate?.keyboardView(self, didTriggerChordKey: event)
+                return
+            }
+        }
         if isBackspace {
             if !selectionBackspace {
                 delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("begin"))
@@ -1660,6 +1686,16 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         if !activeTouches.values.contains(where: { $0.keyIndex == finishedTouch.keyIndex }) {
             animateKeyPress(keyIndex: finishedTouch.keyIndex, pressed: false)
+        }
+        if let event = chordTouches.end(identifier) {
+            delegate?.keyboardView(self, didTriggerChordKey: event)
+            clearOneShotShift(after: resolveCommand(
+                finishedTouch.key.spec,
+                deltaY: 0,
+                rect: finishedTouch.key.rect,
+                releaseY: finishedTouch.touchStart.y
+            ))
+            return
         }
         if var panel = finishedTouch.alternatePanel {
             panel.selectedIndex = alternateIndex(in: &panel, at: point)
@@ -1925,10 +1961,20 @@ final class KeyTaoIOSKeyboardView: UIView {
         if !activeTouches.values.contains(where: { $0.keyIndex == touch.keyIndex }) {
             animateKeyPress(keyIndex: touch.keyIndex, pressed: false)
         }
+        if let event = chordTouches.end(identifier) {
+            delegate?.keyboardView(self, didTriggerChordKey: event)
+        }
     }
 
-    private func clearActiveTouches() {
+    func releaseChordTouches() {
+        for identifier in chordTouches.identifiers {
+            cancelActiveTouch(identifier)
+        }
+    }
+
+    func clearActiveTouches() {
         let removedTouches = activeTouches.removeAll()
+        let chordReleases = chordTouches.releaseAll()
         if usesSelectionBackspaceGesture(), removedTouches.contains(where: { $0.backspaceGestureConsumed }) {
             delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("cancelSelection"))
         }
@@ -1947,6 +1993,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         keyboardScrollWasAnimatingAtDown = false
         keyboardScrollTouchActive = false
         keyboardDragging = false
+        for event in chordReleases {
+            delegate?.keyboardView(self, didTriggerChordKey: event)
+        }
     }
 
     private func allocatePointerSlot(for identifier: ObjectIdentifier) -> Int {
@@ -5813,7 +5862,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         expandedCandidateItemsCache = []
         switch action {
         case .layer, .back, .reset:
-            clearActiveTouches()
+            if case .reset = action {
+                releaseChordTouches()
+            } else {
+                clearActiveTouches()
+            }
             pressedToolbar = nil
             resetKeyboardScroll()
         default: break
@@ -6603,7 +6656,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func applyShift(_ command: KeyTaoKeyCommand) -> KeyTaoKeyCommand {
         guard shiftState != .off,
-              command.type == KeyTaoCommandType.input,
+              command.type == KeyTaoCommandType.input || (state.chordComposer && command.type == KeyTaoCommandType.rimeInput),
               let value = command.value,
               value.count == 1,
               value.range(of: "[A-Za-z]", options: .regularExpression) != nil else {
@@ -6611,6 +6664,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         var shifted = command
         shifted.value = value.uppercased()
+        if state.chordComposer, command.type == KeyTaoCommandType.rimeInput,
+           let fallback = command.fallbackValue, fallback.count == 1,
+           fallback.range(of: "[A-Za-z]", options: .regularExpression) != nil {
+            shifted.fallbackValue = fallback.uppercased()
+        }
         return shifted
     }
 

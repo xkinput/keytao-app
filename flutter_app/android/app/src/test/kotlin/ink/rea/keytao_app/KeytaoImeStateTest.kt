@@ -1,10 +1,18 @@
 package ink.rea.keytao_app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KeytaoImeStateTest {
+    @Test
+    fun `chord composer defaults to false and decodes when enabled`() {
+        assertFalse(KeytaoImeState().chordComposer)
+        assertFalse(KeytaoImeState.fromJson("{}")!!.chordComposer)
+        assertTrue(KeytaoImeState.fromJson("""{"chordComposer":true}""")!!.chordComposer)
+    }
+
     @Test
     fun `parse state keeps schema name and the current page`() {
         val state = KeytaoImeState.fromJson(
