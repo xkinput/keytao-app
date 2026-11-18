@@ -9,74 +9,93 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.os.Process
 import android.os.ResultReceiver
+import android.os.SystemClock
 import android.util.Log
 import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
 
 class KeytaoRimeDeployService : Service() {
-    private val deploymentRunning = AtomicBoolean(false)
+    private data class Request(val receiver: ResultReceiver, val timeoutMs: Long, val testRoot: String?)
+
+    private val deployments = KeytaoRimeDeploymentQueue<Request>()
+    private var lastStartId = 0
+    private var deadlineMs = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onDestroy() {
-        super.onDestroy()
-        // Preserve .rendering when a timed-out native renderer is still running.
-        if (deploymentRunning.get()) Process.killProcess(Process.myPid())
-    }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         val receiver = intent?.resultReceiver()
         if (receiver == null) {
-            stopSelf(startId)
+            if (!deployments.running) stopSelf(startId)
             return START_NOT_STICKY
         }
+        val request = Request(
+            receiver,
+            intent.getLongExtra(KeytaoRimeDeployContract.keyTimeoutMs, 180_000L).coerceAtLeast(1_000L),
+            intent.getStringExtra(KeytaoRimeDeployContract.extraTestRoot),
+        )
+        if (deployments.enqueue(request)) {
+            startDeploymentForeground()
+            startBatch()
+        } else {
+            // Each waiter gets the remaining current run plus its own run budget.
+            sendWaiting(request, (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0) + request.timeoutMs)
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun startBatch() {
+        val requests = deployments.requests
+        val timeoutMs = requests.maxOf { it.timeoutMs }
+        deadlineMs = SystemClock.elapsedRealtime() + timeoutMs + resultGraceMs
+        requests.forEach { sendWaiting(it, timeoutMs) }
         try {
-            intent.getStringExtra(KeytaoRimeDeployContract.extraTestRoot)?.let {
+            requests.first().testRoot?.let {
                 KeytaoAndroidPaths.setUserRootForTests(this, File(it))
             }
-        } catch (error: Exception) {
-            sendResult(receiver, DeploymentResult(error = error.message ?: "Invalid test root"))
-            stopSelf(startId)
-            return START_NOT_STICKY
+            KeytaoRimeDeployClient.runDeployment(applicationContext, timeoutMs, ::completeBatch)
+        } catch (error: Throwable) {
+            completeBatch(KeytaoRimeDeployClient.Result(
+                success = false,
+                error = error.message ?: "Android RIME 部署失败",
+            ))
         }
-        if (!deploymentRunning.compareAndSet(false, true)) {
-            sendResult(receiver, DeploymentResult(error = "Android RIME deployment is already running"))
-            return START_NOT_STICKY
+    }
+
+    private fun completeBatch(result: KeytaoRimeDeployClient.Result) {
+        val completed = deployments.complete()
+        completed.forEach { request ->
+            val data = Bundle().apply {
+                putString(KeytaoRimeDeployContract.keyPath, result.path)
+                putString(KeytaoRimeDeployContract.keySchemaName, result.schemaName)
+                putBoolean(KeytaoRimeDeployContract.keyDeployed, result.deployed)
+                putString(KeytaoRimeDeployContract.keyError, result.error)
+                putString(KeytaoRimeDeployContract.keyWarning, result.warning)
+            }
+            send(
+                request.receiver,
+                if (result.success) KeytaoRimeDeployContract.resultOk else KeytaoRimeDeployContract.resultError,
+                data,
+            )
         }
+        if (deployments.running) {
+            startBatch()
+        } else {
+            stopDeploymentForeground()
+            stopSelfResult(lastStartId)
+        }
+    }
 
-        // Compiling a dictionary takes tens of seconds; as a plain background
-        // service it would be a candidate for reclaim as soon as the user leaves
-        // the app, and the client could only report a timeout.
-        startDeploymentForeground()
+    private fun sendWaiting(request: Request, timeoutMs: Long) {
+        send(request.receiver, KeytaoRimeDeployContract.resultWaiting, Bundle().apply {
+            putLong(KeytaoRimeDeployContract.keyTimeoutMs, timeoutMs + resultGraceMs)
+        })
+    }
 
-        Thread(
-            {
-                val result = if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraRenderLogos, false)) {
-                    runCatching {
-                        val root = KeytaoAndroidPaths.userRoot(applicationContext)
-                        KeytaoNativeBridge.nativeRenderSchemaLogos(root.absolutePath)
-                    }.onFailure { Log.w(tag, "Failed to render schema logos", it) }
-                    DeploymentResult(success = true)
-                } else {
-                    runDeployment(intent.getStringExtra(KeytaoRimeDeployContract.extraSchemaId))
-                }
-                sendResult(receiver, result)
-                deploymentRunning.set(false)
-                stopDeploymentForeground()
-                stopSelfResult(startId)
-
-                // librime's compiler allocator retains a large native heap after finalize.
-                // Ending this dedicated process is the only reliable way to return it to Android.
-                Thread.sleep(processExitDelayMs)
-                KeytaoRuntimeLog.flush(200)
-                // The client may already have started the next step in this process.
-                if (!deploymentRunning.get()) Process.killProcess(Process.myPid())
-            },
-            "KeyTao-Rime-Deployer",
-        ).start()
-        return START_NOT_STICKY
+    private fun send(receiver: ResultReceiver, resultCode: Int, data: Bundle) {
+        runCatching { receiver.send(resultCode, data) }
+            .onFailure { Log.w(tag, "Failed to deliver deployment result", it) }
     }
 
     private fun startDeploymentForeground() {
@@ -84,41 +103,26 @@ class KeytaoRimeDeployService : Service() {
             ensureNotificationChannel()
             val notification = buildNotification()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    notificationId,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                )
+                startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             } else {
                 startForeground(notificationId, notification)
             }
-        }.onFailure { error ->
-            Log.w(tag, "Failed to enter foreground for deployment", error)
-        }
+        }.onFailure { Log.w(tag, "Failed to enter foreground for deployment", it) }
     }
 
     private fun stopDeploymentForeground() {
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-        }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
     }
 
     private fun ensureNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(notificationChannelId) != null) return
-        manager.createNotificationChannel(
-            NotificationChannel(
-                notificationChannelId,
-                getString(R.string.keytao_deploy_channel_name),
-                NotificationManager.IMPORTANCE_LOW,
-            )
-        )
+        manager.createNotificationChannel(NotificationChannel(
+            notificationChannelId,
+            getString(R.string.keytao_deploy_channel_name),
+            NotificationManager.IMPORTANCE_LOW,
+        ))
     }
 
     private fun buildNotification(): Notification {
@@ -136,77 +140,18 @@ class KeytaoRimeDeployService : Service() {
             .build()
     }
 
-    private fun runDeployment(schemaId: String?): DeploymentResult {
-        val started = System.nanoTime()
-        var success = false
-        var schemaCount = 0
-        val configStep = schemaId == null
-        var engine: KeytaoImeEngine? = null
-        return try {
-            Log.i(tag, "Starting deployment step: ${schemaId ?: "default"}")
-            KeytaoAndroidPaths.userRoot(applicationContext)
-            engine = KeytaoImeEngine(applicationContext)
-            if (!engine.hasInstalledSchema()) {
-                return DeploymentResult(error = "请先安装键道方案")
-            }
-            val step = engine.deployStep(schemaId)
-            if (!step.success) {
-                return DeploymentResult(error = step.error.ifBlank { "Android RIME 部署失败" })
-            }
-            Log.i(tag, "Completed deployment step: ${schemaId ?: "default"}")
-            success = true
-            schemaCount = step.schemas.size
-            DeploymentResult(
-                success = true,
-                schemas = step.schemas,
-            )
-        } catch (error: Throwable) {
-            Log.e(tag, "Android RIME deployment failed", error)
-            DeploymentResult(error = error.message ?: "Android RIME 部署失败")
-        } finally {
-            engine?.close()
-            val ok = success
-            val count = schemaCount
-            KeytaoRuntimeLog.event("rime", "deploy_step", KeytaoRuntimeLog.elapsedMs(started)) {
-                put("success", ok)
-                put("schema_count", count)
-                put("config_step", configStep)
-                put("source", "service")
-            }
-        }
-    }
-
-    private fun sendResult(receiver: ResultReceiver, result: DeploymentResult) {
-        val data = Bundle().apply {
-            putBoolean(KeytaoRimeDeployContract.keySuccess, result.success)
-            putStringArrayList(KeytaoRimeDeployContract.keySchemas, ArrayList(result.schemas))
-            putString(KeytaoRimeDeployContract.keyError, result.error)
-        }
-        receiver.send(
-            if (result.success) KeytaoRimeDeployContract.resultOk else KeytaoRimeDeployContract.resultError,
-            data,
-        )
-    }
-
     @Suppress("DEPRECATION")
-    private fun Intent.resultReceiver(): ResultReceiver? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    private fun Intent.resultReceiver(): ResultReceiver? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getParcelableExtra(KeytaoRimeDeployContract.extraReceiver, ResultReceiver::class.java)
         } else {
             getParcelableExtra(KeytaoRimeDeployContract.extraReceiver)
         }
-    }
-
-    private data class DeploymentResult(
-        val success: Boolean = false,
-        val schemas: List<String> = emptyList(),
-        val error: String = "",
-    )
 
     companion object {
         private const val tag = "KeytaoRimeDeploy"
-        private const val processExitDelayMs = 150L
+        private const val resultGraceMs = 1_000L
         private const val notificationChannelId = "keytao_rime_deploy"
-        private const val notificationId = 1001
+        private const val notificationId = 1002
     }
 }

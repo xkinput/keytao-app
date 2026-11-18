@@ -334,7 +334,7 @@ class _SchemePageState extends State<SchemePage> {
                           onPress: c.cancelDownload,
                         ),
                       ActionButton(
-                        AppStrings.deploy,
+                        c.isDeploying ? AppStrings.deploying : AppStrings.deploy,
                         icon: FLucideIcons.play,
                         tooltip: c.deployTooltip,
                         onPress: c.canDeploy ? c.deploy : null,
@@ -523,7 +523,7 @@ class SchemePackageRow extends StatelessWidget {
           ),
         if (active)
           ActionButton(
-            AppStrings.deploy,
+            c.isDeploying ? AppStrings.deploying : AppStrings.deploy,
             primary: true,
             icon: FLucideIcons.play,
             onPress: c.canDeploy ? c.deploy : null,

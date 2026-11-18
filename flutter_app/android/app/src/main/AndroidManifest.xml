@@ -61,6 +61,13 @@
             android:name=".KeytaoRimeDeployService"
             android:exported="false"
             android:foregroundServiceType="dataSync"
+            android:process=":rime_deploy_coordinator"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".KeytaoRimeDeployWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
             android:process=":rime_deployer"
             android:stopWithTask="false" />
 
