@@ -448,6 +448,8 @@ impl<'a> PackageStore<'a> {
         metadata
             .sync_all()
             .map_err(|error| context("同步文件", &metadata_path, error))?;
+        // Windows refuses to rename a directory while any file beneath it is open.
+        drop(metadata);
         Self::read_files_at(&stage.0, &meta.scheme_key)?;
         sync_package_directories(&stage.0)?;
         let parent = destination.parent().unwrap();
