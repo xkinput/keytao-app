@@ -437,6 +437,9 @@ Future<EnglishModeDto> getDesktopEnglishMode() =>
 Future<int?> getCandidatePageSize() =>
     RustLib.instance.api.crateApiCoreGetCandidatePageSize();
 
+Future<String> previewCandidates({int? size}) =>
+    RustLib.instance.api.crateApiCorePreviewCandidates(size: size);
+
 Future<int?> setCandidatePageSize({int? size}) =>
     RustLib.instance.api.crateApiCoreSetCandidatePageSize(size: size);
 

@@ -9,6 +9,8 @@ mod deployment_log;
 mod deployment_state_tests;
 pub mod english_mode;
 pub mod package_store;
+mod preview;
+pub use preview::{CandidatePreview, PreviewCandidate, PreviewRequest};
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -1041,6 +1043,85 @@ mod desktop {
         Ok(())
     }
 
+    pub(crate) fn preview_deployed_candidates(
+        user_dir: &Path,
+        request: &PreviewRequest,
+    ) -> Result<CandidatePreview, String> {
+        request.validate()?;
+        let schema = deployed_schema_id_from_dir(user_dir).ok_or("no active deployed schema")?;
+        let directory = preview::PreviewDirectory::snapshot(user_dir)?;
+        let _rime = rime_api_lock();
+        if *lock_ignore_poison(&RIME_INITIALIZED) {
+            return Err("candidate preview requires a fresh child process".into());
+        }
+        // Rime's user config and user dictionaries are writable only in this snapshot.
+        // Compiled dictionaries/models remain in the original, read-only data search path.
+        setup_rime(
+            &directory.path().to_string_lossy(),
+            &user_dir.to_string_lossy(),
+            &directory.path().join("build").to_string_lossy(),
+            &user_dir.join("build").to_string_lossy(),
+            &directory.path().join("log").to_string_lossy(),
+            false,
+            user_dir,
+        );
+        *lock_ignore_poison(&RIME_INITIALIZED) = true;
+        let result = preview_session(&schema, request, true);
+        let finalized = finalize_rime();
+        result.and_then(|preview| finalized.map(|()| preview))
+    }
+
+    pub(crate) fn preview_session(
+        schema_id: &str,
+        request: &PreviewRequest,
+        isolated: bool,
+    ) -> Result<CandidatePreview, String> {
+        request.validate()?;
+        let _rime = rime_api_lock();
+        // Creating a raw session restores the saved schema without ApplySchema's Save().
+        let session = create_session().map_err(|e| format!("create preview session: {e:?}"))?;
+        let active = session
+            .status()
+            .map_err(|e| format!("read preview schema: {e:?}"))?;
+        if active.schema_id() != schema_id {
+            if !isolated {
+                return Err("active preview schema differs from the saved schema".into());
+            }
+            select_schema_checked(&session, schema_id)?;
+        }
+        unsafe {
+            let api = rime_get_api();
+            let set =
+                rime_api_member!(api, set_option).ok_or("preview options API is unavailable")?;
+            set(session.session_id, c"ascii_mode".as_ptr(), 0);
+        }
+        session.process_key(key_event(u32::from(b'f'), 0));
+        let context = session.context().ok_or("read preview context failed")?;
+        let configured = u8::try_from(context.menu().page_size)
+            .ok()
+            .filter(|size| *size > 0)
+            .ok_or("invalid deployed candidate page size")?;
+        let page_size = request.page_size.unwrap_or(configured);
+        let candidates = extract_all_candidates(&session, usize::from(page_size))
+            .ok_or("candidate preview iterator is unavailable")?
+            .into_iter()
+            .map(|candidate| PreviewCandidate {
+                text: candidate.text,
+                comment: candidate.comment.unwrap_or_default(),
+            })
+            .collect();
+        unsafe {
+            let api = rime_get_api();
+            let clear = rime_api_member!(api, clear_composition)
+                .ok_or("preview clear API is unavailable")?;
+            clear(session.session_id);
+        }
+        Ok(CandidatePreview {
+            candidates,
+            page_size,
+        })
+    }
+
     /// Tear librime down, leaving the process without an instance.
     ///
     /// Only for callers that already drained every live engine — see
@@ -1334,6 +1415,7 @@ mod desktop {
             &prebuilt_dir.to_string_lossy(),
             &log_dir.to_string_lossy(),
             deployer_only,
+            user_dir,
         );
     }
 
@@ -1584,9 +1666,10 @@ mod desktop {
         prebuilt_data_dir: &str,
         log_dir: &str,
         deployer_only: bool,
+        grammar_user_dir: &Path,
     ) {
         let configured_log_dir = PathBuf::from(log_dir);
-        let use_octagram = !deployer_only && wanxiang_grammar_enabled(Path::new(user_data_dir));
+        let use_octagram = !deployer_only && wanxiang_grammar_enabled(grammar_user_dir);
         let user_data_dir = CString::new(user_data_dir).expect("valid user data dir");
         let shared_data_dir = CString::new(shared_data_dir).expect("valid shared data dir");
         let staging_dir = CString::new(staging_dir).expect("valid staging dir");
@@ -4923,6 +5006,26 @@ impl ImeRuntime {
             );
         }
         result
+    }
+
+    /// Inspect a private session in the existing mobile runtime without saving a schema.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn preview_candidates(&self, page_size: Option<u8>) -> Result<CandidatePreview, String> {
+        let dirs = self.data_dirs()?;
+        let initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        let _barrier = PROCESS_RIME
+            .reload_barrier
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if initialized.is_none() {
+            // An App can open settings before its keyboard/IME has started librime.
+            return desktop::preview_deployed_candidates(&dirs.user, &PreviewRequest { page_size });
+        }
+        if initialized.as_ref() != Some(&dirs) {
+            return Err("candidate preview runtime is not initialized".into());
+        }
+        let schema = deployed_schema_id_from_dir(&dirs.user).ok_or("no active deployed schema")?;
+        desktop::preview_session(&schema, &PreviewRequest { page_size }, false)
     }
 
     pub fn reload_without_deploy(&self) -> Result<(), String> {

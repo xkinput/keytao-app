@@ -20,12 +20,15 @@ mod pipe_io;
 
 #[cfg(windows)]
 fn main() {
-    if let Some(subcommand) = std::env::args_os()
-        .skip(1)
-        .find(|arg| arg == "--deploy" || arg == "--deploy-public")
-    {
+    if let Some(subcommand) = std::env::args_os().skip(1).find(|arg| {
+        arg == "--deploy"
+            || arg == "--deploy-public"
+            || arg == keytao_core::deploy_child::PREVIEW_SUBCOMMAND
+    }) {
         let code = keytao_windows_ime::engine_backend::InProcEngine::deploy_server(|| {
-            let code = if subcommand == "--deploy-public" {
+            let code = if subcommand == keytao_core::deploy_child::PREVIEW_SUBCOMMAND {
+                keytao_core::deploy_child::run_preview_child_main()
+            } else if subcommand == "--deploy-public" {
                 keytao_core::deploy_child::run_deploy_child_main_with_action(
                     "--deploy-public",
                     keytao_app_core::windows_public_schemas::deploy_and_publish,

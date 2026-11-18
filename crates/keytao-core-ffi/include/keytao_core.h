@@ -82,6 +82,12 @@ void keytao_log_flush(uint32_t timeout_ms);
 void keytao_run_deploy_child_main(void);
 
 /**
+ * Run the macOS executable's read-only `--preview-candidates` entry.
+ * Terminates the process without running librime's static destructors.
+ */
+void keytao_run_preview_child_main(void);
+
+/**
  * Redeploy through the macOS executable itself, with a 600-second timeout.
  * Returns true only for a successful exit and a valid success protocol result.
  */

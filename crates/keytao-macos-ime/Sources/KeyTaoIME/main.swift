@@ -2,7 +2,9 @@ import Cocoa
 import InputMethodKit
 import CKeytaoCore
 
-if CommandLine.arguments.dropFirst().first == "--deploy" {
+if let subcommand = CommandLine.arguments.dropFirst().first,
+  subcommand == "--deploy" || subcommand == "--preview-candidates"
+{
   if let resources = Bundle.main.resourceURL {
     for name in ["rime-data", "SharedSupport"] {
       let path = resources.appendingPathComponent(name).path
@@ -12,7 +14,11 @@ if CommandLine.arguments.dropFirst().first == "--deploy" {
       }
     }
   }
-  keytao_run_deploy_child_main()
+  if subcommand == "--preview-candidates" {
+    keytao_run_preview_child_main()
+  } else {
+    keytao_run_deploy_child_main()
+  }
 }
 
 let installer = KeyTaoInputSourceInstaller()

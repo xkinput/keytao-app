@@ -1471,6 +1471,18 @@ pub async fn windows_ime_ensure_registered(core: Arc<Core>) -> Result<WindowsIme
     result.map_err(CoreError::Other)
 }
 #[cfg(target_os = "windows")]
+pub(crate) fn preview_candidates_blocking(
+    request: &keytao_core::PreviewRequest,
+) -> Result<keytao_core::CandidatePreview, String> {
+    let executable = server::installed_server_exe()?;
+    keytao_core::deploy_child::run_preview_child(
+        &executable,
+        request,
+        std::time::Duration::from_secs(10),
+    )
+}
+
+#[cfg(target_os = "windows")]
 pub fn windows_deploy_rime_blocking(
     user_dir: PathBuf,
     _shared_data_dir: String,

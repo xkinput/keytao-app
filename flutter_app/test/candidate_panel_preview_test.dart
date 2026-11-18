@@ -206,6 +206,83 @@ void main() {
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   for (final orientation in PanelOrientationDto.values) {
+    testWidgets('real candidates and page size render in ${orientation.name}', (
+      tester,
+    ) async {
+      final controller = _PreviewController()
+        ..candidatePreviewPageSize = 4
+        ..candidatePreviewCandidates = const [
+          (text: '方案首选', comment: '~real'),
+          (text: '第二词', comment: '词典注释'),
+          (text: '第三词', comment: ''),
+          (text: '第四词', comment: '🙂'),
+          (text: '第五词', comment: 'fifth'),
+        ]
+        ..updateSettings(orientation: orientation);
+      await _pumpSettings(tester, controller);
+      expect(find.text('方案首选'), findsOneWidget);
+      expect(find.text('~real'), findsOneWidget);
+      expect(find.text('词典注释'), findsOneWidget);
+      expect(find.text('🙂'), findsOneWidget);
+      expect(find.text('这'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('candidate-preview-text-3')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('candidate-preview-text-4')),
+        findsNothing,
+      );
+      expect(
+        tester.widget<Flex>(_candidates).direction,
+        orientation == PanelOrientationDto.vertical
+            ? Axis.vertical
+            : Axis.horizontal,
+      );
+
+      controller.candidatePageSize = 2;
+      controller.updateSettings();
+      await tester.pumpAndSettle();
+      expect(find.text('第二词'), findsOneWidget);
+      expect(find.text('第三词'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('candidate-preview-text-2')),
+        findsNothing,
+      );
+
+      controller.candidatePageSize = null;
+      controller.candidatePreviewPageSize = 12;
+      controller.candidatePreviewCandidates = controller
+          .candidatePreviewCandidates
+          .take(2)
+          .toList();
+      controller.updateSettings();
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('candidate-preview-text-3')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('candidate-preview-text-11')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('candidate-preview-text-12')),
+        findsNothing,
+      );
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const ValueKey('candidate-preview-text-3')),
+            )
+            .data,
+        '',
+      );
+      expect(find.text('支'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
     testWidgets('candidate count updates live in ${orientation.name}', (
       tester,
     ) async {

@@ -378,6 +378,17 @@ pub extern "C" fn keytao_run_deploy_child_main() -> ! {
     keytao_core::deploy_child::exit_deploy_child(code)
 }
 
+/// Run the macOS executable's read-only `--preview-candidates` entry.
+/// Terminates the process without running librime's static destructors.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn keytao_run_preview_child_main() -> ! {
+    let code = guard("keytao_run_preview_child_main", 1, || {
+        keytao_core::deploy_child::run_preview_child_main()
+    });
+    keytao_core::deploy_child::exit_deploy_child(code)
+}
+
 /// Redeploy through the macOS executable itself, with a 600-second timeout.
 /// Returns true only for a successful exit and a valid success protocol result.
 #[cfg(target_os = "macos")]
