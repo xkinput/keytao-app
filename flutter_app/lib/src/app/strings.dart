@@ -8,6 +8,7 @@ abstract final class AppStrings {
   static const appUpdate = 'KeyTao 有新版本可用';
   static const ime = '输入法';
   static const scheme = '方案';
+  static const selectSchemas = '选择方案';
   static const extension = '扩展安装';
   static const about = '关于';
   static const debug = '调试';

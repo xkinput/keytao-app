@@ -29,6 +29,7 @@ pub mod package_orphans;
 #[cfg(test)]
 mod package_activation_tests;
 pub mod packages;
+pub mod package_schemas;
 pub mod scheme;
 pub mod scheme_files;
 pub mod scheme_host;

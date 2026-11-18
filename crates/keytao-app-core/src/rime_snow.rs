@@ -72,7 +72,12 @@ pub(crate) fn prepare_archive(core: &Core, bytes: Vec<u8>) -> Result<Vec<u8>, Co
         .into_iter()
         .map(|file| Ok((file.path.clone(), fs::read(stage.join(file.path))?)))
         .collect::<Result<Vec<_>, CoreError>>()?;
-    files.push(default_custom());
+    files.extend(crate::package_schemas::directory_schemas(&stage)?.into_iter()
+        .filter(|(name, _)| matches!(name.as_str(), "default.yaml" | "default.custom.yaml" | "default-custom.yaml")));
+    if crate::package_schemas::default_schemas(&files)?.is_empty() {
+        files.retain(|(name, _)| name != "default.custom.yaml");
+        files.push(default_custom());
+    }
     crate::packages::archive_from_files(&files)
 }
 

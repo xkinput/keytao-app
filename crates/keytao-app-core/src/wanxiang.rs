@@ -710,6 +710,13 @@ pub struct InstallReceipt {
 }
 
 impl InstallReceipt {
+    pub(crate) fn schema_selection(&self, id: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        match &self.store {
+            Some(store) => store.schema_selection(&self.work.join("files")),
+            None => Ok((vec![id.into()], vec![id.into()])),
+        }
+    }
+
     pub(crate) fn new(root: &Path) -> Result<Self, String> {
         let operation = OPERATION
             .try_lock()
@@ -785,7 +792,7 @@ impl InstallReceipt {
     }
 
     fn seed_store_sources(&self, core: &Core, id: &str) -> Result<(), String> {
-        for (source, relative) in crate::addon_store::public_files(core, id)? {
+        for (source, relative) in crate::addon_store::source_files(core, id)? {
             let destination = self.work.join("files").join(relative);
             if !destination.exists() {
                 fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -1171,6 +1178,7 @@ pub(crate) fn extract_package_with_limit(
     let mut destinations = BTreeSet::new();
     let mut files = Vec::new();
     let mut expanded = 0u64;
+    let mut defaults = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
         let name = entry.name().trim_end_matches('/').to_string();
@@ -1192,6 +1200,13 @@ pub(crate) fn extract_package_with_limit(
             .ok_or("万象压缩包大小溢出")?;
         if entry.size() > MAX_FILE_BYTES || expanded > max_expanded_bytes {
             return Err("万象压缩包展开大小超出限制".into());
+        }
+        let basename = name.rsplit('/').next().unwrap_or(&name);
+        if name.split('/').count() <= 2 && matches!(basename, "default.yaml" | "default.custom.yaml" | "default-custom.yaml") {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+            defaults.push((name, bytes));
+            continue;
         }
         let Some(name) = destination(&name) else {
             continue;
@@ -1215,6 +1230,20 @@ pub(crate) fn extract_package_with_limit(
             sha256,
             size,
         });
+    }
+    for (path, bytes) in defaults {
+        let (prefix, name) = path.rsplit_once('/').map_or((String::new(), path.as_str()), |(prefix, name)| (format!("{prefix}/"), name));
+        let ids = crate::package_schemas::default_schemas(&[(name.into(), bytes)]).map_err(|error| error.to_string())?;
+        let ids: Vec<_> = ids.into_iter().filter_map(|id| {
+            destination(&format!("{prefix}{id}.schema.yaml"))
+                .or_else(|| stage.join(format!("{id}.schema.yaml")).is_file().then(|| format!("{id}.schema.yaml")))
+                .filter(|path| stage.join(path).is_file())
+                .and_then(|path| path.strip_suffix(".schema.yaml").map(str::to_owned))
+        }).collect();
+        if ids.is_empty() { continue; }
+        let list = serde_json::json!(ids.iter().map(|id| serde_json::json!({"schema": id})).collect::<Vec<_>>());
+        let config = if name == "default.yaml" { serde_json::json!({"schema_list": list}) } else { serde_json::json!({"patch": {"schema_list": list}}) };
+        fs::write(stage.join(name), serde_yaml::to_string(&config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     }
     Ok(files)
 }
@@ -1688,7 +1717,8 @@ where
             let public_source_warning = {
                 match crate::windows_public_schemas::update_public_schemas(|| {
                     if installed {
-                        host.publish_wanxiang_sources(&receipt.public_source_files())
+                        host.publish_wanxiang_sources(&receipt.public_source_files())?;
+                        crate::windows_public_schemas::publish_schema_selection(&root)
                     } else {
                         host.remove_public_schema(SCHEMA_ID, &[])
                     }

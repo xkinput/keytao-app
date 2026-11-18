@@ -1858,6 +1858,33 @@ class AppController extends ChangeNotifier {
         .then((result) => result && verification.every((entry) => entry.ok));
   }
 
+  Future<List<PackageSchemaDto>> packageSchemas(String key) =>
+      core.packageSchemas(schemeKey: key);
+
+  Future<bool> setPackageSchemas(String key, List<String> ids) => run(() async {
+    packageError = null;
+    _startOperation(OperationKind.install, AppStrings.installing);
+    try {
+      if (isAndroid && (installedPackageFor(key)?.active ?? true)) {
+        await _requireStorage(redirect: true);
+      }
+      final shouldDeploy = await core.setPackageSchemas(
+        schemeKey: key,
+        ids: ids,
+      );
+      await _readInstalledPackages();
+      if (shouldDeploy) {
+        await _readLocal();
+        await _deploy();
+      }
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
   Future<void> _activateSchemePackage(String key) async {
     packageError = null;
     _invalidateSchemeUpdates();

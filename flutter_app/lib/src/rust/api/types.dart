@@ -904,6 +904,30 @@ class PackageOrphanReportDto {
           keptBackups == other.keptBackups;
 }
 
+class PackageSchemaDto {
+  final String id;
+  final String name;
+  final bool selected;
+
+  const PackageSchemaDto({
+    required this.id,
+    required this.name,
+    required this.selected,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ name.hashCode ^ selected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PackageSchemaDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          selected == other.selected;
+}
+
 enum PanelOrientationDto { horizontal, vertical }
 
 class PlatformReleaseDto {

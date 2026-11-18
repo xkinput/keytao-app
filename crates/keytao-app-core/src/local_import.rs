@@ -205,11 +205,21 @@ pub fn import_local_scheme(
                 && schemas.iter().any(|id| id == schema)
         })
     });
-    let schema_order = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .find_map(|name| fs::read_to_string(directory.join(name)).ok())
-        .map(|content| crate::scheme_files::parse_schema_list(&content))
-        .unwrap_or_default();
+    let defaults = ["default.yaml", "default-custom.yaml", "default.custom.yaml"].into_iter()
+        .filter_map(|name| match fs::read(directory.join(name)) {
+            Ok(bytes) => Some(Ok((name.to_owned(), bytes))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(context("读取方案配置", &directory.join(name), error))),
+        }).collect::<Result<Vec<_>, _>>()?;
+    let schema_order = crate::package_schemas::default_schemas(&defaults)?;
+    if !schema_order.is_empty() {
+        schemas.retain(|schema| schema_order.contains(schema));
+    } else {
+        let candidates = crate::package_schemas::enumerate("local-import", &files.iter()
+            .filter(|(path, _)| path.ends_with(".schema.yaml"))
+            .map(|(path, bytes)| (path.clone(), bytes.clone())).collect::<Vec<_>>(), None)?;
+        schemas.retain(|id| candidates.iter().any(|schema| &schema.id == id));
+    }
     schemas.sort_by_key(|schema| {
         schema_order
             .iter()

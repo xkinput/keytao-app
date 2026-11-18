@@ -198,6 +198,25 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
 }
 
 #[tokio::test]
+async fn deselected_local_user_schema_is_not_retained_after_reactivation_or_removal() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let mut entries = files("alpha");
+    entries.push(("beta.schema.yaml".into(), b"schema: {schema_id: beta, name: Beta}".to_vec()));
+    entries.iter_mut().find(|(path, _)| path == "default.custom.yaml").unwrap().1 = b"patch: {schema_list: [{schema: alpha}, {schema: beta}]}".to_vec();
+    store(&host, "local-demo", entries);
+    activate_scheme(&host.core, "local-demo", &host.root).await.unwrap();
+    write(&host.root, "alpha.schema.yaml", b"schema: {schema_id: alpha, name: User edit}");
+    crate::package_schemas::set_package_schemas(&host.core, "local-demo", &["beta".into()]).unwrap();
+    activate_scheme(&host.core, "local-demo", &host.root).await.unwrap();
+    assert_eq!(crate::scheme_files::parse_schema_list(&fs::read_to_string(host.root.join("default.custom.yaml")).unwrap()), ["beta"]);
+    remove_scheme_package(&host.core, "local-demo", &host).await.unwrap();
+    let config = fs::read_to_string(host.root.join("default.custom.yaml")).unwrap();
+    assert!(crate::scheme_files::parse_schema_list(&config).is_empty());
+}
+
+#[tokio::test]
 async fn main_package_switch_preserves_each_addon_record_and_sources() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     for id in crate::addon_store::IDS

@@ -134,6 +134,8 @@ fn package_schema_ids(
     files: &[(String, Vec<u8>)],
     meta: &crate::packages::PackageMeta,
 ) -> Result<Vec<String>, CoreError> {
+    let defaults = crate::package_schemas::default_schemas(files)?;
+    if !defaults.is_empty() { return Ok(defaults); }
     let mut fallback = std::collections::BTreeSet::new();
     for name in meta.manifest.keys() {
         if !name.contains('/') {
@@ -168,7 +170,9 @@ fn prepare_with_smoke(
     smoke: impl FnMut(&str, u32) -> Result<(), String>,
 ) -> Result<PreparedUpload, CoreError> {
     eligible(core, scheme_key, root)?;
-    let (stored, meta) = crate::package_store::PackageStore::new(core).read_files(scheme_key)?;
+    let (mut stored, meta) = crate::package_store::PackageStore::new(core).read_files(scheme_key)?;
+    crate::package_schemas::filter_files(scheme_key, &mut stored,
+        crate::package_schemas::read_selection(&crate::package_schemas::metadata_path(core, scheme_key)?)?.as_deref())?;
     let ids = package_schema_ids(&stored, &meta)?;
     let bundle = if cfg!(target_os = "android") {
         // Android validates Kotlin's deploy result and artifacts, without in-process Rime.

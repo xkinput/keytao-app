@@ -63,6 +63,26 @@ class PackageCore extends FakeCore {
   );
 
   @override
+  Future<List<PackageSchemaDto>> crateApiCorePackageSchemas({
+    required String schemeKey,
+  }) async => const [
+    PackageSchemaDto(id: 'alpha', name: 'Alpha Name', selected: true),
+    PackageSchemaDto(id: 'beta', name: 'Beta Name', selected: false),
+  ];
+
+  @override
+  Future<bool> crateApiCoreSetPackageSchemas({
+    required String schemeKey,
+    required List<String> ids,
+  }) async {
+    calls.add('schemas:$schemeKey:${ids.join(',')}');
+    return packages.any(
+          (package) => package.schemeKey == schemeKey && package.active,
+        ) ||
+        schemeKey == 'rime_mint';
+  }
+
+  @override
   Future<String?> crateApiCoreActiveSchemaLogoPath() async =>
       local.deployed ? '/isolated/logos/${local.schemas.first}.png' : null;
 
@@ -339,6 +359,38 @@ void main() {
     expect(controller.activeSchemaLogoRevision, 2);
     expect(controller.busy, isFalse);
   });
+
+  test(
+    'schema confirmation deploys the active package and installed addons',
+    () async {
+      await controller.refreshSchemeUpdates();
+      expect(
+        (await controller.packageSchemas('keytao')).first.name,
+        'Alpha Name',
+      );
+      for (final key in ['keytao', 'rime_mint']) {
+        core.calls.clear();
+        expect(await controller.setPackageSchemas(key, ['beta']), isTrue);
+        expect(
+          core.calls,
+          containsAllInOrder(['schemas:$key:beta', 'deployDefault']),
+        );
+        expect(controller.busy, isFalse);
+      }
+    },
+  );
+
+  test(
+    'inactive schema selection only saves without Android permission or deploy',
+    () async {
+      controller.dispose();
+      controller = create(mobile: true);
+      android.permission = {'granted': false, 'writable': false};
+      await controller.refreshSchemeUpdates();
+      expect(await controller.setPackageSchemas('xmjd', ['beta']), isTrue);
+      expect(core.calls, ['schemas:xmjd:beta']);
+    },
+  );
 
   test('inactive removal preserves the active package and selection', () async {
     await controller.refreshSchemeUpdates();

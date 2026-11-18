@@ -216,6 +216,7 @@ pub(crate) struct PendingPackage {
     manifest: BTreeMap<String, String>,
     root: String,
     zip_sha256: String,
+    from_store: bool,
     pub(crate) activation: Option<crate::package_activation::Activation>,
     pub(crate) transaction: Option<crate::package_activation::Transaction>,
 }
@@ -556,6 +557,7 @@ pub(crate) fn stage_install(
         manifest,
         root,
         zip_sha256: format!("{:x}", Sha256::digest(zip_bytes)),
+        from_store: false,
         activation: None,
         transaction: None,
     });
@@ -680,7 +682,15 @@ pub(crate) fn finalize_pending(
             }
         }
     }
-    store.write_archive(BufReader::new(receipt.archive.reopen()?), &meta, None)?;
+    if !receipt.from_store {
+        store.write_archive(BufReader::new(receipt.archive.reopen()?), &meta, None)?;
+    } else {
+        let path = store.checked_metadata_path(scheme_key)?;
+        let mut stored: crate::package_store::StoredPackage = serde_json::from_slice(&fs::read(&path)?)?;
+        if stored.meta.selection_base_version.take().is_some() {
+            crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec_pretty(&stored)?)?;
+        }
+    }
     #[cfg(target_os = "windows")]
     if publish_public {
         crate::windows_public_schemas::publish_activation(
@@ -764,48 +774,39 @@ pub(crate) fn finalize_pending(
     Ok(())
 }
 
-fn select_package_primary_schema(receipt: &PendingPackage) -> Result<(), CoreError> {
+fn select_package_primary_schema(core: &Core, key: &str, receipt: &PendingPackage, preserve: bool) -> Result<(), CoreError> {
     let mut archive = zip::ZipArchive::new(BufReader::new(receipt.archive.reopen()?))
         .map_err(|error| CoreError::Other(error.to_string()))?;
-    let Some(index) = archive.file_names().position(|name| {
-        matches!(
-            name.rsplit('/').next(),
-            Some("default.custom.yaml" | "default-custom.yaml")
-        )
-    }) else {
-        return Ok(());
-    };
-    let mut config = String::new();
-    archive
-        .by_index(index)
-        .map_err(|error| CoreError::Other(error.to_string()))?
-        .read_to_string(&mut config)?;
-    let Some(primary) = crate::scheme_files::parse_schema_list(&config)
-        .into_iter()
-        .next()
-    else {
-        return Ok(());
-    };
-    let path = safe_path(Path::new(&receipt.root), "user.yaml").map_err(CoreError::Other)?;
-    let mut user: serde_yaml::Mapping = match fs::read(&path) {
-        Ok(bytes) => serde_yaml::from_slice(&bytes)
-            .map_err(|error| CoreError::Other(format!("Cannot read user.yaml: {error}")))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_yaml::Mapping::new(),
+    let mut files = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| CoreError::Other(error.to_string()))?;
+        if entry.is_dir() { continue; }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        files.push((entry.name().to_owned(), bytes));
+    }
+    if crate::package_schemas::enumerate(key, &files, None)?.is_empty() { return Ok(()); }
+    let previous = match PackageStore::new(core).read_metadata_bytes(key) {
+        Ok(bytes) => Some(serde_json::from_slice::<crate::package_store::StoredPackage>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let vars = user
-        .entry(serde_yaml::Value::String("var".into()))
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
-        .as_mapping_mut()
-        .ok_or_else(|| CoreError::Other("user.yaml var must be a mapping".into()))?;
-    vars.insert(
-        serde_yaml::Value::String("previously_selected_schema".into()),
-        serde_yaml::Value::String(primary),
-    );
-    let content =
-        serde_yaml::to_string(&user).map_err(|error| CoreError::Other(error.to_string()))?;
-    crate::scheme_files::write_file_atomic(&path, content.as_bytes())?;
-    Ok(())
+    let selection = previous.as_ref().and_then(|stored| stored.selected_schemas.as_deref())
+        .map(|selected| crate::package_schemas::reconcile_selection(key, &files, selected,
+            &previous.as_ref().unwrap().files.iter().map(|file| file.path.clone()).collect::<Vec<_>>()))
+        .transpose()?;
+    let preserve = preserve || (receipt.from_store
+        && previous.as_ref().is_some_and(|stored| stored.selected_schemas.is_some())
+        && core.state().active_scheme.as_deref() == Some(key));
+    let selected = crate::package_schemas::filter_files(key, &mut files, selection.as_deref())?;
+    let root = Path::new(&receipt.root);
+    let addons = crate::package_activation::addon_ownership(core, root)?;
+    let owned: Vec<_> = files.iter().filter(|(path, _)| !addons.contains_key(path))
+        .filter_map(|(path, _)| path.strip_suffix(".schema.yaml").map(str::to_owned)).collect();
+    let (relative, current) = crate::addon::addon_default_custom(root).map_err(CoreError::Other)?;
+    let content = crate::addon::update_addon_schemas_content(&current, &owned, &selected).map_err(CoreError::Other)?;
+    crate::scheme_files::write_file_atomic(&root.join(relative), content.as_bytes())?;
+    crate::package_schemas::ensure_active_schema(root, &selected, preserve)
 }
 
 pub fn record_package(
@@ -858,10 +859,7 @@ pub fn record_package(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(receipt) = pending.as_ref().filter(|receipt| !receipt.root.is_empty()) {
-            // Only a same-package version update preserves a manual schema selection.
-            if !updating_active_package {
-                select_package_primary_schema(receipt)?;
-            }
+            select_package_primary_schema(core, scheme_key, receipt, updating_active_package)?;
             Some(PathBuf::from(&receipt.root))
         } else {
             None
@@ -1241,7 +1239,9 @@ pub async fn activate_scheme(
             "Stored package directory is missing; re-download this scheme before activation".into(),
         ));
     }
-    let (files, meta) = store.read_files(scheme_key)?;
+    let (mut files, meta) = store.read_files(scheme_key)?;
+    crate::package_schemas::filter_files(scheme_key, &mut files,
+        crate::package_schemas::read_selection(&store.checked_metadata_path(scheme_key)?)?.as_deref())?;
     if meta.scheme_key != scheme_key || meta.version != package.version {
         return Err(CoreError::Other(
             "Stored package metadata is inconsistent; re-download this scheme before activation"
@@ -1264,6 +1264,7 @@ pub async fn activate_scheme(
         .as_mut()
     {
         receipt.zip_sha256 = meta.zip_sha256;
+        receipt.from_store = true;
     }
     crate::scheme::record_installed_scheme(core, scheme_key, package.version.as_deref())?;
     Ok(result)

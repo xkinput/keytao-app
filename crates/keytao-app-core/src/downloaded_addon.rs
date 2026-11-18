@@ -97,6 +97,10 @@ impl Addon {
     }
 
     fn status_with_manifest(&self, root: &Path, manifest: Option<Manifest>) -> Status {
+        let configured = crate::addon::addon_default_custom(root).ok().map(|(_, content)| keytao_core::parse_schema_list(&content)).unwrap_or_default();
+        let selected: Vec<_> = manifest.as_ref().into_iter().flat_map(|manifest| &manifest.files)
+            .filter_map(|file| file.path.strip_suffix(".schema.yaml"))
+            .filter(|id| configured.iter().any(|selected| selected == id)).collect();
         let installed = manifest.as_ref().is_some_and(|manifest| {
             manifest
                 .files
@@ -108,12 +112,9 @@ impl Addon {
         Status {
             installed,
             deployed: installed
-                && root
-                    .join(format!("build/{}.schema.yaml", self.id))
-                    .is_file()
-                && root
-                    .join(format!("build/{}.table.bin", self.dictionary))
-                    .is_file(),
+                && !selected.is_empty()
+                && selected.iter().all(|id| root.join(format!("build/{id}.schema.yaml")).is_file())
+                && (!selected.contains(&self.id) || root.join(format!("build/{}.table.bin", self.dictionary)).is_file()),
             version: manifest.map_or_else(String::new, |manifest| manifest.version),
             variant: String::new(),
         }
@@ -327,7 +328,8 @@ impl Addon {
                 let public_source_warning = {
                     match crate::windows_public_schemas::update_public_schemas(|| {
                         if installed {
-                            host.publish_wanxiang_sources(&receipt.public_source_files())
+                            host.publish_wanxiang_sources(&receipt.public_source_files())?;
+                            crate::windows_public_schemas::publish_schema_selection(&root)
                         } else {
                             host.remove_public_schema(self.id, &package_paths)
                         }

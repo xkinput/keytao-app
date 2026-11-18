@@ -36,6 +36,8 @@ pub(crate) struct StoredPackage {
     pub(crate) grammar: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) addon_manifest: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) selected_schemas: Option<Vec<String>>,
     #[serde(flatten)]
     pub(crate) meta: PackageMeta,
 }
@@ -422,19 +424,28 @@ impl<'a> PackageStore<'a> {
             });
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
+        let previous = self.read_metadata_bytes(&meta.scheme_key).ok()
+            .map(|bytes| serde_json::from_slice::<StoredPackage>(&bytes))
+            .transpose()?;
+        let selected_schemas = previous.as_ref().and_then(|stored| stored.selected_schemas.as_ref())
+            .map(|selected| {
+                let incoming = files.iter().map(|file| {
+                    Ok((file.path.clone(), fs::read(files_root.join(&file.path))?))
+                }).collect::<Result<Vec<_>, CoreError>>()?;
+                crate::package_schemas::reconcile_selection(
+                    &meta.scheme_key, &incoming, selected,
+                    &previous.as_ref().unwrap().files.iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
+                )
+            }).transpose()?;
         let stored = StoredPackage {
             key: meta.scheme_key.clone(),
-            origin: origin.map(str::to_owned).or_else(|| {
-                self.read_metadata_bytes(&meta.scheme_key)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<StoredPackage>(&bytes).ok())
-                    .and_then(|stored| stored.origin)
-            }),
+            origin: origin.map(str::to_owned).or_else(|| previous.and_then(|stored| stored.origin)),
             installed_at: meta.installed_at_unix,
             files,
             variant: None,
             grammar: None,
             addon_manifest: None,
+            selected_schemas,
             meta: serde_json::from_value(serde_json::to_value(meta)?)?,
         };
         validate_metadata(&meta.scheme_key, &stored)?;

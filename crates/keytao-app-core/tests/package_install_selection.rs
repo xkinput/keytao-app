@@ -108,6 +108,65 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn selected_local_schemas_survive_reimport_and_deploy_with_librime() {
+    let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let source = fixture.dir.path().join("source");
+    let selected_path = source.join("keytao-dz.schema.yaml");
+    let template = fs::read_to_string(&selected_path).unwrap();
+    fs::write(source.join("support.schema.yaml"), template.replace("schema_id: keytao-dz", "schema_id: support")).unwrap();
+    fs::write(&selected_path, template.replace("schema_id: keytao-dz", "schema_id: keytao-dz\n  dependencies: [support]")).unwrap();
+    let key = packages::import_local_scheme(&fixture.core, &source, "Local", None).unwrap();
+    let schemas = keytao_app_core::package_schemas::package_schemas(&fixture.core, &key).unwrap();
+    assert_eq!(schemas.iter().filter(|schema| schema.selected).count(), 3);
+    assert!(keytao_app_core::package_schemas::set_package_schemas(&fixture.core, &key, &[]).is_err());
+    assert!(keytao_app_core::package_schemas::set_package_schemas(&fixture.core, &key, &["outside".into()]).is_err());
+    packages::activate_scheme(&fixture.core, &key, &fixture.root,
+        #[cfg(target_os = "windows")] |_, _, _, _| Ok(Vec::new()),
+    ).await.unwrap();
+    fs::write(fixture.root.join("user.yaml"), "var: {previously_selected_schema: keytao-bj}").unwrap();
+    keytao_app_core::package_schemas::set_package_schemas(&fixture.core, &key, &["keytao-dz".into()]).unwrap();
+    packages::activate_scheme(&fixture.core, &key, &fixture.root,
+        #[cfg(target_os = "windows")] |_, _, _, _| Ok(Vec::new()),
+    ).await.unwrap();
+    assert_eq!(keytao_core::parse_schema_list(&fs::read_to_string(fixture.root.join("default.custom.yaml")).unwrap()), ["keytao-dz"]);
+    assert_eq!(keytao_app_core::package_schemas::package_schemas(&fixture.core, &key).unwrap().len(), schemas.len());
+    packages::import_local_scheme(&fixture.core, &source, "Local", Some(&key)).unwrap();
+    let selected = keytao_app_core::package_schemas::package_schemas(&fixture.core, &key).unwrap();
+    assert_eq!(selected.iter().filter(|schema| schema.selected).map(|schema| schema.id.as_str()).collect::<Vec<_>>(), ["keytao-dz"]);
+    let runtime = fixture.runtime();
+    runtime.init().unwrap();
+    fixture.assert_selected("keytao-dz");
+    assert_eq!(keytao_core::parse_schema_list(&fs::read_to_string(fixture.root.join("build/default.yaml")).unwrap()), ["keytao-dz"]);
+    assert!(fixture.root.join("build/keytao-dz.schema.yaml").is_file());
+    assert!(fixture.root.join("build/support.schema.yaml").is_file());
+    eprintln!("librime selection deploy: schema_list=[keytao-dz], active=keytao-dz, dependency=support compiled");
+}
+
+#[tokio::test]
+async fn saved_cloud_selection_survives_direct_update_and_reopen() {
+    let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    fixture.install("v1").await;
+    keytao_app_core::package_schemas::set_package_schemas(&fixture.core, "keytao", &["keytao-dz".into()]).unwrap();
+    fs::write(fixture.root.join("user.yaml"), "var: {previously_selected_schema: keytao-bj}").unwrap();
+    fixture.install("v2").await;
+    assert_eq!(keytao_core::parse_schema_list(&fs::read_to_string(fixture.root.join("default.custom.yaml")).unwrap()), ["keytao-dz"]);
+    let reopened = Core::new(fixture.core.env().clone(), Arc::new(NullSink)).unwrap();
+    let schemas = keytao_app_core::package_schemas::package_schemas(&reopened, "keytao").unwrap();
+    assert!(schemas.len() > 1);
+    assert_eq!(schemas.iter().filter(|schema| schema.selected).map(|schema| schema.id.as_str()).collect::<Vec<_>>(), ["keytao-dz"]);
+    let user: serde_yaml::Value = serde_yaml::from_slice(&fs::read(fixture.root.join("user.yaml")).unwrap()).unwrap();
+    assert_eq!(user["var"]["previously_selected_schema"].as_str(), Some("keytao-dz"));
+    keytao_app_core::package_schemas::set_package_schemas(&fixture.core, "keytao", &["keytao".into(), "keytao-dz".into()]).unwrap();
+    packages::activate_scheme(&fixture.core, "keytao", &fixture.root,
+        #[cfg(target_os = "windows")] |_, _, _, _| Ok(Vec::new()),
+    ).await.unwrap();
+    let user: serde_yaml::Value = serde_yaml::from_slice(&fs::read(fixture.root.join("user.yaml")).unwrap()).unwrap();
+    assert_eq!(user["var"]["previously_selected_schema"].as_str(), Some("keytao-dz"));
+}
+
+#[tokio::test]
 async fn installing_package_replaces_stale_selection_with_its_primary_schema() {
     let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();

@@ -33,6 +33,18 @@ class _PackageController extends ViewController {
 
   final actions = <String>[];
 
+  @override
+  Future<List<PackageSchemaDto>> packageSchemas(String key) async => const [
+    PackageSchemaDto(id: 'alpha', name: 'Alpha Name', selected: true),
+    PackageSchemaDto(id: 'beta', name: 'Beta Name', selected: false),
+  ];
+
+  @override
+  Future<bool> setPackageSchemas(String key, List<String> ids) async {
+    actions.add('schemas:$key:${ids.join(',')}');
+    return true;
+  }
+
   void rebuild() => notifyListeners();
 
   @override
@@ -184,6 +196,91 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  testWidgets(
+    'every installed card selects named schemas and confirms deployment',
+    (tester) async {
+      final c = _PackageController();
+      addTearDown(c.dispose);
+      _size(tester, const Size(1100, 1200));
+      Future<void> select(String key, Finder menu) async {
+        await tester.ensureVisible(menu);
+        await tester.tap(menu);
+        await tester.pumpAndSettle();
+        final item = find.widgetWithText(FItem, AppStrings.selectSchemas);
+        expect(item, findsOneWidget, reason: key);
+        await tester.tap(item);
+        await tester.pumpAndSettle();
+        expect(find.text('Alpha Name'), findsOneWidget);
+        expect(find.text('alpha'), findsOneWidget);
+        expect(find.text('Beta Name'), findsOneWidget);
+        final boxes = find.byType(FCheckbox);
+        expect(tester.widget<FCheckbox>(boxes.at(0)).value, isTrue);
+        expect(tester.widget<FCheckbox>(boxes.at(0)).enabled, isFalse);
+        expect(tester.widget<FCheckbox>(boxes.at(1)).value, isFalse);
+        await tester.tap(boxes.at(1));
+        await tester.pumpAndSettle();
+        await tester.tap(boxes.at(0));
+        await tester.pumpAndSettle();
+        expect(tester.widget<FCheckbox>(boxes.at(1)).enabled, isFalse);
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AppDialog),
+            matching: find.widgetWithText(ActionButton, AppStrings.deploy),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(c.actions.last, 'schemas:$key:beta');
+        expect(find.byType(AppDialog), findsNothing);
+        expect(tester.takeException(), isNull);
+      }
+
+      for (final key in [
+        'keytao',
+        'xmjd',
+        'txjx',
+        'keydo',
+        'snow_jiandao',
+        'local-demo',
+      ]) {
+        c.installedPackages = [
+          InstalledPackageDto(
+            schemeKey: key,
+            active: true,
+            hasPackageZip: true,
+            source: key.startsWith('local-') ? 'local' : 'official',
+          ),
+        ];
+        await _pumpRow(tester, c, key);
+        await select(key, find.byIcon(FLucideIcons.ellipsis));
+      }
+      const installed = AddonStatusDto(
+        installed: true,
+        deployed: true,
+        version: 'v1',
+        englishAvailable: false,
+      );
+      c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost = c.rimeLssp =
+          installed;
+      await _pumpAddons(tester, c);
+      for (final (card, key) in [
+        ('addon-easy-en', 'easy_en'),
+        ('addon-wanxiang', 'wanxiang'),
+        ('addon-rime-ice', 'rime_ice'),
+        ('addon-rime-mint', 'rime_mint'),
+        ('addon-rime-frost', 'rime_frost'),
+        ('addon-rime-lssp', 'triple_pinyin_lssp'),
+      ]) {
+        await select(
+          key,
+          find.descendant(
+            of: find.byKey(ValueKey(card)),
+            matching: find.byIcon(FLucideIcons.ellipsis),
+          ),
+        );
+      }
+    },
+  );
+
   for (final platform in [
     BridgePlatform.windows,
     BridgePlatform.macOs,
@@ -990,7 +1087,7 @@ void main() {
       await tester.pump();
       await gesture.up();
       await tester.pumpAndSettle();
-      expect(find.byType(FItem), findsNWidgets(3));
+      expect(find.byType(FItem), findsNWidgets(4));
       expect(
         tester.widgetList<FItem>(find.byType(FItem)),
         everyElement(

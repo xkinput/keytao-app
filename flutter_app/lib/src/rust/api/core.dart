@@ -39,6 +39,17 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
       version: version,
     );
 
+Future<List<PackageSchemaDto>> packageSchemas({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCorePackageSchemas(schemeKey: schemeKey);
+
+Future<bool> setPackageSchemas({
+  required String schemeKey,
+  required List<String> ids,
+}) => RustLib.instance.api.crateApiCoreSetPackageSchemas(
+  schemeKey: schemeKey,
+  ids: ids,
+);
+
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 

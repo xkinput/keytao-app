@@ -70,6 +70,34 @@ pub fn record_installed_scheme(scheme: String, version: Option<String>) -> Resul
     .map_err(|error| error.to_string())
 }
 
+pub fn package_schemas(scheme_key: String) -> Result<Vec<PackageSchemaDto>, String> {
+    runtime::dto(keytao_app_core::package_schemas::package_schemas(&runtime::state()?.core, &scheme_key)
+        .map_err(|error| error.to_string())?)
+}
+
+pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result<bool, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    keytao_app_core::package_schemas::set_package_schemas(&state.core, &scheme_key, &ids)
+        .map_err(|error| error.to_string())?;
+    if state.core.state().active_scheme.as_deref() == Some(scheme_key.as_str()) {
+        keytao_app_core::packages::activate_scheme(&state.core, &scheme_key, &root,
+            #[cfg(target_os = "android")]
+            |_| Box::pin(async { Err("Unused extraction callback".into()) }),
+            #[cfg(target_os = "windows")]
+            keytao_app_core::install::finish_windows_scheme_install,
+        ).await.map_err(|error| error.to_string())?;
+        Ok(true)
+    } else if keytao_core::is_addon_schema(&scheme_key) {
+        keytao_app_core::package_schemas::register_addon_selection(&state.core, &scheme_key, &root)
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     let state = runtime::state()?;
     runtime::dto(

@@ -38,6 +38,28 @@ pub(crate) struct AddonStore {
 }
 
 impl AddonStore {
+    pub(crate) fn schema_selection(&self, incoming: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+        let previous = match fs::read(self.destination.join("package.json")) {
+            Ok(bytes) => Some(serde_json::from_slice::<StoredPackage>(&bytes).map_err(|error| error.to_string())?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut files = crate::package_schemas::directory_schemas(incoming).map_err(|error| error.to_string())?;
+        if files.iter().all(|(path, _)| !path.ends_with(".schema.yaml")) {
+            files = crate::package_schemas::directory_schemas(&self.destination.join("files")).map_err(|error| error.to_string())?;
+        }
+        let old_paths: Vec<_> = previous.as_ref().map(|stored| stored.files.iter().map(|file| file.path.clone()).collect()).unwrap_or_default();
+        let selection = previous.as_ref().and_then(|stored| stored.selected_schemas.as_deref())
+            .map(|selected| crate::package_schemas::reconcile_selection(&self.id, &files, selected, &old_paths))
+            .transpose().map_err(|error| error.to_string())?;
+        let selected = crate::package_schemas::enumerate(&self.id, &files, selection.as_deref()).map_err(|error| error.to_string())?
+            .into_iter().filter(|schema| schema.selected).map(|schema| schema.id).collect();
+        let mut owned: BTreeSet<_> = old_paths.iter().chain(files.iter().map(|(path, _)| path))
+            .filter_map(|path| path.strip_suffix(".schema.yaml").map(str::to_owned)).collect();
+        owned.insert(self.id.clone());
+        Ok((owned.into_iter().collect(), selected))
+    }
+
     pub(crate) fn new(core: &Core, root: &Path, id: &str) -> Result<Self, String> {
         let _guard = operation();
         Self::new_inner(core, root, id)
@@ -252,6 +274,13 @@ impl AddonStore {
             variant: value["variant"].as_str().map(str::to_owned),
             grammar: value.get("grammar").cloned().filter(|v| !v.is_null()),
             addon_manifest: Some(value.clone()),
+            selected_schemas: match fs::read(self.destination.join("package.json")) {
+                Ok(bytes) => serde_json::from_slice::<StoredPackage>(&bytes)?.selected_schemas
+                    .map(|_| self.schema_selection(&files_root).map(|(_, selected)| selected))
+                    .transpose().map_err(CoreError::Other)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            },
             meta: PackageMeta {
                 scheme_key: self.id.clone(),
                 version: value["version"].as_str().map(str::to_owned),
@@ -300,6 +329,7 @@ fn generated(path: &str) -> bool {
 
 fn validate_path(id: &str, path: &str) -> Result<(), String> {
     crate::packages::validate_relative(path)?;
+    if matches!(path, "default.yaml" | "default.custom.yaml" | "default-custom.yaml") { return Ok(()); }
     if crate::package_activation::user_file(path) {
         return Err("Add-on manifest contains protected user data".into());
     }
@@ -524,6 +554,10 @@ fn files_path(core: &Core, id: &str) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn public_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    Ok(source_files(core, id)?.into_iter().filter(|(_, relative)| !matches!(relative.to_str(), Some("default.yaml" | "default.custom.yaml" | "default-custom.yaml"))).collect())
+}
+
+pub(crate) fn source_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     let _guard = operation();
     let root = files_path(core, id)?;
     let mut files = BTreeSet::new();
@@ -564,7 +598,10 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
                 ))
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
-        files.push(crate::rime_snow::default_custom());
+        if crate::package_schemas::default_schemas(&files)?.is_empty() {
+            files.retain(|(name, _)| name != "default.custom.yaml");
+            files.push(crate::rime_snow::default_custom());
+        }
         let bytes = crate::packages::archive_from_files(&files)?;
         let meta = PackageMeta {
             scheme_key: key.into(),
@@ -581,6 +618,9 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
             zip_sha256: sha256_reader(bytes.as_slice())?,
         };
         store.write_archive(std::io::Cursor::new(bytes), &meta, stored.origin.as_deref())?;
+        if let Some(selected) = stored.selected_schemas.as_ref() {
+            crate::package_schemas::set_package_schemas(core, key, selected)?;
+        }
     }
     // Package finalization can hold pending_package while entering the addon store.
     drop(_guard);

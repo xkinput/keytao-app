@@ -20,6 +20,25 @@ fn fixture_package() -> RemotePackage {
     }
 }
 
+#[test]
+fn extraction_retains_adapted_defaults_only_in_package_sources() {
+    let root = TestRoot::new();
+    let archive = root.path.join("defaults.zip");
+    archive_at(&archive, &[
+        ("default.yaml", "schema_list: [{schema: alpha}, {schema: beta}, {schema: omitted}]"),
+        ("default.custom.yaml", "patch: {schema_list: [{schema: beta}]}"),
+        ("alpha.schema.yaml", "schema: {schema_id: alpha}"),
+        ("beta.schema.yaml", "schema: {schema_id: beta}"),
+    ]);
+    let stage = root.path.join("stage");
+    let files = extract_package(&archive, &stage,
+        |name| name.ends_with(".schema.yaml").then(|| name.replace("beta", "adapted_beta")),
+        |_, _| Ok(()),
+    ).unwrap();
+    assert!(files.iter().all(|file| !file.path.starts_with("default")));
+    assert_eq!(crate::package_schemas::default_schemas(&crate::package_schemas::directory_schemas(&stage).unwrap()).unwrap(), ["adapted_beta"]);
+}
+
 fn grammar_fixture(receipt: &InstallReceipt) -> (PathBuf, RemotePackage) {
     let path = receipt.work.join("fixture.gram");
     fs::write(&path, b"tiny fake grammar fixture").unwrap();

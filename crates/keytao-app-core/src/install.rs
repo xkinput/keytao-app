@@ -676,9 +676,17 @@ fn smart_install_entries(
             // Merge default.custom.yaml
             let (dc_path, dc_content, schemas) =
                 if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
-                    let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
+                    let mut existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
                         .ok()
                         .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
+                    if let Some(current) = existing.as_mut() {
+                        let selected = crate::scheme_files::parse_schema_list(&content);
+                        for id in &package_schema_ids {
+                            if !selected.contains(id) && !addons.contains_key(&format!("{id}.schema.yaml")) {
+                                *current = crate::addon::update_addon_schema_list_content(current, id, false)?;
+                            }
+                        }
+                    }
                     let (merged, user) = if preserve_default_settings {
                         merge_local_default_custom(existing.as_deref(), &content)?
                     } else {

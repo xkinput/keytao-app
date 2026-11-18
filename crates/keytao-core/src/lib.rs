@@ -6098,6 +6098,13 @@ fn nix_store_rime_data_dirs() -> Vec<PathBuf> {
 }
 
 pub fn parse_schema_list(content: &str) -> Vec<String> {
+    if let Ok(value) = serde_yaml::from_str::<Value>(content) {
+        if let Some(list) = value.get("patch").and_then(|patch| patch.get("schema_list"))
+            .or_else(|| value.get("schema_list"))
+        {
+            return schema_list_from_yaml(Some(list));
+        }
+    }
     let mut schemas = Vec::new();
     let mut in_list = false;
     for line in content.lines() {
@@ -6120,15 +6127,9 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
     schemas
 }
 
-fn parse_schema_name(content: &str) -> Option<String> {
-    let Value::Mapping(root) = serde_yaml::from_str::<Value>(content).ok()? else {
-        return None;
-    };
-    let Value::Mapping(schema) = root.get(Value::String("schema".into()))? else {
-        return None;
-    };
-    schema
-        .get(Value::String("name".into()))?
+pub fn parse_schema_name(content: &str) -> Option<String> {
+    serde_yaml::from_str::<serde_json::Value>(content).ok()?
+        .get("schema")?.get("name")?
         .as_str()
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -6147,20 +6148,17 @@ fn schema_name_from_dir(user_data_dir: &Path, schema_id: &str) -> Option<String>
     .find_map(|content| parse_schema_name(&content))
 }
 
-fn parse_schema_dependencies(content: &str) -> Vec<String> {
-    let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(content) else {
+pub fn parse_schema_dependencies(content: &str) -> Vec<String> {
+    let Ok(root) = serde_yaml::from_str::<serde_json::Value>(content) else {
         return Vec::new();
     };
-    let Some(Value::Mapping(schema)) = root.get(Value::String("schema".into())) else {
-        return Vec::new();
-    };
-    let Some(Value::Sequence(dependencies)) = schema.get(Value::String("dependencies".into()))
+    let Some(dependencies) = root.get("schema").and_then(|schema| schema.get("dependencies")).and_then(serde_json::Value::as_array)
     else {
         return Vec::new();
     };
     dependencies
         .iter()
-        .filter_map(Value::as_str)
+        .filter_map(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|dependency| !dependency.is_empty())
         .map(ToOwned::to_owned)
@@ -6264,7 +6262,7 @@ fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
     Some(manifest)
 }
 
-fn active_local_schema_ids(user_data_dir: &Path) -> HashSet<String> {
+fn active_package_schema_ids(user_data_dir: &Path) -> HashSet<String> {
     let read = || -> Option<HashSet<String>> {
         let manifest = match std::fs::read(user_data_dir.join(ACTIVE_SCHEME_MANIFEST)) {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok()?,
@@ -6273,7 +6271,7 @@ fn active_local_schema_ids(user_data_dir: &Path) -> HashSet<String> {
             }
             Err(_) => return None,
         };
-        if !manifest["scheme_key"].as_str()?.starts_with("local-")
+        if manifest["scheme_key"].as_str()?.is_empty()
             || Path::new(manifest["root"].as_str()?) != user_data_dir.canonicalize().ok()?
         {
             return None;
@@ -6337,7 +6335,7 @@ fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
 }
 
 fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<String> {
-    let local_schemas = active_local_schema_ids(user_data_dir);
+    let package_schemas = active_package_schema_ids(user_data_dir);
     let schemas: Vec<_> = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
@@ -6353,12 +6351,12 @@ fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<Strin
     };
     let has_primary = schemas
         .iter()
-        .any(|schema| is_keytao_managed_schema(schema) || local_schemas.contains(schema));
+        .any(|schema| is_keytao_managed_schema(schema) || package_schemas.contains(schema));
     schemas
         .into_iter()
         .filter(|schema| {
             is_keytao_managed_schema(schema)
-                || local_schemas.contains(schema)
+                || package_schemas.contains(schema)
                 || (!has_primary && is_addon_schema(schema))
         })
         .collect()
@@ -6784,6 +6782,10 @@ pub fn is_addon_schema(schema: &str) -> bool {
             | "rime_mint"
             | "rime_frost"
             | "triple_pinyin_lssp"
+            | "melt_eng" | "radical_pinyin" | "wubi98_mint"
+            | "rime_mint_melt_eng" | "rime_mint_radical_pinyin" | "rime_mint_stroke"
+            | "rime_frost_aux" | "rime_frost_melt_eng" | "rime_frost_radical_pinyin"
+            | "lssp_stroke"
     )
 }
 
@@ -8131,7 +8133,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_install_state_counts_only_installed_active_local_package_schemas() {
+    fn schema_install_state_counts_only_registered_active_package_schemas() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -8164,7 +8166,11 @@ mod tests {
         assert!(schema_install_state(&dir).deployed);
         manifest["scheme_key"] = serde_json::json!("keytao");
         std::fs::write(&marker, manifest.to_string()).unwrap();
-        assert!(!schema_install_state(&dir).installed);
+        assert!(schema_install_state(&dir).installed);
+        std::fs::write(dir.join("default.custom.yaml"), "patch: {schema_list: [{schema: example}]}").unwrap();
+        std::fs::remove_file(dir.join("auxiliary.schema.yaml")).unwrap();
+        assert_eq!(schema_install_state(&dir).schemas, ["example"]);
+        assert!(schema_install_state(&dir).installed);
         manifest["scheme_key"] = serde_json::json!("local-example");
         manifest["root"] = serde_json::json!(dir.join("other"));
         std::fs::write(&marker, manifest.to_string()).unwrap();

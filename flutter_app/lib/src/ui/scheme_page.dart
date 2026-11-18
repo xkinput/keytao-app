@@ -5,6 +5,7 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
 import 'package_orphans.dart';
+import 'package_schema_selection.dart';
 import 'settings.dart' show SchemaSwitchesSection, showCloudPackageTransfer;
 import 'theme.dart';
 import 'user_words.dart';
@@ -390,11 +391,7 @@ class SchemePackageRow extends StatelessWidget {
           ),
         if (changelogBody != null ||
             schemeRepositoryUrls[schemeKey] != null ||
-            (package != null &&
-                (package.supportsUserWords ||
-                    isLocal ||
-                    c.accountUser != null ||
-                    !active)))
+            package != null)
           FPopoverMenu(
             control: FPopoverControl.managed(controller: menu),
             menuAnchor: Alignment.topRight,
@@ -425,6 +422,16 @@ class SchemePackageRow extends StatelessWidget {
                       },
                     ),
                   if (package != null) ...[
+                    FItem(
+                      title: const Text(AppStrings.selectSchemas),
+                      prefix: const Icon(FLucideIcons.listChecks),
+                      onPress: c.busy
+                          ? null
+                          : () {
+                              popover.hide();
+                              showPackageSchemaSelection(context, c, schemeKey);
+                            },
+                    ),
                     if (package.supportsUserWords)
                       FItem(
                         title: const Text('自造词'),
@@ -954,6 +961,7 @@ class AddonCard extends StatelessWidget {
 List<Widget> _addonCells(BuildContext context, AppController c) {
   Widget addon({
     required String key,
+    required String packageKey,
     required String title,
     required String repositoryUrl,
     required String status,
@@ -1010,6 +1018,22 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
                 menuBuilder: (_, popover, _) => [
                   FItemGroup(
                     children: [
+                      if (installed)
+                        FItem(
+                          title: const Text(AppStrings.selectSchemas),
+                          prefix: const Icon(FLucideIcons.listChecks),
+                          enabled: !c.busy,
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  showPackageSchemaSelection(
+                                    context,
+                                    c,
+                                    packageKey,
+                                  );
+                                },
+                        ),
                       FItem(
                         title: const Text('仓库地址'),
                         prefix: const Icon(FLucideIcons.externalLink),
@@ -1039,6 +1063,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
   return [
     addon(
       key: 'addon-easy-en',
+      packageKey: 'easy_en',
       title: AppStrings.easyEnglish,
       repositoryUrl: schemeRepositoryUrls['easy_en']!,
       status: c.addonStatusText,
@@ -1057,6 +1082,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-wanxiang',
+      packageKey: 'wanxiang',
       title: AppStrings.wanxiang,
       repositoryUrl: schemeRepositoryUrls['wanxiang']!,
       variant: Align(
@@ -1147,6 +1173,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-rime-ice',
+      packageKey: 'rime_ice',
       title: AppStrings.rimeIce,
       repositoryUrl: schemeRepositoryUrls['rime_ice']!,
       status: c.rimeIceStatusText,
@@ -1165,6 +1192,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-rime-mint',
+      packageKey: 'rime_mint',
       title: AppStrings.rimeMint,
       repositoryUrl: schemeRepositoryUrls['rime_mint']!,
       status: c.rimeMintStatusText,
@@ -1183,6 +1211,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-rime-frost',
+      packageKey: 'rime_frost',
       title: AppStrings.rimeFrost,
       repositoryUrl: schemeRepositoryUrls['rime_frost']!,
       status: c.rimeFrostStatusText,
@@ -1203,6 +1232,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-rime-lssp',
+      packageKey: 'triple_pinyin_lssp',
       repositoryUrl: schemeRepositoryUrls['rime_lssp']!,
       title: AppStrings.rimeLssp,
       status: c.rimeLsspStatusText,

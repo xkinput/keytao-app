@@ -323,6 +323,10 @@ pub fn update_addon_schema_list_content(
     id: &str,
     installed: bool,
 ) -> Result<String, String> {
+    update_addon_schemas_content(existing, &[id.to_owned()], &if installed { vec![id.to_owned()] } else { Vec::new() })
+}
+
+pub(crate) fn update_addon_schemas_content(existing: &str, owned: &[String], selected: &[String]) -> Result<String, String> {
     let mut value = serde_yaml::from_str::<serde_yaml::Value>(&existing)
         .map_err(|error| format!("解析 default custom 配置失败: {error}"))?;
     let mapping = value
@@ -331,15 +335,16 @@ pub fn update_addon_schema_list_content(
     let patch = yaml_child_mapping(mapping, "patch", "patch 必须是 YAML mapping")?;
 
     let mut schemas = parse_schema_list(&existing);
-    schemas.retain(|schema| schema != id);
-    if installed {
+    schemas.retain(|schema| !owned.contains(schema));
+    let selected: Vec<_> = selected.iter().filter(|id| !schemas.contains(id)).cloned().collect();
+    if !selected.is_empty() {
         if schemas
             .iter()
             .all(|schema| keytao_core::is_addon_schema(schema))
         {
-            schemas.insert(0, id.to_string());
+            schemas.splice(0..0, selected.iter().cloned());
         } else {
-            schemas.push(id.to_string());
+            schemas.extend_from_slice(&selected);
         }
     }
     let schema_list = serde_yaml::Value::Sequence(
@@ -597,7 +602,8 @@ pub(crate) fn write_schema_list_transaction(
     shared: &Path,
 ) -> Result<(), String> {
     let (relative, existing) = addon_default_custom(&receipt.root)?;
-    let updated = update_addon_schema_list_content(&existing, id, installed)?;
+    let (owned, selected) = receipt.schema_selection(id)?;
+    let updated = update_addon_schemas_content(&existing, &owned, if installed { &selected } else { &[] })?;
     write_schema_list_content_transaction(receipt, relative, &updated, shared, None)
 }
 

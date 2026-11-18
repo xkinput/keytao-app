@@ -198,6 +198,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PackageSchemaDto> dco_decode_list_package_schema_dto(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -299,6 +302,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PackageOrphanReportDto dco_decode_package_orphan_report_dto(dynamic raw);
+
+  @protected
+  PackageSchemaDto dco_decode_package_schema_dto(dynamic raw);
 
   @protected
   PanelOrientationDto dco_decode_panel_orientation_dto(dynamic raw);
@@ -588,6 +594,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PackageSchemaDto> sse_decode_list_package_schema_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -711,6 +722,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PackageOrphanReportDto sse_decode_package_orphan_report_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PackageSchemaDto sse_decode_package_schema_dto(SseDeserializer deserializer);
 
   @protected
   PanelOrientationDto sse_decode_panel_orientation_dto(
@@ -1093,6 +1107,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_package_schema_dto(
+    List<PackageSchemaDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1245,6 +1265,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_package_orphan_report_dto(
     PackageOrphanReportDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_package_schema_dto(
+    PackageSchemaDto self,
     SseSerializer serializer,
   );
 

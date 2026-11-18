@@ -39,6 +39,37 @@ fn put(root: &Path, relative: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn addon_multi_schema_defaults_selection_update_and_migration() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let core = core(directory.path());
+    let root = directory.path().join("rime");
+    let source = directory.path().join("source");
+    fs::create_dir(&root).unwrap();
+    let entries: &[(&str, &[u8])] = &[
+        ("rime_mint.schema.yaml", b"schema: {schema_id: rime_mint, name: Mint, dependencies: [rime_mint_stroke]}"),
+        ("wubi98_mint.schema.yaml", b"schema: {schema_id: wubi98_mint, name: Wubi}"),
+        ("rime_mint_stroke.schema.yaml", b"schema: {schema_id: rime_mint_stroke, name: Stroke}"),
+    ];
+    for (path, bytes) in entries { put(&source, path, bytes); put(&root, path, bytes); }
+    put(&source, "default.yaml", b"schema_list: [{schema: wubi98_mint}]");
+    let store = AddonStore::new(&core, &root, "rime_mint").unwrap();
+    store.commit(&source, &manifest_bytes(entries)).unwrap();
+    let schemas = crate::package_schemas::package_schemas(&core, "rime_mint").unwrap();
+    assert_eq!(schemas.iter().map(|schema| (schema.id.as_str(), schema.selected)).collect::<Vec<_>>(), [("wubi98_mint", true), ("rime_mint", false)]);
+    assert!(public_files(&core, "rime_mint").unwrap().iter().all(|(_, path)| path != Path::new("default.yaml")));
+    crate::package_schemas::set_package_schemas(&core, "rime_mint", &["wubi98_mint".into()]).unwrap();
+    put(&root, "default.custom.yaml", b"patch: {schema_list: [{schema: keytao}, {schema: rime_mint}]}");
+    crate::package_schemas::register_addon_selection(&core, "rime_mint", &root).unwrap();
+    assert_eq!(keytao_core::parse_schema_list(&fs::read_to_string(root.join("default.custom.yaml")).unwrap()), ["keytao", "wubi98_mint"]);
+    store.commit(&source, &manifest_bytes(entries)).unwrap();
+    migrate(&core, &root).unwrap();
+    let schemas = crate::package_schemas::package_schemas(&core, "rime_mint").unwrap();
+    assert_eq!(schemas.iter().filter(|schema| schema.selected).map(|schema| schema.id.as_str()).collect::<Vec<_>>(), ["wubi98_mint"]);
+    assert!(root.join("rime_mint_stroke.schema.yaml").is_file());
+}
+
+#[test]
 fn snow_migration_releases_addon_lock_before_waiting_for_package_lock() {
     use std::time::{Duration, Instant};
 

@@ -42,6 +42,19 @@ fn stored_files(core: &Core, key: &str) -> BTreeMap<String, Vec<u8>> {
 }
 
 #[test]
+fn local_import_without_defaults_hides_dependency_only_schemas() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = source(directory.path(), "source");
+    fs::write(path.join("example.schema.yaml"), "schema: {schema_id: example, name: Example, dependencies: [reverse]}").unwrap();
+    fs::write(path.join("reverse.schema.yaml"), "schema: {schema_id: reverse, name: Reverse}").unwrap();
+    let key = import_local_scheme(&core, &path, "Local", None).unwrap();
+    let schemas = crate::package_schemas::package_schemas(&core, &key).unwrap();
+    assert_eq!(schemas.iter().map(|schema| schema.id.as_str()).collect::<Vec<_>>(), ["example"]);
+    assert!(stored_files(&core, &key).contains_key("reverse.schema.yaml"));
+}
+
+#[test]
 fn local_import_skips_protected_and_hidden_entries() {
     let directory = tempfile::tempdir().unwrap();
     let path = source(directory.path(), "source");
@@ -206,10 +219,10 @@ fn local_import_preserves_package_schema_order() {
         let key = import_local_scheme(&core, &path, "Local", None).unwrap();
         let files = stored_files(&core, &key);
         let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
-        let expected = if config_name.is_some() {
-            ["keytao", "keytao-dz", "keytao-bj", "keytao-aa", "keytao-cx"]
+        let expected: &[&str] = if config_name.is_some() {
+            &["keytao", "keytao-dz", "keytao-bj"]
         } else {
-            ["keytao-aa", "keytao-bj", "keytao-cx", "keytao-dz", "keytao"]
+            &["keytao-aa", "keytao-bj", "keytao-cx", "keytao-dz", "keytao"]
         };
         assert_eq!(crate::scheme_files::parse_schema_list(config), expected);
     }

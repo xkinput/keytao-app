@@ -47,6 +47,13 @@ pub struct InstalledPackageDto {
 }
 
 #[derive(serde::Deserialize)]
+pub struct PackageSchemaDto {
+    pub id: String,
+    pub name: String,
+    pub selected: bool,
+}
+
+#[derive(serde::Deserialize)]
 pub struct PackageOrphanFileDto {
     pub path: String,
     pub sha256: String,

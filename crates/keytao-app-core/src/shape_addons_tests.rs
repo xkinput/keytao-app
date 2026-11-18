@@ -29,6 +29,31 @@ fn zip_at(path: &Path, prefix: &str, entries: BTreeMap<String, String>) {
     fs::write(path, zip.finish().unwrap().into_inner()).unwrap();
 }
 
+#[test]
+fn snow_preparation_preserves_source_defaults_instead_of_replacing_them() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = crate::scheme_host::tests::AddonHost::new(directory.path());
+    fs::create_dir_all(&host.core.env().cache_dir).unwrap();
+    let path = fixture(Package::Snow, &host.core.env().cache_dir);
+    let mut archive = zip::ZipArchive::new(Cursor::new(fs::read(&path).unwrap())).unwrap();
+    let mut entries = BTreeMap::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content).unwrap();
+        entries.insert(entry.name().to_owned(), content);
+    }
+    entries.insert("default.custom.yaml".into(), "patch: {schema_list: [{schema: snow_jiandao}, {schema: snow_pinyin}]}".into());
+    zip_at(&path, "", entries);
+    let prepared = crate::rime_snow::prepare_archive(&host.core, fs::read(path).unwrap()).unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(prepared)).unwrap();
+    let mut defaults = String::new();
+    std::io::Read::read_to_string(&mut archive.by_name("default.custom.yaml").unwrap(), &mut defaults).unwrap();
+    assert_eq!(crate::scheme_files::parse_schema_list(&defaults), ["snow_jiandao", "snow_pinyin"]);
+    assert_eq!(archive.file_names().filter(|name| *name == "default.custom.yaml").count(), 1);
+}
+
 fn fixture(kind: Package, work: &Path) -> PathBuf {
     let mut entries = BTreeMap::new();
     for name in kind.addon().required {

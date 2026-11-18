@@ -810,7 +810,16 @@ fn publish_activation_at(
         }
     }
     if let Some(incoming) = incoming {
-        let incoming = package_directory_files(incoming)?
+        let mut entries: Vec<_> = package_directory_files(incoming)?.into_iter()
+            .map(|(path, bytes)| (path.to_string_lossy().replace('\\', "/"), bytes)).collect();
+        let metadata = incoming.parent().unwrap().join("package.json");
+        if metadata.is_file() {
+            let stored: crate::package_store::StoredPackage = serde_json::from_slice(&std::fs::read(&metadata).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+            crate::package_schemas::filter_files(&stored.key, &mut entries, stored.selected_schemas.as_deref())
+                .map_err(|error| error.to_string())?;
+        }
+        let incoming = entries.into_iter().map(|(path, bytes)| (PathBuf::from(path), bytes))
             .into_iter()
             .filter(|(path, _)| {
                 !crate::package_activation::user_file(&path.to_string_lossy().replace('\\', "/"))
@@ -927,6 +936,21 @@ pub fn publish_english_settings(root: &Path, enabled: bool) -> Result<(), String
 
 pub fn publish_schema_switches(root: &Path) -> Result<(), String> {
     publish_files(&[crate::ime_settings::schema_switch_settings_file(root)?])
+}
+
+pub fn publish_schema_selection(private_root: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let _guard = PUBLISH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let root = public_root()?;
+    let mut files = read_snapshot(&root)?;
+    let (_, content) = crate::addon::addon_default_custom(private_root)?;
+    let ids: Vec<_> = crate::scheme_files::parse_schema_list(&content).into_iter()
+        .filter(|id| files.contains_key(&PathBuf::from(format!("{id}.schema.yaml")))).collect();
+    let config = crate::addon::update_addon_schemas_content("patch: {}", &[], &ids)?;
+    files.insert(PathBuf::from("default.custom.yaml"), config.into_bytes());
+    files.retain(|path, _| !path.starts_with("build"));
+    store_snapshot(&root, &files, true)
 }
 
 fn read_generation(root: &Path) -> Result<Option<String>, String> {
@@ -1298,6 +1322,30 @@ fn grant_appcontainer_read(_root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_selection_filters_public_registration_without_removing_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        let sources = package.path().join("files");
+        std::fs::create_dir(&sources).unwrap();
+        for (name, content) in [
+            ("default.custom.yaml", "patch: {schema_list: [{schema: keytao}, {schema: keytao_alt}]}"),
+            ("keytao.schema.yaml", "schema: {schema_id: keytao, name: Main}"),
+            ("keytao_alt.schema.yaml", "schema: {schema_id: keytao_alt, name: Alternate, dependencies: [reverse]}"),
+            ("reverse.schema.yaml", "schema: {schema_id: reverse, name: Reverse}"),
+        ] { std::fs::write(sources.join(name), content).unwrap(); }
+        std::fs::write(package.path().join("package.json"), serde_json::to_vec(&serde_json::json!({
+            "key": "keytao", "origin": null, "installed_at": 0, "files": [],
+            "selected_schemas": ["keytao_alt"], "scheme_key": "keytao", "version": "v1",
+            "installed_at_unix": 0, "source": "official", "manifest": {}, "zip_sha256": "0".repeat(64)
+        })).unwrap()).unwrap();
+        publish_activation_at(root.path(), Some(&sources), None, &BTreeMap::new(), false).unwrap();
+        let files = read_snapshot(root.path()).unwrap();
+        assert_eq!(crate::scheme_files::parse_schema_list(std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap()), ["keytao_alt"]);
+        assert!(files.contains_key(Path::new("reverse.schema.yaml")));
+        assert!(files.contains_key(Path::new("keytao.schema.yaml")));
+    }
 
     #[test]
     fn directory_identity_compares_resolved_paths_and_rejects_missing_paths() {
