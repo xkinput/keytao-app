@@ -78,6 +78,10 @@ pub struct ImeUiSettings {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn ime_theme_path() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(root) = TEST_IME_DATA_ROOT.with(|root| root.borrow().clone()) {
+        return Ok(root.join("theme.yaml"));
+    }
     keytao_theme::default_user_theme_path().ok_or("Cannot determine keytao data directory".into())
 }
 
@@ -994,11 +998,7 @@ pub fn get_ime_ui_settings(host: impl ImeHost) -> Result<ImeUiSettings, CoreErro
 pub fn set_ime_embedded_composition(embedded: bool) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         write_ime_embedded_composition(embedded)?;
-        let reload_message = match write_keytao_ime_reload_stamp() {
-            Ok(()) => "已保存嵌入模式设置并通知系统输入法重载".to_string(),
-            Err(e) => format!("已保存嵌入模式设置，但系统输入法重载通知失败：{e}"),
-        };
-        ime_ui_settings_with_message(reload_message)
+        ime_ui_settings_with_message("已保存嵌入模式设置".into())
     })();
     result.map_err(CoreError::Other)
 }
@@ -1007,11 +1007,7 @@ pub fn set_ime_embedded_composition(embedded: bool) -> Result<ImeUiSettings, Cor
 pub fn set_ime_hide_candidate_panel(hide: bool) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         write_ime_hide_candidate_panel_to_path(ime_theme_path()?, hide)?;
-        let reload_message = match write_keytao_ime_reload_stamp() {
-            Ok(()) => "已保存无候选框模式设置并通知系统输入法重载".to_string(),
-            Err(e) => format!("已保存无候选框模式设置，但系统输入法重载通知失败：{e}"),
-        };
-        ime_ui_settings_with_message(reload_message)
+        ime_ui_settings_with_message("已保存无候选框模式设置".into())
     })();
     result.map_err(CoreError::Other)
 }
@@ -1025,11 +1021,7 @@ pub fn set_ime_show_tray_mode_indicator(show: bool) -> Result<ImeUiSettings, Cor
             "show_tray_mode_indicator",
             show,
         )?;
-        let reload_message = match write_keytao_ime_reload_stamp() {
-            Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
-            Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
-        };
-        ime_ui_settings_with_message(reload_message)
+        ime_ui_settings_with_message("已保存输入法 UI 配置".into())
     })();
     result.map_err(CoreError::Other)
 }
@@ -1052,11 +1044,7 @@ pub fn set_ime_ui_settings(
             corner_radius,
             background_color,
         )?;
-        let reload_message = match write_keytao_ime_reload_stamp() {
-            Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
-            Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
-        };
-        ime_ui_settings_with_message(reload_message)
+        ime_ui_settings_with_message("已保存输入法 UI 配置".into())
     })();
     result.map_err(CoreError::Other)
 }
@@ -1140,6 +1128,75 @@ pub fn set_ime_ui_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn desktop_ui_saves_leave_reload_stamp_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        TEST_IME_DATA_ROOT.with(|root| *root.borrow_mut() = Some(dir.path().to_path_buf()));
+        let theme_path = ime_theme_path().unwrap();
+        let stamp = reload_stamp_path().unwrap();
+        assert!(theme_path.starts_with(dir.path()));
+        assert!(stamp.starts_with(dir.path()));
+        let resolver = keytao_theme::ThemeResolver::new(None, Some(theme_path));
+        let _ = resolver.current();
+        let mut stamped = Vec::new();
+        for save_case in ["theme", "embedded", "hide", "tray"] {
+            std::fs::write(&stamp, "unchanged reload stamp").unwrap();
+            let signature = file_signature(&stamp);
+            let settings = match save_case {
+                "theme" => set_ime_ui_settings(
+                    keytao_theme::UiColorScheme::Dark,
+                    keytao_theme::PanelOrientation::Vertical,
+                    Some("#123456".into()),
+                    27.0,
+                    Some(9.0),
+                    "#112233".into(),
+                ),
+                "embedded" => set_ime_embedded_composition(true),
+                "hide" => set_ime_hide_candidate_panel(true),
+                "tray" => set_ime_show_tray_mode_indicator(false),
+                _ => panic!("unknown desktop UI save case"),
+            }
+            .unwrap();
+            if file_signature(&stamp) != signature {
+                stamped.push(save_case);
+            }
+            assert_eq!(
+                settings.reload_stamp_signature,
+                Some(file_signature(&stamp))
+            );
+            let theme = resolver.current();
+            match save_case {
+                "theme" => {
+                    assert_eq!(theme.ui.color_scheme, keytao_theme::UiColorScheme::Dark);
+                    assert_eq!(
+                        theme.panel.orientation,
+                        keytao_theme::PanelOrientation::Vertical
+                    );
+                    assert_eq!(theme.font.size, 27.0);
+                    assert_eq!(theme.panel.corner_radius, 9.0);
+                    assert_eq!(color_to_hex(theme.panel.background), "#112233");
+                    assert_eq!(
+                        theme.ui.accent_color.map(color_to_hex).as_deref(),
+                        Some("#123456")
+                    );
+                }
+                "embedded" => assert!(theme.ui.effective_embedded_composition()),
+                "hide" => {
+                    assert!(theme.ui.hide_candidate_panel);
+                    assert!(theme.ui.effective_embedded_composition());
+                }
+                "tray" => assert!(!theme.ui.show_tray_mode_indicator),
+                _ => unreachable!(),
+            }
+        }
+        TEST_IME_DATA_ROOT.with(|root| *root.borrow_mut() = None);
+        assert!(
+            stamped.is_empty(),
+            "desktop UI saves rewrote reload stamp: {stamped:?}"
+        );
+    }
 
     #[test]
     fn select_schema_updates_current_schema_without_an_ime() {

@@ -1,4 +1,8 @@
 use std::path::{Path, PathBuf};
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+thread_local! {
+    pub(crate) static TEST_IME_DATA_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
 pub fn path_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -18,6 +22,10 @@ pub fn default_user_data_dir_string() -> Option<String> {
 }
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn reload_stamp_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = TEST_IME_DATA_ROOT.with(|root| root.borrow().clone()) {
+        return Some(keytao_core::ReloadStamp::path(&root));
+    }
     keytao_core::ReloadStamp::default_path()
 }
 #[cfg(target_os = "ios")]
@@ -58,6 +66,10 @@ pub fn shared_data_status(packaged: Option<String>) -> (Option<String>, String) 
 }
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn write_keytao_ime_reload_stamp() -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(root) = TEST_IME_DATA_ROOT.with(|root| root.borrow().clone()) {
+        return keytao_core::ReloadStamp::write(&root).map(|_| ());
+    }
     keytao_core::ReloadStamp::write_default()
         .map(|_| ())
         .map_err(|e| format!("写入 keytao-ime 重载标记失败: {e}"))
