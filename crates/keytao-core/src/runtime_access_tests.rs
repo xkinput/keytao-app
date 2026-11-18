@@ -47,6 +47,377 @@ fn native_fixture(name: &str) -> Option<(ImeRuntime, PathBuf)> {
 }
 
 #[test]
+fn lua_file_regeneration_does_not_wait_for_librime() {
+    let Some((_runtime, dir)) = native_fixture("lua_file_regeneration_does_not_wait_for_librime")
+    else {
+        return;
+    };
+    std::fs::write(
+        dir.join(ACTIVE_SCHEME_MANIFEST),
+        serde_json::json!({
+            "root": dir.canonicalize().unwrap(),
+            "packages": {"smoke": {
+                "schemas": [smoke_fixture::SCHEMA_ID],
+                "rime_lua": "file_only = true\n"
+            }}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let rime = desktop::rime_api_lock();
+    let (sent, received) = mpsc::channel();
+    let root = dir.clone();
+    let worker = std::thread::spawn(move || {
+        let result = regenerate_active_rime_lua_for_schema(&root, smoke_fixture::SCHEMA_ID)
+            .and_then(|()| regenerate_active_rime_lua(&root));
+        let _ = sent.send(result);
+    });
+    let result = received.recv_timeout(Duration::from_secs(2));
+    drop(rime);
+    worker.join().unwrap();
+    result
+        .expect("Lua file regeneration waited for librime")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("rime.lua")).unwrap(),
+        "file_only = true\n"
+    );
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn schema_lua_switches_reinitialize_before_the_next_key() {
+    let Some((runtime, dir)) =
+        native_fixture("schema_lua_switches_reinitialize_before_the_next_key")
+    else {
+        return;
+    };
+    let ids = [
+        "keytao_smoke",
+        "keytao_lua_a2",
+        "keytao_lua_b",
+        "keytao_lua_same",
+        "keytao_lua_plain",
+    ];
+    let list = ids
+        .iter()
+        .map(|id| format!("    - schema: {id}\n"))
+        .collect::<String>();
+    std::fs::write(dir.join("default.yaml"), format!("config_version: '2'\nswitcher:\n  caption: Schemas\n  hotkeys: [F4]\n  save_options: []\nschema_list:\n{list}")).unwrap();
+    std::fs::write(
+        dir.join("default.custom.yaml"),
+        format!("patch:\n  switcher/hotkeys: [F4]\n  schema_list:\n{list}"),
+    )
+    .unwrap();
+    for id in ids {
+        let global = if id.ends_with("plain") {
+            ""
+        } else {
+            "    - lua_translator@probe_global\n"
+        };
+        std::fs::write(dir.join(format!("{id}.schema.yaml")), format!("schema:\n  schema_id: {id}\n  name: {id}\n  version: '1'\nswitches:\n  - name: ascii_mode\n    reset: 0\nengine:\n  processors: [ascii_composer, speller, express_editor]\n  segmentors: [ascii_segmentor, abc_segmentor, fallback_segmentor]\n  translators:\n{global}    - lua_translator@*probe\nspeller:\n  alphabet: a\n")).unwrap();
+    }
+    let lua = |label| {
+        format!("function probe_global(input, seg) yield(Candidate('probe',seg.start,seg._end,'{label}-GLOBAL','')) end\n")
+    };
+    for (key, label) in [("a", "A"), ("b", "B"), ("same", "B"), ("plain", "PLAIN")] {
+        let source = dir.join(format!(".keytao-package-lua/{key}/lua"));
+        std::fs::create_dir_all(&source).unwrap();
+        let source = if matches!(key, "b" | "same") {
+            source.join("probe/init.lua")
+        } else {
+            source.join("probe.lua")
+        };
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, format!("return function(input, seg) yield(Candidate('probe',seg.start,seg._end,'{label}-MODULE','')) end\n")).unwrap();
+    }
+    let package = |key: &str, schemas: &[&str], content: Option<String>| {
+        let module = if matches!(key, "b" | "same") {
+            "lua/probe/init.lua"
+        } else {
+            "lua/probe.lua"
+        };
+        serde_json::json!({"schemas": schemas, "rime_lua": content, "lua_files": {module: format!(".keytao-package-lua/{key}/{module}")}})
+    };
+    let marker = serde_json::json!({"root": dir.canonicalize().unwrap(), "packages": {
+        "a": package("a", &ids[..2], Some(lua("A"))),
+        "b": package("b", &ids[2..3], Some(lua("B"))),
+        "same": package("same", &ids[3..4], Some(lua("B"))),
+        "plain": package("plain", &ids[4..], None)
+    }});
+    std::fs::write(dir.join(ACTIVE_SCHEME_MANIFEST), marker.to_string()).unwrap();
+    persist_selected_schema(&dir, ids[0]).unwrap();
+    runtime.reload().unwrap();
+    // Keep this fixture independent of librime's second-resolution source timestamps.
+    let path = dir.join("build/default.yaml");
+    let mut config: Value = serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["switcher"] =
+        serde_yaml::from_str("caption: Schemas\nhotkeys: [F4]\nsave_options: []\n").unwrap();
+    std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    let session = runtime.create_session().unwrap();
+    let peer = runtime.create_session().unwrap();
+    let candidates = |session: &ImeRuntimeSession| {
+        session.reset().unwrap();
+        session
+            .process_key_result(b'a' as u32, 0)
+            .unwrap()
+            .state
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
+    session.reset().unwrap();
+    let generation = runtime.generation();
+    session.select_schema(ids[1]).unwrap();
+    assert_eq!(runtime.generation(), generation);
+    let deployed = ReloadStamp::signature_at(&dir.join("build").join(DEPLOYED_FILE));
+    request_schema(&dir, ids[2]).unwrap();
+    ReloadStamp::write_schema(&dir).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert!(runtime.generation() > generation);
+    assert_eq!(session.current_schema().unwrap().id, ids[2]);
+    assert_eq!(peer.current_schema().unwrap().id, ids[2]);
+    assert_eq!(candidates(&session), ["B-GLOBAL", "B-MODULE"]);
+    session.reset().unwrap();
+    let generation = runtime.generation();
+    session.select_schema(ids[3]).unwrap();
+    assert_eq!(
+        runtime.generation(),
+        generation,
+        "identical effective Lua reloaded"
+    );
+    session.select_schema(ids[4]).unwrap();
+    assert!(runtime.generation() > generation);
+    assert_eq!(session.current_schema().unwrap().id, ids[4]);
+    assert_eq!(candidates(&session), ["PLAIN-MODULE"]);
+    assert!(std::fs::read(dir.join("rime.lua"))
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(
+        ReloadStamp::signature_at(&dir.join("build").join(DEPLOYED_FILE)),
+        deployed
+    );
+    session.reset().unwrap();
+    let menu = session.process_key_result(0xffc1, 0).unwrap().state;
+    assert!(!menu.candidates.is_empty(), "{menu:?}");
+    let index = menu
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text.contains(ids[2]))
+        .unwrap();
+    session
+        .process_key_result(b'1' as u32 + index as u32, 0)
+        .unwrap();
+    assert_eq!(session.current_schema().unwrap().id, ids[2]);
+    assert_eq!(candidates(&session), ["B-GLOBAL", "B-MODULE"]);
+    session.reset().unwrap();
+    let snapshot = dir.join(".keytao-package-lua/a/lua/probe.lua");
+    let snapshot_bytes = std::fs::read(&snapshot).unwrap();
+    let lua_bytes = std::fs::read(dir.join("rime.lua")).unwrap();
+    std::fs::remove_file(&snapshot).unwrap();
+    request_schema(&dir, ids[0]).unwrap();
+    let generation = runtime.generation();
+    assert_eq!(candidates(&session), ["B-GLOBAL", "B-MODULE"]);
+    let deferred = lock_ignore_poison(&PROCESS_RIME.lua_retry_after).clone();
+    assert!(deferred.is_some());
+    assert_eq!(candidates(&session), ["B-GLOBAL", "B-MODULE"]);
+    assert_eq!(*lock_ignore_poison(&PROCESS_RIME.lua_retry_after), deferred);
+    assert_eq!(runtime.generation(), generation);
+    assert_eq!(std::fs::read(dir.join("rime.lua")).unwrap(), lua_bytes);
+    assert!(schema_switch_request::pending_for_process(&dir)
+        .unwrap()
+        .is_some());
+    let during_failure = runtime.create_session().unwrap();
+    assert_eq!(during_failure.current_schema().unwrap().id, ids[2]);
+    assert_eq!(candidates(&during_failure), ["B-GLOBAL", "B-MODULE"]);
+    assert!(schema_switch_request::pending_for_process(&dir)
+        .unwrap()
+        .is_some());
+    drop(during_failure);
+    std::fs::write(snapshot, snapshot_bytes).unwrap();
+    *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) =
+        Some((dir.clone(), Instant::now() - Duration::from_secs(1)));
+    assert_eq!(session.current_schema().unwrap().id, ids[0]);
+    assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
+    assert!(schema_switch_request::pending_for_process(&dir)
+        .unwrap()
+        .is_none());
+    session.reset().unwrap();
+    session.select_schema(ids[2]).unwrap();
+    let marker_bytes = std::fs::read(dir.join(ACTIVE_SCHEME_MANIFEST)).unwrap();
+    let completed = session.with_engine_access(true, false, |_, _, _, _, _| {
+        std::fs::write(dir.join(ACTIVE_SCHEME_MANIFEST), "invalid").unwrap();
+        rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
+        "committed"
+    });
+    assert_eq!(
+        completed,
+        Some("committed"),
+        "post-action reload discarded completed output"
+    );
+    assert!(session.process_key_result(b'a' as u32, 0).is_some());
+    std::fs::write(dir.join(ACTIVE_SCHEME_MANIFEST), marker_bytes).unwrap();
+    session.select_schema(ids[0]).unwrap();
+    assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
+    session.reset().unwrap();
+    session.select_schema(ids[2]).unwrap();
+    session.state();
+    session.reset().unwrap();
+    let user_bytes = std::fs::read(dir.join("user.yaml")).unwrap();
+    std::fs::remove_file(dir.join("user.yaml")).unwrap();
+    std::fs::create_dir(dir.join("user.yaml")).unwrap();
+    session.select_schema(ids[0]).unwrap();
+    assert!(
+        session.process_key_result(b'a' as u32, 0).is_some(),
+        "selection persistence failure stopped typing"
+    );
+    assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
+    std::fs::remove_dir(dir.join("user.yaml")).unwrap();
+    std::fs::write(dir.join("user.yaml"), user_bytes).unwrap();
+    *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+    assert!(session.try_finish_lua_reload());
+    assert_eq!(session.current_schema().unwrap().id, ids[0]);
+    assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
+    session.reset().unwrap();
+    session.select_schema(ids[2]).unwrap();
+    drop((session, peer));
+    // A fresh process must repair a stale A snapshot before initializing B.
+    std::fs::write(dir.join("rime.lua"), lua("A")).unwrap();
+    persist_selected_schema(&dir, ids[2]).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "runtime_access_tests::persisted_schema_selects_lua_before_startup",
+            "--nocapture",
+        ])
+        .env("KEYTAO_LUA_STARTUP_ROOT", &dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stale = runtime.create_session().unwrap();
+    let other_dir = smoke_fixture::scratch_dir("lua-stale-session");
+    smoke_fixture::write(&other_dir).unwrap();
+    let other =
+        ImeRuntime::with_dirs(&other_dir, other_dir.to_string_lossy().into_owned()).with_ime_host();
+    other.init().unwrap();
+    rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
+    assert!(stale.state().schema_id.is_empty());
+    assert_eq!(
+        lock_ignore_poison(&PROCESS_RIME.initialized)
+            .as_ref()
+            .unwrap()
+            .user,
+        other_dir
+    );
+    rime_lua::RELOAD_PENDING.store(false, Ordering::Release);
+    runtime.shutdown().unwrap();
+    assert!(other.is_initialized());
+    other.shutdown().unwrap();
+    assert!(!other.is_initialized());
+    drop(stale);
+    std::fs::remove_dir_all(other_dir).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn lua_regeneration_errors_do_not_block_startup_or_reload() {
+    let Some((runtime, dir)) =
+        native_fixture("lua_regeneration_errors_do_not_block_startup_or_reload")
+    else {
+        return;
+    };
+    std::fs::write(dir.join("rime.lua"), "last_good = true\n").unwrap();
+    std::fs::write(dir.join(ACTIVE_SCHEME_MANIFEST), "invalid").unwrap();
+    // Exercise setup in a fresh process, independently from the reinitialize path.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "runtime_access_tests::lua_regeneration_startup_child",
+            "--nocapture",
+        ])
+        .env("KEYTAO_LUA_FAILURE_ROOT", &dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    reinitialize(
+        dir.to_string_lossy().into_owned(),
+        dir.to_string_lossy().into_owned(),
+    )
+    .unwrap();
+    let session = runtime.create_session().unwrap();
+    assert_eq!(session.current_schema().unwrap().name, "KeyTao Smoke");
+    let schema_path = dir.join(format!("build/{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+    let mut schema: Value = serde_yaml::from_slice(&std::fs::read(&schema_path).unwrap()).unwrap();
+    schema["schema"]["name"] = Value::String("Reloaded Smoke".into());
+    std::fs::write(schema_path, serde_yaml::to_string(&schema).unwrap()).unwrap();
+    ReloadStamp::write(&dir).unwrap();
+    let generation = runtime.generation();
+    runtime.reload_without_deploy().unwrap();
+    assert!(
+        runtime.generation() > generation,
+        "deployment reload was skipped"
+    );
+    assert_eq!(session.current_schema().unwrap().name, "Reloaded Smoke");
+    assert!(session.process_key_result(b'a' as u32, 0).is_some());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("rime.lua")).unwrap(),
+        "last_good = true\n"
+    );
+    drop(session);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn lua_regeneration_startup_child() {
+    let Ok(dir) = std::env::var("KEYTAO_LUA_FAILURE_ROOT") else {
+        return;
+    };
+    let runtime = ImeRuntime::with_dirs(&dir, dir.clone()).with_ime_host();
+    runtime.init_without_deploy().unwrap();
+    let session = runtime.create_session().unwrap();
+    assert!(session.process_key_result(b'a' as u32, 0).is_some());
+}
+
+#[test]
+fn persisted_schema_selects_lua_before_startup() {
+    let Ok(dir) = std::env::var("KEYTAO_LUA_STARTUP_ROOT") else {
+        return;
+    };
+    let runtime = ImeRuntime::with_dirs(&dir, dir.clone()).with_ime_host();
+    let snapshot = Path::new(&dir).join(".keytao-package-lua/b/lua/probe/init.lua");
+    let bytes = std::fs::read(&snapshot).unwrap();
+    std::fs::remove_file(&snapshot).unwrap();
+    runtime.init_without_deploy().unwrap();
+    let session = runtime.create_session().unwrap();
+    assert_eq!(session.current_schema().unwrap().id, "keytao_lua_b");
+    std::fs::write(snapshot, bytes).unwrap();
+    *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+    let texts: Vec<_> = session
+        .process_key_result(b'a' as u32, 0)
+        .unwrap()
+        .state
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.text)
+        .collect();
+    assert_eq!(texts, ["B-GLOBAL", "B-MODULE"]);
+}
+
+#[test]
 fn plain_reload_rebuilds_only_the_next_used_session() {
     let Some((runtime, dir)) = native_fixture("plain_reload_rebuilds_only_the_next_used_session")
     else {
@@ -154,6 +525,7 @@ fn keys_f4_and_creation_do_not_wait_for_another_sessions_rebuild() {
     }
     assert!(second.process_key_result(b'a' as u32, 0).is_some());
     drop((first, second));
+    runtime_log::flush_blocking(Duration::from_secs(1));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

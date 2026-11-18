@@ -14,6 +14,7 @@ use std::{
 pub(crate) enum Staging {
     Metadata,
     Pending,
+    #[cfg(test)]
     ActiveManifest,
 }
 
@@ -202,7 +203,7 @@ impl<'a> PackageStore<'a> {
         publish_directory(destination, stage, package_fs::rename)
     }
 
-    fn checked_package_path(&self, key: &str) -> Result<PathBuf, CoreError> {
+    pub(crate) fn checked_package_path(&self, key: &str) -> Result<PathBuf, CoreError> {
         crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
         self.checked_root()?;
         let namespace = if crate::scheme::is_local_scheme_key(key) {
@@ -224,6 +225,7 @@ impl<'a> PackageStore<'a> {
         safe_path(&self.checked_package_path(key)?, "package.json").map_err(CoreError::Other)
     }
 
+    #[cfg(test)]
     pub(crate) fn active_manifest_path(&self) -> PathBuf {
         keytao_core::package_store::active_manifest(&self.core.env().data_dir)
     }
@@ -248,6 +250,7 @@ impl<'a> PackageStore<'a> {
         let prefix = match staging {
             Staging::Metadata => ".meta-",
             Staging::Pending => ".pending-",
+            #[cfg(test)]
             Staging::ActiveManifest => ".active-",
         };
         let stage = self.stage().map_err(std::io::Error::other)?;
@@ -295,7 +298,7 @@ impl<'a> PackageStore<'a> {
         Ok(Some(stored.meta))
     }
 
-    fn read_files_at(
+    pub(crate) fn read_files_at(
         path: &Path,
         key: &str,
     ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
@@ -764,6 +767,16 @@ impl<'a> PackageStore<'a> {
         self.checked_root()?;
         let core = self.core;
         let state = core.state();
+        let activated = match fs::read(self.checked_activation_path()?) {
+            Ok(bytes) => {
+                let record: crate::package_activation::Activation = serde_json::from_slice(&bytes)?;
+                let mut keys = record.activations.unwrap_or_default().into_keys().collect::<BTreeSet<_>>();
+                if !record.key.is_empty() { keys.insert(record.key); }
+                keys
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(error) => return Err(error.into()),
+        };
         Ok(state.installed_packages.into_iter().filter_map(|(scheme_key, package)| {
             let has_package_zip = self.checked_package_path(&scheme_key).is_ok_and(|path| path.is_dir());
             let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
@@ -779,7 +792,7 @@ impl<'a> PackageStore<'a> {
                 logo_path: if has_package_zip {
                     crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
                 } else { None },
-                active: state.active_scheme.as_deref() == Some(&scheme_key),
+                active: activated.contains(&scheme_key) || state.active_scheme.as_deref() == Some(&scheme_key),
                 supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false

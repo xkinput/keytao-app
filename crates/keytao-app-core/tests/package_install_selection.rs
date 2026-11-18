@@ -167,7 +167,7 @@ async fn saved_cloud_selection_survives_direct_update_and_reopen() {
 }
 
 #[tokio::test]
-async fn installing_package_replaces_stale_selection_with_its_primary_schema() {
+async fn first_install_selects_primary_and_reinstall_preserves_manual_selection() {
     let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();
     fs::write(
@@ -190,7 +190,7 @@ async fn installing_package_replaces_stale_selection_with_its_primary_schema() {
     drop(session);
     fixture.install("v1").await;
     runtime.reload().unwrap();
-    fixture.assert_selected("keytao");
+    fixture.assert_selected("keytao-bj");
 
     let session = runtime.create_session().unwrap();
     session.select_schema("keytao-bj").unwrap();
@@ -209,7 +209,7 @@ async fn installing_package_replaces_stale_selection_with_its_primary_schema() {
     .await
     .unwrap();
     runtime.reload().unwrap();
-    fixture.assert_selected("keytao");
+    fixture.assert_selected("keytao-bj");
 }
 
 #[tokio::test]
@@ -234,7 +234,7 @@ async fn updating_same_package_keeps_the_manual_schema_selection() {
 }
 
 #[tokio::test]
-async fn local_reimport_update_keeps_selection_and_unchanged_reimport_selects_primary() {
+async fn local_reimport_update_and_unchanged_reimport_preserve_manual_selection() {
     let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();
     let source = fixture.dir.path().join("source");
@@ -320,7 +320,7 @@ async fn local_reimport_update_keeps_selection_and_unchanged_reimport_selects_pr
     )
     .remove(0);
     assert_ne!(primary, "keytao-dz");
-    fixture.assert_selected(&primary);
+    fixture.assert_selected("keytao-dz");
 }
 
 #[tokio::test]

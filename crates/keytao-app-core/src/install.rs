@@ -628,6 +628,11 @@ fn smart_install_entries(
         let package_rime_lua = crate::packages::rime_lua_from_archive(&zip_bytes)?;
         let addons =
             crate::package_activation::addon_ownership(core, &dest).map_err(|e| e.to_string())?;
+        let installed_records = crate::package_activation::read_all(core, &dest).map_err(|e| e.to_string())?;
+        let mut installed_ownership = std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for file in installed_records.values().flat_map(|record| &record.owned) {
+            installed_ownership.entry(file.path.clone()).or_default().insert(file.sha256.clone());
+        }
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         cleanup_logs.extend(legacy_logs);
         let retained: std::collections::BTreeSet<_> =
@@ -647,6 +652,12 @@ fn smart_install_entries(
             ..Default::default()
         };
         for relative in ["default.custom.yaml", "default-custom.yaml", "rime.lua"] {
+            if relative == "rime.lua" && installed_records.values().any(|record| {
+                prepare_rime_lua_install(record.rime_lua.as_deref(), keytao_core::installed_addon_rime_lua_lines(&dest))
+                    == std::fs::read_to_string(dest.join(relative)).ok()
+            }) {
+                continue;
+            }
             if let Some(backup) = crate::package_activation::backup(core, &dest, relative)
                 .map_err(|e| e.to_string())?
             {
@@ -735,11 +746,25 @@ fn smart_install_entries(
                 logs.push(format!("[KEPT] Add-on file: {relative}"));
             } else {
                 let existing = crate::packages::safe_path(&dest, relative)?;
+                if let Some(expected) = installed_ownership.get(relative) {
+                    let current = if relative.ends_with(".custom.yaml") && existing.is_file() {
+                        let content = std::fs::read_to_string(&existing).map_err(|e| e.to_string())?;
+                        Some(crate::packages::sha256_reader(crate::managed_custom::strip(&content)?.as_bytes()).map_err(|e| e.to_string())?)
+                    } else {
+                        crate::package_activation::fingerprint(&dest, relative).map_err(|e| e.to_string())?.map(|file| file.sha256)
+                    };
+                    if current.is_some_and(|current| !expected.contains(&current)) {
+                        logs.push(format!("[KEPT] User-modified file: {relative}"));
+                        continue;
+                    }
+                }
                 if !crate::packages::excluded_from_manifest(relative) && existing.is_file() {
+                    if !installed_ownership.contains_key(relative) {
                     if let Some(backup) = crate::package_activation::backup(core, &dest, relative)
                         .map_err(|e| e.to_string())?
                     {
                         activation.backups.push(backup);
+                    }
                     }
                 }
                 match write_package_file(&dest, &relative, &content, &mut logs) {
@@ -777,7 +802,7 @@ fn smart_install_entries(
         generated_schemas.extend(
             crate::managed_custom::active_schema_ids_from_default(&dest)?
                 .into_iter()
-                .filter(|id| keytao_core::is_addon_schema(id)),
+                .filter(|id| keytao_core::is_addon_schema(id) || installed_ownership.contains_key(&format!("{id}.schema.yaml"))),
         );
         crate::managed_custom::regenerate(&dest, &generated_schemas)?;
         for relative in manifest.keys() {

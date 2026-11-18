@@ -16,6 +16,7 @@ pub struct UploadBundle {
     pub total_size: u64,
     pub sha256: String,
     schemas: BTreeMap<String, SchemaFiles>,
+    runtime_source: Option<tempfile::TempDir>,
 }
 
 #[derive(Debug, Default)]
@@ -30,11 +31,73 @@ struct SchemaFiles {
 struct Collector<'a> {
     root: &'a Path,
     shared: Option<&'a Path>,
+    lua: Option<&'a LuaSnapshot>,
     files: BTreeMap<String, BundleFile>,
     schemas: BTreeMap<String, SchemaFiles>,
     pending: BTreeSet<String>,
     bindings: BTreeMap<String, String>,
     targets: BTreeSet<(String, String, bool)>,
+}
+
+struct LuaSnapshot {
+    directory: tempfile::TempDir,
+    managed: BTreeSet<String>,
+}
+
+impl LuaSnapshot {
+    fn for_schemas(root: &Path, ids: &[String]) -> Result<Option<Self>, CoreError> {
+        let path = crate::packages::safe_path(root, keytao_core::ACTIVE_SCHEME_MANIFEST)
+            .map_err(failure)?;
+        let mut manifest: serde_json::Value = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(packages) = manifest["packages"].as_object() else { return Ok(None) };
+        let Some((key, package)) = packages.iter().find(|(_, package)| {
+            package["schemas"].as_array().is_some_and(|schemas| {
+                schemas.iter().any(|schema| schema.as_str().is_some_and(|id| ids.iter().any(|selected| selected == id)))
+            })
+        }) else { return Ok(None) };
+        let selected = package["schemas"].as_array().unwrap().iter()
+            .filter_map(serde_json::Value::as_str).find(|id| ids.iter().any(|selected| selected == id)).unwrap().to_owned();
+        if manifest["root"].as_str().map(Path::new) != Some(root.canonicalize()?.as_path()) {
+            return Err(failure("active scheme root does not match the upload source"));
+        }
+        if manifest["lua_owner"]["key"].as_str() == Some(key) { return Ok(None); }
+        let directory = tempfile::tempdir()?;
+        let mut managed = BTreeSet::new();
+        for (key, package) in packages {
+            crate::scheme::validate_scheme_key(key).map_err(failure)?;
+            if let Some(files) = package["lua_files"].as_object() {
+                for (relative, source) in files {
+                    if !relative.starts_with("lua/") { return Err(failure("invalid Lua module path")); }
+                    crate::packages::safe_path(root, relative).map_err(failure)?;
+                    let source = source.as_str().ok_or_else(|| failure("invalid Lua snapshot path"))?;
+                    if !source.starts_with(&format!(".keytao-package-lua/{key}/lua/")) {
+                        return Err(failure("invalid Lua snapshot path"));
+                    }
+                    let input = crate::packages::safe_path(root, source).map_err(failure)?;
+                    let output = crate::packages::safe_path(directory.path(), source).map_err(failure)?;
+                    fs::create_dir_all(output.parent().unwrap())?;
+                    fs::copy(input, output)?;
+                    managed.insert(relative.clone());
+                }
+            }
+        }
+        if let Some(files) = manifest["lua_owner"]["files"].as_object() {
+            managed.extend(files.keys().cloned());
+        }
+        fs::create_dir_all(directory.path().join("build"))?;
+        let defaults = serde_yaml::to_string(&serde_json::json!({"schema_list": [{"schema": selected}]}))
+            .map_err(|error| failure(error.to_string()))?;
+        fs::write(directory.path().join("default.yaml"), defaults)?;
+        fs::write(crate::packages::safe_path(directory.path(), &format!("build/{selected}.schema.yaml")).map_err(failure)?, "")?;
+        manifest["root"] = directory.path().canonicalize()?.to_string_lossy().as_ref().into();
+        fs::write(directory.path().join(keytao_core::ACTIVE_SCHEME_MANIFEST), serde_json::to_vec(&manifest)?)?;
+        keytao_core::regenerate_active_rime_lua(directory.path()).map_err(failure)?;
+        Ok(Some(Self { directory, managed }))
+    }
 }
 
 enum BundleFile {
@@ -165,6 +228,11 @@ fn yaml(bytes: &[u8], name: &str) -> Result<Value, CoreError> {
 }
 
 impl Collector<'_> {
+    fn source(&self, name: &str) -> Result<std::path::PathBuf, CoreError> {
+        let root = self.lua.filter(|lua| name == "rime.lua" || lua.managed.contains(name))
+            .map_or(self.root, |lua| lua.directory.path());
+        crate::packages::safe_path(root, name).map_err(failure)
+    }
     fn shared_file(&self, name: &str) -> bool {
         self.shared.is_some_and(|root| root.join(name).is_file())
     }
@@ -175,7 +243,7 @@ impl Collector<'_> {
 
     fn add_file(&mut self, schema: &str, name: &str, copy_only: bool) -> Result<bool, CoreError> {
         allowed(name)?;
-        let path = crate::packages::safe_path(self.root, name).map_err(failure)?;
+        let path = self.source(name)?;
         if !path.try_exists()? && self.shared_file(name) {
             return Ok(false);
         }
@@ -404,8 +472,7 @@ impl Collector<'_> {
                         self.lua(schema, module, false)?;
                     } else {
                         let global = name.split('.').next().unwrap_or(name);
-                        let path =
-                            crate::packages::safe_path(self.root, "rime.lua").map_err(failure)?;
+                        let path = self.source("rime.lua")?;
                         if !path.try_exists()? && self.shared_file("rime.lua") {
                             return Ok(());
                         }
@@ -437,9 +504,9 @@ impl Collector<'_> {
         let module = module.replace('.', "/");
         let direct = format!("lua/{module}.lua");
         let init = format!("lua/{module}/init.lua");
-        let name = if self.root.join(&direct).is_file() {
+        let name = if self.source(&direct)?.is_file() {
             direct
-        } else if self.root.join(&init).is_file() {
+        } else if self.source(&init)?.is_file() {
             init
         } else if self.shared_file(&direct) {
             direct
@@ -663,9 +730,11 @@ pub fn build(
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
     }
+    let lua = LuaSnapshot::for_schemas(root, schema_ids)?;
     let mut collector = Collector {
         root,
         shared,
+        lua: lua.as_ref(),
         files: BTreeMap::new(),
         schemas: BTreeMap::new(),
         pending: schema_ids.iter().cloned().collect(),
@@ -776,6 +845,7 @@ pub fn build(
         total_size,
         sha256,
         schemas: collector.schemas,
+        runtime_source: lua.map(|lua| lua.directory),
     })
 }
 
@@ -783,7 +853,7 @@ pub fn verified(
     root: &Path,
     shared: Option<&Path>,
     schema_ids: &[String],
-    mut smoke: impl FnMut(&str, u32) -> Result<(), String>,
+    mut smoke: impl FnMut(&Path, &str, u32) -> Result<(), String>,
 ) -> Result<UploadBundle, CoreError> {
     checked(root, shared, schema_ids, Some(&mut smoke), true)
 }
@@ -920,10 +990,13 @@ fn checked(
     root: &Path,
     shared: Option<&Path>,
     schema_ids: &[String],
-    mut smoke: Option<&mut dyn FnMut(&str, u32) -> Result<(), String>>,
+    mut smoke: Option<&mut dyn FnMut(&Path, &str, u32) -> Result<(), String>>,
     require_freshness: bool,
 ) -> Result<UploadBundle, CoreError> {
     let bundle = build(root, shared, schema_ids)?;
+    let smoke_root = if smoke.is_some() {
+        bundle.prepare_smoke_source(root, schema_ids)?
+    } else { root };
     for (id, schema) in &bundle.schemas {
         let configs: BTreeSet<_> = schema
             .sources
@@ -981,11 +1054,42 @@ fn checked(
                 .as_str()
                 .and_then(|s| s.chars().next())
                 .ok_or_else(|| failure(format!("方案 {id}：{compiled} 缺少 speller/alphabet")))?;
-            smoke(id, u32::from(alphabet))
+            smoke(smoke_root, id, u32::from(alphabet))
                 .map_err(|e| failure(format!("方案 {id}：输入冒烟检查失败: {e}")))?;
         }
     }
     Ok(bundle)
+}
+
+impl UploadBundle {
+    fn prepare_smoke_source<'a>(&'a self, root: &'a Path, ids: &[String]) -> Result<&'a Path, CoreError> {
+        let Some(directory) = self.runtime_source.as_ref() else { return Ok(root) };
+        let output = directory.path();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&self.bytes))
+            .map_err(|error| failure(error.to_string()))?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|error| failure(error.to_string()))?;
+            let destination = crate::packages::safe_path(output, entry.name()).map_err(failure)?;
+            fs::create_dir_all(destination.parent().unwrap())?;
+            let mut file = fs::File::create(destination)?;
+            std::io::copy(&mut entry, &mut file)?;
+        }
+        for entry in fs::read_dir(root.join("build"))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| failure("invalid build artifact path"))?;
+            if name.starts_with(".keytao-") || !entry.file_type()?.is_file() { continue; }
+            let source = crate::packages::safe_path(root, &format!("build/{name}")).map_err(failure)?;
+            fs::copy(source, output.join("build").join(name))?;
+        }
+        fs::write(output.join("build/default.yaml"), serde_yaml::to_string(&serde_json::json!({
+            "schema_list": ids.iter().map(|id| serde_json::json!({"schema": id})).collect::<Vec<_>>()
+        })).map_err(|error| failure(error.to_string()))?)?;
+        keytao_core::complete_deployment(output).map_err(failure)?;
+        #[cfg(target_os = "windows")]
+        keytao_core::mark_windows_rime_build_repair_complete(output).map_err(failure)?;
+        Ok(output)
+    }
 }
 
 fn verify_artifact(
@@ -1026,6 +1130,62 @@ fn verify_artifact(
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
+
+    #[test]
+    fn inactive_lua_owner_upload_uses_its_snapshot_without_changing_runtime_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("lua")).unwrap();
+        fs::create_dir_all(root.join(".keytao-package-lua/keytao/lua")).unwrap();
+        fs::create_dir_all(root.join(".keytao-package-lua/xmjd/lua/shared")).unwrap();
+        fs::write(root.join("rime.lua"), "filter = require('a_shared')\n").unwrap();
+        fs::write(root.join("lua/a_shared.lua"), "return 'A'\n").unwrap();
+        fs::write(root.join("lua/shared.lua"), "return 'A'\n").unwrap();
+        fs::write(root.join(".keytao-package-lua/keytao/lua/shared.lua"), "return 'A'\n").unwrap();
+        fs::write(root.join(".keytao-package-lua/xmjd/lua/shared/init.lua"), "return 'B'\n").unwrap();
+        fs::write(root.join("b.schema.yaml"), "schema: {schema_id: b}\nengine: {filters: [lua_filter@filter]}\n").unwrap();
+        fs::write(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST), serde_json::json!({
+            "root": root.canonicalize().unwrap(),
+            "lua_owner": {"key": "keytao"},
+            "packages": {
+                "keytao": {"schemas": ["a"], "rime_lua": "filter = require('a_shared')\n", "lua_files": {"lua/shared.lua": ".keytao-package-lua/keytao/lua/shared.lua"}},
+                "xmjd": {"schemas": ["b"], "rime_lua": "filter = require('shared')\n", "lua_files": {"lua/shared/init.lua": ".keytao-package-lua/xmjd/lua/shared/init.lua"}}
+            }
+        }).to_string()).unwrap();
+        let marker = fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap();
+        let bundle = build(root, None, &["b".into()]).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bundle.bytes)).unwrap();
+        let mut entry = String::new();
+        archive.by_name("rime.lua").unwrap().read_to_string(&mut entry).unwrap();
+        assert_eq!(entry, "filter = require(\"shared\")\n");
+        let mut module = String::new();
+        archive.by_name("lua/shared/init.lua").unwrap().read_to_string(&mut module).unwrap();
+        assert_eq!(module, "return 'B'\n");
+        assert!(archive.by_name("lua/shared.lua").is_err());
+        fs::create_dir_all(root.join("build")).unwrap();
+        let compiled = "schema: {schema_id: b}\nspeller: {alphabet: a}\nengine: {filters: [lua_filter@filter]}\n";
+        fs::write(root.join("build/b.schema.yaml"), compiled).unwrap();
+        for (name, seconds) in [("b.schema.yaml", 1), ("build/b.schema.yaml", 2)] {
+            fs::File::open(root.join(name)).unwrap().set_times(fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+            )).unwrap();
+        }
+        let mut smoked = false;
+        verified(root, None, &["b".into()], |source, id, key| {
+            assert_ne!(source, root);
+            assert_eq!((id, key), ("b", u32::from('a')));
+            assert_eq!(fs::read_to_string(source.join("rime.lua")).unwrap(), "filter = require(\"shared\")\n");
+            assert_eq!(fs::read_to_string(source.join("lua/shared/init.lua")).unwrap(), "return 'B'\n");
+            assert!(!source.join("lua/shared.lua").exists());
+            assert!(keytao_core::schema_install_state(source).deployed);
+            smoked = true;
+            Ok(())
+        }).unwrap();
+        assert!(smoked);
+        assert_eq!(fs::read_to_string(root.join("rime.lua")).unwrap(), "filter = require('a_shared')\n");
+        assert_eq!(fs::read_to_string(root.join("lua/shared.lua")).unwrap(), "return 'A'\n");
+        assert_eq!(fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(), marker);
+    }
 
     #[test]
     fn streamed_opencc_resource_preserves_archive_bytes_and_hash() {

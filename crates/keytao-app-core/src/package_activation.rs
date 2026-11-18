@@ -27,6 +27,8 @@ pub(crate) struct Backup {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Activation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activations: Option<BTreeMap<String, Activation>>,
     pub key: String,
     pub root: String,
     pub owned: Vec<OwnedFile>,
@@ -54,18 +56,59 @@ pub(crate) fn read(core: &Core, root: &Path) -> Result<Option<Activation>, CoreE
             {
                 return Ok(None);
             }
-            for file in active.owned.iter().chain(&active.generated) {
+            for record in std::iter::once(&active).chain(active.activations.iter().flat_map(|records| records.values())) {
+            for file in record.owned.iter().chain(&record.generated) {
                 safe_path(root, &file.path).map_err(CoreError::Other)?;
             }
-            for backup in active.backups.iter().chain(&active.kept_backups) {
+            for backup in record.backups.iter().chain(&record.kept_backups) {
                 safe_path(root, &backup.path).map_err(CoreError::Other)?;
                 safe_path(&store.root(), &backup.backup).map_err(CoreError::Other)?;
+            }
             }
             Ok(Some(active))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(crate::package_fs::context("读取文件", &path, e).into()),
     }
+}
+
+pub(crate) fn read_all(core: &Core, root: &Path) -> Result<BTreeMap<String, Activation>, CoreError> {
+    let mut active = read(core, root)?.unwrap_or_default();
+    let legacy = active.activations.is_none();
+    let mut records = active.activations.take().unwrap_or_default();
+    if !active.key.is_empty() {
+        records.entry(active.key.clone()).or_insert(active);
+    }
+    if records.is_empty() && legacy {
+        let path = safe_path(root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?;
+        if let Ok(bytes) = fs::read(path) {
+            let marker: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if marker.get("packages").is_none() && marker["root"].as_str().map(Path::new) == Some(root.canonicalize()?.as_path()) {
+                let key = marker["scheme_key"].as_str().map(str::to_owned).or_else(|| core.state().active_scheme);
+                if key.as_deref().is_some_and(keytao_core::is_addon_schema) {
+                    return Ok(records);
+                }
+                if let Some(key) = key.filter(|key| !key.is_empty()) {
+                    crate::scheme::validate_scheme_key(&key).map_err(CoreError::Other)?;
+                    let manifest: BTreeMap<String, String> = serde_json::from_value(marker["manifest"].clone())?;
+                    for path in manifest.keys() { safe_path(root, path).map_err(CoreError::Other)?; }
+                    records.insert(key.clone(), Activation {
+                        key: key.clone(), scheme_key: key,
+                        root: root.canonicalize()?.to_string_lossy().into_owned(),
+                        owned: manifest.iter().map(|(path, sha256)| OwnedFile { path: path.clone(), sha256: sha256.clone(), move_file: false }).collect(),
+                        manifest,
+                        rime_lua: marker["rime_lua"].as_str().map(str::to_owned),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
+pub(crate) fn read_package(core: &Core, root: &Path, key: &str) -> Result<Option<Activation>, CoreError> {
+    Ok(read_all(core, root)?.remove(key))
 }
 
 pub(crate) fn user_file(path: &str) -> bool {
@@ -136,6 +179,10 @@ pub(crate) fn deactivate(
     let mut logs = Vec::new();
     let mut modified = BTreeSet::new();
     let addons = addon_ownership(core, root)?;
+    let others = read_all(core, root)?.into_iter()
+        .filter(|(key, _)| key != &active.key)
+        .flat_map(|(_, record)| record.owned.into_iter().map(|file| file.path))
+        .collect::<BTreeSet<_>>();
     let package_files = PackageStore::new(core).read_files(&active.key)?.0;
     let mut custom_hashes = BTreeMap::new();
     for (path, bytes) in &package_files {
@@ -155,6 +202,7 @@ pub(crate) fn deactivate(
         if !checked.insert(&file.path)
             || user_file(&file.path)
             || addons.contains_key(&file.path)
+            || others.contains(&file.path)
             || matches!(
                 file.path.as_str(),
                 "default.custom.yaml" | "default-custom.yaml" | "rime.lua"
@@ -191,7 +239,7 @@ pub(crate) fn deactivate(
         }
         let target = safe_path(root, &item.path).map_err(CoreError::Other)?;
         // A newly authored file must never be overwritten during restoration.
-        if modified.contains(&item.path) || target.try_exists()? {
+        if modified.contains(&item.path) || target.try_exists()? || others.contains(&item.path) {
             if !active.kept_backups.iter().any(|b| b.backup == item.backup) {
                 active.kept_backups.push(item.clone());
             }
@@ -202,6 +250,7 @@ pub(crate) fn deactivate(
         logs.push(format!("[RESTORED] {}", item.path));
     }
     regenerate_default(core, root, active)?;
+    if others.is_empty() {
     let package_lua = package_files
         .into_iter()
         .find(|(path, _)| path == "rime.lua")
@@ -216,7 +265,8 @@ pub(crate) fn deactivate(
         .map(|s| sha256_reader(s.as_bytes()))
         .transpose()?;
     let current_lua = fingerprint(root, "rime.lua")?;
-    if current_lua.is_some() && current_lua.as_ref().map(|f| &f.sha256) != expected_hash.as_ref() {
+    let user_modified_lua = current_lua.is_some() && current_lua.as_ref().map(|f| &f.sha256) != expected_hash.as_ref();
+    if user_modified_lua {
         if let Some(backup) = backup(core, root, "rime.lua")? {
             if !active
                 .kept_backups
@@ -251,10 +301,11 @@ pub(crate) fn deactivate(
             crate::package_fs::remove_file(&path)?;
         }
     }
+    }
     let remaining = crate::managed_custom::active_schema_ids_from_default(root)
         .map_err(CoreError::Other)?
         .into_iter()
-        .filter(|id| keytao_core::is_addon_schema(id))
+        .filter(|id| keytao_core::is_addon_schema(id) || others.contains(&format!("{id}.schema.yaml")))
         .collect();
     crate::managed_custom::regenerate(root, &remaining).map_err(CoreError::Other)?;
     Ok(logs)
@@ -264,9 +315,29 @@ pub(crate) fn write(core: &Core, active: &Activation) -> Result<(), CoreError> {
     let store = PackageStore::new(core).checked_root()?;
     fs::create_dir_all(&store)
         .map_err(|error| crate::package_fs::context("创建目录", &store, error))?;
+    let mut combined = active.clone();
+    let mut records = read_all(core, Path::new(&active.root))?;
+    if !active.key.is_empty() {
+        let mut record = active.clone();
+        record.activations = None;
+        records.insert(active.key.clone(), record);
+    }
+    combined.activations = Some(records);
     crate::scheme_files::write_file_atomic(
         &PackageStore::new(core).checked_activation_path()?,
-        &serde_json::to_vec_pretty(active)?,
+        &serde_json::to_vec_pretty(&combined)?,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn remove(core: &Core, root: &Path, key: &str, inactive: &Activation) -> Result<(), CoreError> {
+    let mut records = read_all(core, root)?;
+    records.remove(key);
+    let mut combined = records.values().next().cloned().unwrap_or_else(|| inactive.clone());
+    combined.activations = Some(records);
+    crate::scheme_files::write_file_atomic(
+        &PackageStore::new(core).checked_activation_path()?,
+        &serde_json::to_vec_pretty(&combined)?,
     )?;
     Ok(())
 }
@@ -492,6 +563,11 @@ impl Transaction {
 
     pub(crate) fn snapshot_store_file(&mut self, relative: &str) -> Result<(), CoreError> {
         self.snapshot(relative, true)?;
+        self.persist()
+    }
+
+    pub(crate) fn snapshot_user_file(&mut self, relative: &str) -> Result<(), CoreError> {
+        self.snapshot(relative, false)?;
         self.persist()
     }
 

@@ -704,7 +704,7 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
     }
     fs::create_dir_all(&addons)?;
     let mut claimed = BTreeSet::new();
-    if let Some(active) = crate::package_activation::read(core, root)? {
+    for active in crate::package_activation::read_all(core, root)?.into_values() {
         claimed.extend(
             active
                 .owned

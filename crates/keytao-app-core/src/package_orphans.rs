@@ -56,17 +56,22 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         }
     }
     let mut kept_backups = Vec::new();
-    if let Some(active) = package_activation::read(core, root)? {
+    let mut seen_backups = BTreeSet::new();
+    let active = package_activation::read(core, root)?;
+    for active in active.iter().chain(active.iter().flat_map(|record| record.activations.iter().flat_map(|records| records.values()))) {
         owned.extend(
             active
                 .owned
-                .into_iter()
-                .chain(active.generated)
-                .map(|file| file.path),
+                .iter()
+                .chain(&active.generated)
+                .map(|file| file.path.clone()),
         );
-        for backup in active.kept_backups {
+        for backup in &active.kept_backups {
+            if !seen_backups.insert((&backup.path, &backup.backup)) {
+                continue;
+            }
             kept_backups.push(KeptBackup {
-                path: backup.path,
+                path: backup.path.clone(),
                 backup: safe_path(&store.root(), &backup.backup)
                     .map_err(CoreError::Other)?
                     .to_string_lossy()

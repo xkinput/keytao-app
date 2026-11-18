@@ -310,7 +310,7 @@ void main() {
     expect(api.calls.where((call) => call.contains('Upload')), isEmpty);
   });
 
-  testWidgets('successful deploy queues only the active marked package once', (
+  testWidgets('successful shared deploy queues a marked co-active package once', (
     tester,
   ) async {
     api.enabled = true;
@@ -321,11 +321,18 @@ void main() {
         active: true,
         hasPackageZip: true,
       ),
+      InstalledPackageDto(
+        schemeKey: 'xmjd',
+        version: '1',
+        active: true,
+        hasPackageZip: true,
+      ),
     ];
     controller.local = const LocalSchemaDto(
       installed: true,
       deployed: true,
-      schemas: ['keytao'],
+      schemas: ['xmjd6', 'keytao'],
+      installedScheme: 'xmjd',
     );
     await controller.loadSchemeSyncState();
     await controller.reloadAccountSession();
@@ -344,6 +351,19 @@ void main() {
       'Symbol("crateApiCoreUploadSchemeProfile")',
     ]);
     await tester.pump(const Duration(seconds: 2));
+    expect(
+      api.calls.where((call) => call.contains('UploadCloudPackage')),
+      hasLength(1),
+    );
+    controller.scheduleSchemeProfileSync(
+      packageKey: 'keytao',
+      afterSuccessfulDeploy: true,
+    );
+    controller.installedPackages = controller.installedPackages
+        .where((package) => package.schemeKey != 'keytao')
+        .toList();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
     expect(
       api.calls.where((call) => call.contains('UploadCloudPackage')),
       hasLength(1),

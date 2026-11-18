@@ -444,9 +444,17 @@ async fn snow_builtin_migration_activation_update_and_uninstall_preserve_other_p
     .await
     .unwrap();
     crate::scheme::record_installed_scheme(&host.core, SNOW.id, Some("v2")).unwrap();
+    let updated = crate::package_activation::read_package(&host.core, root.path(), SNOW.id)
+        .unwrap().unwrap();
+    let module = "lua/snow/snow.lua";
+    let owned = updated.owned.iter().find(|file| file.path == module).expect("Updated Snow must own its Lua module");
+    assert_eq!(crate::package_activation::fingerprint(root.path(), module).unwrap().unwrap().sha256, owned.sha256);
+    assert!(!updated.backups.iter().any(|backup| backup.path == module), "Package-owned Lua must not become a user backup");
     crate::packages::remove_scheme_package(&host.core, SNOW.id, &host)
         .await
         .unwrap();
+    assert!(crate::package_activation::read_package(&host.core, root.path(), SNOW.id)
+        .unwrap().is_none(), "Deployment must not reactivate the removed package");
     assert!(!store.package_path(SNOW.id).exists());
     assert!(!store.addon_path(SNOW.id).exists());
     for path in SNOW_REQUIRED

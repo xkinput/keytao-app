@@ -114,10 +114,21 @@ fn checked_relative(text: &str) -> std::result::Result<PathBuf, String> {
 }
 
 pub(crate) fn public_asset(path: &Path) -> bool {
-    if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
+    if path == Path::new(keytao_core::ACTIVE_SCHEME_MANIFEST)
+        || path == Path::new(".keytao-current-schema")
+        || path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
         || path == Path::new("build/.keytao-skipped-schemas.json")
     {
         return true;
+    }
+    if let Ok(relative) = path.strip_prefix(".keytao-package-lua") {
+        let parts: Vec<_> = relative.components().collect();
+        return parts.iter().all(|part| {
+            matches!(part, Component::Normal(name)
+            if !name.to_string_lossy().starts_with('.')
+                && !name.to_string_lossy().to_ascii_lowercase().ends_with(".userdb")
+                && !name.to_string_lossy().eq_ignore_ascii_case("log"))
+        }) && (parts.len() < 2 || parts[1].as_os_str() == "lua");
     }
     !path.components().any(|part| {
         let part = part.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -392,6 +403,7 @@ fn prepare_at(
         Ok(())
     }
     copy_assets(&source, &source, private, &mut copied)?;
+    keytao_core::rebase_active_scheme_manifest(private)?;
     if let Ok(previous) = std::fs::read_to_string(private.join(SEED_FILES)) {
         for name in previous
             .lines()
@@ -428,6 +440,51 @@ mod tests {
     use super::*;
 
     const VERSION: &str = "1.0.0";
+
+    #[test]
+    fn sandbox_lua_snapshots_rebase_and_exclude_private_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let public = root.path().join("public");
+        let private = root.path().join("private");
+        let generation = "c".repeat(64);
+        let source = public.join(&generation);
+        seed(&source);
+        let snapshots = source.join(".keytao-package-lua/keytao/lua");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        std::fs::write(snapshots.join("shared.lua"), "return 'A'").unwrap();
+        let marker = r#"{"root":"","packages":{"keytao":{"schemas":["keytao"],"rime_lua":"owner = 'A'\n","lua_files":{"lua/shared.lua":".keytao-package-lua/keytao/lua/shared.lua"}}}}"#;
+        std::fs::write(source.join(keytao_core::ACTIVE_SCHEME_MANIFEST), marker).unwrap();
+        std::fs::write(source.join(".keytao-current-schema"), "keytao").unwrap();
+        std::fs::write(source.join(".private.json"), "private").unwrap();
+        std::fs::write(public.join("current.txt"), generation).unwrap();
+        prepare_at(&public, &private, VERSION).unwrap();
+        let relocated: serde_yaml::Value = serde_yaml::from_slice(
+            &std::fs::read(private.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            relocated["root"].as_str(),
+            private.canonicalize().unwrap().to_str()
+        );
+        assert_eq!(
+            std::fs::read_to_string(private.join(".keytao-package-lua/keytao/lua/shared.lua"))
+                .unwrap(),
+            "return 'A'"
+        );
+        assert_eq!(
+            std::fs::read_to_string(private.join(".keytao-current-schema")).unwrap(),
+            "keytao"
+        );
+        assert!(!private.join(".private.json").exists());
+        for path in [
+            ".private.json",
+            ".keytao-package-lua/keytao/app-state.json",
+            ".keytao-package-lua/keytao/lua/../../secret",
+            ".keytao-package-lua/keytao/lua/.private.json",
+        ] {
+            assert!(!public_asset(Path::new(path)), "{path}");
+        }
+    }
 
     fn seed(root: &Path) {
         std::fs::create_dir_all(root.join("build")).unwrap();

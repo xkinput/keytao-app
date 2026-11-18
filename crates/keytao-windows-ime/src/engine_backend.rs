@@ -324,6 +324,7 @@ impl InProcEngine {
         if stale {
             std::fs::create_dir_all(&user_dir).map_err(|error| error.to_string())?;
             copy_fallback_data(&deployed, &user_dir)?;
+            keytao_core::rebase_active_scheme_manifest(&user_dir)?;
             keytao_core::complete_deployment(&user_dir)?;
             keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
         }
@@ -370,9 +371,15 @@ impl InProcEngine {
 }
 
 fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
+    copy_fallback_assets(source, source, target)
+}
+
+fn copy_fallback_assets(base: &Path, source: &Path, target: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        if !crate::appcontainer::public_asset(Path::new(&entry.file_name())) {
+        let path = entry.path();
+        let relative = path.strip_prefix(base).map_err(|error| error.to_string())?;
+        if !crate::appcontainer::public_asset(relative) {
             continue;
         }
         let kind = entry.file_type().map_err(|error| error.to_string())?;
@@ -382,7 +389,7 @@ fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
         let destination = target.join(entry.file_name());
         if kind.is_dir() {
             std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
-            copy_fallback_data(&entry.path(), &destination)?;
+            copy_fallback_assets(base, &entry.path(), &destination)?;
         } else if kind.is_file() {
             let mut bytes = std::fs::read(entry.path()).map_err(|error| error.to_string())?;
             if entry
@@ -435,6 +442,21 @@ mod tests {
         std::fs::write(source.path().join("build/keytao.table.bin"), b"prebuilt").unwrap();
         std::fs::create_dir_all(source.path().join("keytao.userdb")).unwrap();
         std::fs::write(source.path().join("keytao.userdb/words"), b"private").unwrap();
+        std::fs::create_dir_all(source.path().join(".keytao-package-lua/keytao/lua")).unwrap();
+        std::fs::write(
+            source
+                .path()
+                .join(".keytao-package-lua/keytao/lua/shared.lua"),
+            "return 'A'",
+        )
+        .unwrap();
+        std::fs::write(
+            source
+                .path()
+                .join(".keytao-package-lua/keytao/app-state.json"),
+            "private",
+        )
+        .unwrap();
         copy_fallback_data(source.path(), target.path()).unwrap();
         let schema: serde_yaml::Value = serde_yaml::from_slice(
             &std::fs::read(target.path().join("build/keytao.schema.yaml")).unwrap(),
@@ -450,6 +472,14 @@ mod tests {
             b"prebuilt"
         );
         assert!(!target.path().join("keytao.userdb").exists());
+        assert!(target
+            .path()
+            .join(".keytao-package-lua/keytao/lua/shared.lua")
+            .is_file());
+        assert!(!target
+            .path()
+            .join(".keytao-package-lua/keytao/app-state.json")
+            .exists());
         assert!(
             std::fs::read_to_string(source.path().join("build/keytao.schema.yaml"))
                 .unwrap()
