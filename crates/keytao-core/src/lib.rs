@@ -709,7 +709,8 @@ mod desktop {
     ///
     /// The lock is reentrant so that a composite operation (create session,
     /// process key + read state, deploy) can hold it across the smaller helpers
-    /// that also take it. It is never held across platform I/O outside librime.
+    /// that also take it. Runtime UI entry points take it without waiting,
+    /// across engine rebuilding and shared input-state restoration as well.
     static RIME_API_LOCK: Mutex<()> = Mutex::new(());
     thread_local! {
         static RIME_API_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -762,6 +763,17 @@ mod desktop {
         RimeApiGuard {
             guard: Some(lock_ignore_poison(&RIME_API_LOCK)),
         }
+    }
+
+    /// UI callbacks must not wait for another session's native rebuild.
+    pub(crate) fn try_rime_api_lock() -> Option<RimeApiGuard> {
+        let guard = if RIME_API_LOCK_DEPTH.with(|depth| depth.get() > 0) {
+            None
+        } else {
+            Some(try_lock_ignore_poison(&RIME_API_LOCK)?)
+        };
+        RIME_API_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Some(RimeApiGuard { guard })
     }
 
     /// librime's `RIME_STRUCT_HAS_MEMBER` for `RimeApi`.
@@ -2524,6 +2536,11 @@ mod desktop {
             let user_dictionary_source_available =
                 user_dictionary_cache_available_for(Some(user_data_dir));
             let _rime = rime_api_lock();
+            #[cfg(all(
+                test,
+                any(target_os = "linux", target_os = "windows", target_os = "macos")
+            ))]
+            super::runtime_access_tests::pause_engine_creation();
             let session = create_session().map_err(|e| format!("{e:?}"))?;
             if let Some((_, schema_id)) = &preferred {
                 // ascii_mode is left to the schema switches and to ascii_composer;
@@ -4742,8 +4759,9 @@ struct RimeDataDirs {
 /// one runtime finalize librime while another runtime's sessions still hold
 /// live session ids.
 ///
-/// Lock order: `initialized` → `reload_barrier` → `sessions` → session inner →
-/// global input → librime.
+/// Reloads lock `initialized` → write barrier → `sessions` → session inner →
+/// global input → librime. UI paths pin a read barrier, release `initialized`,
+/// and try their session/native locks before accessing shared input state.
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -4825,6 +4843,9 @@ impl ProcessRimeState {
         extra: Option<&Engine>,
         request: Option<&SchemaSwitchRequest>,
     ) -> Result<(), String> {
+        if request.is_none() {
+            return Ok(());
+        }
         let sessions = lock_ignore_poison(&self.sessions);
         let apply = |engine: &Engine| -> Result<(), String> {
             if let Some(request) = request {
@@ -5303,9 +5324,8 @@ impl ImeRuntime {
         let dirs = self.data_dirs()?;
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let result = (|| {
-            // Every teardown takes `initialized` before the reload barrier, so
-            // holding it here keeps librime from being finalized between the check
-            // and the session that is about to be created against it.
+            // Pin the read barrier before releasing the directory check, so
+            // teardown cannot race creation or block peers behind this session.
             let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)
                 .ok_or("librime initialization or reload is busy")?;
             if initialized.as_ref() != Some(&dirs) {
@@ -5313,6 +5333,8 @@ impl ImeRuntime {
             }
             let barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)
                 .ok_or("librime initialization or reload is busy")?;
+            drop(initialized);
+            let rime = desktop::try_rime_api_lock().ok_or("librime session is busy")?;
             let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
             let request = if self.0.ime_host {
                 Engine::prepare_switch_request(&dirs.user)?
@@ -5355,8 +5377,8 @@ impl ImeRuntime {
                 last_input_state: None,
             }));
             PROCESS_RIME.register(&inner);
+            drop(rime);
             drop(barrier);
-            drop(initialized);
             Ok(ImeRuntimeSession {
                 dirs,
                 inner,
@@ -5800,6 +5822,7 @@ impl ImeRuntimeSession {
         let _barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)?;
         drop(initialized);
         let mut inner = try_lock_ignore_poison(&self.inner)?;
+        let _rime = desktop::try_rime_api_lock()?;
         self.refresh_if_needed(&mut inner).ok()?;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(id) = inner.pending_schema_id.clone() {
