@@ -34,6 +34,11 @@ pub use schema_switch_request::{
     read_schema_switch_request, request_schema, schema_switch_applied_generation,
     write_file_atomic, SchemaSwitchRequest, SCHEMA_SWITCH_APPLIED_FILE, SCHEMA_SWITCH_REQUEST_FILE,
 };
+mod user_data_sync;
+pub use user_data_sync::{
+    cancel_user_data_sync, read_user_data_sync_result, request_user_data_sync, UserDataSyncResult,
+    USER_DATA_SYNC_REQUEST_FILE, USER_DATA_SYNC_RESULT_FILE,
+};
 
 use runtime_log::Level;
 use serde::{Deserialize, Serialize};
@@ -2334,6 +2339,36 @@ mod desktop {
             }
         }
         Ok(*lock_ignore_poison(&DEPLOY_RESULT) == Some(true))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    pub(super) fn sync_user_data_and_wait(user_dir: &Path) -> Result<(), String> {
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        let _rime = rime_api_lock();
+        *lock_ignore_poison(&DEPLOY_RESULT) = None;
+        // librime 1.17.0 rime_api_impl.h:127-134 schedules installation_update,
+        // backup_config_files and user_dict_sync only; no workspace deployment.
+        unsafe {
+            let api = rime_get_api();
+            let sync = rime_api_member!(api, sync_user_data)
+                .ok_or("librime sync_user_data API is unavailable")?;
+            let join = rime_api_member!(api, join_maintenance_thread)
+                .ok_or("librime join_maintenance_thread API is unavailable")?;
+            let initialize_deployer = rime_api_member!(api, deployer_initialize)
+                .ok_or("librime deployer_initialize API is unavailable")?;
+            // NULL preserves the configured paths and only loads task modules.
+            initialize_deployer(std::ptr::null_mut());
+            if sync() == 0 {
+                return Err("Rime user data sync could not start".into());
+            }
+            join();
+        }
+        initialize_user_dictionary_cache(user_dir);
+        // Deployer::Run aggregates task failures into the deploy notification.
+        if *lock_ignore_poison(&DEPLOY_RESULT) != Some(true) {
+            return Err("Rime user data sync failed".into());
+        }
+        Ok(())
     }
 
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
@@ -4975,6 +5010,23 @@ impl ImeRuntime {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    fn apply_pending_user_data_sync(&self, root: &Path) -> Result<bool, String> {
+        if !self.0.ime_host {
+            return Ok(false);
+        }
+        let Some(generation) = user_data_sync::claim(root)? else {
+            return Ok(false);
+        };
+        // RimeSyncUserData destroys all native sessions before releasing userdbs.
+        PROCESS_RIME.drop_live_engines();
+        let outcome = desktop::sync_user_data_and_wait(root);
+        PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+        let rebuilt = PROCESS_RIME.apply_pending_switch_request(root);
+        user_data_sync::finish(root, generation, outcome.and(rebuilt))?;
+        Ok(true)
+    }
+
     /// What the linked librime can do natively, see [`EngineCapabilities`].
     pub fn capabilities(&self) -> EngineCapabilities {
         engine_capabilities()
@@ -5137,6 +5189,10 @@ impl ImeRuntime {
                 && initialized.as_ref() == Some(&dirs)
                 && desktop::loaded_deployment_is_current(&dirs.user)
             {
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                if self.apply_pending_user_data_sync(&dirs.user)? {
+                    return Ok(());
+                }
                 let request = read_schema_switch_request(&dirs.user)?;
                 let schema_stamp = std::fs::read_to_string(ReloadStamp::path(&dirs.user))
                     .ok()
@@ -5158,6 +5214,9 @@ impl ImeRuntime {
             PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
             *initialized = result.is_ok().then(|| dirs.clone());
             let result = result.and_then(|()| self.apply_pending_switch_request(&dirs.user));
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            let result =
+                result.and_then(|()| self.apply_pending_user_data_sync(&dirs.user).map(|_| ()));
             drop(barrier);
             result
         })();

@@ -47,6 +47,7 @@ class SchemePage extends StatefulWidget {
 
 class _SchemePageState extends State<SchemePage> {
   String? _activatingScheme;
+  bool _schemesExpanded = false;
 
   Future<void> _activate(String key) async {
     FocusManager.instance.primaryFocus?.unfocus();
@@ -66,6 +67,38 @@ class _SchemePageState extends State<SchemePage> {
     onActivate: () => _activate(key),
   );
 
+  Widget _schemeGridToggle(int hiddenCount) => TableCell(
+    verticalAlignment: TableCellVerticalAlignment.intrinsicHeight,
+    child: FTappable(
+      semanticsLabel: _schemesExpanded ? '收起' : '展开全部方案',
+      semanticsExpanded: _schemesExpanded,
+      excludeSemantics: true,
+      onPress: () => setState(() => _schemesExpanded = !_schemesExpanded),
+      child: HairlineGridCell(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          spacing: 12,
+          children: [
+            if (!_schemesExpanded) const Icon(FLucideIcons.layers3, size: 32),
+            Text(
+              _schemesExpanded ? '收起' : '+$hiddenCount',
+              style: context.theme.typography.body.sm.copyWith(
+                fontSize: 34,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            Icon(
+              _schemesExpanded
+                  ? FLucideIcons.chevronUp
+                  : FLucideIcons.chevronDown,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final c = widget.controller;
@@ -76,7 +109,7 @@ class _SchemePageState extends State<SchemePage> {
     };
     final desktop = MediaQuery.sizeOf(context).width >= 720;
     final palette = AppPalette.of(context);
-    final cloudKeys = schemeKeys.where((key) => !c.isLocalScheme(key));
+    final cloudKeys = schemeKeys.where((key) => !c.isLocalScheme(key)).toList();
     final addons = _addonCells(context, c);
     final activeKey = c.installedPackages
         .where((package) => package.active)
@@ -120,17 +153,51 @@ class _SchemePageState extends State<SchemePage> {
           ),
         ),
         if (c.schemeUpdatesLoading) const FProgress(),
-        HairlineGridSection(
-          key: const ValueKey('cloud-schemes'),
-          minCellWidth: 320,
-          children: [
-            for (final key in cloudKeys)
-              HairlineGridCell(
-                color: key == activeKey ? palette.surface : null,
-                child: _package(key),
-              ),
-            ...addons,
-          ],
+        LayoutBuilder(
+          builder: (context, constraints) {
+            const minCellWidth = 320.0;
+            final cells = <Widget>[
+              for (final key in cloudKeys)
+                HairlineGridCell(
+                  color: key == activeKey ? palette.surface : null,
+                  child: _package(key),
+                ),
+              ...addons,
+            ];
+            final columns = desktop && constraints.hasBoundedWidth
+                ? (constraints.maxWidth / minCellWidth).floor().clamp(
+                    1,
+                    cells.length,
+                  )
+                : 1;
+            final collapsible = columns > 1 && cells.length > columns * 2;
+            final visibleCount = columns * 2 - 1;
+            final hiddenCount = cells.length - visibleCount;
+            if (collapsible && !_schemesExpanded) {
+              final activeScheme = c.activeSchemeKey;
+              var activeIndex = cloudKeys.indexOf(activeScheme);
+              if (activeIndex < 0) {
+                final addonKey = activeScheme == 'triple_pinyin_lssp'
+                    ? 'addon-rime-lssp'
+                    : 'addon-${activeScheme.replaceAll('_', '-')}';
+                activeIndex = cells.indexWhere(
+                  (cell) => cell.key == ValueKey(addonKey),
+                );
+              }
+              if (activeIndex >= visibleCount) {
+                cells[visibleCount - 1] = cells[activeIndex];
+              }
+              cells.removeRange(visibleCount, cells.length);
+            }
+            return HairlineGridSection(
+              key: const ValueKey('cloud-schemes'),
+              minCellWidth: minCellWidth,
+              children: [
+                ...cells,
+                if (collapsible) _schemeGridToggle(hiddenCount),
+              ],
+            );
+          },
         ),
         HairlineGridSection(
           minCellWidth: 440,

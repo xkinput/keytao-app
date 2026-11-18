@@ -987,6 +987,47 @@ pub fn get_schemas() -> Result<SchemaListDto, String> {
     )
 }
 
+pub fn get_rime_sync_settings() -> Result<RimeSyncSettingsDto, String> {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    return runtime::dto(keytao_app_core::rime_sync::read_settings(
+        &runtime::state()?.host.user_root()?,
+    )?);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err("Rime user data sync is only available on desktop".into())
+}
+
+pub async fn save_rime_sync_settings(
+    installation_id: String,
+    sync_dir: String,
+) -> Result<RimeSyncSettingsDto, String> {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        let state = runtime::state()?;
+        let _guard = state.install_lock.lock().await;
+        runtime::dto(keytao_app_core::rime_sync::save_settings(
+            &state.host.user_root()?,
+            &installation_id,
+            &sync_dir,
+        )?)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (installation_id, sync_dir);
+        Err("Rime user data sync is only available on desktop".into())
+    }
+}
+
+pub async fn sync_rime_user_data() -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        let state = runtime::state()?;
+        let _guard = state.install_lock.lock().await;
+        keytao_app_core::rime_sync::sync_user_data(state.host.clone()).await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err("Rime user data sync is only available on desktop".into())
+}
+
 pub fn select_schema(schema_id: String) -> Result<(), String> {
     keytao_app_core::ime_settings::select_schema(runtime::state()?.host.clone(), &schema_id)
         .map_err(|error| error.to_string())

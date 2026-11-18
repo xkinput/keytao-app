@@ -319,6 +319,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ReleaseInfoDto dco_decode_release_info_dto(dynamic raw);
 
   @protected
+  RimeSyncSettingsDto dco_decode_rime_sync_settings_dto(dynamic raw);
+
+  @protected
   RuntimeLogFileInfoDto dco_decode_runtime_log_file_info_dto(dynamic raw);
 
   @protected
@@ -743,6 +746,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReleaseInfoDto sse_decode_release_info_dto(SseDeserializer deserializer);
+
+  @protected
+  RimeSyncSettingsDto sse_decode_rime_sync_settings_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RuntimeLogFileInfoDto sse_decode_runtime_log_file_info_dto(
@@ -1295,6 +1303,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_release_info_dto(
     ReleaseInfoDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_rime_sync_settings_dto(
+    RimeSyncSettingsDto self,
     SseSerializer serializer,
   );
 

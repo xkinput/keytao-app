@@ -128,6 +128,15 @@ void unifiedGateCases(BridgePlatform platform) {
             platform == BridgePlatform.macOs ? findsOneWidget : findsNothing,
           );
           if (showShell) {
+            expect(AppPage.values.map((page) => page.id), [
+              'ime',
+              'scheme',
+              'about',
+              'debug',
+            ]);
+            expect(AppPage.about.shortcutDigit, 3);
+            expect(AppPage.debug.shortcutDigit, 4);
+            expect(find.byKey(const ValueKey('nav-extension')), findsNothing);
             if (platform == BridgePlatform.windows) {
               expect(find.text(AppStrings.windowsIme), findsOneWidget);
               expect(
@@ -202,6 +211,27 @@ void unifiedGateCases(BridgePlatform platform) {
                     PlatformDispatcher.instance.locale,
                   ),
                 );
+              }
+            }
+            if (platform == BridgePlatform.windows ||
+                platform == BridgePlatform.linux) {
+              Focus.of(tester.element(find.byType(AppShell))).requestFocus();
+              await tester.pump();
+              await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+              try {
+                for (final (key, character, page) in const [
+                  (LogicalKeyboardKey.digit3, '3', AppPage.about),
+                  (LogicalKeyboardKey.digit4, '4', AppPage.debug),
+                  (LogicalKeyboardKey.digit1, '1', AppPage.input),
+                ]) {
+                  await tester.sendKeyEvent(key, character: character);
+                  await tester.pumpAndSettle();
+                  expect(c.activePage, page);
+                  expect(find.byKey(PageStorageKey(page.id)), findsOneWidget);
+                  expect(tester.takeException(), isNull);
+                }
+              } finally {
+                await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
               }
             }
           }

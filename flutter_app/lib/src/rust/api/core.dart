@@ -385,6 +385,20 @@ Future<AndroidImeInputSettingsDto> setAndroidImeInputSettings({
 Future<SchemaListDto> getSchemas() =>
     RustLib.instance.api.crateApiCoreGetSchemas();
 
+Future<RimeSyncSettingsDto> getRimeSyncSettings() =>
+    RustLib.instance.api.crateApiCoreGetRimeSyncSettings();
+
+Future<RimeSyncSettingsDto> saveRimeSyncSettings({
+  required String installationId,
+  required String syncDir,
+}) => RustLib.instance.api.crateApiCoreSaveRimeSyncSettings(
+  installationId: installationId,
+  syncDir: syncDir,
+);
+
+Future<void> syncRimeUserData() =>
+    RustLib.instance.api.crateApiCoreSyncRimeUserData();
+
 Future<void> selectSchema({required String schemaId}) =>
     RustLib.instance.api.crateApiCoreSelectSchema(schemaId: schemaId);
 

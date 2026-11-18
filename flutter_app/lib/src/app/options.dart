@@ -93,7 +93,6 @@ const candidateFontDivisions = 26;
 enum AppPage {
   input('ime', AppStrings.ime),
   scheme('scheme', AppStrings.scheme),
-  extension('extension', AppStrings.extension),
   about('about', AppStrings.about),
   debug('debug', AppStrings.debug);
 

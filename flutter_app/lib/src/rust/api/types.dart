@@ -987,6 +987,31 @@ class ReleaseInfoDto {
           gitee == other.gitee;
 }
 
+class RimeSyncSettingsDto {
+  final String installationId;
+  final String syncDir;
+  final String effectiveSyncDir;
+
+  const RimeSyncSettingsDto({
+    required this.installationId,
+    required this.syncDir,
+    required this.effectiveSyncDir,
+  });
+
+  @override
+  int get hashCode =>
+      installationId.hashCode ^ syncDir.hashCode ^ effectiveSyncDir.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RimeSyncSettingsDto &&
+          runtimeType == other.runtimeType &&
+          installationId == other.installationId &&
+          syncDir == other.syncDir &&
+          effectiveSyncDir == other.effectiveSyncDir;
+}
+
 class RuntimeLogFileInfoDto {
   final String name;
   final BigInt size;

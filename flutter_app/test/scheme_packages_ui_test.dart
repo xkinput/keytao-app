@@ -189,6 +189,24 @@ Future<void> _pumpAddons(
   await tester.pumpAndSettle();
 }
 
+Future<void> _pumpSchemePage(
+  WidgetTester tester,
+  _PackageController controller,
+) async {
+  await tester.pumpWidget(
+    KeyTaoTheme(
+      platform: controller.info.platform,
+      home: FScaffold(
+        child: ListenableBuilder(
+          listenable: controller,
+          builder: (_, _) => SchemePage(controller: controller),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 List<String> _actionLabels(WidgetTester tester) => tester
     .widgetList<ActionButton>(find.byType(ActionButton))
     .map((button) => button.label)
@@ -1131,6 +1149,169 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+  for (final layout in [
+    (width: 1200.0, columns: 3),
+    (width: 900.0, columns: 2),
+    (width: 360.0, columns: 1),
+  ]) {
+    testWidgets('scheme grid collapses to two rows at ${layout.width}', (
+      tester,
+    ) async {
+      final c = _PackageController();
+      addTearDown(c.dispose);
+      _size(tester, Size(layout.width, 1000));
+      await _pumpSchemePage(tester, c);
+      final catalogue = find.byKey(const ValueKey('cloud-schemes'));
+      final table = find.descendant(
+        of: catalogue,
+        matching: find.byType(Table),
+      );
+      final expand = find.bySemanticsLabel('展开全部方案');
+      if (layout.columns == 1) {
+        expect(
+          tester.widget<HairlineGridSection>(catalogue).children,
+          hasLength(11),
+        );
+        expect(tester.widget<Table>(table).children, hasLength(11));
+        expect(expand, findsNothing);
+      } else {
+        final visibleCount = layout.columns * 2;
+        expect(
+          tester.widget<HairlineGridSection>(catalogue).children,
+          hasLength(visibleCount),
+        );
+        expect(tester.widget<Table>(table).children, hasLength(2));
+        expect(find.text('+${11 - visibleCount + 1}'), findsOneWidget);
+        expect(find.byKey(const ValueKey('addon-rime-lssp')), findsNothing);
+        expect(
+          tester.getSize(expand).width,
+          closeTo(tester.getSize(table).width / layout.columns, .01),
+        );
+        await tester.ensureVisible(expand);
+        await tester.tap(expand);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<HairlineGridSection>(catalogue).children,
+          hasLength(12),
+        );
+        expect(
+          tester.widget<Table>(table).children,
+          hasLength((12 / layout.columns).ceil()),
+        );
+      }
+      expect(
+        find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
+        findsNWidgets(5),
+      );
+      for (final key in [
+        'easy-en',
+        'wanxiang',
+        'rime-ice',
+        'rime-mint',
+        'rime-frost',
+        'rime-lssp',
+      ]) {
+        expect(find.byKey(ValueKey('addon-$key')), findsOneWidget);
+      }
+      if (layout.columns > 1) {
+        final collapse = find.bySemanticsLabel('收起');
+        expect(collapse, findsOneWidget);
+        await tester.ensureVisible(collapse);
+        await tester.tap(collapse);
+        await tester.pumpAndSettle();
+        expect(tester.widget<Table>(table).children, hasLength(2));
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('collapsed scheme grid keeps the active hidden package visible', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: 'xmjd-feiding',
+          active: true,
+          hasPackageZip: true,
+        ),
+      ];
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 1000));
+    await _pumpSchemePage(tester, c);
+    final catalogue = find.byKey(const ValueKey('cloud-schemes'));
+    final rows = find.descendant(
+      of: catalogue,
+      matching: find.byType(SchemePackageRow),
+    );
+    expect(
+      tester.widgetList<SchemePackageRow>(rows).map((row) => row.schemeKey),
+      ['keytao', 'xmjd', 'txjx', 'keydo', 'xmjd-feiding'],
+    );
+    expect(
+      find.byKey(const ValueKey('scheme-package-snow_jiandao')),
+      findsNothing,
+    );
+    expect(find.text('+7'), findsOneWidget);
+    final expand = find.bySemanticsLabel('展开全部方案');
+    await tester.ensureVisible(expand);
+    await tester.tap(expand);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widgetList<SchemePackageRow>(rows).map((row) => row.schemeKey),
+      ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao', 'xmjd-feiding'],
+    );
+    final collapse = find.bySemanticsLabel('收起');
+    expect(tester.getSize(collapse).height, greaterThan(0));
+    await tester.ensureVisible(collapse);
+    await tester.tap(collapse);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('scheme-package-snow_jiandao')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('collapsed scheme grid keeps standalone active add-ons visible', (
+    tester,
+  ) async {
+    final c = _PackageController();
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 1000));
+    for (final (schema, addon) in [
+      ('easy_en', 'easy-en'),
+      ('wanxiang', 'wanxiang'),
+      ('rime_ice', 'rime-ice'),
+      ('rime_mint', 'rime-mint'),
+      ('rime_frost', 'rime-frost'),
+      ('triple_pinyin_lssp', 'rime-lssp'),
+    ]) {
+      c.local = LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        schemas: [schema],
+      );
+      await _pumpSchemePage(tester, c);
+      expect(c.activeSchemeKey, schema);
+      final grid = tester.widget<HairlineGridSection>(
+        find.byKey(const ValueKey('cloud-schemes')),
+      );
+      expect(grid.children, hasLength(6));
+      expect(grid.children[4].key, ValueKey('addon-$addon'));
+      expect(find.byKey(ValueKey('addon-$addon')), findsOneWidget);
+      expect(find.text('+6'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('scheme sections separate local packages and deployment', (
     tester,
   ) async {
@@ -1356,6 +1537,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    final expand = find.bySemanticsLabel('展开全部方案');
+    await tester.ensureVisible(expand);
+    await tester.tap(expand);
+    await tester.pumpAndSettle();
     final catalogue = find.byKey(const ValueKey('cloud-schemes'));
     expect(
       find.descendant(
@@ -1384,6 +1569,7 @@ void main() {
       ),
       findsOneWidget,
     );
+    await tester.ensureVisible(find.text('非顶'));
     await tester.tap(find.text('非顶'));
     await tester.pumpAndSettle();
     expect(c.scheme, 'xmjd-feiding');
