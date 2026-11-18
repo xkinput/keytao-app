@@ -3220,7 +3220,21 @@ class AppController extends ChangeNotifier {
     await _persistSchemeSettings();
   });
 
-  Future<bool> open(String value) => run(() => _open(value));
+  Future<bool> open(String value) async {
+    if (_disposed) return false;
+    error = null;
+    try {
+      await _open(value);
+      return true;
+    } catch (failure) {
+      final message = errorText(failure);
+      error = _isInlineError(message) ? null : message;
+      return false;
+    } finally {
+      _changed();
+    }
+  }
+
   Future<void> _open(String value) async {
     if (isAndroid) {
       await android.openUrl(value);

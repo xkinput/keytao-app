@@ -16,6 +16,11 @@ const schemeRepositoryUrls = {
   'xmjd-feiding': 'https://github.com/hugh7007/xmjd6-rere',
   'txjx': 'https://github.com/wzxmer/rime-txjx',
   'keydo': 'https://github.com/pingshunhuangalex/rime-keydo',
+  'easy_en': 'https://github.com/BlindingDark/rime-easy-en',
+  'wanxiang': 'https://github.com/amzxyz/rime-wanxiang',
+  'rime_ice': 'https://github.com/iDvel/rime-ice',
+  'rime_mint': 'https://github.com/Mintimate/oh-my-rime',
+  'rime_frost': 'https://github.com/gaboolic/rime-frost',
 };
 // 星猫键道在同一个 release 里发两个包：顶功版 xmjd6.zip、非顶版 feiding-xmjd6.zip。
 // 选中「星猫键道」后再列一次具体文件；键名直接作为后端 scheme 参数，值即 asset 名。

@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +34,12 @@ class _PackageController extends ViewController {
   final actions = <String>[];
 
   void rebuild() => notifyListeners();
+
+  @override
+  Future<bool> open(String value) async {
+    actions.add('open:$value');
+    return true;
+  }
 
   @override
   void selectScheme(String value) {
@@ -302,6 +309,110 @@ void main() {
       },
     );
   }
+
+  testWidgets('add-on repository menus open by button and secondary tap', (
+    tester,
+  ) async {
+    final c = _PackageController();
+    addTearDown(c.dispose);
+    _size(tester, const Size(1000, 1200));
+    for (final busy in [false, true]) {
+      c.busy = busy;
+      await _pumpAddons(tester, c);
+      for (final (key, title, url) in const [
+        (
+          'addon-easy-en',
+          AppStrings.easyEnglish,
+          'https://github.com/BlindingDark/rime-easy-en',
+        ),
+        ('addon-wanxiang', '万象拼音', 'https://github.com/amzxyz/rime-wanxiang'),
+        ('addon-rime-ice', '雾凇拼音', 'https://github.com/iDvel/rime-ice'),
+        ('addon-rime-mint', '薄荷拼音', 'https://github.com/Mintimate/oh-my-rime'),
+        ('addon-rime-frost', '白霜拼音', 'https://github.com/gaboolic/rime-frost'),
+      ]) {
+        final card = find.byKey(ValueKey(key));
+        final more = find.descendant(
+          of: card,
+          matching: find.byIcon(FLucideIcons.ellipsis),
+        );
+        expect(more, findsOneWidget);
+        await tester.ensureVisible(more);
+        c.actions.clear();
+        await tester.tap(more);
+        await tester.pumpAndSettle();
+        final repository = find.widgetWithText(FItem, '仓库地址');
+        expect(repository, findsOneWidget, reason: '$key busy=$busy');
+        expect(tester.widget<FItem>(repository).onPress, isNotNull);
+        await tester.tap(repository);
+        await tester.pumpAndSettle();
+        expect(c.actions, ['open:$url']);
+
+        c.actions.clear();
+        final heading = find.descendant(of: card, matching: find.text(title));
+        await tester.ensureVisible(heading);
+        await tester.tap(
+          heading,
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        expect(repository, findsOneWidget);
+        expect(c.actions, isEmpty);
+        await tester.tap(repository);
+        await tester.pumpAndSettle();
+        expect(c.actions, ['open:$url']);
+      }
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('scheme card secondary tap opens its menu without activation', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: 'local-custom',
+          source: 'local',
+          displayName: 'Custom scheme',
+          active: false,
+          hasPackageZip: true,
+        ),
+      ];
+    addTearDown(c.dispose);
+    _size(tester, const Size(1000, 1200));
+    for (final busy in [false, true]) {
+      c.busy = busy;
+      for (final key in {...schemes.keys, 'xmjd-feiding', 'local-custom'}) {
+        await _pumpRow(tester, c, key);
+        final selected = c.scheme;
+        final title = key == 'local-custom'
+            ? 'Custom scheme'
+            : key.startsWith('xmjd')
+            ? schemes['xmjd']!
+            : schemeDisplayName(key);
+        await tester.tap(
+          find.text(title),
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(FItem), findsWidgets, reason: '$key busy=$busy');
+        expect(
+          find.widgetWithText(FItem, '仓库地址'),
+          key == 'local-custom' ? findsNothing : findsOneWidget,
+        );
+        expect(c.scheme, selected);
+        expect(c.actions, isEmpty);
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
+        expect(find.byType(FItem), findsNothing);
+      }
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   for (final latest in ['1', '2']) {
     testWidgets('Wanxiang variant replacement with latest=$latest', (
@@ -798,8 +909,14 @@ void main() {
         await tester.tap(find.byIcon(FLucideIcons.ellipsis));
         await tester.pumpAndSettle();
         expect(tester.widgetList<FItem>(find.byType(FItem)), isNotEmpty);
+        final repository = tester.widget<FItem>(
+          find.widgetWithText(FItem, '仓库地址'),
+        );
+        expect(repository.onPress, isNotNull);
         expect(
-          tester.widgetList<FItem>(find.byType(FItem)),
+          tester
+              .widgetList<FItem>(find.byType(FItem))
+              .where((item) => item != repository),
           everyElement(
             isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
           ),
