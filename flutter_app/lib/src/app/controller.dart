@@ -206,6 +206,11 @@ class AppController extends ChangeNotifier {
   String? imeUiError;
   String? debugError;
   String? debugNotice;
+  RimeSyncSettingsDto? rimeSyncSettings;
+  bool rimeSyncLoading = false;
+  bool rimeSyncing = false;
+  bool? rimeSyncSucceeded;
+  String? rimeSyncError;
   InstallProgressDto? installProgress;
   String? installingSchemeKey;
   InstallProgressDto? addonProgress;
@@ -754,6 +759,7 @@ class AppController extends ChangeNotifier {
     linuxImeError,
     imeUiError,
     debugError,
+    rimeSyncError,
     schemeSyncError,
     cloudTransferError,
     ...deploySteps.map((step) => step.message),
@@ -949,6 +955,7 @@ class AppController extends ChangeNotifier {
     unawaited(setWindowTitle());
     if (page == AppPage.debug) {
       sharedLogPath = null;
+      if (!isMobile) unawaited(refreshRimeSyncSettings());
       if (busy) {
         _logsWhenIdle = true;
       } else {
@@ -3471,6 +3478,80 @@ class AppController extends ChangeNotifier {
   Future<bool> resetAndroidSettings() =>
       _saveAndroid(androidDefaults, resetKeyboardLayout: true);
 
+  Future<void> refreshRimeSyncSettings() async {
+    if (_disposed || isMobile || busy || rimeSyncLoading) return;
+    rimeSyncLoading = true;
+    rimeSyncError = null;
+    _changed();
+    try {
+      rimeSyncSettings = await core.getRimeSyncSettings();
+    } catch (failure) {
+      rimeSyncError = errorText(failure);
+    } finally {
+      rimeSyncLoading = false;
+      _changed();
+    }
+  }
+
+  Future<bool> _rimeSyncAction(Future<void> Function() action) {
+    if (isMobile || rimeSyncLoading) return Future.value(false);
+    return run(() async {
+      rimeSyncError = null;
+      try {
+        await action();
+      } catch (failure) {
+        rimeSyncError = errorText(failure);
+        rethrow;
+      }
+    });
+  }
+
+  Future<void> _saveRimeSyncSettings(
+    String installationId,
+    String syncDir,
+  ) async {
+    rimeSyncSettings = await core.saveRimeSyncSettings(
+      installationId: installationId,
+      syncDir: syncDir,
+    );
+    rimeSyncSucceeded = null;
+  }
+
+  Future<bool> saveRimeSyncSettings(String installationId, String syncDir) =>
+      _rimeSyncAction(() => _saveRimeSyncSettings(installationId, syncDir));
+
+  Future<bool> pickRimeSyncDirectory(String installationId) =>
+      _rimeSyncAction(() async {
+        final selected = await pickDesktopDirectory();
+        if (selected == null || selected.isEmpty) return;
+        await _saveRimeSyncSettings(installationId, selected);
+      });
+
+  Future<bool> resetRimeSyncDirectory(String installationId) =>
+      saveRimeSyncSettings(installationId, '');
+
+  Future<bool> openRimeSyncDirectory() => _rimeSyncAction(() async {
+    if (rimeSyncSettings case final settings?) {
+      await Directory(settings.effectiveSyncDir).create(recursive: true);
+      await _open(settings.effectiveSyncDir);
+    }
+  });
+
+  Future<bool> syncRimeUserData() => _rimeSyncAction(() async {
+    rimeSyncing = true;
+    rimeSyncSucceeded = null;
+    _changed();
+    try {
+      await core.syncRimeUserData();
+      rimeSyncSucceeded = true;
+    } catch (_) {
+      rimeSyncSucceeded = false;
+      rethrow;
+    } finally {
+      rimeSyncing = false;
+    }
+  });
+
   Future<void> _readLogs() async {
     logsLoading = true;
     debugError = null;
@@ -3508,6 +3589,9 @@ class AppController extends ChangeNotifier {
 
   Future<bool> refreshLogs() async {
     if (_disposed || logsLoading) return false;
+    if (!isMobile && rimeSyncSettings == null) {
+      unawaited(refreshRimeSyncSettings());
+    }
     await _readLogs();
     return true;
   }

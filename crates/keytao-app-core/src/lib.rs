@@ -14,6 +14,7 @@ pub mod deploy;
 pub mod ime_host;
 pub mod ime_paths;
 pub mod ime_settings;
+pub mod rime_sync;
 pub mod ime_status;
 pub mod download;
 pub mod install;

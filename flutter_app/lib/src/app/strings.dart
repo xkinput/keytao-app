@@ -283,6 +283,28 @@ abstract final class AppStrings {
       locale.languageCode.startsWith('zh') ? '检查更新' : 'Check for updates';
   static String appUpToDate(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '已是最新版本' : 'Already up to date';
+  static String rimeSync(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '同步' : 'Sync';
+  static String syncInstallationId(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '同步文件夹名称' : 'Sync folder name';
+  static String syncDirectory(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '同步路径' : 'Sync path';
+  static String syncSave(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '保存' : 'Save';
+  static String syncChoose(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '选择' : 'Choose';
+  static String syncReset(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '重置' : 'Reset';
+  static String syncOpen(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '打开' : 'Open';
+  static String syncNow(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '立即同步' : 'Sync now';
+  static String syncing(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '同步中' : 'Syncing';
+  static String syncDone(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '完成' : 'Complete';
+  static String syncFailed(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '失败' : 'Failed';
   static String appUpdateFailure(Locale locale, String message) =>
       locale.languageCode.startsWith('zh')
       ? '检查更新失败：$message'
