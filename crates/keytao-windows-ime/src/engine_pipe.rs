@@ -20,7 +20,7 @@ use windows::{
     Win32::{
         Foundation::{
             LocalFree, ERROR_ACCESS_DENIED, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, GENERIC_READ,
-            GENERIC_WRITE, HANDLE, HLOCAL, WAIT_OBJECT_0,
+            GENERIC_WRITE, HANDLE, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT},
@@ -49,6 +49,7 @@ mod generation_activity;
 use generation_activity::{reaper_wait, GenerationActivity};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(80);
+const KEY_TIMEOUT: Duration = Duration::from_secs(2);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30);
 const GENERATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -63,6 +64,8 @@ struct Shared {
     control: Mutex<Option<Connection>>,
     active: AtomicBool,
     reload_required: AtomicBool,
+    reconnect_required: AtomicBool,
+    consume_failed_key: AtomicBool,
     generation: AtomicU64,
     epoch: AtomicU64,
     activity: Mutex<GenerationActivity>,
@@ -72,11 +75,126 @@ struct Shared {
 #[derive(Default)]
 struct PipeState {
     connection: Option<Connection>,
+    policy: Option<InputContextPolicy>,
+    ascii_mode: Option<bool>,
+    context_ascii_mode: Option<bool>,
+}
+
+impl PipeState {
+    fn remember(&mut self, request: &Request, response: &Response) {
+        let state = match response {
+            Response::Key(Some(result)) => &result.state,
+            Response::State(Some(state)) | Response::English(Ok(state)) => state,
+            _ => return,
+        };
+        if let Request::SetInputPolicy { policy } = request {
+            self.policy = Some(*policy);
+        }
+        match request {
+            Request::SetContextAsciiMode { enabled } => self.context_ascii_mode = *enabled,
+            Request::SetEnglishMode { .. } => self.context_ascii_mode = None,
+            Request::ProcessKeys { .. } | Request::ProcessEnter
+                if self.ascii_mode != Some(state.ascii_mode) =>
+            {
+                self.context_ascii_mode = None
+            }
+            _ => {}
+        }
+        if !state.schema_id.is_empty() {
+            self.ascii_mode = Some(state.ascii_mode);
+        }
+    }
+
+    fn settings(&self) -> Vec<Request> {
+        let mut settings = Vec::new();
+        if let Some(policy) = self.policy {
+            settings.push(Request::SetInputPolicy { policy });
+        }
+        // Normal language/schema state is shared by the server, not a context override.
+        if let Some(ascii) = self.context_ascii_mode {
+            settings.push(Request::SetContextAsciiMode {
+                enabled: Some(ascii),
+            });
+        }
+        settings
+    }
+}
+
+fn request_timeout(request: &Request) -> Duration {
+    match request {
+        Request::Generation => REQUEST_TIMEOUT,
+        _ => KEY_TIMEOUT,
+    }
+}
+
+#[derive(Debug)]
+struct RequestError {
+    message: String,
+    written: bool,
+    timed_out: bool,
+}
+
+impl RequestError {
+    fn timeout() -> Self {
+        Self {
+            message: "engine pipe request timed out".into(),
+            written: false,
+            timed_out: true,
+        }
+    }
+
+    fn consume_key(&self) -> bool {
+        self.written && self.timed_out
+    }
+}
+
+impl From<String> for RequestError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            written: false,
+            timed_out: false,
+        }
+    }
+}
+
+impl From<&str> for RequestError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl From<RequestError> for String {
+    fn from(error: RequestError) -> Self {
+        error.message
+    }
 }
 
 impl PipeEngine {
     fn request(&self, request: Request) -> Option<Response> {
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        self.request_with(
+            request,
+            |inner, deadline| self.reconnect(inner, deadline),
+            |inner, request, deadline| Some(inner.connection.as_mut()?.request(request, deadline)),
+        )
+    }
+
+    fn request_with(
+        &self,
+        request: Request,
+        reconnect: impl FnOnce(&mut PipeState, Instant) -> Result<u64, String>,
+        send: impl FnOnce(&mut PipeState, Request, Instant) -> Option<Result<Response, RequestError>>,
+    ) -> Option<Response> {
+        let started = Instant::now();
+        let timeout = request_timeout(&request);
+        let deadline = started + timeout;
+        let key_request = matches!(
+            &request,
+            Request::ProcessKeys { .. } | Request::ProcessEnter
+        );
+        self.shared
+            .consume_failed_key
+            .store(false, Ordering::Release);
         if !self.shared.active.load(Ordering::Acquire)
             || self.shared.reload_required.load(Ordering::Acquire)
         {
@@ -90,7 +208,25 @@ impl PipeEngine {
         {
             return None;
         }
-        let result = inner.connection.as_mut()?.request(request, deadline);
+        if self.shared.reconnect_required.load(Ordering::Acquire) {
+            let generation = match reconnect(&mut inner, deadline) {
+                Ok(generation) => generation,
+                Err(error) => {
+                    self.shared.reload_required.store(true, Ordering::Release);
+                    log_disconnect(&error);
+                    return None;
+                }
+            };
+            if self.shared.generation.load(Ordering::Acquire) != generation {
+                inner.connection = None;
+                self.shared.reload_required.store(true, Ordering::Release);
+                return None;
+            }
+            self.shared
+                .reconnect_required
+                .store(false, Ordering::Release);
+        }
+        let result = send(&mut inner, request.clone(), deadline)?;
         if self.shared.epoch.load(Ordering::Acquire) != epoch
             || !self.shared.active.load(Ordering::Acquire)
         {
@@ -103,15 +239,70 @@ impl PipeEngine {
                 self.shared.reload_required.store(true, Ordering::Release);
                 None
             }
-            Ok(response) => Some(response),
+            Ok(response) => {
+                inner.remember(&request, &response);
+                Some(response)
+            }
             Err(error) => {
                 inner.connection = None;
-                self.shared.reload_required.store(true, Ordering::Release);
+                let consume = key_request && error.consume_key();
+                self.shared
+                    .consume_failed_key
+                    .store(consume, Ordering::Release);
+                if consume {
+                    self.shared.epoch.fetch_add(1, Ordering::AcqRel);
+                    self.shared
+                        .reconnect_required
+                        .store(true, Ordering::Release);
+                } else {
+                    self.shared.reload_required.store(true, Ordering::Release);
+                }
                 drop(inner);
-                log_disconnect(&error);
+                if key_request && error.timed_out {
+                    keytao_core::rt_log!(
+                        keytao_core::runtime_log::Level::Info,
+                        "ipc",
+                        "key_request_timeout",
+                        key = format!("{request:?}"),
+                        duration_ms = started.elapsed().as_millis(),
+                        timeout_ms = timeout.as_millis(),
+                        written = error.written
+                    );
+                }
+                log_disconnect(&error.message);
                 None
             }
         }
+    }
+
+    fn reconnect(&self, inner: &mut PipeState, deadline: Instant) -> Result<u64, String> {
+        let (mut connection, control, _) = Connection::connect_until(
+            self.shared
+                .reaper
+                .get()
+                .ok_or("pipe reaper unavailable")?
+                .clone(),
+            deadline,
+        )?;
+        for setting in inner.settings() {
+            match connection.request(setting, deadline)? {
+                Response::State(Some(_)) | Response::English(Ok(_)) => {}
+                _ => return Err("could not restore engine session settings".into()),
+            }
+        }
+        let state = connection.request(Request::GetState, deadline)?;
+        if !matches!(state, Response::State(Some(_))) {
+            return Err("could not resync engine session state".into());
+        }
+        inner.remember(&Request::GetState, &state);
+        let generation = connection.generation;
+        *self
+            .shared
+            .control
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(control);
+        inner.connection = Some(connection);
+        Ok(generation)
     }
 }
 
@@ -120,6 +311,12 @@ impl ImeEngineBackend for PipeEngine {
         self.shared.active.store(false, Ordering::Release);
         let epoch = self.shared.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.reload_required.store(false, Ordering::Release);
+        self.shared
+            .reconnect_required
+            .store(false, Ordering::Release);
+        self.shared
+            .consume_failed_key
+            .store(false, Ordering::Release);
         if self.shared.reaper.get().is_none() {
             let reaper = start_reaper(Arc::downgrade(&self.shared))?;
             let _ = self.shared.reaper.set(reaper);
@@ -143,6 +340,9 @@ impl ImeEngineBackend for PipeEngine {
             .generation
             .store(connection.generation, Ordering::Release);
         inner.connection = Some(connection);
+        inner.policy = None;
+        inner.ascii_mode = None;
+        inner.context_ascii_mode = None;
         self.shared.active.store(true, Ordering::Release);
         drop(inner);
         let _ = self
@@ -175,6 +375,12 @@ impl ImeEngineBackend for PipeEngine {
         self.shared.active.store(false, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::AcqRel);
         self.shared.reload_required.store(false, Ordering::Release);
+        self.shared
+            .reconnect_required
+            .store(false, Ordering::Release);
+        self.shared
+            .consume_failed_key
+            .store(false, Ordering::Release);
         if let Ok(mut inner) = self.shared.inner.try_lock() {
             // Disconnect releases the server session without a second STA wait.
             inner.connection = None;
@@ -202,6 +408,10 @@ impl ImeEngineBackend for PipeEngine {
             .into_key_result()
             .ok()
             .flatten()
+    }
+
+    fn consume_failed_key(&self) -> bool {
+        self.shared.consume_failed_key.swap(false, Ordering::AcqRel)
     }
 
     fn select_candidate_on_page(&self, index: usize) -> Option<ImeState> {
@@ -259,7 +469,13 @@ struct Connection {
 
 impl Connection {
     fn connect(reaper: Sender<ReaperMessage>) -> Result<(Self, Self, EngineHandle), String> {
-        let deadline = Instant::now() + BUILD_TIMEOUT;
+        Self::connect_until(reaper, Instant::now() + BUILD_TIMEOUT)
+    }
+
+    fn connect_until(
+        reaper: Sender<ReaperMessage>,
+        deadline: Instant,
+    ) -> Result<(Self, Self, EngineHandle), String> {
         let mut connection = Self::open(reaper.clone(), deadline)?;
         let schema_id = match connection.request(Request::CreateSession, deadline)? {
             Response::Handle { schema_id } => schema_id,
@@ -317,39 +533,47 @@ impl Connection {
         Ok(connection)
     }
 
-    fn request(&mut self, request: Request, deadline: Instant) -> Result<Response, String> {
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or("IPC sequence exhausted")?;
-        let mut frame = Vec::new();
-        write_frame(
-            &mut frame,
-            &RequestEnvelope {
-                seq: self.sequence,
-                message: request,
-            },
-        )
-        .map_err(|error| format!("encode engine request: {error}"))?;
-        while !frame.is_empty() {
-            let (buffer, count) = self.transfer(frame, false, deadline)?;
-            if count == 0 {
-                return Err("engine pipe disconnected while writing".into());
+    fn request(&mut self, request: Request, deadline: Instant) -> Result<Response, RequestError> {
+        let mut written = false;
+        let result = (|| {
+            self.sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or("IPC sequence exhausted")?;
+            let mut frame = Vec::new();
+            write_frame(
+                &mut frame,
+                &RequestEnvelope {
+                    seq: self.sequence,
+                    message: request,
+                },
+            )
+            .map_err(|error| format!("encode engine request: {error}"))?;
+            while !frame.is_empty() {
+                let (buffer, count) = self.transfer(frame, false, deadline)?;
+                if count == 0 {
+                    return Err("engine pipe disconnected while writing".into());
+                }
+                frame = buffer[count..].to_vec();
             }
-            frame = buffer[count..].to_vec();
-        }
-        let header = self.read_exact(4, deadline)?;
-        let length = u32::from_le_bytes(header.as_slice().try_into().unwrap()) as usize;
-        if length > MAX_FRAME_SIZE {
-            return Err("engine response exceeds 1 MiB".into());
-        }
-        let mut frame = header;
-        frame.extend(self.read_exact(length, deadline)?);
-        read_response(&mut Cursor::new(frame), self.sequence)
-            .map_err(|error| format!("decode engine response: {error}"))
+            written = true;
+            let header = self.read_exact(4, deadline)?;
+            let length = u32::from_le_bytes(header.as_slice().try_into().unwrap()) as usize;
+            if length > MAX_FRAME_SIZE {
+                return Err("engine response exceeds 1 MiB".into());
+            }
+            let mut frame = header;
+            frame.extend(self.read_exact(length, deadline)?);
+            read_response(&mut Cursor::new(frame), self.sequence)
+                .map_err(|error| RequestError::from(format!("decode engine response: {error}")))
+        })();
+        result.map_err(|mut error| {
+            error.written = written;
+            error
+        })
     }
 
-    fn read_exact(&self, length: usize, deadline: Instant) -> Result<Vec<u8>, String> {
+    fn read_exact(&self, length: usize, deadline: Instant) -> Result<Vec<u8>, RequestError> {
         let mut output = Vec::with_capacity(length);
         while output.len() < length {
             let (buffer, count) = self.transfer(vec![0; length - output.len()], true, deadline)?;
@@ -366,9 +590,9 @@ impl Connection {
         buffer: Vec<u8>,
         read: bool,
         deadline: Instant,
-    ) -> Result<(Vec<u8>, usize), String> {
+    ) -> Result<(Vec<u8>, usize), RequestError> {
         if Instant::now() >= deadline {
-            return Err("engine pipe request timed out".into());
+            return Err(RequestError::timeout());
         }
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
             .map_err(|error| format!("create pipe I/O event: {error}"))?;
@@ -400,7 +624,7 @@ impl Connection {
         };
         if let Err(error) = &started {
             if error.code() != ERROR_IO_PENDING.to_hresult() {
-                return Err(format!("start pipe I/O: {error}"));
+                return Err(format!("start pipe I/O: {error}").into());
             }
         }
         if started.is_err() {
@@ -411,7 +635,11 @@ impl Connection {
                 // CancelIoEx is nonblocking. Keep every kernel-visible allocation
                 // alive until a background reaper observes actual completion.
                 self.cancel_pending(pending);
-                return Err("engine pipe request timed out or wait failed".into());
+                return Err(if wait == WAIT_TIMEOUT {
+                    RequestError::timeout()
+                } else {
+                    format!("wait for pipe I/O failed: {wait:?}").into()
+                });
             }
         }
         let mut count = 0;
@@ -421,7 +649,7 @@ impl Connection {
             if error.code() == ERROR_IO_INCOMPLETE.to_hresult() {
                 self.cancel_pending(pending);
             }
-            return Err(format!("complete pipe I/O: {error}"));
+            return Err(format!("complete pipe I/O: {error}").into());
         }
         Ok((pending.buffer, count as usize))
     }
@@ -535,7 +763,10 @@ fn reap_pending(receiver: Receiver<ReaperMessage>, shared: std::sync::Weak<Share
 }
 
 fn poll_generation(shared: &Shared, synchronous: bool) {
-    if !shared.active.load(Ordering::Acquire) || shared.reload_required.load(Ordering::Acquire) {
+    if !shared.active.load(Ordering::Acquire)
+        || shared.reload_required.load(Ordering::Acquire)
+        || shared.reconnect_required.load(Ordering::Acquire)
+    {
         return;
     }
     let deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -550,7 +781,10 @@ fn poll_generation(shared: &Shared, synchronous: bool) {
         };
         control
     };
-    if !shared.active.load(Ordering::Acquire) || shared.reload_required.load(Ordering::Acquire) {
+    if !shared.active.load(Ordering::Acquire)
+        || shared.reload_required.load(Ordering::Acquire)
+        || shared.reconnect_required.load(Ordering::Acquire)
+    {
         return;
     }
     let epoch = shared.epoch.load(Ordering::Acquire);
@@ -569,6 +803,22 @@ fn poll_generation(shared: &Shared, synchronous: bool) {
         *control = None;
     }
     drop(control);
+    apply_generation_response(shared, epoch, response);
+}
+
+fn apply_generation_response(
+    shared: &Shared,
+    epoch: u64,
+    response: Result<Response, RequestError>,
+) {
+    // Serialize the decision with key timeouts, which must recover without a State reload.
+    let mut inner = shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+    if !shared.active.load(Ordering::Acquire)
+        || shared.epoch.load(Ordering::Acquire) != epoch
+        || shared.reconnect_required.load(Ordering::Acquire)
+    {
+        return;
+    }
     match response {
         Ok(Response::Generation(generation)) => {
             if shared.generation.load(Ordering::Acquire) != generation {
@@ -577,18 +827,14 @@ fn poll_generation(shared: &Shared, synchronous: bool) {
         }
         Ok(Response::Err(EngineError::Busy)) => {}
         Ok(_) => {
-            if let Ok(mut inner) = shared.inner.try_lock() {
-                inner.connection = None;
-            }
+            inner.connection = None;
             shared.reload_required.store(true, Ordering::Release);
             log_disconnect("invalid engine generation response");
         }
         Err(error) => {
-            if let Ok(mut inner) = shared.inner.try_lock() {
-                inner.connection = None;
-            }
+            inner.connection = None;
             shared.reload_required.store(true, Ordering::Release);
-            log_disconnect(&error);
+            log_disconnect(&error.message);
         }
     }
 }
@@ -686,4 +932,287 @@ fn log_disconnect(error: &str) {
         "pipe_disconnected",
         msg = error
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> Request {
+        Request::ProcessKeys {
+            keys: vec![(b'0' as u32, 0)],
+        }
+    }
+
+    fn engine() -> PipeEngine {
+        let engine = PipeEngine::default();
+        engine.shared.active.store(true, Ordering::Release);
+        engine
+    }
+
+    fn written_timeout(engine: &PipeEngine) {
+        assert!(engine
+            .request_with(
+                key(),
+                |_, _| panic!("connected key must not reconnect"),
+                |_, _, _| Some(Err(RequestError {
+                    written: true,
+                    ..RequestError::timeout()
+                })),
+            )
+            .is_none());
+        assert!(engine.shared.consume_failed_key.load(Ordering::Acquire));
+        assert!(engine.shared.reconnect_required.load(Ordering::Acquire));
+        assert!(!engine.reload_needed());
+    }
+
+    #[test]
+    fn session_requests_allow_slow_lua_but_generation_stays_short() {
+        for request in [
+            key(),
+            Request::ProcessEnter,
+            Request::Reset,
+            Request::GetState,
+            Request::SetInputPolicy {
+                policy: InputContextPolicy::default(),
+            },
+            Request::SetContextAsciiMode { enabled: None },
+            Request::SelectCandidate { index: 0 },
+            Request::ChangePage { backward: false },
+        ] {
+            assert_eq!(request_timeout(&request), Duration::from_secs(2));
+        }
+        assert_eq!(
+            request_timeout(&Request::Generation),
+            Duration::from_millis(80)
+        );
+    }
+
+    #[test]
+    fn only_written_timeouts_consume_failed_keys() {
+        for (written, timed_out, expected) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, false),
+            (false, false, false),
+        ] {
+            let engine = engine();
+            let error = RequestError {
+                written,
+                timed_out,
+                message: "pipe failure".into(),
+            };
+            assert!(engine
+                .request_with(key(), |_, _| unreachable!(), |_, _, _| Some(Err(error)))
+                .is_none());
+            assert_eq!(engine.consume_failed_key(), expected);
+            assert_eq!(
+                engine.shared.reconnect_required.load(Ordering::Acquire),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn next_key_reconnects_then_processes_without_entering_reload() {
+        let engine = engine();
+        written_timeout(&engine);
+        let reconnected = std::cell::Cell::new(false);
+        let response = engine.request_with(key(), |_, _| {
+            reconnected.set(true);
+            Ok(0)
+        }, |_, request, _| {
+            assert!(reconnected.get(), "recover before sending the next key");
+            assert!(matches!(request, Request::ProcessKeys { keys } if keys == vec![(b'0' as u32, 0)]));
+            Some(Ok(Response::Key(Some(KeyProcessResult { accepted: true, state: ImeState::empty() }))))
+        });
+        assert!(
+            response
+                .unwrap()
+                .into_key_result()
+                .unwrap()
+                .unwrap()
+                .accepted
+        );
+        assert!(!engine.consume_failed_key());
+        assert!(!engine.shared.reconnect_required.load(Ordering::Acquire));
+        assert!(!engine.reload_needed());
+    }
+
+    #[test]
+    fn reconnect_failure_before_next_key_write_passes_through_and_requires_rebuild() {
+        for first_request in [key(), Request::SetContextAsciiMode { enabled: None }] {
+            let engine = engine();
+            written_timeout(&engine);
+            assert!(engine
+                .request_with(
+                    first_request,
+                    |_, deadline| {
+                        assert!(deadline <= Instant::now() + KEY_TIMEOUT);
+                        Err("connect failed".into())
+                    },
+                    |_, _, _| panic!("must not write after connect failure")
+                )
+                .is_none());
+            assert!(!engine.consume_failed_key());
+            assert!(engine.reload_needed());
+            for request in [Request::GetState, Request::ProcessEnter, key()] {
+                assert!(engine
+                    .request_with(
+                        request,
+                        |_, _| panic!("must not reconnect again before background rebuild"),
+                        |_, _, _| panic!("must not write before background rebuild")
+                    )
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn reconnect_generation_change_requires_reload_before_next_key_write() {
+        let engine = engine();
+        engine.shared.generation.store(7, Ordering::Release);
+        written_timeout(&engine);
+        assert!(engine
+            .request_with(
+                key(),
+                |_, _| Ok(8),
+                |_, _, _| panic!("must not write a key after generation changed")
+            )
+            .is_none());
+        assert!(engine.reload_needed());
+        assert_eq!(engine.shared.generation.load(Ordering::Acquire), 7);
+        assert!(!engine.consume_failed_key());
+    }
+
+    #[test]
+    fn failed_key_consumption_is_taken_once_without_another_request() {
+        let engine = engine();
+        written_timeout(&engine);
+        assert!(engine.consume_failed_key());
+        assert!(
+            !engine.consume_failed_key(),
+            "a later key skipped before sending a request must pass through"
+        );
+    }
+
+    #[test]
+    fn recovery_uses_mode_after_key_toggle_instead_of_old_setter() {
+        let mut inner = PipeState::default();
+        let mut state = ImeState::empty();
+        state.schema_id = "xmjd6".into();
+        state.ascii_mode = true;
+        inner.remember(
+            &Request::SetEnglishMode { enabled: true },
+            &Response::English(Ok(state.clone())),
+        );
+        state.ascii_mode = false;
+        inner.remember(
+            &key(),
+            &Response::Key(Some(KeyProcessResult {
+                state,
+                accepted: true,
+            })),
+        );
+        assert!(
+            inner.settings().is_empty(),
+            "use the server's current global mode"
+        );
+        inner.remember(
+            &Request::SetContextAsciiMode {
+                enabled: Some(false),
+            },
+            &Response::State(Some(ImeState {
+                schema_id: "xmjd6".into(),
+                ..ImeState::empty()
+            })),
+        );
+        assert!(matches!(
+            inner.settings().as_slice(),
+            [Request::SetContextAsciiMode {
+                enabled: Some(false)
+            }]
+        ));
+        inner.remember(
+            &key(),
+            &Response::Key(Some(KeyProcessResult {
+                state: ImeState {
+                    schema_id: "xmjd6".into(),
+                    ascii_mode: true,
+                    ..ImeState::empty()
+                },
+                accepted: true,
+            })),
+        );
+        assert!(
+            inner.settings().is_empty(),
+            "a key toggle clears the context override"
+        );
+        inner.remember(
+            &Request::SetInputPolicy {
+                policy: InputContextPolicy::sensitive(),
+            },
+            &Response::State(Some(ImeState::empty())),
+        );
+        assert!(
+            matches!(inner.settings().first(), Some(Request::SetInputPolicy { policy }) if !policy.composing)
+        );
+    }
+
+    #[test]
+    fn old_generation_timeout_cannot_turn_key_recovery_into_reload() {
+        let engine = engine();
+        let epoch = engine.shared.epoch.load(Ordering::Acquire);
+        written_timeout(&engine);
+        apply_generation_response(&engine.shared, epoch, Err(RequestError::timeout()));
+        assert!(!engine.reload_needed());
+        assert!(engine.shared.reconnect_required.load(Ordering::Acquire));
+        assert!(engine.consume_failed_key());
+        assert!(engine
+            .request_with(key(), |_, _| Ok(0), |_, _, _| Some(Ok(Response::Key(None))))
+            .is_some());
+        apply_generation_response(&engine.shared, epoch, Err(RequestError::timeout()));
+        assert!(
+            !engine.reload_needed(),
+            "old poll must stay stale after reconnect"
+        );
+    }
+
+    #[test]
+    fn reset_reconnect_failure_does_not_reuse_previous_key_consumption() {
+        let engine = engine();
+        written_timeout(&engine);
+        assert!(engine
+            .request_with(
+                Request::Reset,
+                |_, _| Err("connect failed".into()),
+                |_, _, _| panic!("must not write after connect failure")
+            )
+            .is_none());
+        assert!(!engine.consume_failed_key());
+        assert!(engine.reload_needed());
+    }
+
+    #[test]
+    fn generation_failure_is_applied_after_current_key_releases_connection() {
+        let engine = engine();
+        let inner = engine.shared.inner.lock().unwrap();
+        let shared = engine.shared.clone();
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let worker_ready = ready.clone();
+        let (done, completed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            apply_generation_response(&shared, 0, Err(RequestError::timeout()));
+            done.send(()).unwrap();
+        });
+        ready.wait();
+        assert_eq!(
+            completed.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(inner);
+        worker.join().unwrap();
+        assert!(engine.reload_needed());
+    }
 }

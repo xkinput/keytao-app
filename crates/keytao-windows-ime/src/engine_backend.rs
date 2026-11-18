@@ -52,6 +52,10 @@ pub trait ImeEngineBackend: Send + Sync {
         None
     }
     fn drop_session(&self);
+    /// Take the consume decision for a written key that timed out, at most once.
+    fn consume_failed_key(&self) -> bool {
+        false
+    }
     fn process_key(&self, keysym: u32, mods: u32) -> Option<KeyProcessResult>;
     fn process_keys(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult>;
     fn process_enter(&self) -> Option<KeyProcessResult>;

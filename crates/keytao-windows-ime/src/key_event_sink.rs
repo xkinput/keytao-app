@@ -2306,12 +2306,14 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let mut result = match result {
                 Some(r) => r,
                 None => {
-                    append_key_diagnostic!("OnKeyDown result=false");
+                    let consumed =
+                        runtime_session(&state).is_some_and(|session| session.consume_failed_key());
+                    append_key_diagnostic!("OnKeyDown result=false eat={consumed}");
                     // Another text service in this host may be deploying a
                     // new public snapshot. Core declines without waiting for
                     // its reload lock; do not leave obsolete candidates up.
                     hide_candidate_window(&state);
-                    return Ok(BOOL::from(false));
+                    return Ok(BOOL::from(consumed));
                 }
             };
             complete_unhandled_key(keysym, mods, &mut result);
@@ -2417,7 +2419,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(result) = result else {
                 append_key_diagnostic!("OnKeyUp shift={is_shift} result=false");
                 hide_candidate_window(&state);
-                return Ok(BOOL::from(false));
+                return Ok(BOOL::from(
+                    runtime_session(&state).is_some_and(|session| session.consume_failed_key()),
+                ));
             };
             append_key_diagnostic!(
                 "OnKeyUp shift={is_shift} accepted={} ascii={}->{}",
