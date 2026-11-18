@@ -43,7 +43,7 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 实现按 Microsoft TSF 文档保持这些边界：
 
 - text service 除标准 COM in-proc server 注册外，还要通过现代 `RegisterProfile`（旧系统回退为 `ITfInputProcessorProfiles::Register` + `AddLanguageProfile`）和 `ITfCategoryMgr::RegisterCategory` 注册到 TSF。
-- IME branding icon 必须嵌入 DLL/EXE。KeyTao 的 PE 资源 ID 1 使用与 macOS 输入源一致的白色五角星品牌图形，深色底保证其在 Windows 浅色任务栏仍可辨识，并包含 `16/20/24/32/40/48` 六档 32-bit alpha frame；`RegisterProfile` 使用 DLL 路径与负资源 ID，发布验证会以 image resource 模式加载 DLL 并验证该资源，不再依赖外置 `.ico`。资源 ID 2/3 继续独立表示“中/EN”模式，品牌与输入模式不混用。
+- IME branding icon 必须嵌入 DLL/EXE。KeyTao 的 PE 资源 ID 1 使用 keytao-next 的彩色星形 Tao 图标（`ime-brand-source.png` 裁切生成，浅色与深色任务栏都可辨识），并包含 `16/20/24/32/40/48` 六档 32-bit alpha frame；`RegisterProfile` 使用 DLL 路径与负资源 ID，发布验证会以 image resource 模式加载 DLL 并验证该资源，不再依赖外置 `.ico`。资源 ID 2/3 继续独立表示“中/EN”模式，品牌与输入模式不混用。
 - 安装后要调用 `InstallLayoutOrTip`，把 `<LangID>:{CLSID}{ProfileGUID}` 加进当前用户输入法列表；只启用 language profile 仍可能导致输入切换器里可见但不能真正切换。
 - 现代 Windows 可能查询 `ITfTextInputProcessorEx`；KeyTao 同时实现 `ITfTextInputProcessor` 和 `ITfTextInputProcessorEx`。两条激活路径共用轻量接线逻辑，并通过 `ITfThreadMgrEx::GetActiveFlags` 保存 thread mode。
 - `ITfKeyEventSink` 由 text service 实现，并通过 `ITfKeystrokeMgr::AdviseKeyEventSink` 安装到当前 `ITfThreadMgr`。

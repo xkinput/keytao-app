@@ -276,23 +276,28 @@ def generate_macos():
 
 
 def generate_windows():
+    # The Windows brand icon is cropped from keytao-next's app/icon.png (kept as
+    # ime-brand-source.png). Needs Pillow: uv run --with pillow python scripts/...
+    from PIL import Image, ImageFilter
+
     directory = ROOT / "crates/keytao-windows-ime"
-    svg = directory / "ime-brand.svg"
-    star = svg_path(fit_star((11.2, 12.8, 52.8, 51.1)))
-    tao = svg_path(place_tao(20.25, 24.98, 23.5))
-    body = ('  <rect x="3" y="3" width="58" height="58" rx="14" fill="#202124"/>\n'
-            f'  <path id="keytao-star" fill="#ffffff" d="{star}"/>')
-    write_svg(svg, 64, 64, body + f'\n  <path id="keytao-tao" fill="#202124" d="{tao}"/>')
-    with tempfile.TemporaryDirectory(prefix="keytao-ime-icons-") as temporary:
-        plain = Path(temporary) / "plain.svg"
-        write_svg(plain, 64, 64, body)
-        frames = []
-        for size in ICO_SIZES:
-            frame = Path(temporary) / f"{size}.png"
-            # Tao collapses into gray specks at 16/20px; retain the plain star there.
-            render_svg(plain if size <= 20 else svg, frame, size, size, 64)
-            frames.append(str(frame))
-        subprocess.run(["magick", *frames, "-strip", str(directory / "ime-brand.ico")], check=True)
+    image = Image.open(directory / "ime-brand-source.png").convert("RGBA")
+    # Erode the alpha so the faint scatter dots do not widen the crop.
+    solid = image.getchannel("A").point(lambda v: 255 if v > 160 else 0)
+    left, top, right, bottom = solid.filter(ImageFilter.MinFilter(9)).getbbox()
+    half = max(right - left, bottom - top) * 51 // 100
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    square = Image.new("RGBA", (2 * half, 2 * half))
+    square.paste(image.crop((cx - half, cy - half, cx + half, cy + half)))
+    frames = []
+    for size in ICO_SIZES:
+        frame = square.resize((size, size), Image.LANCZOS)
+        if size <= 24:
+            # Thin strokes wash out at taskbar sizes.
+            frame.putalpha(frame.getchannel("A").point(lambda v: min(255, int(v * 1.8))))
+        frames.append(frame)
+    frames[-1].save(directory / "ime-brand.ico", format="ICO",
+                    sizes=[(s, s) for s in ICO_SIZES], append_images=frames[:-1])
 
 
 def main():
