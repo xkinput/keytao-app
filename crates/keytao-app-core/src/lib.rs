@@ -18,6 +18,7 @@ pub mod ime_status;
 pub mod download;
 pub mod install;
 mod package_store;
+mod package_fs;
 mod addon_store;
 mod downloaded_addon;
 mod pinyin_addons;
