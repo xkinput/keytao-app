@@ -1,5 +1,6 @@
 //! JSON-lines protocol for deployment in a short-lived desktop process.
 
+pub use crate::{CandidatePreview, PreviewRequest};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -12,6 +13,7 @@ use std::{
 };
 
 pub const DEPLOY_SUBCOMMAND: &str = "--deploy";
+pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
 #[cfg(target_os = "linux")]
@@ -66,6 +68,9 @@ enum Message {
     Progress {
         progress: String,
     },
+    Preview {
+        preview: CandidatePreview,
+    },
     Final {
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +106,66 @@ pub fn run_deploy_child_main() -> i32 {
         crate::mark_windows_rime_build_repair_complete(&user_dir)?;
         Ok(())
     })
+}
+
+/// Inspect deployed data in an isolated user directory, never running deployment.
+pub fn run_preview_child_main() -> i32 {
+    preview_child_main(
+        std::env::args_os().skip(1),
+        &mut io::stdin().lock(),
+        &mut io::stdout().lock(),
+        |request| {
+            let user_dir = crate::default_user_data_dir()
+                .ok_or("cannot determine the librime user data directory")?;
+            crate::desktop::preview_deployed_candidates(&user_dir, request)
+        },
+    )
+}
+
+fn preview_child_main(
+    args: impl Iterator<Item = OsString>,
+    input: &mut impl Read,
+    output: &mut impl Write,
+    action: impl FnOnce(&PreviewRequest) -> Result<CandidatePreview, String>,
+) -> i32 {
+    let valid_args = args.eq([OsString::from(PREVIEW_SUBCOMMAND)]);
+    let result = (|| {
+        if !valid_args {
+            return Err(format!(
+                "usage: {PREVIEW_SUBCOMMAND} (no additional arguments)"
+            ));
+        }
+        let mut request = Vec::new();
+        input
+            .take(MAX_LINE_BYTES + 1)
+            .read_to_end(&mut request)
+            .map_err(|e| format!("read candidate preview request: {e}"))?;
+        if request.len() as u64 > MAX_LINE_BYTES {
+            return Err("candidate preview request is too long".into());
+        }
+        let request: PreviewRequest = serde_json::from_slice(&request)
+            .map_err(|e| format!("invalid candidate preview request: {e}"))?;
+        request.validate()?;
+        let preview = action(&request)?;
+        write_message(output, &Message::Preview { preview })
+    })();
+    let code = if !valid_args {
+        2
+    } else if result.is_ok() {
+        0
+    } else {
+        1
+    };
+    match write_message(
+        output,
+        &Message::Final {
+            ok: result.is_ok(),
+            error: result.err(),
+        },
+    ) {
+        Ok(()) => code,
+        Err(_) => 1,
+    }
 }
 
 /// Handle exactly one trusted subcommand without running the private deployment.
@@ -187,6 +252,8 @@ fn child_main(
 #[derive(Default)]
 struct Protocol {
     final_result: Option<Result<(), String>>,
+    expect_preview: bool,
+    preview: Option<CandidatePreview>,
 }
 
 impl Protocol {
@@ -198,6 +265,16 @@ impl Protocol {
             .map_err(|error| format!("invalid deployment protocol line: {error}"))?
         {
             Message::Progress { progress } => return Ok(Some(progress)),
+            Message::Preview { preview } => {
+                if !self.expect_preview
+                    || self.preview.is_some()
+                    || preview.page_size == 0
+                    || preview.candidates.len() > usize::from(preview.page_size)
+                {
+                    return Err("invalid candidate preview result".into());
+                }
+                self.preview = Some(preview);
+            }
             Message::Final {
                 ok: true,
                 error: None,
@@ -213,14 +290,67 @@ impl Protocol {
         Ok(None)
     }
 
-    fn finish(self, status: ExitStatus) -> Result<(), String> {
-        match self.final_result {
-            Some(Err(error)) => Err(error),
+    fn finish(&self, status: ExitStatus) -> Result<(), String> {
+        match &self.final_result {
+            Some(Err(error)) => Err(error.clone()),
             _ if !status.success() => Err(format!("deploy child exited unsuccessfully ({status})")),
+            Some(Ok(())) if self.expect_preview && self.preview.is_none() => {
+                Err("preview child did not emit candidates".into())
+            }
             Some(Ok(())) => Ok(()),
             None => Err("deploy child did not emit a final result".into()),
         }
     }
+}
+
+pub fn run_preview_child(
+    exe: &Path,
+    request: &PreviewRequest,
+    timeout: Duration,
+) -> Result<CandidatePreview, String> {
+    run_preview_child_command(&mut Command::new(exe), request, timeout)
+}
+
+/// Like deployment, the caller must verify the executable before constructing this command.
+pub fn run_preview_child_command(
+    command: &mut Command,
+    request: &PreviewRequest,
+    timeout: Duration,
+) -> Result<CandidatePreview, String> {
+    request.validate()?;
+    let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+    // The parent owns cleanup even when the bounded child is forcibly terminated.
+    let workspace = crate::preview::PreviewDirectory::create()?;
+    let mut child = command
+        .arg(PREVIEW_SUBCOMMAND)
+        .env(
+            crate::preview::PREVIEW_DIRECTORY_ENV,
+            workspace
+                .path()
+                .file_name()
+                .ok_or("invalid preview workspace name")?,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("cannot spawn preview child: {e}"))?;
+    let guard = ChildGuard(&mut child);
+    guard
+        .0
+        .stdin
+        .take()
+        .ok_or("preview child stdin is not piped")?
+        .write_all(&input)
+        .map_err(|e| format!("write preview request: {e}"))?;
+    let mut protocol = Protocol {
+        expect_preview: true,
+        ..Protocol::default()
+    };
+    wait_for_child_protocol(guard.0, timeout, &mut |_| {}, &mut protocol)?;
+    protocol
+        .preview
+        .ok_or("preview child did not emit candidates".into())
 }
 
 /// Execute a trusted binary directly with `--deploy`, killing and reaping it on failure.
@@ -287,6 +417,15 @@ fn wait_for_child(
     timeout: Duration,
     progress: &mut impl FnMut(&str),
 ) -> Result<(), String> {
+    wait_for_child_protocol(child, timeout, progress, &mut Protocol::default())
+}
+
+fn wait_for_child_protocol(
+    child: &mut Child,
+    timeout: Duration,
+    progress: &mut impl FnMut(&str),
+    protocol: &mut Protocol,
+) -> Result<(), String> {
     let guard = ChildGuard(child);
     let child = &mut *guard.0;
     let started = Instant::now();
@@ -320,7 +459,6 @@ fn wait_for_child(
             }
         })
         .map_err(|error| format!("cannot read deploy child output: {error}"))?;
-    let mut protocol = Protocol::default();
     let mut stdout_closed = false;
     loop {
         let remaining = timeout.saturating_sub(started.elapsed());
@@ -448,6 +586,185 @@ mod tests {
             );
         }
         assert!(Protocol::default().line(b"\xff").is_err());
+    }
+
+    #[test]
+    fn preview_child_validates_requests_and_protocol() {
+        for input in [
+            b"{\"page_size\":0}".as_slice(),
+            b"{\"path\":\"/tmp/data\"}",
+            b"{} {}",
+        ] {
+            let mut output = Vec::new();
+            let code = preview_child_main(
+                [OsString::from(PREVIEW_SUBCOMMAND)].into_iter(),
+                &mut &input[..],
+                &mut output,
+                |_| panic!("invalid request must not initialize librime"),
+            );
+            assert_eq!(code, 1);
+            assert!(String::from_utf8(output).unwrap().contains("\"ok\":false"));
+        }
+        let mut protocol = Protocol {
+            expect_preview: true,
+            ..Protocol::default()
+        };
+        protocol.line(b"{\"preview\":{\"candidates\":[{\"text\":\"real\",\"comment\":\"actual\"}],\"page_size\":1}}").unwrap();
+        assert!(protocol
+            .line(b"{\"preview\":{\"candidates\":[],\"page_size\":1}}")
+            .is_err());
+        assert!(Protocol::default()
+            .line(b"{\"preview\":{\"candidates\":[],\"page_size\":1}}")
+            .is_err());
+    }
+
+    #[test]
+    fn real_librime_preview_child_preserves_user_config() {
+        const FIXTURE: &str = "KEYTAO_PREVIEW_FIXTURE";
+        const MODE: &str = "KEYTAO_PREVIEW_FIXTURE_MODE";
+        const RESULT: &str = "KEYTAO_PREVIEW_RESULT=";
+        if let Some(directory) = std::env::var_os(FIXTURE) {
+            let directory = std::path::PathBuf::from(directory);
+            let mode = std::env::var(MODE).unwrap();
+            if mode == "deploy" {
+                crate::deploy(
+                    directory.to_string_lossy().into_owned(),
+                    directory.to_string_lossy().into_owned(),
+                )
+                .unwrap();
+                exit_deploy_child(0);
+            }
+            let before = std::fs::read(directory.join("user.yaml")).unwrap();
+            let preview = if mode == "live" {
+                crate::desktop::setup_only(
+                    directory.to_string_lossy().into_owned(),
+                    directory.to_string_lossy().into_owned(),
+                )
+                .unwrap();
+                crate::desktop::preview_session(
+                    "keytao_preview",
+                    &PreviewRequest { page_size: Some(3) },
+                    false,
+                )
+                .unwrap()
+            } else {
+                let mut output = Vec::new();
+                let input = if mode == "scheme" {
+                    "{}"
+                } else {
+                    "{\"page_size\":3}"
+                };
+                assert_eq!(
+                    preview_child_main(
+                        [OsString::from(PREVIEW_SUBCOMMAND)].into_iter(),
+                        &mut input.as_bytes(),
+                        &mut output,
+                        |request| crate::desktop::preview_deployed_candidates(&directory, request),
+                    ),
+                    0,
+                    "{}",
+                    String::from_utf8_lossy(&output)
+                );
+                output
+                    .split(|byte| *byte == b'\n')
+                    .find_map(|line| match serde_json::from_slice::<Message>(line).ok()? {
+                        Message::Preview { preview } => Some(preview),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            assert_eq!(std::fs::read(directory.join("user.yaml")).unwrap(), before);
+            println!("{RESULT}{}", serde_json::to_string(&preview).unwrap());
+            exit_deploy_child(0);
+        }
+        let directory =
+            std::env::temp_dir().join(format!("keytao-preview-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("default.yaml"), "config_version: '1'\nschema_list:\n  - schema: keytao_decoy\n  - schema: keytao_preview\n").unwrap();
+        std::fs::write(
+            directory.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keytao_decoy\n    - schema: keytao_preview\n",
+        )
+        .unwrap();
+        let schema = "schema:\n  schema_id: keytao_preview\n  name: Preview Fixture\n  version: '1'\nmenu:\n  page_size: 2\nengine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\nspeller:\n  alphabet: fabcd\ntranslator:\n  dictionary: keytao_preview\n  enable_completion: true\n  enable_sentence: false\n  enable_user_dict: false\n";
+        for name in ["keytao_preview", "keytao_decoy"] {
+            std::fs::write(
+                directory.join(format!("{name}.schema.yaml")),
+                schema.replace("schema_id: keytao_preview", &format!("schema_id: {name}")),
+            )
+            .unwrap();
+        }
+        std::fs::write(directory.join("keytao_preview.dict.yaml"), "---\nname: keytao_preview\nversion: '1'\nsort: by_weight\nuse_preset_vocabulary: false\n...\n甲\tfa\t100\n乙\tfb\t90\n丙\tfc\t80\n丁\tfd\t70\n").unwrap();
+        let child = |mode: &str| {
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "deploy_child::tests::real_librime_preview_child_preserves_user_config",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, &directory)
+                .env(MODE, mode)
+                .output()
+                .unwrap()
+        };
+        let deployed = child("deploy");
+        assert!(
+            deployed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&deployed.stderr)
+        );
+        let user =
+            b"var:\n  previously_selected_schema: keytao_preview\n  preview_fixture: keep-me\n";
+        std::fs::write(directory.join("user.yaml"), user).unwrap();
+        let originals: Vec<_> = std::fs::read_dir(directory.join("build"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        for mode in ["scheme", "override", "live"] {
+            let output = child(mode);
+            assert!(
+                output.status.success(),
+                "{mode}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let preview: CandidatePreview = serde_json::from_str(
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix(RESULT))
+                    .unwrap(),
+            )
+            .unwrap();
+            let count = if mode == "scheme" { 2 } else { 3 };
+            assert_eq!(usize::from(preview.page_size), count);
+            assert_eq!(preview.candidates.len(), count);
+            assert_eq!(
+                preview
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["甲", "乙", "丙"][..count]
+            );
+            assert_eq!(
+                preview
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.comment.as_str())
+                    .collect::<Vec<_>>(),
+                ["~a", "~b", "~c"][..count]
+            );
+            assert_eq!(std::fs::read(directory.join("user.yaml")).unwrap(), user);
+            for (path, bytes) in &originals {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes, "{}", path.display());
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -691,6 +1008,44 @@ printf '%s\n' '{"progress":"Compiling..."}' '{"ok":true}'
             assert!(started.elapsed() < Duration::from_secs(5));
             assert!(status.is_some_and(|status| !status.success()));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_parent_reads_bounded_result_and_enforces_timeout() {
+        let exe = helper_script(
+            "preview-result",
+            r#"
+case "$#:$1" in 1:--preview-candidates) ;; *) exit 2 ;; esac
+cat >/dev/null
+printf '%s' "$KEYTAO_CANDIDATE_PREVIEW_WORKSPACE" > "$0.workspace"
+printf '%s\n' '{"preview":{"candidates":[{"text":"real","comment":"actual"}],"page_size":1}}' '{"ok":true}'
+"#,
+        );
+        let preview = run_preview_child(
+            &exe,
+            &PreviewRequest { page_size: Some(1) },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(preview.candidates[0].comment, "actual");
+        let workspace = std::fs::read_to_string(exe.with_extension("workspace")).unwrap();
+        assert!(!std::env::temp_dir().join(workspace).exists());
+        std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
+        let exe = helper_script(
+            "preview-timeout",
+            "printf '%s' \"$KEYTAO_CANDIDATE_PREVIEW_WORKSPACE\" > \"$0.workspace\"\nexec sleep 30",
+        );
+        let started = Instant::now();
+        assert!(
+            run_preview_child(&exe, &PreviewRequest::default(), Duration::from_secs(1))
+                .unwrap_err()
+                .contains("timed out")
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let workspace = std::fs::read_to_string(exe.with_extension("workspace")).unwrap();
+        assert!(!std::env::temp_dir().join(workspace).exists());
+        std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
     }
 
     #[cfg(unix)]

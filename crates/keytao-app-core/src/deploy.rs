@@ -269,6 +269,68 @@ fn verified_macos_deploy_executable(app: &std::path::Path) -> Result<std::path::
     Ok(executable)
 }
 
+/// Read candidates without keeping a desktop librime engine in the App.
+pub async fn preview_candidates(
+    core: &Core,
+    host: impl ImeHost,
+    size: Option<u8>,
+) -> Result<keytao_core::CandidatePreview, String> {
+    if size.is_some_and(|size| !(1..=10).contains(&size)) {
+        return Err("Candidate page size must be between 1 and 10".into());
+    }
+    let root = host.user_root()?;
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    if keytao_core::default_user_data_dir().as_ref() != Some(&root) {
+        return Err("Desktop candidate previews require the default user root".into());
+    }
+    #[cfg(target_os = "linux")]
+    let (mut command, _) = crate::ime_status::linux::resolve_keytao_ime_command(core);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let runtime = {
+        #[cfg(target_os = "ios")]
+        let shared = ios_app_shared_data_dir(core, &root)
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        #[cfg(target_os = "android")]
+        let shared = root.join("rime-data").to_string_lossy().into_owned();
+        keytao_core::ImeRuntime::with_dirs(root, shared)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = core;
+    tokio::task::spawn_blocking(move || {
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        let request = keytao_core::PreviewRequest { page_size: size };
+        #[cfg(target_os = "macos")]
+        {
+            let app = std::env::current_exe()
+                .map_err(|error| format!("Cannot determine the App executable: {error}"))?;
+            let executable = verified_macos_deploy_executable(&app)?;
+            keytao_core::deploy_child::run_preview_child(
+                &executable,
+                &request,
+                std::time::Duration::from_secs(10),
+            )
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::ime_status::windows::preview_candidates_blocking(&request)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            keytao_core::deploy_child::run_preview_child_command(
+                &mut command,
+                &request,
+                std::time::Duration::from_secs(10),
+            )
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            runtime.preview_candidates(size)
+        }
+    })
+    .await
+    .map_err(|error| format!("Candidate preview task failed: {error}"))?
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub async fn rime_deploy_default(
     core: &Core,

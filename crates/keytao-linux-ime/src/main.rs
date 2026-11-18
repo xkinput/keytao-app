@@ -254,6 +254,16 @@ fn main() {
     #[cfg(target_os = "linux")]
     if std::env::args_os()
         .skip(1)
+        .any(|arg| arg == keytao_core::deploy_child::PREVIEW_SUBCOMMAND)
+    {
+        keytao_core::deploy_child::exit_deploy_child(
+            keytao_core::deploy_child::run_preview_child_main(),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .skip(1)
         .any(|arg| arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND)
     {
         keytao_core::deploy_child::exit_deploy_child(

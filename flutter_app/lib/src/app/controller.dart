@@ -253,6 +253,10 @@ class AppController extends ChangeNotifier {
   AndroidImeInputSettingsDto? androidSettings;
   ImeUiSettingsDto? uiSettings;
   int? candidatePageSize;
+  List<({String text, String comment})> candidatePreviewCandidates = [];
+  int? candidatePreviewPageSize;
+  int _candidatePreviewRequest = 0;
+  Future<void>? _candidatePreviewRefresh;
   List<SchemaSwitchDto> schemaSwitches = [];
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
   ComponentVersionsDto? versions;
@@ -917,6 +921,7 @@ class AppController extends ChangeNotifier {
       }
     }
     if (page == AppPage.scheme) unawaited(refreshSchemeUpdates());
+    if (page == AppPage.input) unawaited(refreshCandidatePreview());
     _changed();
   }
 
@@ -1113,6 +1118,7 @@ class AppController extends ChangeNotifier {
       await core.completeOnboarding();
       onboardingCompleted = true;
     }
+    unawaited(refreshCandidatePreview());
   }
 
   Future<bool> refreshState() async {
@@ -3068,13 +3074,67 @@ class AppController extends ChangeNotifier {
           name: entry.name,
           value: value,
         );
+        unawaited(refreshCandidatePreview());
       });
 
   Future<bool> saveCandidatePageSize(int? size) => run(() async {
     if (isAndroid) await _requireStorage();
     candidatePageSize = await core.setCandidatePageSize(size: size);
-    if (local?.installed == true) await _deploy();
+    if (local?.installed == true) {
+      await _deploy();
+    } else {
+      unawaited(refreshCandidatePreview());
+    }
   });
+
+  Future<void> refreshCandidatePreview() {
+    if (_disposed) return Future.value();
+    _candidatePreviewRequest++;
+    return _candidatePreviewRefresh ??= _readCandidatePreview().then<void>((
+      request,
+    ) {
+      _candidatePreviewRefresh = null;
+      if (!_disposed && request != _candidatePreviewRequest) {
+        return refreshCandidatePreview();
+      }
+    });
+  }
+
+  Future<int> _readCandidatePreview() async {
+    var request = 0;
+    while (!_disposed && request != _candidatePreviewRequest) {
+      request = _candidatePreviewRequest;
+      final size = candidatePageSize;
+      final schemeKey = activeSchemeKey;
+      try {
+        final result =
+            jsonDecode(await core.previewCandidates(size: size)) as Map;
+        final pageSize = result['page_size'] as int;
+        final candidates = [
+          for (final candidate in result['candidates'] as List)
+            (
+              text: (candidate as Map)['text'] as String,
+              comment: candidate['comment'] as String,
+            ),
+        ];
+        if (pageSize < 1 || pageSize > 255 || candidates.isEmpty) {
+          throw const FormatException('Invalid candidate preview');
+        }
+        if (_disposed ||
+            request != _candidatePreviewRequest ||
+            size != candidatePageSize ||
+            schemeKey != activeSchemeKey) {
+          continue;
+        }
+        candidatePreviewCandidates = candidates;
+        candidatePreviewPageSize = pageSize;
+        _changed();
+      } catch (_) {
+        // Keep the last preview when deployed data is unavailable.
+      }
+    }
+    return request;
+  }
 
   Map<String, dynamic> resolveCandidatePanelPreview({
     required UiColorSchemeDto colorScheme,

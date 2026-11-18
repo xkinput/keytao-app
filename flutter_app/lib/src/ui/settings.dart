@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
@@ -232,6 +234,12 @@ class _SettingsCardState extends State<SettingsCard> {
   double? _previewRadius;
   bool _resetRadius = false;
   double? _previewFontSize;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(controller.refreshCandidatePreview());
+  }
 
   void _resetPreview() {
     _previewScheme = null;
@@ -527,7 +535,8 @@ class _SettingsCardState extends State<SettingsCard> {
       ),
       orientation: orientation,
       showPreedit: !keyboard && !s!.effectiveEmbeddedComposition,
-      candidateCount: c.candidatePageSize ?? 6,
+      candidateCount: c.candidatePageSize ?? c.candidatePreviewPageSize ?? 6,
+      candidates: c.candidatePreviewCandidates,
       keyboard: keyboard,
       keyboardSchemeName:
           c.installedPackageFor(c.activeSchemeKey)?.displayName ??

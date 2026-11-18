@@ -12,14 +12,16 @@ class CandidatePanelPreview extends StatelessWidget {
     required this.orientation,
     required this.showPreedit,
     this.candidateCount = 6,
+    this.candidates = const [],
     this.keyboard = false,
     this.keyboardSchemeName = 'KeyTao',
     this.keyboardLogo,
-  }) : assert(candidateCount >= 1 && candidateCount <= 10);
+  }) : assert(candidateCount >= 1 && candidateCount <= 255);
 
   final Map<String, dynamic> theme;
   final PanelOrientationDto orientation;
   final int candidateCount;
+  final List<({String text, String comment})> candidates;
   final bool keyboard;
   final String keyboardSchemeName;
   final Widget? keyboardLogo;
@@ -150,7 +152,12 @@ class CandidatePanelPreview extends StatelessWidget {
     for (var index = 0; index < candidateCount; index++) {
       final selected = index == 0;
       final label = '${index + 1}${option['labelSuffix']}';
-      final comment = _comments[index];
+      final candidate = this.candidates.isEmpty && index < _candidates.length
+          ? (text: _candidates[index], comment: _comments[index])
+          : index < this.candidates.length
+          ? this.candidates[index]
+          : (text: '', comment: '');
+      final comment = candidate.comment;
       final labelStyle = style(
         _metric(font, 'labelSize'),
         _color(option, selected ? 'selectedLabelColor' : 'labelColor'),
@@ -168,7 +175,7 @@ class CandidatePanelPreview extends StatelessWidget {
       );
       final width =
           measure(label, labelStyle).width +
-          measure(_candidates[index], textStyle).width +
+          measure(candidate.text, textStyle).width +
           inlineGap +
           (comment.isEmpty
               ? 0
@@ -178,7 +185,7 @@ class CandidatePanelPreview extends StatelessWidget {
       candidates.add(
         Semantics(
           label:
-              '候选 ${index + 1}，${_candidates[index]}${comment.isEmpty ? '' : '，注释 $comment'}',
+              '候选 ${index + 1}，${candidate.text}${comment.isEmpty ? '' : '，注释 $comment'}',
           selected: selected,
           child: ExcludeSemantics(
             child: Container(
@@ -228,7 +235,7 @@ class CandidatePanelPreview extends StatelessWidget {
                     ),
                     SizedBox(width: inlineGap),
                     Text(
-                      _candidates[index],
+                      candidate.text,
                       key: ValueKey('candidate-preview-text-$index'),
                       style: textStyle,
                       textScaler: TextScaler.noScaling,
