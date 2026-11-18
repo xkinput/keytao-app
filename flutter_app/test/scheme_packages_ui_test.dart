@@ -795,19 +795,76 @@ void main() {
         ),
       );
       if (entry.package != null) {
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
+        expect(tester.widgetList<FItem>(find.byType(FItem)), isNotEmpty);
         expect(
-          tester
-              .widget<FButton>(
-                find.widgetWithIcon(FButton, FLucideIcons.ellipsis),
-              )
-              .onPress,
-          isNull,
+          tester.widgetList<FItem>(find.byType(FItem)),
+          everyElement(
+            isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
+          ),
         );
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
       }
       expect(tester.takeException(), isNull);
     }
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets(
+    'package menu opens when busy changes between pointer down and up',
+    (tester) async {
+      final c = _PackageController(BridgePlatform.windows)
+        ..accountUser = const AccountUserDto(id: 1)
+        ..installedPackages = const [
+          InstalledPackageDto(
+            schemeKey: 'local-custom',
+            source: 'local',
+            active: false,
+            hasPackageZip: true,
+            supportsUserWords: false,
+          ),
+        ];
+      addTearDown(c.dispose);
+      _size(tester, const Size(360, 800));
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: c.info.platform,
+          home: FScaffold(
+            child: ListenableBuilder(
+              listenable: c,
+              builder: (_, _) => SchemePackageRow(
+                controller: c,
+                schemeKey: 'local-custom',
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(FItem), findsNothing);
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byIcon(FLucideIcons.ellipsis)),
+      );
+      c.busy = true;
+      c.rebuild();
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(find.byType(FItem), findsNWidgets(3));
+      expect(
+        tester.widgetList<FItem>(find.byType(FItem)),
+        everyElement(
+          isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
+        ),
+      );
+      expect(c.actions, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   testWidgets('custom words action follows package support', (tester) async {
     final c = _PackageController();
