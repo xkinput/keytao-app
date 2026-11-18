@@ -18,9 +18,8 @@ const TOUCH_KEYBOARD_PREVIOUS_PAGE: u32 = 0xF004;
 /// Read Shift, Control, Alt, the Windows key and the CapsLock toggle into an
 /// X11 modifier mask.
 ///
-/// CapsLock is reported as `RIME_MOD_LOCK`; `keytao_core` folds it into the
-/// keysym and strips the bit before librime sees the key, so the engine
-/// receives the character the layout actually produces.
+/// CapsLock is reported as `RIME_MOD_LOCK`; librime needs both the produced
+/// character and the lock state for its ASCII composer.
 pub fn current_mod_mask() -> u32 {
     let mut mask = 0u32;
     unsafe {
@@ -96,12 +95,13 @@ pub fn vk_to_keysym(vk: u16, lparam: isize, mods: u32) -> Option<u32> {
         VK_DIVIDE => 0x002F,
 
         // --- Control keys ---
-        VK_BACK => 0xFF08,   // XK_BackSpace
-        VK_TAB => 0xFF09,    // XK_Tab
-        VK_RETURN => 0xFF0D, // XK_Return
-        VK_ESCAPE => 0xFF1B, // XK_Escape
-        VK_SPACE => 0x0020,  // XK_space
-        VK_DELETE => 0xFFFF, // XK_Delete
+        VK_BACK => 0xFF08,    // XK_BackSpace
+        VK_TAB => 0xFF09,     // XK_Tab
+        VK_RETURN => 0xFF0D,  // XK_Return
+        VK_ESCAPE => 0xFF1B,  // XK_Escape
+        VK_SPACE => 0x0020,   // XK_space
+        VK_DELETE => 0xFFFF,  // XK_Delete
+        VK_CAPITAL => 0xFFE5, // XK_Caps_Lock
 
         // --- Navigation ---
         VK_LEFT => 0xFF51,       // XK_Left
@@ -404,6 +404,19 @@ pub fn is_shift_vk(vk: u16) -> bool {
     shift_keysym_for_vk(vk).is_some()
 }
 
+pub fn is_caps_lock_vk(vk: u16) -> bool {
+    vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_CAPITAL.0
+}
+
+pub fn rime_mod_mask_for_vk(vk: u16, mods: u32) -> u32 {
+    if is_caps_lock_vk(vk) {
+        // GetKeyState already reflects the toggle; Rime expects the prior state.
+        mods ^ RIME_MOD_LOCK
+    } else {
+        mods
+    }
+}
+
 /// Solo-Shift tracking: Shift toggles Chinese/English only when no other key
 /// was pressed while it was held.
 ///
@@ -505,6 +518,9 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     }
 
     let key = VIRTUAL_KEY(vk);
+    if key == VK_CAPITAL {
+        return true;
+    }
     if key == VK_PACKET {
         return packet_keysym()
             .map(|sym| has_composition || is_touch_keyboard_page_key(sym))
@@ -533,7 +549,7 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
 pub fn ascii_mode_rejects_key(vk: u16, mods: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
 
-    if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_MOD_SUPER) != 0 {
+    if is_caps_lock_vk(vk) || mods & (RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_MOD_SUPER) != 0 {
         return false;
     }
     !(mods & RIME_MOD_SHIFT != 0 && vk == VK_SPACE.0)
@@ -612,13 +628,15 @@ mod tests {
         RIME_MOD_SHIFT, RIME_MOD_SUPER,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_1, VK_A, VK_BACK, VK_F4, VK_OEM_1, VK_OEM_COMMA, VK_RETURN, VK_SHIFT, VK_SPACE,
+        VK_1, VK_A, VK_BACK, VK_CAPITAL, VK_F4, VK_OEM_1, VK_OEM_COMMA, VK_RETURN, VK_SHIFT,
+        VK_SPACE,
     };
 
     use super::{
         ascii_mode_rejects_key, chord_keysym_for_vk, fallback_printable_keysym,
-        is_application_shortcut, letters_are_uppercase, shift_pending_after_key_down,
-        should_bypass_empty_composition, should_eat_key, vk_to_keysym,
+        is_application_shortcut, letters_are_uppercase, rime_mod_mask_for_vk,
+        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
+        vk_to_keysym,
     };
 
     fn composing_state() -> ImeState {
@@ -667,6 +685,26 @@ mod tests {
             vk_to_keysym(VK_A.0, 0, RIME_MOD_LOCK | RIME_MOD_SHIFT),
             Some('a' as u32)
         );
+    }
+
+    #[test]
+    fn caps_lock_reaches_rime_in_both_modes_with_the_pre_toggle_mask() {
+        for mods in [
+            0,
+            RIME_MOD_LOCK,
+            RIME_MOD_SHIFT,
+            RIME_MOD_SHIFT | RIME_MOD_LOCK,
+        ] {
+            assert_eq!(vk_to_keysym(VK_CAPITAL.0, 0, mods), Some(0xffe5));
+            assert!(should_eat_key(VK_CAPITAL.0, false, mods));
+            assert!(should_eat_key(VK_CAPITAL.0, true, mods));
+            assert!(!ascii_mode_rejects_key(VK_CAPITAL.0, mods));
+            assert_eq!(
+                rime_mod_mask_for_vk(VK_CAPITAL.0, mods),
+                mods ^ RIME_MOD_LOCK
+            );
+            assert_eq!(rime_mod_mask_for_vk(VK_A.0, mods), mods);
+        }
     }
 
     #[test]

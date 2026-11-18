@@ -3829,8 +3829,7 @@ pub fn engine_capabilities() -> EngineCapabilities {
 
 // Rime modifier bits, mirroring librime's `RimeModifier` in key_table.h.
 pub const RIME_MOD_SHIFT: u32 = 1 << 0;
-/// CapsLock. Never forwarded to librime — see
-/// [`key_policy::normalize_key_for_modifiers`], which folds it into the keysym.
+/// CapsLock. The ASCII composer needs this bit as well as the folded keysym.
 pub const RIME_MOD_LOCK: u32 = 1 << 1;
 pub const RIME_MOD_CONTROL: u32 = 1 << 2;
 pub const RIME_MOD_ALT: u32 = 1 << 3;
@@ -4089,19 +4088,17 @@ pub mod key_policy {
         keysym_for_char(first)
     }
 
-    /// Fold an active `Shift`/`CapsLock` into the keysym and drop the Lock bit.
+    /// Fold an active `Shift`/`CapsLock` into the keysym, preserving modifiers.
     ///
     /// Rime expects the keysym to carry the character that was actually typed
-    /// while the mask carries only real modifiers, so a locked `a` must arrive
-    /// as `A` and never as `a` plus a Lock bit that librime would treat as an
-    /// unknown modifier. With neither modifier, preserve the supplied character:
+    /// and the Lock bit lets ascii_composer bypass the speller. With neither
+    /// modifier, preserve the supplied character:
     /// soft keyboards and text-to-keysym callers already encode its case.
     pub fn normalize_key_for_modifiers(sym: u32, mods: u32) -> (u32, u32) {
         if mods & (RIME_MOD_LOCK | RIME_MOD_SHIFT) == 0 {
             return (sym, mods);
         }
         let uppercase = (mods & RIME_MOD_LOCK != 0) != (mods & RIME_MOD_SHIFT != 0);
-        let mods = mods & !RIME_MOD_LOCK;
         let Some(ch) = char_for_keysym(sym) else {
             return (sym, mods);
         };
@@ -4133,8 +4130,8 @@ pub mod key_policy {
 /// Drop everything librime has no name for (NumLock, mouse buttons, XKB
 /// groups) and keep the modifiers Rime's `key_binder` can bind, including
 /// Super/Hyper/Meta so that a frontend can express Command/Windows chords.
-/// CapsLock is folded into the keysym instead, see
-/// [`key_policy::normalize_key_for_modifiers`].
+/// CapsLock is ignored for shortcut/navigation decisions; the runtime restores
+/// it when dispatching to librime's ASCII composer.
 pub fn rime_modifier_mask(mask: u32) -> u32 {
     mask & (RIME_MOD_SHIFT
         | RIME_MOD_CONTROL
@@ -4303,7 +4300,7 @@ mod ime_runtime_tests {
     }
 
     #[test]
-    fn rime_modifier_mask_strips_lock_and_pointer_modifiers() {
+    fn rime_modifier_mask_ignores_lock_and_pointer_bits_for_navigation() {
         assert_eq!(rime_modifier_mask(0x10), 0);
         assert_eq!(
             rime_modifier_mask(0x10 | RIME_MOD_SHIFT | RIME_MOD_CONTROL),
@@ -4314,6 +4311,10 @@ mod ime_runtime_tests {
             RIME_RELEASE_MASK
         );
         assert_eq!(rime_modifier_mask(RIME_MOD_LOCK), 0);
+        assert_eq!(
+            rime_modifier_mask(RIME_MOD_LOCK | RIME_MOD_SHIFT),
+            RIME_MOD_SHIFT
+        );
     }
 
     #[test]
@@ -4478,30 +4479,30 @@ mod ime_runtime_tests {
     }
 
     #[test]
-    fn normalize_key_for_modifiers_folds_caps_lock_into_the_keysym() {
+    fn normalize_key_for_modifiers_folds_case_and_preserves_caps_lock() {
         assert_eq!(
             key_policy::normalize_key_for_modifiers(b'a' as u32, RIME_MOD_LOCK),
-            (b'A' as u32, 0)
+            (b'A' as u32, RIME_MOD_LOCK)
         );
         assert_eq!(
             key_policy::normalize_key_for_modifiers(b'a' as u32, RIME_MOD_LOCK | RIME_MOD_SHIFT),
-            (b'a' as u32, RIME_MOD_SHIFT)
+            (b'a' as u32, RIME_MOD_LOCK | RIME_MOD_SHIFT)
         );
         assert_eq!(
             key_policy::normalize_key_for_modifiers(b'a' as u32, RIME_MOD_SHIFT),
             (b'A' as u32, RIME_MOD_SHIFT)
         );
-        // Non-letters keep their keysym; only the Lock bit is dropped.
+        // Non-letters keep both their keysym and Lock bit.
         assert_eq!(
             key_policy::normalize_key_for_modifiers(b'1' as u32, RIME_MOD_LOCK),
-            (b'1' as u32, 0)
+            (b'1' as u32, RIME_MOD_LOCK)
         );
         assert_eq!(
             key_policy::normalize_key_for_modifiers(
                 key_policy::XK_BACK_SPACE,
                 RIME_MOD_LOCK | RIME_MOD_CONTROL
             ),
-            (key_policy::XK_BACK_SPACE, RIME_MOD_CONTROL)
+            (key_policy::XK_BACK_SPACE, RIME_MOD_LOCK | RIME_MOD_CONTROL)
         );
     }
 
@@ -5249,17 +5250,22 @@ impl ImeRuntimeSession {
             });
         }
         let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
-        let mask = rime_modifier_mask(mask);
+        let mask = rime_modifier_mask(mask) | (mask & RIME_MOD_LOCK);
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
-        let publish = keycode != 0xffe5; // Caps Lock must not change the global language.
-        self.with_engine_access(publish, |engine, policy, mode, ime_host, input| {
+        let caps = keycode == 0xffe5 && mask & RIME_RELEASE_MASK == 0;
+        if caps {
+            // Physical Caps Lock supersedes a host's context-only language override.
+            self.context_ascii_mode.store(0, Ordering::Release);
+        }
+        self.with_engine_access(!caps, caps, |engine, policy, mode, ime_host, input| {
             if policy.composing {
                 let desktop_dictionary = cfg!(not(any(target_os = "android", target_os = "ios")))
-                    && mode.mode == english_mode::EnglishMode::Schema;
+                    && mode.mode == english_mode::EnglishMode::Schema
+                    && keycode != 0xffe5;
                 let before = engine.is_ascii_mode();
-                let mut result = if mask == 0 {
+                let mut result = if mask & !RIME_MOD_LOCK == 0 {
                     key_policy::CandidateArrowAction::from_keycode(keycode)
                         .map(|action| {
                             use key_policy::CandidateArrowAction::*;
@@ -5327,7 +5333,7 @@ impl ImeRuntimeSession {
                 accepted: false,
             });
         }
-        self.with_engine_access(true, |engine, policy, _, ime_host, before| {
+        self.with_engine_access(true, false, |engine, policy, _, ime_host, before| {
             if policy.composing {
                 let mut result = engine.process_enter();
                 if let Err(error) =
@@ -5492,8 +5498,10 @@ impl ImeRuntimeSession {
     /// Logical English mode, including a dictionary schema with ASCII off.
     /// Keep `is_ascii_mode` for deciding whether keys should pass through.
     pub fn is_english_mode(&self) -> bool {
-        self.with_engine_access(false, |engine, _, mode, _, _| mode.is_english(engine))
-            .unwrap_or(false)
+        self.with_engine_access(false, false, |engine, _, mode, _, _| {
+            mode.is_english(engine)
+        })
+        .unwrap_or(false)
     }
 
     /// Switch desktop input using the saved ASCII/dictionary preference.
@@ -5573,7 +5581,9 @@ impl ImeRuntimeSession {
         &self,
         action: impl FnOnce(&Engine, InputContextPolicy) -> T,
     ) -> Option<T> {
-        self.with_engine_access(false, |engine, policy, _, _, _| action(engine, policy))
+        self.with_engine_access(false, false, |engine, policy, _, _, _| {
+            action(engine, policy)
+        })
     }
 
     fn with_engine_and_mode<T>(
@@ -5586,12 +5596,13 @@ impl ImeRuntimeSession {
             Option<&global_input::InputState>,
         ) -> T,
     ) -> Option<T> {
-        self.with_engine_access(true, action)
+        self.with_engine_access(true, false, action)
     }
 
     fn with_engine_access<T>(
         &self,
         publish: bool,
+        invalidate_peers: bool,
         action: impl FnOnce(
             &Engine,
             InputContextPolicy,
@@ -5668,13 +5679,18 @@ impl ImeRuntimeSession {
                     if global.matches(&after) {
                         *applied_input_version = global.version;
                     }
+                } else if invalidate_peers {
+                    // Caps Lock's ASCII state belongs to this composer's internal toggle.
+                    // Invalidate peers without turning it into a global language preference.
+                    global.version += 1;
+                    *applied_input_version = global.version;
                 }
                 return Some(result);
             }
             *applied_input_version = 0;
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
-        let _ = (publish, applied_input_version);
+        let _ = (publish, invalidate_peers, applied_input_version);
         let before = (ime_host && publish).then(|| global_input::InputState::read(engine));
         Some(action(
             engine,

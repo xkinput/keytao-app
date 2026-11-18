@@ -88,6 +88,7 @@ final class KeyTaoInputController: IMKInputController {
         clearPendingChordReleases()
         let client = sender as? IMKTextInput
         isActive = true
+        lastModifierFlags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         KeyTaoRuntime.shared.checkForReload()
         ensureSession()
         refreshSessionState(from: client)
@@ -687,6 +688,23 @@ final class KeyTaoInputController: IMKInputController {
 
         if !newFlags.isDisjoint(with: chordModifiers) {
             shiftPressedWithoutKey = false
+        }
+
+        if Int(event.keyCode) == kVK_CapsLock,
+           let capsLock = KeyTaoModifierKeyPolicy.capsLockEvent(
+               previousModifiers: rimeModifiers(from: previousFlags),
+               currentModifiers: rimeModifiers(from: newFlags)
+           ) {
+            shiftPressedWithoutKey = false
+            guard let session = ensureSession(),
+                  let state = KeyTaoImeState.consuming(keytao_session_process_key_json(
+                      session, capsLock.keyval, capsLock.modifiers
+                  )) else { return false }
+            apply(state, to: client)
+            if inputContextGeneration.isCurrent(generation) {
+                showModeIndicator(state.modeHint, client: client)
+            }
+            return false
         }
 
         guard changedFlags.contains(.shift) else {
