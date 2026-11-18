@@ -1,0 +1,59 @@
+# Relevant sections copied from keytao 2.2 via the supplied reproduction fixture.
+# Unrelated Lua, OpenCC and reverse-lookup dependencies are omitted.
+schema:
+  schema_id: keytao
+  name: KeyTao Caps Lock Regression
+  version: "2.2"
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [ Chinese, English ]
+
+engine:
+  processors:
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - lua_processor@topup_processor
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - table_translator
+
+ascii_composer:
+  __include: default:/ascii_composer
+
+speller:
+  auto_select: false
+  auto_select_unique_candidate: false
+  alphabet: "abcdefghijklmnopqrstuvwxyz;/=`"
+  initials: "abcdefghijklmnopqrstuvwxyz;/=`"
+
+translator:
+  dictionary: keytao.extended
+  enable_completion: true
+  enable_encoder: true
+  enable_sentence: false
+  enable_user_dict: false
+
+recognizer:
+  patterns:
+    uppercase: "[A-Z][-_+.'0-9A-Za-z]*$"
+
+topup:
+  topup_with: "avuio;"
+  min_length: 4
+  max_length: 6
+  auto_clear: true
+  min_length_danzi: 2
+  topup_command: true

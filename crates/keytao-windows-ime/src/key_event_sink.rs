@@ -46,8 +46,9 @@ use crate::{
     guard,
     key_map::{
         ascii_mode_rejects_key, chord_keysym_for_vk, current_mod_mask, is_application_shortcut,
-        is_enter_vk, is_shift_vk, shift_keysym_for_vk, shift_pending_after_key_down,
-        should_bypass_empty_composition, should_eat_key, vk_to_keysym, RIME_RELEASE_MASK,
+        is_caps_lock_vk, is_enter_vk, is_shift_vk, rime_mod_mask_for_vk, shift_keysym_for_vk,
+        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
+        vk_to_keysym, RIME_RELEASE_MASK,
     },
     panel_anchor::{start_panel_anchor, PanelAnchor},
     state::{
@@ -2281,6 +2282,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     return Ok(BOOL::from(false));
                 }
             };
+            let mods = rime_mod_mask_for_vk(vk, mods);
             // Enter has exactly one meaning across all platforms: hand XK_Return to
             // Rime and let core fall back to committing the raw input (D5).
             let result = if is_enter_vk(vk) {
@@ -2306,8 +2308,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let mut result = match result {
                 Some(r) => r,
                 None => {
-                    let consumed =
-                        runtime_session(&state).is_some_and(|session| session.consume_failed_key());
+                    let consumed = !is_caps_lock_vk(vk)
+                        && runtime_session(&state)
+                            .is_some_and(|session| session.consume_failed_key());
                     append_key_diagnostic!("OnKeyDown result=false eat={consumed}");
                     // Another text service in this host may be deploying a
                     // new public snapshot. Core declines without waiting for
@@ -2319,8 +2322,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             complete_unhandled_key(keysym, mods, &mut result);
             let ime_state = result.state;
 
-            let consumed =
+            let processed =
                 should_consume_processed_state(result.accepted, &before_state, &ime_state);
+            // Apply Caps Lock's commit/mode change while preserving its native toggle.
+            let consumed = processed && !is_caps_lock_vk(vk);
             append_key_diagnostic!(
                 "OnKeyDown accepted={} consumed={} preedit_len={} candidates={} commit={}",
                 result.accepted,
@@ -2330,7 +2335,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 has_commit(&ime_state),
             );
 
-            if !consumed {
+            if !should_apply_processed_state(processed, &before_state, &ime_state) {
                 return Ok(BOOL::from(false));
             }
 

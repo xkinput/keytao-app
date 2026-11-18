@@ -184,7 +184,7 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 
 release 即使返回 `accepted=false`，只要 `ascii_mode` 改变也必须 apply；返回宿主的 eaten 仍是原来的 `consumed`，不因模式变化而吞掉 keyup。只有无 commit、模式改变且没有可见 preedit / 候选的 mode-only apply 可以在 composition 为空时保留有效 caret cache；普通非嵌入 apply 或任何 commit 都清除旧 cache。新 probe 不可用时，模式提示使用可验证的上次 caret / system caret；完全无坐标时省略提示，但照常更新 `st.ascii_mode` 与语言栏。
 
-Caps Lock 本批保留宿主原有路径，不新增 `VK_CAPITAL` keysym 或拦截规则。vendored `ascii_composer.cc::ProcessCapsLock` 在 press 上立即切换并可能提交，且明确区分 Windows 与 IBus 的 lock modifier 时序；简单复用 Shift 的“丢弃 press 返回值、处理 release”会丢失 press commit，mask `0` 也不能表达原生 Caps Lock 状态。这是 F1 允许保留的例外，不能宣称 Caps Lock schema 切换已修复。
+Caps Lock 在 Test 阶段声明接管，即使当前是 ASCII 模式；真实 `OnKeyDown` 将 `VK_CAPITAL` 映射成 `Caps_Lock`（`0xffe5`），把 `GetKeyState` 的切换后 Lock toggle 位反转为 librime 所需的切换前状态。press 产生的 commit 和模式变化走正常 apply，返回宿主的 eaten 始终为 false，保留系统 Caps Lock 行为；keyup 不额外合成。`good_old_caps_lock` 与 `commit_text` 因此仍由 schema 和 `ascii_composer` 决定。
 
 ## 敏感与禁用输入上下文
 
@@ -245,7 +245,7 @@ Windows 默认使用非嵌入模式。设置保存在 `%APPDATA%/keytao/theme.ya
 `src/key_map.rs` 维护 VK 到 X11 keysym 的转换：
 
 - 字母按 `CapsLock XOR Shift` 传小写或大写 ASCII keysym，同时保留 Shift modifier mask，语义与 Linux/macOS 的“keysym 表示实际字符、mask 表示修饰键”一致。
-- `current_mod_mask()` 额外上报 `RIME_MOD_LOCK`（CapsLock 的 toggle 位）和 `RIME_MOD_SUPER`（Win 键）。通用层 `key_policy::normalize_key_for_modifiers` 把 Lock modifier 折进字符 keysym 后剥掉该位；`VK_CAPITAL` 本身仍不送 librime，因此这不代表支持 schema 的 Caps Lock 切换策略。Win 键映射为 Super，用于 `key_policy::is_system_reserved_modifier` 的系统保留判定。
+- `current_mod_mask()` 额外上报 `RIME_MOD_LOCK`（CapsLock 的 toggle 位）和 `RIME_MOD_SUPER`（Win 键）。通用层 `key_policy::normalize_key_for_modifiers` 把 Lock modifier 折进字符 keysym，同时保留 Lock 位交给 librime；只有 `VK_CAPITAL` press 在前端反转 Lock 位以表达切换前状态。Win 键映射为 Super，用于 `key_policy::is_system_reserved_modifier` 的系统保留判定。
 - 数字行和 OEM 标点通过当前 HKL 的 `ToUnicodeEx(..., flag=4)` 解析，正确支持非 US 布局和 Shift 符号；dead key 不会被伪装成 US 标点。小键盘操作符映射到对应 ASCII keysym。带 Control 的组合跳过 `ToUnicodeEx`（它会把 `Ctrl+[` 折成 U+001B 这类控制字符），改用布局无关的 fallback 表，保证 Rime 收到的是"字符 + Control mask"。
 - Backspace、Tab、Return、Escape、Space、Delete、方向键等映射到 XK 值。
 - `VK_F4` 映射为 `XK_F4` / `0xffc1`，用于打开 Rime schema / options 菜单。

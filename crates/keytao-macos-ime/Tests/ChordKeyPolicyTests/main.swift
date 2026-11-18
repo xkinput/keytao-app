@@ -74,4 +74,22 @@ press(2, 0x64, asciiMode: true)
 press(2, 0x64, accepted: false)
 press(36, 0xff0d)
 assert(releases.isEmpty, "ordinary schemas, ASCII, rejected and nonprintable presses stay unchanged")
-print("chord key policy and release synthesis tests passed")
+
+let capsOn = KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0, currentModifiers: 0x0002)
+assert(capsOn?.keyval == 0xffe5 && capsOn?.modifiers == 0, "Caps Lock on sends the pre-toggle unlocked state")
+let capsOff = KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0x0002, currentModifiers: 0)
+assert(capsOff?.keyval == 0xffe5 && capsOff?.modifiers == 0x0002, "Caps Lock off sends the pre-toggle locked state")
+for otherModifiers: UInt32 in [0x0001, 0x0004, 0x0008, 1 << 26, 0x0001 | 0x0004 | 0x0008 | (1 << 26)] {
+    let on = KeyTaoModifierKeyPolicy.capsLockEvent(
+        previousModifiers: otherModifiers, currentModifiers: otherModifiers | 0x0002
+    )
+    assert(on?.modifiers == otherModifiers, "Caps Lock preserves other modifiers")
+    let off = KeyTaoModifierKeyPolicy.capsLockEvent(
+        previousModifiers: otherModifiers | 0x0002, currentModifiers: otherModifiers
+    )
+    assert(off?.modifiers == otherModifiers | 0x0002, "Caps Lock off preserves other modifiers")
+}
+assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0, currentModifiers: 0) == nil)
+assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0x0002, currentModifiers: 0x0003) == nil,
+       "unrelated modifier changes must not toggle Caps Lock again")
+print("chord key policy, release synthesis and Caps Lock policy tests passed")
