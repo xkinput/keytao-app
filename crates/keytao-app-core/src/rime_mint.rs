@@ -13,17 +13,21 @@ pub const SCHEMA_ID: &str = "rime_mint";
 const COMMITS_ATOM: &str = "https://github.com/Mintimate/oh-my-rime/commits/main.atom";
 
 pub(crate) fn package_from_atom(feed: &str) -> Result<RemotePackage, String> {
+    branch_package_from_atom(feed, "Mintimate/oh-my-rime")
+}
+
+pub(crate) fn branch_package_from_atom(feed: &str, repo: &str) -> Result<RemotePackage, String> {
     let entry = feed
         .split_once("<entry>")
         .and_then(|(_, entry)| entry.split_once("</entry>"))
         .map(|(entry, _)| entry)
-        .ok_or("薄荷拼音提交订阅缺少最新提交")?;
+        .ok_or("方案提交订阅缺少最新提交")?;
     let sha = entry
         .split_once("<id>")
         .and_then(|(_, id)| id.split_once("</id>"))
         .and_then(|(id, _)| id.trim().strip_prefix("tag:github.com,2008:Grit::Commit/"))
         .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or("薄荷拼音提交订阅中的提交号无效")?;
+        .ok_or("方案提交订阅中的提交号无效")?;
     let date = entry
         .split_once("<updated>")
         .and_then(|(_, date)| date.split_once("</updated>"))
@@ -39,11 +43,11 @@ pub(crate) fn package_from_atom(feed: &str) -> Result<RemotePackage, String> {
                     .parse::<u8>()
                     .is_ok_and(|d| (1..=31).contains(&d))
         })
-        .ok_or("薄荷拼音提交订阅中的日期无效")?;
+        .ok_or("方案提交订阅中的日期无效")?;
     Ok(RemotePackage {
         version: format!("{} ({date})", &sha[..12]),
-        source: format!("https://github.com/Mintimate/oh-my-rime/commit/{sha}"),
-        download_url: "https://codeload.github.com/Mintimate/oh-my-rime/zip/refs/heads/main".into(),
+        source: format!("https://github.com/{repo}/commit/{sha}"),
+        download_url: format!("https://codeload.github.com/{repo}/zip/refs/heads/main"),
         download_bytes: None,
     })
 }

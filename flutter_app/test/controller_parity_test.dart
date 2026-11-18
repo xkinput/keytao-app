@@ -95,6 +95,8 @@ class FakeCore implements RustLibApi {
   AddonStatusDto rimeIceStatus = missingAddon;
   AddonStatusDto rimeMintStatus = missingAddon;
   AddonStatusDto rimeFrostStatus = missingAddon;
+  AddonStatusDto rimeSnowStatus = missingAddon;
+  AddonStatusDto rimeLsspStatus = missingAddon;
   bool delayAddonUpdates = false;
   bool addonUpdateFails = false;
   bool delayReleases = false;
@@ -195,6 +197,10 @@ class FakeCore implements RustLibApi {
   Future<AddonStatusDto> crateApiCoreRimeMintStatus() async => rimeMintStatus;
   @override
   Future<AddonStatusDto> crateApiCoreRimeFrostStatus() async => rimeFrostStatus;
+  @override
+  Future<AddonStatusDto> crateApiCoreRimeSnowStatus() async => rimeSnowStatus;
+  @override
+  Future<AddonStatusDto> crateApiCoreRimeLsspStatus() async => rimeLsspStatus;
   @override
   Future<AddonStatusDto> crateApiCoreCheckAddonUpdate({required String id}) async {
     calls.add('addonUpdate:$id');
@@ -414,6 +420,32 @@ class FakeCore implements RustLibApi {
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeFrostStatus = installed ? installedAddon : missingAddon;
+  }
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeSnow({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('rimeSnow:$installed');
+    await emitAddonDeployProgress();
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    return rimeSnowStatus = installed ? installedAddon : missingAddon;
+  }
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeLssp({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('rimeLssp:$installed');
+    await emitAddonDeployProgress();
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    return rimeLsspStatus = installed ? installedAddon : missingAddon;
   }
 
   @override
@@ -689,6 +721,10 @@ void main() {
           () => controller.manageRimeMint(false),
           () => controller.manageRimeFrost(true),
           () => controller.manageRimeFrost(false),
+          () => controller.manageRimeSnow(true),
+          () => controller.manageRimeSnow(false),
+          () => controller.manageRimeLssp(true),
+          () => controller.manageRimeLssp(false),
         ]) {
           controller.clearOperationLogs();
           expect(await action(), isTrue);
@@ -729,6 +765,10 @@ void main() {
       () => controller.manageRimeMint(false),
       () => controller.manageRimeFrost(true),
       () => controller.manageRimeFrost(false),
+      () => controller.manageRimeSnow(true),
+      () => controller.manageRimeSnow(false),
+      () => controller.manageRimeLssp(true),
+      () => controller.manageRimeLssp(false),
     ]) {
       controller.deploySteps.clear();
       controller.clearOperationLogs();
@@ -760,6 +800,8 @@ void main() {
         OperationKind.rimeIce,
         OperationKind.rimeMint,
         OperationKind.rimeFrost,
+        OperationKind.rimeSnow,
+        OperationKind.rimeLssp,
       ]) {
         controller.operation = operation;
         const progress = InstallProgressDto(
@@ -797,6 +839,12 @@ void main() {
         }
         if (operation == OperationKind.rimeFrost) {
           expect(controller.rimeFrostProgress, same(progress));
+        }
+        if (operation == OperationKind.rimeSnow) {
+          expect(controller.rimeSnowProgress, same(progress));
+        }
+        if (operation == OperationKind.rimeLssp) {
+          expect(controller.rimeLsspProgress, same(progress));
         }
       }
       var changes = 0;
@@ -1007,12 +1055,21 @@ void main() {
     expect(controller.rimeIceHasUpdate, isTrue);
     core.rimeMintStatus = installedAddon;
     core.rimeFrostStatus = installedAddon;
+    core.rimeSnowStatus = installedAddon;
+    core.rimeLsspStatus = installedAddon;
     await controller.refreshState();
     core.addonUpdateRequests['rime_mint']!.complete(addonUpdate);
     core.addonUpdateRequests['rime_frost']!.complete(addonUpdate);
+    core.addonUpdateRequests['snow_jiandao']!.complete(addonUpdate);
+    core.addonUpdateRequests['triple_pinyin_lssp']!.complete(addonUpdate);
     await settle();
     await controller.refreshState();
-    for (final id in ['rime_mint', 'rime_frost']) {
+    for (final id in [
+      'rime_mint',
+      'rime_frost',
+      'snow_jiandao',
+      'triple_pinyin_lssp',
+    ]) {
       expect(
         core.calls.where((call) => call == 'addonUpdate:$id'),
         hasLength(1),
@@ -1022,6 +1079,10 @@ void main() {
     expect(controller.rimeMintHasUpdate, isTrue);
     expect(controller.rimeFrostLatestVersion, '2');
     expect(controller.rimeFrostHasUpdate, isTrue);
+    expect(controller.rimeSnowLatestVersion, '2');
+    expect(controller.rimeSnowHasUpdate, isTrue);
+    expect(controller.rimeLsspLatestVersion, '2');
+    expect(controller.rimeLsspHasUpdate, isTrue);
   });
 
   test('add-on update check failures remain nonblocking for the session', () async {
@@ -1068,6 +1129,8 @@ void main() {
       core.rimeIceStatus = installedAddon;
       core.rimeMintStatus = installedAddon;
       core.rimeFrostStatus = installedAddon;
+      core.rimeSnowStatus = installedAddon;
+      core.rimeLsspStatus = installedAddon;
       core.delayAddonUpdates = true;
       await controller.refreshState();
       final easyEnRequest = core.addonUpdateRequests['easy_en']!;
@@ -1075,6 +1138,8 @@ void main() {
       final rimeIceRequest = core.addonUpdateRequests['rime_ice']!;
       final rimeMintRequest = core.addonUpdateRequests['rime_mint']!;
       final rimeFrostRequest = core.addonUpdateRequests['rime_frost']!;
+      final rimeSnowRequest = core.addonUpdateRequests['snow_jiandao']!;
+      final rimeLsspRequest = core.addonUpdateRequests['triple_pinyin_lssp']!;
       expect(
         await (installed
             ? controller.installAddon()
@@ -1084,17 +1149,23 @@ void main() {
       expect(await controller.manageRimeIce(installed), isTrue);
       expect(await controller.manageRimeMint(installed), isTrue);
       expect(await controller.manageRimeFrost(installed), isTrue);
+      expect(await controller.manageRimeSnow(installed), isTrue);
+      expect(await controller.manageRimeLssp(installed), isTrue);
       easyEnRequest.complete(addonUpdate);
       wanxiangRequest.complete(addonUpdate);
       rimeIceRequest.complete(addonUpdate);
       rimeMintRequest.complete(addonUpdate);
       rimeFrostRequest.complete(addonUpdate);
+      rimeSnowRequest.complete(addonUpdate);
+      rimeLsspRequest.complete(addonUpdate);
       await settle();
       expect(controller.addonLatestVersion, installed ? '1' : null);
       expect(controller.wanxiangLatestVersion, '2');
       expect(controller.rimeIceLatestVersion, installed ? '1' : null);
       expect(controller.rimeMintLatestVersion, installed ? '1' : null);
       expect(controller.rimeFrostLatestVersion, installed ? '1' : null);
+      expect(controller.rimeSnowLatestVersion, installed ? '1' : null);
+      expect(controller.rimeLsspLatestVersion, installed ? '1' : null);
     }
   });
 
@@ -1231,9 +1302,13 @@ void main() {
     expect(controller.canInstallRimeIce, isTrue);
     expect(controller.canInstallRimeMint, isTrue);
     expect(controller.canInstallRimeFrost, isTrue);
+    expect(controller.canInstallRimeSnow, isTrue);
+    expect(controller.canInstallRimeLssp, isTrue);
     expect(await controller.manageRimeIce(true), isTrue);
     expect(await controller.manageRimeMint(true), isTrue);
     expect(await controller.manageRimeFrost(true), isTrue);
+    expect(await controller.manageRimeSnow(true), isTrue);
+    expect(await controller.manageRimeLssp(true), isTrue);
     expect(await controller.manageWanxiang(true), isTrue);
     core.calls.clear();
     expect(await controller.installAddon(), isTrue);
@@ -1256,6 +1331,10 @@ void main() {
     expect(controller.rimeMintError, 'deploy failed');
     expect(await controller.manageRimeFrost(true), isFalse);
     expect(controller.rimeFrostError, 'deploy failed');
+    expect(await controller.manageRimeSnow(true), isFalse);
+    expect(controller.rimeSnowError, 'deploy failed');
+    expect(await controller.manageRimeLssp(true), isFalse);
+    expect(controller.rimeLsspError, 'deploy failed');
     android.failDeploy = false;
     android.deployed = false;
     expect(await controller.manageWanxiang(true), isFalse);
@@ -1266,6 +1345,10 @@ void main() {
     expect(controller.rimeMintError, '部署未完成');
     expect(await controller.manageRimeFrost(true), isFalse);
     expect(controller.rimeFrostError, '部署未完成');
+    expect(await controller.manageRimeSnow(true), isFalse);
+    expect(controller.rimeSnowError, '部署未完成');
+    expect(await controller.manageRimeLssp(true), isFalse);
+    expect(controller.rimeLsspError, '部署未完成');
     controller.dispose();
     controller = create(mobile: false)
       ..desktopEnglishMode = EnglishModeDto.schema;

@@ -83,6 +83,18 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> manageRimeSnow(bool installed) async {
+    actions.add('snow:$installed');
+    return true;
+  }
+
+  @override
+  Future<bool> manageRimeLssp(bool installed) async {
+    actions.add('lssp:$installed');
+    return true;
+  }
+
+  @override
   Future<bool> importLocalScheme({String? schemeKey}) async {
     actions.add('import:$schemeKey');
     return true;
@@ -232,10 +244,12 @@ void main() {
           version: '1',
           englishAvailable: false,
         );
-        c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost = status;
+        c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost =
+            c.rimeSnow = c.rimeLssp = status;
         c.addonLatestVersion = c.wanxiangLatestVersion =
             c.rimeIceLatestVersion = c.rimeMintLatestVersion =
-                c.rimeFrostLatestVersion = latest;
+                c.rimeFrostLatestVersion = c.rimeSnowLatestVersion =
+                    c.rimeLsspLatestVersion = latest;
         await _pumpAddons(tester, c);
         final buttons = tester.widgetList<ActionButton>(
           find.byType(ActionButton),
@@ -244,15 +258,17 @@ void main() {
           buttons
               .where((button) => button.primary)
               .map((button) => button.label),
-          label == null ? isEmpty : List.filled(5, label),
+          label == null ? isEmpty : List.filled(7, label),
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
-          hasLength(installed ? 5 : 0),
+          hasLength(installed ? 7 : 0),
         );
         for (final (key, name) in [
           ('addon-rime-mint', 'mint'),
           ('addon-rime-frost', 'frost'),
+          ('addon-rime-snow', 'snow'),
+          ('addon-rime-lssp', 'lssp'),
         ]) {
           final card = find.byKey(ValueKey(key));
           if (label != null) {
@@ -346,10 +362,12 @@ void main() {
     await _pumpAddons(tester, c);
     expect(find.text(AppStrings.rimeMint), findsOneWidget);
     expect(find.text(AppStrings.rimeFrost), findsOneWidget);
+    expect(find.text(AppStrings.rimeSnow), findsOneWidget);
+    expect(find.text(AppStrings.rimeLssp), findsOneWidget);
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, AppStrings.install),
     );
-    expect(installs, hasLength(5));
+    expect(installs, hasLength(7));
     expect(installs.every((button) => button.onPress != null), isTrue);
     expect(tester.takeException(), isNull);
   });
@@ -363,6 +381,8 @@ void main() {
       for (final (schema, name) in [
         ('easy_en', 'Easy English'),
         ('wanxiang', AppStrings.wanxiang),
+        ('snow_jiandao', AppStrings.rimeSnow),
+        ('triple_pinyin_lssp', AppStrings.rimeLssp),
       ]) {
         c.local = LocalSchemaDto(
           installed: true,
@@ -377,6 +397,8 @@ void main() {
         );
         c.addon = status;
         c.wanxiang = status;
+        c.rimeSnow = status;
+        c.rimeLssp = status;
         await tester.pumpWidget(
           KeyTaoTheme(
             platform: c.info.platform,
@@ -890,7 +912,7 @@ void main() {
     );
     expect(
       tester.widget<HairlineGridSection>(catalogue).children,
-      hasLength(9),
+      hasLength(11),
     );
     for (final key in [
       'addon-easy-en',
@@ -898,6 +920,8 @@ void main() {
       'addon-rime-ice',
       'addon-rime-mint',
       'addon-rime-frost',
+      'addon-rime-snow',
+      'addon-rime-lssp',
     ]) {
       expect(
         find.descendant(of: catalogue, matching: find.byKey(ValueKey(key))),

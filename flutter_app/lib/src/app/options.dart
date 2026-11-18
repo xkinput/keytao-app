@@ -28,6 +28,8 @@ String schemeDisplayName(String key) => switch (key) {
   'xmjd-feiding' => '星猫键道 · 非顶',
   'easy_en' => 'Easy English',
   'wanxiang' => AppStrings.wanxiang,
+  'snow_jiandao' => AppStrings.rimeSnow,
+  'triple_pinyin_lssp' => AppStrings.rimeLssp,
   _ => schemes[key] ?? key,
 };
 const logoAsset = 'assets/logo.png';

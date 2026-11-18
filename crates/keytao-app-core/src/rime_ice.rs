@@ -42,9 +42,11 @@ const REQUIRED: &[&str] = &[
 
 static ADDON: Addon = Addon {
     id: SCHEMA_ID,
+    dictionary: SCHEMA_ID,
     name: "雾凇拼音",
     manifest: MANIFEST,
     required: REQUIRED,
+    extra_archives: &[],
     installable,
     extract,
 };
