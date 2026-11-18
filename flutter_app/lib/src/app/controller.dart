@@ -133,9 +133,14 @@ String formatWindowTitle(String pageTitle, Locale locale) =>
     '$pageTitle · KeyTao ${locale.languageCode.startsWith('zh') ? '输入法' : 'Input Method'}';
 
 class AppController extends ChangeNotifier {
-  AppController({required this.info, this.android = const AndroidHost()});
+  AppController({
+    required this.info,
+    this.android = const AndroidHost(),
+    this.pickDesktopDirectory = getDirectoryPath,
+  });
   final BridgeInfo info;
   final AndroidHost android;
+  final Future<String?> Function() pickDesktopDirectory;
   bool get isAndroid => info.platform == BridgePlatform.android;
   bool get isWindows => info.platform == BridgePlatform.windows;
   bool get isLinux => info.platform == BridgePlatform.linux;
