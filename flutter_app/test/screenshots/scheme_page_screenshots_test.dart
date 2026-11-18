@@ -13,6 +13,7 @@ import 'package:keytao/src/rust/api/core.dart'
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/shell.dart';
 import 'package:keytao/src/ui/theme.dart';
+import 'package:keytao/src/ui/widgets.dart';
 
 import '../view_fixture.dart';
 
@@ -215,17 +216,38 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(tester.getSize(find.byKey(_captureKey)), device.size);
-      for (final heading in ['方案列表', '键道方案', '附加方案']) {
-        expect(find.text(heading), findsOneWidget);
+      expect(find.text('方案列表'), findsOneWidget);
+      for (final heading in ['键道方案', '附加方案']) {
+        expect(find.text(heading), findsNothing);
       }
       final cards = [
-        'keytao',
-        'xmjd',
-        'txjx',
-        'keydo',
-      ].map((key) => find.byKey(ValueKey('scheme-package-$key'))).toList();
+        for (final key in ['keytao', 'xmjd', 'txjx', 'keydo'])
+          find
+              .ancestor(
+                of: find.byKey(ValueKey('scheme-package-$key')),
+                matching: find.byType(HairlineGridCell),
+              )
+              .first,
+        for (final key in [
+          'easy-en',
+          'wanxiang',
+          'rime-ice',
+          'rime-mint',
+          'rime-frost',
+        ])
+          find.byKey(ValueKey('addon-$key')),
+      ];
+      expect(
+        tester.getTopLeft(cards.first).dy -
+            tester.getBottomLeft(find.text('方案列表')).dy,
+        inInclusiveRange(0, 40),
+      );
+      for (final card in cards) {
+        expect(tester.getSize(card).width, tester.getSize(cards.first).width);
+      }
       if (device.platform == BridgePlatform.macOs) {
         expect(tester.getTopLeft(cards[0]).dy, tester.getTopLeft(cards[1]).dy);
+        expect(tester.getTopLeft(cards[4]).dy, tester.getTopLeft(cards[5]).dy);
         expect(
           tester.getTopLeft(cards[1]).dx,
           greaterThan(tester.getTopLeft(cards[0]).dx),
@@ -238,7 +260,7 @@ void main() {
           );
           expect(
             tester.getTopLeft(cards[index]).dy,
-            greaterThan(tester.getBottomLeft(cards[index - 1]).dy),
+            greaterThanOrEqualTo(tester.getBottomLeft(cards[index - 1]).dy),
           );
         }
       }
@@ -255,6 +277,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('wanxiang-grammar')), findsOneWidget);
       expect(tester.takeException(), isNull);
+      if (screenshots && device.platform == BridgePlatform.macOs) {
+        await _capture(tester, '${device.name}-scrolled');
+      }
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }

@@ -879,14 +879,31 @@ void main() {
     final deployment = find.byWidgetPredicate(
       (widget) => widget is Section && widget.title == '部署',
     );
-    for (final heading in ['方案列表', '键道方案', '附加方案']) {
-      expect(find.text(heading), findsOneWidget);
+    expect(find.text('方案列表'), findsOneWidget);
+    for (final heading in ['键道方案', '附加方案']) {
+      expect(find.text(heading), findsNothing);
     }
     expect(find.text('云端方案'), findsNothing);
     expect(
       find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
       findsNWidgets(4),
     );
+    expect(
+      tester.widget<HairlineGridSection>(catalogue).children,
+      hasLength(9),
+    );
+    for (final key in [
+      'addon-easy-en',
+      'addon-wanxiang',
+      'addon-rime-ice',
+      'addon-rime-mint',
+      'addon-rime-frost',
+    ]) {
+      expect(
+        find.descendant(of: catalogue, matching: find.byKey(ValueKey(key))),
+        findsOneWidget,
+      );
+    }
     expect(
       find.descendant(of: active, matching: find.text('Custom scheme')),
       findsOneWidget,
