@@ -118,7 +118,6 @@ class _SchemePageState extends State<SchemePage> {
           ),
         ),
         if (c.schemeUpdatesLoading) const FProgress(),
-        const HairlineGridCell(child: EyebrowLabel('键道方案')),
         HairlineGridSection(
           key: const ValueKey('cloud-schemes'),
           minCellWidth: 320,
@@ -128,9 +127,9 @@ class _SchemePageState extends State<SchemePage> {
                 color: key == activeKey ? palette.surface : null,
                 child: _package(key),
               ),
+            ..._addonCells(context, c),
           ],
         ),
-        AddonCard(controller: c),
         HairlineGridSection(
           minCellWidth: 440,
           children: [
@@ -898,253 +897,229 @@ class AddonCard extends StatelessWidget {
   const AddonCard({super.key, required this.controller});
   final AppController controller;
   @override
-  Widget build(BuildContext context) {
-    final c = controller;
-    Widget addon({
-      required String key,
-      required String title,
-      required String status,
-      required String label,
-      required String tooltip,
-      required bool showInstall,
-      required VoidCallback? install,
-      required bool installed,
-      required VoidCallback? uninstall,
-      required bool active,
-      required Widget progress,
-      required String? error,
-      Widget? variant,
-      Widget? extra,
-    }) => HairlineGridCell(
-      key: ValueKey(key),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            title,
-            style: context.theme.typography.body.sm.copyWith(
-              fontSize: MediaQuery.sizeOf(context).width >= 720 ? 30 : 26,
-              height: 1.1,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            status,
-            style: context.theme.typography.body.xs.copyWith(
-              color: context.theme.colors.mutedForeground,
-            ),
-          ),
-          if (variant != null) ...[const SizedBox(height: 12), variant],
-          const SizedBox(height: 12),
-          ActionRow(
-            children: [
-              if (showInstall)
-                ActionButton(
-                  label,
-                  primary: true,
-                  icon: FLucideIcons.download,
-                  tooltip: tooltip,
-                  onPress: install,
-                ),
-              if (installed)
-                ActionButton(AppStrings.uninstall, onPress: uninstall),
-            ],
-          ),
-          if (active) ...[const SizedBox(height: 12), progress],
-          if (error != null) ...[
-            const SizedBox(height: 8),
-            ErrorMessage(error),
-          ],
-          if (extra != null) ...[const SizedBox(height: 16), extra],
-        ],
-      ),
-    );
-    return Column(
+  Widget build(BuildContext context) => HairlineGridSection(
+    minCellWidth: 320,
+    children: _addonCells(context, controller),
+  );
+}
+
+List<Widget> _addonCells(BuildContext context, AppController c) {
+  Widget addon({
+    required String key,
+    required String title,
+    required String status,
+    required String label,
+    required String tooltip,
+    required bool showInstall,
+    required VoidCallback? install,
+    required bool installed,
+    required VoidCallback? uninstall,
+    required bool active,
+    required Widget progress,
+    required String? error,
+    Widget? variant,
+    Widget? extra,
+  }) => HairlineGridCell(
+    key: ValueKey(key),
+    child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const HairlineGridCell(child: EyebrowLabel(AppStrings.addonTitle)),
-        HairlineGridSection(
-          minCellWidth: 320,
+        Text(
+          title,
+          style: context.theme.typography.body.sm.copyWith(
+            fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 30,
+            height: 1.1,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          status,
+          style: context.theme.typography.body.xs.copyWith(
+            color: context.theme.colors.mutedForeground,
+          ),
+        ),
+        if (variant != null) ...[const SizedBox(height: 12), variant],
+        const SizedBox(height: 12),
+        ActionRow(
           children: [
-            addon(
-              key: 'addon-easy-en',
-              title: AppStrings.easyEnglish,
-              status: c.addonStatusText,
-              label: c.addonButtonLabel,
-              tooltip: c.addonTooltip,
-              showInstall: c.showAddonInstall,
-              install: c.canInstallAddon ? c.installAddon : null,
-              installed: c.addon?.installed == true,
-              uninstall: c.canUninstallAddon ? c.uninstallAddon : null,
-              active: c.isManagingAddon,
-              progress: InstallProgressView(
-                active: c.isManagingAddon,
-                progress: c.addonProgress,
+            if (showInstall)
+              ActionButton(
+                label,
+                primary: true,
+                icon: FLucideIcons.download,
+                tooltip: tooltip,
+                onPress: install,
               ),
-              error: c.addonError,
-            ),
-            addon(
-              key: 'addon-wanxiang',
-              title: AppStrings.wanxiang,
-              variant: Align(
-                alignment: Alignment.centerLeft,
-                child: SizedBox(
-                  width: 160,
-                  child: Semantics(
-                    label: AppStrings.wanxiangVariant,
-                    enabled: !c.busy,
-                    child: FSelect<String>(
-                      enabled: !c.busy,
-                      control: FSelectControl.lifted(
-                        value: c.selectedWanxiangVariant,
-                        onChange: c.selectWanxiangVariant,
-                      ),
-                      items: {
-                        for (final entry in AppStrings.wanxiangVariants.entries)
-                          entry.value: entry.key,
-                      },
-                    ),
-                  ),
-                ),
-              ),
-              status: c.wanxiangStatusText,
-              label: c.wanxiangButtonLabel,
-              tooltip: c.wanxiangTooltip,
-              showInstall: c.showWanxiangInstall,
-              install: c.canInstallWanxiang
-                  ? () => c.manageWanxiang(true)
-                  : null,
-              installed: c.wanxiang?.installed == true,
-              uninstall: c.canUninstallWanxiang
-                  ? () => c.manageWanxiang(false)
-                  : null,
-              active: c.isManagingWanxiang,
-              progress: InstallProgressView(
-                active: c.isManagingWanxiang,
-                progress: c.wanxiangProgress,
-              ),
-              error: c.wanxiangError,
-              extra: c.showWanxiangGrammar
-                  ? Column(
-                      key: const ValueKey('wanxiang-grammar'),
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        SettingRow(
-                          AppStrings.wanxiangGrammar,
-                          child: ActionRow(
-                            children: [
-                              Text(
-                                c.wanxiangGrammarSize,
-                                style: context.theme.typography.body.xs
-                                    .copyWith(
-                                      color:
-                                          context.theme.colors.mutedForeground,
-                                    ),
-                              ),
-                              if (c.isManagingWanxiangGrammar)
-                                ActionButton(
-                                  AppStrings.cancel,
-                                  onPress: c.canCancelWanxiangGrammarDownload
-                                      ? c.cancelWanxiangGrammarDownload
-                                      : null,
-                                )
-                              else
-                                ActionButton(
-                                  c.wanxiangGrammar?.installed == true
-                                      ? '删除'
-                                      : '下载',
-                                  icon: c.wanxiangGrammar?.installed == true
-                                      ? FLucideIcons.trash2
-                                      : FLucideIcons.download,
-                                  onPress: c.canManageWanxiangGrammar
-                                      ? () => c.manageWanxiangGrammar(
-                                          c.wanxiangGrammar?.installed != true,
-                                        )
-                                      : null,
-                                ),
-                            ],
-                          ),
-                        ),
-                        if (c.isManagingWanxiangGrammar) ...[
-                          const SizedBox(height: 8),
-                          InstallProgressView(
-                            active: true,
-                            progress: c.wanxiangGrammarProgress,
-                          ),
-                        ],
-                        if (c.wanxiangGrammarError case final error?) ...[
-                          const SizedBox(height: 8),
-                          ErrorMessage(error),
-                        ],
-                      ],
-                    )
-                  : null,
-            ),
-            addon(
-              key: 'addon-rime-ice',
-              title: AppStrings.rimeIce,
-              status: c.rimeIceStatusText,
-              label: c.rimeIceButtonLabel,
-              tooltip: c.rimeIceTooltip,
-              showInstall: c.showRimeIceInstall,
-              install: c.canInstallRimeIce ? () => c.manageRimeIce(true) : null,
-              installed: c.rimeIce?.installed == true,
-              uninstall: c.canUninstallRimeIce
-                  ? () => c.manageRimeIce(false)
-                  : null,
-              active: c.isManagingRimeIce,
-              progress: InstallProgressView(
-                active: c.isManagingRimeIce,
-                progress: c.rimeIceProgress,
-              ),
-              error: c.rimeIceError,
-            ),
-            addon(
-              key: 'addon-rime-mint',
-              title: AppStrings.rimeMint,
-              status: c.rimeMintStatusText,
-              label: c.rimeMintButtonLabel,
-              tooltip: c.rimeMintTooltip,
-              showInstall: c.showRimeMintInstall,
-              install: c.canInstallRimeMint
-                  ? () => c.manageRimeMint(true)
-                  : null,
-              installed: c.rimeMint?.installed == true,
-              uninstall: c.canUninstallRimeMint
-                  ? () => c.manageRimeMint(false)
-                  : null,
-              active: c.isManagingRimeMint,
-              progress: InstallProgressView(
-                active: c.isManagingRimeMint,
-                progress: c.rimeMintProgress,
-              ),
-              error: c.rimeMintError,
-            ),
-            addon(
-              key: 'addon-rime-frost',
-              title: AppStrings.rimeFrost,
-              status: c.rimeFrostStatusText,
-              label: c.rimeFrostButtonLabel,
-              tooltip: c.rimeFrostTooltip,
-              showInstall: c.showRimeFrostInstall,
-              install: c.canInstallRimeFrost
-                  ? () => c.manageRimeFrost(true)
-                  : null,
-              installed: c.rimeFrost?.installed == true,
-              uninstall: c.canUninstallRimeFrost
-                  ? () => c.manageRimeFrost(false)
-                  : null,
-              active: c.isManagingRimeFrost,
-              progress: InstallProgressView(
-                active: c.isManagingRimeFrost,
-                progress: c.rimeFrostProgress,
-              ),
-              error: c.rimeFrostError,
-            ),
+            if (installed)
+              ActionButton(AppStrings.uninstall, onPress: uninstall),
           ],
         ),
+        if (active) ...[const SizedBox(height: 12), progress],
+        if (error != null) ...[const SizedBox(height: 8), ErrorMessage(error)],
+        if (extra != null) ...[const SizedBox(height: 16), extra],
       ],
-    );
-  }
+    ),
+  );
+  return [
+    addon(
+      key: 'addon-easy-en',
+      title: AppStrings.easyEnglish,
+      status: c.addonStatusText,
+      label: c.addonButtonLabel,
+      tooltip: c.addonTooltip,
+      showInstall: c.showAddonInstall,
+      install: c.canInstallAddon ? c.installAddon : null,
+      installed: c.addon?.installed == true,
+      uninstall: c.canUninstallAddon ? c.uninstallAddon : null,
+      active: c.isManagingAddon,
+      progress: InstallProgressView(
+        active: c.isManagingAddon,
+        progress: c.addonProgress,
+      ),
+      error: c.addonError,
+    ),
+    addon(
+      key: 'addon-wanxiang',
+      title: AppStrings.wanxiang,
+      variant: Align(
+        alignment: Alignment.centerLeft,
+        child: SizedBox(
+          width: 160,
+          child: Semantics(
+            label: AppStrings.wanxiangVariant,
+            enabled: !c.busy,
+            child: FSelect<String>(
+              enabled: !c.busy,
+              control: FSelectControl.lifted(
+                value: c.selectedWanxiangVariant,
+                onChange: c.selectWanxiangVariant,
+              ),
+              items: {
+                for (final entry in AppStrings.wanxiangVariants.entries)
+                  entry.value: entry.key,
+              },
+            ),
+          ),
+        ),
+      ),
+      status: c.wanxiangStatusText,
+      label: c.wanxiangButtonLabel,
+      tooltip: c.wanxiangTooltip,
+      showInstall: c.showWanxiangInstall,
+      install: c.canInstallWanxiang ? () => c.manageWanxiang(true) : null,
+      installed: c.wanxiang?.installed == true,
+      uninstall: c.canUninstallWanxiang ? () => c.manageWanxiang(false) : null,
+      active: c.isManagingWanxiang,
+      progress: InstallProgressView(
+        active: c.isManagingWanxiang,
+        progress: c.wanxiangProgress,
+      ),
+      error: c.wanxiangError,
+      extra: c.showWanxiangGrammar
+          ? Column(
+              key: const ValueKey('wanxiang-grammar'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SettingRow(
+                  AppStrings.wanxiangGrammar,
+                  child: ActionRow(
+                    children: [
+                      Text(
+                        c.wanxiangGrammarSize,
+                        style: context.theme.typography.body.xs.copyWith(
+                          color: context.theme.colors.mutedForeground,
+                        ),
+                      ),
+                      if (c.isManagingWanxiangGrammar)
+                        ActionButton(
+                          AppStrings.cancel,
+                          onPress: c.canCancelWanxiangGrammarDownload
+                              ? c.cancelWanxiangGrammarDownload
+                              : null,
+                        )
+                      else
+                        ActionButton(
+                          c.wanxiangGrammar?.installed == true ? '删除' : '下载',
+                          icon: c.wanxiangGrammar?.installed == true
+                              ? FLucideIcons.trash2
+                              : FLucideIcons.download,
+                          onPress: c.canManageWanxiangGrammar
+                              ? () => c.manageWanxiangGrammar(
+                                  c.wanxiangGrammar?.installed != true,
+                                )
+                              : null,
+                        ),
+                    ],
+                  ),
+                ),
+                if (c.isManagingWanxiangGrammar) ...[
+                  const SizedBox(height: 8),
+                  InstallProgressView(
+                    active: true,
+                    progress: c.wanxiangGrammarProgress,
+                  ),
+                ],
+                if (c.wanxiangGrammarError case final error?) ...[
+                  const SizedBox(height: 8),
+                  ErrorMessage(error),
+                ],
+              ],
+            )
+          : null,
+    ),
+    addon(
+      key: 'addon-rime-ice',
+      title: AppStrings.rimeIce,
+      status: c.rimeIceStatusText,
+      label: c.rimeIceButtonLabel,
+      tooltip: c.rimeIceTooltip,
+      showInstall: c.showRimeIceInstall,
+      install: c.canInstallRimeIce ? () => c.manageRimeIce(true) : null,
+      installed: c.rimeIce?.installed == true,
+      uninstall: c.canUninstallRimeIce ? () => c.manageRimeIce(false) : null,
+      active: c.isManagingRimeIce,
+      progress: InstallProgressView(
+        active: c.isManagingRimeIce,
+        progress: c.rimeIceProgress,
+      ),
+      error: c.rimeIceError,
+    ),
+    addon(
+      key: 'addon-rime-mint',
+      title: AppStrings.rimeMint,
+      status: c.rimeMintStatusText,
+      label: c.rimeMintButtonLabel,
+      tooltip: c.rimeMintTooltip,
+      showInstall: c.showRimeMintInstall,
+      install: c.canInstallRimeMint ? () => c.manageRimeMint(true) : null,
+      installed: c.rimeMint?.installed == true,
+      uninstall: c.canUninstallRimeMint ? () => c.manageRimeMint(false) : null,
+      active: c.isManagingRimeMint,
+      progress: InstallProgressView(
+        active: c.isManagingRimeMint,
+        progress: c.rimeMintProgress,
+      ),
+      error: c.rimeMintError,
+    ),
+    addon(
+      key: 'addon-rime-frost',
+      title: AppStrings.rimeFrost,
+      status: c.rimeFrostStatusText,
+      label: c.rimeFrostButtonLabel,
+      tooltip: c.rimeFrostTooltip,
+      showInstall: c.showRimeFrostInstall,
+      install: c.canInstallRimeFrost ? () => c.manageRimeFrost(true) : null,
+      installed: c.rimeFrost?.installed == true,
+      uninstall: c.canUninstallRimeFrost
+          ? () => c.manageRimeFrost(false)
+          : null,
+      active: c.isManagingRimeFrost,
+      progress: InstallProgressView(
+        active: c.isManagingRimeFrost,
+        progress: c.rimeFrostProgress,
+      ),
+      error: c.rimeFrostError,
+    ),
+  ];
 }
