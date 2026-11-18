@@ -76,6 +76,7 @@ class _SchemePageState extends State<SchemePage> {
     final desktop = MediaQuery.sizeOf(context).width >= 720;
     final palette = AppPalette.of(context);
     final cloudKeys = schemeKeys.where((key) => !c.isLocalScheme(key));
+    final addons = _addonCells(context, c);
     final activeKey = c.installedPackages
         .where((package) => package.active)
         .map((package) => package.schemeKey)
@@ -127,7 +128,10 @@ class _SchemePageState extends State<SchemePage> {
                 color: key == activeKey ? palette.surface : null,
                 child: _package(key),
               ),
-            ..._addonCells(context, c),
+            // 冰雪键道 follows the 键道 family; 李氏三拼 goes last.
+            addons[addons.length - 2],
+            ...addons.take(addons.length - 2),
+            addons.last,
           ],
         ),
         HairlineGridSection(
@@ -1199,6 +1203,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-rime-snow',
+      repositoryUrl: schemeRepositoryUrls['rime_snow']!,
       title: AppStrings.rimeSnow,
       status: c.rimeSnowStatusText,
       label: c.rimeSnowButtonLabel,
@@ -1216,6 +1221,7 @@ List<Widget> _addonCells(BuildContext context, AppController c) {
     ),
     addon(
       key: 'addon-rime-lssp',
+      repositoryUrl: schemeRepositoryUrls['rime_lssp']!,
       title: AppStrings.rimeLssp,
       status: c.rimeLsspStatusText,
       label: c.rimeLsspButtonLabel,
