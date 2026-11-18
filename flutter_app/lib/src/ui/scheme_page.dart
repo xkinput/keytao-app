@@ -130,8 +130,6 @@ class _SchemePageState extends State<SchemePage> {
               ),
           ],
         ),
-        if (c.local?.deployed == true && c.schemaSwitches.isNotEmpty)
-          HairlineGridCell(child: SchemaSwitchesSection(controller: c)),
         AddonCard(controller: c),
         HairlineGridSection(
           minCellWidth: 440,
@@ -238,6 +236,8 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ],
         ),
+        if (c.local?.deployed == true && c.schemaSwitches.isNotEmpty)
+          HairlineGridCell(child: SchemaSwitchesSection(controller: c)),
         HairlineGridCell(
           child: const FTextField(
             hint: AppStrings.testInput,
