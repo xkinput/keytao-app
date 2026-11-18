@@ -23,6 +23,13 @@ pub struct BridgeInfo {
     pub user_root: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct RimeSyncSettingsDto {
+    pub installation_id: String,
+    pub sync_dir: String,
+    pub effective_sync_dir: String,
+}
+
 pub struct LocalSchemaDto {
     pub installed: bool,
     pub deployed: bool,
