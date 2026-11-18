@@ -437,7 +437,7 @@ class SchemePackageRow extends StatelessWidget {
               tipBuilder: (_, _) => const Text('更多操作'),
               child: FButton.icon(
                 variant: FButtonVariant.outline,
-                onPress: c.busy ? null : popover.toggle,
+                onPress: popover.toggle,
                 style: FButtonStyleDelta.delta(
                   decoration: FVariants.all(
                     ShapeDecoration(
@@ -729,7 +729,7 @@ class _SchemeSource extends StatelessWidget {
         ],
         builder: (_, popover, _) => FButton(
           variant: FButtonVariant.ghost,
-          onPress: c.busy ? null : popover.toggle,
+          onPress: popover.toggle,
           child: Text('来源 · ${downloadSources[c.source] ?? c.source}'),
         ),
       ),
