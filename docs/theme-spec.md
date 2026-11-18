@@ -591,3 +591,12 @@ theme.yaml 的 `ui:` 本机设置、`themeId`/`themeHash`、keyboard.yaml 的布
 ### 未采纳的意见
 
 无。
+
+## 已定决策（2026-11-19）
+
+1. 柔和强调色的基色定为 `pc.panel.background`，与 Android/iOS IME 一致；Flutter 预览改为跟随。
+2. 主题文件名直接用 id（`themes/<id>.yaml`），靠 id 正则与 Windows 保留名拒绝保证安全。
+3. 检测到 `theme.yaml` 被手改时，默认按钮为「另存为新主题」。
+4. 实心按键阴影为 P1，Android 与 iOS 两端都做。
+5. 分享串超过 4000 字符时引导改用文件分享（待 QQ/微信实测后调整）。
+6. 各平台实现以视觉一致为目标：所有默认值与派生只在 Rust 计算一次，平台只按 resolved 结果渲染，不再自行改色或改 alpha；用同一份主题在各平台渲染对比验收。
