@@ -762,9 +762,7 @@ impl InstallReceipt {
             .into_iter()
             .filter(|(_, owner)| owner != id)
             .collect();
-        if let Some(active) =
-            crate::package_activation::read(core, &self.root).map_err(|e| e.to_string())?
-        {
+        for active in crate::package_activation::read_all(core, &self.root).map_err(|e| e.to_string())?.into_values() {
             for file in active.owned {
                 self.other_owners
                     .entry(file.path)

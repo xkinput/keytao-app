@@ -413,7 +413,7 @@ fn missing_referenced_file_refuses_upload_with_filename() {
     let dir = fixture();
     compiled(dir.path());
     fs::remove_file(dir.path().join("personal.dict.yaml")).unwrap();
-    let error = verified(dir.path(), None, &["main".into()], |_, _| Ok(()))
+    let error = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(()))
         .unwrap_err()
         .to_string();
     assert!(error.contains("personal.dict.yaml"), "{error}");
@@ -424,7 +424,7 @@ fn missing_build_artifact_refuses_upload_with_schema_and_filename() {
     let dir = fixture();
     compiled(dir.path());
     fs::remove_file(dir.path().join("build/helper.reverse.bin")).unwrap();
-    let error = verified(dir.path(), None, &["main".into()], |_, _| Ok(()))
+    let error = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(()))
         .unwrap_err()
         .to_string();
     assert!(
@@ -444,7 +444,7 @@ fn stale_build_artifact_refuses_upload_with_source_and_filename() {
                 .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(3000)),
         )
         .unwrap();
-    let error = verified(dir.path(), None, &["main".into()], |_, _| Ok(()))
+    let error = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(()))
         .unwrap_err()
         .to_string();
     assert!(
@@ -460,7 +460,7 @@ fn verified_archive_is_deterministic_and_smokes_every_schema() {
     let dir = fixture();
     compiled(dir.path());
     let mut smoked = Vec::new();
-    let first = verified(dir.path(), None, &["main".into()], |id, key| {
+    let first = verified(dir.path(), None, &["main".into()], |_, id, key| {
         smoked.push((id.to_owned(), key));
         Ok(())
     })
@@ -472,7 +472,7 @@ fn verified_archive_is_deterministic_and_smokes_every_schema() {
                 .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(500)),
         )
         .unwrap();
-    let second = verified(dir.path(), None, &["main".into()], |_, _| Ok(())).unwrap();
+    let second = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(())).unwrap();
     assert_eq!(
         smoked,
         [
@@ -503,7 +503,7 @@ fn verified_archive_is_deterministic_and_smokes_every_schema() {
 fn smoke_failure_refuses_upload_with_schema() {
     let dir = fixture();
     compiled(dir.path());
-    let error = verified(dir.path(), None, &["main".into()], |_, _| {
+    let error = verified(dir.path(), None, &["main".into()], |_, _, _| {
         Err("session error".into())
     })
     .unwrap_err()
@@ -538,7 +538,7 @@ fn deployed_custom_patch_exports_only_the_effective_dictionary_and_text_table() 
     write(dir.path(), "build/selected.reverse.bin", "compiled");
     write(dir.path(), "build/selected.prism.bin", "compiled");
     fs::remove_file(dir.path().join("main.dict.yaml")).unwrap();
-    let bundle = verified(dir.path(), None, &["main".into()], |_, _| Ok(())).unwrap();
+    let bundle = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(())).unwrap();
     assert!(bundle.files.contains(&"selected.dict.yaml".into()));
     assert!(bundle.files.contains(&"custom_notes.txt".into()));
     assert!(!bundle.files.contains(&"phrases.txt".into()));
@@ -652,7 +652,7 @@ fn runtime_resources_do_not_make_unrelated_compiled_outputs_stale() {
     );
     write(dir.path(), "phrases.txt", "new phrase\ta\n");
     write(dir.path(), "opencc/demo.txt", "updated\tword\n");
-    let bundle = verified(dir.path(), None, &["main".into()], |_, _| Ok(())).unwrap();
+    let bundle = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(())).unwrap();
     assert!(bundle.files.contains(&"phrases.txt".into()));
 }
 
@@ -677,7 +677,7 @@ fn reverse_lookup_filter_requires_only_its_reverse_artifact() {
     );
     compiled(dir.path());
     write(dir.path(), "build/comments.reverse.bin", "compiled");
-    let bundle = verified(dir.path(), None, &["main".into()], |_, _| Ok(())).unwrap();
+    let bundle = verified(dir.path(), None, &["main".into()], |_, _, _| Ok(())).unwrap();
     assert!(bundle.files.contains(&"comments.dict.yaml".into()));
 }
 

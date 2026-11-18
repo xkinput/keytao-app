@@ -22,6 +22,7 @@ mod global_input;
 #[cfg(test)]
 mod grammar_tests;
 mod reload_stamp_cache;
+mod rime_lua;
 #[cfg(all(
     test,
     any(target_os = "windows", target_os = "macos", target_os = "linux")
@@ -721,6 +722,7 @@ mod desktop {
     /// above.
     static RIME_INITIALIZED: Mutex<bool> = Mutex::new(false);
     static RIME_DEPLOYMENT_SIGNATURE: Mutex<Option<String>> = Mutex::new(None);
+    static RIME_LUA_SIGNATURE: Mutex<Option<String>> = Mutex::new(None);
     /// `RimeSetup` configures process-wide librime logging and modules. In
     /// particular, calling it again reaches glog's one-time initializer and
     /// aborts the process. Finalizing the Rime service does not undo setup, so
@@ -1036,6 +1038,7 @@ mod desktop {
         crate::rt_log!(Level::Info, "rime", "setup_start");
         let initialized_now = {
             let _rime = rime_api_lock();
+            regenerate_rime_lua_for_ime(Path::new(&user_data_dir));
             let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
             if *initialized {
                 false
@@ -1179,6 +1182,7 @@ mod desktop {
     ) -> Result<(), String> {
         {
             let _rime = rime_api_lock();
+            regenerate_rime_lua_for_ime(Path::new(&user_data_dir));
             finalize_rime()?;
             let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
             initialize_rime(&user_data_dir, &shared_data_dir, false);
@@ -1417,6 +1421,12 @@ mod desktop {
 
     fn initialize_rime(user_data_dir: &str, shared_data_dir: &str, deployer_only: bool) {
         let user_dir = Path::new(user_data_dir);
+        let lua_prepared = !lock_ignore_poison(&PROCESS_RIME.lua_retry_after)
+            .as_ref()
+            .is_some_and(|(root, _)| root == user_dir);
+        *lock_ignore_poison(&RIME_LUA_SIGNATURE) = lua_prepared
+            .then(|| rime_lua::signature(user_dir).ok().flatten())
+            .flatten();
         *lock_ignore_poison(&RIME_DEPLOYMENT_SIGNATURE) =
             ReloadStamp::signature_at(&user_dir.join("build").join(DEPLOYED_FILE));
         patch_neutral_grammar(user_dir);
@@ -1442,6 +1452,11 @@ mod desktop {
     pub(super) fn loaded_deployment_is_current(user_dir: &Path) -> bool {
         let current = ReloadStamp::signature_at(&user_dir.join("build").join(DEPLOYED_FILE));
         current.is_some() && *lock_ignore_poison(&RIME_DEPLOYMENT_SIGNATURE) == current
+    }
+
+    pub(super) fn loaded_lua_is_current(user_dir: &Path) -> bool {
+        rime_lua::signature(user_dir)
+            .is_ok_and(|signature| *lock_ignore_poison(&RIME_LUA_SIGNATURE) == signature)
     }
 
     #[cfg(not(target_os = "android"))]
@@ -4782,6 +4797,7 @@ struct ProcessRimeState {
     /// Every session handed out in this process. A teardown must drop their
     /// engines before finalizing librime; entries die with their session.
     sessions: Mutex<Vec<Weak<Mutex<ImeRuntimeSessionInner>>>>,
+    lua_retry_after: Mutex<Option<(PathBuf, Instant)>>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     global_input: Mutex<Option<global_input::GlobalInput>>,
 }
@@ -4798,6 +4814,7 @@ static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     generation: AtomicU64::new(0),
     reload_barrier: RwLock::new(()),
     sessions: Mutex::new(Vec::new()),
+    lua_retry_after: Mutex::new(None),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     global_input: Mutex::new(None),
 };
@@ -5063,6 +5080,20 @@ impl ImeRuntime {
         lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() == Some(&dirs)
     }
 
+    /// Release this runtime before removing its isolated data directory.
+    pub fn shutdown(&self) -> Result<(), String> {
+        let dirs = self.data_dirs()?;
+        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        if initialized.as_ref() != Some(&dirs) {
+            return Ok(());
+        }
+        let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+        PROCESS_RIME.drop_live_engines();
+        *initialized = None;
+        PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+        desktop::finalize_rime()
+    }
+
     /// Initialize and deploy. Idempotent per process: librime can only run for
     /// one pair of directories, so a second runtime asking for the ones it is
     /// already running for is a no-op instead of a second deployment.
@@ -5205,10 +5236,12 @@ impl ImeRuntime {
             }
 
             let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+            regenerate_rime_lua_for_ime(&dirs.user);
             // A schema signal can replace a deployment signal before the IME sees it.
             if self.0.ime_host
                 && initialized.as_ref() == Some(&dirs)
                 && desktop::loaded_deployment_is_current(&dirs.user)
+                && desktop::loaded_lua_is_current(&dirs.user)
             {
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 if self.apply_pending_user_data_sync(&dirs.user)? {
@@ -5337,7 +5370,16 @@ impl ImeRuntime {
             let rime = desktop::try_rime_api_lock().ok_or("librime session is busy")?;
             let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
             let request = if self.0.ime_host {
-                Engine::prepare_switch_request(&dirs.user)?
+                // Schema requests need the registered session's Lua reload barrier first.
+                let pending = schema_switch_request::pending_for_process(&dirs.user)?;
+                if pending
+                    .as_ref()
+                    .is_some_and(|request| request.schema_id.is_some())
+                {
+                    None
+                } else {
+                    Engine::prepare_switch_request(&dirs.user)?
+                }
             } else {
                 None
             };
@@ -5794,6 +5836,126 @@ impl ImeRuntimeSession {
             Option<&global_input::InputState>,
         ) -> T,
     ) -> Option<T> {
+        let ime_host = try_lock_ignore_poison(&self.inner)?.ime_host;
+        let lua_ready = !ime_host || self.try_finish_lua_reload();
+        let result = self.with_engine_access_inner(publish, invalidate_peers, lua_ready, action);
+        // F4 and mobile selection publish while holding session locks.
+        if ime_host {
+            self.try_finish_lua_reload();
+        }
+        result
+    }
+
+    fn try_finish_lua_reload(&self) -> bool {
+        let Some(initialized) = try_lock_ignore_poison(&PROCESS_RIME.initialized) else {
+            return false;
+        };
+        if initialized.as_ref() != Some(&self.dirs) {
+            return false;
+        }
+        drop(initialized);
+        if lock_ignore_poison(&PROCESS_RIME.lua_retry_after)
+            .as_ref()
+            .is_some_and(|(root, after)| root == &self.dirs.user && Instant::now() < *after)
+        {
+            return false;
+        }
+        let result =
+            schema_switch_request::pending_for_process(&self.dirs.user).and_then(|request| {
+                self.finish_lua_reload(request.and_then(|r| r.schema_id).as_deref())
+            });
+        match result {
+            Ok(()) => {
+                let ready = !rime_lua::RELOAD_PENDING.load(Ordering::Acquire);
+                if ready {
+                    *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+                }
+                ready
+            }
+            Err(error) => {
+                if try_lock_ignore_poison(&PROCESS_RIME.initialized)
+                    .is_some_and(|initialized| initialized.as_ref() == Some(&self.dirs))
+                {
+                    defer_rime_lua_reload(&self.dirs.user, &error);
+                }
+                false
+            }
+        }
+    }
+
+    fn finish_lua_reload(&self, requested: Option<&str>) -> Result<(), String> {
+        let mut initialized =
+            try_lock_ignore_poison(&PROCESS_RIME.initialized).ok_or("Rime is busy")?;
+        if initialized.as_ref() != Some(&self.dirs) {
+            return Err("Rime session belongs to another user directory".into());
+        }
+        if requested.is_none()
+            && !rime_lua::RELOAD_PENDING.load(Ordering::Acquire)
+            && desktop::loaded_lua_is_current(&self.dirs.user)
+        {
+            return Ok(());
+        }
+        let _barrier = PROCESS_RIME
+            .reload_barrier
+            .try_write()
+            .map_err(|_| "Rime is busy")?;
+        let retry = lock_ignore_poison(&rime_lua::SAVE_RETRY).clone();
+        let retry = retry.filter(|(root, _)| root == &self.dirs.user);
+        let save_error = retry.as_ref().and_then(|(root, id)| {
+            match persist_selected_schema(root, id).and_then(|()| write_current_schema(root, id)) {
+                Ok(()) => {
+                    *lock_ignore_poison(&rime_lua::SAVE_RETRY) = None;
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        });
+        let requested = if save_error.is_some() {
+            retry.as_ref().map(|(_, id)| id.as_str())
+        } else {
+            requested
+        };
+        match requested {
+            Some(id) => {
+                rime_lua::select(&self.dirs.user, id)?;
+            }
+            None => regenerate_active_rime_lua(&self.dirs.user)?,
+        }
+        if !desktop::loaded_lua_is_current(&self.dirs.user) {
+            PROCESS_RIME.drop_live_engines();
+            let result = desktop::reinitialize_rime(
+                self.dirs.user.to_string_lossy().into_owned(),
+                self.dirs.shared.clone(),
+            );
+            PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+            *initialized = result.is_ok().then(|| self.dirs.clone());
+            result?;
+            if save_error.is_none() {
+                PROCESS_RIME.apply_pending_switch_request(&self.dirs.user)?;
+            }
+        }
+        // Consume under the directory lock and write barrier, excluding publishers.
+        if let Some(error) = save_error {
+            defer_rime_lua_reload(&self.dirs.user, &error);
+        } else {
+            rime_lua::RELOAD_PENDING.store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn with_engine_access_inner<T>(
+        &self,
+        publish: bool,
+        invalidate_peers: bool,
+        lua_ready: bool,
+        action: impl FnOnce(
+            &Engine,
+            InputContextPolicy,
+            &mut english_mode::EnglishModeController,
+            bool,
+            Option<&global_input::InputState>,
+        ) -> T,
+    ) -> Option<T> {
         // A surviving session must not rebuild against another runtime's
         // deployment. Take locks in the same order as initialization, and keep
         // the read barrier pinned before releasing the directory check.
@@ -5801,11 +5963,12 @@ impl ImeRuntimeSession {
         if initialized.as_ref() != Some(&self.dirs) {
             return None;
         }
-        if self
-            .inner
-            .try_lock()
-            .ok()
-            .is_some_and(|inner| inner.ime_host)
+        if lua_ready
+            && self
+                .inner
+                .try_lock()
+                .ok()
+                .is_some_and(|inner| inner.ime_host)
             && schema_switch_request::pending_for_process(&self.dirs.user)
                 .ok()
                 .flatten()
@@ -6078,7 +6241,40 @@ fn publish_current_schema(root: &Path, id: &str) {
     if let Err(error) =
         persist_selected_schema(root, id).and_then(|()| write_current_schema(root, id))
     {
+        *lock_ignore_poison(&rime_lua::SAVE_RETRY) = Some((root.to_path_buf(), id.to_owned()));
+        rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
         crate::rt_log!(Level::Info, "error", "schema_selection_save", msg = error);
+    } else {
+        let mut retry = lock_ignore_poison(&rime_lua::SAVE_RETRY);
+        if retry
+            .as_ref()
+            .is_some_and(|(saved_root, _)| saved_root == root)
+        {
+            *retry = None;
+        }
+    }
+    match rime_lua::select(root, id) {
+        Ok(true) => {
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "android",
+                target_os = "ios"
+            ))]
+            {
+                *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+            }
+            rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
+            if let Err(error) = ReloadStamp::write(root) {
+                crate::rt_log!(Level::Info, "error", "schema_lua_reload", msg = error);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
+            crate::rt_log!(Level::Info, "error", "schema_lua_prepare", msg = error);
+        }
     }
 }
 
@@ -6092,13 +6288,25 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
         .map(|content| parse_schema_list(&content))
         .filter(|schemas| !schemas.is_empty());
     let schemas = effective_schema_list(dir, deployed.as_ref().cloned().unwrap_or(configured));
-    let selected = std::fs::read_to_string(dir.join("user.yaml"))
-        .ok()
-        .and_then(|content| serde_yaml::from_str::<Value>(&content).ok())
-        .and_then(|value| {
-            value["var"]["previously_selected_schema"]
-                .as_str()
-                .map(str::to_owned)
+    // A live selection still applies when saving user.yaml must be retried.
+    let selected = lock_ignore_poison(&rime_lua::SAVE_RETRY)
+        .as_ref()
+        .filter(|(root, _)| root == dir)
+        .map(|(_, id)| id.clone())
+        .or_else(|| {
+            std::fs::read_to_string(dir.join("user.yaml"))
+                .ok()
+                .and_then(|content| serde_yaml::from_str::<Value>(&content).ok())
+                .and_then(|value| {
+                    value["var"]["previously_selected_schema"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    std::fs::read_to_string(dir.join(".keytao-current-schema"))
+                        .ok()
+                        .map(|id| id.trim().to_owned())
+                })
         });
     if let Some(schema) = selected.filter(|schema| {
         valid_rime_build_id(schema)
@@ -6181,7 +6389,9 @@ fn nix_store_rime_data_dirs() -> Vec<PathBuf> {
 
 pub fn parse_schema_list(content: &str) -> Vec<String> {
     if let Ok(value) = serde_yaml::from_str::<Value>(content) {
-        if let Some(list) = value.get("patch").and_then(|patch| patch.get("schema_list"))
+        if let Some(list) = value
+            .get("patch")
+            .and_then(|patch| patch.get("schema_list"))
             .or_else(|| value.get("schema_list"))
         {
             return schema_list_from_yaml(Some(list));
@@ -6210,8 +6420,10 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
 }
 
 pub fn parse_schema_name(content: &str) -> Option<String> {
-    serde_yaml::from_str::<serde_json::Value>(content).ok()?
-        .get("schema")?.get("name")?
+    serde_yaml::from_str::<serde_json::Value>(content)
+        .ok()?
+        .get("schema")?
+        .get("name")?
         .as_str()
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -6234,7 +6446,10 @@ pub fn parse_schema_dependencies(content: &str) -> Vec<String> {
     let Ok(root) = serde_yaml::from_str::<serde_json::Value>(content) else {
         return Vec::new();
     };
-    let Some(dependencies) = root.get("schema").and_then(|schema| schema.get("dependencies")).and_then(serde_json::Value::as_array)
+    let Some(dependencies) = root
+        .get("schema")
+        .and_then(|schema| schema.get("dependencies"))
+        .and_then(serde_json::Value::as_array)
     else {
         return Vec::new();
     };
@@ -6322,6 +6537,11 @@ pub struct SchemaInstallState {
 
 pub const ACTIVE_SCHEME_MANIFEST: &str = ".keytao-active-scheme.json";
 
+/// Rebase a verified package snapshot after copying it into an isolated runtime.
+pub fn rebase_active_scheme_manifest(root: &Path) -> Result<(), String> {
+    rime_lua::rebase_manifest(root)
+}
+
 fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(data_dir.join("app-state.json")).ok()?).ok()?;
@@ -6349,13 +6569,29 @@ fn active_package_schema_ids(user_data_dir: &Path) -> HashSet<String> {
         let manifest = match std::fs::read(user_data_dir.join(ACTIVE_SCHEME_MANIFEST)) {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok()?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if default_user_data_dir().as_deref() != Some(user_data_dir) {
+                    return None;
+                }
                 legacy_active_local_manifest(&dirs::data_local_dir()?.join("ink.rea.keytao-app"))?
             }
             Err(_) => return None,
         };
-        if manifest["scheme_key"].as_str()?.is_empty()
-            || Path::new(manifest["root"].as_str()?) != user_data_dir.canonicalize().ok()?
-        {
+        if Path::new(manifest["root"].as_str()?) != user_data_dir.canonicalize().ok()? {
+            return None;
+        }
+        if let Some(packages) = manifest["packages"].as_object() {
+            return Some(
+                packages
+                    .values()
+                    .filter_map(|package| package["schemas"].as_array())
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|id| valid_rime_build_id(id))
+                    .map(str::to_owned)
+                    .collect(),
+            );
+        }
+        if manifest["scheme_key"].as_str()?.is_empty() {
             return None;
         }
         Some(
@@ -6864,9 +7100,15 @@ pub fn is_addon_schema(schema: &str) -> bool {
             | "rime_mint"
             | "rime_frost"
             | "triple_pinyin_lssp"
-            | "melt_eng" | "radical_pinyin" | "wubi98_mint"
-            | "rime_mint_melt_eng" | "rime_mint_radical_pinyin" | "rime_mint_stroke"
-            | "rime_frost_aux" | "rime_frost_melt_eng" | "rime_frost_radical_pinyin"
+            | "melt_eng"
+            | "radical_pinyin"
+            | "wubi98_mint"
+            | "rime_mint_melt_eng"
+            | "rime_mint_radical_pinyin"
+            | "rime_mint_stroke"
+            | "rime_frost_aux"
+            | "rime_frost_melt_eng"
+            | "rime_frost_radical_pinyin"
             | "lssp_stroke"
     )
 }
@@ -6883,7 +7125,7 @@ fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
 fn merge_schema_lists(existing_schemas: Vec<String>, package_schemas: Vec<String>) -> Vec<String> {
     let user_schemas = existing_schemas
         .iter()
-        .filter(|schema| !is_keytao_managed_schema(schema) && !is_addon_schema(schema))
+        .filter(|schema| !is_addon_schema(schema))
         .cloned();
     let package_schemas_without_addons = package_schemas
         .iter()
@@ -7237,6 +7479,52 @@ pub fn installed_addon_rime_lua_lines(_user_data_dir: &Path) -> &'static [&'stat
 
 /// Restore the active package snapshot before any platform starts deployment.
 pub fn regenerate_active_rime_lua(user_data_dir: &Path) -> Result<(), String> {
+    rime_lua::regenerate(user_data_dir)
+}
+
+/// Prepare an isolated package stage before its selected schema has been built.
+pub fn regenerate_active_rime_lua_for_schema(
+    user_data_dir: &Path,
+    schema_id: &str,
+) -> Result<(), String> {
+    rime_lua::select(user_data_dir, schema_id).map(|_| ())
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+fn defer_rime_lua_reload(root: &Path, error: &str) {
+    rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
+    *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) =
+        Some((root.to_path_buf(), Instant::now() + Duration::from_secs(1)));
+    crate::rt_log!(Level::Info, "error", "schema_lua_reload", msg = error);
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+fn regenerate_rime_lua_for_ime(root: &Path) -> bool {
+    match regenerate_active_rime_lua(root) {
+        Ok(()) => {
+            *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+            true
+        }
+        Err(error) => {
+            defer_rime_lua_reload(root, &error);
+            false
+        }
+    }
+}
+
+fn regenerate_legacy_rime_lua(user_data_dir: &Path) -> Result<(), String> {
     let manifest_path = user_data_dir.join(ACTIVE_SCHEME_MANIFEST);
     let rime_lua_path = user_data_dir.join("rime.lua");
     for path in [&manifest_path, &rime_lua_path] {
@@ -8249,7 +8537,11 @@ mod tests {
         manifest["scheme_key"] = serde_json::json!("keytao");
         std::fs::write(&marker, manifest.to_string()).unwrap();
         assert!(schema_install_state(&dir).installed);
-        std::fs::write(dir.join("default.custom.yaml"), "patch: {schema_list: [{schema: example}]}").unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch: {schema_list: [{schema: example}]}",
+        )
+        .unwrap();
         std::fs::remove_file(dir.join("auxiliary.schema.yaml")).unwrap();
         assert_eq!(schema_install_state(&dir).schemas, ["example"]);
         assert!(schema_install_state(&dir).installed);
@@ -8585,7 +8877,8 @@ mod tests {
         assert!(merged.contains("- schema: user_schema"));
         assert!(merged.contains("- schema: keytao"));
         assert!(merged.contains("- schema: keytao-dz"));
-        assert!(!merged.contains("keytao_old"));
+        assert!(merged.contains("- schema: keytao_old"));
+        assert!(merged.contains("- schema: txjx"));
     }
 
     #[test]
@@ -8600,8 +8893,9 @@ mod tests {
             schemas,
             vec![
                 "user_schema",
-                "keytao",
                 "snow_jiandao",
+                "keydo",
+                "keytao",
                 "keytao-dz",
                 "easy_en",
                 "wanxiang",
@@ -8651,8 +8945,8 @@ mod tests {
         assert_eq!(user, vec!["user_schema"]);
         assert!(merged.contains("- schema: user_schema"));
         assert!(merged.contains("- schema: txjx"));
-        assert!(!merged.contains("- schema: keytao"));
-        assert!(!merged.contains("- schema: xmjd6"));
+        assert!(merged.contains("- schema: keytao"));
+        assert!(merged.contains("- schema: xmjd6"));
     }
 
     #[test]
@@ -8666,7 +8960,7 @@ mod tests {
         assert!(merged.contains("- schema: txjx"));
         assert!(!merged.contains("Caps_Lock"));
         assert!(!merged.contains("good_old_caps_lock"));
-        assert!(!merged.contains("- schema: keydo"));
+        assert!(merged.contains("- schema: keydo"));
     }
 
     #[test]

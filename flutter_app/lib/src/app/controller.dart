@@ -318,6 +318,10 @@ class AppController extends ChangeNotifier {
   bool isLocalScheme(String key) => installedPackageFor(key)?.source == 'local';
 
   String get activeSchemeKey {
+    final installed = local?.installedScheme;
+    if (installed != null && installedPackageFor(installed)?.active == true) {
+      return installed;
+    }
     for (final package in installedPackages) {
       if (package.active) return package.schemeKey;
     }
@@ -1739,9 +1743,7 @@ class AppController extends ChangeNotifier {
   Future<bool> updateSchemePackage(String key) {
     final package = installedPackageFor(key);
     if (package == null) return Future.value(false);
-    return package.active
-        ? _installSchemePackage(key, latest: true)
-        : downloadSchemePackage(key);
+    return downloadSchemePackage(key);
   }
 
   Future<bool> downloadSchemePackage(String key) => run(() async {
@@ -1750,7 +1752,9 @@ class AppController extends ChangeNotifier {
     _invalidateSchemeUpdates();
     _startOperation(OperationKind.install, AppStrings.installing);
     try {
+      if (isAndroid) await _requireStorage(redirect: true);
       await core.downloadSchemePackage(schemeKey: key, source: source);
+      await _activateSchemePackage(key);
       _invalidateSchemeUpdates();
       await _readInstalledPackages();
       await _readUserWordsReport(key);
@@ -1873,6 +1877,7 @@ class AppController extends ChangeNotifier {
   });
 
   Future<void> _activateSchemePackage(String key) async {
+    final wasActive = installedPackageFor(key)?.active == true;
     packageError = null;
     _invalidateSchemeUpdates();
     _startOperation(OperationKind.install, AppStrings.installing);
@@ -1891,7 +1896,7 @@ class AppController extends ChangeNotifier {
       _recordInstallResult(result);
       verification = result.verify;
       _manuallySelectedScheme = true;
-      scheme = key;
+      if (!wasActive) scheme = key;
       latestRelease = null;
       schemeRelease = null;
       _invalidateSchemeUpdates();
@@ -1906,7 +1911,10 @@ class AppController extends ChangeNotifier {
     } finally {
       operation = null;
     }
-    if (verification.every((entry) => entry.ok)) await _deploy();
+    if (verification.every((entry) => entry.ok)) {
+      await _deploy();
+      scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
+    }
   }
 
   Future<bool> removeSchemePackage(String key) {
@@ -1989,7 +1997,7 @@ class AppController extends ChangeNotifier {
       run(() => _deploy(imeActionId: imeActionId));
 
   Future<void> _deploy({int? imeActionId}) async {
-    _pendingCloudPackageUploads.remove(activeSchemeKey);
+    _pendingCloudPackageUploads.clear();
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
@@ -2377,7 +2385,7 @@ class AppController extends ChangeNotifier {
     _schemeProfileDirty = true;
     if (afterSuccessfulDeploy &&
         packageKey != null &&
-        packageKey == activeSchemeKey &&
+        installedPackageFor(packageKey)?.active == true &&
         syncedSchemes.contains(packageKey)) {
       _pendingCloudPackageUploads.add(packageKey);
     }
@@ -2411,7 +2419,7 @@ class AppController extends ChangeNotifier {
             _pendingCloudPackageUploads.remove(key);
             continue;
           }
-          if (key != activeSchemeKey || local?.deployed != true) {
+          if (installedPackageFor(key)?.active != true || local?.deployed != true) {
             _pendingCloudPackageUploads.remove(key);
             continue;
           }
@@ -2610,8 +2618,21 @@ class AppController extends ChangeNotifier {
       }, modal: true);
 
   Future<bool> downloadCloudPackage(String id) => _schemeCloudAction(() async {
+    if (!cloudPackages.any((package) => package['id'] == id)) {
+      cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
+          .map((value) => Map<String, dynamic>.from(value as Map))
+          .toList();
+    }
+    final package = cloudPackages.firstWhere((package) => package['id'] == id);
+    final previous = installedPackages.map((package) => package.schemeKey).toSet();
+    if (isAndroid) await _requireStorage(redirect: true);
     await core.downloadCloudPackage(id: id);
     await _readInstalledPackages();
+    final key = installedPackages
+        .where((package) => !previous.contains(package.schemeKey))
+        .firstOrNull
+        ?.schemeKey ?? package['schemeKey'] as String;
+    await _activateSchemePackage(key);
     scheduleSchemeProfileSync();
   }, modal: true);
 

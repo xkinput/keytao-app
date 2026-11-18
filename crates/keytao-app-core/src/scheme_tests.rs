@@ -218,7 +218,7 @@ use std::collections::HashSet;
     }
 
     #[test]
-    fn test_merge_dc_excludes_user_keytao_schemas() {
+    fn test_merge_dc_keeps_other_installed_keytao_schemas() {
         let existing =
             "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n    - schema: txjx\n";
         let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
@@ -226,7 +226,7 @@ use std::collections::HashSet;
         assert_eq!(user, vec!["my_schema"]);
         assert!(merged.contains("- schema: keytao_b"));
         assert!(merged.contains("- schema: keytao_bg"));
-        assert!(!merged.contains("- schema: txjx"));
+        assert!(merged.contains("- schema: txjx"));
     }
 
     #[test]
@@ -246,8 +246,8 @@ use std::collections::HashSet;
         assert_eq!(user, vec!["my_schema"]);
         assert!(merged.contains("- schema: my_schema"));
         assert!(merged.contains("- schema: txjx"));
-        assert!(!merged.contains("- schema: keytao"));
-        assert!(!merged.contains("- schema: xmjd6"));
+        assert!(merged.contains("- schema: keytao"));
+        assert!(merged.contains("- schema: xmjd6"));
     }
 
     #[test]

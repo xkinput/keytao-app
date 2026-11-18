@@ -81,7 +81,10 @@ pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result
     let root = state.host.user_root()?;
     keytao_app_core::package_schemas::set_package_schemas(&state.core, &scheme_key, &ids)
         .map_err(|error| error.to_string())?;
-    if state.core.state().active_scheme.as_deref() == Some(scheme_key.as_str()) {
+    if keytao_app_core::packages::list_installed_packages(&state.core)
+        .map_err(|error| error.to_string())?
+        .iter().any(|package| package.scheme_key == scheme_key && package.active)
+    {
         keytao_app_core::packages::activate_scheme(&state.core, &scheme_key, &root,
             #[cfg(target_os = "android")]
             |_| Box::pin(async { Err("Unused extraction callback".into()) }),

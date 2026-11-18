@@ -95,7 +95,8 @@ struct PreparedUpload {
 
 fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError> {
     let state = core.state();
-    if state.active_scheme.as_deref() != Some(scheme_key) {
+    let activated = crate::package_activation::read_package(core, root, scheme_key)?.is_some();
+    if !activated && state.active_scheme.as_deref() != Some(scheme_key) {
         return Err(CoreError::Other(format!(
             "方案 {scheme_key} 不是当前使用中的方案"
         )));
@@ -110,7 +111,7 @@ fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError>
             "方案 {scheme_key} 的最后一次本地部署未成功"
         )));
     }
-    if last.scheme_key.as_deref() != Some(scheme_key) {
+    if !activated && last.scheme_key.as_deref() != Some(scheme_key) {
         return Err(CoreError::Other(format!(
             "方案 {scheme_key} 的最近部署记录属于其他方案"
         )));
@@ -167,7 +168,7 @@ fn prepare_with_smoke(
     scheme_key: &str,
     root: &Path,
     shared: Option<&Path>,
-    smoke: impl FnMut(&str, u32) -> Result<(), String>,
+    smoke: impl FnMut(&Path, &str, u32) -> Result<(), String>,
 ) -> Result<PreparedUpload, CoreError> {
     eligible(core, scheme_key, root)?;
     let (mut stored, meta) = crate::package_store::PackageStore::new(core).read_files(scheme_key)?;
@@ -211,7 +212,7 @@ fn prepare_android(
         scheme_key,
         root,
         Some(&root.join("rime-data")),
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
     )
 }
 
@@ -225,19 +226,23 @@ fn prepare(core: &Core, scheme_key: &str, root: &Path) -> Result<PreparedUpload,
             .unwrap_or_else(keytao_core::default_shared_data_dir);
         #[cfg(not(target_os = "ios"))]
         let shared = crate::ime_status::app_shared_data_dir(core);
-        let runtime = keytao_core::ImeRuntime::with_dirs(root, &shared);
-        let shared = (!shared.is_empty()).then(|| Path::new(&shared));
-        prepare_with_smoke(core, scheme_key, root, shared, |id, key| {
-            runtime.init_without_deploy()?;
-            let session = runtime.create_session()?;
-            session.select_schema(id)?;
-            session
-                .set_ascii_mode(false)
-                .ok_or("Rime session is unavailable")?;
-            session
-                .process_key_result(key, 0)
-                .ok_or("Rime key processing failed")?;
-            Ok(())
+        let shared_root = (!shared.is_empty()).then(|| Path::new(&shared));
+        prepare_with_smoke(core, scheme_key, root, shared_root, |source, id, key| {
+            let runtime = keytao_core::ImeRuntime::with_dirs(source, &shared);
+            let result = (|| {
+                runtime.init_without_deploy()?;
+                let session = runtime.create_session()?;
+                session.select_schema(id)?;
+                session.set_ascii_mode(false).ok_or("Rime session is unavailable")?;
+                session.process_key_result(key, 0).ok_or("Rime key processing failed")?;
+                Ok(())
+            })();
+            let shutdown = if source != root { runtime.shutdown() } else { Ok(()) };
+            match (result, shutdown) {
+                (Err(error), Err(shutdown)) => Err(format!("{error}; runtime shutdown failed: {shutdown}")),
+                (result, Ok(())) => result,
+                (Ok(()), Err(error)) => Err(error),
+            }
         })
     }
 }
@@ -319,7 +324,7 @@ pub(crate) async fn upload_at(
     root: &Path,
     api_base: &str,
 ) -> Result<CloudPackage, CoreError> {
-    let prepared = prepare_with_smoke(core, scheme_key, root, None, |_, _| Ok(()))?;
+    let prepared = prepare_with_smoke(core, scheme_key, root, None, |_, _, _| Ok(()))?;
     upload_prepared_at(core, scheme_key, root, prepared, api_base).await
 }
 
@@ -512,11 +517,6 @@ pub(crate) async fn download_at(
         .ok_or_else(|| CoreError::Other("云端方案不存在".into()))?;
     crate::scheme::validate_scheme_key(&package.scheme_key).map_err(CoreError::Other)?;
     ensure_account(core, account)?;
-    if !crate::scheme::is_local_scheme_key(&package.scheme_key)
-        && core.state().active_scheme.as_deref() == Some(&package.scheme_key)
-    {
-        return Err(CoreError::Other("请先切换到其他方案".into()));
-    }
     let mut progress = CloudTransferProgress {
         direction: "download".into(),
         scheme_key: package.scheme_key.clone(),

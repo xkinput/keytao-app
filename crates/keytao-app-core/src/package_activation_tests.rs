@@ -95,11 +95,12 @@ async fn mobile_install_switch_and_delete_share_owned_generated_transactions() {
             assert!(!host.root.join("weasel.custom.yaml").exists());
         }
         for path in ["alpha.schema.yaml", "alpha.custom.yaml", "lua/alpha.lua"] {
-            assert!(!host.root.join(path).exists(), "{platform:?}: {path}");
+            assert!(host.root.join(path).exists(), "{platform:?}: {path}");
         }
         activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
-        assert!(!host.root.join("beta.custom.yaml").exists());
+        assert!(host.root.join("beta.custom.yaml").exists());
         remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+        remove_scheme_package(&host.core, "xmjd", &host).await.unwrap();
         assert_eq!(package_state(&host.root), original, "{platform:?}");
     }
 }
@@ -195,6 +196,97 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
         .unwrap(),
         key,
     );
+}
+
+#[tokio::test]
+async fn installed_package_updates_preserve_selected_schema_and_other_activations() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    for updated in ["keytao", "xmjd"] {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Host::new(directory.path(), Arc::new(Sink));
+        for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
+            store(&host, key, files(schema));
+            activate_scheme(&host.core, key, &host.root).await.unwrap();
+        }
+        write(&host.root, "user.yaml", b"var: {previously_selected_schema: beta}\n");
+        let mut updated_files = files(if updated == "keytao" { "alpha" } else { "beta" });
+        updated_files.push(("version.txt".into(), b"v2".to_vec()));
+        let bytes = archive_from_files(&updated_files).unwrap();
+        store_cloud_archive(&host.core, updated, Some("v2"), "official", None, &bytes, &host.root).unwrap();
+        activate_scheme(&host.core, updated, &host.root).await.unwrap();
+        assert_eq!(fs::read_to_string(host.root.join("version.txt")).unwrap(), "v2");
+        assert_eq!(fs::read_to_string(host.root.join("user.yaml")).unwrap(), "var: {previously_selected_schema: beta}\n");
+        assert_eq!(host.core.state().active_scheme.as_deref(), Some("xmjd"));
+        assert_eq!(package_activation::read_all(&host.core, &host.root).unwrap().len(), 2);
+        assert_eq!(host.core.state().installed_packages[updated].version.as_deref(), Some("v2"));
+    }
+}
+
+#[tokio::test]
+async fn updating_package_keeps_removed_files_owned_by_another_activation() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
+        let mut entries = files(schema);
+        entries.iter_mut().find(|(path, _)| path == "shared.txt").unwrap().1 = b"shared".to_vec();
+        store(&host, key, entries);
+        activate_scheme(&host.core, key, &host.root).await.unwrap();
+        assert!(package_activation::read_package(&host.core, &host.root, key).unwrap().unwrap()
+            .owned.iter().any(|file| file.path == "shared.txt"));
+    }
+    let mut entries = files("alpha");
+    entries.retain(|(path, _)| path != "shared.txt");
+    store(&host, "keytao", entries);
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert_eq!(fs::read(host.root.join("shared.txt")).unwrap(), b"shared");
+    assert!(!package_activation::read_package(&host.core, &host.root, "keytao").unwrap().unwrap()
+        .owned.iter().any(|file| file.path == "shared.txt"));
+    assert!(package_activation::read_package(&host.core, &host.root, "xmjd").unwrap().unwrap()
+        .owned.iter().any(|file| file.path == "shared.txt"));
+    remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+    assert_eq!(fs::read(host.root.join("shared.txt")).unwrap(), b"shared");
+    remove_scheme_package(&host.core, "xmjd", &host).await.unwrap();
+    assert!(!host.root.join("shared.txt").exists());
+}
+
+#[tokio::test]
+async fn installed_packages_coexist_with_lua_snapshots_and_independent_removal() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
+        let mut entries = files(schema);
+        entries.push(("lua/shared.lua".into(), format!("return '{schema}'\n").into_bytes()));
+        store(&host, key, entries);
+        activate_scheme(&host.core, key, &host.root).await.unwrap();
+    }
+    let schemas = crate::scheme_files::parse_schema_list(
+        &fs::read_to_string(host.root.join("default.custom.yaml")).unwrap(),
+    );
+    assert_eq!(schemas, ["alpha", "beta"]);
+    for schema in ["alpha", "beta"] {
+        assert!(host.root.join(format!("{schema}.schema.yaml")).is_file());
+    }
+    let marker: serde_json::Value = serde_json::from_slice(
+        &fs::read(host.root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
+    ).unwrap();
+    for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
+        assert_eq!(marker["packages"][key]["schemas"], serde_json::json!([schema]));
+        let snapshot = marker["packages"][key]["lua_files"]["lua/shared.lua"].as_str().unwrap();
+        assert_eq!(fs::read_to_string(host.root.join(snapshot)).unwrap(), format!("return '{schema}'\n"));
+    }
+    for _ in 0..2 {
+        let result = activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+        assert!(!package_activation::retained(&result.logs).contains(&"lua/shared.lua".into()));
+        assert!(package_activation::read_package(&host.core, &host.root, "keytao").unwrap().unwrap()
+            .owned.iter().any(|file| file.path == "lua/shared.lua"));
+    }
+    remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+    assert!(!host.root.join("alpha.schema.yaml").exists());
+    assert!(host.root.join("beta.schema.yaml").is_file());
+    assert_eq!(crate::scheme_files::parse_schema_list(
+        &fs::read_to_string(host.root.join("default.custom.yaml")).unwrap()), ["beta"]);
 }
 
 #[tokio::test]
@@ -417,17 +509,20 @@ async fn activation_a_b_a_restores_files_and_unowned_backups() {
     activate_scheme(&host.core, "xmjd", &host.root)
         .await
         .unwrap();
-    assert!(!host.root.join("alpha.custom.yaml").exists());
-    assert!(!host.root.join("lua/alpha.lua").exists());
+    assert!(host.root.join("alpha.custom.yaml").exists());
+    assert!(host.root.join("lua/alpha.lua").exists());
     activate_scheme(&host.core, "keytao", &host.root)
         .await
         .unwrap();
-    assert_eq!(package_state(&host.root), initial_a);
-    assert!(!host.root.join("beta.custom.yaml").exists());
-    assert!(!host.root.join("lua/beta.lua").exists());
+    for path in ["alpha.schema.yaml", "alpha.custom.yaml", "lua/alpha.lua"] {
+        assert_eq!(package_state(&host.root)[path], initial_a[path]);
+    }
+    assert!(host.root.join("beta.custom.yaml").exists());
+    assert!(host.root.join("lua/beta.lua").exists());
     remove_scheme_package(&host.core, "keytao", &host)
         .await
         .unwrap();
+    remove_scheme_package(&host.core, "xmjd", &host).await.unwrap();
     assert_eq!(package_state(&host.root), original);
     let default: serde_yaml::Value =
         serde_yaml::from_slice(&fs::read(host.root.join("default.custom.yaml")).unwrap()).unwrap();
@@ -472,15 +567,18 @@ async fn generated_sections_follow_active_set_and_restore_package_bytes() {
                     .any(|f| f.path == "keytao.custom.yaml")
             );
             assert!(host.root.join("lua/keytao_remove_filter.lua").is_file());
-            assert!(!host.root.join("beta.custom.yaml").exists());
+            if package_activation::read_package(&host.core, &host.root, "xmjd").unwrap().is_some() {
+                assert!(host.root.join("beta.custom.yaml").exists());
+            }
         } else {
-            assert!(!host.root.join("keytao.custom.yaml").exists());
-            assert!(!host.root.join("lua/keytao_remove_filter.lua").exists());
+            assert!(host.root.join("keytao.custom.yaml").exists());
+            assert!(host.root.join("lua/keytao_remove_filter.lua").exists());
         }
     }
     remove_scheme_package(&host.core, "keytao", &host)
         .await
         .unwrap();
+    remove_scheme_package(&host.core, "xmjd", &host).await.unwrap();
     assert!(
         crate::managed_custom::generated_paths(&host.root)
             .unwrap()
@@ -609,7 +707,7 @@ async fn user_lua_and_kept_backups_survive_delete_and_reinstall() {
 }
 
 #[tokio::test]
-async fn legacy_generated_activation_switch_cleans_previous_package() {
+async fn legacy_generated_activation_switch_preserves_previous_package() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let host = Host::new(directory.path(), Arc::new(Sink));
@@ -619,15 +717,15 @@ async fn legacy_generated_activation_switch_cleans_previous_package() {
         .await
         .unwrap();
     for path in ["alpha.schema.yaml", "alpha.custom.yaml", "lua/alpha.lua"] {
-        assert!(!host.root.join(path).exists(), "{path}");
-        assert!(result.logs.contains(&format!("[REMOVED] {path}")), "{path}");
+        assert!(host.root.join(path).exists(), "{path}");
+        assert!(!result.logs.contains(&format!("[REMOVED] {path}")), "{path}");
     }
     assert!(host.root.join("beta.schema.yaml").is_file());
     remove_scheme_package(&host.core, "xmjd", &host)
         .await
         .unwrap();
     assert!(!host.root.join("beta.schema.yaml").exists());
-    assert!(host.core.state().active_scheme.is_none());
+    assert_eq!(host.core.state().active_scheme.as_deref(), Some("keytao"));
 }
 
 #[tokio::test]
@@ -774,6 +872,26 @@ async fn activation_keeps_and_reports_modified_owned_custom_and_lua() {
 }
 
 #[tokio::test]
+async fn regenerate_preserves_modified_non_colliding_package_lua() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    store(&host, "keytao", files("alpha"));
+    activate_scheme(&host.core, "keytao", &host.root)
+        .await
+        .unwrap();
+    write(&host.root, "lua/alpha.lua", b"return 'user edit'\n");
+
+    for _ in 0..2 {
+        keytao_core::regenerate_active_rime_lua(&host.root).unwrap();
+        assert_eq!(
+            fs::read(host.root.join("lua/alpha.lua")).unwrap(),
+            b"return 'user edit'\n"
+        );
+    }
+}
+
+#[tokio::test]
 async fn switching_preserves_modified_owned_paths_also_shipped_by_the_next_package() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -846,7 +964,7 @@ async fn activating_identical_unowned_file_preserves_it_after_deactivation() {
 }
 
 #[tokio::test]
-async fn switching_keeps_shared_dictionary_binaries_and_removes_a_only_outputs() {
+async fn switching_keeps_installed_package_dictionary_binaries() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let host = Host::new(directory.path(), Arc::new(Sink));
@@ -907,10 +1025,10 @@ async fn switching_keeps_shared_dictionary_binaries_and_removes_a_only_outputs()
     let result = activate_scheme(&host.core, "xmjd", &host.root)
         .await
         .unwrap();
-    assert!(!host.root.join("build/alpha.schema.yaml").exists());
+    assert!(host.root.join("build/alpha.schema.yaml").exists());
     for extension in ["table", "prism", "reverse"] {
         assert!(
-            !host
+            host
                 .root
                 .join(format!("build/alpha_only.{extension}.bin"))
                 .exists()

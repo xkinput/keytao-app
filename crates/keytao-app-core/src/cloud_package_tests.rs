@@ -119,7 +119,7 @@ fn deployed_fixture_with_sink(
     core.update_state(|state| state.active_scheme = Some("xmjd".into()))
         .unwrap();
     crate::deploy::record_result(&core, &root, true).unwrap();
-    let bytes = prepare_with_smoke(&core, "xmjd", &root, None, |_, _| Ok(()))
+    let bytes = prepare_with_smoke(&core, "xmjd", &root, None, |_, _, _| Ok(()))
         .unwrap()
         .bundle
         .bytes;
@@ -453,6 +453,27 @@ async fn downloading_identical_local_package_reuses_key() {
         downloaded.1.zip_sha256,
         format!("{:x}", Sha256::digest(&bytes))
     );
+}
+
+#[tokio::test]
+async fn cloud_redownload_of_activated_builtin_package_is_allowed() {
+    let (dir, core, bytes) = fixture();
+    let root = dir.path().join("rime");
+    crate::packages::activate_scheme(&core, "xmjd", &root,
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    ).await.unwrap();
+    let user = std::fs::read(root.join("user.yaml")).unwrap();
+    let mock = server(|url| vec![
+        response("200 OK", json!({"packages":[package(&bytes)]})),
+        Response { status: "302 Found", headers: vec![("Location".into(), format!("{url}/storage"))], body: vec![] },
+        Response { status: "200 OK", headers: vec![], body: bytes.clone() },
+    ]).await;
+    download_at(&core, "21", &root, &mock.url).await.unwrap();
+    assert_eq!(mock.finish().await.len(), 3);
+    assert_eq!(std::fs::read(root.join("user.yaml")).unwrap(), user);
+    assert_eq!(core.state().active_scheme.as_deref(), Some("xmjd"));
+    assert_eq!(core.state().scheme_cloud_ids["xmjd"], "21");
 }
 
 #[tokio::test]
@@ -804,7 +825,7 @@ async fn upload_rechecks_with_the_prepared_shared_directory() {
         .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
         .unwrap();
     std::fs::write(root.join("build/xmjd6.schema.yaml"), schema).unwrap();
-    let prepared = prepare_with_smoke(&core, "xmjd", &root, Some(&shared), |_, _| Ok(())).unwrap();
+    let prepared = prepare_with_smoke(&core, "xmjd", &root, Some(&shared), |_, _, _| Ok(())).unwrap();
     assert_eq!(
         prepared.bundle.files,
         ["default.custom.yaml", "xmjd6.schema.yaml"]
@@ -815,6 +836,23 @@ async fn upload_rechecks_with_the_prepared_shared_directory() {
     let requests = mock.finish().await;
     assert_eq!(result.unwrap().id, "21");
     assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn every_activated_package_can_upload_after_shared_deploy() {
+    let (dir, core, _) = deployed_fixture();
+    let root = dir.path().join("rime");
+    crate::package_activation::write(&core, &crate::package_activation::Activation {
+        key: "xmjd".into(), scheme_key: "xmjd".into(),
+        root: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+        ..Default::default()
+    }).unwrap();
+    core.update_state(|state| state.active_scheme = Some("txjx".into())).unwrap();
+    crate::deploy::record_result(&core, &root, true).unwrap();
+    let prepared = prepare_with_smoke(&core, "xmjd", &root, None, |_, _, _| Ok(())).unwrap();
+    assert!(prepared.ids.contains(&"xmjd6".into()));
+    crate::deploy::record_result(&core, &root, false).unwrap();
+    assert!(eligible(&core, "xmjd", &root).unwrap_err().to_string().contains("部署未成功"));
 }
 
 #[tokio::test]
@@ -922,7 +960,7 @@ fn oversized_distribution_can_prepare_a_small_dependency_closure() {
     crate::packages::stage_install(&core, &bytes, Default::default(), String::new()).unwrap();
     crate::packages::finalize_pending(&core, "xmjd", Some("v1"), false).unwrap();
     let prepared =
-        prepare_with_smoke(&core, "xmjd", &dir.path().join("rime"), None, |_, _| Ok(())).unwrap();
+        prepare_with_smoke(&core, "xmjd", &dir.path().join("rime"), None, |_, _, _| Ok(())).unwrap();
     assert!(prepared.bundle.bytes.len() < 1024);
     assert_eq!(
         prepared.bundle.files,

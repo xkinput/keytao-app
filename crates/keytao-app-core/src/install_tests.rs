@@ -463,7 +463,7 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
 }
 
 #[tokio::test]
-async fn switching_packages_does_not_retain_removed_package_schemas() {
+async fn switching_packages_keeps_all_installed_package_schemas() {
     for preserve_modified in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("rime");
@@ -541,13 +541,11 @@ async fn switching_packages_does_not_retain_removed_package_schemas() {
             let schemas = crate::scheme_files::parse_schema_list(
                 &fs::read_to_string(root.join("default.custom.yaml")).unwrap(),
             );
-            let retained = (index == 2 && preserve_modified).then_some("english");
             assert_eq!(
-                schemas,
-                std::iter::once("personal")
-                    .chain(retained)
-                    .chain(ids.iter().copied())
-                    .collect::<Vec<_>>()
+                schemas.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+                if index == 0 { vec!["personal", "keytao"] }
+                else { vec!["personal", "keytao", "xmjd6", "english"] }
+                    .into_iter().collect::<std::collections::BTreeSet<_>>()
             );
             assert!(
                 schemas
@@ -608,6 +606,8 @@ async fn installing_switching_and_deploy_regeneration_use_only_the_active_packag
         .await
         .unwrap();
         assert!(result.verify.iter().all(|entry| entry.ok));
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::copy(root.join(format!("{key}.schema.yaml")), root.join(format!("build/{key}.schema.yaml"))).unwrap();
         crate::packages::record_package(&core, key, Some("v1"), true).unwrap();
         let store = PackageStore::new(&core);
         assert_eq!(
@@ -619,6 +619,7 @@ async fn installing_switching_and_deploy_regeneration_use_only_the_active_packag
         assert!(!archive.exists());
     }
 
+    fs::write(root.join("user.yaml"), "var: {previously_selected_schema: keydo}\n").unwrap();
     crate::packages::activate_scheme(
         &core,
         "keydo",
@@ -628,7 +629,9 @@ async fn installing_switching_and_deploy_regeneration_use_only_the_active_packag
     )
     .await
     .unwrap();
-    assert_eq!(core.state().active_scheme.as_deref(), Some("keydo"));
+    fs::copy(root.join("keydo.schema.yaml"), root.join("build/keydo.schema.yaml")).unwrap();
+    keytao_core::regenerate_active_rime_lua(&root).unwrap();
+    assert_eq!(keytao_core::deployed_schema_id_from_dir(&root).as_deref(), Some("keydo"));
     assert_eq!(fs::read_to_string(root.join("rime.lua")).unwrap(), keydo);
 
     fs::write(root.join("rime.lua"), keytao).unwrap();
