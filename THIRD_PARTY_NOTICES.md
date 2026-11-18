@@ -16,3 +16,30 @@ Copyright © 2015-2024 Unicode, Inc. Licensed under the Unicode License v3
 (`Unicode-3.0`). The complete upstream copyright and permission notice is in
 [`LICENSE-UNICODE.txt`](crates/keytao-theme/resources/LICENSE-UNICODE.txt), which is
 bundled with the index in the Android assets and iOS keyboard extension.
+
+## Downloadable Snow Jiandao and LSSP Triple Pinyin
+
+Snow Jiandao (`snow_jiandao`) is downloaded from
+[rimeinn/rime-snow-pinyin](https://github.com/rimeinn/rime-snow-pinyin), licensed
+under GPL-3.0. KeyTao installs its required Snow schemas, dictionaries and
+`lua/snow` modules, namespaces radical lookup as `snow_radical_pinyin`, renames
+the upstream user-pack seed as `snow_pinyin.user_pack` to keep it separate from
+protected user dictionaries, and
+registers only Snow Jiandao. Other layouts and host settings are omitted.
+
+LSSP Triple Pinyin (`triple_pinyin_lssp`) is downloaded from
+[arsenali/rime-triple-pinyin-lssp](https://github.com/arsenali/rime-triple-pinyin-lssp),
+licensed under LGPL-3.0. KeyTao installs the primary layout and namespaced Lua
+modules, omitting host settings, the optional language-model patch, zianyin table
+and Pinyin reverse lookup. Its fourteen dictionary tables are package-owned
+copies in `lssp-dicts` from the compatible
+[Wanxiang v17.0.0 release](https://github.com/amzxyz/rime-wanxiang/releases/tag/v17.0.0),
+licensed under [CC BY 4.0](https://github.com/amzxyz/rime-wanxiang/blob/v17.0.0/LICENSE).
+Its stroke lookup is a package-owned copy from
+[rime/rime-stroke](https://github.com/rime/rime-stroke), licensed under LGPL-3.0,
+renamed to `lssp_stroke`. Punctuation uses the runtime's default preset, and the
+vocabulary reference uses the runtime's bundled `essay` data.
+
+These add-ons are downloaded at runtime and are not bundled with KeyTao. Their
+installed notices retain source and license attribution. Uninstall preserves
+user customizations and learned dictionaries, including Snow's user database.

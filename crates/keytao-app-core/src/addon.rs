@@ -1169,6 +1169,8 @@ mod tests {
             crate::rime_ice::SCHEMA_ID,
             "rime_mint",
             "rime_frost",
+            "snow_jiandao",
+            "triple_pinyin_lssp",
         ] {
             let root = TestRoot::new();
             std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
@@ -1194,6 +1196,8 @@ mod tests {
             crate::rime_ice::SCHEMA_ID,
             "rime_mint",
             "rime_frost",
+            "snow_jiandao",
+            "triple_pinyin_lssp",
         ] {
             for edited in [false, true] {
                 let root = TestRoot::new();
@@ -1299,6 +1303,8 @@ mod tests {
             crate::rime_ice::SCHEMA_ID,
             "rime_mint",
             "rime_frost",
+            "snow_jiandao",
+            "triple_pinyin_lssp",
         ] {
             let root = TestRoot::new();
             smoke_fixture::write(root.path()).unwrap();

@@ -86,7 +86,7 @@ class _SchemeScreenshotController extends ViewController {
       version: '',
       size: BigInt.zero,
     );
-    rimeMint = rimeFrost = rimeIce;
+    rimeMint = rimeFrost = rimeSnow = rimeLssp = rimeIce;
   }
 }
 

@@ -18,9 +18,11 @@ use std::{
 
 pub(crate) struct Addon {
     pub id: &'static str,
+    pub dictionary: &'static str,
     pub name: &'static str,
     pub manifest: &'static str,
     pub required: &'static [&'static str],
+    pub extra_archives: &'static [(&'static str, &'static str)],
     pub installable: fn(&str) -> bool,
     pub extract: fn(&Path, &Path, &RemotePackage) -> Result<Vec<InstalledFile>, String>,
 }
@@ -110,7 +112,9 @@ impl Addon {
                 && root
                     .join(format!("build/{}.schema.yaml", self.id))
                     .is_file()
-                && root.join(format!("build/{}.table.bin", self.id)).is_file(),
+                && root
+                    .join(format!("build/{}.table.bin", self.dictionary))
+                    .is_file(),
             version: manifest.map_or_else(String::new, |manifest| manifest.version),
             variant: String::new(),
         }
@@ -219,6 +223,22 @@ impl Addon {
         progress(5, &format!("正在下载{}…", self.name));
         let archive = receipt.work.join("download.zip");
         wanxiang::download_with_limit(&package, &archive, &progress, 64 * 1024 * 1024).await?;
+        for (name, url) in self.extra_archives {
+            progress(45, &format!("正在下载{}依赖词库…", self.name));
+            let dependency = RemotePackage {
+                version: String::new(),
+                source: (*url).into(),
+                download_url: (*url).into(),
+                download_bytes: None,
+            };
+            wanxiang::download_with_limit(
+                &dependency,
+                &receipt.work.join(name),
+                &progress,
+                64 * 1024 * 1024,
+            )
+            .await?;
+        }
         progress(52, &format!("正在校验并解压{}…", self.name));
         tokio::task::spawn_blocking(move || {
             let mut receipt = receipt;

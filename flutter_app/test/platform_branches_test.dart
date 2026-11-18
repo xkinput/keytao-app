@@ -516,6 +516,15 @@ void main() {
 
   test('iOS detects keyboard prerequisites at startup and after resume', () async {
     final c = create(BridgePlatform.ios);
+    Future<void> resumeAndWait() async {
+      c.onResume();
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (c.busy && DateTime.now().isBefore(deadline)) {
+        await settle();
+      }
+      expect(c.busy, isFalse);
+    }
+
     iosKeyboardStatus = {'enabled': false, 'fullAccess': true};
     expect(await c.refreshState(), isTrue);
     expect(c.iosKeyboardEnabled, isFalse);
@@ -536,15 +545,13 @@ void main() {
     }
 
     iosKeyboardStatus = {'enabled': true, 'fullAccess': true};
-    c.onResume();
-    await settle();
+    await resumeAndWait();
     expect(c.iosKeyboardEnabled, isTrue);
     expect(c.iosKeyboardFullAccess, isTrue);
     expect(SetupStep.fullAccess.isComplete(c), isTrue);
 
     iosKeyboardStatus = {'enabled': false, 'fullAccess': null};
-    c.onResume();
-    await settle();
+    await resumeAndWait();
     expect(c.iosKeyboardEnabled, isFalse);
     expect(c.iosKeyboardFullAccess, isNull);
     expect(SetupStep.enable.isComplete(c), isFalse);
