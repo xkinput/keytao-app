@@ -36,7 +36,7 @@ fn keytao_bj_chord_finishes_only_after_all_matching_releases() {
     for key in [b'd', b'k'] {
         assert!(session.process_key_result(key as u32, 0).unwrap().accepted);
     }
-    // Without macOS release synthesis the composition remains stuck here.
+    // Without matching releases the composition remains stuck here.
     let pending = session.state();
     assert_eq!(pending.preedit, "[dk]");
     assert!(pending.candidates.is_empty());
@@ -78,6 +78,122 @@ fn keytao_bj_chord_finishes_only_after_all_matching_releases() {
         let state = session.state();
         assert_eq!(state.preedit, code);
         assert_eq!(state.candidates[0].text, word);
+    }
+
+    // Android and iOS send these events directly from overlapping touches.
+    for (events, code, word) in [
+        (
+            vec![
+                (b'd', 0),
+                (b'k', 0),
+                (b'd', RIME_RELEASE_MASK),
+                (b'k', RIME_RELEASE_MASK),
+            ],
+            "dk",
+            "并击",
+        ),
+        (
+            vec![
+                (b'd', 0),
+                (b'f', 0),
+                (b'f', RIME_RELEASE_MASK),
+                (b'd', RIME_RELEASE_MASK),
+            ],
+            "y",
+            "左",
+        ),
+        (
+            vec![
+                (b'd', 0),
+                (b'j', 0),
+                (b'k', 0),
+                (b'd', RIME_RELEASE_MASK),
+                (b'j', RIME_RELEASE_MASK),
+                (b'k', RIME_RELEASE_MASK),
+            ],
+            "da",
+            "三键",
+        ),
+        (
+            vec![
+                (b'd', 0),
+                (b'j', 0),
+                (b'd', RIME_RELEASE_MASK),
+                (b'k', 0),
+                (b'j', RIME_RELEASE_MASK),
+                (b'k', RIME_RELEASE_MASK),
+            ],
+            "da",
+            "三键",
+        ),
+    ] {
+        session.reset().unwrap();
+        let mut state = session.state();
+        for (index, (key, mask)) in events.iter().enumerate() {
+            let result = session.process_key_result(*key as u32, *mask).unwrap();
+            assert!(result.accepted);
+            state = result.state;
+            if index + 1 < events.len() {
+                assert!(state.committed.is_none());
+                assert!(state.candidates.is_empty());
+            }
+        }
+        if state.committed.is_none() {
+            assert_eq!(state.preedit, code);
+            assert_eq!(state.candidates[0].text, word);
+            state = session.process_key_result(b' ' as u32, 0).unwrap().state;
+        }
+        assert_eq!(state.committed.as_deref(), Some(word));
+        assert!(state.preedit.is_empty());
+    }
+
+    session.reset().unwrap();
+    session.process_key_result(b'd' as u32, 0).unwrap();
+    let lone_release = session
+        .process_key_result(b'd' as u32, RIME_RELEASE_MASK)
+        .unwrap();
+    assert_eq!(lone_release.state.preedit, "d");
+    session.reset().unwrap();
+    for (key, mask) in [
+        (b'j', 0),
+        (b'k', 0),
+        (b'j', RIME_RELEASE_MASK),
+        (b'k', RIME_RELEASE_MASK),
+    ] {
+        session.process_key_result(key as u32, mask).unwrap();
+    }
+    assert_eq!(session.state().preedit, "a");
+    assert_eq!(session.state().candidates[0].text, "右");
+
+    // Shifted letters use the mobile normal-key fallback: this schema's chord
+    // alphabet accepts neither uppercase keysyms nor Shift-modified letters.
+    for (key, modifiers) in [(b'D', 0), (b'd', 1), (b'D', 1)] {
+        session.reset().unwrap();
+        let pressed = session.process_key_result(key as u32, modifiers).unwrap();
+        assert!(!pressed.accepted);
+        assert!(pressed.state.preedit.is_empty());
+        assert!(pressed.state.committed.is_none());
+        let released = session
+            .process_key_result(key as u32, modifiers | RIME_RELEASE_MASK)
+            .unwrap();
+        assert!(!released.accepted);
+        assert!(released.state.preedit.is_empty());
+        assert!(released.state.committed.is_none());
+        for (key, mask) in [
+            (b'j', 0),
+            (b'k', 0),
+            (b'j', RIME_RELEASE_MASK),
+            (b'k', RIME_RELEASE_MASK),
+        ] {
+            assert!(
+                session
+                    .process_key_result(key as u32, mask)
+                    .unwrap()
+                    .accepted
+            );
+        }
+        assert_eq!(session.state().preedit, "a");
+        assert_eq!(session.state().candidates[0].text, "右");
     }
 
     let ordinary = session.select_schema(smoke_fixture::SCHEMA_ID).unwrap();

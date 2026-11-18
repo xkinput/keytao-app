@@ -60,6 +60,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val inputCounts = KeytaoInputCounts()
     private val applyStateDurations = KeytaoDurationHistogram()
     private var pendingKeystrokeStartNs = 0L
+    private var releasingPreviousInput = false
+    private val hardwareChordKeys = KeytaoHardwareChordKeys()
     private lateinit var engine: KeytaoImeEngine
     private val mainHandler = Handler(Looper.getMainLooper())
     private val voiceInput = KeytaoVoiceInput()
@@ -242,6 +244,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onDestroy() {
+        releaseHardwareChordKeys()
+        keyboardView?.clearActiveKeyTouches()
         cancelVoiceInput()
         discardPendingHostBackspace(resetOutstanding = true)
         serviceDestroyed = true
@@ -332,6 +336,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        releasingPreviousInput = true
+        try {
+            releaseHardwareChordKeys()
+            // Drain the old chord before clearing Rime, preserving ordinary rollover on host restarts.
+            if (restarting) keyboardView?.releaseChordTouches() else keyboardView?.clearActiveKeyTouches()
+        } finally {
+            releasingPreviousInput = false
+        }
         cancelVoiceInput()
         voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
         val started = System.nanoTime()
@@ -411,6 +423,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
+        releaseHardwareChordKeys()
+        keyboardView?.clearActiveKeyTouches()
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         inputViewShown = false
@@ -456,6 +470,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onWindowHidden() {
+        releaseHardwareChordKeys()
+        keyboardView?.clearActiveKeyTouches()
         cancelVoiceInput()
         if (!configurationChanging) navigationResetOnShow = true
         panelBackDownConsumed = false
@@ -876,6 +892,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
+        releaseHardwareChordKeys()
+        keyboardView?.clearActiveKeyTouches()
         cancelVoiceInput()
         onEmojiSearchRequested(false)
         val started = System.nanoTime()
@@ -915,7 +933,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 panelBackDownConsumed = true
                 return true
             }
-            return super.onKeyDown(keyCode, event)
+            return passKeyDownToHost(keyCode, event)
         }
         if (emojiSearchQuery != null) {
             if (isShiftKey(keyCode)) {
@@ -933,6 +951,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                         val key = AndroidKeyMapper.fromAndroidKeyEvent(event)
                         if (key != null && !bypassesComposition() && !engine.shouldBypassKey(key.keyCode, key.modifiers)) {
                             val result = engine.processKey(key.keyCode, key.modifiers)
+                            hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
                             applyState(result)
                             if (!result.accepted && !result.hasComposition && event.unicodeChar > 0 &&
                                 Character.isValidCodePoint(event.unicodeChar)) {
@@ -949,23 +968,23 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (isShiftKey(keyCode)) {
             shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
             pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
-            return super.onKeyDown(keyCode, event)
+            return passKeyDownToHost(keyCode, event)
         }
         if (shiftPressedWithoutKey) {
             shiftPressedWithoutKey = false
             pendingShiftKeyCode = 0
         }
         if (!inputAvailable || event.isMetaPressed) {
-            return super.onKeyDown(keyCode, event)
+            return passKeyDownToHost(keyCode, event)
         }
-        val key = AndroidKeyMapper.fromAndroidKeyEvent(event) ?: return super.onKeyDown(keyCode, event)
+        val key = AndroidKeyMapper.fromAndroidKeyEvent(event) ?: return passKeyDownToHost(keyCode, event)
         if (!privacyMode.allowsComposing || directInputEditor) {
-            return super.onKeyDown(keyCode, event)
+            return passKeyDownToHost(keyCode, event)
         }
         // ascii_mode deliberately plays no part here: English mode still needs
         // librime's ascii_composer to see the key. keytao-core owns the rule.
         if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
-            return super.onKeyDown(keyCode, event)
+            return passKeyDownToHost(keyCode, event)
         }
         pendingKeystrokeStartNs = System.nanoTime()
         try {
@@ -976,10 +995,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             } else {
                 engine.processKey(key.keyCode, key.modifiers)
             }
+            hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
             if (!result.accepted) {
                 KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
                 pendingKeystrokeStartNs = 0L
-                return super.onKeyDown(keyCode, event)
+                return passKeyDownToHost(keyCode, event)
             }
             applyState(result)
             return true
@@ -994,8 +1014,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             panelBackDownConsumed = false
             return true
         }
-        if (emojiSearchQuery != null && !isShiftKey(keyCode)) return true
-        if (!isShiftKey(keyCode)) return super.onKeyUp(keyCode, event)
+        hardwareChordKeys.release(keyCode)?.let { release ->
+            release.key?.let { key -> applyState(engine.processKey(key.keyCode, key.modifiers)) }
+            return if (release.passToHost) super.onKeyUp(keyCode, event) else true
+        }
+        if (!isShiftKey(keyCode)) {
+            if (emojiSearchQuery != null) return true
+            return super.onKeyUp(keyCode, event)
+        }
         val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode &&
             AndroidKeyMapper.permitsSoloShift(event)
         shiftPressedWithoutKey = false
@@ -1021,6 +1047,38 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }
         }
         return true
+    }
+
+    override fun allowsChordInput(): Boolean = !bypassesComposition()
+
+    private fun passKeyDownToHost(keyCode: Int, event: KeyEvent): Boolean {
+        if (!isShiftKey(keyCode)) hardwareChordKeys.passToHost(keyCode)
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun releaseHardwareChordKeys() {
+        hardwareChordKeys.releaseAll().forEach { key ->
+            val result = engine.processKey(key.keyCode, key.modifiers)
+            if (!releasingPreviousInput) applyState(result)
+        }
+    }
+
+    override fun onChordKey(text: String, released: Boolean) {
+        if (!released && !inputAvailable) {
+            showUnavailableMessage()
+            return
+        }
+        if (!released && bypassesComposition()) {
+            commitDirect(text)
+            return
+        }
+        if (!released) discardPendingHostBackspace()
+        val modifiers = if (released) AndroidKeyMapper.RIME_RELEASE_MASK else 0
+        val result = engine.processKey(text.single().code, modifiers)
+        // A restarted editor must drain the old chord without receiving its commit.
+        if (releasingPreviousInput) return
+        applyState(result)
+        if (!released && !result.accepted && !result.hasComposition) commitDirect(text)
     }
 
     override fun onKeyCommand(command: KeyCommand) {
