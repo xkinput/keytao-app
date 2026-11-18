@@ -21,8 +21,6 @@ object KeytaoRimeDeployClient {
         val warning: String = "",
     )
 
-    private val deploymentRunning = AtomicBoolean(false)
-
     internal fun timeoutMsForSchemas(schemas: List<String>) =
         if (schemas.any(::isAddonSchema)) addonTimeoutMs else defaultTimeoutMs
 
@@ -32,17 +30,64 @@ object KeytaoRimeDeployClient {
         callback: (Result) -> Unit,
     ) {
         val handler = Handler(Looper.getMainLooper())
+        val finished = AtomicBoolean(false)
+        val timeout = Runnable {
+            if (finished.compareAndSet(false, true)) {
+                callback(Result(success = false, error = "Android RIME deployment timed out"))
+            }
+        }
+        val budget = timeoutMs.coerceAtLeast(minimumTimeoutMs)
+        val receiver = object : ResultReceiver(handler) {
+            override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                if (finished.get()) return
+                handler.removeCallbacks(timeout)
+                if (resultCode == KeytaoRimeDeployContract.resultWaiting) {
+                    handler.postDelayed(
+                        timeout,
+                        resultData?.getLong(KeytaoRimeDeployContract.keyTimeoutMs, budget)
+                            ?.coerceAtLeast(minimumTimeoutMs) ?: budget,
+                    )
+                    return
+                }
+                if (!finished.compareAndSet(false, true)) return
+                callback(Result(
+                    success = resultCode == KeytaoRimeDeployContract.resultOk,
+                    path = resultData?.getString(KeytaoRimeDeployContract.keyPath).orEmpty(),
+                    schemaName = resultData?.getString(KeytaoRimeDeployContract.keySchemaName).orEmpty(),
+                    deployed = resultData?.getBoolean(KeytaoRimeDeployContract.keyDeployed, false) == true,
+                    error = resultData?.getString(KeytaoRimeDeployContract.keyError).orEmpty(),
+                    warning = resultData?.getString(KeytaoRimeDeployContract.keyWarning).orEmpty(),
+                ))
+            }
+        }
+        handler.post {
+            handler.postDelayed(timeout, budget)
+            try {
+                val intent = Intent(context, KeytaoRimeDeployService::class.java).apply {
+                    putExtra(KeytaoRimeDeployContract.extraReceiver, receiver)
+                    putExtra(KeytaoRimeDeployContract.keyTimeoutMs, budget)
+                    KeytaoAndroidPaths.testRootOverride?.let {
+                        putExtra(KeytaoRimeDeployContract.extraTestRoot, it.absolutePath)
+                    }
+                }
+                check(context.applicationContext.startService(intent) != null) {
+                    "Android RIME deployment service is unavailable"
+                }
+            } catch (error: Throwable) {
+                handler.removeCallbacks(timeout)
+                if (finished.compareAndSet(false, true)) {
+                    callback(Result(success = false, error = error.message ?: "Android RIME 部署失败"))
+                }
+            }
+        }
+    }
+
+    internal fun runDeployment(context: Context, timeoutMs: Long, callback: (Result) -> Unit) {
+        val handler = Handler(Looper.getMainLooper())
         val root = runCatching { KeytaoAndroidPaths.userRoot(context) }.getOrElse { error ->
             handler.post { callback(Result(success = false, error = error.message ?: "存储尚未就绪")) }
             return
         }
-        if (!deploymentRunning.compareAndSet(false, true)) {
-            handler.post {
-                callback(Result(success = false, error = "Android RIME deployment is already running"))
-            }
-            return
-        }
-
         Deployment(
             context = context.applicationContext,
             userRoot = root,
@@ -65,18 +110,16 @@ object KeytaoRimeDeployClient {
         private var initialSchemas = emptyList<String>()
         private var current: PendingSchema? = null
         private var renderingLogos = false
+        private var timingOut = false
         private var startedNs = 0L
         private var stepStartedNs = 0L
         private val timeout = Runnable {
-            if (renderingLogos) {
-                context.stopService(Intent(context, KeytaoRimeDeployService::class.java))
-                handler.postDelayed(
-                    { handleStepResult(false, emptyList(), "") },
-                    processExitGraceMs,
-                )
-            } else {
-                finish(Result(success = false, error = "Android RIME deployment timed out"))
-            }
+            timingOut = true
+            runCatching { context.stopService(Intent(context, KeytaoRimeDeployWorkerService::class.java)) }
+            handler.postDelayed({
+                if (renderingLogos) completeDeployment()
+                else finish(Result(success = false, error = "Android RIME deployment timed out"))
+            }, processExitGraceMs)
         }
 
         fun start() {
@@ -93,14 +136,14 @@ object KeytaoRimeDeployClient {
         }
 
         private fun startStep(schema: PendingSchema?, renderLogos: Boolean = false) {
-            if (finished.get()) return
+            if (finished.get() || timingOut) return
             current = schema
             renderingLogos = renderLogos
             stepStartedNs = System.nanoTime()
             val delivered = AtomicBoolean(false)
             val receiver = object : ResultReceiver(handler) {
                 override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
-                    if (!delivered.compareAndSet(false, true) || finished.get()) return
+                    if (!delivered.compareAndSet(false, true) || finished.get() || timingOut) return
                     val success = resultCode == KeytaoRimeDeployContract.resultOk &&
                         resultData?.getBoolean(KeytaoRimeDeployContract.keySuccess, false) == true
                     val schemas = resultData
@@ -117,7 +160,7 @@ object KeytaoRimeDeployClient {
             }
 
             try {
-                val intent = Intent(context, KeytaoRimeDeployService::class.java).apply {
+                val intent = Intent(context, KeytaoRimeDeployWorkerService::class.java).apply {
                     putExtra(KeytaoRimeDeployContract.extraReceiver, receiver)
                     schema?.let { putExtra(KeytaoRimeDeployContract.extraSchemaId, it.id) }
                     putExtra(KeytaoRimeDeployContract.extraRenderLogos, renderLogos)
@@ -138,7 +181,7 @@ object KeytaoRimeDeployClient {
         }
 
         private fun handleStepResult(success: Boolean, schemas: List<String>, error: String) {
-            if (finished.get()) return
+            if (finished.get() || timingOut) return
             logStepResult(success, schemas.size)
             if (renderingLogos) {
                 completeDeployment()
@@ -219,15 +262,16 @@ object KeytaoRimeDeployClient {
 
         private fun finish(result: Result) {
             if (!finished.compareAndSet(false, true)) return
-            logStepResult(result.success, 0)
-            val success = result.success
-            val schemaCount = processed.size
-            KeytaoRuntimeLog.event("rime", "deploy", KeytaoRuntimeLog.elapsedMs(startedNs)) {
-                put("success", success)
-                put("schema_count", schemaCount)
-            }
             handler.removeCallbacks(timeout)
-            deploymentRunning.set(false)
+            runCatching {
+                logStepResult(result.success, 0)
+                val success = result.success
+                val schemaCount = processed.size
+                KeytaoRuntimeLog.event("rime", "deploy", KeytaoRuntimeLog.elapsedMs(startedNs)) {
+                    put("success", success)
+                    put("schema_count", schemaCount)
+                }
+            }
             callback(result)
         }
 
@@ -262,6 +306,12 @@ internal object KeytaoRimeDeployContract {
     const val keySuccess = "success"
     const val keySchemas = "schemas"
     const val keyError = "error"
+    const val keyPath = "path"
+    const val keySchemaName = "schemaName"
+    const val keyDeployed = "deployed"
+    const val keyWarning = "warning"
+    const val keyTimeoutMs = "timeoutMs"
+    const val resultWaiting = 2
     const val resultOk = 1
     const val resultError = 0
 }
