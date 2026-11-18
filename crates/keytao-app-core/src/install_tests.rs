@@ -200,6 +200,33 @@ fn protected_file_install_decides_missing_valid_and_broken_with_backup() {
     );
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn package_install_replaces_readonly_files_and_keeps_writable_broken_backups() {
+    let directory = tempfile::tempdir().unwrap();
+    for relative in ["example.schema.yaml", "example.user.yaml"] {
+        let path = directory.path().join(relative);
+        fs::write(&path, b"patch: [\n").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let mut logs = Vec::new();
+        crate::install::write_package_file(directory.path(), relative, b"patch: {}\n", &mut logs)
+            .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"patch: {}\n");
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+    }
+    let backup = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().contains(".broken-"))
+        .unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), b"patch: [\n");
+    assert!(!fs::metadata(backup).unwrap().permissions().readonly());
+}
+
 #[test]
 fn manifest_cleanup_deletes_only_unchanged_obsolete_files() {
     use std::collections::{BTreeMap, BTreeSet};

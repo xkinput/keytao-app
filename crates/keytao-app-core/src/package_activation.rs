@@ -45,10 +45,13 @@ pub(crate) struct Activation {
 pub(crate) fn read(core: &Core, root: &Path) -> Result<Option<Activation>, CoreError> {
     let store = PackageStore::new(core);
     let path = store.checked_activation_path()?;
-    match fs::read(path) {
+    match fs::read(&path) {
         Ok(bytes) => {
             let active: Activation = serde_json::from_slice(&bytes)?;
-            if Path::new(&active.root) != root.canonicalize()? {
+            if Path::new(&active.root)
+                != root.canonicalize()
+                    .map_err(|error| crate::package_fs::context("解析目录", root, error))?
+            {
                 return Ok(None);
             }
             for file in active.owned.iter().chain(&active.generated) {
@@ -61,7 +64,7 @@ pub(crate) fn read(core: &Core, root: &Path) -> Result<Option<Activation>, CoreE
             Ok(Some(active))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(crate::package_fs::context("读取文件", &path, e).into()),
     }
 }
 
@@ -83,16 +86,18 @@ pub(crate) fn backup(
     relative: &str,
 ) -> Result<Option<Backup>, CoreError> {
     let path = safe_path(root, relative).map_err(CoreError::Other)?;
-    let bytes = match fs::read(path) {
+    let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(crate::package_fs::context("读取文件", &path, e).into()),
     };
     let digest = sha256_reader(bytes.as_slice())?;
     let name = format!("backups/{digest}/{relative}");
     let destination =
         safe_path(&PackageStore::new(core).checked_root()?, &name).map_err(CoreError::Other)?;
-    fs::create_dir_all(destination.parent().unwrap())?;
+    let parent = destination.parent().unwrap();
+    fs::create_dir_all(parent)
+        .map_err(|error| crate::package_fs::context("创建目录", parent, error))?;
     crate::scheme_files::write_file_atomic(&destination, &bytes)?;
     Ok(Some(Backup {
         path: relative.into(),
@@ -103,14 +108,14 @@ pub(crate) fn backup(
 
 pub(crate) fn fingerprint(root: &Path, relative: &str) -> Result<Option<OwnedFile>, CoreError> {
     let path = safe_path(root, relative).map_err(CoreError::Other)?;
-    match fs::File::open(path) {
+    match fs::File::open(&path) {
         Ok(file) => Ok(Some(OwnedFile {
             path: relative.into(),
             sha256: sha256_reader(file)?,
             move_file: false,
         })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(crate::package_fs::context("读取文件", &path, e).into()),
     }
 }
 
@@ -167,7 +172,9 @@ pub(crate) fn deactivate(
                 &file.sha256
             };
             if &current.sha256 == expected {
-                fs::remove_file(safe_path(root, &file.path).map_err(CoreError::Other)?)?;
+                crate::package_fs::remove_file(
+                    &safe_path(root, &file.path).map_err(CoreError::Other)?,
+                )?;
                 logs.push(format!("[REMOVED] {}", file.path));
             } else {
                 logs.push(format!("[KEPT] User-modified file: {}", file.path));
@@ -241,7 +248,7 @@ pub(crate) fn deactivate(
         if let Some(content) = content {
             crate::scheme_files::write_file_atomic(&path, content.as_bytes())?;
         } else if path.try_exists()? {
-            fs::remove_file(path)?;
+            crate::package_fs::remove_file(&path)?;
         }
     }
     let remaining = crate::managed_custom::active_schema_ids_from_default(root)
@@ -254,7 +261,9 @@ pub(crate) fn deactivate(
 }
 
 pub(crate) fn write(core: &Core, active: &Activation) -> Result<(), CoreError> {
-    fs::create_dir_all(PackageStore::new(core).checked_root()?)?;
+    let store = PackageStore::new(core).checked_root()?;
+    fs::create_dir_all(&store)
+        .map_err(|error| crate::package_fs::context("创建目录", &store, error))?;
     crate::scheme_files::write_file_atomic(
         &PackageStore::new(core).checked_activation_path()?,
         &serde_json::to_vec_pretty(active)?,
@@ -263,10 +272,10 @@ pub(crate) fn write(core: &Core, active: &Activation) -> Result<(), CoreError> {
 }
 
 fn backup_bytes(core: &Core, backup: &Backup) -> Result<Vec<u8>, CoreError> {
-    let bytes = fs::read(
-        safe_path(&PackageStore::new(core).checked_root()?, &backup.backup)
-            .map_err(CoreError::Other)?,
-    )?;
+    let path = safe_path(&PackageStore::new(core).checked_root()?, &backup.backup)
+        .map_err(CoreError::Other)?;
+    let bytes = fs::read(&path)
+        .map_err(|error| crate::package_fs::context("读取备份文件", &path, error))?;
     if sha256_reader(bytes.as_slice())? != backup.sha256 {
         return Err(CoreError::Other(
             "Activation backup checksum mismatch".into(),
@@ -277,7 +286,9 @@ fn backup_bytes(core: &Core, backup: &Backup) -> Result<Vec<u8>, CoreError> {
 
 fn restore_backup(core: &Core, root: &Path, backup: &Backup) -> Result<(), CoreError> {
     let path = safe_path(root, &backup.path).map_err(CoreError::Other)?;
-    fs::create_dir_all(path.parent().unwrap())?;
+    let parent = path.parent().unwrap();
+    fs::create_dir_all(parent)
+        .map_err(|error| crate::package_fs::context("创建目录", parent, error))?;
     crate::scheme_files::write_file_atomic(&path, &backup_bytes(core, backup)?)?;
     Ok(())
 }
@@ -293,7 +304,7 @@ fn regenerate_default(core: &Core, root: &Path, active: &Activation) -> Result<(
         let current = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(crate::package_fs::context("读取文件", &path, e).into()),
         };
         let remaining: Vec<_> = crate::scheme_files::parse_schema_list(&current)
             .into_iter()
@@ -395,8 +406,10 @@ impl Transaction {
         mut paths: BTreeSet<String>,
     ) -> Result<Self, CoreError> {
         let store = PackageStore::new(core).checked_root()?;
-        fs::create_dir_all(root)?;
-        fs::create_dir_all(&store)?;
+        fs::create_dir_all(root)
+            .map_err(|error| crate::package_fs::context("创建目录", root, error))?;
+        fs::create_dir_all(&store)
+            .map_err(|error| crate::package_fs::context("创建目录", &store, error))?;
         let build_paths = build_files(root)?;
         paths.extend(build_paths.iter().cloned());
         let directory = safe_path(&store, ".activation-transaction").map_err(CoreError::Other)?;
@@ -405,7 +418,8 @@ impl Transaction {
                 "An unfinished activation requires recovery".into(),
             ));
         }
-        fs::create_dir(&directory)?;
+        fs::create_dir(&directory)
+            .map_err(|error| crate::package_fs::context("创建目录", &directory, error))?;
         let state = match fs::read(core.env().data_dir.join("app-state.json")) {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -454,16 +468,19 @@ impl Transaction {
         let bytes = match fs::read(&path) {
             Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(crate::package_fs::context("读取文件", &path, e).into()),
         };
         if let Some(bytes) = &bytes {
             let backup = self
                 .directory
                 .join(self.journal.snapshots.len().to_string());
-            let file = fs::File::create(&backup)?;
             use std::io::Write;
-            (&file).write_all(bytes)?;
-            file.sync_all()?;
+            (|| {
+                let file = fs::File::create(&backup)?;
+                (&file).write_all(bytes)?;
+                file.sync_all()
+            })()
+            .map_err(|error| crate::package_fs::context("写入备份文件", &backup, error))?;
         }
         self.journal.snapshots.push(Snapshot {
             path: relative.into(),
@@ -498,8 +515,11 @@ impl Transaction {
             if !directory.try_exists()? {
                 return Ok(());
             }
-            for entry in fs::read_dir(directory)? {
-                let entry = entry?;
+            for entry in fs::read_dir(directory)
+                .map_err(|error| crate::package_fs::context("读取目录", directory, error))?
+            {
+                let entry = entry
+                    .map_err(|error| crate::package_fs::context("读取目录项", directory, error))?;
                 let relative = entry
                     .path()
                     .strip_prefix(root)
@@ -507,7 +527,10 @@ impl Transaction {
                     .to_string_lossy()
                     .replace('\\', "/");
                 let path = safe_path(root, &relative).map_err(CoreError::Other)?;
-                if entry.file_type()?.is_dir() {
+                if entry.file_type()
+                    .map_err(|error| crate::package_fs::context("读取文件属性", &path, error))?
+                    .is_dir()
+                {
                     collect(root, &path, paths)?;
                 } else {
                     paths.insert(relative);
@@ -537,14 +560,14 @@ impl Transaction {
             return Err(error);
         }
         self.finished = true;
-        if let Err(error) = fs::remove_dir_all(&self.directory) {
+        if let Err(error) = crate::package_fs::remove_dir_all(&self.directory) {
             tracing::warn!(%error, "Committed activation cleanup deferred until startup");
         }
         Ok(())
     }
 
     fn rollback(&self) -> Result<(), CoreError> {
-        self.rollback_with_remove(|path| fs::remove_file(path))
+        self.rollback_with_remove(crate::package_fs::remove_file)
     }
 
     fn rollback_with_remove(
@@ -571,7 +594,12 @@ impl Transaction {
                                 while let Some(directory) =
                                     parent.filter(|dir| *dir != self.journal.root)
                                 {
-                                    if fs::remove_dir(directory).is_err() {
+                                    if crate::package_fs::retry_windows(|| {
+                                        crate::package_fs::clear_readonly(directory)?;
+                                        fs::remove_dir(directory)
+                                    })
+                                    .is_err()
+                                    {
                                         break;
                                     }
                                     parent = directory.parent();
@@ -595,17 +623,24 @@ impl Transaction {
                     };
                     let path = safe_path(root, &snapshot.path).map_err(CoreError::Other)?;
                     if snapshot.existed {
-                        fs::create_dir_all(path.parent().unwrap())?;
-                        crate::scheme_files::write_file_atomic(
-                            &path,
-                            &fs::read(self.directory.join(index.to_string()))?,
-                        )?;
+                        let parent = path.parent().unwrap();
+                        fs::create_dir_all(parent)
+                            .map_err(|error| crate::package_fs::context("创建目录", parent, error))?;
+                        let backup = self.directory.join(index.to_string());
+                        let bytes = fs::read(&backup)
+                            .map_err(|error| crate::package_fs::context("读取备份文件", &backup, error))?;
+                        crate::scheme_files::write_file_atomic(&path, &bytes)?;
                     } else if path.try_exists()? {
                         remove_file(&path)?;
                     }
                     let mut parent = path.parent();
                     while let Some(dir) = parent.filter(|dir| *dir != root) {
-                        if fs::remove_dir(dir).is_err() {
+                        if crate::package_fs::retry_windows(|| {
+                            crate::package_fs::clear_readonly(dir)?;
+                            fs::remove_dir(dir)
+                        })
+                        .is_err()
+                        {
                             break;
                         }
                         parent = dir.parent();
@@ -641,7 +676,7 @@ impl Transaction {
                 errors.join("; ")
             )));
         }
-        fs::remove_dir_all(&self.directory)?;
+        crate::package_fs::remove_dir_all(&self.directory)?;
         Ok(())
     }
 }
@@ -662,17 +697,18 @@ pub(crate) fn recover(core: &Core) -> Result<(), CoreError> {
     if !directory.try_exists()? {
         return Ok(());
     }
-    let bytes = match fs::read(directory.join("journal.json")) {
+    let journal_path = directory.join("journal.json");
+    let bytes = match fs::read(&journal_path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::remove_dir_all(directory)?;
+            crate::package_fs::remove_dir_all(&directory)?;
             return Ok(());
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(crate::package_fs::context("读取事务日志", &journal_path, e).into()),
     };
     let journal: Journal = serde_json::from_slice(&bytes)?;
     if journal.committed {
-        fs::remove_dir_all(directory)?;
+        crate::package_fs::remove_dir_all(&directory)?;
         return Ok(());
     }
     let mut transaction = Transaction {
@@ -750,8 +786,11 @@ fn build_files(root: &Path) -> Result<BTreeSet<String>, CoreError> {
         if !directory.try_exists()? {
             return Ok(());
         }
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
+        for entry in fs::read_dir(directory)
+            .map_err(|error| crate::package_fs::context("读取目录", directory, error))?
+        {
+            let entry = entry
+                .map_err(|error| crate::package_fs::context("读取目录项", directory, error))?;
             let relative = entry
                 .path()
                 .strip_prefix(root)
@@ -765,7 +804,10 @@ fn build_files(root: &Path) -> Result<BTreeSet<String>, CoreError> {
                 continue;
             }
             let path = safe_path(root, &relative).map_err(CoreError::Other)?;
-            if entry.file_type()?.is_dir() {
+            if entry.file_type()
+                .map_err(|error| crate::package_fs::context("读取文件属性", &path, error))?
+                .is_dir()
+            {
                 collect(root, &path, paths)?;
             } else {
                 paths.insert(relative);
@@ -811,6 +853,35 @@ mod transaction_tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn backup_and_restore_create_writable_copies_of_readonly_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let root = directory.path().join("rime");
+        let relative = "example.schema.yaml";
+        write(&root, relative, b"original");
+        let path = root.join(relative);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let backup = backup(&core, &root, relative).unwrap().unwrap();
+        let stored = PackageStore::new(&core).root().join(&backup.backup);
+        assert!(!fs::metadata(&stored).unwrap().permissions().readonly());
+        assert!(fs::metadata(&path).unwrap().permissions().readonly());
+        crate::package_fs::remove_file(&path).unwrap();
+        let mut permissions = fs::metadata(&stored).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&stored, permissions).unwrap();
+
+        restore_backup(&core, &root, &backup).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(fs::metadata(&stored).unwrap().permissions().readonly());
+        crate::package_fs::clear_readonly(&stored).unwrap();
     }
 
     #[test]

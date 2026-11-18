@@ -42,6 +42,116 @@ fn stored_files(core: &Core, key: &str) -> BTreeMap<String, Vec<u8>> {
 }
 
 #[test]
+fn local_import_skips_protected_and_hidden_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = source(directory.path(), "source");
+    for name in [
+        "System Volume Information/private.yaml",
+        "$RECYCLE.BIN/deleted.schema.yaml",
+        "nested/sYsTeM vOlUmE iNfOrMaTiOn/private.yaml",
+        "nested/$recycle.bin/deleted.yaml",
+        ".hidden/private.yaml",
+        "nested/.hidden.yaml",
+        "app-state.json",
+    ] {
+        let file = path.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, b"must not import").unwrap();
+    }
+    let mut files = BTreeMap::new();
+    collect(&path, "", &mut files, &mut 0).unwrap();
+    assert_eq!(files.keys().collect::<Vec<_>>(), [&"example.schema.yaml"]);
+}
+
+#[test]
+fn local_import_root_error_names_operation_and_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+    let error = collect(&missing, "", &mut BTreeMap::new(), &mut 0)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("读取目录"), "{error}");
+    assert!(error.contains(&missing.display().to_string()), "{error}");
+}
+
+#[test]
+fn local_import_propagates_permission_denied_and_other_errors() {
+    use std::io::{Error, ErrorKind};
+    for path in [Path::new("source"), Path::new("source/child")] {
+        for operation in ["读取目录", "读取目录项", "读取文件属性", "读取文件"] {
+            for kind in [ErrorKind::PermissionDenied, ErrorKind::NotFound] {
+                let message = import_io::<()>(Err(Error::from(kind)), operation, path)
+                    .unwrap_err()
+                    .to_string();
+                assert!(message.contains(operation), "{message}");
+                assert!(
+                    message.contains(&std::path::absolute(path).unwrap().display().to_string()),
+                    "{message}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_import_windows_attributes_exclude_hidden_and_system_but_not_readonly() {
+    for flags in [0x2, 0x4, 0x6, 0x13, 0x24] {
+        assert!(excluded_attributes(flags));
+    }
+    for flags in [0, 0x1, 0x10, 0x20, 0x21] {
+        assert!(!excluded_attributes(flags));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn local_import_propagates_windows_access_errors() {
+    for code in [5, 32, 33] {
+        for (operation, path) in [
+            ("读取文件", Path::new("source/locked.yaml")),
+            ("读取目录", Path::new("source")),
+            ("读取目录", Path::new("source/lua")),
+        ] {
+            let message = import_io::<()>(
+                Err(std::io::Error::from_raw_os_error(code)),
+                operation,
+                path,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains(operation), "{message}");
+            assert!(
+                message.contains(&std::path::absolute(path).unwrap().display().to_string()),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn local_import_skips_windows_hidden_and_system_attributes() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES};
+    let directory = tempfile::tempdir().unwrap();
+    let path = source(directory.path(), "source");
+    for (name, flags) in [("hidden.yaml", 0x2), ("system", 0x4)] {
+        let entry = path.join(name);
+        if name == "system" {
+            fs::create_dir(&entry).unwrap();
+            fs::write(entry.join("private.yaml"), b"skip").unwrap();
+        } else {
+            fs::write(&entry, b"skip").unwrap();
+        }
+        let name: Vec<u16> = entry.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe { SetFileAttributesW(windows::core::PCWSTR(name.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(flags)) }.unwrap();
+    }
+    let mut files = BTreeMap::new();
+    collect(&path, "", &mut files, &mut 0).unwrap();
+    assert_eq!(files.keys().collect::<Vec<_>>(), [&"example.schema.yaml"]);
+}
+
+#[test]
 fn local_import_requires_directory_with_schema() {
     let directory = tempfile::tempdir().unwrap();
     let core = open_core(directory.path());
@@ -50,6 +160,7 @@ fn local_import_requires_directory_with_schema() {
     fs::write(empty.join("build/example.schema.yaml"), "built schema").unwrap();
     fs::create_dir_all(empty.join("nested")).unwrap();
     fs::write(empty.join("nested/example.schema.yaml"), "nested schema").unwrap();
+    fs::write(empty.join("unrelated.custom.yaml"), b"\xff").unwrap();
     assert!(
         import_local_scheme(&core, &empty, "Empty", None)
             .unwrap_err()

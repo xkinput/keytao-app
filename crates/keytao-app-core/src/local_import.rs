@@ -1,6 +1,6 @@
 use super::{PackageMeta, excluded_from_manifest, validate_relative};
 use crate::package_store::PackageStore;
-use crate::{Core, CoreError};
+use crate::{Core, CoreError, package_fs::context};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -15,9 +15,15 @@ fn ships_with_scheme(name: &str) -> bool {
 
 fn excluded(relative: &str) -> bool {
     let top = relative.split('/').next().unwrap_or(relative);
-    matches!(top, "build" | "sync" | "installation.yaml" | "user.yaml")
+    matches!(
+        top,
+        "build" | "sync" | "log" | "installation.yaml" | "user.yaml"
+    )
         || relative.split('/').any(|part| {
-            matches!(part, ".git" | ".DS_Store")
+            part.starts_with('.')
+                || part.eq_ignore_ascii_case("System Volume Information")
+                || part.eq_ignore_ascii_case("$RECYCLE.BIN")
+                || part.eq_ignore_ascii_case("app-state.json")
                 || part.ends_with(".userdb")
                 || part == "default.custom.yaml"
                 || part == "default-custom.yaml"
@@ -29,44 +35,98 @@ fn excluded(relative: &str) -> bool {
         })
 }
 
+#[cfg(any(windows, test))]
+fn excluded_attributes(attributes: u32) -> bool {
+    // Windows hidden/system flags; readonly scheme files are still importable.
+    attributes & (0x2 | 0x4) != 0
+}
+
+fn import_io<T>(
+    result: std::io::Result<T>,
+    operation: &str,
+    path: &Path,
+) -> Result<T, CoreError> {
+    result.map_err(|error| context(operation, path, error).into())
+}
+
+fn has_root_schema(directory: &Path) -> Result<bool, CoreError> {
+    let entries = fs::read_dir(directory).map_err(|error| context("读取目录", directory, error))?;
+    for entry in entries {
+        let entry = import_io(entry, "读取目录项", directory)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".schema.yaml") || excluded(name) {
+            continue;
+        }
+        let metadata = import_io(entry.metadata(), "读取文件属性", &entry.path())?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if excluded_attributes(metadata.file_attributes()) {
+                continue;
+            }
+        }
+        if metadata.is_file() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn collect(
     directory: &Path,
     prefix: &str,
     files: &mut BTreeMap<String, Vec<u8>>,
     size: &mut u64,
 ) -> Result<(), CoreError> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
+    let entries = import_io(fs::read_dir(directory), "读取目录", directory)?;
+    for entry in entries {
+        let entry = import_io(entry, "读取目录项", directory)?;
+        let path = entry.path();
         let name = entry
             .file_name()
             .into_string()
-            .map_err(|_| CoreError::Other("方案包文件名无效".into()))?;
+            .map_err(|_| CoreError::Other(format!("方案包文件名无效：{}", path.display())))?;
         let relative = if prefix.is_empty() {
             name
         } else {
             format!("{prefix}/{name}")
         };
         if excluded(&relative) {
+            tracing::warn!(path = %path.display(), "Skipping hidden, protected or runtime import entry");
             continue;
         }
         validate_relative(&relative).map_err(CoreError::Other)?;
-        let kind = entry.file_type()?;
+        let metadata = import_io(entry.metadata(), "读取文件属性", &path)?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if excluded_attributes(metadata.file_attributes()) {
+                tracing::warn!(path = %path.display(), "Skipping hidden or system import entry");
+                continue;
+            }
+        }
+        let kind = metadata.file_type();
         if kind.is_symlink() {
             return Err(CoreError::Other(format!(
-                "方案包不能包含符号链接：{relative}"
+                "方案包不能包含符号链接：{}",
+                path.display()
             )));
         }
         if kind.is_dir() {
-            collect(&entry.path(), &relative, files, size)?;
+            collect(&path, &relative, files, size)?;
         } else if kind.is_file() {
             if files.len() >= 10_000 {
                 return Err(CoreError::Other("方案包文件过多".into()));
             }
-            *size = size.saturating_add(entry.metadata()?.len());
-            if *size > 512 * 1024 * 1024 {
+            let next_size = size.saturating_add(metadata.len());
+            if next_size > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("方案包解压后过大".into()));
             }
-            let mut bytes = fs::read(entry.path())?;
+            let mut bytes = import_io(fs::read(&path), "读取文件", &path)?;
+            *size = next_size;
             if relative.ends_with(".custom.yaml") {
                 let content = std::str::from_utf8(&bytes)
                     .map_err(|error| CoreError::Other(error.to_string()))?;
@@ -117,9 +177,14 @@ pub fn import_local_scheme(
 ) -> Result<String, CoreError> {
     let directory = directory
         .canonicalize()
-        .map_err(|error| CoreError::Other(format!("无法读取方案目录：{error}")))?;
+        .map_err(|error| context("读取方案目录", directory, error))?;
     if !directory.is_dir() {
         return Err(CoreError::Other("请选择方案目录".into()));
+    }
+    if !has_root_schema(&directory)? {
+        return Err(CoreError::Other(
+            "目录根部未找到 .schema.yaml 方案文件".into(),
+        ));
     }
     let mut files = BTreeMap::new();
     collect(&directory, "", &mut files, &mut 0)?;
@@ -188,7 +253,7 @@ pub fn import_local_scheme(
         .pending_package
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    fs::create_dir_all(&store_root)?;
+    fs::create_dir_all(&store_root).map_err(|error| context("创建方案存储目录", &store_root, error))?;
     let state = core.state();
     let scheme_key = if let Some(key) = scheme_key {
         if !crate::scheme::is_local_scheme_key(key) || !state.installed_packages.contains_key(key) {

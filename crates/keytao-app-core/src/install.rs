@@ -100,7 +100,9 @@ pub(crate) fn write_package_file(
         match std::fs::read(&out) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(format!("Cannot read {relative}; left untouched: {error}")),
+            Err(error) => {
+                return Err(crate::package_fs::context("读取文件", &out, error).to_string());
+            }
         }
     } else {
         None
@@ -111,9 +113,9 @@ pub(crate) fn write_package_file(
         let renamed = match std::fs::symlink_metadata(&backup) {
             Ok(_) => Err(format!("backup already exists: {backup_name}")),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::rename(&out, backup).map_err(|error| error.to_string())
+                crate::package_fs::rename(&out, &backup).map_err(|error| error.to_string())
             }
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(crate::package_fs::context("检查备份文件", &backup, error).to_string()),
         };
         if let Err(error) = renamed {
             logs.push(format!(
@@ -154,7 +156,7 @@ fn install_rime_lua(
         Some(content) => {
             write_file_force(&path, content.as_bytes())?;
         }
-        None => match std::fs::remove_file(&path) {
+        None => match crate::package_fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
@@ -326,27 +328,38 @@ fn rime_package_build_ids(zip_bytes: &[u8]) -> Result<(Vec<String>, Vec<String>)
 /// Returns a tag for logging: "" (normal), " [forced]", or " [root]".
 fn write_file_force(path: &std::path::Path, content: &[u8]) -> Result<&'static str, String> {
     if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p).ok();
-    }
-    if std::fs::write(path, content).is_ok() {
-        return Ok("");
-    }
-    // Try chmod before falling back to root — works when we own the file but it's read-only
-    #[cfg(unix)]
-    if path.exists() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
-        if std::fs::write(path, content).is_ok() {
-            return Ok(" [forced]");
+        if let Err(error) = std::fs::create_dir_all(p) {
+            return write_file_privileged_fallback(path, content, error);
         }
     }
-    write_file_privileged_fallback(path, content)
+    let error = match crate::package_fs::retry_windows(|| {
+        #[cfg(target_os = "windows")]
+        crate::package_fs::clear_readonly(path)?;
+        std::fs::write(path, content)
+    }) {
+        Ok(()) => return Ok(""),
+        Err(error) => error,
+    };
+    // Try chmod before falling back to root — works when we own the file but it's read-only
+    #[cfg(unix)]
+    let error = if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+        match std::fs::write(path, content) {
+            Ok(()) => return Ok(" [forced]"),
+            Err(error) => error,
+        }
+    } else {
+        error
+    };
+    write_file_privileged_fallback(path, content, error)
 }
 
 #[cfg(target_os = "linux")]
 fn write_file_privileged_fallback(
     path: &std::path::Path,
     content: &[u8],
+    _error: std::io::Error,
 ) -> Result<&'static str, String> {
     let mut tmp = tempfile::NamedTempFile::new().map_err(|e| format!("临时文件写入失败: {e}"))?;
     tmp.write_all(content)
@@ -373,8 +386,9 @@ fn write_file_privileged_fallback(
 fn write_file_privileged_fallback(
     path: &std::path::Path,
     _content: &[u8],
+    error: std::io::Error,
 ) -> Result<&'static str, String> {
-    Err(format!("写入失败（权限不足）：{}", path.display()))
+    Err(crate::package_fs::context("写入文件", path, error).to_string())
 }
 
 #[cfg(target_os = "windows")]

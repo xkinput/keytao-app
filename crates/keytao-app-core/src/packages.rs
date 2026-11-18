@@ -107,7 +107,7 @@ where
         ));
         Ok(())
     })();
-    let _ = fs::remove_file(archive_path);
+    let _ = crate::package_fs::remove_file(Path::new(&archive_path));
     result
 }
 
@@ -706,23 +706,27 @@ pub(crate) fn finalize_pending(
             let root = Path::new(&receipt.root);
             select_main_schema_after_addon(root)?;
             if let Some(path) = crate::addon::owned_addon_default(root).map_err(CoreError::Other)? {
-                fs::remove_file(path)?;
+                crate::package_fs::remove_file(&path)?;
             }
             let mut marker = tempfile::Builder::new()
                 .prefix(".active-")
-                .tempfile_in(root)?;
-            serde_json::to_writer_pretty(marker.as_file_mut(), &active_manifest)?;
-            marker.as_file().sync_all()?;
-            marker
-                .persist(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST))
-                .map_err(|error| CoreError::from(error.error))?;
+                .tempfile_in(root)
+                .map_err(|error| crate::package_fs::context("创建临时文件", root, error))?;
+            serde_json::to_writer_pretty(marker.as_file_mut(), &active_manifest)
+                .map_err(|error| CoreError::Other(format!("写入文件 {} 失败：{error}", marker.path().display())))?;
+            marker.as_file().sync_all()
+                .map_err(|error| crate::package_fs::context("同步文件", marker.path(), error))?;
+            crate::package_fs::rename(
+                marker.path(),
+                &root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
+            )?;
         }
         let mut temporary = store.staging_file(Staging::ActiveManifest)?;
-        serde_json::to_writer_pretty(temporary.as_file_mut(), &active_manifest)?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist(store.active_manifest_path())
-            .map_err(|error| CoreError::from(error.error))?;
+        serde_json::to_writer_pretty(temporary.as_file_mut(), &active_manifest)
+            .map_err(|error| CoreError::Other(format!("写入文件 {} 失败：{error}", temporary.path().display())))?;
+        temporary.as_file().sync_all()
+            .map_err(|error| crate::package_fs::context("同步文件", temporary.path(), error))?;
+        crate::package_fs::rename(temporary.path(), &store.active_manifest_path())?;
         if let Some(mut activation) = receipt.activation.take() {
             activation.key = scheme_key.into();
             activation.scheme_key = scheme_key.into();
@@ -1004,7 +1008,9 @@ async fn remove_active_package(
     let empty = crate::scheme_files::parse_schema_list(&config).is_empty();
     let result: Result<(), CoreError> = async {
         for marker in ["build/.keytao-deployed", "build/.keytao-deploying"] {
-            match fs::remove_file(safe_path(&root, marker).map_err(CoreError::Other)?) {
+            match crate::package_fs::remove_file(
+                &safe_path(&root, marker).map_err(CoreError::Other)?,
+            ) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
@@ -1016,7 +1022,7 @@ async fn remove_active_package(
         crate::package_artifacts::cleanup(&root, &files, &remaining)?;
         let default_build = safe_path(&root, "build/default.yaml").map_err(CoreError::Other)?;
         if default_build.try_exists()? {
-            fs::remove_file(default_build)?;
+            crate::package_fs::remove_file(&default_build)?;
         }
         #[cfg(target_os = "windows")]
         {
@@ -1062,7 +1068,7 @@ async fn remove_active_package(
     }
     receipt.finish().map_err(CoreError::Other)?;
     let store_manifest = PackageStore::new(core).checked_active_manifest_path()?;
-    match fs::remove_file(store_manifest) {
+    match crate::package_fs::remove_file(&store_manifest) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
@@ -1113,7 +1119,7 @@ async fn remove_owned_package(
     ] {
         let path = safe_path(root, name).map_err(CoreError::Other)?;
         if path.try_exists()? {
-            fs::remove_file(path)?;
+            crate::package_fs::remove_file(&path)?;
         }
     }
     // Keep the native deployer's package source in sync with the remaining add-ons.
@@ -1156,7 +1162,7 @@ async fn remove_owned_package(
     crate::package_activation::write(core, &inactive)?;
     let legacy = PackageStore::new(core).checked_active_manifest_path()?;
     if legacy.try_exists()? {
-        fs::remove_file(legacy)?;
+        crate::package_fs::remove_file(&legacy)?;
     }
     core.update_state(|state| {
         state.active_scheme = None;
@@ -1197,7 +1203,9 @@ pub(crate) fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> 
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                return Err(crate::package_fs::context("读取文件属性", &path, error).to_string());
+            }
         }
     }
     Ok(path)
@@ -1342,7 +1350,9 @@ pub(crate) fn cleanup_previous(
             ) {
                 Some(content) => crate::scheme_files::write_file_atomic(&path, content.as_bytes())
                     .map_err(|e| e.to_string())?,
-                None if path.exists() => fs::remove_file(path).map_err(|e| e.to_string())?,
+                None if path.exists() => {
+                    crate::package_fs::remove_file(&path).map_err(|e| e.to_string())?;
+                }
                 None => {}
             }
         } else if path.exists() {
@@ -1382,7 +1392,8 @@ pub(crate) fn cleanup_manifest(
     incoming: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
     cleanup_manifest_with(root, manifest, incoming, |relative| {
-        fs::remove_file(safe_path(root, relative)?).map_err(|error| error.to_string())
+        crate::package_fs::remove_file(&safe_path(root, relative)?)
+            .map_err(|error| error.to_string())
     })
 }
 

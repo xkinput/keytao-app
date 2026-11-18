@@ -1,5 +1,6 @@
 use crate::{
     Core, CoreError,
+    package_fs::{self, context},
     packages::{InstalledPackageInfo, PackageMeta, safe_path, sha256_reader},
 };
 use serde::{Deserialize, Serialize};
@@ -43,7 +44,7 @@ struct PackageStage(PathBuf);
 
 impl Drop for PackageStage {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = package_fs::remove_dir_all(&self.0);
     }
 }
 
@@ -67,10 +68,14 @@ impl std::ops::DerefMut for StagingFile {
 
 impl Write for StagingFile {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.file.write(bytes)
+        self.file
+            .write(bytes)
+            .map_err(|error| context("写入", self.file.path(), error))
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+        self.file
+            .flush()
+            .map_err(|error| context("刷新", self.file.path(), error))
     }
 }
 
@@ -79,7 +84,19 @@ impl StagingFile {
         self,
         path: impl AsRef<Path>,
     ) -> Result<fs::File, tempfile::PersistError> {
-        self.file.persist(path)
+        let path = path.as_ref();
+        if let Err(error) = package_fs::clear_readonly(path) {
+            return Err(tempfile::PersistError {
+                error,
+                file: self.file,
+            });
+        }
+        let source =
+            std::path::absolute(self.file.path()).unwrap_or_else(|_| self.file.path().to_owned());
+        self.file.persist(path).map_err(|mut error| {
+            error.error = context(&format!("重命名 {} →", source.display()), path, error.error);
+            error
+        })
     }
 }
 
@@ -133,7 +150,8 @@ impl<'a> PackageStore<'a> {
     }
 
     pub(crate) fn addon_stage(&self) -> Result<tempfile::TempDir, CoreError> {
-        Ok(tempfile::tempdir_in(self.staging_root()?)?)
+        let root = self.staging_root()?;
+        Ok(tempfile::tempdir_in(&root).map_err(|error| context("创建临时目录", &root, error))?)
     }
 
     pub(crate) fn recover_addon(&self, id: &str) -> Result<(), CoreError> {
@@ -145,18 +163,26 @@ impl<'a> PackageStore<'a> {
         let old = destination.with_file_name(format!(".old-{id}"));
         safe_path(destination.parent().unwrap(), &format!(".old-{id}"))
             .map_err(CoreError::Other)?;
-        if !old.try_exists()? {
+        if !old
+            .try_exists()
+            .map_err(|error| context("读取文件属性", &old, error))?
+        {
             return Ok(());
         }
-        if destination.try_exists()?
+        if destination
+            .try_exists()
+            .map_err(|error| context("读取文件属性", destination, error))?
             && crate::addon_store::validate_directory(&destination, id).is_ok()
         {
-            fs::remove_dir_all(old)?;
+            package_fs::remove_dir_all(&old)?;
         } else {
-            if destination.try_exists()? {
-                fs::remove_dir_all(&destination)?;
+            if destination
+                .try_exists()
+                .map_err(|error| context("读取文件属性", destination, error))?
+            {
+                package_fs::remove_dir_all(destination)?;
             }
-            fs::rename(old, destination)?;
+            package_fs::rename(&old, destination)?;
         }
         Ok(())
     }
@@ -169,10 +195,9 @@ impl<'a> PackageStore<'a> {
         Self::recover_addon_at(destination, id)?;
         crate::addon_store::validate_directory(stage, id)?;
         sync_package_directories(stage)?;
-        fs::create_dir_all(destination.parent().unwrap())?;
-        publish_directory(destination, stage, |source, target| {
-            fs::rename(source, target)
-        })
+        let parent = destination.parent().unwrap();
+        fs::create_dir_all(parent).map_err(|error| context("创建目录", parent, error))?;
+        publish_directory(destination, stage, package_fs::rename)
     }
 
     fn checked_package_path(&self, key: &str) -> Result<PathBuf, CoreError> {
@@ -190,7 +215,7 @@ impl<'a> PackageStore<'a> {
         let path = self
             .checked_metadata_path(key)
             .map_err(std::io::Error::other)?;
-        fs::read(path)
+        fs::read(&path).map_err(|error| context("读取", &path, error))
     }
 
     pub(crate) fn checked_metadata_path(&self, key: &str) -> Result<PathBuf, CoreError> {
@@ -213,7 +238,7 @@ impl<'a> PackageStore<'a> {
     fn staging_root(&self) -> Result<PathBuf, CoreError> {
         self.checked_root()?;
         let path = safe_path(&self.root(), ".staging").map_err(CoreError::Other)?;
-        fs::create_dir_all(&path)?;
+        fs::create_dir_all(&path).map_err(|error| context("创建目录", &path, error))?;
         Ok(path)
     }
 
@@ -226,7 +251,8 @@ impl<'a> PackageStore<'a> {
         let stage = self.stage().map_err(std::io::Error::other)?;
         let file = tempfile::Builder::new()
             .prefix(prefix)
-            .tempfile_in(&stage.0)?;
+            .tempfile_in(&stage.0)
+            .map_err(|error| context("创建临时文件", &stage.0, error))?;
         Ok(StagingFile {
             file,
             _stage: stage,
@@ -235,7 +261,8 @@ impl<'a> PackageStore<'a> {
 
     fn stage(&self) -> Result<PackageStage, CoreError> {
         let root = self.staging_root()?;
-        let temporary = tempfile::tempdir_in(&root)?;
+        let temporary =
+            tempfile::tempdir_in(&root).map_err(|error| context("创建临时目录", &root, error))?;
         let digest = sha256_reader(temporary.path().as_os_str().as_encoded_bytes())?;
         let name = format!(
             "{}-{}-4{}-a{}-{}",
@@ -246,7 +273,7 @@ impl<'a> PackageStore<'a> {
             &digest[20..32]
         );
         let destination = root.join(name);
-        fs::rename(temporary.path(), &destination)?;
+        package_fs::rename(temporary.path(), &destination)?;
         Ok(PackageStage(destination))
     }
 
@@ -271,7 +298,9 @@ impl<'a> PackageStore<'a> {
         key: &str,
     ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
         let metadata_path = safe_path(path, "package.json").map_err(CoreError::Other)?;
-        let stored: StoredPackage = serde_json::from_slice(&fs::read(metadata_path)?)?;
+        let stored: StoredPackage = serde_json::from_slice(
+            &fs::read(&metadata_path).map_err(|error| context("读取", &metadata_path, error))?,
+        )?;
         validate_metadata(key, &stored)?;
         let root = safe_path(path, "files").map_err(CoreError::Other)?;
         let mut expected = BTreeSet::new();
@@ -282,12 +311,13 @@ impl<'a> PackageStore<'a> {
                 return Err(CoreError::Other("Duplicate package file".into()));
             }
             let path = safe_path(&root, &entry.path).map_err(CoreError::Other)?;
-            let metadata = fs::symlink_metadata(&path)?;
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| context("读取文件属性", &path, error))?;
             total = total.saturating_add(metadata.len());
             if !metadata.is_file() || metadata.len() != entry.size || total > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("Package file size mismatch".into()));
             }
-            let bytes = fs::read(path)?;
+            let bytes = fs::read(&path).map_err(|error| context("读取", &path, error))?;
             if sha256_reader(bytes.as_slice())? != entry.sha256 {
                 return Err(CoreError::Other("Package file checksum mismatch".into()));
             }
@@ -319,9 +349,7 @@ impl<'a> PackageStore<'a> {
         meta: &PackageMeta,
         origin: Option<&str>,
     ) -> Result<(), CoreError> {
-        self.write_archive_with(reader, meta, origin, |source, target| {
-            fs::rename(source, target)
-        })
+        self.write_archive_with(reader, meta, origin, package_fs::rename)
     }
 
     fn write_archive_with(
@@ -334,7 +362,7 @@ impl<'a> PackageStore<'a> {
         let destination = self.checked_package_path(&meta.scheme_key)?;
         let stage = self.stage()?;
         let files_root = stage.0.join("files");
-        fs::create_dir(&files_root)?;
+        fs::create_dir(&files_root).map_err(|error| context("创建目录", &files_root, error))?;
         let mut archive =
             zip::ZipArchive::new(reader).map_err(|error| CoreError::Other(error.to_string()))?;
         if archive.len() > 10_000 {
@@ -367,20 +395,29 @@ impl<'a> PackageStore<'a> {
             if total > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("Expanded package is too large".into()));
             }
-            fs::create_dir_all(target.parent().unwrap())?;
-            let mut output = fs::File::create(&target)?;
+            let parent = target.parent().unwrap();
+            fs::create_dir_all(parent).map_err(|error| context("创建目录", parent, error))?;
+            let mut output =
+                fs::File::create(&target).map_err(|error| context("创建文件", &target, error))?;
+            package_fs::clear_readonly(&target)?;
             let expected_size = entry.size();
             let size = std::io::copy(
                 &mut entry.by_ref().take(expected_size.saturating_add(1)),
                 &mut output,
-            )?;
+            )
+            .map_err(|error| context("解压写入", &target, error))?;
             if size != expected_size {
                 return Err(CoreError::Other("Package file size mismatch".into()));
             }
-            output.sync_all()?;
+            output
+                .sync_all()
+                .map_err(|error| context("同步文件", &target, error))?;
             files.push(PackageFile {
                 path: relative,
-                sha256: sha256_reader(fs::File::open(target)?)?,
+                sha256: sha256_reader(
+                    fs::File::open(&target).map_err(|error| context("打开文件", &target, error))?,
+                )
+                .map_err(|error| context("读取文件校验和", &target, error))?,
                 size,
             });
         }
@@ -401,12 +438,20 @@ impl<'a> PackageStore<'a> {
             meta: serde_json::from_value(serde_json::to_value(meta)?)?,
         };
         validate_metadata(&meta.scheme_key, &stored)?;
-        let mut metadata = fs::File::create(stage.0.join("package.json"))?;
-        serde_json::to_writer_pretty(&mut metadata, &stored)?;
-        metadata.sync_all()?;
+        let metadata_path = stage.0.join("package.json");
+        let mut metadata = fs::File::create(&metadata_path)
+            .map_err(|error| context("创建文件", &metadata_path, error))?;
+        package_fs::clear_readonly(&metadata_path)?;
+        serde_json::to_writer_pretty(&mut metadata, &stored).map_err(|error| {
+            CoreError::Other(format!("写入 {} 失败：{error}", metadata_path.display()))
+        })?;
+        metadata
+            .sync_all()
+            .map_err(|error| context("同步文件", &metadata_path, error))?;
         Self::read_files_at(&stage.0, &meta.scheme_key)?;
         sync_package_directories(&stage.0)?;
-        fs::create_dir_all(destination.parent().unwrap())?;
+        let parent = destination.parent().unwrap();
+        fs::create_dir_all(parent).map_err(|error| context("创建目录", parent, error))?;
         sync_directory(&self.root())?;
         self.recover_old(&meta.scheme_key)?;
         publish_directory(&destination, &stage.0, rename_new)
@@ -415,7 +460,10 @@ impl<'a> PackageStore<'a> {
     fn recover_old(&self, key: &str) -> Result<(), CoreError> {
         let destination = self.checked_package_path(key)?;
         let old = destination.with_file_name(format!(".old-{key}"));
-        if !old.try_exists()? {
+        if !old
+            .try_exists()
+            .map_err(|error| context("读取文件属性", &old, error))?
+        {
             return Ok(());
         }
         safe_path(
@@ -423,19 +471,26 @@ impl<'a> PackageStore<'a> {
             old.file_name().unwrap().to_str().unwrap(),
         )
         .map_err(CoreError::Other)?;
-        if destination.try_exists()? && Self::read_files_at(&destination, key).is_ok() {
-            fs::remove_dir_all(old)?;
+        if destination
+            .try_exists()
+            .map_err(|error| context("读取文件属性", &destination, error))?
+            && Self::read_files_at(&destination, key).is_ok()
+        {
+            package_fs::remove_dir_all(&old)?;
         } else {
-            if destination.try_exists()? {
-                fs::remove_dir_all(&destination)?;
+            if destination
+                .try_exists()
+                .map_err(|error| context("读取文件属性", &destination, error))?
+            {
+                package_fs::remove_dir_all(&destination)?;
             }
-            fs::rename(old, destination)?;
+            package_fs::rename(&old, &destination)?;
         }
         Ok(())
     }
 
     pub(crate) fn remove(&self, key: &str) -> Result<(), CoreError> {
-        self.remove_with(key, |path| fs::remove_dir_all(path))
+        self.remove_with(key, package_fs::remove_dir_all)
     }
 
     fn remove_with(
@@ -454,7 +509,7 @@ impl<'a> PackageStore<'a> {
             (destination.with_file_name(format!(".old-{key}")), "old"),
             (destination.clone(), "package"),
         ] {
-            match fs::rename(&path, tombstone.0.join(name)) {
+            match package_fs::rename(&path, &tombstone.0.join(name)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
@@ -465,7 +520,7 @@ impl<'a> PackageStore<'a> {
         if destination.parent().unwrap().exists() {
             sync_directory(destination.parent().unwrap())?;
         }
-        delete(&tombstone.0)?;
+        delete(&tombstone.0).map_err(|error| context("删除目录", &tombstone.0, error))?;
         sync_directory(tombstone.0.parent().unwrap())?;
         Ok(())
     }
@@ -508,43 +563,57 @@ impl<'a> PackageStore<'a> {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = self.checked_root()?;
-        if !root.try_exists()? {
+        if !root
+            .try_exists()
+            .map_err(|error| context("读取文件属性", &root, error))?
+        {
             return Ok(());
         }
         let staging = root.join(".staging");
         match fs::symlink_metadata(&staging) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(&staging)?;
+                package_fs::remove_dir_all(&staging)?;
             }
-            Ok(_) => fs::remove_file(&staging)?,
+            Ok(_) => package_fs::remove_file(&staging)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(context("读取文件属性", &staging, error).into()),
         }
         for namespace in ["cloud", "local"] {
             let directory = safe_path(&root, namespace).map_err(CoreError::Other)?;
             if directory.exists() {
-                for entry in fs::read_dir(directory)? {
-                    let name = entry?.file_name();
+                for entry in fs::read_dir(&directory)
+                    .map_err(|error| context("读取目录", &directory, error))?
+                {
+                    let name = entry
+                        .map_err(|error| context("读取目录项", &directory, error))?
+                        .file_name();
                     if let Some(key) = name.to_str().and_then(|name| name.strip_prefix(".old-")) {
                         self.recover_old(key)?;
                     }
                 }
             }
         }
-        for entry in fs::read_dir(&root)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&root).map_err(|error| context("读取目录", &root, error))? {
+            let entry = entry.map_err(|error| context("读取目录项", &root, error))?;
             let name = entry.file_name();
             let Some(key) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
                 continue;
             };
             if crate::scheme::validate_scheme_key(key).is_ok()
-                && !root.join(format!("{key}.zip")).try_exists()?
+                && !root
+                    .join(format!("{key}.zip"))
+                    .try_exists()
+                    .map_err(|error| {
+                        context("读取文件属性", &root.join(format!("{key}.zip")), error)
+                    })?
                 && Self::read_files_at(&self.checked_package_path(key)?, key).is_ok()
             {
                 let path = safe_path(&root, &format!("{key}.json")).map_err(CoreError::Other)?;
-                let legacy: PackageMeta = serde_json::from_slice(&fs::read(&path)?)?;
+                let legacy: PackageMeta = serde_json::from_slice(
+                    &fs::read(&path).map_err(|error| context("读取", &path, error))?,
+                )?;
                 if legacy.scheme_key == key {
-                    fs::remove_file(path)?;
+                    package_fs::remove_file(&path)?;
                 }
             }
         }
@@ -553,8 +622,8 @@ impl<'a> PackageStore<'a> {
             return Ok(());
         }
         let mut failed = false;
-        for entry in fs::read_dir(&root)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&root).map_err(|error| context("读取目录", &root, error))? {
+            let entry = entry.map_err(|error| context("读取目录项", &root, error))?;
             let name = entry.file_name();
             let Some(key) = name.to_str().and_then(|name| name.strip_suffix(".zip")) else {
                 continue;
@@ -569,12 +638,17 @@ impl<'a> PackageStore<'a> {
                     Ok(bytes) => Some(bytes),
                     // A published directory is authoritative, including updates after migration.
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound && installed => None,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(context("读取", &json_path, error).into()),
                 };
                 if let Some(metadata) = &metadata {
                     let meta: PackageMeta = serde_json::from_slice(metadata)?;
                     if meta.scheme_key != key
-                        || sha256_reader(fs::File::open(&zip_path)?)? != meta.zip_sha256
+                        || sha256_reader(
+                            fs::File::open(&zip_path)
+                                .map_err(|error| context("打开文件", &zip_path, error))?,
+                        )
+                        .map_err(|error| context("读取文件校验和", &zip_path, error))?
+                            != meta.zip_sha256
                     {
                         return Err(CoreError::Other("Legacy package checksum mismatch".into()));
                     }
@@ -593,19 +667,26 @@ impl<'a> PackageStore<'a> {
                         {
                             return Ok(());
                         }
-                        self.write_archive(fs::File::open(&zip_path)?, &meta, None)?;
+                        self.write_archive(
+                            fs::File::open(&zip_path)
+                                .map_err(|error| context("打开文件", &zip_path, error))?,
+                            &meta,
+                            None,
+                        )?;
                     }
                 }
                 // Keep the archive until the new directory has passed a complete read-back.
                 Self::read_files_at(&self.checked_package_path(key)?, key)?;
-                match fs::remove_file(&json_path) {
+                match package_fs::remove_file(&json_path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
                 }
-                if let Err(error) = fs::remove_file(zip_path) {
+                if let Err(error) = package_fs::remove_file(&zip_path) {
                     if let Some(metadata) = metadata {
-                        if let Err(restore) = fs::write(json_path, metadata) {
+                        if let Err(restore) = fs::write(&json_path, metadata)
+                            .map_err(|error| context("写入", &json_path, error))
+                        {
                             tracing::warn!(%restore, "Legacy metadata cleanup will resume from published package");
                         }
                     }
@@ -619,18 +700,27 @@ impl<'a> PackageStore<'a> {
                     let report_path = safe_path(&root, &format!("{key}.migration-error.json"))
                         .map_err(CoreError::Other)?;
                     let mut report = self.staging_file(Staging::Metadata)?;
+                    let zip_path = root.join(format!("{key}.zip"));
+                    let archive_sha256 = sha256_reader(
+                        fs::File::open(&zip_path)
+                            .map_err(|error| context("打开文件", &zip_path, error))?,
+                    )
+                    .map_err(|error| context("读取文件校验和", &zip_path, error))?;
                     serde_json::to_writer_pretty(
                         &mut report,
                         &serde_json::json!({
                             "key": key,
                             "error": error.to_string(),
                             "archive": format!("{key}.zip"),
-                            "archive_sha256": sha256_reader(fs::File::open(root.join(format!("{key}.zip")))?)?,
+                            "archive_sha256": archive_sha256,
                             "status": "rejected",
                             "recovery": "Rename duplicate paths and import the package again. The original archive and metadata have been retained.",
                         }),
                     )?;
-                    report.as_file().sync_all()?;
+                    report
+                        .as_file()
+                        .sync_all()
+                        .map_err(|error| context("同步文件", report.path(), error))?;
                     report
                         .persist(report_path)
                         .map_err(|error| CoreError::Io(error.error))?;
@@ -645,7 +735,10 @@ impl<'a> PackageStore<'a> {
         if !failed {
             let mut temporary = self.staging_file(Staging::Metadata)?;
             temporary.write_all(b"2\n")?;
-            temporary.as_file().sync_all()?;
+            temporary
+                .as_file()
+                .sync_all()
+                .map_err(|error| context("同步文件", temporary.path(), error))?;
             temporary
                 .persist(marker)
                 .map_err(|error| CoreError::Io(error.error))?;
@@ -711,9 +804,12 @@ fn collect_files(
     directory: &Path,
     files: &mut BTreeSet<String>,
 ) -> Result<(), CoreError> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
+    for entry in fs::read_dir(directory).map_err(|error| context("读取目录", directory, error))?
+    {
+        let entry = entry.map_err(|error| context("读取目录项", directory, error))?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| context("读取文件属性", &path, error))?;
         if metadata.file_type().is_symlink() {
             return Err(CoreError::Other("Package contains a symlink".into()));
         }
@@ -744,17 +840,25 @@ fn publish_directory(
 ) -> Result<(), CoreError> {
     let name = destination.file_name().unwrap().to_string_lossy();
     let old = destination.with_file_name(format!(".old-{name}"));
-    let had_old = destination.try_exists()?;
+    let had_old = destination
+        .try_exists()
+        .map_err(|error| context("读取文件属性", destination, error))?;
     if had_old {
-        fs::rename(destination, &old)?;
+        package_fs::rename(destination, &old)?;
         if let Err(error) = sync_directory(destination.parent().unwrap()) {
-            fs::rename(&old, destination)?;
+            package_fs::rename(&old, destination)?;
             return Err(error.into());
         }
     }
     if let Err(error) = rename_new(stage, destination) {
+        let source = std::path::absolute(stage).unwrap_or_else(|_| stage.to_owned());
+        let error = context(
+            &format!("重命名 {} →", source.display()),
+            destination,
+            error,
+        );
         if had_old {
-            fs::rename(&old, destination).map_err(|rollback| {
+            package_fs::rename(&old, destination).map_err(|rollback| {
                 CoreError::Other(format!(
                     "Package update failed: {error}; rollback failed: {rollback}"
                 ))
@@ -763,14 +867,14 @@ fn publish_directory(
         return Err(error.into());
     }
     if let Err(error) = sync_directory(destination.parent().unwrap()) {
-        fs::remove_dir_all(destination)?;
+        package_fs::remove_dir_all(destination)?;
         if had_old {
-            fs::rename(&old, destination)?;
+            package_fs::rename(&old, destination)?;
         }
         return Err(error.into());
     }
     if had_old {
-        if let Err(error) = fs::remove_dir_all(&old) {
+        if let Err(error) = package_fs::remove_dir_all(&old) {
             tracing::warn!(%error, "Old package cleanup deferred until next launch");
         }
     }
@@ -779,16 +883,22 @@ fn publish_directory(
 
 fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    fs::File::open(path)?.sync_all()?;
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| context("同步目录", path, error))?;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
 }
 
 fn sync_package_directories(path: &Path) -> std::io::Result<()> {
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
+    for entry in fs::read_dir(path).map_err(|error| context("读取目录", path, error))? {
+        let entry = entry.map_err(|error| context("读取目录项", path, error))?;
+        if entry
+            .file_type()
+            .map_err(|error| context("读取文件属性", &entry.path(), error))?
+            .is_dir()
+        {
             sync_package_directories(&entry.path())?;
         }
     }
@@ -1163,7 +1273,10 @@ mod tests {
                 Err(std::io::Error::other("injected publication failure"))
             },
         );
-        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("重命名"));
+        assert!(error.contains(&store.package_path("keytao").display().to_string()));
+        assert!(error.contains("injected publication failure"));
         assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"old");
         assert!(!store.root().join("cloud/.old-keytao").exists());
         store
@@ -1171,6 +1284,50 @@ mod tests {
             .unwrap();
         assert_eq!(store.read_files("keytao").unwrap().0[0].1, b"new");
         assert!(!store.root().join("cloud/.old-keytao").exists());
+    }
+
+    #[test]
+    fn readonly_archives_and_stored_files_can_be_reimported_and_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "nested/example.schema.yaml",
+                zip::write::SimpleFileOptions::default().unix_permissions(0o444),
+            )
+            .unwrap();
+        writer.write_all(b"old").unwrap();
+        let old = writer.finish().unwrap().into_inner();
+        store
+            .write_archive(Cursor::new(&old), &metadata("local-example", &old), None)
+            .unwrap();
+        let destination = store.package_path("local-example");
+        let payload = destination.join("files/nested/example.schema.yaml");
+        assert!(!fs::metadata(&payload).unwrap().permissions().readonly());
+        for path in [&payload, &destination.join("package.json")] {
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+        let new = archive(&[("example.schema.yaml", b"new")]);
+        store
+            .write_archive(Cursor::new(&new), &metadata("local-example", &new), None)
+            .unwrap();
+        let payload = destination.join("files/example.schema.yaml");
+        assert!(!fs::metadata(&payload).unwrap().permissions().readonly());
+        assert_eq!(fs::read(&payload).unwrap(), b"new");
+        let mut permissions = fs::metadata(&payload).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&payload, permissions).unwrap();
+        store.remove("local-example").unwrap();
+        assert!(!destination.exists());
+        assert!(!destination.with_file_name(".old-local-example").exists());
+        assert_eq!(
+            fs::read_dir(store.root().join(".staging")).unwrap().count(),
+            0
+        );
     }
 
     #[test]
@@ -1272,7 +1429,10 @@ mod tests {
             );
             Err(std::io::Error::other("injected cleanup failure"))
         });
-        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("删除目录"));
+        assert!(error.contains(&store.root().join(".staging").display().to_string()));
+        assert!(error.contains("injected cleanup failure"));
         store.migrate().unwrap();
         assert!(!destination.exists());
         assert!(!old.exists());
