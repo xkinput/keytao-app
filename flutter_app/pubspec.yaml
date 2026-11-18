@@ -1,7 +1,7 @@
 name: keytao
 description: "KeyTao cross-platform input method and scheme manager."
 publish_to: 'none'
-version: 1.2.10+1002010
+version: 1.2.11+1002011
 
 environment:
   sdk: ^3.13.4
