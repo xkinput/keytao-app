@@ -13,7 +13,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-pub(crate) const IDS: &[&str] = &["easy_en", "wanxiang", "rime_ice", "rime_mint", "rime_frost"];
+pub(crate) const IDS: &[&str] = &["easy_en", "wanxiang", "rime_ice", "rime_mint", "rime_frost", "snow_jiandao", "triple_pinyin_lssp"];
 const GRAMMAR: &str = "wanxiang-lts-zh-hans.gram";
 static STORE_OPERATION: Mutex<()> = Mutex::new(());
 
@@ -309,6 +309,8 @@ fn validate_path(id: &str, path: &str) -> Result<(), String> {
         "rime_ice" => crate::rime_ice::installable(path),
         "rime_mint" => (crate::pinyin_addons::MINT.installable)(path),
         "rime_frost" => (crate::pinyin_addons::FROST.installable)(path),
+        "snow_jiandao" => (crate::pinyin_addons::SNOW.installable)(path),
+        "triple_pinyin_lssp" => (crate::pinyin_addons::LSSP.installable)(path),
         _ => false,
     };
     if !allowed {
@@ -583,6 +585,8 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
         ".keytao-rime-ice.json",
         ".keytao-rime-mint.json",
         ".keytao-rime-frost.json",
+        ".keytao-rime-snow.json",
+        ".keytao-rime-lssp.json",
     ]) {
         let legacy = safe_path(root, name).map_err(CoreError::Other)?;
         if fs::metadata(&legacy).is_ok_and(|m| m.len() > 1024 * 1024) {

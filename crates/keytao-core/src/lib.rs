@@ -6577,7 +6577,13 @@ fn is_keytao_managed_schema(schema: &str) -> bool {
 pub fn is_addon_schema(schema: &str) -> bool {
     matches!(
         schema,
-        "easy_en" | "wanxiang" | "rime_ice" | "rime_mint" | "rime_frost"
+        "easy_en"
+            | "wanxiang"
+            | "rime_ice"
+            | "rime_mint"
+            | "rime_frost"
+            | "snow_jiandao"
+            | "triple_pinyin_lssp"
     )
 }
 
@@ -7722,7 +7728,15 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("keytao-addon-schema-state-{suffix}"));
         std::fs::create_dir_all(dir.join("build")).unwrap();
-        for addon in ["easy_en", "wanxiang", "rime_ice", "rime_mint", "rime_frost"] {
+        for addon in [
+            "easy_en",
+            "wanxiang",
+            "rime_ice",
+            "rime_mint",
+            "rime_frost",
+            "snow_jiandao",
+            "triple_pinyin_lssp",
+        ] {
             std::fs::write(
                 dir.join("default.custom.yaml"),
                 format!("patch:\n  schema_list:\n    - schema: {addon}\n"),
@@ -8271,8 +8285,8 @@ mod tests {
 
     #[test]
     fn merge_default_custom_preserves_addon_after_package_schemas() {
-        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: wanxiang\n    - schema: rime_ice\n    - schema: rime_mint\n    - schema: rime_frost\n    - schema: keydo\n";
-        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: wanxiang\n    - schema: rime_ice\n    - schema: rime_mint\n    - schema: rime_frost\n    - schema: keytao-dz\n";
+        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: wanxiang\n    - schema: rime_ice\n    - schema: rime_mint\n    - schema: rime_frost\n    - schema: snow_jiandao\n    - schema: triple_pinyin_lssp\n    - schema: keydo\n";
+        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: wanxiang\n    - schema: rime_ice\n    - schema: rime_mint\n    - schema: rime_frost\n    - schema: snow_jiandao\n    - schema: triple_pinyin_lssp\n    - schema: keytao-dz\n";
         let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
         let schemas = parse_schema_list(&merged);
 
@@ -8287,14 +8301,24 @@ mod tests {
                 "wanxiang",
                 "rime_ice",
                 "rime_mint",
-                "rime_frost"
+                "rime_frost",
+                "snow_jiandao",
+                "triple_pinyin_lssp"
             ]
         );
     }
 
     #[test]
     fn preferred_schema_uses_addon_only_without_other_schemas() {
-        for addon in ["easy_en", "wanxiang", "rime_ice", "rime_mint", "rime_frost"] {
+        for addon in [
+            "easy_en",
+            "wanxiang",
+            "rime_ice",
+            "rime_mint",
+            "rime_frost",
+            "snow_jiandao",
+            "triple_pinyin_lssp",
+        ] {
             assert_eq!(
                 preferred_schema_from_list(vec![addon.into(), "user_schema".into()]),
                 Some("user_schema".into())

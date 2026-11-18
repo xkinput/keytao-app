@@ -211,11 +211,18 @@ async fn main_package_switch_preserves_each_addon_record_and_sources() {
         let module = match *id {
             "easy_en" => "lua/easy_en.lua".into(),
             "wanxiang" => "wanxiang_algebra.yaml".into(),
+            "snow_jiandao" => "lua/snow/snow.lua".into(),
+            "triple_pinyin_lssp" => "lua/lssp/limited.lua".into(),
             _ => format!("lua/{id}/select_character.lua"),
         };
+        let dictionary = match *id {
+            "snow_jiandao" => "snow_pinyin",
+            "triple_pinyin_lssp" => "triple_pinyin",
+            _ => id,
+        };
         let entries = [
-            (format!("{id}.schema.yaml"), format!("schema: {{schema_id: {id}}}\ntranslator: {{dictionary: {id}}}\n").into_bytes()),
-            (format!("{id}.dict.yaml"), format!("name: {id}\nversion: '1'\n...\n").into_bytes()),
+            (format!("{id}.schema.yaml"), format!("schema: {{schema_id: {id}}}\ntranslator: {{dictionary: {dictionary}}}\n").into_bytes()),
+            (format!("{dictionary}.dict.yaml"), format!("name: {dictionary}\nversion: '1'\n...\n").into_bytes()),
             (module, b"return true\n".to_vec()),
         ];
         let mut inventory = Vec::new();

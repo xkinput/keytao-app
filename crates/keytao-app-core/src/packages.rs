@@ -1574,6 +1574,10 @@ mod tests {
             ("rime_mint", false),
             ("rime_frost", true),
             ("rime_frost", false),
+            ("snow_jiandao", true),
+            ("snow_jiandao", false),
+            ("triple_pinyin_lssp", true),
+            ("triple_pinyin_lssp", false),
             ("keytao", true),
         ] {
             let dir = tempfile::tempdir().unwrap();

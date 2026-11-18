@@ -41,7 +41,10 @@ fn redeploy_restores_the_process_wide_log_directory() {
 
     // An obstruction must become a Rust error before entering old librime's
     // synchronous directory iterator, and a later retry must remain usable.
+    #[cfg(windows)]
     std::fs::remove_dir(&original_log).unwrap();
+    #[cfg(not(windows))]
+    std::fs::remove_dir_all(&original_log).unwrap();
     std::fs::write(&original_log, b"not a directory").unwrap();
     let error = second
         .reload()
