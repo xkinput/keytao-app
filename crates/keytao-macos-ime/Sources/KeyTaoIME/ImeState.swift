@@ -20,9 +20,14 @@ struct KeyTaoPanelNavigation: Decodable {
 
 struct KeyTaoPanelModel: Decodable {
     var preedit: String?
+    var preeditCaretRange: NSRange? = nil
     var orientation: CandidatePanelOrientation
     var candidates: [KeyTaoPanelCandidate]
     var navigation: KeyTaoPanelNavigation
+
+    enum CodingKeys: String, CodingKey {
+        case preedit, orientation, candidates, navigation
+    }
 
     static let empty = KeyTaoPanelModel(
         preedit: nil,

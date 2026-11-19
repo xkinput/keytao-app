@@ -464,10 +464,16 @@ final class KeyTaoInputController: IMKInputController {
         var model = state.candidatePanel
         if theme.ui.effectiveEmbeddedComposition || state.preedit.isEmpty {
             model.preedit = nil
+            model.preeditCaretRange = nil
         } else {
             var scalars = Array(state.preedit.unicodeScalars)
-            scalars.insert("|", at: min(max(state.cursor, 0), scalars.count))
+            let cursor = min(max(state.cursor, 0), scalars.count)
+            scalars.insert("|", at: cursor)
             model.preedit = String(String.UnicodeScalarView(scalars))
+            model.preeditCaretRange = NSRange(
+                location: state.preedit.keytaoUtf16Offset(fromCharacterOffset: cursor),
+                length: 1
+            )
         }
         return model
     }
