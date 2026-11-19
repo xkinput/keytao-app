@@ -945,7 +945,6 @@ class AppController extends ChangeNotifier {
     unawaited(setWindowTitle());
     if (page == AppPage.debug) {
       sharedLogPath = null;
-      if (!isMobile) unawaited(refreshRimeSyncSettings());
       if (busy) {
         _logsWhenIdle = true;
       } else {
@@ -3458,9 +3457,6 @@ class AppController extends ChangeNotifier {
 
   Future<bool> refreshLogs() async {
     if (_disposed || logsLoading) return false;
-    if (!isMobile && rimeSyncSettings == null) {
-      unawaited(refreshRimeSyncSettings());
-    }
     await _readLogs();
     return true;
   }
