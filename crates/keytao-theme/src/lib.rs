@@ -4,12 +4,17 @@
 //! and view models. Platform frontends render the resolved model with their own
 //! native UI stack.
 //!
-//! The shared theme covers candidate panel and mode hint semantics only. The
-//! mobile soft keyboard layout is an Android/iOS adapter concern and lives in
-//! [`mobile_layout`], resolved from its own `keyboard.yaml` document.
+//! The shared theme covers desktop candidates, mode hints and mobile appearance.
+//! Mobile layout and geometry live in [`mobile_layout`], resolved separately
+//! from `keyboard.yaml`; v3 theme sources compile to backward-compatible v2.
 
 pub mod mobile_layout;
+pub mod mobile_theme;
 pub mod panel_hit;
+pub mod share;
+pub mod source;
+pub mod theme_store;
+pub use source::THEME_SOURCE_VERSION;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
@@ -40,8 +45,8 @@ pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
 pub const MIN_CANDIDATE_FONT_SIZE: f32 = 10.0;
 pub const MAX_CANDIDATE_FONT_SIZE: f32 = 36.0;
 
-/// Atomically update the complete set of App-owned IME UI settings while
-/// preserving every unrelated key in the user's theme document.
+/// Update the active v3 source, then atomically compile its v2 `theme.yaml`.
+/// Local UI settings stay in the compiled document and are never shared.
 /// An omitted accent preserves the existing override, including its absence.
 pub fn write_ime_ui_settings_to_path(
     theme_path: &Path,
@@ -58,41 +63,19 @@ pub fn write_ime_ui_settings_to_path(
     let font_size = normalize_candidate_font_size(font_size)?;
     let corner_radius = corner_radius.map(normalize_corner_radius).transpose()?;
     let background_color = normalize_background_color(&background_color)?;
-    let mut root = read_theme_yaml_mapping(theme_path)?;
-    let mapping = root
-        .as_mapping_mut()
-        .ok_or("主题配置根节点必须是 YAML mapping")?;
-    ensure_theme_version(mapping);
-    write_theme_ui_mapping(
-        mapping,
+    theme_store::write_source_settings(
+        theme_path,
         color_scheme,
         accent_color,
         Some(corner_radius),
         Some(background_color),
-    )?;
-
-    let panel_mapping = yaml_child_mapping(mapping, "panel", "主题面板配置必须是 YAML mapping")?;
-    panel_mapping.insert(
-        serde_yaml::Value::String("orientation".into()),
-        serde_yaml::Value::String(
-            match orientation {
-                PanelOrientation::Horizontal => "horizontal",
-                PanelOrientation::Vertical => "vertical",
-            }
-            .into(),
-        ),
-    );
-
-    let font_mapping = yaml_child_mapping(mapping, "font", "主题字体配置必须是 YAML mapping")?;
-    font_mapping.insert(
-        serde_yaml::Value::String("size".into()),
-        serde_yaml::to_value(font_size).map_err(|e| format!("序列化候选字号失败: {e}"))?,
-    );
-    write_theme_yaml_atomic(theme_path, &root)
+        Some(orientation),
+        Some(font_size),
+    )
 }
 
 /// Atomically update the mobile keyboard's color scheme and, when supplied,
-/// its accent. `None` preserves `ui.accentColor`; an empty string removes it.
+/// its source accent. `None` preserves it; an empty string removes it.
 pub fn write_theme_ui_to_path(
     theme_path: &Path,
     color_scheme: UiColorScheme,
@@ -121,108 +104,15 @@ pub fn write_theme_appearance_to_path(
     let background_color = background_color
         .map(|value| normalize_background_color(&value))
         .transpose()?;
-    let mut root = read_theme_yaml_mapping(theme_path)?;
-    let mapping = root
-        .as_mapping_mut()
-        .ok_or("主题配置根节点必须是 YAML mapping")?;
-    ensure_theme_version(mapping);
-    write_theme_ui_mapping(
-        mapping,
+    theme_store::write_source_settings(
+        theme_path,
         color_scheme,
         accent_color,
         corner_radius,
         background_color,
-    )?;
-    write_theme_yaml_atomic(theme_path, &root)
-}
-
-fn read_theme_yaml_mapping(theme_path: &Path) -> Result<serde_yaml::Value, String> {
-    if let Some(parent) = theme_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
-    }
-    let mut root = if theme_path.is_file() {
-        let content = fs::read_to_string(theme_path)
-            .map_err(|e| format!("读取主题配置失败 {}: {e}", theme_path.display()))?;
-        serde_yaml::from_str::<serde_yaml::Value>(&content)
-            .map_err(|e| format!("主题配置无法解析 {}: {e}", theme_path.display()))?
-    } else {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-    };
-    if !matches!(root, serde_yaml::Value::Mapping(_)) {
-        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    Ok(root)
-}
-
-fn ensure_theme_version(mapping: &mut serde_yaml::Mapping) {
-    mapping
-        .entry(serde_yaml::Value::String("version".into()))
-        .or_insert_with(|| {
-            serde_yaml::Value::Number(serde_yaml::Number::from(THEME_SCHEMA_VERSION))
-        });
-}
-
-fn write_theme_ui_mapping(
-    mapping: &mut serde_yaml::Mapping,
-    color_scheme: UiColorScheme,
-    accent_color: Option<String>,
-    corner_radius: Option<Option<f32>>,
-    background_color: Option<String>,
-) -> Result<(), String> {
-    let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
-    ui_mapping.insert(
-        serde_yaml::Value::String("colorScheme".into()),
-        serde_yaml::Value::String(
-            match color_scheme {
-                UiColorScheme::Auto => "auto",
-                UiColorScheme::Light => "light",
-                UiColorScheme::Dark => "dark",
-            }
-            .into(),
-        ),
-    );
-    if let Some(accent_color) = accent_color {
-        let accent_key = serde_yaml::Value::String("accentColor".into());
-        if accent_color.is_empty() {
-            ui_mapping.remove(&accent_key);
-        } else {
-            ui_mapping.insert(accent_key, serde_yaml::Value::String(accent_color));
-        }
-    }
-    if let Some(corner_radius) = corner_radius {
-        let radius_key = serde_yaml::Value::String("cornerRadius".into());
-        if let Some(corner_radius) = corner_radius {
-            ui_mapping.insert(
-                radius_key,
-                serde_yaml::to_value(corner_radius).map_err(|e| format!("序列化圆角失败: {e}"))?,
-            );
-        } else {
-            ui_mapping.remove(&radius_key);
-        }
-    }
-    if let Some(background_color) = background_color {
-        let background_key = serde_yaml::Value::String("backgroundColor".into());
-        if background_color.is_empty() {
-            ui_mapping.remove(&background_key);
-        } else {
-            ui_mapping.insert(background_key, serde_yaml::Value::String(background_color));
-        }
-    }
-    Ok(())
-}
-
-fn yaml_child_mapping<'a>(
-    mapping: &'a mut serde_yaml::Mapping,
-    key: &str,
-    error: &str,
-) -> Result<&'a mut serde_yaml::Mapping, String> {
-    let value = mapping
-        .entry(serde_yaml::Value::String(key.into()))
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !matches!(value, serde_yaml::Value::Mapping(_)) {
-        *value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    value.as_mapping_mut().ok_or_else(|| error.to_string())
+        None,
+        None,
+    )
 }
 
 fn normalize_hex_color(value: &str) -> Result<String, String> {
@@ -335,6 +225,7 @@ pub struct ResolvedImeTheme {
     pub candidate: CandidateTheme,
     pub navigation: NavigationTheme,
     pub mode_hint: ModeHintTheme,
+    pub mobile: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -771,6 +662,37 @@ pub fn resolve_candidate_panel_preview_from_paths(
     let font_size = normalize_candidate_font_size(font_size)?;
     let corner_radius = corner_radius.map(normalize_corner_radius).transpose()?;
     let background_color = normalize_background_color(background_color)?;
+    if let Some(source) = user_theme_path
+        .map(theme_store::read_current_theme_source)
+        .transpose()?
+        .flatten()
+    {
+        let source = theme_store::edit_source_settings(
+            source,
+            Some(accent_color),
+            Some(corner_radius),
+            Some(background_color),
+            None,
+            Some(font_size),
+        )?;
+        let scheme = match color_scheme {
+            UiColorScheme::Auto => system_scheme,
+            UiColorScheme::Light => EffectiveColorScheme::Light,
+            UiColorScheme::Dark => EffectiveColorScheme::Dark,
+        };
+        let mut theme = source::resolve_theme_source(&source, scheme);
+        let local = resolve_theme_from_paths_with_system_scheme(
+            default_theme_path,
+            user_theme_path,
+            system_scheme,
+        )
+        .ui;
+        theme.ui.color_scheme = color_scheme;
+        theme.ui.embedded_composition = local.embedded_composition;
+        theme.ui.hide_candidate_panel = local.hide_candidate_panel;
+        theme.ui.show_tray_mode_indicator = local.show_tray_mode_indicator;
+        return Ok(scaled_candidate_panel(&theme));
+    }
     let pending = PartialTheme {
         ui: Some(PartialUiTheme {
             color_scheme: Some(color_scheme),
@@ -801,6 +723,7 @@ fn resolve_theme_with_pending_settings(
     pending_settings: Option<PartialTheme>,
 ) -> ResolvedImeTheme {
     let mut partials = Vec::new();
+    let mut compiled = None;
     if let Ok(partial) = serde_yaml::from_str::<PartialTheme>(DEFAULT_THEME_YAML) {
         partials.push(partial);
     }
@@ -811,10 +734,90 @@ fn resolve_theme_with_pending_settings(
         let Ok(partial) = serde_yaml::from_str::<PartialTheme>(&content) else {
             continue;
         };
+        if let Ok(value) = serde_yaml::from_str::<serde_json::Value>(&content) {
+            if value.get("themeHash").is_some() {
+                compiled = Some(value);
+            }
+        }
         partials.push(partial);
     }
+    let has_pending = pending_settings.is_some();
     partials.extend(pending_settings);
+    let mut theme = resolve_legacy_partials(partials, system_scheme);
+    if let Some(compiled) = compiled.filter(|_| !has_pending) {
+        restore_compiled_theme(&mut theme, &compiled);
+    }
+    theme
+}
 
+fn restore_compiled_theme(theme: &mut ResolvedImeTheme, compiled: &serde_json::Value) {
+    let variant = if theme.ui.effective_color_scheme == EffectiveColorScheme::Dark {
+        "dark"
+    } else {
+        "light"
+    };
+    if let Some(metadata) = compiled.get("resolvedUi").and_then(|v| v.get(variant)) {
+        theme.ui.accent_color = compiled["ui"]
+            .get("accentColor")
+            .or_else(|| metadata.get("accentColor"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_color);
+        theme.ui.corner_radius = compiled["ui"]
+            .get("cornerRadius")
+            .or_else(|| metadata.get("cornerRadius"))
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+        theme.ui.background_color = compiled["ui"]
+            .get("backgroundColor")
+            .or_else(|| metadata.get("backgroundColor"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_color);
+        if let Some(scheme) = metadata
+            .get("effectiveColorScheme")
+            .and_then(|v| v.as_str())
+            .and_then(parse_effective_color_scheme)
+        {
+            theme.ui.effective_color_scheme = scheme;
+        }
+    }
+    if let Some(mobile) = if variant == "dark" {
+        compiled.pointer("/dark/mobile")
+    } else {
+        compiled.get("mobile")
+    } {
+        theme.mobile = mobile.clone();
+    }
+}
+
+pub(crate) fn resolve_compiled_theme_yaml(
+    yaml: &str,
+    scheme: EffectiveColorScheme,
+) -> ResolvedImeTheme {
+    let mut theme = resolve_legacy_theme_yaml(yaml, scheme);
+    if let Ok(compiled) = serde_yaml::from_str::<serde_json::Value>(yaml) {
+        if compiled.get("themeHash").is_some() {
+            restore_compiled_theme(&mut theme, &compiled);
+        }
+    }
+    theme
+}
+
+/// The frozen v2 resolver used to prove migration equivalence without disk I/O.
+pub(crate) fn resolve_legacy_theme_yaml(
+    yaml: &str,
+    scheme: EffectiveColorScheme,
+) -> ResolvedImeTheme {
+    let mut partials = vec![serde_yaml::from_str(DEFAULT_THEME_YAML).expect("bundled theme")];
+    if let Ok(partial) = serde_yaml::from_str(yaml) {
+        partials.push(partial);
+    }
+    resolve_legacy_partials(partials, scheme)
+}
+
+fn resolve_legacy_partials(
+    partials: Vec<PartialTheme>,
+    system_scheme: EffectiveColorScheme,
+) -> ResolvedImeTheme {
     let mut ui = UiTheme::default();
     for partial in &partials {
         if let Some(partial_ui) = partial.ui.clone() {
@@ -887,7 +890,13 @@ fn resolve_theme_with_pending_settings(
         theme.apply_accent_color(accent_color);
     }
 
-    theme.sanitized()
+    let mut theme = theme.sanitized();
+    theme.mobile = mobile_theme::resolve_mobile_theme(
+        &theme,
+        &serde_json::Value::Null,
+        theme.ui.effective_color_scheme == EffectiveColorScheme::Dark,
+    );
+    theme
 }
 
 pub fn resolved_theme_json(theme: &ResolvedImeTheme) -> Result<String, serde_json::Error> {
@@ -969,6 +978,7 @@ impl ResolvedImeTheme {
                 chinese_text: "中".to_string(),
                 english_text: "英".to_string(),
             },
+            mobile: serde_json::Value::Null,
         }
     }
 
@@ -1982,10 +1992,7 @@ mod tests {
 
     #[test]
     fn appearance_writer_preserves_and_clears_overrides_and_unrelated_fields() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-theme-appearance-writer-{}.yaml",
-            std::process::id()
-        ));
+        let path = writer_test_theme_path("appearance");
         fs::write(
             &path,
             "ui:\n  showTrayModeIndicator: false\ncustom: preserved\n",
@@ -2056,7 +2063,7 @@ mod tests {
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(written["ui"].get("cornerRadius").is_none());
         assert!(written["ui"].get("backgroundColor").is_none());
-        fs::remove_file(path).unwrap();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -2088,11 +2095,7 @@ mod tests {
 
     #[test]
     fn mobile_theme_writer_updates_ui_and_preserves_other_settings() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-theme-mobile-writer-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
+        let path = writer_test_theme_path("mobile");
         fs::write(
             &path,
             "ui:\n  showTrayModeIndicator: false\npanel:\n  orientation: vertical\nfont:\n  size: 27\ncandidate:\n  labelSuffix: ')'\n",
@@ -2102,7 +2105,7 @@ mod tests {
         write_theme_ui_to_path(&path, UiColorScheme::Dark, Some("#123456".into())).unwrap();
 
         let theme = resolve_theme_from_paths(None, Some(&path));
-        fs::remove_file(path).ok();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Dark);
         assert_eq!(theme.ui.accent_color, Some(rgba(0x12, 0x34, 0x56, 0xff)));
         assert!(!theme.ui.show_tray_mode_indicator);
@@ -2113,11 +2116,7 @@ mod tests {
 
     #[test]
     fn mobile_theme_writer_preserves_accent_when_it_is_omitted() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-theme-mobile-preserve-accent-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
+        let path = writer_test_theme_path("preserve-accent");
         fs::write(
             &path,
             "ui:\n  colorScheme: light\n  accentColor: '#123456'\n",
@@ -2128,18 +2127,21 @@ mod tests {
 
         let written: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        fs::remove_file(path).ok();
         assert_eq!(written["ui"]["colorScheme"].as_str(), Some("dark"));
-        assert_eq!(written["ui"]["accentColor"].as_str(), Some("#123456"));
+        assert!(written["ui"].get("accentColor").is_none());
+        let source = theme_store::read_current_theme_source(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.value()["common"]["accentColor"].as_str(),
+            Some("#123456FF")
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn mobile_theme_writer_removes_accent_when_it_is_explicitly_cleared() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-theme-mobile-clear-accent-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
+        let path = writer_test_theme_path("clear-accent");
         fs::write(
             &path,
             "ui:\n  colorScheme: dark\n  accentColor: '#123456'\n",
@@ -2150,18 +2152,18 @@ mod tests {
 
         let written: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        fs::remove_file(path).ok();
         assert_eq!(written["ui"]["colorScheme"].as_str(), Some("auto"));
         assert!(written["ui"].get("accentColor").is_none());
+        let source = theme_store::read_current_theme_source(&path)
+            .unwrap()
+            .unwrap();
+        assert!(source.value()["common"].get("accentColor").is_none());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn full_theme_writer_clamps_font_and_rejects_non_finite_values() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-theme-full-writer-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
+        let path = writer_test_theme_path("full");
         fs::write(&path, "ui:\n  showTrayModeIndicator: false\n").unwrap();
 
         write_ime_ui_settings_to_path(
@@ -2187,7 +2189,16 @@ mod tests {
             String::new(),
         )
         .is_err());
-        fs::remove_file(path).ok();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    fn writer_test_theme_path(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-theme-writer-{label}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("theme.yaml")
     }
 
     #[test]
@@ -2285,7 +2296,10 @@ mod tests {
     fn resolved_theme_json_carries_no_mobile_layout() {
         let theme = resolve_theme_from_paths(None, None);
         let json = resolved_theme_json(&theme).unwrap();
-        assert!(!json.contains("\"keyboard\""));
+        assert!(serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .get("keyboard")
+            .is_none());
         assert!(!json.contains("\"numberRows\""));
         assert!(!json.contains("\"symbolRows\""));
         assert!(json.contains("\"panel\""));
@@ -2310,7 +2324,10 @@ mod tests {
         fs::remove_file(path).ok();
 
         assert_eq!(theme.panel.min_width, 200.0);
-        assert!(!json.contains("\"keyboard\""));
+        assert!(serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .get("keyboard")
+            .is_none());
     }
 
     #[test]
