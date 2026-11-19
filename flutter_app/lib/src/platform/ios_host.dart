@@ -17,4 +17,10 @@ class IosHost {
 
   Future<void> openUrl(String url) =>
       channel.invokeMethod<void>('openUrl', {'url': url});
+
+  Future<void> shareThemeFile(String fileName, String json) =>
+      channel.invokeMethod<void>('shareThemeFile', {
+        'fileName': fileName,
+        'json': json,
+      });
 }

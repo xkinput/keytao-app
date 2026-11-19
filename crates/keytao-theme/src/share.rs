@@ -212,6 +212,39 @@ fn pasted_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{200b}'..='\u{200d}' | '\u{feff}')
 }
 
+fn parse_portable_theme(value: Value) -> Result<ThemeSource, String> {
+    fn report_excluded(original: &Value, portable: &Value, path: &str, dropped: &mut Vec<String>) {
+        match original {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    let full = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if let Some(kept) = portable.get(key) {
+                        report_excluded(value, kept, &full, dropped);
+                    } else {
+                        dropped.push(format!("{full}: excluded from theme sharing"));
+                    }
+                }
+            }
+            Value::Array(array) => {
+                for (index, value) in array.iter().enumerate() {
+                    if let Some(kept) = portable.get(index) {
+                        report_excluded(value, kept, &format!("{path}[{index}]"), dropped);
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+    let portable = portable_source(value.clone());
+    let mut source = parse_theme_source_json(&canonical_json(&portable)?)?;
+    report_excluded(&value, &portable, "", &mut source.report.dropped);
+    Ok(source)
+}
+
 /// Decode a share string or plain JSON, without touching local IME settings.
 /// Share whitespace/zero-width cleanup leaves spaces inside plain JSON intact.
 /// Zlib must reach its checksum-verified end with no trailing compressed bytes.
@@ -239,7 +272,7 @@ pub fn decode_theme_share(text: &str) -> Result<ThemeSource, String> {
             }
         }
         let value: Value = serde_json::from_str(&cleaned).map_err(|error| error.to_string())?;
-        return parse_theme_source_json(&canonical_json(&portable_source(value))?);
+        return parse_portable_theme(value);
     }
     let mut cleaned = String::with_capacity(text.len().min(THEME_SHARE_MAX_TEXT_BYTES));
     for character in text
@@ -280,7 +313,7 @@ pub fn decode_theme_share(text: &str) -> Result<ThemeSource, String> {
     }
     output.truncate(decoder.total_out() as usize);
     let value: Value = serde_json::from_slice(&output).map_err(|error| error.to_string())?;
-    parse_theme_source_json(&canonical_json(&portable_source(value))?)
+    parse_portable_theme(value)
 }
 
 /// Install action selected without writing files. Built-in themes are read-only.
@@ -309,7 +342,8 @@ pub fn resolve_import_conflict(
     let portable = parse_theme_source_json(&export_theme_source_json(incoming)?)?;
     let existing = installed.iter().find(|source| source.id() == portable.id());
     if let Some(existing) = existing {
-        if theme_source_hash(existing)? == theme_source_hash(&portable)? {
+        let existing = parse_theme_source_json(&export_theme_source_json(existing)?)?;
+        if theme_source_hash(&existing)? == theme_source_hash(&portable)? {
             return Ok(ThemeImportResolution {
                 disposition: ThemeImportDisposition::AlreadyInstalled,
                 source: None,
@@ -446,6 +480,11 @@ mod tests {
         assert_eq!(decoded.value["common"]["font"]["family"], "A, B, C D");
         assert_eq!(decoded.value["pc"]["candidate"]["labelSuffix"], "1234");
         assert_eq!(local.value["pc"]["candidate"]["labelSuffix"], "12345678");
+        let resolution = resolve_import_conflict(&decoded, &[local], false).unwrap();
+        assert_eq!(
+            resolution.disposition,
+            ThemeImportDisposition::AlreadyInstalled
+        );
     }
 
     #[test]
@@ -487,6 +526,37 @@ mod tests {
             decoded.value["dark"]["mobile"]["keyboard"]["background"],
             "#112233FF"
         );
+    }
+
+    #[test]
+    fn imports_report_excluded_fields_alongside_validation_diagnostics() {
+        let value = json!({"version":3,"meta":{"id":"my.report","name":"Report"},
+            "ui":{"colorScheme":"dark"},"localPath":"/private/local",
+            "common":{"cornerRadius":100},
+            "mobile":{"keyboard":{"height":300,"key":{"background":"bad","foreground":"#123"}}}});
+        let json = value.to_string();
+        for text in [json.clone(), encoded_raw(json.as_bytes())] {
+            let source = decode_theme_share(&text).unwrap();
+            for path in ["ui", "localPath", "mobile.keyboard.height"] {
+                assert!(source.report.dropped.iter().any(
+                    |diagnostic| diagnostic == &format!("{path}: excluded from theme sharing")
+                ));
+            }
+            assert!(source
+                .report
+                .dropped
+                .iter()
+                .any(|diagnostic| diagnostic == "mobile.keyboard.key.background"));
+            assert!(source
+                .report
+                .clamped
+                .iter()
+                .any(|diagnostic| diagnostic.contains("common.cornerRadius")));
+            assert_eq!(
+                source.value["mobile"]["keyboard"]["key"]["foreground"],
+                "#112233FF"
+            );
+        }
     }
 
     #[test]

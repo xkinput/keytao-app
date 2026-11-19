@@ -9,7 +9,7 @@ class CandidatePanelPreview extends StatelessWidget {
   const CandidatePanelPreview({
     super.key,
     required this.theme,
-    required this.orientation,
+    this.orientation,
     required this.showPreedit,
     this.candidateCount = 6,
     this.candidates = const [],
@@ -19,7 +19,7 @@ class CandidatePanelPreview extends StatelessWidget {
   }) : assert(candidateCount >= 1 && candidateCount <= 255);
 
   final Map<String, dynamic> theme;
-  final PanelOrientationDto orientation;
+  final PanelOrientationDto? orientation;
   final int candidateCount;
   final List<({String text, String comment})> candidates;
   final bool keyboard;
@@ -73,15 +73,22 @@ class CandidatePanelPreview extends StatelessWidget {
         theme: theme,
         schemeName: keyboardSchemeName,
         logo: keyboardLogo,
+        candidates: this.candidates,
       );
     }
     final font = theme['font'] as Map<String, dynamic>;
     final panel = theme['panel'] as Map<String, dynamic>;
     final option = theme['candidate'] as Map<String, dynamic>;
     final navigation = theme['navigation'] as Map<String, dynamic>;
-    final vertical = orientation == PanelOrientationDto.vertical;
+    final vertical = orientation == null
+        ? panel['orientation'] == 'vertical'
+        : orientation == PanelOrientationDto.vertical;
     final fontSize = _metric(font, 'size');
-    final family = font['family'] as String?;
+    final families = (font['family'] as String?)
+        ?.split(',')
+        .map((family) => family.trim())
+        .where((family) => family.isNotEmpty)
+        .toList();
     final weight = switch (font['weight']) {
       'ultralight' => FontWeight.w100,
       'thin' => FontWeight.w200,
@@ -95,7 +102,8 @@ class CandidatePanelPreview extends StatelessWidget {
     };
     TextStyle style(double size, Color color, FontWeight weight) => TextStyle(
       inherit: false,
-      fontFamily: family == null || family.isEmpty ? null : family,
+      fontFamily: families?.firstOrNull,
+      fontFamilyFallback: families,
       fontSize: size,
       fontWeight: weight,
       color: color,
@@ -206,15 +214,15 @@ class CandidatePanelPreview extends StatelessWidget {
                 borderRadius: BorderRadius.circular(
                   _metric(option, 'cornerRadius'),
                 ),
-                border: Border.all(
-                  color: _color(
-                    option,
-                    selected ? 'selectedBorderColor' : 'borderColor',
-                  ),
-                  width: selected
-                      ? math.max(1, _metric(option, 'borderWidth')).toDouble()
-                      : _metric(option, 'borderWidth'),
-                ),
+                border: _metric(option, 'borderWidth') > 0
+                    ? Border.all(
+                        color: _color(
+                          option,
+                          selected ? 'selectedBorderColor' : 'borderColor',
+                        ),
+                        width: _metric(option, 'borderWidth'),
+                      )
+                    : null,
               ),
               padding: EdgeInsets.symmetric(
                 horizontal: math.min(_metric(option, 'paddingX'), width / 2),
@@ -309,6 +317,15 @@ class CandidatePanelPreview extends StatelessWidget {
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
                     color: _color(panel, 'background'),
+                    boxShadow: panel['shadow'] == true
+                        ? const [
+                            BoxShadow(
+                              color: Color(0x26000000),
+                              blurRadius: 12,
+                              offset: Offset(0, 4),
+                            ),
+                          ]
+                        : null,
                     borderRadius: BorderRadius.circular(
                       _metric(panel, 'cornerRadius'),
                     ),
@@ -317,10 +334,12 @@ class CandidatePanelPreview extends StatelessWidget {
                     borderRadius: BorderRadius.circular(
                       _metric(panel, 'cornerRadius'),
                     ),
-                    border: Border.all(
-                      color: _color(panel, 'borderColor'),
-                      width: _metric(panel, 'borderWidth'),
-                    ),
+                    border: _metric(panel, 'borderWidth') > 0
+                        ? Border.all(
+                            color: _color(panel, 'borderColor'),
+                            width: _metric(panel, 'borderWidth'),
+                          )
+                        : null,
                   ),
                   padding: EdgeInsets.symmetric(
                     horizontal: paddingX,

@@ -349,6 +349,57 @@ pub enum EnglishModeDto {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThemePreviewColorsDto {
+    pub background: String,
+    pub foreground: String,
+    pub accent: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeSummaryDto {
+    pub id: String,
+    pub name: String,
+    pub built_in: bool,
+    pub current: bool,
+    pub light: ThemePreviewColorsDto,
+    pub dark: ThemePreviewColorsDto,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeExportDto {
+    pub id: String,
+    pub file_name: String,
+    pub json: String,
+    pub share_string: String,
+    pub use_file: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeImportPreviewDto {
+    pub id: String,
+    pub name: String,
+    pub can_overwrite: bool,
+    pub conflict: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeImportResultDto {
+    pub id: String,
+    pub name: String,
+    pub disposition: String,
+    pub renamed_from: Option<String>,
+    pub dropped: Vec<String>,
+    pub clamped: Vec<String>,
+    pub unknown: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImeUiSettingsDto {
     pub color_scheme: UiColorSchemeDto,
     pub effective_color_scheme: EffectiveColorSchemeDto,

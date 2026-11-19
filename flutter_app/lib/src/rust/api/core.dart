@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `install_result_dto`
+// These functions are ignored because they are not marked as `pub`: `install_result_dto`, `theme_library_host`
 
 /// Creates the process-wide Core, or returns its existing info when the resolved
 /// directories, platform and user root match. Restart the process to change them.
@@ -413,6 +413,58 @@ Future<List<SchemaSwitchDto>> setSchemaSwitch({
   schemaId: schemaId,
   name: name,
   value: value,
+);
+
+Future<List<ThemeSummaryDto>> getThemeLibrary() =>
+    RustLib.instance.api.crateApiCoreGetThemeLibrary();
+
+Future<String> getThemeEditor() =>
+    RustLib.instance.api.crateApiCoreGetThemeEditor();
+
+Future<String> updateThemeEditor({
+  required String target,
+  required String path,
+  String? valueJson,
+}) => RustLib.instance.api.crateApiCoreUpdateThemeEditor(
+  target: target,
+  path: path,
+  valueJson: valueJson,
+);
+
+Future<String> setThemeEditorColorScheme({UiColorSchemeDto? colorScheme}) =>
+    RustLib.instance.api.crateApiCoreSetThemeEditorColorScheme(
+      colorScheme: colorScheme,
+    );
+
+String resolveThemeEditorPreview({
+  required String sourceJson,
+  required bool dark,
+}) => RustLib.instance.api.crateApiCoreResolveThemeEditorPreview(
+  sourceJson: sourceJson,
+  dark: dark,
+);
+
+Future<void> applyTheme({required String id}) =>
+    RustLib.instance.api.crateApiCoreApplyTheme(id: id);
+
+Future<String> duplicateTheme({required String id}) =>
+    RustLib.instance.api.crateApiCoreDuplicateTheme(id: id);
+
+Future<void> deleteTheme({required String id}) =>
+    RustLib.instance.api.crateApiCoreDeleteTheme(id: id);
+
+Future<ThemeExportDto> exportTheme({required String id}) =>
+    RustLib.instance.api.crateApiCoreExportTheme(id: id);
+
+Future<ThemeImportPreviewDto> previewThemeImport({required String text}) =>
+    RustLib.instance.api.crateApiCorePreviewThemeImport(text: text);
+
+Future<ThemeImportResultDto> importTheme({
+  required String text,
+  required bool overwrite,
+}) => RustLib.instance.api.crateApiCoreImportTheme(
+  text: text,
+  overwrite: overwrite,
 );
 
 Future<ImeUiSettingsDto> getImeUiSettings() =>

@@ -73,4 +73,9 @@ class AndroidHost {
       _channel.invokeMethod<void>('openUrl', {'url': url});
   Future<Map<String, dynamic>?> shareRuntimeLog() =>
       _channel.invokeMapMethod<String, dynamic>('shareRuntimeLog');
+  Future<void> shareThemeFile(String fileName, String json) =>
+      _channel.invokeMethod<void>('shareThemeFile', {
+        'fileName': fileName,
+        'json': json,
+      });
 }

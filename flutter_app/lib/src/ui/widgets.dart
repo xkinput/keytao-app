@@ -537,6 +537,7 @@ class ChoiceSetting<T> extends StatelessWidget {
     this.onChanged,
     this.disabled = const {},
     this.hint,
+    this.scrollable = false,
   });
   final String label;
   final T value;
@@ -544,6 +545,7 @@ class ChoiceSetting<T> extends StatelessWidget {
   final Set<T> disabled;
   final ValueChanged<T>? onChanged;
   final String? hint;
+  final bool scrollable;
 
   @override
   Widget build(BuildContext context) {
@@ -568,7 +570,8 @@ class ChoiceSetting<T> extends StatelessWidget {
       minimumControlWidth: minimumWidth,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          if (disabled.isNotEmpty || minimumWidth > constraints.maxWidth) {
+          if (disabled.isNotEmpty ||
+              (!scrollable && minimumWidth > constraints.maxWidth)) {
             return FSelectGroup<T>(
               enabled: onChanged != null,
               control: FMultiValueControl.lifted(
@@ -587,7 +590,7 @@ class ChoiceSetting<T> extends StatelessWidget {
               ],
             );
           }
-          return Semantics(
+          final tabs = Semantics(
             enabled: onChanged != null,
             child: ExcludeFocus(
               excluding: onChanged == null,
@@ -643,6 +646,12 @@ class ChoiceSetting<T> extends StatelessWidget {
               ),
             ),
           );
+          return scrollable && minimumWidth > constraints.maxWidth
+              ? SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(width: minimumWidth, child: tabs),
+                )
+              : tabs;
         },
       ),
     );

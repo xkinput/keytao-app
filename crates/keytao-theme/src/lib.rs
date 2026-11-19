@@ -8,6 +8,7 @@
 //! Mobile layout and geometry live in [`mobile_layout`], resolved separately
 //! from `keyboard.yaml`; v3 theme sources compile to backward-compatible v2.
 
+pub mod editor;
 pub mod mobile_layout;
 pub mod mobile_theme;
 pub mod panel_hit;
@@ -735,11 +736,14 @@ fn resolve_theme_with_pending_settings(
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
-        let Ok(partial) = serde_yaml::from_str::<PartialTheme>(&content) else {
+        let Ok((value, _)) = source::parse_compilation_base_yaml(&content) else {
             continue;
         };
-        if let Ok(value) = serde_yaml::from_str::<serde_json::Value>(&content) {
-            if value.get("themeHash").is_some() {
+        let Ok(partial) = serde_yaml::from_value::<PartialTheme>(value.clone()) else {
+            continue;
+        };
+        if value.get("themeHash").is_some() {
+            if let Ok(value) = serde_json::to_value(value) {
                 compiled = Some(value);
             }
         }

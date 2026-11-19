@@ -599,19 +599,101 @@ pub fn resolve_theme_source(
     theme
 }
 
+pub(crate) fn parse_compilation_base(yaml: &str) -> Result<(Value, bool), String> {
+    let (base, changed) = parse_compilation_base_yaml(yaml)?;
+    Ok((serde_json::to_value(base).map_err(|e| e.to_string())?, changed))
+}
+
+/// Ignore invalid mapping sections while retaining every valid YAML sibling.
+pub(crate) fn parse_compilation_base_yaml(
+    yaml: &str,
+) -> Result<(serde_yaml::Value, bool), String> {
+    let mut base: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
+    if base.is_null() {
+        return Ok((serde_yaml::Value::Mapping(serde_yaml::Mapping::new()), false));
+    }
+    if !base.is_mapping() {
+        return Err("base theme must be a mapping".into());
+    }
+    let mut changed = false;
+    let mut sanitize = |path: &str| {
+        let (parent_path, key) = path.rsplit_once('/').unwrap();
+        let mut parent = &mut base;
+        for section in parent_path.split('/').filter(|section| !section.is_empty()) {
+            let Some(child) = parent.get_mut(section) else {
+                return;
+            };
+            parent = child;
+        }
+        let Some(mapping) = parent.as_mapping_mut() else {
+            return;
+        };
+        let key = serde_yaml::Value::String(key.into());
+        if mapping.get(&key).is_some_and(|v| !v.is_mapping()) {
+            mapping.remove(&key);
+            eprintln!(
+                "Warning: theme section {} must be a mapping; ignoring it",
+                path.trim_start_matches('/').replace('/', ".")
+            );
+            changed = true;
+        }
+    };
+    sanitize("/ui");
+    for prefix in ["", "/light", "/dark", "/night"] {
+        if !prefix.is_empty() {
+            sanitize(prefix);
+        }
+        for section in [
+            "font", "panel", "candidate", "navigation", "modeHint", "mode_hint", "mobile",
+        ] {
+            sanitize(&format!("{prefix}/{section}"));
+        }
+        let mobile = format!("{prefix}/mobile");
+        for section in ["keyboard", "candidateBar"] {
+            sanitize(&format!("{mobile}/{section}"));
+        }
+        for section in [
+            "key", "keyTypes", "keyClasses", "keyStates", "toolbar", "floating",
+        ] {
+            sanitize(&format!("{mobile}/keyboard/{section}"));
+        }
+        for (group, sections) in [
+            (
+                "keyTypes",
+                &["character", "function", "space", "enter", "backspace", "shift"][..],
+            ),
+            ("keyClasses", &["accent", "accentPunctuation"][..]),
+            ("keyStates", &["selected", "shiftOn"][..]),
+        ] {
+            for section in sections {
+                sanitize(&format!("{mobile}/keyboard/{group}/{section}"));
+            }
+        }
+    }
+    for path in [
+        "/keyboard",
+        "/keyboard/floating",
+        "/keyboard/floating/portrait",
+        "/keyboard/floating/landscape",
+        "/keyboard/layers",
+        "/keyboard/pages",
+        "/keyboard/keyboards",
+        "/resolvedUi",
+        "/resolvedUi/light",
+        "/resolvedUi/dark",
+    ] {
+        sanitize(path);
+    }
+    Ok((base, changed))
+}
+
 /// Compile a validated partial to explicit v2 light/dark fields. Only local UI
 /// settings and unrelated legacy extension keys are retained from the base.
 /// `resolvedUi` is compatibility metadata; it never participates in derivation.
 pub fn compile_theme(source: &ThemeSource, base_theme_yaml: &str) -> Result<String, String> {
-    let base: Value = if base_theme_yaml.trim().is_empty() {
-        json!({})
-    } else {
-        serde_yaml::from_str(base_theme_yaml).map_err(|e| e.to_string())?
-    };
-    if !base.is_object() {
-        return Err("base theme must be a mapping".into());
-    }
-    let local = resolve_legacy_theme_yaml(base_theme_yaml, EffectiveColorScheme::Light).ui;
+    let (base, _) = parse_compilation_base(base_theme_yaml)?;
+    let base_yaml = serde_yaml::to_string(&base).map_err(|e| e.to_string())?;
+    let local = resolve_legacy_theme_yaml(&base_yaml, EffectiveColorScheme::Light).ui;
     let mut light = resolve_theme_source(source, EffectiveColorScheme::Light);
     let mut dark = resolve_theme_source(source, EffectiveColorScheme::Dark);
     for theme in [&mut light, &mut dark] {
@@ -696,6 +778,93 @@ mod tests {
         merge(&mut v, &extra);
         parse_theme_source_json(&v.to_string()).unwrap()
     }
+
+    #[test]
+    fn compilation_base_repairs_only_invalid_mapping_sections() {
+        let source = source(json!({"pc":{"candidate":{"labelSuffix":"!"}}}));
+        for path in [
+            "/ui",
+            "/panel",
+            "/light/font",
+            "/dark/candidate",
+            "/keyboard/floating/portrait",
+            "/keyboard/layers",
+            "/mobile/keyboard/key",
+            "/mobile/keyboard/keyTypes/function",
+            "/resolvedUi/light",
+        ] {
+            for invalid in [json!([]), json!("invalid"), Value::Null] {
+                let mut base = json!({
+                    "ui":{"colorScheme":"dark","embeddedComposition":true,
+                        "hideCandidatePanel":true,"showTrayModeIndicator":false},
+                    "panel":{"paddingX":7},
+                    "candidate":{"labelSuffix":")"},
+                    "light":{"font":{"size":24}},
+                    "dark":{"candidate":{"foreground":"#AABBCC"}},
+                    "keyboard":{"floating":{"portrait":{"enabled":true}},
+                        "rows":[[{"label":"x","value":"x"}]],
+                        "layers":{"letters":[[{"label":"y","value":"y"}]]}},
+                    "mobile":{"keyboard":{"key":{"fontScale":1.1},
+                        "keyTypes":{"function":{"cornerRadius":8}}},
+                        "candidateBar":{"showComment":false}},
+                    "resolvedUi":{"light":{"cornerRadius":12},"dark":{"cornerRadius":14}},
+                    "future":{"keep":[1,2]}
+                });
+                *base.pointer_mut(path).unwrap() = invalid;
+                let yaml = serde_yaml::to_string(&base).unwrap();
+                let (repaired, changed) = parse_compilation_base(&yaml).unwrap();
+                assert!(changed, "{path}");
+                assert!(repaired.pointer(path).is_none(), "{path}");
+                assert_eq!(repaired["candidate"], base["candidate"], "{path}");
+                assert_eq!(
+                    repaired["keyboard"]["rows"], base["keyboard"]["rows"],
+                    "{path}"
+                );
+                assert_eq!(repaired["future"], base["future"], "{path}");
+                if path != "/ui" {
+                    assert_eq!(repaired["ui"], base["ui"], "{path}");
+                }
+                let compiled: Value =
+                    serde_yaml::from_str(&compile_theme(&source, &yaml).unwrap()).unwrap();
+                assert_eq!(compiled["candidate"]["labelSuffix"], "!", "{path}");
+                assert_eq!(compiled["future"], base["future"], "{path}");
+                if path != "/ui" {
+                    assert_eq!(compiled["ui"], base["ui"], "{path}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compilation_base_reports_repairs_without_changing_valid_or_empty_documents() {
+        for yaml in ["", "null", "{}"] {
+            assert_eq!(parse_compilation_base(yaml).unwrap(), (json!({}), false));
+        }
+        let value = json!({"ui":{"hideCandidatePanel":true},"future":[1,2],
+            "keyboard":{"rows":[[{"label":"x","value":"x"}]]}});
+        assert_eq!(
+            parse_compilation_base(&serde_yaml::to_string(&value).unwrap()).unwrap(),
+            (value, false)
+        );
+        for yaml in ["ui: [", "[]", "scalar"] {
+            assert!(parse_compilation_base(yaml).is_err());
+        }
+    }
+
+    #[test]
+    fn compilation_base_yaml_preserves_native_yaml_extension_values() {
+        let yaml = "ui: {hideCandidatePanel: true}\nfuture:\n  infinite: .inf\n  nan: .nan\n  tagged: !custom retained\n";
+        let original: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let (base, changed) = parse_compilation_base_yaml(yaml).unwrap();
+        assert!(!changed);
+        assert_eq!(base, original);
+        assert!(base["future"]["infinite"].as_f64().unwrap().is_infinite());
+        assert!(base["future"]["nan"].as_f64().unwrap().is_nan());
+        assert!(matches!(base["future"]["tagged"], serde_yaml::Value::Tagged(_)));
+        let saved = serde_yaml::to_string(&base).unwrap();
+        assert_eq!(serde_yaml::from_str::<serde_yaml::Value>(&saved).unwrap(), original);
+    }
+
     #[test]
     fn fields_validate_independently_and_unknowns_survive_storage() {
         let s = source(

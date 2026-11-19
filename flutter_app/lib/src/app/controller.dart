@@ -2435,7 +2435,8 @@ class AppController extends ChangeNotifier {
             _pendingCloudPackageUploads.remove(key);
             continue;
           }
-          if (installedPackageFor(key)?.active != true || local?.deployed != true) {
+          if (installedPackageFor(key)?.active != true ||
+              local?.deployed != true) {
             _pendingCloudPackageUploads.remove(key);
             continue;
           }
@@ -2640,14 +2641,18 @@ class AppController extends ChangeNotifier {
           .toList();
     }
     final package = cloudPackages.firstWhere((package) => package['id'] == id);
-    final previous = installedPackages.map((package) => package.schemeKey).toSet();
+    final previous = installedPackages
+        .map((package) => package.schemeKey)
+        .toSet();
     if (isAndroid) await _requireStorage(redirect: true);
     await core.downloadCloudPackage(id: id);
     await _readInstalledPackages();
-    final key = installedPackages
-        .where((package) => !previous.contains(package.schemeKey))
-        .firstOrNull
-        ?.schemeKey ?? package['schemeKey'] as String;
+    final key =
+        installedPackages
+            .where((package) => !previous.contains(package.schemeKey))
+            .firstOrNull
+            ?.schemeKey ??
+        package['schemeKey'] as String;
     await _activateSchemePackage(key);
     scheduleSchemeProfileSync();
   }, modal: true);
@@ -3192,6 +3197,82 @@ class AppController extends ChangeNotifier {
       systemDark: systemDark,
     ),
   ) as Map<String, dynamic>;
+
+  Future<T> themeLibraryAction<T>(
+    Future<T> Function() action, {
+    bool refresh = false,
+  }) async {
+    late T result;
+    Object? failure;
+    final completed = await run(() async {
+      try {
+        if (isAndroid) await _requireStorage();
+        result = await action();
+        if (refresh) uiSettings = await core.getImeUiSettings();
+      } catch (error) {
+        failure = error;
+        rethrow;
+      }
+    });
+    if (!completed) throw failure ?? StateError('操作中');
+    return result;
+  }
+
+  Future<Map<String, dynamic>> getThemeEditor() async =>
+      jsonDecode(await core.getThemeEditor()) as Map<String, dynamic>;
+
+  Map<String, dynamic> resolveThemeEditorPreview({
+    required Map<String, dynamic> source,
+    required bool dark,
+  }) => jsonDecode(
+    core.resolveThemeEditorPreview(sourceJson: jsonEncode(source), dark: dark),
+  ) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> updateThemeEditor({
+    required String target,
+    required String path,
+    Object? value,
+  }) async => jsonDecode(
+    await themeLibraryAction(
+      () => core.updateThemeEditor(
+        target: target,
+        path: path,
+        valueJson: value == null ? null : jsonEncode(value),
+      ),
+      refresh: true,
+    ),
+  ) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> setThemeEditorColorScheme(
+    UiColorSchemeDto? scheme,
+  ) async => jsonDecode(
+    await themeLibraryAction(
+      () => core.setThemeEditorColorScheme(colorScheme: scheme),
+      refresh: true,
+    ),
+  ) as Map<String, dynamic>;
+
+  Future<void> shareThemeFile(ThemeExportDto theme) =>
+      themeLibraryAction(() async {
+        if (isAndroid) {
+          await android.shareThemeFile(theme.fileName, theme.json);
+        } else if (isIos) {
+          await const IosHost().shareThemeFile(theme.fileName, theme.json);
+        } else if (info.platform == BridgePlatform.macOs) {
+          await const MethodChannel('ink.rea.keytao/window').invokeMethod<void>(
+            'shareThemeFile',
+            {'fileName': theme.fileName, 'json': theme.json},
+          );
+        } else {
+          final location = await getSaveLocation(suggestedName: theme.fileName);
+          if (location == null) return;
+          await XFile.fromData(
+            Uint8List.fromList(utf8.encode(theme.json)),
+            mimeType: 'application/json',
+            name: theme.fileName,
+          ).saveTo(location.path);
+        }
+      });
 
   Future<bool> saveUi({
     UiColorSchemeDto? colorScheme,

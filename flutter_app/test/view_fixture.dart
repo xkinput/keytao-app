@@ -236,7 +236,7 @@ class ViewController extends AppController {
       jsonEncode(_candidatePanelThemes[dark ? 'dark' : 'light']),
     ) as Map<String, dynamic>;
     (theme['ui'] as Map<String, dynamic>)['colorScheme'] = colorScheme.name;
-    final accent = int.parse(accentColor.substring(1), radix: 16);
+    final accent = int.parse(accentColor.substring(1, 7), radix: 16);
     theme['ui']['accentColor'] = {
       'red': (accent >> 16) & 255,
       'green': (accent >> 8) & 255,
@@ -256,11 +256,23 @@ class ViewController extends AppController {
       }
     }
     if (backgroundColor.isNotEmpty) {
-      final rgb = int.parse(backgroundColor.substring(1), radix: 16);
+      final rgb = int.parse(backgroundColor.substring(1, 7), radix: 16);
       final background = theme['panel']['background'] as Map<String, dynamic>;
       background['red'] = (rgb >> 16) & 255;
       background['green'] = (rgb >> 8) & 255;
       background['blue'] = rgb & 255;
+    }
+    final mobileEdits =
+        _candidatePanelThemes['mobileEdits'][dark ? 'dark' : 'light']
+            as Map<String, dynamic>;
+    if (backgroundColor == '#102030') {
+      theme['mobile'] = jsonDecode(jsonEncode(mobileEdits['background']));
+    }
+    if (cornerRadius != null) {
+      final radius = mobileEdits['radii']['${cornerRadius.round()}'];
+      if (radius != null) {
+        theme['mobile']['keyboard']['key']['cornerRadius'] = radius;
+      }
     }
     final scale = fontSize / 20;
     final font = theme['font'] as Map<String, dynamic>;
@@ -278,6 +290,63 @@ class ViewController extends AppController {
         section[field] = (section[field] as num) * scale;
       }
     }
+    return theme;
+  }
+
+  @override
+  Future<Map<String, dynamic>> getThemeEditor() async {
+    final platform = switch (info.platform) {
+      BridgePlatform.macOs => 'macos',
+      BridgePlatform.windows => 'windows',
+      BridgePlatform.linux => 'linux',
+      BridgePlatform.android => 'android',
+      BridgePlatform.ios => 'ios',
+    };
+    final settings = uiSettings;
+    final source = <String, dynamic>{
+      'version': 3,
+      'meta': {'id': 'my.fixture', 'name': 'Fixture'},
+      'common': {
+        'accentColor': settings?.accentColor ?? '#3B73D9',
+        'cornerRadius': ?settings?.cornerRadius,
+        if (settings?.backgroundColor case final color? when color.isNotEmpty)
+          'backgroundColor': color,
+      },
+      'pc': {
+        'font': {'size': settings?.fontSize ?? 20},
+        'panel': {'orientation': settings?.orientation.name ?? 'horizontal'},
+      },
+    };
+    return {
+      'source': source,
+      'resolvedLight': resolveThemeEditorPreview(source: source, dark: false),
+      'resolvedDark': resolveThemeEditorPreview(source: source, dark: true),
+      'colorScheme': settings?.colorScheme.name ?? 'auto',
+      'capabilities': _candidatePanelThemes['editorCapabilities'][platform],
+    };
+  }
+
+  @override
+  Map<String, dynamic> resolveThemeEditorPreview({
+    required Map<String, dynamic> source,
+    required bool dark,
+  }) {
+    final variant = source[dark ? 'dark' : 'light'] as Map<String, dynamic>?;
+    Object? field(String section, String name) =>
+        (variant?[section] as Map<String, dynamic>?)?[name] ??
+        (source[section] as Map<String, dynamic>?)?[name];
+    Object? pcField(String section, String name) =>
+        variant?['pc']?[section]?[name] ?? source['pc']?[section]?[name];
+    final theme = resolveCandidatePanelPreview(
+      colorScheme: dark ? UiColorSchemeDto.dark : UiColorSchemeDto.light,
+      accentColor: field('common', 'accentColor') as String? ?? '#3B73D9',
+      cornerRadius: (field('common', 'cornerRadius') as num?)?.toDouble(),
+      backgroundColor: field('common', 'backgroundColor') as String? ?? '',
+      fontSize: (pcField('font', 'size') as num?)?.toDouble() ?? 20,
+      systemDark: dark,
+    );
+    theme['panel']['orientation'] =
+        pcField('panel', 'orientation') ?? 'horizontal';
     return theme;
   }
 
