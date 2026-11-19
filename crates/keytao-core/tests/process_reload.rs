@@ -256,7 +256,9 @@ fn concurrent_reloads_from_two_runtimes_keep_sessions_alive() {
 
     // The sessions that were live through every one of those reloads still
     // belong to the librime that is up now.
-    first.prewarm(None).expect("warm sessions after the reload storm");
+    first
+        .prewarm(None)
+        .expect("warm sessions after the reload storm");
     for (index, session) in sessions.iter().enumerate() {
         assert_composes(session, &format!("runtime {index} after the reload storm"));
     }

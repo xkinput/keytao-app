@@ -12,11 +12,22 @@ const RECEIPT: &str = "build/.keytao-schema-inputs.json";
 /// Save source/output hashes only after the deployment has fully succeeded.
 pub fn record_schema_input_fingerprints(root: &Path, deployed: &[String]) -> Result<(), String> {
     let raw = raw_fingerprints(root, deployed)?;
+    // Android's bundled shared data lives below the user root.
+    let shared = root.join("rime-data");
     let mut fingerprints = read_receipt(root);
-    fingerprints.retain(|id, saved| raw.get(id) == Some(&Some(*saved)));
+    fingerprints.retain(|id, saved| {
+        if let Some(id) = id.strip_prefix("android:") {
+            fingerprint(root, id, &mut BTreeSet::new(), Some(&shared)) == Some(*saved)
+        } else {
+            raw.get(id) == Some(&Some(*saved))
+        }
+    });
     for id in schema_closure(root, deployed) {
         if let Some(Some(value)) = raw.get(&id) {
-            fingerprints.insert(id, *value);
+            fingerprints.insert(id.clone(), *value);
+        }
+        if let Some(value) = fingerprint(root, &id, &mut BTreeSet::new(), Some(&shared)) {
+            fingerprints.insert(format!("android:{id}"), value);
         }
     }
     let bytes = serde_json::to_vec(&fingerprints).map_err(|error| error.to_string())?;
@@ -94,6 +105,11 @@ fn read_receipt(root: &Path) -> BTreeMap<String, [u8; 32]> {
         .unwrap_or_default()
 }
 
+pub(crate) fn schema_input_is_current(root: &Path, id: &str, shared: &Path) -> bool {
+    fingerprint(root, id, &mut BTreeSet::new(), Some(shared))
+        .is_some_and(|value| read_receipt(root).get(&format!("android:{id}")) == Some(&value))
+}
+
 fn raw_fingerprints(
     root: &Path,
     schema_ids: &[String],
@@ -118,13 +134,18 @@ fn raw_fingerprints(
     Ok(ids
         .into_iter()
         .map(|id| {
-            let fingerprint = fingerprint(root, &id, &mut BTreeSet::new());
+            let fingerprint = fingerprint(root, &id, &mut BTreeSet::new(), None);
             (id, fingerprint)
         })
         .collect())
 }
 
-fn fingerprint(root: &Path, id: &str, visited: &mut BTreeSet<String>) -> Option<[u8; 32]> {
+fn fingerprint(
+    root: &Path,
+    id: &str,
+    visited: &mut BTreeSet<String>,
+    shared: Option<&Path>,
+) -> Option<[u8; 32]> {
     if !valid_rime_build_id(id) || !visited.insert(id.into()) {
         return None;
     }
@@ -148,7 +169,10 @@ fn fingerprint(root: &Path, id: &str, visited: &mut BTreeSet<String>) -> Option<
         if !valid_rime_build_id(name) || stamp.as_u64().is_none() {
             return None;
         }
-        if stamp.as_u64()? != 0 && !root.join(format!("{name}.yaml")).is_file() {
+        if stamp.as_u64()? != 0
+            && !root.join(format!("{name}.yaml")).is_file()
+            && !shared.is_some_and(|shared| shared.join(format!("{name}.yaml")).is_file())
+        {
             return None;
         }
         paths.insert(format!("{name}.yaml"));
@@ -158,13 +182,31 @@ fn fingerprint(root: &Path, id: &str, visited: &mut BTreeSet<String>) -> Option<
         }
     }
     let mut hash = Sha256::new();
-    hash.update(b"keytao-schema-inputs/v1");
+    if shared.is_some() {
+        // Keep Android deploy trust separate from the installer's source comparison.
+        paths.extend([
+            "default.yaml".into(),
+            "default.custom.yaml".into(),
+            "default-custom.yaml".into(),
+        ]);
+        hash.update(b"keytao-android-schema-inputs/v1");
+        hash.update(crate::librime_runtime_version()?.as_bytes());
+    } else {
+        hash.update(b"keytao-schema-inputs/v1");
+    }
     hash.update((compiled_bytes.len() as u64).to_le_bytes());
     hash.update(compiled_bytes);
     for name in paths {
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name.as_bytes());
-        let path = root.join(&name);
+        let mut path = root.join(&name);
+        if let Some(shared) = shared {
+            if fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                path = shared.join(&name);
+            }
+        }
         match fs::symlink_metadata(&path) {
             Ok(metadata) if !metadata.is_file() => return None,
             Ok(_) => {}
@@ -183,7 +225,7 @@ fn fingerprint(root: &Path, id: &str, visited: &mut BTreeSet<String>) -> Option<
     }
     if !compiled["schema"]["dependencies"].is_null() {
         for dependency in compiled["schema"]["dependencies"].as_sequence()? {
-            hash.update(fingerprint(root, dependency.as_str()?, visited)?);
+            hash.update(fingerprint(root, dependency.as_str()?, visited, shared)?);
         }
     }
     visited.remove(id);
@@ -284,6 +326,7 @@ mod tests {
         for (name, expected) in [
             ("shared.yaml", vec!["one", "two"]),
             ("default.custom.yaml", vec!["one", "two"]),
+            ("default-custom.yaml", vec!["one", "two"]),
             ("one.custom.yaml", vec!["one"]),
         ] {
             let fixture = Fixture::new();
@@ -291,6 +334,48 @@ mod tests {
             fs::write(fixture.0.join(name), b"patch: {value: 2}\n").unwrap();
             assert_eq!(fixture.changed(&before), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn listed_schema_reuse_requires_a_matching_receipt_and_resolved_inputs() {
+        let fixture = Fixture::new();
+        assert!(schema_input_is_current(&fixture.0, "one", &fixture.0));
+        fs::write(fixture.0.join("shared.yaml"), b"value: 2\n").unwrap();
+        assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
+        record_schema_input_fingerprints(&fixture.0, &["one".into()]).unwrap();
+        assert!(schema_input_is_current(&fixture.0, "one", &fixture.0));
+        fs::remove_file(fixture.0.join("shared.yaml")).unwrap();
+        assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
+        assert!(!schema_input_is_current(&fixture.0, "missing", &fixture.0));
+        assert!(!schema_input_is_current(
+            &fixture.0,
+            "../outside",
+            &fixture.0
+        ));
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.0.join(RECEIPT)).unwrap();
+        assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
+    }
+
+    #[test]
+    fn android_defaults_do_not_change_installer_fingerprints_or_trust_legacy_receipts() {
+        let fixture = Fixture::new();
+        let before = schema_input_fingerprints(&fixture.0, &[]).unwrap();
+        fs::write(fixture.0.join("default.yaml"), b"menu: {page_size: 9}\n").unwrap();
+        assert_eq!(schema_input_fingerprints(&fixture.0, &[]).unwrap(), before);
+        assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
+        record_schema_input_fingerprints(&fixture.0, &["one".into()]).unwrap();
+        assert!(schema_input_is_current(&fixture.0, "one", &fixture.0));
+        assert!(!schema_input_is_current(&fixture.0, "two", &fixture.0));
+        let mut legacy = read_receipt(&fixture.0);
+        legacy.retain(|id, _| !id.starts_with("android:"));
+        fs::write(
+            fixture.0.join(RECEIPT),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(schema_input_fingerprints(&fixture.0, &[]).unwrap(), before);
+        assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
     }
 
     #[test]
@@ -378,6 +463,8 @@ mod tests {
         let before = schema_input_fingerprints(&fixture.0, &[]).unwrap();
         assert!(before["one"].is_some());
         assert!(before["two"].is_none());
+        assert!(schema_input_is_current(&fixture.0, "one", &fixture.0));
+        assert!(!schema_input_is_current(&fixture.0, "two", &fixture.0));
         assert_eq!(fixture.changed(&before), ["two"]);
         fs::remove_file(fixture.0.join(RECEIPT)).unwrap();
         fs::create_dir(fixture.0.join(RECEIPT)).unwrap();

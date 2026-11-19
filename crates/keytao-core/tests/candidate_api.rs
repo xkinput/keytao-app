@@ -267,7 +267,12 @@ fn a_shift_ascii_toggle_clears_the_host_context_override() {
     let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
     runtime.init().unwrap();
     let session = runtime.create_session().unwrap();
-    assert!(session.set_context_ascii_mode(Some(true)).unwrap().ascii_mode);
+    assert!(
+        session
+            .set_context_ascii_mode(Some(true))
+            .unwrap()
+            .ascii_mode
+    );
     session.process_key_result(0xffe1, 0).unwrap();
     let toggled = session
         .process_key_result(0xffe1, keytao_core::RIME_RELEASE_MASK)
