@@ -337,6 +337,14 @@ fn matching_ready_pid(
     processes: &[KeytaoImeProcess],
     kde_native: bool,
 ) -> Option<u32> {
+    let (pid, _) = ready_backend_record(content)?;
+    processes
+        .iter()
+        .find(|process| process.pid == pid && process.kde_native == kde_native)
+        .map(|process| process.pid)
+}
+
+fn ready_backend_record(content: &str) -> Option<(u32, &str)> {
     let mut fields = content.split_whitespace();
     let pid = fields.next()?.parse::<u32>().ok().filter(|pid| *pid > 0)?;
     let backends = fields.next()?;
@@ -347,10 +355,18 @@ fn matching_ready_pid(
     {
         return None;
     }
-    processes
-        .iter()
-        .find(|process| process.pid == pid && process.kde_native == kde_native)
-        .map(|process| process.pid)
+    Some((pid, backends))
+}
+
+pub(crate) fn active_ime_backends() -> Vec<String> {
+    [false, true]
+        .into_iter()
+        .filter_map(|kde_native| {
+            let content = std::fs::read_to_string(keytao_ime_ready_path(kde_native)?).ok()?;
+            let (pid, backends) = ready_backend_record(&content)?;
+            is_keytao_ime_executable(pid).then(|| backends.to_owned())
+        })
+        .collect()
 }
 
 fn ready_keytao_ime_pid(processes: &[KeytaoImeProcess], kde_native: bool) -> Option<u32> {

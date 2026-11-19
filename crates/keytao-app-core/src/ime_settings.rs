@@ -198,17 +198,7 @@ fn write_ime_ui_flag_to_path(
     if let Some(parent) = theme_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
     }
-    let mut root = if theme_path.is_file() {
-        let content = std::fs::read_to_string(&theme_path)
-            .map_err(|e| format!("读取主题配置失败 {}: {e}", theme_path.display()))?;
-        serde_yaml::from_str::<serde_yaml::Value>(&content)
-            .map_err(|e| format!("主题配置无法解析 {}: {e}", theme_path.display()))?
-    } else {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-    };
-    if !matches!(root, serde_yaml::Value::Mapping(_)) {
-        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
+    let mut root = keytao_theme::theme_store::read_theme_for_update(&theme_path)?;
     let mapping = root
         .as_mapping_mut()
         .ok_or("主题配置根节点必须是 YAML mapping")?;
@@ -1134,6 +1124,24 @@ pub fn set_ime_ui_settings(
 mod tests {
     use super::*;
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn assert_manual_theme_backup(dir: &Path, original: &str) {
+        let backups: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap() != "theme.yaml")
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let name = backups[0].file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.strip_prefix("theme.yaml.manual-")
+                .and_then(|suffix| suffix.strip_suffix(".bak"))
+                .and_then(|timestamp| timestamp.parse::<u64>().ok())
+                .is_some()
+        );
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), original);
+    }
+
     #[test]
     fn malformed_theme_read_falls_back_to_defaults_without_rewriting() {
         let dir = tempfile::tempdir().unwrap();
@@ -1146,6 +1154,35 @@ mod tests {
             assert_eq!(settings.accent_color, defaults.accent_color);
             assert_eq!(settings.hide_candidate_panel, defaults.hide_candidate_panel);
             assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+        }
+    }
+
+    #[test]
+    fn invalid_mapping_sections_read_preserves_valid_settings_without_rewriting() {
+        for invalid in ["[]", "false"] {
+            for section in ["ui", "panel"] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("theme.yaml");
+                let original = if section == "ui" {
+                    format!("ui: {invalid}\nfont:\n  size: 23\ncandidate:\n  labelSuffix: ')'\n")
+                } else {
+                    format!(
+                        "ui:\n  colorScheme: dark\n  embeddedComposition: true\n  hideCandidatePanel: true\n  showTrayModeIndicator: false\npanel: {invalid}\nfont:\n  size: 23\ncandidate:\n  labelSuffix: ')'\n"
+                    )
+                };
+                std::fs::write(&path, &original).unwrap();
+                let settings =
+                    ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+                assert_eq!(settings.font_size, 23.0);
+                if section == "panel" {
+                    assert_eq!(settings.color_scheme, keytao_theme::UiColorScheme::Dark);
+                    assert!(settings.embedded_composition);
+                    assert!(settings.hide_candidate_panel);
+                    assert!(!settings.show_tray_mode_indicator);
+                }
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+            }
         }
     }
 
@@ -1499,15 +1536,61 @@ mod tests {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
-    fn embedded_composition_rejects_invalid_yaml_without_overwriting_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("theme.yaml");
-        for original in ["ui: [", "ui:\n  embeddedComposition: [true"] {
-            std::fs::write(&path, original).unwrap();
-            assert!(write_ime_embedded_composition_to_path(path.clone(), true).is_err());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    fn embedded_composition_preserves_unknown_nonfinite_yaml_values_without_backup() {
+        for nonfinite in [".inf", ".nan"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("theme.yaml");
+            let original = format!("ui:\n  embeddedComposition: false\nfuture: {nonfinite}\n");
+            let original_root: serde_yaml::Value = serde_yaml::from_str(&original).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            write_ime_embedded_composition_to_path(path.clone(), true).unwrap();
+            let written: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(written["future"], original_root["future"]);
+            assert_eq!(written["ui"]["embeddedComposition"].as_bool(), Some(true));
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn embedded_composition_recovers_invalid_yaml_with_backup() {
+        for original in [
+            "ui: [",
+            "ui:\n  embeddedComposition: [true",
+            "- not-a-mapping",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("theme.yaml");
+            std::fs::write(&path, original).unwrap();
+            write_ime_embedded_composition_to_path(path.clone(), true).unwrap();
+            let root: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(root["ui"]["embeddedComposition"].as_bool(), Some(true));
+            assert_manual_theme_backup(dir.path(), original);
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn embedded_composition_replaces_only_invalid_ui_section_with_backup() {
+        for invalid_ui in ["[]", "false"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("theme.yaml");
+            let original = format!(
+                "version: 7\nui: {invalid_ui}\nfont:\n  size: 23\ncandidate:\n  labelSuffix: ')'\ncustomSetting: keep\n"
+            );
+            std::fs::write(&path, &original).unwrap();
+            write_ime_embedded_composition_to_path(path.clone(), true).unwrap();
+            let root: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(root["version"].as_u64(), Some(7));
+            assert_eq!(root["ui"]["embeddedComposition"].as_bool(), Some(true));
+            assert_eq!(root["font"]["size"].as_u64(), Some(23));
+            assert_eq!(root["candidate"]["labelSuffix"].as_str(), Some(")"));
+            assert_eq!(root["customSetting"].as_str(), Some("keep"));
+            assert_manual_theme_backup(dir.path(), &original);
+        }
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1569,15 +1652,42 @@ mod tests {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
-    fn hide_candidate_panel_rejects_invalid_yaml_without_overwriting_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("theme.yaml");
+    fn hide_candidate_panel_recovers_invalid_yaml_with_backup() {
         for original in ["ui: [", "ui:\n  hideCandidatePanel: [true"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("theme.yaml");
             std::fs::write(&path, original).unwrap();
-            assert!(write_ime_hide_candidate_panel_to_path(path.clone(), true).is_err());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            write_ime_hide_candidate_panel_to_path(path.clone(), true).unwrap();
+            let root: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(root["ui"]["hideCandidatePanel"].as_bool(), Some(true));
+            assert_manual_theme_backup(dir.path(), original);
         }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn hide_candidate_panel_preserves_ui_and_unrelated_valid_sections_with_backup() {
+        for invalid_panel in ["[]", "false"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("theme.yaml");
+            let original = format!(
+                "version: 7\nui:\n  embeddedComposition: false\n  showTrayModeIndicator: false\npanel: {invalid_panel}\nfont:\n  size: 23\ncandidate:\n  labelSuffix: ')'\ncustomSetting: keep\n"
+            );
+            std::fs::write(&path, &original).unwrap();
+            write_ime_hide_candidate_panel_to_path(path.clone(), true).unwrap();
+            let root: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(root["version"].as_u64(), Some(7));
+            assert_eq!(root["ui"]["hideCandidatePanel"].as_bool(), Some(true));
+            assert_eq!(root["ui"]["embeddedComposition"].as_bool(), Some(false));
+            assert_eq!(root["ui"]["showTrayModeIndicator"].as_bool(), Some(false));
+            assert!(root.get("panel").is_none());
+            assert_eq!(root["font"]["size"].as_u64(), Some(23));
+            assert_eq!(root["candidate"]["labelSuffix"].as_str(), Some(")"));
+            assert_eq!(root["customSetting"].as_str(), Some("keep"));
+            assert_manual_theme_backup(dir.path(), &original);
+        }
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

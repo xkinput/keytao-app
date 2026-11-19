@@ -1,0 +1,317 @@
+//! Editor field capabilities and validated, variant-specific source edits.
+use crate::{source::ThemeSource, EffectiveColorScheme};
+use serde::Serialize;
+use serde_json::{json, Value};
+
+const MAC: u8 = 1;
+const WINDOWS: u8 = 2;
+const LINUX: u8 = 4;
+const MOBILE: u8 = 8;
+const DESKTOP: u8 = MAC | WINDOWS | LINUX;
+const ALL: u8 = DESKTOP | MOBILE;
+
+// Keep editor availability and the editable path boundary in one table.
+const FIELDS: &[(&str, u8)] = &[
+    ("common.accentColor", ALL),
+    ("common.backgroundColor", ALL),
+    ("common.cornerRadius", ALL),
+    ("common.font.family", MAC),
+    ("common.font.weight", MAC),
+    ("pc.panel.orientation", DESKTOP),
+    ("pc.panel.background", DESKTOP),
+    ("pc.panel.borderColor", DESKTOP),
+    ("pc.panel.borderWidth", DESKTOP),
+    ("pc.panel.cornerRadius", DESKTOP),
+    ("pc.panel.paddingX", DESKTOP),
+    ("pc.panel.paddingY", DESKTOP),
+    ("pc.panel.gap", DESKTOP),
+    ("pc.panel.preeditGap", DESKTOP),
+    ("pc.panel.shadow", MAC),
+    ("pc.font.size", DESKTOP),
+    ("pc.font.labelSize", DESKTOP),
+    ("pc.font.commentSize", DESKTOP),
+    ("pc.font.preeditSize", DESKTOP),
+    ("pc.candidate.background", DESKTOP),
+    ("pc.candidate.foreground", DESKTOP),
+    ("pc.candidate.selectedForeground", DESKTOP),
+    ("pc.candidate.selectedBackground", DESKTOP),
+    ("pc.candidate.labelColor", DESKTOP),
+    ("pc.candidate.selectedLabelColor", DESKTOP),
+    ("pc.candidate.commentColor", DESKTOP),
+    ("pc.candidate.selectedCommentColor", DESKTOP),
+    ("pc.candidate.hoverBackground", MAC),
+    ("pc.candidate.borderColor", DESKTOP),
+    ("pc.candidate.selectedBorderColor", DESKTOP),
+    ("pc.candidate.borderWidth", DESKTOP),
+    ("pc.candidate.cornerRadius", DESKTOP),
+    ("pc.candidate.labelSuffix", DESKTOP),
+    ("pc.modeHint.background", DESKTOP),
+    ("pc.modeHint.foreground", DESKTOP),
+    ("pc.modeHint.borderColor", DESKTOP),
+    ("pc.modeHint.borderWidth", DESKTOP),
+    ("pc.modeHint.fontSize", DESKTOP),
+    ("pc.modeHint.width", DESKTOP),
+    ("pc.modeHint.height", DESKTOP),
+    ("pc.modeHint.cornerRadius", DESKTOP),
+    ("pc.modeHint.shadow", MAC),
+    ("mobile.keyboard.background", MOBILE),
+    ("mobile.keyboard.key.background", MOBILE),
+    ("mobile.keyboard.key.foreground", MOBILE),
+    ("mobile.keyboard.key.hintForeground", MOBILE),
+    ("mobile.keyboard.key.cornerRadius", MOBILE),
+    ("mobile.keyboard.key.borderColor", MOBILE),
+    ("mobile.keyboard.key.borderWidth", MOBILE),
+    ("mobile.keyboard.key.shadowColor", MOBILE),
+    ("mobile.keyboard.key.shadowOffsetY", MOBILE),
+    ("mobile.keyboard.key.fontScale", MOBILE),
+    ("mobile.keyboard.key.hintFontScale", MOBILE),
+    ("mobile.keyboard.keyTypes.function.background", MOBILE),
+    ("mobile.keyboard.keyTypes.function.foreground", MOBILE),
+    ("mobile.keyboard.keyTypes.space.background", MOBILE),
+    ("mobile.keyboard.keyTypes.space.foreground", MOBILE),
+    ("mobile.keyboard.keyTypes.enter.background", MOBILE),
+    ("mobile.keyboard.keyTypes.enter.foreground", MOBILE),
+    ("mobile.keyboard.keyClasses.accent.background", MOBILE),
+    ("mobile.keyboard.keyClasses.accent.foreground", MOBILE),
+    ("mobile.candidateBar.fontScale", MOBILE),
+    ("mobile.candidateBar.showComment", MOBILE),
+    ("mobile.candidateBar.background", MOBILE),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorPlatform {
+    Macos,
+    Windows,
+    Linux,
+    LinuxKimpanel,
+    Android,
+    Ios,
+    Unsupported,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorCapabilities {
+    pub platform: &'static str,
+    pub supported_fields: Vec<&'static str>,
+}
+
+pub fn editor_capabilities(platform: EditorPlatform) -> EditorCapabilities {
+    let (name, mask) = match platform {
+        EditorPlatform::Macos => ("macos", MAC),
+        EditorPlatform::Windows => ("windows", WINDOWS),
+        EditorPlatform::Linux => ("linux", LINUX),
+        EditorPlatform::LinuxKimpanel => ("linuxKimpanel", 0),
+        EditorPlatform::Android => ("android", MOBILE),
+        EditorPlatform::Ios => ("ios", MOBILE),
+        EditorPlatform::Unsupported => ("unsupported", 0),
+    };
+    EditorCapabilities {
+        platform: name,
+        supported_fields: FIELDS
+            .iter()
+            .filter_map(|(path, supported)| (supported & mask != 0).then_some(*path))
+            .collect(),
+    }
+}
+
+/// Validate just the incoming leaf, so edits preserve unrelated local source text.
+pub fn edit_theme_source_field(
+    source: &ThemeSource,
+    target: &str,
+    path: &str,
+    value: Option<Value>,
+) -> Result<ThemeSource, String> {
+    if !matches!(target, "light" | "dark") {
+        return Err("Theme edit target must be light or dark".into());
+    }
+    if !FIELDS.iter().any(|(field, _)| *field == path) {
+        return Err("Unsupported theme editor field".into());
+    }
+    let parts: Vec<_> = path.split('.').collect();
+    let mut next = source.value.clone();
+    if let Some(value) = value {
+        let mut incoming = json!({"version":3,"meta":{"id":"my.validate","name":"Validate"}});
+        set_field(&mut incoming, &parts, value);
+        let incoming = crate::source::parse_theme_source_json(
+            &serde_json::to_string(&incoming).map_err(|error| error.to_string())?,
+        )?;
+        let pointer = format!("/{}", parts.join("/"));
+        let value = incoming
+            .value
+            .pointer(&pointer)
+            .ok_or("Invalid theme field value")?;
+        set_field(&mut next[target], &parts, value.clone());
+    } else {
+        if let Some(layer) = next.get_mut(target) {
+            remove_field(layer, &parts);
+            if layer.as_object().is_some_and(serde_json::Map::is_empty) {
+                next.as_object_mut().unwrap().remove(target);
+            }
+        }
+    }
+    crate::source::parse_local_theme_source(next)
+}
+
+fn set_field(root: &mut Value, path: &[&str], value: Value) {
+    let mut parent = root;
+    for key in path {
+        if !parent.is_object() {
+            *parent = json!({});
+        }
+        parent = &mut parent[*key];
+    }
+    *parent = value;
+}
+
+fn remove_field(root: &mut Value, path: &[&str]) {
+    let Some(object) = root.as_object_mut() else {
+        return;
+    };
+    if path.len() == 1 {
+        object.remove(path[0]);
+    } else if let Some(child) = object.get_mut(path[0]) {
+        remove_field(child, &path[1..]);
+        if child.as_object().is_some_and(serde_json::Map::is_empty) {
+            object.remove(path[0]);
+        }
+    }
+}
+
+pub fn resolve_theme_editor_preview(source_json: &str, dark: bool) -> Result<String, String> {
+    if source_json.len() > crate::source::MAX_THEME_SOURCE_BYTES {
+        return Err("Theme source exceeds 64 KiB".into());
+    }
+    let source = crate::source::parse_local_theme_source(
+        serde_json::from_str(source_json).map_err(|error| error.to_string())?,
+    )?;
+    let scheme = if dark {
+        EffectiveColorScheme::Dark
+    } else {
+        EffectiveColorScheme::Light
+    };
+    crate::resolved_theme_json(&crate::source::resolve_theme_source(&source, scheme))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> ThemeSource {
+        crate::source::parse_theme_source_json(
+            r##"{"version":3,"meta":{"id":"my.editor","name":"Editor"},"common":{"accentColor":"#123456"},"extension":{"keep":true}}"##,
+        ).unwrap()
+    }
+
+    #[test]
+    fn platform_tables_match_supported_rendering_fields() {
+        let supported = |platform| editor_capabilities(platform).supported_fields;
+        let mac = supported(EditorPlatform::Macos);
+        assert!(mac.contains(&"common.font.family"));
+        assert!(mac.contains(&"pc.panel.shadow"));
+        assert!(!mac.iter().any(|path| path.starts_with("mobile.")));
+        for platform in [EditorPlatform::Windows, EditorPlatform::Linux] {
+            let fields = supported(platform);
+            assert!(fields.contains(&"pc.panel.orientation"));
+            for unavailable in [
+                "common.font.family",
+                "common.font.weight",
+                "pc.panel.shadow",
+                "pc.candidate.hoverBackground",
+            ] {
+                assert!(!fields.contains(&unavailable));
+            }
+        }
+        assert!(supported(EditorPlatform::LinuxKimpanel).is_empty());
+        let mobile = supported(EditorPlatform::Android);
+        assert_eq!(mobile, supported(EditorPlatform::Ios));
+        assert!(mobile.contains(&"mobile.keyboard.key.shadowColor"));
+        assert!(mobile.contains(&"mobile.candidateBar.showComment"));
+        assert!(!mobile.iter().any(|path| path.starts_with("pc.")));
+        let mut unique = std::collections::HashSet::new();
+        for (path, _) in FIELDS {
+            assert!(unique.insert(path));
+            assert!(!path.contains("pressed"));
+            assert!(!path.contains("maxWidth"));
+        }
+    }
+
+    fn field_value(path: &str) -> Value {
+        match path.rsplit('.').next().unwrap() {
+            "family" => json!("A, B"),
+            "weight" => json!("bold"),
+            "orientation" => json!("horizontal"),
+            "shadow" | "showComment" => json!(false),
+            "labelSuffix" => json!(":"),
+            "fontScale" | "hintFontScale" => json!(1.1),
+            "size" | "labelSize" | "commentSize" | "preeditSize" | "fontSize" => json!(21),
+            "width" => json!(60),
+            "height" => json!(40),
+            "cornerRadius" | "paddingX" | "paddingY" | "gap" | "preeditGap" => json!(7),
+            "borderWidth" | "shadowOffsetY" => json!(1),
+            _ => json!("#98765432"),
+        }
+    }
+
+    #[test]
+    fn every_editor_field_writes_and_removes_in_each_variant() {
+        for target in ["light", "dark"] {
+            for (path, _) in FIELDS {
+                let original = source();
+                let edited =
+                    edit_theme_source_field(&original, target, path, Some(field_value(path)))
+                        .unwrap();
+                let pointer = format!("/{target}/{}", path.replace('.', "/"));
+                assert!(edited.value.pointer(&pointer).is_some(), "{pointer}");
+                let other = if target == "light" { "dark" } else { "light" };
+                assert_eq!(edited.value.get(other), original.value.get(other));
+                assert_eq!(edited.value["common"], original.value["common"]);
+                assert_eq!(edited.value["extension"], original.value["extension"]);
+                let roundtrip = edit_theme_source_field(&edited, target, path, None).unwrap();
+                assert!(roundtrip.value.pointer(&pointer).is_none());
+                assert_eq!(roundtrip.value, original.value);
+            }
+        }
+    }
+
+    #[test]
+    fn edit_boundary_rejects_unknown_paths_and_invalid_values_without_losing_source() {
+        let original = source();
+        for path in [
+            "meta.id",
+            "ui.colorScheme",
+            "pc.panel.maxWidth",
+            "../theme.yaml",
+            "mobile.keyboard.keyClasses.custom.background",
+        ] {
+            assert!(
+                edit_theme_source_field(&original, "light", path, Some(json!("#FFFFFF"))).is_err()
+            );
+        }
+        assert!(edit_theme_source_field(&original, "base", "common.accentColor", None).is_err());
+        for value in [json!(null), json!("bad"), json!(42), json!({"red":1})] {
+            assert!(
+                edit_theme_source_field(&original, "light", "common.accentColor", Some(value))
+                    .is_err()
+            );
+        }
+        let clamped = edit_theme_source_field(
+            &original,
+            "dark",
+            "mobile.keyboard.key.fontScale",
+            Some(json!(9)),
+        )
+        .unwrap();
+        assert_eq!(
+            clamped.value["dark"]["mobile"]["keyboard"]["key"]["fontScale"],
+            1.3
+        );
+        let preview =
+            resolve_theme_editor_preview(&serde_json::to_string(&clamped.value).unwrap(), true)
+                .unwrap();
+        let preview: Value = serde_json::from_str(&preview).unwrap();
+        assert_eq!(preview["mobile"]["isDark"], true);
+        assert_eq!(preview["mobile"]["keyboard"]["key"]["fontScale"], 1.3);
+    }
+}

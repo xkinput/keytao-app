@@ -183,6 +183,8 @@ enum KeyTaoIOSBundledData {
         }
       case "importLocalSchemeDirectory":
         importLocalSchemeDirectory(result)
+      case "shareThemeFile":
+        shareThemeFile(call.arguments, result: result)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -209,6 +211,54 @@ enum KeyTaoIOSBundledData {
       ? (UserDefaults(suiteName: appGroupIdentifier)?.bool(forKey: "keyboardFullAccess") == true) as Any
       : NSNull()
     return ["enabled": enabled, "fullAccess": fullAccess]
+  }
+
+  private func shareThemeFile(_ arguments: Any?, result: @escaping FlutterResult) {
+    guard let arguments = arguments as? [String: Any],
+      let fileName = arguments["fileName"] as? String,
+      let json = arguments["json"] as? String,
+      fileName.hasSuffix(".keytao-theme.json")
+    else {
+      result(FlutterError(code: "INVALID_THEME_FILE", message: "主题文件无效", details: nil))
+      return
+    }
+    let id = String(fileName.dropLast(".keytao-theme.json".count))
+    let data = Data(json.utf8)
+    guard (3...64).contains(id.count),
+      id.range(of: "\\A[a-z0-9][a-z0-9_-]*(\\.[a-z0-9_-]+)*\\z", options: .regularExpression) != nil,
+      data.count <= 64 * 1024
+    else {
+      result(FlutterError(code: "INVALID_THEME_FILE", message: "主题文件无效或超过 64 KiB", details: nil))
+      return
+    }
+    guard var presenter = UIApplication.shared.connectedScenes
+      .compactMap({ $0 as? UIWindowScene })
+      .filter({ $0.activationState == .foregroundActive })
+      .flatMap({ $0.windows })
+      .first(where: { $0.isKeyWindow })?.rootViewController
+    else {
+      result(FlutterError(code: "SHARE_UNAVAILABLE", message: "无法打开分享面板", details: nil))
+      return
+    }
+    while let presented = presenter.presentedViewController { presenter = presented }
+    let manager = FileManager.default
+    let directory = manager.temporaryDirectory
+      .appendingPathComponent("theme-share-\(UUID().uuidString)", isDirectory: true)
+    do {
+      try manager.createDirectory(at: directory, withIntermediateDirectories: false)
+      let file = directory.appendingPathComponent(fileName)
+      try data.write(to: file, options: .atomic)
+      let activity = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+      activity.completionWithItemsHandler = { _, _, _, _ in try? manager.removeItem(at: directory) }
+      activity.popoverPresentationController?.sourceView = presenter.view
+      activity.popoverPresentationController?.sourceRect = CGRect(
+        x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1
+      )
+      presenter.present(activity, animated: true) { result(nil) }
+    } catch {
+      try? manager.removeItem(at: directory)
+      result(FlutterError(code: "THEME_SHARE_FAILED", message: error.localizedDescription, details: nil))
+    }
   }
 
   private func importLocalSchemeDirectory(_ result: @escaping FlutterResult) {

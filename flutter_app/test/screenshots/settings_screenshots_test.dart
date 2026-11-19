@@ -36,6 +36,7 @@ class _ScreenshotCore implements RustLibApi {
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       switch (invocation.memberName) {
+        #crateApiCoreGetThemeLibrary => Future.value(<ThemeSummaryDto>[]),
         #crateApiCoreListUserWords => Future.value([_conflict.entry]),
         #crateApiCoreCompareUserWords => Future.value([_conflict]),
         _ => throw StateError(

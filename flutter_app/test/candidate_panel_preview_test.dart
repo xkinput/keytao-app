@@ -78,11 +78,45 @@ class _PreviewController extends ViewController {
     );
     return true;
   }
+
+  @override
+  Future<Map<String, dynamic>> updateThemeEditor({
+    required String target,
+    required String path,
+    Object? value,
+  }) async {
+    if (path == 'pc.font.size' && value is num) {
+      savedFonts.add(value.toDouble());
+    }
+    if (saveGate != null) await saveGate!.future;
+    switch (path) {
+      case 'common.accentColor':
+        updateSettings(accentColor: value as String? ?? '#3B73D9');
+      case 'common.backgroundColor':
+        updateSettings(backgroundColor: value as String? ?? '');
+      case 'common.cornerRadius':
+        updateSettings(
+          cornerRadius: (value as num?)?.toDouble(),
+          resetCornerRadius: value == null,
+        );
+      case 'pc.font.size':
+        updateSettings(fontSize: (value as num?)?.toDouble() ?? 20);
+      case 'pc.panel.orientation':
+        updateSettings(
+          orientation: PanelOrientationDto.values.byName(value as String),
+        );
+    }
+    return getThemeEditor();
+  }
 }
 
 final _panel = find.byKey(const ValueKey('candidate-panel-preview'));
 final _candidates = find.byKey(const ValueKey('candidate-preview-candidates'));
 final _firstText = find.byKey(const ValueKey('candidate-preview-text-0'));
+Finder _pcText(String text) => find.descendant(
+  of: find.byType(CandidatePanelPreview),
+  matching: find.text(text),
+);
 
 void _narrowScreen(WidgetTester tester) {
   tester.view.devicePixelRatio = 1;
@@ -163,7 +197,7 @@ void main() {
 
   test('accent parsing falls back safely for invalid settings', () {
     expect(parseAccentColor('#ab12ef'), const Color(0xFFAB12EF));
-    for (final value in ['', '#', '#bad', '#GGGGGG', 'invalid']) {
+    for (final value in ['', '#', '#GGGGGG', 'invalid']) {
       expect(parseAccentColor(value), const Color(0xFF3B73D9));
     }
   });
@@ -188,18 +222,34 @@ void main() {
     );
     await tester.pumpAndSettle();
     for (final key in 'qwertyuiopasdfghjkl'.split('')) {
-      expect(find.text(key), findsOneWidget);
+      expect(find.byKey(ValueKey('keyboard-preview-key-$key')), findsOneWidget);
     }
-    // The preview shows only the toolbar and the top two letter rows.
+    // The preview keeps two letter rows and the edited key types visible.
     for (final key in 'zxcvbnm'.split('')) {
       expect(find.text(key), findsNothing);
     }
-    for (final label in ['⇧', '⌫', '123', '，', '键道6', '。', '↵']) {
+    for (final label in ['⇧', '⌫', '，', '键道6', '。']) {
       expect(find.byKey(ValueKey('keyboard-preview-key-$label')), findsNothing);
     }
-    expect(find.text('1'), findsOneWidget);
-    expect(find.text('@'), findsOneWidget);
-    expect(find.byIcon(FLucideIcons.ellipsis), findsOneWidget);
+    for (final label in ['123', '符', '空格', '↵']) {
+      expect(
+        find.byKey(ValueKey('keyboard-preview-key-$label')),
+        findsOneWidget,
+      );
+    }
+    final keyboard = find.byKey(const ValueKey('mobile-keyboard-preview'));
+    expect(
+      find.descendant(of: keyboard, matching: find.text('1')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: keyboard, matching: find.text('@')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('mobile-candidate-bar-preview')),
+      findsOneWidget,
+    );
     expect(find.bySemanticsLabel('KeyTao 键盘预览，键道6，静态展示'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -220,11 +270,11 @@ void main() {
         ]
         ..updateSettings(orientation: orientation);
       await _pumpSettings(tester, controller);
-      expect(find.text('方案首选'), findsOneWidget);
-      expect(find.text('~real'), findsOneWidget);
-      expect(find.text('词典注释'), findsOneWidget);
-      expect(find.text('🙂'), findsOneWidget);
-      expect(find.text('这'), findsNothing);
+      expect(_pcText('方案首选'), findsOneWidget);
+      expect(_pcText('~real'), findsOneWidget);
+      expect(_pcText('词典注释'), findsOneWidget);
+      expect(_pcText('🙂'), findsOneWidget);
+      expect(_pcText('这'), findsNothing);
       expect(
         find.byKey(const ValueKey('candidate-preview-text-3')),
         findsOneWidget,
@@ -243,8 +293,8 @@ void main() {
       controller.candidatePageSize = 2;
       controller.updateSettings();
       await tester.pumpAndSettle();
-      expect(find.text('第二词'), findsOneWidget);
-      expect(find.text('第三词'), findsNothing);
+      expect(_pcText('第二词'), findsOneWidget);
+      expect(_pcText('第三词'), findsNothing);
       expect(
         find.byKey(const ValueKey('candidate-preview-text-2')),
         findsNothing,
@@ -278,7 +328,7 @@ void main() {
             .data,
         '',
       );
-      expect(find.text('支'), findsNothing);
+      expect(_pcText('支'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
@@ -375,10 +425,11 @@ void main() {
       await tester.ensureVisible(horizontal);
       await tester.tap(horizontal);
       await tester.pump();
-      expect(tester.widget<Flex>(_candidates).direction, Axis.horizontal);
+      expect(tester.widget<Flex>(_candidates).direction, Axis.vertical);
       expect(controller.uiSettings!.orientation, PanelOrientationDto.vertical);
       controller.saveGate!.complete(true);
       await tester.pumpAndSettle();
+      expect(tester.widget<Flex>(_candidates).direction, Axis.horizontal);
       expect(tester.getSize(_panel).width, lessThanOrEqualTo(368));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -414,23 +465,39 @@ void main() {
     }
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  testWidgets('automatic preview colors follow system brightness', (
-    tester,
-  ) async {
-    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
-    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
-    final controller = _PreviewController();
-    await _pumpSettings(tester, controller);
-    final light = _panelColor(tester);
-    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
-    await tester.pumpAndSettle();
-    expect(_panelColor(tester), isNot(light));
-    controller.updateSettings(colorScheme: UiColorSchemeDto.light);
-    await tester.pumpAndSettle();
-    expect(_panelColor(tester), light);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+  testWidgets(
+    'editing target controls preview colors independently of appearance',
+    (tester) async {
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+      addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+      final controller = _PreviewController();
+      await _pumpSettings(tester, controller);
+      final light = _panelColor(tester);
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+      await tester.pumpAndSettle();
+      expect(_panelColor(tester), light);
+      ChoiceSetting<String> editTarget() =>
+          tester.widget<ChoiceSetting<String>>(
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is ChoiceSetting<String> && widget.label == '编辑目标',
+            ),
+          );
+      editTarget().onChanged!('dark');
+      await tester.pumpAndSettle();
+      final dark = _panelColor(tester);
+      expect(dark, isNot(light));
+      controller.updateSettings(colorScheme: UiColorSchemeDto.light);
+      await tester.pumpAndSettle();
+      expect(_panelColor(tester), dark);
+      editTarget().onChanged!('light');
+      await tester.pumpAndSettle();
+      expect(_panelColor(tester), light);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
 
   for (final entry in {
     BridgePlatform.macOs: TargetPlatform.macOS,
@@ -452,7 +519,9 @@ void main() {
       );
       radius.onPreview!(24);
       await tester.pump();
-      expect(decoration(panel).borderRadius, BorderRadius.circular(24));
+      if (!controller.isMobile) {
+        expect(decoration(panel).borderRadius, BorderRadius.circular(24));
+      }
       final preview = tester.widget<CandidatePanelPreview>(
         find.byType(CandidatePanelPreview),
       );
@@ -466,7 +535,9 @@ void main() {
       }
       radius.onPreview!(0);
       await tester.pump();
-      expect(decoration(panel).borderRadius, BorderRadius.zero);
+      if (!controller.isMobile) {
+        expect(decoration(panel).borderRadius, BorderRadius.zero);
+      }
       controller.saveGate = Completer<bool>();
       radius.onChanged!(0);
       await tester.pump();
@@ -502,7 +573,7 @@ void main() {
         expect(
           decoration(find.byKey(const ValueKey('keyboard-preview-key-q')))
               .color,
-          const Color(0xAA2A303A),
+          const Color(0xD2FFFFFF),
         );
       }
       await tester.tap(find.text(AppStrings.cancel));
@@ -512,13 +583,15 @@ void main() {
       await editBackground();
       controller.saveGate = Completer<bool>();
       await tester.tap(find.text(AppStrings.apply));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 250));
       expect(controller.uiSettings!.backgroundColor, isEmpty);
       expect(decoration(panel).color, isNot(originalColor));
       controller.saveGate!.complete(true);
       await tester.pumpAndSettle();
       expect(controller.uiSettings!.backgroundColor, '#102030');
-      expect(decoration(panel).borderRadius, BorderRadius.zero);
+      if (!controller.isMobile) {
+        expect(decoration(panel).borderRadius, BorderRadius.zero);
+      }
 
       final reset = find.descendant(
         of: picker,

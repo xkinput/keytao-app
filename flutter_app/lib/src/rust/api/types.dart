@@ -1224,6 +1224,180 @@ class SchemeUpdateDto {
           hasUpdate == other.hasUpdate;
 }
 
+class ThemeExportDto {
+  final String id;
+  final String fileName;
+  final String json;
+  final String shareString;
+  final bool useFile;
+
+  const ThemeExportDto({
+    required this.id,
+    required this.fileName,
+    required this.json,
+    required this.shareString,
+    required this.useFile,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      fileName.hashCode ^
+      json.hashCode ^
+      shareString.hashCode ^
+      useFile.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThemeExportDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          fileName == other.fileName &&
+          json == other.json &&
+          shareString == other.shareString &&
+          useFile == other.useFile;
+}
+
+class ThemeImportPreviewDto {
+  final String id;
+  final String name;
+  final bool canOverwrite;
+  final bool conflict;
+
+  const ThemeImportPreviewDto({
+    required this.id,
+    required this.name,
+    required this.canOverwrite,
+    required this.conflict,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ name.hashCode ^ canOverwrite.hashCode ^ conflict.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThemeImportPreviewDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          canOverwrite == other.canOverwrite &&
+          conflict == other.conflict;
+}
+
+class ThemeImportResultDto {
+  final String id;
+  final String name;
+  final String disposition;
+  final String? renamedFrom;
+  final List<String> dropped;
+  final List<String> clamped;
+  final List<String> unknown;
+  final List<String> warnings;
+
+  const ThemeImportResultDto({
+    required this.id,
+    required this.name,
+    required this.disposition,
+    this.renamedFrom,
+    required this.dropped,
+    required this.clamped,
+    required this.unknown,
+    required this.warnings,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      disposition.hashCode ^
+      renamedFrom.hashCode ^
+      dropped.hashCode ^
+      clamped.hashCode ^
+      unknown.hashCode ^
+      warnings.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThemeImportResultDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          disposition == other.disposition &&
+          renamedFrom == other.renamedFrom &&
+          dropped == other.dropped &&
+          clamped == other.clamped &&
+          unknown == other.unknown &&
+          warnings == other.warnings;
+}
+
+class ThemePreviewColorsDto {
+  final String background;
+  final String foreground;
+  final String accent;
+
+  const ThemePreviewColorsDto({
+    required this.background,
+    required this.foreground,
+    required this.accent,
+  });
+
+  @override
+  int get hashCode =>
+      background.hashCode ^ foreground.hashCode ^ accent.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThemePreviewColorsDto &&
+          runtimeType == other.runtimeType &&
+          background == other.background &&
+          foreground == other.foreground &&
+          accent == other.accent;
+}
+
+class ThemeSummaryDto {
+  final String id;
+  final String name;
+  final bool builtIn;
+  final bool current;
+  final ThemePreviewColorsDto light;
+  final ThemePreviewColorsDto dark;
+
+  const ThemeSummaryDto({
+    required this.id,
+    required this.name,
+    required this.builtIn,
+    required this.current,
+    required this.light,
+    required this.dark,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      builtIn.hashCode ^
+      current.hashCode ^
+      light.hashCode ^
+      dark.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThemeSummaryDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          builtIn == other.builtIn &&
+          current == other.current &&
+          light == other.light &&
+          dark == other.dark;
+}
+
 enum UiColorSchemeDto { auto, light, dark }
 
 class UserDictionaryDeletionConfirmationDto {

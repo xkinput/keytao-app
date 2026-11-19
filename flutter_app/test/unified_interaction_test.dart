@@ -16,18 +16,13 @@ class _EditingController extends ViewController {
   String? savedAccent;
   final keyboardPatches = <Map<String, Object>>[];
   @override
-  Future<bool> saveUi({
-    UiColorSchemeDto? colorScheme,
-    PanelOrientationDto? orientation,
-    bool? hideCandidatePanel,
-    String? accentColor,
-    double? cornerRadius,
-    bool resetCornerRadius = false,
-    String? backgroundColor,
-    double? fontSize,
+  Future<Map<String, dynamic>> updateThemeEditor({
+    required String target,
+    required String path,
+    Object? value,
   }) async {
-    savedAccent = accentColor;
-    return true;
+    if (path == 'common.accentColor') savedAccent = value as String?;
+    return getThemeEditor();
   }
 
   @override
@@ -116,7 +111,7 @@ void main() {
       of: find.byType(FDialog),
       matching: find.byType(EditableText),
     );
-    await tester.enterText(field, '#bad');
+    await tester.enterText(field, '#GGGGGG');
     await tester.pump();
     expect(
       tester

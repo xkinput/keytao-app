@@ -7,14 +7,40 @@ import 'theme.dart';
 import 'widgets.dart';
 
 Color parseAccentColor(String hex) {
-  final value = hex.startsWith('#') && hex.length == 7
-      ? int.tryParse(hex.substring(1), radix: 16)
-      : null;
-  return Color(0xFF000000 | (value ?? 0x3B73D9));
+  if (hex == 'transparent') return Colors.transparent;
+  final digits = hex.startsWith('#') ? hex.substring(1) : '';
+  final expanded = digits.length == 3
+      ? digits.split('').map((digit) => '$digit$digit').join()
+      : digits;
+  final value = int.tryParse(expanded, radix: 16);
+  if (value == null) return const Color(0xFF3B73D9);
+  return expanded.length == 8
+      ? Color(((value & 0xff) << 24) | (value >> 8))
+      : Color(0xFF000000 | value);
 }
 
-String _hex(Color color) =>
-    '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+String _hex(Color color) {
+  final value = color.toARGB32();
+  final rgb = (value & 0xFFFFFF).toRadixString(16).padLeft(6, '0');
+  final alpha = value >> 24;
+  return '#$rgb${alpha == 255 ? '' : alpha.toRadixString(16).padLeft(2, '0')}'
+      .toUpperCase();
+}
+
+Future<String?> showThemeColorPicker(
+  BuildContext context, {
+  required String initial,
+  required String title,
+  ValueChanged<String>? onPreview,
+}) => showFDialog<String>(
+  context: context,
+  builder: (_, _, animation) => _ColorDialog(
+    initial: initial,
+    animation: animation,
+    title: title,
+    onPreview: onPreview,
+  ),
+);
 
 class AccentPicker extends StatelessWidget {
   const AccentPicker({
@@ -22,18 +48,30 @@ class AccentPicker extends StatelessWidget {
     required this.controller,
     this.onPreview,
     this.background = false,
+    this.value,
+    this.onChanged,
+    this.enabled = true,
   });
   final AppController controller;
   final ValueChanged<String>? onPreview;
   final bool background;
-  String get _selected => background
-      ? controller.uiSettings!.backgroundColor
-      : controller.uiSettings!.accentColor;
+  final String? value;
+  final Future<void> Function(String)? onChanged;
+  final bool enabled;
+  String get _selected =>
+      value ??
+      (background
+          ? controller.uiSettings!.backgroundColor
+          : controller.uiSettings!.accentColor);
   String get _chooseLabel =>
       background ? '选择背景色' : AppStrings.chooseAccentColor;
 
   Future<void> _save(String value) async {
     onPreview?.call(value);
+    if (onChanged case final change?) {
+      await change(value);
+      return;
+    }
     final saved = await (background
         ? controller.saveUi(backgroundColor: value)
         : controller.saveUi(accentColor: value));
@@ -41,14 +79,11 @@ class AccentPicker extends StatelessWidget {
   }
 
   Future<void> _pick(BuildContext context, String initial) async {
-    final value = await showFDialog<String>(
-      context: context,
-      builder: (_, _, animation) => _ColorDialog(
-        initial: initial,
-        animation: animation,
-        title: _chooseLabel,
-        onPreview: onPreview,
-      ),
+    final value = await showThemeColorPicker(
+      context,
+      initial: initial,
+      title: _chooseLabel,
+      onPreview: onPreview,
     );
     if (value != null) {
       await _save(value);
@@ -59,9 +94,12 @@ class AccentPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selected = _selected.toUpperCase();
+    final raw = _selected.toUpperCase();
+    final selected = raw.length == 9 && raw.endsWith('FF')
+        ? raw.substring(0, 7)
+        : raw;
     var defaultColor = '#3B73D9';
-    if (background) {
+    if (background && value == null) {
       final settings = controller.uiSettings!;
       final theme = controller.resolveCandidatePanelPreview(
         colorScheme: settings.colorScheme,
@@ -107,7 +145,7 @@ class AccentPicker extends StatelessWidget {
             focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
               borderRadius: BorderRadius.circular(8),
             ),
-            onPress: controller.busy
+            onPress: controller.busy || !enabled
                 ? null
                 : () => custom ? _pick(context, hex) : _save(reset ? '' : hex),
             child: AnimatedContainer(
@@ -197,6 +235,9 @@ class BackgroundPicker extends AccentPicker {
     super.key,
     required super.controller,
     super.onPreview,
+    super.value,
+    super.onChanged,
+    super.enabled,
   }) : super(background: true);
 }
 
@@ -326,19 +367,31 @@ class _ColorDialogState extends State<_ColorDialog> {
               '${(value * 360).round()}°',
         ),
         const SizedBox(height: 16),
+        FSlider(
+          control: FSliderControl.liftedContinuous(
+            value: FSliderValue(max: _color.alpha),
+            onChange: (value) => _update(_color.withAlpha(value.max)),
+          ),
+          tooltipBuilder: (_, value) => Text('${(value * 100).round()}%'),
+          semanticValueFormatterCallback: (value) =>
+              '不透明度 ${(value * 100).round()}%',
+        ),
+        const SizedBox(height: 16),
         FTextField(
           label: const Text('HEX'),
           control: FTextFieldControl.managed(
             controller: _text,
             onChange: (value) => setState(() {
-              _valid = RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(value.text);
+              _valid = RegExp(
+                r'^(transparent|#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}))$',
+              ).hasMatch(value.text);
               if (_valid) {
                 _color = HSVColor.fromColor(parseAccentColor(value.text));
                 widget.onPreview?.call(_hex(_color.toColor()));
               }
             }),
           ),
-          maxLength: 7,
+          maxLength: 11,
           onSubmit: (_) {
             if (_valid) Navigator.pop(context, _hex(_color.toColor()));
           },

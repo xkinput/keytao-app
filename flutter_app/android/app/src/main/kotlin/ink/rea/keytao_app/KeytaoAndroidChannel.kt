@@ -77,6 +77,7 @@ class KeytaoAndroidChannel(
                 "adoptAppLogger" -> adoptAppLogger(reply)
                 "openUrl" -> openUrl(call, reply)
                 "shareRuntimeLog" -> shareRuntimeLog(reply)
+                "shareThemeFile" -> shareThemeFile(call, reply)
                 else -> reply.notImplemented()
             }
         } catch (ex: Exception) {
@@ -186,6 +187,37 @@ class KeytaoAndroidChannel(
             return
         }
         prepareRuntimeLogShare(reply)
+    }
+
+    private fun shareThemeFile(call: MethodCall, reply: Reply) {
+        val fileName = call.argument<String>("fileName") ?: return reply.error("缺少主题文件名")
+        val json = call.argument<String>("json") ?: return reply.error("缺少主题内容")
+        val id = fileName.removeSuffix(".keytao-theme.json")
+        require(fileName.endsWith(".keytao-theme.json") && id.length in 3..64 &&
+            id.matches(Regex("[a-z0-9][a-z0-9_-]*(\\.[a-z0-9_-]+)*"))) { "主题文件名无效" }
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        require(bytes.size <= 64 * 1024) { "主题内容超过 64 KiB" }
+        val directory = File(activity.cacheDir, "theme-share/${UUID.randomUUID()}")
+        check(directory.mkdirs()) { "无法创建主题分享文件" }
+        val file = File(directory, fileName)
+        try {
+            file.writeBytes(bytes)
+            val uri = runtimeLogFileUri(file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(activity.contentResolver, fileName, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(Intent.createChooser(intent, "分享主题").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+            reply.success()
+        } catch (ex: Exception) {
+            file.delete()
+            directory.delete()
+            throw ex
+        }
     }
 
     private fun handleLogExportPermission(reply: Reply) {

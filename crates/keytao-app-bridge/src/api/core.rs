@@ -44,8 +44,10 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
 
 pub fn active_schema_logo_path() -> Result<Option<String>, String> {
     let state = runtime::state()?;
-    Ok(keytao_app_core::deploy::active_schema_logo_path(&state.host.user_root()?)
-        .map(|path| path.to_string_lossy().into_owned()))
+    Ok(
+        keytao_app_core::deploy::active_schema_logo_path(&state.host.user_root()?)
+            .map(|path| path.to_string_lossy().into_owned()),
+    )
 }
 
 pub fn onboarding() -> Result<OnboardingDto, String> {
@@ -71,8 +73,10 @@ pub fn record_installed_scheme(scheme: String, version: Option<String>) -> Resul
 }
 
 pub fn package_schemas(scheme_key: String) -> Result<Vec<PackageSchemaDto>, String> {
-    runtime::dto(keytao_app_core::package_schemas::package_schemas(&runtime::state()?.core, &scheme_key)
-        .map_err(|error| error.to_string())?)
+    runtime::dto(
+        keytao_app_core::package_schemas::package_schemas(&runtime::state()?.core, &scheme_key)
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result<bool, String> {
@@ -83,14 +87,20 @@ pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result
         .map_err(|error| error.to_string())?;
     if keytao_app_core::packages::list_installed_packages(&state.core)
         .map_err(|error| error.to_string())?
-        .iter().any(|package| package.scheme_key == scheme_key && package.active)
+        .iter()
+        .any(|package| package.scheme_key == scheme_key && package.active)
     {
-        keytao_app_core::packages::activate_scheme(&state.core, &scheme_key, &root,
+        keytao_app_core::packages::activate_scheme(
+            &state.core,
+            &scheme_key,
+            &root,
             #[cfg(target_os = "android")]
             |_| Box::pin(async { Err("Unused extraction callback".into()) }),
             #[cfg(target_os = "windows")]
             keytao_app_core::install::finish_windows_scheme_install,
-        ).await.map_err(|error| error.to_string())?;
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         Ok(true)
     } else if keytao_core::is_addon_schema(&scheme_key) {
         keytao_app_core::package_schemas::register_addon_selection(&state.core, &scheme_key, &root)
@@ -118,7 +128,9 @@ pub async fn package_orphan_report() -> Result<PackageOrphanReportDto, String> {
     )
 }
 
-pub async fn trash_package_orphans(files: Vec<PackageOrphanFileDto>) -> Result<Vec<String>, String> {
+pub async fn trash_package_orphans(
+    files: Vec<PackageOrphanFileDto>,
+) -> Result<Vec<String>, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let files: Vec<_> = files
@@ -221,17 +233,29 @@ pub async fn list_cloud_packages() -> Result<String, String> {
 pub async fn preview_cloud_package(scheme_key: String) -> Result<String, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    let preview = keytao_app_core::cloud_packages::preview(&state.core, &scheme_key, &state.host.user_root()?)
-        .map_err(|error| error.to_string())?;
+    let preview = keytao_app_core::cloud_packages::preview(
+        &state.core,
+        &scheme_key,
+        &state.host.user_root()?,
+    )
+    .map_err(|error| error.to_string())?;
     serde_json::to_string(&preview).map_err(|error| error.to_string())
 }
 
-pub async fn upload_cloud_package(scheme_key: String, expected_sha256: Option<String>) -> Result<String, String> {
+pub async fn upload_cloud_package(
+    scheme_key: String,
+    expected_sha256: Option<String>,
+) -> Result<String, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    let package = keytao_app_core::cloud_packages::upload(&state.core, &scheme_key, &state.host.user_root()?, expected_sha256.as_deref())
-        .await
-        .map_err(|error| error.to_string())?;
+    let package = keytao_app_core::cloud_packages::upload(
+        &state.core,
+        &scheme_key,
+        &state.host.user_root()?,
+        expected_sha256.as_deref(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     serde_json::to_string(&package).map_err(|error| error.to_string())
 }
 
@@ -240,11 +264,18 @@ pub fn record_android_deploy(success: bool) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = runtime::state()?;
-        keytao_app_core::deploy::record_android_result(&state.core, &state.host.user_root()?, success)
-            .map_err(|error| error.to_string())
+        keytao_app_core::deploy::record_android_result(
+            &state.core,
+            &state.host.user_root()?,
+            success,
+        )
+        .map_err(|error| error.to_string())
     }
     #[cfg(not(target_os = "android"))]
-    { let _ = success; Err("Android deployment result is only available on Android".into()) }
+    {
+        let _ = success;
+        Err("Android deployment result is only available on Android".into())
+    }
 }
 
 pub async fn download_cloud_package(id: String) -> Result<(), String> {
@@ -1057,6 +1088,86 @@ pub fn set_schema_switch(
     .map_err(|error| error.to_string())
 }
 
+fn theme_library_host() -> Result<crate::host::BridgeHost, String> {
+    let state = runtime::state()?;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    state.host.require_default_theme_root()?;
+    Ok(state.host.clone())
+}
+
+pub fn get_theme_library() -> Result<Vec<ThemeSummaryDto>, String> {
+    runtime::dto(keytao_app_core::theme_library::get_theme_library(
+        theme_library_host()?,
+    )?)
+}
+
+pub fn get_theme_editor() -> Result<String, String> {
+    keytao_app_core::theme_library::get_theme_editor(theme_library_host()?)
+}
+
+pub fn update_theme_editor(
+    target: String,
+    path: String,
+    value_json: Option<String>,
+) -> Result<String, String> {
+    keytao_app_core::theme_library::update_theme_editor(
+        theme_library_host()?,
+        &target,
+        &path,
+        value_json.as_deref(),
+    )
+}
+
+pub fn set_theme_editor_color_scheme(color_scheme: Option<UiColorSchemeDto>) -> Result<String, String> {
+    keytao_app_core::theme_library::set_theme_editor_color_scheme(
+        theme_library_host()?,
+        color_scheme.map(|color_scheme| match color_scheme {
+            UiColorSchemeDto::Auto => keytao_theme::UiColorScheme::Auto,
+            UiColorSchemeDto::Light => keytao_theme::UiColorScheme::Light,
+            UiColorSchemeDto::Dark => keytao_theme::UiColorScheme::Dark,
+        }),
+    )
+}
+
+#[flutter_rust_bridge::frb(sync)]
+pub fn resolve_theme_editor_preview(source_json: String, dark: bool) -> Result<String, String> {
+    keytao_theme::editor::resolve_theme_editor_preview(&source_json, dark)
+}
+
+pub fn apply_theme(id: String) -> Result<(), String> {
+    keytao_app_core::theme_library::apply_theme(theme_library_host()?, &id)
+}
+
+pub fn duplicate_theme(id: String) -> Result<String, String> {
+    keytao_app_core::theme_library::duplicate_theme(theme_library_host()?, &id)
+}
+
+pub fn delete_theme(id: String) -> Result<(), String> {
+    keytao_app_core::theme_library::delete_theme(theme_library_host()?, &id)
+}
+
+pub fn export_theme(id: String) -> Result<ThemeExportDto, String> {
+    runtime::dto(keytao_app_core::theme_library::export_theme(
+        theme_library_host()?,
+        &id,
+    )?)
+}
+
+pub fn preview_theme_import(text: String) -> Result<ThemeImportPreviewDto, String> {
+    runtime::dto(keytao_app_core::theme_library::preview_theme_import(
+        theme_library_host()?,
+        &text,
+    )?)
+}
+
+pub fn import_theme(text: String, overwrite: bool) -> Result<ThemeImportResultDto, String> {
+    runtime::dto(keytao_app_core::theme_library::import_theme(
+        theme_library_host()?,
+        &text,
+        overwrite,
+    )?)
+}
+
 pub fn get_ime_ui_settings() -> Result<ImeUiSettingsDto, String> {
     let state = runtime::state()?;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1191,8 +1302,8 @@ pub fn get_candidate_page_size() -> Result<Option<u8>, String> {
 pub async fn preview_candidates(size: Option<u8>) -> Result<String, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    let preview = keytao_app_core::deploy::preview_candidates(&state.core, state.host.clone(), size)
-        .await?;
+    let preview =
+        keytao_app_core::deploy::preview_candidates(&state.core, state.host.clone(), size).await?;
     serde_json::to_string(&preview).map_err(|error| error.to_string())
 }
 
@@ -1672,29 +1783,25 @@ mod tests {
         assert_eq!(theme["candidate"]["selectedLabelColor"]["red"], 0x12);
         assert_eq!(theme["panel"]["cornerRadius"], 24.0);
         assert_eq!(theme["panel"]["background"]["red"], 0x65);
-        assert!(
-            resolve_candidate_panel_preview(
+        assert!(resolve_candidate_panel_preview(
+            UiColorSchemeDto::Light,
+            "invalid".into(),
+            20.0,
+            false,
+            None,
+            String::new(),
+        )
+        .is_err());
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(resolve_candidate_panel_preview(
                 UiColorSchemeDto::Light,
-                "invalid".into(),
-                20.0,
+                "#123456".into(),
+                invalid,
                 false,
                 None,
                 String::new(),
             )
-            .is_err()
-        );
-        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert!(
-                resolve_candidate_panel_preview(
-                    UiColorSchemeDto::Light,
-                    "#123456".into(),
-                    invalid,
-                    false,
-                    None,
-                    String::new(),
-                )
-                .is_err()
-            );
+            .is_err());
         }
     }
 
@@ -1739,7 +1846,11 @@ mod tests {
         assert_eq!(existing.app_version, first.app_version);
 
         let mut equivalent_root = config();
-        equivalent_root.user_root_override.as_mut().unwrap().push('/');
+        equivalent_root
+            .user_root_override
+            .as_mut()
+            .unwrap()
+            .push('/');
         let existing = init_core(equivalent_root).unwrap();
         assert_eq!(existing.user_root, first.user_root);
     }
@@ -1747,7 +1858,13 @@ mod tests {
     #[test]
     fn init_core_rejects_changed_config() {
         init_core(config()).unwrap();
-        for field in ["data_dir", "cache_dir", "resource_dir", "platform", "user_root"] {
+        for field in [
+            "data_dir",
+            "cache_dir",
+            "resource_dir",
+            "platform",
+            "user_root",
+        ] {
             let mut changed = config();
             match field {
                 "data_dir" => changed.data_dir.push_str("-other"),
@@ -1760,7 +1877,11 @@ mod tests {
                         BridgePlatform::Android
                     };
                 }
-                "user_root" => changed.user_root_override.as_mut().unwrap().push_str("-other"),
+                "user_root" => changed
+                    .user_root_override
+                    .as_mut()
+                    .unwrap()
+                    .push_str("-other"),
                 _ => unreachable!(),
             }
             assert!(

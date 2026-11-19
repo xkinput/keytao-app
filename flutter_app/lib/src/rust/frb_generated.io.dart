@@ -101,6 +101,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_8(dynamic raw);
 
   @protected
+  UiColorSchemeDto dco_decode_box_autoadd_ui_color_scheme_dto(dynamic raw);
+
+  @protected
   UserDictionaryDeletionConfirmationDto
   dco_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(dynamic raw);
 
@@ -221,6 +224,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SchemeUpdateDto> dco_decode_list_scheme_update_dto(dynamic raw);
 
   @protected
+  List<ThemeSummaryDto> dco_decode_list_theme_summary_dto(dynamic raw);
+
+  @protected
   List<UserDictionaryDeletionDto> dco_decode_list_user_dictionary_deletion_dto(
     dynamic raw,
   );
@@ -284,6 +290,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_8(dynamic raw);
 
   @protected
+  UiColorSchemeDto? dco_decode_opt_box_autoadd_ui_color_scheme_dto(dynamic raw);
+
+  @protected
   UserDictionaryDeletionConfirmationDto?
   dco_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
     dynamic raw,
@@ -344,6 +353,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeUpdateDto dco_decode_scheme_update_dto(dynamic raw);
+
+  @protected
+  ThemeExportDto dco_decode_theme_export_dto(dynamic raw);
+
+  @protected
+  ThemeImportPreviewDto dco_decode_theme_import_preview_dto(dynamic raw);
+
+  @protected
+  ThemeImportResultDto dco_decode_theme_import_result_dto(dynamic raw);
+
+  @protected
+  ThemePreviewColorsDto dco_decode_theme_preview_colors_dto(dynamic raw);
+
+  @protected
+  ThemeSummaryDto dco_decode_theme_summary_dto(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -482,6 +506,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_u_8(SseDeserializer deserializer);
+
+  @protected
+  UiColorSchemeDto sse_decode_box_autoadd_ui_color_scheme_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   UserDictionaryDeletionConfirmationDto
@@ -628,6 +657,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<ThemeSummaryDto> sse_decode_list_theme_summary_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<UserDictionaryDeletionDto> sse_decode_list_user_dictionary_deletion_dto(
     SseDeserializer deserializer,
   );
@@ -699,6 +733,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? sse_decode_opt_box_autoadd_u_8(SseDeserializer deserializer);
+
+  @protected
+  UiColorSchemeDto? sse_decode_opt_box_autoadd_ui_color_scheme_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   UserDictionaryDeletionConfirmationDto?
@@ -781,6 +820,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeUpdateDto sse_decode_scheme_update_dto(SseDeserializer deserializer);
+
+  @protected
+  ThemeExportDto sse_decode_theme_export_dto(SseDeserializer deserializer);
+
+  @protected
+  ThemeImportPreviewDto sse_decode_theme_import_preview_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ThemeImportResultDto sse_decode_theme_import_result_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ThemePreviewColorsDto sse_decode_theme_preview_colors_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ThemeSummaryDto sse_decode_theme_summary_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -963,6 +1023,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_u_8(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_ui_color_scheme_dto(
+    UiColorSchemeDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_user_dictionary_deletion_confirmation_dto(
@@ -1157,6 +1223,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_theme_summary_dto(
+    List<ThemeSummaryDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_user_dictionary_deletion_dto(
     List<UserDictionaryDeletionDto> self,
     SseSerializer serializer,
@@ -1245,6 +1317,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_8(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_ui_color_scheme_dto(
+    UiColorSchemeDto? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
@@ -1351,6 +1429,36 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_scheme_update_dto(
     SchemeUpdateDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_theme_export_dto(
+    ThemeExportDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_theme_import_preview_dto(
+    ThemeImportPreviewDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_theme_import_result_dto(
+    ThemeImportResultDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_theme_preview_colors_dto(
+    ThemePreviewColorsDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_theme_summary_dto(
+    ThemeSummaryDto self,
     SseSerializer serializer,
   );
 
