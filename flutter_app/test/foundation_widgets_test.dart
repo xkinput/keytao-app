@@ -226,7 +226,7 @@ void main() {
       );
       expect(
         tester.widget<Text>(find.text('横排')).style!.fontSize,
-        width < 720 ? 24 : 36,
+        width < 720 ? 20 : 28,
       );
       expect(tester.getSize(_tappables.first).height, greaterThanOrEqualTo(44));
     }

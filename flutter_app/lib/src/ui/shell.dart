@@ -179,10 +179,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     child: Padding(
                       padding: wide
                           ? const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 16,
+                              horizontal: 18,
+                              vertical: 12,
                             )
-                          : const EdgeInsets.fromLTRB(16, 20, 16, 12),
+                          : const EdgeInsets.fromLTRB(16, 15, 16, 9),
                       child: Align(
                         alignment: Alignment.topCenter,
                         child: ConstrainedBox(
@@ -227,7 +227,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                                               .display
                                               .xl2
                                               .copyWith(
-                                                fontSize: 30,
+                                                fontSize: 26,
                                                 fontWeight: FontWeight.w700,
                                                 color: palette.ink,
                                               ),
@@ -262,18 +262,18 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                           ),
                         ),
                         padding: const EdgeInsetsGeometryDelta.value(
-                          EdgeInsets.fromLTRB(4, 6, 4, 18),
+                          EdgeInsets.fromLTRB(4, 6, 4, 10),
                         ),
                         itemStyle: FBottomNavigationBarItemStyleDelta.delta(
                           padding: const EdgeInsetsGeometryDelta.value(
                             EdgeInsets.symmetric(vertical: 4),
                           ),
                           iconStyle: FVariants(
-                            IconThemeData(color: palette.muted, size: 22),
+                            IconThemeData(color: palette.muted, size: 20),
                             variants: {
                               [FTappableVariant.selected]: IconThemeData(
                                 color: accent,
-                                size: 22,
+                                size: 20,
                               ),
                             },
                           ),
@@ -305,7 +305,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         for (final page in AppPage.values)
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
-                            icon: _navigationIcon(page, c, 22),
+                            icon: _navigationIcon(page, c, 20),
                             label: Text(page.title, semanticsLabel: page.title),
                           ),
                       ],
@@ -366,8 +366,8 @@ class _DesktopNavigation extends StatelessWidget {
                   builder: (context, variants, _) => Container(
                     constraints: const BoxConstraints(minHeight: 44),
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+                      horizontal: 12,
+                      vertical: 6,
                     ),
                     decoration: BoxDecoration(
                       color: controller.activePage == page
@@ -385,7 +385,7 @@ class _DesktopNavigation extends StatelessWidget {
                           page.title,
                           semanticsLabel: page.title,
                           style: context.theme.typography.body.sm.copyWith(
-                            fontSize: 15,
+                            fontSize: 13,
                             height: 1.5,
                             fontWeight: controller.activePage == page
                                 ? FontWeight.w600
@@ -443,11 +443,11 @@ class _AccountButton extends StatelessWidget {
           contentStyle: FButtonContentStyleDelta.delta(
             constraints: const BoxConstraints(minHeight: 44),
             padding: const EdgeInsetsGeometryDelta.value(
-              EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             ),
             textStyle: FVariants.all(
               context.theme.typography.body.sm.copyWith(
-                fontSize: 15,
+                fontSize: 13,
                 fontWeight: FontWeight.w500,
                 color: AppPalette.of(context).ink,
               ),

@@ -334,10 +334,6 @@ void main() {
         ),
       );
       await _pumpSchemePage(tester, c);
-      final expand = find.bySemanticsLabel('展开全部方案');
-      await tester.ensureVisible(expand);
-      await tester.tap(expand);
-      await tester.pumpAndSettle();
       await select(
         'easy_en',
         find.descendant(
@@ -1269,10 +1265,6 @@ void main() {
         expect(tester.getCenter(button).dy, tester.getCenter(refresh).dy);
         expect(tester.getCenter(source).dy, tester.getCenter(button).dy);
         if (width == 1200) {
-          final expand = find.bySemanticsLabel('展开全部方案');
-          await tester.ensureVisible(expand);
-          await tester.tap(expand);
-          await tester.pumpAndSettle();
           for (final key in [
             'keytao',
             'xmjd',
@@ -1499,7 +1491,7 @@ void main() {
             find.byKey(const ValueKey('cloud-schemes')),
           )
           .children,
-      hasLength(6),
+      hasLength(7),
     );
     await _openAddons(tester);
     final rows = tester
@@ -1597,9 +1589,9 @@ void main() {
   });
 
   for (final layout in [
-    (width: 1400.0, columns: 4),
-    (width: 1200.0, columns: 3),
-    (width: 900.0, columns: 2),
+    (width: 1400.0, columns: 5),
+    (width: 1200.0, columns: 4),
+    (width: 900.0, columns: 3),
     (width: 360.0, columns: 1),
   ]) {
     testWidgets('home scheme grid fits or collapses at ${layout.width}', (
@@ -1696,7 +1688,7 @@ void main() {
         ),
       ];
     addTearDown(c.dispose);
-    _size(tester, const Size(900, 1000));
+    _size(tester, const Size(720, 1000));
     await _pumpSchemePage(tester, c);
     final catalogue = find.byKey(const ValueKey('cloud-schemes'));
     final rows = find.descendant(
@@ -1731,7 +1723,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  for (final (width, hiddenCount) in [(1200.0, 2), (900.0, 4)]) {
+  for (final (width, hiddenCount) in [(900.0, 2), (720.0, 4)]) {
     for (final (scheme, key) in [
       ('rime_ice', 'rime-ice'),
       ('easy_en', 'easy-en'),

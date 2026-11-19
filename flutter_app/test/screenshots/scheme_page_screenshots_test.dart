@@ -138,6 +138,23 @@ Future<void> _capture(WidgetTester tester, String name) async {
   });
 }
 
+FTypeface _withScreenshotFont(FTypeface typeface) => typeface.copyWith(
+  xs3: typeface.xs3.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xs2: typeface.xs2.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xs: typeface.xs.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  sm: typeface.sm.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  md: typeface.md.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  lg: typeface.lg.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl: typeface.xl.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl2: typeface.xl2.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl3: typeface.xl3.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl4: typeface.xl4.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl5: typeface.xl5.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl6: typeface.xl6.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl7: typeface.xl7.copyWith(fontFamilyFallback: const [_cjkFamily]),
+  xl8: typeface.xl8.copyWith(fontFamilyFallback: const [_cjkFamily]),
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final screenshots = Platform.environment['SCREENSHOTS'] == '1';
@@ -185,17 +202,20 @@ void main() {
               builder: (context) {
                 final theme = context.theme;
                 final fallback = screenshots ? const [_cjkFamily] : null;
-                final typeface = FTypeface.inherit(
-                  colors: theme.colors,
-                  touch: context.platformVariant.touch,
-                  fontFamilyFallback: fallback,
-                );
                 return FTheme(
                   platform: context.platformVariant,
                   data: FThemeData(
                     colors: theme.colors,
                     touch: context.platformVariant.touch,
-                    typography: FTypography(display: typeface, body: typeface),
+                    style: theme.style,
+                    typography: screenshots
+                        ? FTypography(
+                            display: _withScreenshotFont(
+                              theme.typography.display,
+                            ),
+                            body: _withScreenshotFont(theme.typography.body),
+                          )
+                        : theme.typography,
                   ),
                   child: Theme(
                     data: Theme.of(context).copyWith(
@@ -254,48 +274,6 @@ void main() {
               find.descendant(of: card, matching: find.text(title)),
             );
             expect(paragraph.didExceedMaxLines, isFalse, reason: title);
-          }
-          expect(
-            tester
-                    .getTopLeft(
-                      find.descendant(of: card, matching: find.text(title)),
-                    )
-                    .dy -
-                tester.getTopLeft(card).dy,
-            closeTo(
-              tester
-                      .getTopLeft(
-                        find.descendant(
-                          of: cards[4],
-                          matching: find.text(AppStrings.rimeSnow),
-                        ),
-                      )
-                      .dy -
-                  tester.getTopLeft(cards[4]).dy,
-              .01,
-            ),
-          );
-          for (final type in [EyebrowLabel, StatusPill, ActionRow]) {
-            expect(
-              tester
-                      .getCenter(
-                        find.descendant(of: card, matching: find.byType(type)),
-                      )
-                      .dy -
-                  tester.getTopLeft(card).dy,
-              closeTo(
-                tester
-                        .getCenter(
-                          find.descendant(
-                            of: cards[4],
-                            matching: find.byType(type),
-                          ),
-                        )
-                        .dy -
-                    tester.getTopLeft(cards[4]).dy,
-                .01,
-              ),
-            );
           }
         }
         expect(

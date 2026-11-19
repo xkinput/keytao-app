@@ -99,7 +99,7 @@ class DebugPage extends StatelessWidget {
               title: AppStrings.structuredRuntimeLogs,
               log: c.runtimeLog,
               storageKey: 'runtimeLogs',
-              height: 240,
+              height: 180,
             ),
             DebugLogPanel(
               title: AppStrings.imeLogs,
@@ -280,7 +280,7 @@ class DebugLogPanel extends StatelessWidget {
     required this.title,
     required this.log,
     required this.storageKey,
-    this.height = 192,
+    this.height = 144,
   });
   final String title;
   final DebugLogFileDto? log;

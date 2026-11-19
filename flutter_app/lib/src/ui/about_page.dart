@@ -19,15 +19,15 @@ class AboutPage extends StatelessWidget {
       children: [
         if (!c.isAndroid)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 20),
+            padding: const EdgeInsets.symmetric(vertical: 15),
             child: Column(
               children: [
-                Image.asset(logoAsset, width: 80, height: 80),
+                Image.asset(logoAsset, width: 60, height: 60),
                 const SizedBox(height: 12),
                 Text(
                   AppStrings.title,
                   style: context.theme.typography.display.xl2.copyWith(
-                    fontSize: MediaQuery.sizeOf(context).width >= 720 ? 40 : 32,
+                    fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 28,
                     color: AppPalette.of(context).ink,
                     fontWeight: FontWeight.w700,
                     height: 1.1,

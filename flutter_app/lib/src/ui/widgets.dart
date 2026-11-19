@@ -116,7 +116,7 @@ class BigTextRadioGroup<T> extends StatelessWidget {
         if (selected case final T option) onChanged?.call(option);
       },
       child: Wrap(
-        spacing: MediaQuery.sizeOf(context).width >= 720 ? 20 : 18,
+        spacing: MediaQuery.sizeOf(context).width >= 720 ? 15 : 14,
         runSpacing: 4,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
@@ -210,7 +210,7 @@ class _BigTextRadioState<T> extends State<_BigTextRadio<T>>
             widget.label,
             style: context.theme.typography.body.sm.copyWith(
               color: enabled ? color : context.theme.colors.disable(color),
-              fontSize: MediaQuery.sizeOf(context).width >= 720 ? 36 : 24,
+              fontSize: MediaQuery.sizeOf(context).width >= 720 ? 28 : 20,
               fontWeight: FontWeight.w700,
               height: 1.2,
             ),
@@ -285,8 +285,8 @@ class HairlineGridCell extends StatelessWidget {
       padding:
           padding ??
           (MediaQuery.sizeOf(context).width >= 720
-              ? const EdgeInsets.symmetric(horizontal: 32, vertical: 28)
-              : const EdgeInsets.symmetric(vertical: 16)),
+              ? const EdgeInsets.symmetric(horizontal: 24, vertical: 20)
+              : const EdgeInsets.symmetric(vertical: 12)),
       child: child,
     ),
   );
@@ -308,25 +308,25 @@ class StatusPill extends StatelessWidget {
       ),
       child: Padding(
         padding: EdgeInsets.symmetric(
-          horizontal: desktop ? 14 : 12,
-          vertical: desktop ? 6 : 4,
+          horizontal: desktop ? 8 : 10,
+          vertical: 4,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
-          spacing: desktop ? 8 : 6,
+          spacing: 6,
           children: [
             DecoratedBox(
               decoration: BoxDecoration(
                 color: color ?? palette.success,
                 shape: BoxShape.circle,
               ),
-              child: const SizedBox.square(dimension: 8),
+              child: const SizedBox.square(dimension: 6),
             ),
             Text(
               label,
               style: context.theme.typography.body.sm.copyWith(
                 color: palette.ink,
-                fontSize: desktop ? 15 : 13,
+                fontSize: 13,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -417,7 +417,7 @@ class Section extends StatelessWidget {
                 ),
                 child: Padding(
                   padding: EdgeInsets.symmetric(
-                    vertical: context.platformVariant.touch ? 16 : 12,
+                    vertical: context.platformVariant.touch ? 12 : 9,
                   ),
                   child: DefaultTextStyle.merge(
                     overflow: TextOverflow.visible,
@@ -844,7 +844,7 @@ class ActionButton extends StatelessWidget {
         contentStyle: FButtonContentStyleDelta.delta(
           constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
           padding: const EdgeInsetsGeometryDelta.value(
-            EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            EdgeInsets.symmetric(horizontal: 15, vertical: 8),
           ),
           textStyle: FVariants.from(
             context.theme.typography.body.sm.copyWith(
@@ -922,7 +922,7 @@ class AppPageBody extends StatelessWidget {
     required this.page,
     required this.children,
     this.fullWidth = false,
-    this.spacing = 32,
+    this.spacing = 24,
   });
   final AppController controller;
   final AppPage page;
@@ -938,7 +938,7 @@ class AppPageBody extends StatelessWidget {
               ? EdgeInsets.zero
               : const EdgeInsets.fromLTRB(16, 0, 16, 24)
         : MediaQuery.sizeOf(context).width >= 720
-        ? const EdgeInsets.fromLTRB(32, 8, 32, 32)
+        ? const EdgeInsets.fromLTRB(24, 6, 24, 24)
         : const EdgeInsets.fromLTRB(16, 8, 16, 24),
     child: Align(
       alignment: Alignment.topCenter,
@@ -1267,8 +1267,8 @@ class AppDialog extends StatelessWidget {
     constraints: constraints,
     builder: (context, _) => Padding(
       padding: EdgeInsets.symmetric(
-        horizontal: MediaQuery.sizeOf(context).width >= 720 ? 32 : 16,
-        vertical: 24,
+        horizontal: MediaQuery.sizeOf(context).width >= 720 ? 24 : 16,
+        vertical: 18,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1280,11 +1280,11 @@ class AppDialog extends StatelessWidget {
               fontWeight: FontWeight.w500,
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           Flexible(
             child: scrollable ? SingleChildScrollView(child: child) : child,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           Align(
             alignment: Alignment.centerRight,
             child: ActionRow(children: actions),

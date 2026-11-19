@@ -133,11 +133,11 @@ class _SchemePageState extends State<SchemePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           spacing: 12,
           children: [
-            if (!_schemesExpanded) const Icon(FLucideIcons.layers3, size: 32),
+            if (!_schemesExpanded) const Icon(FLucideIcons.layers3, size: 24),
             Text(
               _schemesExpanded ? '收起' : '+$hiddenCount',
               style: context.theme.typography.body.sm.copyWith(
-                fontSize: 34,
+                fontSize: 26,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -187,9 +187,9 @@ class _SchemePageState extends State<SchemePage> {
           UserWordsNotice(controller: c),
         Padding(
           padding: EdgeInsets.fromLTRB(
-            desktop ? 32 : 0,
+            desktop ? 24 : 0,
             8,
-            desktop ? 32 : 0,
+            desktop ? 24 : 0,
             12,
           ),
           child: Row(
@@ -230,11 +230,12 @@ class _SchemePageState extends State<SchemePage> {
         if (c.schemeUpdatesLoading) const FProgress(),
         LayoutBuilder(
           builder: (context, constraints) {
-            const minCellWidth = 320.0;
+            const minCellWidth = 240.0;
             final cells = <Widget>[
               for (final key in cloudKeys)
                 HairlineGridCell(
                   color: key == activeKey ? palette.surface : null,
+                  padding: desktop ? const EdgeInsets.all(20) : null,
                   child: _package(key),
                 ),
               for (final key in _homeAddonKeys) addons[key]!,
@@ -272,7 +273,7 @@ class _SchemePageState extends State<SchemePage> {
           },
         ),
         HairlineGridSection(
-          minCellWidth: 440,
+          minCellWidth: 360,
           children: [
             HairlineGridCell(
               child: Section(
@@ -334,7 +335,9 @@ class _SchemePageState extends State<SchemePage> {
                           onPress: c.cancelDownload,
                         ),
                       ActionButton(
-                        c.isDeploying ? AppStrings.deploying : AppStrings.deploy,
+                        c.isDeploying
+                            ? AppStrings.deploying
+                            : AppStrings.deploy,
                         icon: FLucideIcons.play,
                         tooltip: c.deployTooltip,
                         onPress: c.canDeploy ? c.deploy : null,
@@ -669,10 +672,10 @@ class SchemePackageRow extends StatelessWidget {
             semanticsLabel: name,
             style: context.theme.typography.body.sm.copyWith(
               fontSize: compact
-                  ? 18
+                  ? 16
                   : desktop
-                  ? 34
-                  : 30,
+                  ? 22
+                  : 24,
               height: 1.1,
               fontWeight: FontWeight.w700,
               letterSpacing: compact ? 0 : -.34,
@@ -746,7 +749,7 @@ class SchemePackageRow extends StatelessWidget {
                   if (hasLogo)
                     SchemaLogo(
                       controller: c,
-                      size: 28,
+                      size: 24,
                       schemeKey: schemeKey,
                       appLogoFallback: false,
                     ),
@@ -762,7 +765,7 @@ class SchemePackageRow extends StatelessWidget {
               if (hasLogo)
                 SchemaLogo(
                   controller: c,
-                  size: desktop ? 52 : 36,
+                  size: desktop ? 32 : 30,
                   schemeKey: schemeKey,
                   appLogoFallback: false,
                 ),
@@ -817,7 +820,7 @@ class SchemePackageRow extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
         ],
         heading,
         if (active && !deploying)
@@ -834,7 +837,7 @@ class SchemePackageRow extends StatelessWidget {
             onChanged: c.busy ? null : c.selectScheme,
           ),
         ] else if (!compact && (desktop || !active)) ...[
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
           const SizedBox(height: 44),
         ],
         const SizedBox(height: 10),
@@ -1125,10 +1128,10 @@ Map<String, Widget> _addonCells(
     final palette = AppPalette.of(context);
     final titleStyle = context.theme.typography.body.sm.copyWith(
       fontSize: compact
-          ? 20
+          ? 18
           : MediaQuery.sizeOf(context).width >= 720
-          ? 34
-          : 30,
+          ? 22
+          : 24,
       height: 1.1,
       fontWeight: FontWeight.w700,
       letterSpacing: cloudCard ? -.34 : null,
@@ -1141,12 +1144,16 @@ Map<String, Widget> _addonCells(
           ? StrutStyle.fromTextStyle(titleStyle, forceStrutHeight: true)
           : null,
       style: cloudCard && title.length > 10
-          ? titleStyle.copyWith(fontSize: 28)
+          ? titleStyle.copyWith(fontSize: 18)
           : titleStyle,
     );
     return HairlineGridCell(
       key: ValueKey(key),
-      padding: compact ? const EdgeInsets.all(12) : null,
+      padding: compact
+          ? const EdgeInsets.all(12)
+          : cloudCard && MediaQuery.sizeOf(context).width >= 720
+          ? const EdgeInsets.all(20)
+          : null,
       child: _SchemeCardMenu(
         builder: (context, menu) => Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1171,7 +1178,7 @@ Map<String, Widget> _addonCells(
                   ),
                 ],
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 10),
               Row(
                 spacing: 6,
                 children: [
@@ -1197,7 +1204,7 @@ Map<String, Widget> _addonCells(
                     ),
                 ],
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 10),
               const SizedBox(height: 44),
               const SizedBox(height: 10),
             ] else ...[
