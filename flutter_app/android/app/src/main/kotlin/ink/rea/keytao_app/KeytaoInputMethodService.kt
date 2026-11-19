@@ -66,6 +66,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val mainHandler = Handler(Looper.getMainLooper())
     private val voiceInput = KeytaoVoiceInput()
     private var speechRecognizer: SpeechRecognizer? = null
+    private var voiceInputConnection: InputConnection? = null
+    private var voiceEditorInfo: EditorInfo? = null
     private var voiceRecognitionAvailable = false
     private val candidateExecutor = Executors.newSingleThreadExecutor()
     private var clipboardHistory = ClipboardHistoryState()
@@ -2976,12 +2978,27 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun cancelVoiceInput() {
-        voiceInput.cancel()
+        // Clear the captured connection, never a different editor that now has focus.
+        val connection = voiceInputConnection?.takeIf {
+            it !== currentInputConnection || voiceEditorInfo === currentInputEditorInfo
+        }
+        if (voiceInput.cancel(connection)) {
+            connection?.setComposingText("", 1)
+            connection?.finishComposingText()
+        }
+        voiceInputConnection = null
+        voiceEditorInfo = null
         val recognizer = speechRecognizer
         speechRecognizer = null
         runCatching { recognizer?.cancel() }
         runCatching { recognizer?.destroy() }
         refreshVoiceInput()
+    }
+
+    private fun currentVoiceInputConnection(): InputConnection? {
+        return voiceInputConnection?.takeIf {
+            it === currentInputConnection && voiceEditorInfo === currentInputEditorInfo
+        }
     }
 
     override fun onVoiceInputRequested(): Boolean {
@@ -3003,7 +3020,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }
             return true
         }
-        val token = voiceInput.start()
+        val connection = currentInputConnection ?: return false
+        voiceInputConnection = connection
+        voiceEditorInfo = currentInputEditorInfo
+        val token = voiceInput.start(connection)
         refreshVoiceInput()
         try {
             val recognizer = SpeechRecognizer.createSpeechRecognizer(this)
@@ -3019,7 +3039,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     voiceInput.transcribe()
                     refreshVoiceInput()
                 }
-                override fun onPartialResults(partialResults: Bundle?) = voiceInput.runIfCurrent(token) { }
+                override fun onPartialResults(partialResults: Bundle?) = voiceInput.runIfCurrent(token) {
+                    val target = currentVoiceInputConnection()
+                    if (target == null) {
+                        cancelVoiceInput()
+                    } else {
+                        val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                        val unstableText = partialResults?.getStringArrayList("android.speech.extra.UNSTABLE_TEXT")?.firstOrNull()
+                        voiceInput.partial(token, target, text, unstableText)?.let {
+                            target.setComposingText(it, 1)
+                        }
+                    }
+                }
                 override fun onEvent(eventType: Int, params: Bundle?) = voiceInput.runIfCurrent(token) { }
 
                 override fun onError(error: Int) = voiceInput.runIfCurrent(token) {
@@ -3035,14 +3066,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
                 override fun onResults(results: Bundle?) = voiceInput.runIfCurrent(token) {
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                    val target = currentVoiceInputConnection()
+                    val finalText = voiceInput.finish(token, target, text)
                     cancelVoiceInput()
-                    if (!text.isNullOrEmpty()) commitDirect(text)
+                    if (finalText != null && target != null) commitDirect(finalText, target)
                 }
             })
             recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (currentState.asciiMode) "en-US" else "zh-CN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             })
         } catch (_: RuntimeException) {
             voiceInput.runIfCurrent(token) {
@@ -3082,16 +3115,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         applyState(cleared.copy(committed = text))
     }
 
-    private fun commitDirect(text: String) {
+    private fun commitDirect(text: String, editorConnection: InputConnection? = null) {
         discardPendingHostBackspace()
         inputCounts.record("commit_direct")
-        if (emojiSearchQuery != null) {
+        if (editorConnection == null && emojiSearchQuery != null) {
             commitCompositionBeforeDirectInput()
             emojiSearchQuery = emojiSearchQuery.orEmpty() + text
             keyboardView?.updateEmojiSearch(emojiSearchQuery)
             return
         }
-        val connection = currentInputConnection ?: return
+        val connection = editorConnection ?: currentInputConnection ?: return
         commitCompositionBeforeDirectInput()
         backspaceRestoreStack.clear()
         restoreAllOnNextDirectionalRestore = false

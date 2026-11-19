@@ -4,10 +4,14 @@ internal class KeytaoVoiceInput {
     enum class State { IDLE, RECORDING, TRANSCRIBING }
 
     private var generation = 0L
+    private var editor: Any? = null
+    private var partialText = ""
     var state = State.IDLE
         private set
 
-    fun start(): Long {
+    fun start(editor: Any? = null): Long {
+        this.editor = editor
+        partialText = ""
         state = State.RECORDING
         return ++generation
     }
@@ -16,9 +20,36 @@ internal class KeytaoVoiceInput {
         if (state == State.RECORDING) state = State.TRANSCRIBING
     }
 
-    fun cancel() {
+    fun partial(token: Long, editor: Any?, text: String?, unstableText: String? = null): String? {
+        var shown: String? = null
+        runIfCurrent(token) {
+            val combined = text.orEmpty() + unstableText.orEmpty()
+            if (this.editor === editor && combined.isNotEmpty()) {
+                partialText = combined
+                shown = combined
+            }
+        }
+        return shown
+    }
+
+    fun finish(token: Long, editor: Any?, text: String?): String? {
+        var committed: String? = null
+        runIfCurrent(token) {
+            if (this.editor === editor) {
+                committed = text?.takeIf { it.isNotEmpty() } ?: partialText.takeIf { it.isNotEmpty() }
+                cancel()
+            }
+        }
+        return committed
+    }
+
+    fun cancel(editor: Any? = null): Boolean {
+        val clear = partialText.isNotEmpty() && this.editor === editor
         generation++
         state = State.IDLE
+        this.editor = null
+        partialText = ""
+        return clear
     }
 
     fun runIfCurrent(token: Long, action: () -> Unit) {
