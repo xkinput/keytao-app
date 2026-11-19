@@ -317,12 +317,18 @@ class CandidatePanelPreview extends StatelessWidget {
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
                     color: _color(panel, 'background'),
-                    boxShadow: panel['shadow'] == true
-                        ? const [
+                    boxShadow: panel['shadowStyle'] != null
+                        ? [
                             BoxShadow(
-                              color: Color(0x26000000),
-                              blurRadius: 12,
-                              offset: Offset(0, 4),
+                              color: _color(panel['shadowStyle'], 'color'),
+                              blurRadius: _metric(
+                                panel['shadowStyle'],
+                                'blurRadius',
+                              ),
+                              offset: Offset(
+                                0,
+                                _metric(panel['shadowStyle'], 'offsetY'),
+                              ),
                             ),
                           ]
                         : null,

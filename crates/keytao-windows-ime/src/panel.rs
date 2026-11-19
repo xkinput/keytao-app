@@ -5,9 +5,10 @@
 //!
 use keytao_core::ImeState;
 use keytao_theme::{
-    panel_hit::{layout, PanelGeometry, PanelHitAreas},
-    preedit_caret_color, scaled_candidate_panel, CandidatePanelInput, CandidatePanelModel,
-    PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
+    panel_hit::{layout, PanelClick, PanelGeometry, PanelHitAreas},
+    preedit_caret_color, resolved_panel_shadow, scaled_candidate_panel, CandidatePanelInput,
+    CandidatePanelModel, PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate,
+    ThemeResolver, UiCapabilities,
 };
 use std::path::PathBuf;
 use tiny_skia::*;
@@ -102,6 +103,7 @@ pub struct RenderedPanel {
     pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub shadow_inset: u32,
     pub hit_areas: PanelHitAreas,
 }
 
@@ -111,6 +113,7 @@ impl RenderedPanel {
             pixels: Vec::new(),
             width: 0,
             height: 0,
+            shadow_inset: 0,
             hit_areas: PanelHitAreas::default(),
         }
     }
@@ -130,6 +133,28 @@ impl PanelRenderer {
         theme: ResolvedImeTheme,
         available_width: f32,
         preedit_caret: Option<usize>,
+    ) -> RenderedPanel {
+        self.render_with_pointer(
+            model,
+            scale,
+            theme,
+            available_width,
+            preedit_caret,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_pointer(
+        &self,
+        model: &CandidatePanelModel,
+        scale: f32,
+        theme: ResolvedImeTheme,
+        available_width: f32,
+        preedit_caret: Option<usize>,
+        hovered: Option<PanelClick>,
+        pressed: Option<PanelClick>,
     ) -> RenderedPanel {
         let mut theme = scaled_candidate_panel(&theme);
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
@@ -211,7 +236,13 @@ impl PanelRenderer {
             .max(content_width + panel_pad_x * 2.0)
             .max(preedit_width)
             .ceil()
-            .min(available_width.floor().max(1.0)) as u32;
+            .min(
+                (available_width
+                    - resolved_panel_shadow(theme.panel.shadow)
+                        .map_or(0.0, |shadow| shadow.margin * scale * 2.0))
+                .floor()
+                .max(1.0),
+            ) as u32;
         let height = (content_height + panel_pad_y * 2.0)
             .min(theme.panel.max_height)
             .ceil()
@@ -241,12 +272,12 @@ impl PanelRenderer {
                 preedit,
                 panel_pad_x,
                 y + preedit_size,
-                bgra(theme.candidate.selected_label_color),
+                bgra(theme.candidate.foreground),
                 preedit_size,
                 preedit_caret.map(|index| {
                     (
                         index,
-                        bgra(preedit_caret_color(theme.candidate.selected_label_color)),
+                        bgra(preedit_caret_color(theme.candidate.foreground)),
                     )
                 }),
             );
@@ -264,7 +295,12 @@ impl PanelRenderer {
             can_go_previous: model.navigation.can_go_previous,
             can_go_next: model.navigation.can_go_next,
         });
-        for (candidate, rect) in model.candidates.iter().zip(hit_areas.candidates.iter()) {
+        for (index, (candidate, rect)) in model
+            .candidates
+            .iter()
+            .zip(hit_areas.candidates.iter())
+            .enumerate()
+        {
             self.draw_candidate_option(
                 &mut pm,
                 candidate,
@@ -277,10 +313,56 @@ impl PanelRenderer {
                 comment_size,
                 scale,
                 &theme,
+                hovered == Some(PanelClick::Candidate(index)),
+                pressed == Some(PanelClick::Candidate(index)),
             );
+            if theme.candidate.separator_visible && index + 1 < model.candidates.len() {
+                let (x, y, width, height) = if model.orientation == PanelOrientation::Vertical {
+                    (
+                        rect.x,
+                        rect.y + rect.height + panel_gap * 0.5,
+                        rect.width,
+                        scale,
+                    )
+                } else {
+                    (
+                        rect.x + rect.width + panel_gap * 0.5,
+                        rect.y,
+                        scale,
+                        rect.height,
+                    )
+                };
+                draw_rounded_rect(
+                    &mut pm,
+                    x,
+                    y,
+                    width,
+                    height,
+                    0.0,
+                    theme.candidate.separator_color,
+                    theme.candidate.separator_color,
+                    0.0,
+                );
+            }
         }
-        for (rect, glyph) in [(hit_areas.previous_page, "‹"), (hit_areas.next_page, "›")] {
+        for (rect, glyph, target) in [
+            (hit_areas.previous_page, "‹", PanelClick::PreviousPage),
+            (hit_areas.next_page, "›", PanelClick::NextPage),
+        ] {
             if let Some(rect) = rect {
+                if hovered == Some(target) {
+                    draw_rounded_rect(
+                        &mut pm,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                        theme.navigation.corner_radius,
+                        theme.navigation.hover_background,
+                        theme.navigation.hover_background,
+                        0.0,
+                    );
+                }
                 self.draw_text(
                     &mut pm,
                     glyph,
@@ -291,6 +373,9 @@ impl PanelRenderer {
                 );
             }
         }
+        let (pm, inset) =
+            with_panel_shadow(pm, theme.panel.corner_radius, theme.panel.shadow, scale);
+        let (width, height) = (pm.width(), pm.height());
         // Preserve Windows' integer-pixel hit bounds after drawing at subpixel positions.
         for rect in hit_areas
             .candidates
@@ -298,6 +383,8 @@ impl PanelRenderer {
             .chain(hit_areas.previous_page.iter_mut())
             .chain(hit_areas.next_page.iter_mut())
         {
+            rect.x += inset as f32;
+            rect.y += inset as f32;
             rect.x = rect.x.floor() as i32 as f32;
             rect.y = rect.y.floor() as i32 as f32;
             rect.width = rect.width.ceil() as i32 as f32;
@@ -314,6 +401,7 @@ impl PanelRenderer {
             pixels: out,
             width,
             height,
+            shadow_inset: inset,
             hit_areas,
         }
     }
@@ -323,21 +411,31 @@ impl PanelRenderer {
         ascii_mode: bool,
         scale: f32,
         mut theme: ResolvedImeTheme,
-    ) -> (Vec<u8>, u32, u32) {
+    ) -> RenderedPanel {
         scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme.mode_hint_model(ascii_mode);
-        let font_size = theme.font.size;
+        let font_size = theme.mode_hint.font_size;
         let padding = font_size / 3.0;
         let label = model.text;
         let (text_left, text_bottom, text_right, text_top) = self.text_bounds(&label, font_size);
         let text_width = text_right - text_left;
         let text_height = text_top - text_bottom;
-        let width = (text_width + padding * 2.0).ceil().max(1.0) as u32;
-        let height = (text_height + padding * 2.0).ceil().max(1.0) as u32;
+        let width = theme
+            .mode_hint
+            .width
+            .max(text_width + padding * 2.0)
+            .ceil()
+            .max(1.0) as u32;
+        let height = theme
+            .mode_hint
+            .height
+            .max(text_height + padding * 2.0)
+            .ceil()
+            .max(1.0) as u32;
 
         let Some(mut pm) = Pixmap::new(width, height) else {
             tracing::warn!("mode hint: failed to allocate pixmap {width}x{height}");
-            return (Vec::new(), 0, 0);
+            return RenderedPanel::empty();
         };
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
         draw_rounded_rect(
@@ -363,12 +461,25 @@ impl PanelRenderer {
             font_size,
         );
 
+        let (pm, shadow_inset) = with_panel_shadow(
+            pm,
+            theme.mode_hint.corner_radius,
+            theme.mode_hint.shadow,
+            scale,
+        );
+        let (width, height) = (pm.width(), pm.height());
         let mut out: Vec<u8> = pm.data().to_vec();
         for px in out.chunks_exact_mut(4) {
             px.swap(0, 2);
         }
 
-        (out, width, height)
+        RenderedPanel {
+            pixels: out,
+            width,
+            height,
+            shadow_inset,
+            hit_areas: PanelHitAreas::default(),
+        }
     }
 
     pub fn mode_hint_duration_ms(theme: &ResolvedImeTheme) -> u32 {
@@ -391,10 +502,16 @@ impl PanelRenderer {
         comment_size: f32,
         scale: f32,
         theme: &keytao_theme::ResolvedImeTheme,
+        hovered: bool,
+        pressed: bool,
     ) {
         let option = &theme.candidate;
-        let background = if candidate.selected {
+        let background = if pressed {
+            option.pressed_background
+        } else if candidate.selected {
             option.selected_background
+        } else if hovered {
+            option.hover_background
         } else {
             option.background
         };
@@ -402,11 +519,6 @@ impl PanelRenderer {
             option.selected_border_color
         } else {
             option.border_color
-        };
-        let border_width = if candidate.selected {
-            option.border_width.max(1.0)
-        } else {
-            option.border_width
         };
         draw_rounded_rect(
             pm,
@@ -417,7 +529,7 @@ impl PanelRenderer {
             option.corner_radius,
             background,
             border,
-            border_width,
+            option.border_width,
         );
 
         let mut text_x = x + option.padding_x;
@@ -427,7 +539,9 @@ impl PanelRenderer {
         } else {
             option.label_color
         };
-        let text_color = if candidate.selected {
+        let text_color = if pressed {
+            option.pressed_foreground
+        } else if candidate.selected {
             option.selected_foreground
         } else {
             option.foreground
@@ -500,11 +614,9 @@ impl PanelRenderer {
             };
             let gx = (x + metrics.xmin as f32) as i32;
             let gy = (baseline - metrics.height as f32 - metrics.ymin as f32) as i32;
-            let (color, opacity) = match caret {
-                Some((caret_index, caret_color)) if caret_index == index => {
-                    (caret_color, caret_color[3] as f32 / 255.0)
-                }
-                _ => (color, 1.0),
+            let color = match caret {
+                Some((caret_index, caret_color)) if caret_index == index => caret_color,
+                _ => color,
             };
             for row in 0..metrics.height {
                 for col in 0..metrics.width {
@@ -517,12 +629,13 @@ impl PanelRenderer {
                     if px < 0 || py < 0 || px >= pm.width() as i32 || py >= pm.height() as i32 {
                         continue;
                     }
-                    let a = alpha as f32 / 255.0 * opacity;
+                    let a = alpha as f32 / 255.0 * color[3] as f32 / 255.0;
                     let off = (py as usize * pm.width() as usize + px as usize) * 4;
                     let d = pm.data_mut();
-                    d[off] = lerp(d[off], color[0], a); // R
+                    d[off] = lerp(d[off], color[2], a); // R
                     d[off + 1] = lerp(d[off + 1], color[1], a); // G
-                    d[off + 2] = lerp(d[off + 2], color[2], a); // B
+                    d[off + 2] = lerp(d[off + 2], color[0], a); // B
+                    d[off + 3] = (255.0 * a + d[off + 3] as f32 * (1.0 - a)).round() as u8;
                 }
             }
             x += metrics.advance_width;
@@ -628,6 +741,9 @@ fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
 
     theme.mode_hint.border_width *= scale;
     theme.mode_hint.corner_radius *= scale;
+    theme.mode_hint.font_size *= scale;
+    theme.mode_hint.width *= scale;
+    theme.mode_hint.height *= scale;
 
     scale
 }
@@ -714,6 +830,52 @@ fn tiny_color(color: RgbaColor) -> Color {
     Color::from_rgba8(color.red, color.green, color.blue, color.alpha)
 }
 
+fn with_panel_shadow(body: Pixmap, radius: f32, enabled: bool, scale: f32) -> (Pixmap, u32) {
+    let Some(shadow) = resolved_panel_shadow(enabled) else {
+        return (body, 0);
+    };
+    let inset = (shadow.margin * scale).ceil() as u32;
+    let Some(mut result) = Pixmap::new(body.width() + inset * 2, body.height() + inset * 2) else {
+        return (body, 0);
+    };
+    let half_width = body.width() as f32 * 0.5;
+    let half_height = body.height() as f32 * 0.5;
+    let radius = radius.min(half_width).min(half_height);
+    let sigma = shadow.blur_radius * scale * 0.5;
+    let width = result.width() as usize;
+    for (index, pixel) in result.data_mut().chunks_exact_mut(4).enumerate() {
+        let dx =
+            ((index % width) as f32 + 0.5 - inset as f32 - half_width).abs() - half_width + radius;
+        let dy =
+            ((index / width) as f32 + 0.5 - inset as f32 - half_height - shadow.offset_y * scale)
+                .abs()
+                - half_height
+                + radius;
+        let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius;
+        let coverage = if distance <= 0.0 {
+            1.0
+        } else {
+            (-0.5 * (distance / sigma).powi(2)).exp()
+        };
+        let alpha = shadow.color.alpha as f32 * coverage / 255.0;
+        pixel.copy_from_slice(&[
+            (shadow.color.red as f32 * alpha).round() as u8,
+            (shadow.color.green as f32 * alpha).round() as u8,
+            (shadow.color.blue as f32 * alpha).round() as u8,
+            (255.0 * alpha).round() as u8,
+        ]);
+    }
+    result.draw_pixmap(
+        inset as i32,
+        inset as i32,
+        body.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    (result, inset)
+}
+
 fn draw_rounded_rect(
     pm: &mut Pixmap,
     x: f32,
@@ -726,7 +888,7 @@ fn draw_rounded_rect(
     border_width: f32,
 ) {
     let stroke_width = if border_width > 0.0 && border.alpha > 0 {
-        border_width.max(1.0)
+        border_width
     } else {
         0.0
     };
@@ -835,6 +997,7 @@ mod tests {
         let default_theme = ResolvedImeTheme::default();
         for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
             let mut theme = default_theme.clone();
+            theme.panel.shadow = false;
             theme.panel.orientation = orientation;
             let model = theme.candidate_panel_model(
                 CandidatePanelInput {
@@ -900,7 +1063,8 @@ mod tests {
         );
         let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
         let render = || {
-            let theme = resolver.current();
+            let mut theme = resolver.current();
+            theme.panel.shadow = false;
             let model = theme.candidate_panel_model(
                 CandidatePanelInput {
                     preedit: String::new(),
@@ -945,24 +1109,35 @@ mod tests {
     }
 
     #[test]
-    fn mode_hint_uses_candidate_font_measurement_and_ignores_legacy_box_fields() {
+    fn mode_hint_uses_resolved_font_and_box_fields() {
         let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
         let mut theme = ResolvedImeTheme::default();
         theme.mode_hint.english_text = "English".into();
-        theme.mode_hint.font_size = 99.0;
-        theme.mode_hint.width = 999.0;
-        theme.mode_hint.height = 999.0;
+        theme.mode_hint.font_size = 26.0;
+        theme.mode_hint.width = 96.0;
+        theme.mode_hint.height = 60.0;
+        theme.mode_hint.shadow = false;
         for font_size in [10.0, 20.0, 36.0] {
             for dpi_scale in [1.0, 2.0] {
                 theme.font.size = font_size;
                 for ascii_mode in [false, true] {
-                    let (_, width, height) =
-                        renderer.render_mode_hint(ascii_mode, dpi_scale, theme.clone());
-                    let font_size = font_size * dpi_scale;
+                    let rendered = renderer.render_mode_hint(ascii_mode, dpi_scale, theme.clone());
+                    let (width, height) = (rendered.width, rendered.height);
+                    let font_size = theme.mode_hint.font_size * dpi_scale;
                     let label = theme.mode_hint_model(ascii_mode).text;
                     let text_width = label.chars().count() as f32 * font_size * 0.5;
-                    assert_eq!(width, (text_width + font_size / 3.0 * 2.0).ceil() as u32);
-                    assert_eq!(height, (font_size + font_size / 3.0 * 2.0).ceil() as u32);
+                    assert_eq!(
+                        width,
+                        (theme.mode_hint.width * dpi_scale)
+                            .max(text_width + font_size / 3.0 * 2.0)
+                            .ceil() as u32
+                    );
+                    assert_eq!(
+                        height,
+                        (theme.mode_hint.height * dpi_scale)
+                            .max(font_size + font_size / 3.0 * 2.0)
+                            .ceil() as u32
+                    );
                 }
             }
         }

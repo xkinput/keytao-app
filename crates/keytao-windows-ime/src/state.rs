@@ -2084,7 +2084,7 @@ pub(crate) fn hide_candidate_window(shared_state: &SharedState) {
     });
 }
 
-fn with_detached_windows<R>(
+pub(crate) fn with_detached_windows<R>(
     shared_state: &SharedState,
     hide_request: bool,
     mut f: impl FnMut(

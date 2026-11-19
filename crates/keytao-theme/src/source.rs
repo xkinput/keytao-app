@@ -629,7 +629,9 @@ pub(crate) fn parse_compilation_base_yaml(
             return;
         };
         let key = serde_yaml::Value::String(key.into());
-        if mapping.get(&key).is_some_and(|v| !v.is_mapping()) {
+        if mapping.get(&key).is_some_and(serde_yaml::Value::is_null) {
+            mapping.insert(key, serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        } else if mapping.get(&key).is_some_and(|v| !v.is_mapping()) {
             mapping.remove(&key);
             eprintln!(
                 "Warning: theme section {} must be a mapping; ignoring it",
@@ -793,7 +795,7 @@ mod tests {
             "/mobile/keyboard/keyTypes/function",
             "/resolvedUi/light",
         ] {
-            for invalid in [json!([]), json!("invalid"), Value::Null] {
+            for invalid in [json!([]), json!("invalid")] {
                 let mut base = json!({
                     "ui":{"colorScheme":"dark","embeddedComposition":true,
                         "hideCandidatePanel":true,"showTrayModeIndicator":false},

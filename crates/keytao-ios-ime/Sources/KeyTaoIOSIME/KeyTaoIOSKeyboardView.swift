@@ -125,6 +125,12 @@ private enum SettingsPanelLayout {
 final class KeyTaoIOSKeyboardView: UIView {
     weak var delegate: KeyTaoIOSKeyboardViewDelegate?
 
+    private let fontSize: CGFloat = 20
+    private let labelSize: CGFloat = 15
+    private let commentSize: CGFloat = 16
+    private let preeditSize: CGFloat = 15
+    private let panelGap: CGFloat = 4
+
     private struct KeyRect {
         var spec: KeyTaoKeySpec
         var rect: CGRect
@@ -501,7 +507,8 @@ final class KeyTaoIOSKeyboardView: UIView {
     func currentThemeColorScheme() -> String { theme.ui.colorScheme }
 
     func previewAccent(_ value: String) {
-        update(theme: theme.withAccent(hex: value))
+        theme.ui.accentColor = KeyTaoThemeColor.from(hex: value)
+        setNeedsDisplay()
     }
 
     func update(theme: KeyTaoImeTheme) {
@@ -1321,7 +1328,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         case .slider:
             activeSettingOriginalValue = item.value.map(serializeSettingNumber)
         case .swatches:
-            activeSettingOriginalValue = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+            activeSettingOriginalValue = (theme.ui.accentColor ?? theme.mobile.keyboard.toolbar.selectedForeground).hex
         case .option:
             activeSettingOriginalValue = item.swatches.contains(theme.ui.colorScheme) ? theme.ui.colorScheme : "auto"
         default:
@@ -1404,7 +1411,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             // `original` is the accent before this drag: previews from swatches slid over on the
             // way to 自定义 were never persisted and must not become the picker's entry colour.
             if !cancelled {
-                openColorPicker(original ?? (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex)
+                openColorPicker(original ?? (theme.ui.accentColor ?? theme.mobile.keyboard.toolbar.selectedForeground).hex)
             }
         } else if let value {
             if cancelled {
@@ -2018,8 +2025,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         case .candidates:
             inlineCandidateRects = inlineCandidateLayout()
         case .clipboardSuggestion:
-            let rect = CGRect(x: theme.panel.gap * 1.5, y: 4,
-                              width: max(0, bounds.width - theme.panel.gap * 3),
+            let rect = CGRect(x: panelGap * 1.5, y: 4,
+                              width: max(0, bounds.width - panelGap * 3),
                               height: max(0, config.candidateBarHeightDp - 8))
             inlineCandidateRects = [CandidateRect(identifierIndex: -6000, selectIndex: -6000,
                 rect: rect, global: false, command: .panel("pasteClipboardSuggestion"),
@@ -2060,8 +2067,8 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func candidateMenuLayout() -> [CandidateMenuActionRect] {
         guard let menu = candidateMenu else { return [] }
-        let gap = max(4, theme.panel.gap)
-        let leftPadding = theme.panel.gap * 1.5
+        let gap = max(4, panelGap)
+        let leftPadding = panelGap * 1.5
         let top: CGFloat = 7
         let bottom = config.candidateBarHeightDp - 7
         let codeRight = menu.deletionUnavailable ? bounds.width - leftPadding : bounds.width * 0.62
@@ -2090,7 +2097,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func backspacePreviewLayout() -> CGRect? {
         guard backspacePreviewText?.isEmpty == false else { return nil }
-        let gap = max(KeyTaoIMEInteractionTuning.backspacePreviewMinimumHorizontalInset, theme.panel.gap)
+        let gap = max(KeyTaoIMEInteractionTuning.backspacePreviewMinimumHorizontalInset, panelGap)
         let verticalInset = KeyTaoIMEInteractionTuning.backspacePreviewVerticalInset
         return CGRect(
             x: gap,
@@ -2224,29 +2231,34 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawBackground() {
+        theme.mobile.keyboard.background.uiColor.setFill()
         guard layoutPresentation.isCompact else {
-            // The root UIInputView(.keyboard) supplies the system keyboard material.
+            UIBezierPath(rect: bounds).fill()
             return
         }
-        let borderWidth = max(0.5, theme.panel.borderWidth)
+        let borderWidth = theme.mobile.keyboard.key.borderWidth
         let inset = borderWidth / 2
         let panelRect = bounds.insetBy(dx: inset, dy: inset)
         let path = UIBezierPath(
             roundedRect: panelRect,
-            cornerRadius: theme.panel.cornerRadius
+            cornerRadius: theme.mobile.keyboard.key.cornerRadius
         )
-        theme.panel.background.uiColor.setFill()
         path.fill()
-        theme.panel.borderColor.uiColor.setStroke()
+        theme.mobile.keyboard.floating.borderColor.uiColor.setStroke()
         path.lineWidth = borderWidth
         path.stroke()
     }
 
     private func drawCandidateBar() {
         let barHeight = config.candidateBarHeightDp
-        let leftPadding = theme.panel.gap * 1.5
+        let content = candidateBarContent()
+        let background = content == .toolbar || content == .functionPanel || content == .clipboardSuggestion
+            ? theme.mobile.keyboard.toolbar.background : theme.mobile.candidateBar.background
+        background.uiColor.setFill()
+        UIBezierPath(rect: CGRect(x: 0, y: 0, width: bounds.width, height: barHeight)).fill()
+        let leftPadding = panelGap * 1.5
         let message = availabilityMessage?.isEmpty == false ? availabilityMessage : nil
-        switch candidateBarContent() {
+        switch content {
         case .candidateMenu:
             if let candidateMenu {
                 drawCandidateMenu(candidateMenu)
@@ -2257,7 +2269,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 message ?? "请先在 KeyTao App 安装键道方案",
                 in: CGRect(x: leftPadding, y: 0, width: bounds.width - leftPadding * 2, height: barHeight),
                 color: statusMessageColor(),
-                size: theme.font.preeditSize,
+                size: preeditSize,
                 weight: theme.font.weight,
                 alignment: .left
             )
@@ -2293,7 +2305,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 keyBackgroundColor().setFill()
                 UIBezierPath(roundedRect: suggestion.rect, cornerRadius: candidateCornerRadius()).fill()
                 drawTruncatedText(suggestion.label, in: suggestion.rect.insetBy(dx: candidatePaddingX(), dy: 0),
-                                  color: theme.candidate.foreground.uiColor, size: candidateTextSize(), alignment: .left)
+                                  color: theme.mobile.candidateBar.foreground.uiColor, size: candidateTextSize(), alignment: .left)
             }
             return
         case .toolbar:
@@ -2303,16 +2315,18 @@ final class KeyTaoIOSKeyboardView: UIView {
         let preedit = state.candidatePanel.preedit ?? state.preedit
         if !config.hostMarkedTextEnabled, !preedit.isEmpty {
             let logo = logoRect()
+            theme.mobile.candidateBar.preeditBackground.uiColor.setFill()
+            UIBezierPath(rect: CGRect(x: leftPadding, y: 0, width: max(0, logo.minX - leftPadding - panelGap), height: barHeight)).fill()
             drawText(
                 preedit,
                 in: CGRect(
                     x: leftPadding,
                     y: 0,
-                    width: max(0, logo.minX - leftPadding - theme.panel.gap),
+                    width: max(0, logo.minX - leftPadding - panelGap),
                     height: barHeight
                 ),
-                color: theme.candidate.labelColor.uiColor,
-                size: theme.font.preeditSize,
+                color: theme.mobile.candidateBar.preeditForeground.uiColor,
+                size: preeditSize,
                 weight: theme.font.weight,
                 alignment: .left
             )
@@ -2348,7 +2362,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(
             menu.deletionUnavailable ? "\(codeText) · 系统词不可删除" : codeText,
             in: codeRect,
-            color: theme.candidate.foreground.uiColor,
+            color: theme.mobile.candidateBar.foreground.uiColor,
             size: candidateLabelSize(),
             weight: theme.font.weight,
             alignment: .center
@@ -2359,12 +2373,12 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
             let pressed = pressedCandidateMenuAction?.action == "delete"
             drawSurfaceShadow(deleteRect, pressed: pressed)
-            (pressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
+            (pressed ? theme.mobile.candidateBar.selectedBackground.uiColor : keyBackgroundColor()).setFill()
             UIBezierPath(roundedRect: deleteRect, cornerRadius: candidateCornerRadius()).fill()
             drawText(
                 "删除该词",
                 in: deleteRect,
-                color: pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+                color: pressed ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
                 size: candidateLabelSize(),
                 weight: theme.font.weight,
                 alignment: .center
@@ -2377,7 +2391,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
         drawSurfaceShadow(rect, pressed: backspacePreviewPressed)
-        (backspacePreviewPressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
+        (backspacePreviewPressed ? theme.mobile.candidateBar.selectedBackground.uiColor : keyBackgroundColor()).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
         let text = fittedBackspacePreviewText(
             deleted,
@@ -2389,7 +2403,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(
             text,
             in: rect,
-            color: backspacePreviewPressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: backspacePreviewPressed ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateLabelSize(),
             weight: theme.font.weight,
             alignment: .center
@@ -2424,7 +2438,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let query = emojiSearchDisplayText()
         drawTruncatedText(query.isEmpty ? "输入关键词搜索 Emoji" : query,
                           in: emojiSearchQueryRect().insetBy(dx: 8, dy: 0),
-                          color: query.isEmpty ? theme.candidate.commentColor.uiColor : theme.candidate.foreground.uiColor,
+                          color: query.isEmpty ? theme.mobile.candidateBar.commentColor.uiColor : theme.mobile.candidateBar.foreground.uiColor,
                           size: 16, alignment: .left)
     }
 
@@ -2521,7 +2535,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         let top = config.candidateBarHeightDp
         let panelRect = CGRect(x: 0, y: top, width: bounds.width, height: keyboardBottom() - top)
-        context.setStrokeColor(theme.panel.borderColor.uiColor.cgColor)
+        (functionPanelActive ? theme.mobile.keyboard.pageBackground : theme.mobile.candidateBar.expandedBackground).uiColor.setFill()
+        UIBezierPath(rect: panelRect).fill()
+        context.setStrokeColor(theme.mobile.keyboard.key.borderColor.uiColor.cgColor)
         context.setLineWidth(max(1, pixel))
         context.move(to: CGPoint(x: 0, y: top))
         context.addLine(to: CGPoint(x: bounds.width, y: top))
@@ -2530,14 +2546,14 @@ final class KeyTaoIOSKeyboardView: UIView {
         let items = expandedCandidateItems()
         if items.isEmpty {
             let message = expandedPanelEmptyMessage()
-            let messageRect = panelRect.insetBy(dx: theme.panel.gap * 1.5, dy: 0)
+            let messageRect = panelRect.insetBy(dx: panelGap * 1.5, dy: 0)
             let messageSize = functionPanelActive && functionPanelMode == .clipboard && !clipboardFullAccess
-                ? min(theme.font.labelSize, theme.font.labelSize * messageRect.width / max(1, textWidth(message, size: theme.font.labelSize)))
-                : theme.font.labelSize
+                ? min(labelSize, labelSize * messageRect.width / max(1, textWidth(message, size: labelSize)))
+                : labelSize
             drawTruncatedText(
                 message,
                 in: messageRect,
-                color: theme.candidate.commentColor.uiColor,
+                color: theme.mobile.candidateBar.commentColor.uiColor,
                 size: messageSize,
                 alignment: .center
             )
@@ -2571,8 +2587,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawText(
                 functionPanelTitle(),
                 in: CGRect(x: 0, y: 0, width: bounds.width, height: config.candidateBarHeightDp),
-                color: theme.candidate.commentColor.uiColor,
-                size: theme.font.labelSize,
+                color: theme.mobile.candidateBar.commentColor.uiColor,
+                size: labelSize,
                 weight: theme.font.weight,
                 alignment: .center
             )
@@ -2586,7 +2602,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 width: width,
                 height: 2
             )
-            theme.candidate.selectedLabelColor.uiColor.setFill()
+            theme.mobile.keyboard.toolbar.selectedForeground.uiColor.setFill()
             UIBezierPath(roundedRect: rect, cornerRadius: 1).fill()
         }
     }
@@ -2599,8 +2615,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(
             candidatePanelExpanded ? "⌃" : "⌄",
             in: rect,
-            color: pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
-            size: theme.font.size,
+            color: pressed ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
+            size: fontSize,
             weight: theme.font.weight,
             alignment: .center
         )
@@ -2621,22 +2637,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         let selected = item.selected || pressed
         if selected {
-            drawSurfaceShadow(rect, pressed: pressed, cornerRadius: candidateCornerRadius())
-        }
-        (selected ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
-        UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
-
-        let borderWidth = selected
-            ? max(theme.candidate.borderWidth, 1)
-            : KeyTaoIMEInteractionTuning.accentBorderWidth
-        if borderWidth > 0 {
-            let path = UIBezierPath(roundedRect: rect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2), cornerRadius: candidateCornerRadius())
-            path.lineWidth = borderWidth
-            (selected
-                ? theme.candidate.selectedBorderColor.uiColor
-                : accentBorderColor(KeyTaoIMEInteractionTuning.candidateBorderAlpha)
-            ).setStroke()
-            path.stroke()
+            theme.mobile.candidateBar.selectedBackground.uiColor.setFill()
+            UIBezierPath(rect: rect).fill()
         }
 
         var displayItem = item
@@ -2702,7 +2704,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawTruncatedText(
             item.label,
             in: rect,
-            color: theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: SettingsPanelLayout.sectionTextSize,
             alignment: .left
         )
@@ -2716,12 +2718,12 @@ final class KeyTaoIOSKeyboardView: UIView {
             height: SettingsPanelLayout.controlHeight
         )
         drawSettingsLabel(item.label, rect: rect, controlLeft: controlRect.minX)
-        (item.selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.borderColor.uiColor).setFill()
+        (item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.keyboard.key.borderColor.uiColor).setFill()
         UIBezierPath(roundedRect: controlRect, cornerRadius: controlRect.height / 2).fill()
         drawTruncatedText(
             item.text,
             in: controlRect,
-            color: item.selected ? theme.candidate.selectedBackground.uiColor : theme.candidate.commentColor.uiColor,
+            color: item.selected ? theme.mobile.candidateBar.selectedBackground.uiColor : theme.mobile.candidateBar.commentColor.uiColor,
             size: SettingsPanelLayout.secondaryTextSize,
             alignment: .center
         )
@@ -2747,13 +2749,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             )
             let selected = schemeLabel(value) == item.text
             if selected {
-                theme.candidate.selectedForeground.uiColor.setFill()
+                theme.mobile.candidateBar.selectedForeground.uiColor.setFill()
                 UIBezierPath(roundedRect: segmentRect, cornerRadius: controlRect.height / 4).fill()
             }
             drawTruncatedText(
                 schemeLabel(value),
                 in: segmentRect,
-                color: selected ? theme.candidate.selectedBackground.uiColor : theme.candidate.commentColor.uiColor,
+                color: selected ? theme.mobile.candidateBar.selectedBackground.uiColor : theme.mobile.candidateBar.commentColor.uiColor,
                 size: SettingsPanelLayout.secondaryTextSize,
                 alignment: .center
             )
@@ -2766,7 +2768,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             cornerRadius: controlRect.height / 4
         )
         border.lineWidth = SettingsPanelLayout.sliderThumbBorderWidth
-        accentBorderColor(SettingsPanelLayout.dividerAlpha).setStroke()
+        accentBorderColor().setStroke()
         border.stroke()
     }
 
@@ -2797,7 +2799,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             x: rect.minX,
             baselineY: rect.minY + SettingsPanelLayout.sliderTextBaseline,
             maxWidth: labelMaxWidth,
-            color: theme.candidate.foreground.uiColor,
+            color: theme.mobile.candidateBar.foreground.uiColor,
             size: SettingsPanelLayout.labelTextSize,
             alignment: .left
         )
@@ -2806,7 +2808,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             x: rect.maxX - valueWidth,
             baselineY: rect.minY + SettingsPanelLayout.sliderTextBaseline,
             maxWidth: valueWidth,
-            color: theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: SettingsPanelLayout.secondaryTextSize,
             alignment: .right
         )
@@ -2816,11 +2818,11 @@ final class KeyTaoIOSKeyboardView: UIView {
             width: trackRight - trackLeft,
             height: SettingsPanelLayout.sliderTrackHeight
         )
-        theme.panel.borderColor.uiColor.setFill()
+        theme.mobile.keyboard.key.borderColor.uiColor.setFill()
         UIBezierPath(roundedRect: trackRect, cornerRadius: SettingsPanelLayout.sliderTrackHeight / 2).fill()
         let filledRight = trackLeft + (trackRight - trackLeft) * ratio
         if filledRight > trackLeft {
-            theme.candidate.selectedLabelColor.uiColor.setFill()
+            theme.mobile.keyboard.toolbar.selectedForeground.uiColor.setFill()
             UIBezierPath(
                 roundedRect: CGRect(
                     x: trackLeft,
@@ -2832,7 +2834,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             ).fill()
         }
         let thumbRadius = SettingsPanelLayout.sliderThumbDiameter / 2
-        theme.candidate.selectedLabelColor.uiColor.setFill()
+        theme.mobile.keyboard.toolbar.selectedForeground.uiColor.setFill()
         UIBezierPath(
             ovalIn: CGRect(
                 x: filledRight - thumbRadius,
@@ -2850,7 +2852,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             )
         )
         thumbBorder.lineWidth = SettingsPanelLayout.sliderThumbBorderWidth
-        theme.candidate.selectedBorderColor.uiColor.setStroke()
+        theme.mobile.keyboard.key.borderColor.uiColor.setStroke()
         thumbBorder.stroke()
     }
 
@@ -2858,7 +2860,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let radius = SettingsPanelLayout.swatchDiameter / 2
         let startX = settingsSwatchStartX(rect: rect, count: item.swatches.count)
         drawSettingsLabel(item.label, rect: rect, controlLeft: startX)
-        let accent = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        let accent = (theme.ui.accentColor ?? theme.mobile.keyboard.toolbar.selectedForeground).hex
         let accentIsPreset = Self.accentPresets.contains { $0.caseInsensitiveCompare(accent) == .orderedSame }
         for (index, value) in item.swatches.enumerated() {
             let center = CGPoint(
@@ -2888,7 +2890,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     clockwise: true
                 )
                 ring.lineWidth = SettingsPanelLayout.swatchRingWidth
-                theme.candidate.selectedLabelColor.uiColor.setStroke()
+                theme.mobile.keyboard.toolbar.selectedForeground.uiColor.setStroke()
                 ring.stroke()
             }
         }
@@ -3035,7 +3037,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         uiColor(red: color.red, green: color.green, blue: color.blue).setFill()
         swatchPath.fill()
         swatchPath.lineWidth = SettingsPanelLayout.colorMarkerBorderWidth
-        accentBorderColor(SettingsPanelLayout.dividerAlpha).setStroke()
+        accentBorderColor().setStroke()
         swatchPath.stroke()
 
         let font = UIFont.monospacedSystemFont(ofSize: SettingsPanelLayout.secondaryTextSize, weight: .regular)
@@ -3043,7 +3045,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let size = hex.size(withAttributes: [.font: font])
         hex.draw(
             at: CGPoint(x: swatch.maxX + SettingsPanelLayout.controlGap, y: rect.midY - size.height / 2),
-            withAttributes: [.font: font, .foregroundColor: theme.candidate.commentColor.uiColor]
+            withAttributes: [.font: font, .foregroundColor: theme.mobile.candidateBar.commentColor.uiColor]
         )
 
         let chips = colorPickerChipRects(rect)
@@ -3057,13 +3059,13 @@ final class KeyTaoIOSKeyboardView: UIView {
         let fill: UIColor
         let foreground: UIColor
         if accentFilled {
-            let accent = theme.ui.accentColor ?? theme.candidate.selectedLabelColor
+            let accent = theme.ui.accentColor ?? theme.mobile.keyboard.toolbar.selectedForeground
             fill = accent.uiColor
             // A near-white or near-black accent needs the opposite label, not the panel colour.
             foreground = accentIsLight(accent.hex) ? .black : .white
         } else {
-            fill = pressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()
-            foreground = pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor
+            fill = pressed ? theme.mobile.candidateBar.selectedBackground.uiColor : keyBackgroundColor()
+            foreground = pressed ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor
         }
         fill.setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
@@ -3127,7 +3129,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawTruncatedText(
             label,
             in: CGRect(x: rect.minX, y: rect.minY, width: maxWidth, height: rect.height),
-            color: theme.candidate.foreground.uiColor,
+            color: theme.mobile.candidateBar.foreground.uiColor,
             size: SettingsPanelLayout.labelTextSize,
             alignment: .left
         )
@@ -3135,19 +3137,19 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func drawSettingsFooterChip(_ item: CandidateDrawItem, rect: CGRect, pressed: Bool) {
         drawSurfaceShadow(rect, pressed: pressed, cornerRadius: candidateCornerRadius())
-        (pressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
+        (pressed ? theme.mobile.candidateBar.selectedBackground.uiColor : keyBackgroundColor()).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
         drawTruncatedText(
             item.label,
             in: rect.insetBy(dx: SettingsPanelLayout.footerHorizontalPadding, dy: 0),
-            color: pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: pressed ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: SettingsPanelLayout.footerTextSize,
             alignment: .center
         )
     }
 
     private func drawSettingsDivider(_ rect: CGRect) {
-        theme.panel.borderColor.uiColor.withAlphaComponent(SettingsPanelLayout.dividerAlpha).setFill()
+        theme.mobile.keyboard.key.borderColor.uiColor.setFill()
         UIBezierPath(
             rect: CGRect(
                 x: rect.minX,
@@ -3229,7 +3231,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(
             item.label,
             in: rect,
-            color: theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: candidateLabelSize(),
             weight: theme.font.weight,
             alignment: .center
@@ -3243,7 +3245,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(
             item.label,
             in: labelRect,
-            color: theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             font: font,
             alignment: .left
         )
@@ -3252,8 +3254,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             let line = UIBezierPath()
             line.move(to: CGPoint(x: lineLeft, y: rect.midY))
             line.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
-            line.lineWidth = max(pixel, theme.candidate.borderWidth)
-            theme.panel.borderColor.uiColor.setStroke()
+            line.lineWidth = max(pixel, theme.mobile.keyboard.key.borderWidth)
+            theme.mobile.keyboard.key.borderColor.uiColor.setStroke()
             line.stroke()
         }
     }
@@ -3262,10 +3264,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         let center = CGPoint(x: rect.minX + 18, y: rect.midY)
         let radio = UIBezierPath(arcCenter: center, radius: 7, startAngle: 0, endAngle: .pi * 2, clockwise: true)
         radio.lineWidth = item.selected ? 2 : 1.4
-        (item.selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.commentColor.uiColor).setStroke()
+        (item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.commentColor.uiColor).setStroke()
         radio.stroke()
         if item.selected {
-            theme.candidate.selectedForeground.uiColor.setFill()
+            theme.mobile.candidateBar.selectedForeground.uiColor.setFill()
             UIBezierPath(arcCenter: center, radius: 3.5, startAngle: 0, endAngle: .pi * 2, clockwise: true).fill()
         }
 
@@ -3274,14 +3276,14 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawTruncatedText(
             item.label,
             in: CGRect(x: textLeft, y: rect.minY + 3, width: textWidth, height: 23),
-            color: item.selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateTextSize(),
             alignment: .left
         )
         drawTruncatedText(
             item.text,
             in: CGRect(x: textLeft, y: rect.midY, width: textWidth, height: 19),
-            color: item.selected ? theme.candidate.selectedCommentColor.uiColor : theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: candidateCommentSize(),
             alignment: .left
         )
@@ -3294,23 +3296,23 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawTruncatedText(
             item.label,
             in: CGRect(x: textLeft, y: rect.minY + 3, width: textWidth, height: 23),
-            color: item.selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateLabelSize(),
             alignment: .left
         )
         drawTruncatedText(
             item.text,
             in: CGRect(x: textLeft, y: rect.midY, width: textWidth, height: 19),
-            color: item.selected ? theme.candidate.selectedCommentColor.uiColor : theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: candidateCommentSize(),
             alignment: .left
         )
-        (item.selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.borderColor.uiColor).setFill()
+        (item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.keyboard.key.borderColor.uiColor).setFill()
         UIBezierPath(roundedRect: statusRect, cornerRadius: 11).fill()
         drawText(
             item.statusLabel ?? (item.selected ? "ON" : "OFF"),
             in: statusRect,
-            color: item.selected ? theme.candidate.selectedBackground.uiColor : theme.candidate.commentColor.uiColor,
+            color: item.selected ? theme.mobile.candidateBar.selectedBackground.uiColor : theme.mobile.candidateBar.commentColor.uiColor,
             size: 10,
             weight: theme.font.weight,
             alignment: .center
@@ -3325,17 +3327,17 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawTruncatedText(
             item.label,
             in: labelRect,
-            color: selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateTextSize(),
             alignment: .center
         )
-        let caption = [item.text, item.comment]
+        let caption = [item.text, theme.mobile.candidateBar.showComment ? item.comment : nil]
             .compactMap { value in value?.isEmpty == false ? value : nil }
             .joined(separator: " ")
         drawTruncatedText(
             caption,
             in: captionRect,
-            color: selected ? theme.candidate.selectedCommentColor.uiColor : theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: candidateCommentSize(),
             alignment: .center
         )
@@ -3352,7 +3354,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 item.label,
                 x: x,
                 centerY: rect.midY,
-                color: selected ? theme.candidate.selectedLabelColor.uiColor : theme.candidate.labelColor.uiColor,
+                color: selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.commentColor.uiColor,
                 size: candidateLabelSize(),
                 weight: theme.font.weight
             ) + inlineGap
@@ -3362,7 +3364,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             in: CGRect(x: x, y: rect.minY,
                        width: max(0, (item.clipboardKey == nil ? rect.maxX : actions.pin.minX) - paddingX - x),
                        height: rect.height),
-            color: selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateTextSize(),
             alignment: .left
         )
@@ -3387,19 +3389,19 @@ final class KeyTaoIOSKeyboardView: UIView {
         } else {
             let outline = UIBezierPath(roundedRect: previewRect.insetBy(dx: 1, dy: 1), cornerRadius: 6)
             outline.lineWidth = max(pixel, 1)
-            theme.candidate.borderColor.uiColor.setStroke()
+            theme.mobile.keyboard.key.borderColor.uiColor.setStroke()
             outline.stroke()
             let placeholder = entry.mime?.hasPrefix("image/") == true ? "IMG"
                 : entry.mime?.hasPrefix("video/") == true ? "VID" : "DOC"
-            drawText(placeholder, in: previewRect, color: theme.candidate.commentColor.uiColor,
+            drawText(placeholder, in: previewRect, color: theme.mobile.candidateBar.commentColor.uiColor,
                      size: 14, weight: theme.font.weight, alignment: .center)
         }
         let textX = previewRect.maxX + inset
         let textWidth = max(0, actions.pin.minX - inset - textX)
         drawTruncatedText(item.text, in: CGRect(x: textX, y: rect.midY - 26, width: textWidth, height: 28),
-                          color: theme.candidate.foreground.uiColor, size: candidateTextSize(), alignment: .left)
+                          color: theme.mobile.candidateBar.foreground.uiColor, size: candidateTextSize(), alignment: .left)
         drawTruncatedText(item.comment ?? "", in: CGRect(x: textX, y: rect.midY + 3, width: textWidth, height: 24),
-                          color: theme.candidate.commentColor.uiColor, size: candidateCommentSize(), alignment: .left)
+                          color: theme.mobile.candidateBar.commentColor.uiColor, size: candidateCommentSize(), alignment: .left)
         drawClipboardActionZone(actions.pin, label: entry.pinned ? "取消置顶" : "置顶")
         drawClipboardActionZone(actions.delete, label: "删除")
     }
@@ -3415,12 +3417,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         divider.move(to: CGPoint(x: deleteRect.minX, y: deleteRect.minY + 7))
         divider.addLine(to: CGPoint(x: deleteRect.minX, y: deleteRect.maxY - 7))
         divider.lineWidth = max(pixel, 0.7)
-        theme.candidate.borderColor.uiColor.setStroke()
+        theme.mobile.keyboard.key.borderColor.uiColor.setStroke()
         divider.stroke()
         drawText(
             label,
             in: deleteRect,
-            color: theme.candidate.commentColor.uiColor,
+            color: theme.mobile.candidateBar.commentColor.uiColor,
             size: 13,
             weight: theme.font.weight,
             alignment: .center
@@ -3438,7 +3440,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 item.label,
                 x: x,
                 centerY: centerY,
-                color: selected ? theme.candidate.selectedLabelColor.uiColor : theme.candidate.labelColor.uiColor,
+                color: selected ? theme.mobile.keyboard.toolbar.selectedForeground.uiColor : theme.mobile.candidateBar.commentColor.uiColor,
                 size: candidateLabelSize(),
                 weight: theme.font.weight
             ) + inlineGap
@@ -3447,16 +3449,16 @@ final class KeyTaoIOSKeyboardView: UIView {
             item.text,
             x: x,
             centerY: centerY,
-            color: selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            color: selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateTextSize(),
             weight: theme.font.weight
         ) + inlineGap
-        if let comment = item.comment, !comment.isEmpty {
+        if theme.mobile.candidateBar.showComment, let comment = item.comment, !comment.isEmpty {
             _ = drawInlineText(
                 comment,
                 x: x,
                 centerY: centerY,
-                color: selected ? theme.candidate.selectedCommentColor.uiColor : theme.candidate.commentColor.uiColor,
+                color: theme.mobile.candidateBar.commentColor.uiColor,
                 size: candidateCommentSize(),
                 weight: theme.font.weight
             )
@@ -3465,44 +3467,28 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func drawToolbarChip(_ item: ToolbarRect) {
         let pressed = pressedToolbar?.action.command == item.action.command && pressedToolbar?.action.label == item.action.label
-        let useAccent = item.action.selected || isSoftAccentToolbar(item.action)
+        let selected = pressed || item.action.selected
+        let toolbar = theme.mobile.keyboard.toolbar
         let rect = item.drawingRect ?? item.rect
-        drawSurfaceShadow(rect, pressed: pressed)
-        toolbarBackgroundColor(item.action, pressed: pressed).setFill()
-        UIBezierPath(roundedRect: rect, cornerRadius: keyCornerRadius(for: rect)).fill()
-
-        if useAccent {
-            let borderWidth = KeyTaoIMEInteractionTuning.accentBorderWidth
-            let path = UIBezierPath(
-                roundedRect: rect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2),
-                cornerRadius: keyCornerRadius(for: rect)
-            )
-            path.lineWidth = borderWidth
-            accentBorderColor(KeyTaoIMEInteractionTuning.accentToolbarBorderAlpha).setStroke()
-            path.stroke()
-        }
-
+        let color = (selected ? toolbar.selectedForeground : toolbar.foreground).uiColor
         if let secondary = item.action.secondaryLabel, !secondary.isEmpty {
-            drawToolbarPair(primary: item.action.label, secondary: secondary, rect: rect, pressed: pressed)
+            drawToolbarPair(primary: item.action.label, secondary: secondary, rect: rect, pressed: selected)
         } else if let icon = item.action.icon {
-            let color = pressed || item.action.selected
-                ? theme.candidate.selectedForeground.uiColor
-                : theme.candidate.foreground.uiColor
             drawToolbarIcon(icon, in: rect, color: color)
         } else {
             drawText(
                 item.action.label,
                 in: rect,
-                color: pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
-                font: fittedFont(for: item.action.label, size: theme.font.labelSize, maxWidth: rect.width - 10, weight: theme.font.weight),
+                color: color,
+                font: fittedFont(for: item.action.label, size: labelSize, maxWidth: rect.width - 10, weight: theme.font.weight),
                 alignment: .center
             )
         }
     }
 
     private func drawToolbarPair(primary: String, secondary: String, rect: CGRect, pressed: Bool) {
-        var primarySize = theme.font.labelSize
-        var secondarySize = theme.font.commentSize
+        var primarySize = labelSize
+        var secondarySize = commentSize
         var primaryFont = themedFont(size: primarySize, weight: theme.font.weight)
         var secondaryFont = themedFont(size: secondarySize, weight: theme.font.weight)
         let primaryWidth = primary.size(withAttributes: [.font: primaryFont]).width
@@ -3524,8 +3510,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         let y2 = rect.midY - secondaryFont.lineHeight / 2
         let x1 = rect.midX - fittedTotal / 2
         let x2 = x1 + fittedPrimaryWidth + gap
-        let primaryColor = pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor
-        let secondaryColor = pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.commentColor.uiColor
+        let primaryColor = (pressed ? theme.mobile.keyboard.toolbar.selectedForeground : theme.mobile.keyboard.toolbar.foreground).uiColor
+        let secondaryColor = primaryColor
         primary.draw(at: CGPoint(x: x1, y: y1), withAttributes: [.font: primaryFont, .foregroundColor: primaryColor])
         secondary.draw(at: CGPoint(x: x2, y: y2), withAttributes: [.font: secondaryFont, .foregroundColor: secondaryColor])
     }
@@ -3711,14 +3697,14 @@ final class KeyTaoIOSKeyboardView: UIView {
             logoImage.draw(in: rect, blendMode: .normal, alpha: 0.86)
             return
         }
-        let color = theme.candidate.selectedLabelColor.uiColor.withAlphaComponent(0.86)
+        let color = theme.mobile.keyboard.toolbar.selectedForeground.uiColor
         color.setFill()
         UIBezierPath(ovalIn: rect).fill()
         drawText(
             "K",
             in: rect,
-            color: theme.candidate.selectedForeground.uiColor,
-            size: theme.font.commentSize,
+            color: theme.mobile.candidateBar.selectedForeground.uiColor,
+            size: commentSize,
             weight: theme.font.weight,
             alignment: .center
         )
@@ -3731,15 +3717,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         pressProgress: CGFloat,
         pressedStackIndices: Set<Int> = []
     ) {
-        let unsupported = isUnsupportedEditKey(key)
-        if unsupported {
-            UIGraphicsGetCurrentContext()?.saveGState()
-            UIGraphicsGetCurrentContext()?.setAlpha(0.38)
-        }
-        defer {
-            if unsupported {
-                UIGraphicsGetCurrentContext()?.restoreGState()
-            }
+        let context = UIGraphicsGetCurrentContext()
+        context?.saveGState()
+        defer { context?.restoreGState() }
+        if isUnsupportedEditKey(key) {
+            context?.setAlpha(0.38)
         }
         if let stack = key.stack, !stack.isEmpty {
             drawStackKey(
@@ -3757,15 +3739,16 @@ final class KeyTaoIOSKeyboardView: UIView {
             keyRect.origin.y += pressProgress
         }
         let selected = isActiveKey(key)
-        drawSurfaceShadow(keyRect, pressed: pressProgress > 0.5)
+        let style = resolvedKeyStyle(key, selected: selected)
+        drawSurfaceShadow(keyRect, pressed: pressProgress > 0.5, style: style)
         keySurfaceColor(key, pressProgress: pressProgress).setFill()
-        UIBezierPath(roundedRect: keyRect, cornerRadius: keyCornerRadius(for: keyRect)).fill()
+        UIBezierPath(roundedRect: keyRect, cornerRadius: style.cornerRadius).fill()
         drawKeyOutline(key, rect: keyRect, pressed: pressProgress > 0.01)
         drawShiftStateDecoration(key, rect: keyRect)
 
         let label = displayLabel(key)
-        let baseSize = keyLabelSize(for: label, keySize: keyRect.size)
-        let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10, weight: keyLabelWeight)
+        let baseSize = keyLabelSize(for: label, keySize: keyRect.size) * style.fontScale
+        let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10, weight: style.fontWeight)
         let color = keyForegroundColor(key, selected: selected, pressProgress: pressProgress)
         if config.mnemonicHintsEnabled,
            layerMode == .letters,
@@ -3773,7 +3756,7 @@ final class KeyTaoIOSKeyboardView: UIView {
            !state.asciiMode,
            let mnemonic = mnemonicHint(for: key),
            mnemonic.topText != nil || !mnemonic.bottomLines.isEmpty {
-            drawMnemonicKeyLabel(label, mnemonic: mnemonic, rect: keyRect, color: color, font: font)
+            drawMnemonicKeyLabel(label, mnemonic: mnemonic, rect: keyRect, color: color, font: font, style: style)
             return
         }
         if key.action?.type == KeyTaoCommandType.keyboardPicker {
@@ -3793,11 +3776,12 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawText(label, in: keyRect, color: color, font: font, alignment: .center)
         }
 
-        if config.keyHintVisible, let hint = key.hint, !hint.isEmpty {
-            let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size), weight: keyLabelWeight)
+        if config.keyHintVisible, let hint = key.hint, !hint.isEmpty,
+           hint.count != 1 || style.swipeHintVisible {
+            let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size) * style.hintFontScale, weight: style.fontWeight)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: hintFont,
-                .foregroundColor: theme.candidate.commentColor.uiColor,
+                .foregroundColor: (hint.count == 1 ? style.swipeHintForeground : style.hintForeground).uiColor,
             ]
             let size = hint.size(withAttributes: attributes)
             hint.draw(
@@ -3821,10 +3805,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         mnemonic: KeyTaoMnemonicHints.Hint,
         rect: CGRect,
         color: UIColor,
-        font: UIFont
+        font: UIFont,
+        style: KeyTaoImeTheme.KeyStyle
     ) {
         let contentRect = rect.insetBy(dx: 3, dy: 3)
-        let hintFont = themedFont(size: min(10, keyHintSize(keySize: rect.size)), weight: keyLabelWeight)
+        let hintFont = themedFont(size: min(10, keyHintSize(keySize: rect.size)) * style.hintFontScale, weight: style.fontWeight)
         let bottomLines = mnemonic.bottomLines
         let lineHeight = min(hintFont.lineHeight, contentRect.height * 0.22)
         let bodyHeight = lineHeight * CGFloat(bottomLines.count)
@@ -3839,7 +3824,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return font.withSize(font.pointSize * max(0.01, scale))
         }
         drawText(label, in: labelRect, color: color, font: fitting(label, font: font, rect: labelRect), alignment: .center)
-        let hintColor = theme.candidate.commentColor.uiColor
+        let hintColor = style.hintForeground.uiColor
         if let topText = mnemonic.topText {
             let topRect = CGRect(
                 x: labelRect.maxX + 1, y: labelRect.minY,
@@ -3872,56 +3857,38 @@ final class KeyTaoIOSKeyboardView: UIView {
                 itemRect.origin.y += itemPressProgress
             }
             let selected = isActiveKey(key)
-            drawSurfaceShadow(itemRect, pressed: itemPressProgress > 0.5)
+            let style = resolvedKeyStyle(key, selected: selected)
+            drawSurfaceShadow(itemRect, pressed: itemPressProgress > 0.5, style: style)
             keySurfaceColor(key, pressProgress: itemPressProgress).setFill()
-            UIBezierPath(roundedRect: itemRect, cornerRadius: keyCornerRadius(for: itemRect)).fill()
+            UIBezierPath(roundedRect: itemRect, cornerRadius: style.cornerRadius).fill()
             drawKeyOutline(key, rect: itemRect, pressed: itemPressProgress > 0.01)
 
             let label = stackLabelForMode(item)
-            let baseSize = keyLabelSize(for: label, keySize: itemRect.size)
-            let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10, weight: keyLabelWeight)
+            let baseSize = keyLabelSize(for: label, keySize: itemRect.size) * style.fontScale
+            let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10, weight: style.fontWeight)
             let color = keyForegroundColor(key, selected: selected, pressProgress: itemPressProgress)
             drawText(label, in: itemRect, color: color, font: font, alignment: .center)
         }
     }
 
     private func keySurfaceColor(_ key: KeyTaoKeySpec, pressProgress: CGFloat) -> UIColor {
-        let active = isActiveKey(key)
-        let normal = active && (key.action?.type != KeyTaoCommandType.shift || shiftState == .locked)
-            ? theme.candidate.selectedBackground.uiColor
-            : keyBackgroundColor(key)
-        guard pressProgress > 0 else { return normal }
-        let pressed: UIColor
-        if active {
-            pressed = blend(
-                foreground: theme.candidate.pressedBackground.uiColor,
-                background: theme.candidate.selectedBackground.uiColor,
-                amount: 0.52
-            )
-        } else if isSoftAccentKey(key) {
-            pressed = blend(
-                foreground: theme.candidate.pressedBackground.uiColor,
-                background: softenedAccentSurfaceColor(KeyTaoIMEInteractionTuning.softAccentKeyFillAmount),
-                amount: 0.72
-            )
-        } else {
-            pressed = theme.candidate.pressedBackground.uiColor
-        }
-        return blend(foreground: pressed, background: normal, amount: pressProgress)
+        let style = resolvedKeyStyle(key, selected: isActiveKey(key))
+        return (pressProgress > 0 ? style.pressedBackground : style.background).uiColor
     }
 
     private func drawShiftStateDecoration(_ key: KeyTaoKeySpec, rect: CGRect) {
-        guard key.action?.type == KeyTaoCommandType.shift, shiftState != .off else {
+        guard actionForMode(key).type == KeyTaoCommandType.shift, shiftState != .off else {
             return
         }
-        let color = theme.candidate.selectedBorderColor.uiColor
+        let style = resolvedKeyStyle(key, selected: isActiveKey(key))
+        let color = style.borderColor.uiColor
         if shiftState == .once {
             color.setStroke()
             let outline = UIBezierPath(
                 roundedRect: rect.insetBy(dx: 1.5, dy: 1.5),
-                cornerRadius: keyCornerRadius(for: rect)
+                cornerRadius: style.cornerRadius
             )
-            outline.lineWidth = 2
+            outline.lineWidth = style.borderWidth
             outline.stroke()
         } else {
             color.setFill()
@@ -3997,27 +3964,29 @@ final class KeyTaoIOSKeyboardView: UIView {
         let left = max(margin, min(bounds.width - margin - bubbleWidth, key.rect.midX - bubbleWidth / 2))
         let top = max(margin, key.rect.minY - bubbleHeight + Self.keyPreviewKeyOverlap)
         let bubble = CGRect(x: left, y: top, width: bubbleWidth, height: bubbleHeight)
-        drawSurfaceShadow(bubble, pressed: false, cornerRadius: keyCornerRadius(for: bubble) * 13 / 10)
-        theme.candidate.pressedBackground.uiColor.setFill()
-        UIBezierPath(roundedRect: bubble, cornerRadius: keyCornerRadius(for: bubble) * 13 / 10).fill()
-        theme.candidate.selectedBorderColor.uiColor.setStroke()
-        let border = UIBezierPath(roundedRect: bubble, cornerRadius: keyCornerRadius(for: bubble) * 13 / 10)
-        border.lineWidth = max(1, pixel)
+        let style = resolvedKeyStyle(key.spec, selected: isActiveKey(key.spec))
+        drawSurfaceShadow(bubble, pressed: false, style: style)
+        style.pressedBackground.uiColor.setFill()
+        UIBezierPath(roundedRect: bubble, cornerRadius: style.cornerRadius).fill()
+        style.borderColor.uiColor.setStroke()
+        let border = UIBezierPath(roundedRect: bubble, cornerRadius: style.cornerRadius)
+        border.lineWidth = style.borderWidth
         border.stroke()
         drawText(
             text,
             in: bubble,
-            color: theme.candidate.selectedForeground.uiColor,
-            size: Self.keyPreviewTextSize,
-            weight: theme.font.weight,
+            color: style.pressedForeground.uiColor,
+            size: Self.keyPreviewTextSize * style.fontScale,
+            weight: style.fontWeight,
             alignment: .center
         )
     }
 
     private func drawAlternatePanel(_ panel: AlternatePanel) {
-        drawSurfaceShadow(panel.rect, pressed: false, cornerRadius: keyCornerRadius(for: panel.rect) * 13 / 10)
-        panelBackgroundColor().setFill()
-        UIBezierPath(roundedRect: panel.rect, cornerRadius: keyCornerRadius(for: panel.rect) * 13 / 10).fill()
+        let style = theme.mobile.keyboard.key
+        drawSurfaceShadow(panel.rect, pressed: false, style: style)
+        theme.mobile.keyboard.pageBackground.uiColor.setFill()
+        UIBezierPath(roundedRect: panel.rect, cornerRadius: style.cornerRadius).fill()
         let itemWidth = panel.rect.width / CGFloat(panel.options.count)
         for (index, option) in panel.options.enumerated() {
             let item = CGRect(
@@ -4027,54 +3996,46 @@ final class KeyTaoIOSKeyboardView: UIView {
                 height: panel.rect.height
             )
             if panel.selectedIndex == index {
-                theme.candidate.pressedBackground.uiColor.setFill()
-                UIBezierPath(roundedRect: item, cornerRadius: keyCornerRadius(for: item)).fill()
+                style.pressedBackground.uiColor.setFill()
+                UIBezierPath(roundedRect: item, cornerRadius: style.cornerRadius).fill()
             }
             drawText(
                 option.label,
                 in: item,
                 color: panel.selectedIndex == index
-                    ? theme.candidate.selectedForeground.uiColor
-                    : theme.candidate.foreground.uiColor,
-                size: Self.alternatePanelTextSize,
-                weight: theme.font.weight,
+                    ? style.pressedForeground.uiColor
+                    : style.foreground.uiColor,
+                size: Self.alternatePanelTextSize * style.fontScale,
+                weight: style.fontWeight,
                 alignment: .center
             )
         }
-        theme.candidate.selectedBorderColor.uiColor.setStroke()
-        let border = UIBezierPath(roundedRect: panel.rect, cornerRadius: keyCornerRadius(for: panel.rect) * 13 / 10)
-        border.lineWidth = max(1, pixel)
+        style.borderColor.uiColor.setStroke()
+        let border = UIBezierPath(roundedRect: panel.rect, cornerRadius: style.cornerRadius)
+        border.lineWidth = style.borderWidth
         border.stroke()
     }
 
     private func drawKeyOutline(_ key: KeyTaoKeySpec, rect: CGRect, pressed: Bool) {
-        let softAccent = isSoftAccentKey(key)
-        guard !pressed || softAccent else {
-            return
-        }
-        let outline = rect.insetBy(dx: 1, dy: 1)
-        let path = UIBezierPath(roundedRect: outline, cornerRadius: max(0, keyCornerRadius(for: rect) - 1))
-        path.lineWidth = softAccent ? KeyTaoIMEInteractionTuning.accentBorderWidth : max(1, 0.7)
-        if softAccent {
-            accentBorderColor(pressed ? 1 : KeyTaoIMEInteractionTuning.softAccentKeyBorderAlpha).setStroke()
-        } else if isDarkPanel() {
-            UIColor.white.withAlphaComponent(0.09).setStroke()
-        } else {
-            UIColor(red: 26 / 255, green: 34 / 255, blue: 44 / 255, alpha: 0.11).setStroke()
-        }
+        let style = resolvedKeyStyle(key, selected: isActiveKey(key))
+        guard style.borderWidth > 0 else { return }
+        let outline = rect.insetBy(dx: style.borderWidth / 2, dy: style.borderWidth / 2)
+        let path = UIBezierPath(roundedRect: outline, cornerRadius: style.cornerRadius)
+        path.lineWidth = style.borderWidth
+        style.borderColor.uiColor.setStroke()
         path.stroke()
     }
 
-    private func drawSurfaceShadow(_ rect: CGRect, pressed: Bool, cornerRadius: CGFloat? = nil) {
-        var shadow = rect
-        shadow.origin.y += pressed ? 0.8 : 1.6
-        UIColor(
-            red: 26 / 255,
-            green: 34 / 255,
-            blue: 44 / 255,
-            alpha: CGFloat(pressed ? 18 : 28) / 255
-        ).setFill()
-        UIBezierPath(roundedRect: shadow, cornerRadius: cornerRadius ?? keyCornerRadius(for: rect)).fill()
+    private func drawSurfaceShadow(
+        _ rect: CGRect,
+        pressed: Bool,
+        cornerRadius: CGFloat? = nil,
+        style: KeyTaoImeTheme.KeyStyle? = nil
+    ) {
+        let style = style ?? theme.mobile.keyboard.key
+        let shadow = rect.offsetBy(dx: 0, dy: style.shadowOffsetY)
+        style.shadowColor.uiColor.setFill()
+        UIBezierPath(roundedRect: shadow, cornerRadius: cornerRadius ?? style.cornerRadius).fill()
     }
 
     private func drawText(_ text: String, in rect: CGRect, color: UIColor, size: CGFloat, weight: KeyTaoThemeFontWeight, alignment: NSTextAlignment) {
@@ -4358,7 +4319,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return []
         }
         let barHeight = config.candidateBarHeightDp
-        let gap = theme.panel.gap
+        let gap = panelGap
         let viewport = inlineCandidateViewportRect()
         candidateViewportWidth = viewport.width
         let candidateHeight = min(38, barHeight - gap * 1.8)
@@ -4394,9 +4355,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func inlineCandidateViewportRect() -> CGRect {
-        let leftPadding = theme.panel.gap * 1.5
+        let leftPadding = panelGap * 1.5
         let left = leftPadding
-        let right = (expandButtonRect()?.minX ?? bounds.width - leftPadding) - theme.panel.gap
+        let right = (expandButtonRect()?.minX ?? bounds.width - leftPadding) - panelGap
         return CGRect(x: left, y: 0, width: max(0, right - left), height: config.candidateBarHeightDp)
     }
 
@@ -4740,7 +4701,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func toolbarLayout() -> [ToolbarRect] {
         if functionPanelActive {
             let barHeight = config.candidateBarHeightDp
-            let leftPadding = theme.panel.gap * 1.5
+            let leftPadding = panelGap * 1.5
             let chipHeight = min(34, barHeight - 12)
             let top = (barHeight - chipHeight) / 2
             let backCommand: String
@@ -4856,7 +4817,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return []
         }
         let barHeight = config.candidateBarHeightDp
-        let leftPadding = theme.panel.gap * 1.5
+        let leftPadding = panelGap * 1.5
         if !state.candidatePanel.candidates.isEmpty {
             return []
         }
@@ -4898,14 +4859,14 @@ final class KeyTaoIOSKeyboardView: UIView {
             return nil
         }
         let barHeight = config.candidateBarHeightDp
-        let leftPadding = theme.panel.gap * 1.5
+        let leftPadding = panelGap * 1.5
         let size = min(38, barHeight - 10)
         return CGRect(x: bounds.width - leftPadding - size, y: (barHeight - size) / 2, width: size, height: size)
     }
 
     private func logoRect() -> CGRect {
         let size: CGFloat = bounds.width < 300 ? 24 : 30
-        let leftPadding = theme.panel.gap * 1.5
+        let leftPadding = panelGap * 1.5
         let barHeight = config.candidateBarHeightDp
         return CGRect(x: bounds.width - leftPadding - size, y: (barHeight - size) / 2, width: size, height: size)
     }
@@ -5196,7 +5157,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if settingsColorPickerOpen { return colorPickerPanelItems() }
         let scheme = ["auto", "light", "dark"].contains(theme.ui.colorScheme) ? theme.ui.colorScheme : "auto"
         let nextScheme = scheme == "auto" ? "light" : (scheme == "light" ? "dark" : "auto")
-        let currentAccent = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        let currentAccent = (theme.ui.accentColor ?? theme.mobile.keyboard.toolbar.selectedForeground).hex
         let swatches = Self.accentPresets + [Self.customSwatch]
         var index = -4000
         func nextIndex() -> Int { defer { index -= 1 }; return index }
@@ -5312,7 +5273,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func candidateWidth(_ item: CandidateDrawItem) -> CGFloat {
         let labelWidth = textWidth(item.label, size: candidateLabelSize())
         let bodyWidth = textWidth(item.text, size: candidateTextSize())
-        let commentWidth = item.comment.map { textWidth($0, size: candidateCommentSize()) } ?? 0
+        let commentWidth = theme.mobile.candidateBar.showComment ? (item.comment.map { textWidth($0, size: candidateCommentSize()) } ?? 0) : 0
         let segmentCount = [labelWidth, bodyWidth, commentWidth].filter { $0 > 0 }.count
         let gaps = CGFloat(max(0, segmentCount - 1)) * candidateInlineGap()
         return labelWidth + bodyWidth + commentWidth + gaps + candidatePaddingX() * 2
@@ -5322,8 +5283,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         if action.icon != nil && (action.secondaryLabel?.isEmpty ?? true) {
             return minimumWidth ?? 46
         }
-        let labelWidth = textWidth(action.label, size: theme.font.labelSize)
-        let secondaryWidth = action.secondaryLabel.map { textWidth($0, size: theme.font.commentSize) } ?? 0
+        let labelWidth = textWidth(action.label, size: labelSize)
+        let secondaryWidth = action.secondaryLabel.map { textWidth($0, size: commentSize) } ?? 0
         let inlineGap: CGFloat = secondaryWidth > 0 ? 5 : 0
         let fallbackMinimum = secondaryWidth > 0 ? 58 : 48
         return max(labelWidth + secondaryWidth + inlineGap + horizontalPadding, minimumWidth ?? CGFloat(fallbackMinimum))
@@ -5600,9 +5561,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         guard layoutPresentation.isCompact else {
             return
         }
-        let color = theme.candidate.commentColor.uiColor.withAlphaComponent(0.6)
+        let color = theme.mobile.candidateBar.commentColor.uiColor
         color.setFill()
-        let handleWidth = max(2, theme.candidate.borderWidth)
+        let handleWidth = max(2, theme.mobile.keyboard.key.borderWidth)
         let handleHeight = min(30, bounds.height * 0.12)
         let x = layoutPresentation.side == .left
             ? bounds.maxX - handleWidth - 2
@@ -6245,8 +6206,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let thumbHeight = max(Self.scrollIndicatorMinimumThumb, viewportHeight * viewportHeight / contentHeight)
         let travel = max(0, viewportHeight - thumbHeight - 4)
         let thumbTop = viewportTop + 2 + travel * (max(0, min(maximum, scrollY)) / maximum)
-        theme.candidate.commentColor.uiColor
-            .withAlphaComponent(scrollIndicatorAlpha * Self.scrollIndicatorMaximumAlpha)
+        theme.mobile.candidateBar.commentColor.uiColor
             .setFill()
         UIBezierPath(
             roundedRect: CGRect(
@@ -6865,24 +6825,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func isActiveKey(_ key: KeyTaoKeySpec) -> Bool {
-        if key.action?.type == KeyTaoCommandType.shift { return shiftState != .off }
-        guard key.action?.type == KeyTaoCommandType.keyboardMode,
-              let value = key.action?.value, value != "back" else { return false }
+        let command = actionForMode(key)
+        if command.type == KeyTaoCommandType.shift { return shiftState != .off }
+        guard command.type == KeyTaoCommandType.keyboardMode,
+              let value = command.value, value != "back" else { return false }
         return config.normalizedLayer(navigation.resolve(value).id) == layerMode
-    }
-
-    private func isSoftAccentKey(_ key: KeyTaoKeySpec?) -> Bool {
-        guard let key else {
-            return false
-        }
-        let type = actionForMode(key).type
-        return key.style == "accent"
-            || isSoftAccentPunctuationKey(key)
-            || type == KeyTaoCommandType.mode
-            || type == KeyTaoCommandType.keyboardMode
-            || type == KeyTaoCommandType.space
-            || type == KeyTaoCommandType.enter
-            || type == KeyTaoCommandType.backspace
     }
 
     private func isSoftAccentPunctuationKey(_ key: KeyTaoKeySpec) -> Bool {
@@ -7010,40 +6957,40 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func candidateTextSize() -> CGFloat {
-        let desired = max(13, min(theme.font.size - 2, 22)) * config.candidateFontScale
+        let desired = 20 * config.candidateFontScale * theme.mobile.candidateBar.fontScale
         return max(10, min(desired, candidateFontHeightLimit()))
     }
 
     private func candidateLabelSize() -> CGFloat {
-        let desired = max(10, min(theme.font.labelSize - 1, 16)) * config.candidateFontScale
+        let desired = 14 * config.candidateFontScale * theme.mobile.candidateBar.fontScale
         return max(9, min(desired, candidateFontHeightLimit() * 0.76))
     }
 
     private func candidateCommentSize() -> CGFloat {
-        let desired = max(10, min(theme.font.commentSize - 1, 14)) * config.candidateFontScale
+        let desired = 12 * config.candidateFontScale * theme.mobile.candidateBar.fontScale
         return max(9, min(desired, candidateFontHeightLimit() * 0.68))
     }
 
     private func candidateFontHeightLimit() -> CGFloat {
-        let inlineHeight = max(24, min(38, config.candidateBarHeightDp - theme.panel.gap * 1.8))
+        let inlineHeight = max(24, min(38, config.candidateBarHeightDp - panelGap * 1.8))
         return inlineHeight * 0.72
     }
 
     private func keyLabelSize(for label: String, keySize: CGSize) -> CGFloat {
         if layerMode.id.isSymbolLayer && !containsCJK(label) && label.count <= 2 {
-            return max(theme.font.size, 22)
+            return max(fontSize, 22)
         }
         if label.count > 2 || containsCJK(label) {
-            return max(12, min(theme.font.labelSize, theme.font.size - 4, 16))
+            return max(12, min(labelSize, fontSize - 4, 16))
         }
         if label.count == 1 {
-            return min(theme.font.size, keySize.width * 0.67, keySize.height * 0.45)
+            return min(fontSize, keySize.width * 0.67, keySize.height * 0.45)
         }
-        return theme.font.size
+        return fontSize
     }
 
     private func keyHintSize(keySize: CGSize) -> CGFloat {
-        let base = max(10, min(theme.font.commentSize - 1, keyLabelSize(for: "中", keySize: keySize) - 2, 13))
+        let base = max(10, min(commentSize - 1, keyLabelSize(for: "中", keySize: keySize) - 2, 13))
         return max(10, min(14, base * max(0.9, min(1.2, keySize.height / 54))))
     }
 
@@ -7057,19 +7004,19 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func candidatePaddingX() -> CGFloat {
-        max(7, min(theme.candidate.paddingX, 9))
+        9
     }
 
     private func candidateInlineGap() -> CGFloat {
-        max(2, min(theme.candidate.inlineGap, 4))
+        4
     }
 
     private func candidateCornerRadius() -> CGFloat {
-        theme.candidate.cornerRadius * 8 / 11
+        theme.mobile.keyboard.key.cornerRadius
     }
 
     private func keyCornerRadius(for rect: CGRect) -> CGFloat {
-        min(theme.candidate.cornerRadius * 10 / 11, rect.width * 0.28, rect.height * 0.28)
+        theme.mobile.keyboard.key.cornerRadius
     }
 
     private func keyWeight(_ key: KeyTaoKeySpec) -> CGFloat {
@@ -7161,39 +7108,43 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func panelBackgroundColor() -> UIColor {
-        blend(
-            foreground: theme.candidate.selectedLabelColor.uiColor,
-            background: theme.panel.background.uiColor,
-            amount: 0.07,
-            alpha: CGFloat(theme.panel.background.alpha.clampedColor) / 255
-        )
+        theme.mobile.keyboard.background.uiColor
     }
 
     private func statusMessageColor() -> UIColor {
-        isDarkPanel()
-            ? UIColor(white: 0.94, alpha: 0.92)
-            : UIColor(red: 31 / 255, green: 41 / 255, blue: 51 / 255, alpha: 0.88)
+        theme.mobile.candidateBar.foreground.uiColor
+    }
+
+    private func resolvedKeyStyle(_ key: KeyTaoKeySpec? = nil, selected: Bool = false) -> KeyTaoImeTheme.KeyStyle {
+        let keyboard = theme.mobile.keyboard
+        guard let key else { return keyboard.key }
+        let command = actionForMode(key).type
+        let function = [
+            KeyTaoCommandType.mode, KeyTaoCommandType.keyboardMode, KeyTaoCommandType.space,
+            KeyTaoCommandType.enter, KeyTaoCommandType.backspace,
+        ].contains(command)
+        var style = keyboard.key.applying(keyboard.keyTypes[function ? "function" : "character"])
+        if [KeyTaoCommandType.space, KeyTaoCommandType.enter, KeyTaoCommandType.backspace, KeyTaoCommandType.shift].contains(command) {
+            style = style.applying(keyboard.keyTypes[command])
+        }
+        let accent = key.style == "accent"
+        let punctuation = isSoftAccentPunctuationKey(key)
+        if accent { style = style.applying(keyboard.keyClasses["accent"]) }
+        if punctuation { style = style.applying(keyboard.keyClasses["accentPunctuation"]) }
+        if selected, var state = keyboard.keyStates["selected"] {
+            if function || accent || punctuation {
+                state.background = state.softBackground ?? state.background
+            }
+            style = style.applying(state)
+        }
+        if command == KeyTaoCommandType.shift, shiftState != .off {
+            style = style.applying(keyboard.keyStates["shiftOn"])
+        }
+        return style
     }
 
     private func keyBackgroundColor(_ key: KeyTaoKeySpec? = nil, selected: Bool = false) -> UIColor {
-        if selected && isSoftAccentKey(key) {
-            return softenedAccentSurfaceColor(0.24)
-        }
-        if selected {
-            return theme.candidate.selectedBackground.uiColor.withAlphaComponent(isDarkPanel() ? 0.48 : 0.62)
-        }
-        if isSoftAccentKey(key) {
-            return softenedAccentSurfaceColor(KeyTaoIMEInteractionTuning.softAccentKeyFillAmount)
-        }
-        if key?.style == "accent" {
-            return theme.candidate.selectedBackground.uiColor.withAlphaComponent(isDarkPanel() ? 0.42 : 0.54)
-        }
-        if theme.candidate.background.alpha > 0 {
-            return theme.candidate.background.uiColor.withAlphaComponent(isDarkPanel() ? 0.34 : 0.52)
-        }
-        return isDarkPanel()
-            ? UIColor(red: 28 / 255, green: 34 / 255, blue: 42 / 255, alpha: 0.38)
-            : UIColor.white.withAlphaComponent(0.58)
+        resolvedKeyStyle(key, selected: selected).background.uiColor
     }
 
     private func keyForegroundColor(
@@ -7201,90 +7152,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         selected: Bool,
         pressProgress: CGFloat = 0
     ) -> UIColor {
-        let normal = selected || key.style == "accent"
-            ? theme.candidate.selectedForeground.uiColor
-            : theme.candidate.foreground.uiColor
-        guard pressProgress > 0 else { return normal }
-        return blend(
-            foreground: theme.candidate.pressedForeground.uiColor,
-            background: normal,
-            amount: pressProgress
-        )
+        let style = resolvedKeyStyle(key, selected: selected)
+        return (pressProgress > 0 ? style.pressedForeground : style.foreground).uiColor
     }
 
-    private func toolbarBackgroundColor(_ action: ToolbarAction, pressed: Bool) -> UIColor {
-        let accent = action.selected || isSoftAccentToolbar(action)
-        if pressed && accent {
-            return softenedAccentSurfaceColor(0.24)
-        }
-        if pressed {
-            return theme.candidate.selectedBackground.uiColor
-        }
-        if accent {
-            return softenedAccentSurfaceColor(action.selected ? 0.18 : 0.13)
-        }
-        return keyBackgroundColor()
-    }
-
-    private func isSoftAccentToolbar(_ action: ToolbarAction) -> Bool {
-        if action.command.type == KeyTaoCommandType.mode ||
-            action.command.type == KeyTaoCommandType.openPage ||
-            action.command.type == KeyTaoCommandType.keyboardMode ||
-            action.command.type == KeyTaoCommandType.keyboardPicker {
-            return true
-        }
-        if action.command.type == KeyTaoCommandType.panel,
-           ["rime", "clipboard", "settings", "close", "dismissClipboard"].contains(action.command.value ?? "") {
-            return true
-        }
-        return false
-    }
-
-    private func softenedAccentSurfaceColor(_ amount: CGFloat) -> UIColor {
-        let alpha = isDarkPanel()
-            ? min(0.82, 0.66 + amount * 0.36)
-            : min(0.66, 0.44 + amount * 0.72)
-        return blend(
-            foreground: theme.candidate.selectedLabelColor.uiColor,
-            background: panelBackgroundColor(),
-            amount: max(0, min(amount, 1)),
-            alpha: alpha
-        )
-    }
-
-    private func accentBorderColor(_ alpha: CGFloat) -> UIColor {
-        let effectiveAlpha = alpha * (isDarkPanel()
-            ? KeyTaoIMEInteractionTuning.darkAccentBorderAlphaMultiplier
-            : 1)
-        return theme.candidate.selectedLabelColor.uiColor.withAlphaComponent(
-            max(0, min(effectiveAlpha, 1))
-        )
-    }
-
-    private func blend(foreground: UIColor, background: UIColor, amount: CGFloat, alpha: CGFloat? = nil) -> UIColor {
-        var fr: CGFloat = 0
-        var fg: CGFloat = 0
-        var fb: CGFloat = 0
-        var fa: CGFloat = 0
-        var br: CGFloat = 0
-        var bg: CGFloat = 0
-        var bb: CGFloat = 0
-        var ba: CGFloat = 0
-        foreground.getRed(&fr, green: &fg, blue: &fb, alpha: &fa)
-        background.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
-        let ratio = max(0, min(amount, 1))
-        let inverse = 1 - ratio
-        return UIColor(
-            red: fr * ratio + br * inverse,
-            green: fg * ratio + bg * inverse,
-            blue: fb * ratio + bb * inverse,
-            alpha: alpha ?? ba
-        )
-    }
-
-    private func isDarkPanel() -> Bool {
-        let luminance = (theme.panel.background.red * 299 + theme.panel.background.green * 587 + theme.panel.background.blue * 114) / 1000
-        return luminance < 128
+    private func accentBorderColor() -> UIColor {
+        theme.mobile.keyboard.key.borderColor.uiColor
     }
 
     /// Sound remains owned by iOS' Keyboard Clicks setting. Haptics additionally
@@ -7367,10 +7240,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             KeyTaoCommandType.panel,
             KeyTaoCommandType.floating,
         ].contains(command.type)
-    }
-
-    private var keyLabelWeight: KeyTaoThemeFontWeight {
-        theme.font.weight.uiWeight.rawValue < UIFont.Weight.regular.rawValue ? theme.font.weight : .regular
     }
 
     private func fittedFont(for text: String, size: CGFloat, maxWidth: CGFloat, weight: KeyTaoThemeFontWeight) -> UIFont {

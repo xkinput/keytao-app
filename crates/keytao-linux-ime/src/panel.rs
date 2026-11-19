@@ -15,8 +15,8 @@ use std::{
 use freetype::{bitmap::PixelMode, face::LoadFlag, ffi, Face, Library};
 use keytao_core::ImeState;
 use keytao_theme::{
-    scaled_candidate_panel, CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate,
-    ThemeResolver, UiCapabilities,
+    resolved_panel_shadow, scaled_candidate_panel, CandidatePanelInput, PanelOrientation,
+    RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use tiny_skia::*;
 
@@ -24,8 +24,8 @@ use crate::panel_hit::{layout, PanelGeometry, PanelHitAreas};
 use x11rb::{
     connection::Connection as _,
     protocol::xproto::{
-        ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, ImageFormat,
-        WindowClass,
+        ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask,
+        ImageFormat, Screen, VisualClass, WindowClass,
     },
     rust_connection::RustConnection,
 };
@@ -345,6 +345,7 @@ pub struct PanelRenderer {
     _library: Library,
     scale: f32,
     theme_resolver: ThemeResolver,
+    supports_alpha: bool,
 }
 
 pub struct WaylandPanel {
@@ -382,14 +383,84 @@ pub struct X11OverlayPanel {
     renderer: PanelRenderer,
 }
 
+pub(crate) fn x11_shadow_supported(depth: u8, compositor_owner: u32) -> bool {
+    depth == 32 && compositor_owner != 0
+}
+
+pub(crate) fn x11_panel_position(
+    anchor: (i32, i32),
+    size: (u32, u32),
+    inset: i32,
+    screen: (i32, i32),
+    margin: i32,
+    caret_gap: i32,
+) -> (i32, i32) {
+    let max_x = (screen.0 - size.0 as i32 - margin).max(margin);
+    let max_y = (screen.1 - size.1 as i32).max(0);
+    let mut y = anchor.1 + caret_gap - inset;
+    if y + size.1 as i32 > screen.1 {
+        y = anchor.1 - caret_gap - size.1 as i32 + inset;
+    }
+    ((anchor.0 - inset).clamp(margin, max_x), y.clamp(0, max_y))
+}
+
+pub(crate) fn x11_panel_visual<C: x11rb::connection::Connection>(
+    conn: &C,
+    screen: &Screen,
+    screen_num: usize,
+) -> (u8, u32, u32, bool) {
+    let fallback = (
+        screen.root_depth,
+        screen.root_visual,
+        screen.default_colormap,
+        false,
+    );
+    let compositor_owner = conn
+        .intern_atom(true, format!("_NET_WM_CM_S{screen_num}").as_bytes())
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .filter(|reply| reply.atom != 0)
+        .and_then(|reply| conn.get_selection_owner(reply.atom).ok())
+        .and_then(|cookie| cookie.reply().ok())
+        .map_or(0, |reply| reply.owner);
+    if !x11_shadow_supported(32, compositor_owner) {
+        return fallback;
+    }
+    let Some(visual) = screen
+        .allowed_depths
+        .iter()
+        .filter(|depth| depth.depth == 32)
+        .flat_map(|depth| &depth.visuals)
+        .find(|visual| {
+            visual.class == VisualClass::TRUE_COLOR
+                && visual.red_mask == 0x00FF0000
+                && visual.green_mask == 0x0000FF00
+                && visual.blue_mask == 0x000000FF
+        })
+    else {
+        return fallback;
+    };
+    let Ok(colormap) = conn.generate_id() else {
+        return fallback;
+    };
+    let Ok(cookie) =
+        conn.create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual.visual_id)
+    else {
+        return fallback;
+    };
+    if cookie.check().is_err() {
+        return fallback;
+    }
+    (32, visual.visual_id, colormap, true)
+}
+
 impl X11OverlayPanel {
     pub fn new() -> Option<Self> {
         let (conn, screen_num) = RustConnection::connect(None).ok()?;
         let setup = conn.setup();
         let screen = setup.roots.get(screen_num)?;
         let root = screen.root;
-        let visual = screen.root_visual;
-        let depth = screen.root_depth;
+        let (depth, visual, colormap, supports_alpha) = x11_panel_visual(&conn, screen, screen_num);
         let screen_width = screen.width_in_pixels as i32;
         let screen_height = screen.height_in_pixels as i32;
 
@@ -407,7 +478,9 @@ impl X11OverlayPanel {
             visual,
             &CreateWindowAux::new()
                 .override_redirect(1)
-                .background_pixel(0x1e1e2e)
+                .background_pixel(0)
+                .border_pixel(0)
+                .colormap(colormap)
                 .event_mask(EventMask::EXPOSURE),
         )
         .ok()?;
@@ -415,7 +488,8 @@ impl X11OverlayPanel {
         let gc = conn.generate_id().ok()?;
         conn.create_gc(gc, panel_win, &Default::default()).ok()?;
 
-        let renderer = load_font().and_then(PanelRenderer::new_x11)?;
+        let renderer =
+            load_font().and_then(|source| PanelRenderer::new_x11(source, supports_alpha))?;
 
         Some(Self {
             conn,
@@ -435,9 +509,14 @@ impl X11OverlayPanel {
             return;
         }
         let (pixels, w, h) = self.renderer.render(state, self.screen_width as f32);
-        let margin = self.renderer.screen_margin();
-        let x = x.clamp(margin, (self.screen_width - w as i32 - margin).max(margin));
-        let y = y.clamp(0, (self.screen_height - h as i32).max(0));
+        let (x, y) = x11_panel_position(
+            (x, y),
+            (w, h),
+            self.renderer.candidate_shadow_inset(),
+            (self.screen_width, self.screen_height),
+            self.renderer.screen_margin(),
+            0,
+        );
         self.conn
             .configure_window(
                 self.panel_win,
@@ -479,7 +558,15 @@ impl X11OverlayPanel {
     }
 
     fn show_hint_pixels(&mut self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) {
-        let x = (x - w as i32 / 2).max(0);
+        let inset = self.renderer.hint_shadow_inset();
+        let (x, y) = x11_panel_position(
+            (x - (w as i32 - inset * 2) / 2, y),
+            (w, h),
+            inset,
+            (self.screen_width, self.screen_height),
+            self.renderer.screen_margin(),
+            0,
+        );
         self.conn
             .configure_window(
                 self.panel_win,
@@ -586,8 +673,10 @@ impl PanelRenderer {
         Self::with_scale(source, 1.0)
     }
 
-    pub fn new_x11(source: FontSource) -> Option<Self> {
-        Self::with_scale(source, detect_x11_panel_scale())
+    pub fn new_x11(source: FontSource, supports_alpha: bool) -> Option<Self> {
+        let mut renderer = Self::with_scale(source, detect_x11_panel_scale())?;
+        renderer.supports_alpha = supports_alpha;
+        Some(renderer)
     }
 
     fn with_scale(source: FontSource, scale: f32) -> Option<Self> {
@@ -604,6 +693,7 @@ impl PanelRenderer {
             _library: library,
             scale: clamp_panel_scale(scale),
             theme_resolver: ThemeResolver::from_default_locations(),
+            supports_alpha: true,
         })
     }
 
@@ -618,6 +708,19 @@ impl PanelRenderer {
     pub fn screen_margin(&self) -> i32 {
         self.s(self.theme_resolver.current().panel.screen_margin)
             .ceil() as i32
+    }
+
+    pub fn candidate_shadow_inset(&self) -> i32 {
+        self.shadow_inset(self.theme_resolver.current().panel.shadow)
+    }
+
+    pub fn hint_shadow_inset(&self) -> i32 {
+        self.shadow_inset(self.theme_resolver.current().mode_hint.shadow)
+    }
+
+    fn shadow_inset(&self, enabled: bool) -> i32 {
+        resolved_panel_shadow(enabled && self.supports_alpha)
+            .map_or(0, |shadow| self.s(shadow.margin).ceil() as i32)
     }
 
     pub fn render_wayland(
@@ -691,8 +794,13 @@ impl PanelRenderer {
         screen_width: f32,
     ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
         let theme = scaled_candidate_panel(&self.theme_resolver.current());
-        let model = theme
-            .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
+        let model = theme.candidate_panel_model(
+            state_to_panel_input(state),
+            &UiCapabilities {
+                supports_hover: false,
+                ..UiCapabilities::full_custom()
+            },
+        );
         let font_size = self.s(theme.font.size);
         let label_size = self.s(theme.font.label_size);
         let comment_size = self.s(theme.font.comment_size);
@@ -772,7 +880,9 @@ impl PanelRenderer {
             .max(preedit_width)
             .ceil()
             .min(
-                (screen_width - self.screen_margin() as f32 * 2.0)
+                (screen_width
+                    - self.screen_margin() as f32 * 2.0
+                    - self.shadow_inset(theme.panel.shadow) as f32 * 2.0)
                     .floor()
                     .max(1.0),
             ) as u32;
@@ -819,14 +929,14 @@ impl PanelRenderer {
                 bgra(if theme.ui.hide_candidate_panel {
                     theme.candidate.selected_foreground
                 } else {
-                    theme.candidate.selected_label_color
+                    theme.candidate.foreground
                 }),
                 preedit_size,
             );
             y += preedit_height;
         }
 
-        let areas = layout(&PanelGeometry {
+        let mut areas = layout(&PanelGeometry {
             vertical: model.orientation == PanelOrientation::Vertical,
             pad_x: panel_pad_x,
             top: y,
@@ -837,7 +947,12 @@ impl PanelRenderer {
             can_go_previous: model.navigation.can_go_previous,
             can_go_next: model.navigation.can_go_next,
         });
-        for (candidate, rect) in model.candidates.iter().zip(areas.candidates.iter()) {
+        for (index, (candidate, rect)) in model
+            .candidates
+            .iter()
+            .zip(areas.candidates.iter())
+            .enumerate()
+        {
             self.draw_candidate_option(
                 &mut pm,
                 candidate,
@@ -850,11 +965,55 @@ impl PanelRenderer {
                 comment_size,
                 &theme,
             );
+            if theme.candidate.separator_visible && index + 1 < model.candidates.len() {
+                let (x, y, width, height) = if model.orientation == PanelOrientation::Vertical {
+                    (
+                        rect.x,
+                        rect.y + rect.height + panel_gap * 0.5,
+                        rect.width,
+                        self.scale,
+                    )
+                } else {
+                    (
+                        rect.x + rect.width + panel_gap * 0.5,
+                        rect.y,
+                        self.scale,
+                        rect.height,
+                    )
+                };
+                draw_rounded_rect(
+                    &mut pm,
+                    x,
+                    y,
+                    width,
+                    height,
+                    0.0,
+                    theme.candidate.separator_color,
+                    theme.candidate.separator_color,
+                    0.0,
+                );
+            }
         }
         for (rect, glyph) in [(areas.previous_page, "‹"), (areas.next_page, "›")] {
             if let Some(rect) = rect {
                 self.draw_navigation_button(&mut pm, rect, glyph, font_size, &theme);
             }
+        }
+        let (pm, inset) = with_panel_shadow(
+            pm,
+            self.s(theme.panel.corner_radius),
+            theme.panel.shadow && self.supports_alpha,
+            self.scale,
+        );
+        let (width, height) = (pm.width(), pm.height());
+        for rect in areas
+            .candidates
+            .iter_mut()
+            .chain(areas.previous_page.iter_mut())
+            .chain(areas.next_page.iter_mut())
+        {
+            rect.x += inset;
+            rect.y += inset;
         }
 
         // Convert RGBA (tiny-skia) → BGRA (platform native)
@@ -874,13 +1033,21 @@ impl PanelRenderer {
 
     pub fn render_text_hint(&self, label: &str) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
-        let hint_size = self.s(theme.font.size);
+        let hint_size = self.s(theme.mode_hint.font_size);
         let padding = hint_size / 3.0;
         let (left, top, right, bottom) = self.text_bounds(&label, hint_size);
         let text_width = right - left;
         let text_height = bottom - top;
-        let width = (text_width + padding * 2.0).ceil().max(1.0) as u32;
-        let hint_height = (text_height + padding * 2.0).ceil().max(1.0) as u32;
+        let width = self
+            .s(theme.mode_hint.width)
+            .max(text_width + padding * 2.0)
+            .ceil()
+            .max(1.0) as u32;
+        let hint_height = self
+            .s(theme.mode_hint.height)
+            .max(text_height + padding * 2.0)
+            .ceil()
+            .max(1.0) as u32;
         let mut pm = Pixmap::new(width, hint_height).expect("pixmap alloc");
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
 
@@ -908,6 +1075,13 @@ impl PanelRenderer {
             hint_size,
         );
 
+        let (pm, _) = with_panel_shadow(
+            pm,
+            self.s(theme.mode_hint.corner_radius),
+            theme.mode_hint.shadow && self.supports_alpha,
+            self.scale,
+        );
+        let (width, hint_height) = (pm.width(), pm.height());
         let mut out = pm.data().to_vec();
         for px in out.chunks_exact_mut(4) {
             px.swap(0, 2);
@@ -946,11 +1120,6 @@ impl PanelRenderer {
         } else {
             candidate_theme.border_color
         };
-        let border_width = if candidate.selected {
-            self.s(candidate_theme.border_width.max(1.0))
-        } else {
-            self.s(candidate_theme.border_width)
-        };
         draw_rounded_rect(
             pm,
             x,
@@ -960,7 +1129,7 @@ impl PanelRenderer {
             self.s(candidate_theme.corner_radius),
             background,
             border,
-            border_width,
+            self.s(candidate_theme.border_width),
         );
 
         let option_pad_x = self.s(candidate_theme.padding_x);
@@ -1158,7 +1327,15 @@ impl PanelRenderer {
                     if px < 0 || py < 0 || px >= pm.width() as i32 || py >= pm.height() as i32 {
                         continue;
                     }
-                    blend_pixel(pm, px, py, r, g, b, alpha as f32 / 255.0);
+                    blend_pixel(
+                        pm,
+                        px,
+                        py,
+                        r,
+                        g,
+                        b,
+                        alpha as f32 / 255.0 * color[3] as f32 / 255.0,
+                    );
                 }
             }
             x += layout.advance;
@@ -1240,6 +1417,52 @@ fn tiny_color(color: RgbaColor) -> Color {
     Color::from_rgba8(color.red, color.green, color.blue, color.alpha)
 }
 
+fn with_panel_shadow(body: Pixmap, radius: f32, enabled: bool, scale: f32) -> (Pixmap, f32) {
+    let Some(shadow) = resolved_panel_shadow(enabled) else {
+        return (body, 0.0);
+    };
+    let inset = (shadow.margin * scale).ceil() as u32;
+    let Some(mut result) = Pixmap::new(body.width() + inset * 2, body.height() + inset * 2) else {
+        return (body, 0.0);
+    };
+    let half_width = body.width() as f32 * 0.5;
+    let half_height = body.height() as f32 * 0.5;
+    let radius = radius.min(half_width).min(half_height);
+    let sigma = shadow.blur_radius * scale * 0.5;
+    let width = result.width() as usize;
+    for (index, pixel) in result.data_mut().chunks_exact_mut(4).enumerate() {
+        let dx =
+            ((index % width) as f32 + 0.5 - inset as f32 - half_width).abs() - half_width + radius;
+        let dy =
+            ((index / width) as f32 + 0.5 - inset as f32 - half_height - shadow.offset_y * scale)
+                .abs()
+                - half_height
+                + radius;
+        let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius;
+        let coverage = if distance <= 0.0 {
+            1.0
+        } else {
+            (-0.5 * (distance / sigma).powi(2)).exp()
+        };
+        let alpha = shadow.color.alpha as f32 * coverage / 255.0;
+        pixel.copy_from_slice(&[
+            (shadow.color.red as f32 * alpha).round() as u8,
+            (shadow.color.green as f32 * alpha).round() as u8,
+            (shadow.color.blue as f32 * alpha).round() as u8,
+            (255.0 * alpha).round() as u8,
+        ]);
+    }
+    result.draw_pixmap(
+        inset as i32,
+        inset as i32,
+        body.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    (result, inset as f32)
+}
+
 fn draw_rounded_rect(
     pm: &mut Pixmap,
     x: f32,
@@ -1252,7 +1475,7 @@ fn draw_rounded_rect(
     border_width: f32,
 ) {
     let stroke_width = if border_width > 0.0 && border.alpha > 0 {
-        border_width.max(1.0)
+        border_width
     } else {
         0.0
     };
@@ -1295,7 +1518,7 @@ fn blend_pixel(pm: &mut Pixmap, px: i32, py: i32, r: u8, g: u8, b: u8, alpha: f3
     d[off] = lerp(d[off], r, a);
     d[off + 1] = lerp(d[off + 1], g, a);
     d[off + 2] = lerp(d[off + 2], b, a);
-    d[off + 3] = 255;
+    d[off + 3] = (255.0 * a + d[off + 3] as f32 * (1.0 - a)).round() as u8;
 }
 
 fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
@@ -1318,6 +1541,66 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
 #[inline]
 fn lerp(bg: u8, fg: u8, a: f32) -> u8 {
     (bg as f32 * (1.0 - a) + fg as f32 * a) as u8
+}
+
+#[cfg(test)]
+mod x11_shadow_tests {
+    use super::{x11_panel_position, x11_shadow_supported};
+
+    #[test]
+    fn shadows_require_compositor_and_argb_visual() {
+        assert!(x11_shadow_supported(32, 42));
+        assert!(!x11_shadow_supported(32, 0));
+        assert!(!x11_shadow_supported(24, 42));
+        assert!(!x11_shadow_supported(24, 0));
+    }
+
+    #[test]
+    fn shadow_inset_keeps_body_at_caret_at_every_scale() {
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let inset = (24.0 * scale).ceil() as i32;
+            let size = (200 + inset as u32 * 2, 100 + inset as u32 * 2);
+            let origin = x11_panel_position((300, 250), size, inset, (1920, 1080), 8, 4);
+            assert_eq!((origin.0 + inset, origin.1 + inset), (300, 254));
+        }
+    }
+
+    #[test]
+    fn shadow_panel_flips_body_above_caret_and_clamps_full_window() {
+        let origin = x11_panel_position((300, 1040), (248, 148), 24, (1920, 1080), 8, 4);
+        assert_eq!(origin, (276, 912));
+        assert_eq!(origin.1 + 24 + 100, 1040 - 4);
+        assert_eq!(
+            x11_panel_position((1910, 1060), (248, 148), 24, (1920, 1080), 8, 4),
+            (1664, 932),
+        );
+        assert_eq!(
+            x11_panel_position((0, 0), (248, 148), 24, (1920, 1080), 8, 4),
+            (8, 0),
+        );
+    }
+
+    #[test]
+    fn panels_without_shadow_keep_anchor_and_centered_hints() {
+        assert_eq!(
+            x11_panel_position((300, 250), (200, 100), 0, (1920, 1080), 8, 4),
+            (300, 254),
+        );
+        let inset = 24;
+        let width = 128;
+        let body_left = 300 - (width - inset * 2) / 2;
+        assert_eq!(
+            x11_panel_position(
+                (body_left, 250),
+                (width as u32, 100),
+                inset,
+                (1920, 1080),
+                8,
+                0
+            ),
+            (300 - width / 2, 226),
+        );
+    }
 }
 
 #[cfg(test)]

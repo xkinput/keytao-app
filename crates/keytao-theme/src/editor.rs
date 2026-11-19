@@ -1,4 +1,4 @@
-//! Editor field capabilities and validated, variant-specific source edits.
+//! Editor field capabilities and validated source edits.
 use crate::{source::ThemeSource, EffectiveColorScheme};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("common.backgroundColor", ALL),
     ("common.cornerRadius", ALL),
     ("common.font.family", MAC),
-    ("common.font.weight", MAC),
+    ("common.font.weight", MAC | MOBILE),
     ("pc.panel.orientation", DESKTOP),
     ("pc.panel.background", DESKTOP),
     ("pc.panel.borderColor", DESKTOP),
@@ -26,7 +26,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("pc.panel.paddingY", DESKTOP),
     ("pc.panel.gap", DESKTOP),
     ("pc.panel.preeditGap", DESKTOP),
-    ("pc.panel.shadow", MAC),
+    ("pc.panel.shadow", DESKTOP),
     ("pc.font.size", DESKTOP),
     ("pc.font.labelSize", DESKTOP),
     ("pc.font.commentSize", DESKTOP),
@@ -39,7 +39,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("pc.candidate.selectedLabelColor", DESKTOP),
     ("pc.candidate.commentColor", DESKTOP),
     ("pc.candidate.selectedCommentColor", DESKTOP),
-    ("pc.candidate.hoverBackground", MAC),
+    ("pc.candidate.hoverBackground", MAC | WINDOWS),
     ("pc.candidate.borderColor", DESKTOP),
     ("pc.candidate.selectedBorderColor", DESKTOP),
     ("pc.candidate.borderWidth", DESKTOP),
@@ -53,7 +53,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("pc.modeHint.width", DESKTOP),
     ("pc.modeHint.height", DESKTOP),
     ("pc.modeHint.cornerRadius", DESKTOP),
-    ("pc.modeHint.shadow", MAC),
+    ("pc.modeHint.shadow", DESKTOP),
     ("mobile.keyboard.background", MOBILE),
     ("mobile.keyboard.key.background", MOBILE),
     ("mobile.keyboard.key.foreground", MOBILE),
@@ -143,6 +143,7 @@ pub fn edit_theme_source_field(
             .ok_or("Invalid theme field value")?;
         set_field(&mut next[target], &parts, value.clone());
     } else {
+        remove_field(&mut next, &parts);
         if let Some(layer) = next.get_mut(target) {
             remove_field(layer, &parts);
             if layer.as_object().is_some_and(serde_json::Map::is_empty) {
@@ -190,8 +191,10 @@ pub fn resolve_theme_editor_preview(source_json: &str, dark: bool) -> Result<Str
     } else {
         EffectiveColorScheme::Light
     };
-    crate::resolved_theme_json(&crate::source::resolve_theme_source(&source, scheme))
-        .map_err(|error| error.to_string())
+    crate::resolved_renderer_theme_json(&crate::scaled_candidate_panel(
+        &crate::source::resolve_theme_source(&source, scheme),
+    ))
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -214,12 +217,13 @@ mod tests {
         for platform in [EditorPlatform::Windows, EditorPlatform::Linux] {
             let fields = supported(platform);
             assert!(fields.contains(&"pc.panel.orientation"));
-            for unavailable in [
-                "common.font.family",
-                "common.font.weight",
-                "pc.panel.shadow",
-                "pc.candidate.hoverBackground",
-            ] {
+            assert!(fields.contains(&"pc.panel.shadow"));
+            assert!(fields.contains(&"pc.modeHint.shadow"));
+            assert_eq!(
+                fields.contains(&"pc.candidate.hoverBackground"),
+                platform == EditorPlatform::Windows
+            );
+            for unavailable in ["common.font.family", "common.font.weight"] {
                 assert!(!fields.contains(&unavailable));
             }
         }
@@ -227,6 +231,7 @@ mod tests {
         let mobile = supported(EditorPlatform::Android);
         assert_eq!(mobile, supported(EditorPlatform::Ios));
         assert!(mobile.contains(&"mobile.keyboard.key.shadowColor"));
+        assert!(mobile.contains(&"common.font.weight"));
         assert!(mobile.contains(&"mobile.candidateBar.showComment"));
         assert!(!mobile.iter().any(|path| path.starts_with("pc.")));
         let mut unique = std::collections::HashSet::new();
@@ -270,7 +275,63 @@ mod tests {
                 assert_eq!(edited.value["extension"], original.value["extension"]);
                 let roundtrip = edit_theme_source_field(&edited, target, path, None).unwrap();
                 assert!(roundtrip.value.pointer(&pointer).is_none());
-                assert_eq!(roundtrip.value, original.value);
+                let mut expected = original.value;
+                if *path == "common.accentColor" {
+                    expected.as_object_mut().unwrap().remove("common");
+                }
+                assert_eq!(roundtrip.value, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn reset_removes_base_and_target_fields_but_preserves_other_values() {
+        let defaults = crate::source::parse_theme_source_json(
+            r#"{"version":3,"meta":{"id":"my.defaults","name":"Defaults"}}"#,
+        )
+        .unwrap();
+        for target in ["light", "dark"] {
+            let other = if target == "light" { "dark" } else { "light" };
+            for (base, variant) in [(true, false), (false, true), (true, true), (false, false)] {
+                let mut value = json!({
+                    "version": 3,
+                    "meta": {"id": "my.reset", "name": "Reset", "appearance": "both"},
+                    "pc": {"panel": {"paddingY": 12}},
+                    target: {"pc": {"panel": {"paddingY": 13}}},
+                    other: {"pc": {"panel": {"paddingX": 23}}},
+                    "extension": {"keep": true}
+                });
+                if base {
+                    value["pc"]["panel"]["paddingX"] = json!(20);
+                }
+                if variant {
+                    value[target]["pc"]["panel"]["paddingX"] = json!(21);
+                }
+                let original = crate::source::parse_local_theme_source(value).unwrap();
+                let reset =
+                    edit_theme_source_field(&original, target, "pc.panel.paddingX", None).unwrap();
+                assert!(reset.value.pointer("/pc/panel/paddingX").is_none());
+                assert!(reset
+                    .value
+                    .pointer(&format!("/{target}/pc/panel/paddingX"))
+                    .is_none());
+                assert_eq!(reset.value["pc"]["panel"]["paddingY"], 12.0);
+                assert_eq!(reset.value[target]["pc"]["panel"]["paddingY"], 13.0);
+                assert_eq!(reset.value[other], original.value[other]);
+                assert_eq!(reset.value["extension"], original.value["extension"]);
+                let scheme = if target == "light" {
+                    EffectiveColorScheme::Light
+                } else {
+                    EffectiveColorScheme::Dark
+                };
+                assert_eq!(
+                    crate::source::resolve_theme_source(&reset, scheme)
+                        .panel
+                        .padding_x,
+                    crate::source::resolve_theme_source(&defaults, scheme)
+                        .panel
+                        .padding_x
+                );
             }
         }
     }

@@ -44,6 +44,7 @@ fn check_fields(name: &str, value: &Value) {
                     );
                 }
             }
+            "ShadowStyle" => check_fields("ShadowStyle", v),
             _ => panic!("Unrecognized Swift decoder type: {kind}"),
         }
     }
@@ -61,7 +62,7 @@ fn compiled_json_round_trips_against_swift_decoder_fields() {
         std::fs::write(&path, compiled).unwrap();
         for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
             let theme = resolve_theme_from_paths_with_system_scheme(None, Some(&path), scheme);
-            let encoded = resolved_theme_json(&theme).unwrap();
+            let encoded = resolved_renderer_theme_json(&theme).unwrap();
             let decoded: Value = serde_json::from_str(&encoded).unwrap();
             for (name, field) in [
                 ("Ui", "ui"),

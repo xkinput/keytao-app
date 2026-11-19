@@ -19,6 +19,7 @@ let package = Package(
             dependencies: ["CKeytaoCore"],
             path: "Sources/KeyTaoIOSIME",
             resources: [
+                .process("Resources/default-theme-light.json"),
                 .process("Resources/keytao_ios_ime.json"),
                 .process("Resources/keytao-logo.png"),
             ]

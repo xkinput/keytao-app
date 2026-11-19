@@ -282,6 +282,13 @@ char *keytao_resolve_theme_json_with_system_scheme(const char *default_theme_pat
                                                    const char *system_color_scheme);
 
 /**
+ * Resolve desktop renderer metadata and candidate metric scaling in Rust.
+ */
+char *keytao_resolve_renderer_theme_json_with_system_scheme(const char *default_theme_path,
+                                                            const char *user_theme_path,
+                                                            const char *system_color_scheme);
+
+/**
  * Persist the mobile theme color scheme and optionally its accent. A null
  * accent preserves the key; an empty accent removes it.
  */

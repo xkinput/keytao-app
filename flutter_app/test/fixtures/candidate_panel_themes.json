@@ -45,6 +45,12 @@
       "minHeight": 34.0,
       "paddingX": 10.0,
       "paddingY": 5.0,
+      "preeditCaretColor": {
+        "alpha": 89,
+        "blue": 247,
+        "green": 243,
+        "red": 238
+      },
       "pressedBackground": {
         "alpha": 255,
         "blue": 132,
@@ -353,6 +359,17 @@
       },
       "height": 44.0,
       "shadow": true,
+      "shadowStyle": {
+        "blurRadius": 16.0,
+        "color": {
+          "alpha": 40,
+          "blue": 0,
+          "green": 0,
+          "red": 0
+        },
+        "margin": 24.0,
+        "offsetY": 8.0
+      },
       "width": 72.0
     },
     "navigation": {
@@ -401,7 +418,18 @@
       "paddingY": 10.0,
       "preeditGap": 10.0,
       "screenMargin": 8.0,
-      "shadow": true
+      "shadow": true,
+      "shadowStyle": {
+        "blurRadius": 16.0,
+        "color": {
+          "alpha": 40,
+          "blue": 0,
+          "green": 0,
+          "red": 0
+        },
+        "margin": 24.0,
+        "offsetY": 8.0
+      }
     },
     "ui": {
       "accentColor": {
@@ -428,6 +456,7 @@
         "common.accentColor",
         "common.backgroundColor",
         "common.cornerRadius",
+        "common.font.weight",
         "mobile.keyboard.background",
         "mobile.keyboard.key.background",
         "mobile.keyboard.key.foreground",
@@ -458,6 +487,7 @@
         "common.accentColor",
         "common.backgroundColor",
         "common.cornerRadius",
+        "common.font.weight",
         "mobile.keyboard.background",
         "mobile.keyboard.key.background",
         "mobile.keyboard.key.foreground",
@@ -521,7 +551,9 @@
         "pc.modeHint.fontSize",
         "pc.modeHint.width",
         "pc.modeHint.height",
-        "pc.modeHint.cornerRadius"
+        "pc.modeHint.cornerRadius",
+        "pc.panel.shadow",
+        "pc.modeHint.shadow"
       ]
     },
     "linuxKimpanel": {
@@ -618,7 +650,10 @@
         "pc.modeHint.fontSize",
         "pc.modeHint.width",
         "pc.modeHint.height",
-        "pc.modeHint.cornerRadius"
+        "pc.modeHint.cornerRadius",
+        "pc.panel.shadow",
+        "pc.modeHint.shadow",
+        "pc.candidate.hoverBackground"
       ]
     }
   },
@@ -668,6 +703,12 @@
       "minHeight": 34.0,
       "paddingX": 10.0,
       "paddingY": 5.0,
+      "preeditCaretColor": {
+        "alpha": 89,
+        "blue": 66,
+        "green": 52,
+        "red": 38
+      },
       "pressedBackground": {
         "alpha": 255,
         "blue": 244,
@@ -976,6 +1017,17 @@
       },
       "height": 44.0,
       "shadow": true,
+      "shadowStyle": {
+        "blurRadius": 16.0,
+        "color": {
+          "alpha": 40,
+          "blue": 0,
+          "green": 0,
+          "red": 0
+        },
+        "margin": 24.0,
+        "offsetY": 8.0
+      },
       "width": 72.0
     },
     "navigation": {
@@ -1024,7 +1076,18 @@
       "paddingY": 10.0,
       "preeditGap": 10.0,
       "screenMargin": 8.0,
-      "shadow": true
+      "shadow": true,
+      "shadowStyle": {
+        "blurRadius": 16.0,
+        "color": {
+          "alpha": 40,
+          "blue": 0,
+          "green": 0,
+          "red": 0
+        },
+        "margin": 24.0,
+        "offsetY": 8.0
+      }
     },
     "ui": {
       "accentColor": {

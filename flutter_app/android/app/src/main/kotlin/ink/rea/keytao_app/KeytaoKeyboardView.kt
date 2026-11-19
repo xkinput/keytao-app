@@ -294,6 +294,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var config: KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.load(context)
     private var settingsConfig: KeytaoAndroidImeConfig = config
     private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve(context)
+    private var accentPreviewColor: KeytaoColor? = null
     private var keyboardLayoutMode = KeyboardLayoutMode.FULL
     private var oneHandedSide = KeyboardSide.RIGHT
     private var oneHandedAvailable = true
@@ -593,7 +594,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     fun currentThemeColorScheme(): String = theme.uiColorScheme
 
     fun previewAccent(value: String) {
-        updateTheme(theme.withAccentHex(value))
+        accentPreviewColor = KeytaoColor.fromHex(value)
+        invalidate()
     }
 
     fun updateTextRecallAllowed(allowed: Boolean) {
@@ -656,6 +658,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     fun updateTheme(next: KeytaoImeTheme) {
         theme = next
+        accentPreviewColor = null
         candidateWidthCache.clear()
         invalidateKeyboardLayoutCache()
         invalidateExpandedCandidateItemsCache()
@@ -679,12 +682,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         this.oneHandedSide = oneHandedSide
         this.oneHandedAvailable = oneHandedAvailable
         val compact = mode != KeyboardLayoutMode.FULL
-        clipToOutline = compact
-        elevation = when (mode) {
-            KeyboardLayoutMode.FLOATING -> dp(8f)
-            KeyboardLayoutMode.ONE_HANDED -> dp(4f)
-            KeyboardLayoutMode.FULL -> 0f
-        }
+        clipToOutline = false
+        elevation = 0f
         outlineProvider = if (compact) floatingOutlineProvider else ViewOutlineProvider.BACKGROUND
         invalidateOutline()
         rebuildInteractiveRects()
@@ -984,16 +983,28 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val started = drawDurations.start()
         try {
             super.onDraw(canvas)
+            textPaint.typeface = theme.typeface
             drawBackground(canvas)
+            val contentClip = canvas.save()
+            if (keyboardLayoutMode != KeyboardLayoutMode.FULL) {
+                val outline = Path().apply {
+                    addRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()),
+                        dp(theme.panelCornerRadiusDp), dp(theme.panelCornerRadiusDp), Path.Direction.CW)
+                }
+                canvas.clipPath(outline)
+            }
             drawCandidateBar(canvas)
             if (candidatePanelExpanded) {
                 drawExpandedCandidatePanel(canvas)
             } else {
                 drawKeyboard(canvas)
+                textPaint.typeface = theme.typeface
                 drawKeyFeedbackOverlays(canvas)
             }
+            textPaint.typeface = theme.typeface
             drawFloatingInteractionHints(canvas)
             drawVoiceInputOverlay(canvas)
+            canvas.restoreToCount(contentClip)
             refreshAccessibilityNodes()
             if (
                 !emptyFrameRecoveryAttempted && width > 0 && height > 0 &&
@@ -1049,7 +1060,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         toolbarLogoSize = 0f
         backspacePreviewRect = null
         val barHeight = dp(config.candidateBarHeightDp)
-        val gap = dp(theme.panelGapDp)
+        val gap = dp(panelGapDp)
         val leftPadding = gap * 1.5f
         when (candidateBarContent()) {
             CandidateBarContent.CANDIDATE_MENU -> {
@@ -1073,7 +1084,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
             CandidateBarContent.BACKSPACE_HINT -> {
                 resetCandidateScroll()
-                val previewGap = dp(theme.panelGapDp).coerceAtLeast(
+                val previewGap = dp(panelGapDp).coerceAtLeast(
                     dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_MINIMUM_HORIZONTAL_INSET_DP),
                 )
                 val verticalInset = dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_VERTICAL_INSET_DP)
@@ -1121,7 +1132,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         leftPadding: Float,
         expandRect: RectF?,
     ): List<CandidateRect> {
-        val gap = dp(theme.panelGapDp)
+        val gap = dp(panelGapDp)
         val viewportLeft = leftPadding
         val maxRight = (expandRect?.left?.minus(gap) ?: (width - leftPadding)).coerceAtLeast(viewportLeft)
         candidateViewportWidth = (maxRight - viewportLeft).coerceAtLeast(0f)
@@ -1654,11 +1665,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             )
             val radius = dp(theme.panelCornerRadiusDp)
             paint.style = Paint.Style.FILL
+            paint.color = theme.floating.themeColor("shadowColor").toArgb()
+            val shadow = RectF(panelRect).apply { offset(0f, dp(theme.key.shadowOffsetY)) }
+            canvas.drawRoundRect(shadow, radius, radius, paint)
             paint.color = panelBackgroundColor()
             canvas.drawRoundRect(panelRect, radius, radius, paint)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = strokeWidth
-            paint.color = theme.panelBorder.toArgb()
+            paint.color = theme.floating.themeColor("borderColor").toArgb()
             canvas.drawRoundRect(panelRect, radius, radius, paint)
             return
         }
@@ -1672,24 +1686,32 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val bottomInset = bottomReservedInset()
         if (bottomInset > 0f) {
             val bottomTop = height.toFloat() - bottomInset
-            paint.color = Color.argb(38, theme.panelBorder.red, theme.panelBorder.green, theme.panelBorder.blue)
+            paint.color = theme.panelBorder.toArgb()
             canvas.drawLine(0f, bottomTop, width.toFloat(), bottomTop, paint)
         }
     }
 
     private fun drawCandidateBar(canvas: Canvas) {
         val barHeight = dp(config.candidateBarHeightDp)
-        val gap = dp(theme.panelGapDp)
+        val content = candidateBarContent()
+        paint.style = Paint.Style.FILL
+        paint.color = if (content in setOf(CandidateBarContent.TOOLBAR, CandidateBarContent.FUNCTION_PANEL, CandidateBarContent.CLIPBOARD_SUGGESTION)) {
+            theme.toolbar.themeColor("background").toArgb()
+        } else {
+            theme.candidateBar.themeColor("background").toArgb()
+        }
+        canvas.drawRect(0f, 0f, width.toFloat(), barHeight, paint)
+        val gap = dp(panelGapDp)
         val leftPadding = gap * 1.5f
         val centerY = barHeight / 2f
         val message = visibleDeploymentHint ?: statusMessage?.takeIf { it.isNotBlank() }
-        when (candidateBarContent()) {
+        when (content) {
             CandidateBarContent.CANDIDATE_MENU -> {
                 candidateMenu?.let { drawCandidateMenu(canvas, it) }
                 return
             }
             CandidateBarContent.STATUS_MESSAGE -> {
-                textPaint.textSize = sp(theme.preeditSizeSp)
+                textPaint.textSize = sp(preeditSizeSp)
                 textPaint.color = statusMessageColor()
                 textPaint.textAlign = Paint.Align.LEFT
                 canvas.drawText(
@@ -1757,7 +1779,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (!menu.deletionUnavailable) {
             val deleteRect = candidateMenuActionRects.firstOrNull { it.action == "delete" }?.rect ?: return
             val pressed = pressedCandidateMenuAction?.action == "delete"
-            drawSurfaceShadow(canvas, deleteRect, pressed)
+            drawSurfaceShadow(canvas, deleteRect)
             paint.style = Paint.Style.FILL
             paint.color = if (pressed) theme.keySelectedBackground.toArgb() else theme.keyBackground.toArgb()
             canvas.drawRoundRect(deleteRect, dp(candidateCornerRadiusDp()), dp(candidateCornerRadiusDp()), paint)
@@ -1776,7 +1798,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             candidateMenuActionRects = emptyList()
             return
         }
-        val gap = dp(theme.panelGapDp).coerceAtLeast(dp(4f))
+        val gap = dp(panelGapDp).coerceAtLeast(dp(4f))
         val top = dp(7f)
         val bottom = barHeight - dp(7f)
         val codeRight = if (menu.deletionUnavailable) width - leftPadding else width * 0.62f
@@ -1798,7 +1820,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun drawBackspaceDeletionPreview(canvas: Canvas) {
         val deleted = backspacePreviewText?.takeIf(String::isNotEmpty) ?: return
         val rect = backspacePreviewRect ?: return
-        drawSurfaceShadow(canvas, rect, backspacePreviewPressed)
+        drawSurfaceShadow(canvas, rect)
         paint.style = Paint.Style.FILL
         paint.color = if (backspacePreviewPressed) {
             theme.candidateSelectedBackground.toArgb()
@@ -1850,7 +1872,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawCandidateExpandButton(canvas: Canvas, rect: RectF) {
-        drawSurfaceShadow(canvas, rect, candidateExpandPressed)
+        drawSurfaceShadow(canvas, rect)
         paint.style = Paint.Style.FILL
         paint.color = if (candidateExpandPressed) {
             theme.keySelectedBackground.toArgb()
@@ -1860,7 +1882,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.drawRoundRect(rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
 
         textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = sp(theme.fontSizeSp)
+        textPaint.textSize = sp(fontSizeSp)
         textPaint.color = if (candidateExpandPressed) {
             theme.keySelectedForeground.toArgb()
         } else {
@@ -1885,7 +1907,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
         drawContentLayer(canvas, top) {
             paint.style = Paint.Style.FILL
-            paint.color = panelBackgroundColor()
+            paint.color = if (functionPanelActive) theme.keyboard.themeColor("pageBackground").toArgb()
+                else theme.candidateBar.themeColor("expandedBackground").toArgb()
             canvas.drawRect(visibleRect, paint)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = max(1f, dp(1f))
@@ -1896,7 +1919,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.clipRect(visibleRect)
             if (items.isEmpty()) {
                 textPaint.textAlign = Paint.Align.CENTER
-                textPaint.textSize = sp(theme.labelSizeSp)
+                textPaint.textSize = sp(labelSizeSp)
                 textPaint.color = theme.commentColor.toArgb()
                 val message = when {
                     clipboardItemsLoading -> "正在读取剪贴板"
@@ -2615,6 +2638,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun candidateWidth(item: CandidateDrawItem): Float {
+        textPaint.typeface = theme.typeface
         val cacheKey = candidateWidthCacheKey(item)
         candidateWidthCache[cacheKey]?.let { return it }
         textPaint.textSize = sp(candidateLabelSizeSp())
@@ -2622,7 +2646,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.textSize = sp(candidateTextSizeSp())
         val textWidth = textPaint.measureText(item.text)
         textPaint.textSize = sp(candidateCommentSizeSp())
-        val commentWidth = item.comment?.takeIf { it.isNotBlank() }?.let { textPaint.measureText(it) } ?: 0f
+        val commentWidth = item.comment?.takeIf { theme.showComment && it.isNotBlank() }?.let { textPaint.measureText(it) } ?: 0f
         val inlineGap = dp(candidateInlineGapDp())
         var segmentCount = 0
         if (labelWidth > 0f) segmentCount++
@@ -2647,22 +2671,22 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun candidateTextSizeSp(): Float {
-        val desired = min(theme.fontSizeSp - 2f, 22f).coerceAtLeast(13f) * config.candidateFontScale
+        val desired = 20f * config.candidateFontScale * theme.candidateFontScale
         return min(desired, candidateFontHeightLimitSp()).coerceAtLeast(10f)
     }
 
     private fun candidateLabelSizeSp(): Float {
-        val desired = min(theme.labelSizeSp - 1f, 16f).coerceAtLeast(10f) * config.candidateFontScale
+        val desired = 14f * config.candidateFontScale * theme.candidateFontScale
         return min(desired, candidateFontHeightLimitSp() * 0.76f).coerceAtLeast(9f)
     }
 
     private fun candidateCommentSizeSp(): Float {
-        val desired = min(theme.commentSizeSp - 1f, 14f).coerceAtLeast(10f) * config.candidateFontScale
+        val desired = 12f * config.candidateFontScale * theme.candidateFontScale
         return min(desired, candidateFontHeightLimitSp() * 0.68f).coerceAtLeast(9f)
     }
 
     private fun candidateFontHeightLimitSp(): Float {
-        val verticalInset = theme.panelGapDp * 1.8f
+        val verticalInset = panelGapDp * 1.8f
         val inlineHeightPx = minOf(dp(38f), dp(config.candidateBarHeightDp - verticalInset))
             .coerceAtLeast(dp(24f))
         return inlineHeightPx / resources.displayMetrics.scaledDensity * 0.72f
@@ -2673,16 +2697,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             !containsCjk(label) &&
             label.codePointCount(0, label.length) <= 2
         ) {
-            return max(theme.fontSizeSp, 22f)
+            return max(fontSizeSp, 22f)
         }
         if (label.length > 2 || containsCjk(label)) {
-            return min(min(theme.labelSizeSp, theme.fontSizeSp - 4f), 16f).coerceAtLeast(12f)
+            return min(min(labelSizeSp, fontSizeSp - 4f), 16f).coerceAtLeast(12f)
         }
-        return theme.fontSizeSp
+        return fontSizeSp
     }
 
     private fun keyHintSizeSp(keyHeightPx: Float): Float {
-        val base = min(min(theme.commentSizeSp - 1f, keyLabelSizeSp("中") - 2f), 13f).coerceAtLeast(10f)
+        val base = min(min(commentSizeSp - 1f, keyLabelSizeSp("中") - 2f), 13f).coerceAtLeast(10f)
         val referenceHeight = dp(54f).coerceAtLeast(1f)
         return (base * (keyHeightPx / referenceHeight).coerceIn(0.9f, 1.2f)).coerceIn(10f, 14f)
     }
@@ -2697,13 +2721,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
-    private fun candidatePaddingXDp(): Float = min(theme.candidatePaddingXDp, 9f).coerceAtLeast(7f)
+    private fun candidatePaddingXDp(): Float = 9f
 
-    private fun candidateInlineGapDp(): Float = min(theme.candidateInlineGapDp, 4f).coerceAtLeast(2f)
+    private fun candidateInlineGapDp(): Float = 4f
 
-    private fun candidateCornerRadiusDp(): Float = theme.keyCornerRadiusDp * 8f / 11f
+    private fun candidateCornerRadiusDp(): Float = theme.key.cornerRadius
 
-    private fun keyCornerRadiusDp(): Float = theme.keyCornerRadiusDp * 10f / 11f
+    private fun keyCornerRadiusDp(): Float = theme.key.cornerRadius
 
     private fun drawCandidateOption(
         canvas: Canvas,
@@ -2723,40 +2747,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawRimeEmptyState(canvas, item, rect)
             return
         }
-        val radius = dp(candidateCornerRadiusDp())
-        if (item.command != null || item.selected || pressed) {
-            drawSurfaceShadow(canvas, rect, pressed = pressed)
-        }
-        paint.style = Paint.Style.FILL
-        paint.color = if (item.selected || pressed) {
-            theme.candidateSelectedBackground.toArgb()
-        } else {
-            theme.keyBackground.toArgb()
-        }
-        canvas.drawRoundRect(rect, radius, radius, paint)
-
-        val selected = item.selected || pressed
-        val borderWidth = if (selected) {
-            dp(theme.candidateBorderWidthDp.coerceAtLeast(1f))
-        } else {
-            dp(KeytaoImeInteractionTuning.ACCENT_BORDER_WIDTH_DP)
-        }
-        if (borderWidth > 0f) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = borderWidth
-            paint.color = if (selected) {
-                theme.candidateSelectedBorderColor.toArgb()
-            } else {
-                accentBorderColor(KeytaoImeInteractionTuning.CANDIDATE_BORDER_ALPHA)
-            }
-            val borderInset = borderWidth / 2f
-            val borderRect = RectF(
-                rect.left + borderInset,
-                rect.top + borderInset,
-                rect.right - borderInset,
-                rect.bottom - borderInset,
-            )
-            canvas.drawRoundRect(borderRect, radius, radius, paint)
+        if (item.selected || pressed) {
+            paint.style = Paint.Style.FILL
+            paint.color = theme.candidateSelectedBackground.toArgb()
+            canvas.drawRect(rect, paint)
         }
 
         val displayItem = if (pressed && !item.selected) item.copy(selected = true) else item
@@ -2861,7 +2855,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(SettingsPanelLayout.sliderThumbBorderWidthDp)
-        paint.color = accentBorderColor(SettingsPanelLayout.dividerAlpha)
+        paint.color = theme.key.borderColor.toArgb()
         val inset = paint.strokeWidth / 2f
         canvas.drawRoundRect(
             RectF(controlRect.left + inset, controlRect.top + inset, controlRect.right - inset, controlRect.bottom - inset),
@@ -2930,7 +2924,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val swatchGap = dp(SettingsPanelLayout.swatchGapDp)
         val startX = settingsSwatchStartX(rect, item.swatches.size)
         drawSettingsLabel(canvas, item.label, rect, startX)
-        val accent = theme.accentColor.toHex()
+        val accent = (accentPreviewColor ?: theme.accentColor).toHex()
         val accentIsPreset = accentPresets.any { it.equals(accent, ignoreCase = true) }
         item.swatches.forEachIndexed { index, value ->
             val centerX = startX + swatchRadius + (swatchDiameter + swatchGap) * index
@@ -3051,7 +3045,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.drawRoundRect(swatch, radius, radius, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(SettingsPanelLayout.colorMarkerBorderWidthDp)
-        paint.color = accentBorderColor(SettingsPanelLayout.dividerAlpha)
+        paint.color = theme.key.borderColor.toArgb()
         canvas.drawRoundRect(swatch, radius, radius, paint)
 
         val previousTypeface = textPaint.typeface
@@ -3074,7 +3068,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawColorPickerChip(canvas: Canvas, rect: RectF, label: String, accentFilled: Boolean) {
         val pressed = pressedExpandedCandidate?.rect == rect
-        drawSurfaceShadow(canvas, rect, pressed)
+        drawSurfaceShadow(canvas, rect)
         paint.style = Paint.Style.FILL
         paint.color = when {
             accentFilled -> theme.accentColor.toArgb()
@@ -3085,17 +3079,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(SettingsPanelLayout.footerTextSizeSp)
         textPaint.color = when {
-            // A near-white or near-black accent needs the opposite label, not the panel colour.
-            accentFilled -> if (accentIsLight()) Color.BLACK else Color.WHITE
+            accentFilled -> theme.candidateSelectedForeground.toArgb()
             pressed -> theme.candidateSelectedForeground.toArgb()
             else -> theme.keyForeground.toArgb()
         }
         canvas.drawText(label, rect.centerX(), rect.centerY() + textBaselineOffset(textPaint), textPaint)
-    }
-
-    private fun accentIsLight(): Boolean {
-        val hsv = KeytaoColorMath.hexToHsv(theme.accentColor.toHex()) ?: return false
-        return hsv.value > SettingsPanelLayout.chipAccentLightValue
     }
 
     private fun colorPickerChipRects(rect: RectF): Pair<RectF, RectF> {
@@ -3141,7 +3129,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawSettingsFooterChip(canvas: Canvas, item: CandidateDrawItem, rect: RectF, pressed: Boolean) {
-        drawSurfaceShadow(canvas, rect, pressed)
+        drawSurfaceShadow(canvas, rect)
         paint.style = Paint.Style.FILL
         paint.color = if (pressed) theme.candidateSelectedBackground.toArgb() else theme.keyBackground.toArgb()
         canvas.drawRoundRect(rect, dp(candidateCornerRadiusDp()), dp(candidateCornerRadiusDp()), paint)
@@ -3155,14 +3143,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawSettingsDivider(canvas: Canvas, rect: RectF) {
         val height = dp(SettingsPanelLayout.dividerHeightDp)
-        val border = theme.panelBorder.toArgb()
         paint.style = Paint.Style.FILL
-        paint.color = Color.argb(
-            (255f * SettingsPanelLayout.dividerAlpha).roundToInt(),
-            Color.red(border),
-            Color.green(border),
-            Color.blue(border),
-        )
+        paint.color = theme.panelBorder.toArgb()
         canvas.drawRect(rect.left, rect.bottom - height, rect.right, rect.bottom, paint)
     }
 
@@ -3237,7 +3219,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val maxWidth = (rect.right - dp(10f) - textLeft).coerceAtLeast(0f)
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = sp(candidateTextSizeSp())
-        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val name = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(name, textLeft, rect.centerY() - dp(7f) + textBaselineOffset(textPaint), textPaint)
         textPaint.textSize = sp(candidateCommentSizeSp())
@@ -3259,7 +3241,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val maxWidth = (statusRect.left - dp(8f) - textLeft).coerceAtLeast(0f)
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = sp(candidateLabelSizeSp())
-        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val label = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(label, textLeft, rect.centerY() - dp(7f) + textBaselineOffset(textPaint), textPaint)
         textPaint.textSize = sp(candidateCommentSizeSp())
@@ -3287,11 +3269,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val captionY = rect.centerY() + dp(10f)
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(candidateTextSizeSp())
-        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val label = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(label, rect.centerX(), labelY + textBaselineOffset(textPaint), textPaint)
 
-        val caption = listOfNotNull(item.text.takeIf { it.isNotBlank() }, item.comment?.takeIf { it.isNotBlank() })
+        val caption = listOfNotNull(item.text.takeIf { it.isNotBlank() }, item.comment?.takeIf { theme.showComment && it.isNotBlank() })
             .joinToString(" ")
         textPaint.textSize = sp(candidateCommentSizeSp())
         textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
@@ -3314,7 +3296,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             textX += textPaint.measureText(item.label) + inlineGap
         }
         textPaint.textSize = sp(candidateTextSizeSp())
-        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val maxWidth = (deleteLeft - padding - textX).coerceAtLeast(0f)
         val preview = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(preview, textX, centerY + textBaselineOffset(textPaint), textPaint)
@@ -3354,7 +3336,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = sp(candidateTextSizeSp())
-        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val textX = thumbnailRect.right + inset
         val maxWidth = (rect.right - dp(config.clipboardDeleteHitWidthDp + 64f) - inset - textX).coerceAtLeast(0f)
         val preview = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
@@ -3394,10 +3376,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             textX += textPaint.measureText(item.label) + inlineGap
         }
         textPaint.textSize = sp(candidateTextSizeSp())
-        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         canvas.drawText(item.text, textX, rect.centerY() + textBaselineOffset(textPaint), textPaint)
         textX += textPaint.measureText(item.text) + inlineGap
-        item.comment?.takeIf { it.isNotBlank() }?.let { comment ->
+        item.comment?.takeIf { theme.showComment && it.isNotBlank() }?.let { comment ->
             textPaint.textSize = sp(candidateCommentSizeSp())
             textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
             canvas.drawText(comment, textX, rect.centerY() + textBaselineOffset(textPaint), textPaint)
@@ -3494,7 +3476,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawClipboardSuggestionBar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
         val text = recentClipboardSuggestion ?: return
-        toolbarRects.getOrNull(0)?.let { drawToolbarChip(canvas, it, forceAccent = true) }
+        toolbarRects.getOrNull(0)?.let { drawToolbarChip(canvas, it) }
         toolbarRects.getOrNull(1)?.let { drawClipboardPasteChip(canvas, it, it.secondaryLabel ?: text) }
     }
 
@@ -3520,27 +3502,22 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawClipboardPasteChip(canvas: Canvas, item: ToolbarRect, preview: String) {
         val pressed = isToolbarPressed(item)
-        drawSurfaceShadow(canvas, item.rect, pressed)
-        paint.style = Paint.Style.FILL
-        paint.color = toolbarBackgroundColor(item, pressed, forceAccent = true)
-        canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
-        drawAccentToolbarBorder(canvas, item.rect)
 
         val padding = dp(13f)
         val inlineGap = dp(8f)
         textPaint.textAlign = Paint.Align.LEFT
-        textPaint.textSize = sp(theme.labelSizeSp)
+        textPaint.textSize = sp(labelSizeSp)
         val labelWidth = textPaint.measureText(item.label)
         val labelX = item.rect.left + padding
         val textY = item.rect.centerY() + textBaselineOffset(textPaint)
 
         canvas.save()
         canvas.clipRect(item.rect.left + padding, item.rect.top, item.rect.right - padding, item.rect.bottom)
-        textPaint.color = if (pressed) theme.keySelectedForeground.toArgb() else theme.selectedLabelColor.toArgb()
+        textPaint.color = theme.toolbar.themeColor(if (pressed) "selectedForeground" else "foreground").toArgb()
         canvas.drawText(item.label, labelX, textY, textPaint)
 
-        textPaint.textSize = sp(theme.commentSizeSp)
-        textPaint.color = if (pressed) theme.keySelectedForeground.toArgb() else theme.commentColor.toArgb()
+        textPaint.textSize = sp(commentSizeSp)
+        textPaint.color = theme.toolbar.themeColor(if (pressed) "selectedForeground" else "foreground").toArgb()
         canvas.drawText(
             preview,
             labelX + labelWidth + inlineGap,
@@ -3554,12 +3531,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (action.icon != null && action.secondaryLabel.isNullOrBlank()) {
             return dp(46f)
         }
-        textPaint.textSize = sp(theme.labelSizeSp)
+        textPaint.textSize = sp(labelSizeSp)
         val labelWidth = textPaint.measureText(action.label)
         val secondaryWidth = action.secondaryLabel
             ?.takeIf { it.isNotBlank() }
             ?.let {
-                textPaint.textSize = sp(theme.commentSizeSp)
+                textPaint.textSize = sp(commentSizeSp)
                 textPaint.measureText(it)
             }
             ?: 0f
@@ -3574,7 +3551,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val showsClear = functionPanelMode == FunctionPanelMode.CLIPBOARD && clipboardItems.isNotEmpty()
         if (!showsClear) {
             textPaint.textAlign = Paint.Align.CENTER
-            textPaint.textSize = sp(theme.labelSizeSp)
+            textPaint.textSize = sp(labelSizeSp)
             textPaint.color = theme.commentColor.toArgb()
             canvas.drawText(functionPanelTitle(), width / 2f, barHeight / 2f + textBaselineOffset(textPaint), textPaint)
         }
@@ -3661,48 +3638,35 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
-    private fun drawToolbarChip(canvas: Canvas, item: ToolbarRect, forceAccent: Boolean = false) {
+    private fun drawToolbarChip(canvas: Canvas, item: ToolbarRect) {
         val pressed = isToolbarPressed(item)
-        val useAccent = forceAccent || item.selected || isSoftAccentToolbar(item)
-        drawSurfaceShadow(canvas, item.rect, pressed)
-        paint.style = Paint.Style.FILL
-        paint.color = toolbarBackgroundColor(item, pressed, forceAccent)
-        canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
-
-        if (useAccent) {
-            drawAccentToolbarBorder(canvas, item.rect)
-        }
 
         textPaint.textAlign = Paint.Align.CENTER
         val secondary = item.secondaryLabel?.takeIf { it.isNotBlank() }
         if (secondary == null) {
-            val color = when {
-                pressed -> theme.keySelectedForeground.toArgb()
-                item.selected -> theme.candidateSelectedForeground.toArgb()
-                else -> theme.keyForeground.toArgb()
-            }
+            val color = theme.toolbar.themeColor(if (pressed || item.selected) "selectedForeground" else "foreground").toArgb()
             if (item.icon != null) {
                 drawToolbarIcon(canvas, item.icon, item.rect, color)
             } else {
-                textPaint.textSize = sp(theme.labelSizeSp)
+                textPaint.textSize = sp(labelSizeSp)
                 textPaint.color = color
                 canvas.drawText(item.label, item.rect.centerX(), item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
             }
         } else {
-            textPaint.textSize = sp(theme.labelSizeSp)
+            textPaint.textSize = sp(labelSizeSp)
             val primaryWidth = textPaint.measureText(item.label)
-            textPaint.textSize = sp(theme.commentSizeSp)
+            textPaint.textSize = sp(commentSizeSp)
             val secondaryWidth = textPaint.measureText(secondary)
             val groupWidth = primaryWidth + dp(5f) + secondaryWidth
             val primaryX = item.rect.centerX() - groupWidth / 2f + primaryWidth / 2f
             val secondaryX = primaryX + primaryWidth / 2f + dp(5f) + secondaryWidth / 2f
 
-            textPaint.textSize = sp(theme.labelSizeSp)
-            textPaint.color = if (pressed) theme.keySelectedForeground.toArgb() else theme.keyForeground.toArgb()
+            textPaint.textSize = sp(labelSizeSp)
+            textPaint.color = theme.toolbar.themeColor(if (pressed || item.selected) "selectedForeground" else "foreground").toArgb()
             canvas.drawText(item.label, primaryX, item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
 
-            textPaint.textSize = sp(theme.commentSizeSp)
-            textPaint.color = if (pressed) theme.keySelectedForeground.toArgb() else theme.commentColor.toArgb()
+            textPaint.textSize = sp(commentSizeSp)
+            textPaint.color = theme.toolbar.themeColor(if (pressed || item.selected) "selectedForeground" else "foreground").toArgb()
             canvas.drawText(secondary, secondaryX, item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
         }
     }
@@ -3927,7 +3891,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             paint.color = theme.selectedLabelColor.toArgb()
             canvas.drawOval(rect, paint)
             textPaint.textAlign = Paint.Align.CENTER
-            textPaint.textSize = sp(theme.commentSizeSp)
+            textPaint.textSize = sp(commentSizeSp)
             textPaint.color = theme.candidateSelectedForeground.toArgb()
             canvas.drawText("K", rect.centerX(), rect.centerY() + textBaselineOffset(textPaint), textPaint)
         }
@@ -3984,13 +3948,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (pressProgress > 0f) {
             keyRect.offset(0f, dp(1f) * pressProgress)
         }
-        val selected = isActiveKey(key)
-        drawKeyShadow(canvas, keyRect, pressProgress > 0.5f)
+        val style = resolvedKeyStyle(key)
+        textPaint.typeface = style.typeface
+        drawKeyShadow(canvas, keyRect, style)
 
         paint.style = Paint.Style.FILL
         paint.color = keySurfaceColor(key, pressProgress)
-        canvas.drawRoundRect(keyRect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
-        drawKeyOutline(canvas, key, keyRect, pressProgress > 0.01f)
+        canvas.drawRoundRect(keyRect, dp(style.cornerRadius), dp(style.cornerRadius), paint)
+        drawKeyOutline(canvas, keyRect, style)
         drawShiftStateDecoration(canvas, key, keyRect)
 
         val label = displayLabel(key)
@@ -3999,25 +3964,29 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         ) {
             val mnemonic = KeytaoMnemonicHints.forKey(key)
             if (mnemonic != null && (mnemonic.topText != null || mnemonic.bottomLines.isNotEmpty())) {
-                drawMnemonicKeyContent(canvas, key, keyRect, label, mnemonic, selected, pressProgress)
+                drawMnemonicKeyContent(canvas, key, keyRect, label, mnemonic, pressProgress)
                 return
             }
         }
         textPaint.textAlign = Paint.Align.CENTER
-        var labelSize = sp(keyLabelSizeSp(label))
+        var labelSize = sp(keyLabelSizeSp(label) * style.fontScale)
         textPaint.textSize = labelSize
         val maxLabelWidth = keyRect.width() - dp(10f)
         while (labelSize > sp(12f) && textPaint.measureText(label) > maxLabelWidth) {
             labelSize -= dp(1f)
             textPaint.textSize = labelSize
         }
-        textPaint.color = keyForegroundColor(key, selected, pressProgress)
+        textPaint.color = keyForegroundColor(key, pressProgress)
         canvas.drawText(label, keyRect.centerX(), keyRect.centerY() + textBaselineOffset(textPaint), textPaint)
 
-        (if (isVoiceInputOffered(key)) "🎤" else key.hint)?.takeIf { config.keyHintVisible }?.let { hint ->
+        val voiceHint = isVoiceInputOffered(key)
+        val swipeHint = !voiceHint && key.hint?.length == 1
+        (if (voiceHint) "🎤" else key.hint)?.takeIf {
+            config.keyHintVisible && (!swipeHint || style.swipeHintVisible)
+        }?.let { hint ->
             textPaint.textAlign = Paint.Align.RIGHT
-            textPaint.textSize = sp(keyHintSizeSp(keyRect.height()))
-            textPaint.color = theme.commentColor.toArgb()
+            textPaint.textSize = sp(keyHintSizeSp(keyRect.height()) * style.hintFontScale)
+            textPaint.color = (if (swipeHint) style.swipeHintForeground else style.hintForeground).toArgb()
             canvas.drawText(hint, keyRect.right - dp(7f), keyRect.top + dp(13f), textPaint)
         }
     }
@@ -4028,15 +3997,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         rect: RectF,
         label: String,
         mnemonic: KeytaoMnemonicHints.Hint,
-        selected: Boolean,
         pressProgress: Float,
     ) {
+        val style = resolvedKeyStyle(key)
         val inset = min(dp(3f), min(rect.width(), rect.height()) * 0.1f)
         val content = RectF(rect).apply { inset(inset, inset) }
         val labelBottom = content.top + content.height() * 0.54f
         val labelHeight = labelBottom - content.top
         textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = sp(keyLabelSizeSp(label))
+        textPaint.textSize = sp(keyLabelSizeSp(label) * style.fontScale)
         val labelMetrics = textPaint.fontMetrics
         val labelScale = minOf(
             1f,
@@ -4044,7 +4013,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             labelHeight / (labelMetrics.bottom - labelMetrics.top).coerceAtLeast(1f),
         )
         textPaint.textSize *= labelScale
-        textPaint.color = keyForegroundColor(key, selected, pressProgress)
+        textPaint.color = keyForegroundColor(key, pressProgress)
         val fittedLabelMetrics = textPaint.fontMetrics
         canvas.drawText(
             label,
@@ -4056,8 +4025,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         // Keep the main label fixed and fit the top slot beside its right edge.
         val topSlotLeft = rect.centerX() + textPaint.measureText(label) / 2f + dp(1f)
         mnemonic.topText?.let { topText ->
-            textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f))
-            textPaint.color = theme.commentColor.toArgb()
+            textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f) * style.hintFontScale)
+            textPaint.color = style.hintForeground.toArgb()
             val topMetrics = textPaint.fontMetrics
             val topHeight = min(labelHeight, topMetrics.bottom - topMetrics.top)
             val topWidth = (content.right - topSlotLeft).coerceAtLeast(0f)
@@ -4080,8 +4049,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (bottomLines.isEmpty()) return
         val hintsTop = labelBottom + dp(1f)
         val lineHeight = ((content.bottom - hintsTop) / bottomLines.size).coerceAtLeast(0f)
-        textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f))
-        textPaint.color = theme.commentColor.toArgb()
+        textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f) * style.hintFontScale)
+        textPaint.color = style.hintForeground.toArgb()
         val hintMetrics = textPaint.fontMetrics
         val hintScale = minOf(
             1f,
@@ -4108,6 +4077,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         pressProgress: Float,
         pressedStackIndex: Int?,
     ) {
+        val style = resolvedKeyStyle(key)
+        textPaint.typeface = style.typeface
         val stackRects = stackItemRects(rect, key.stack.size)
         for ((index, item) in key.stack.withIndex()) {
             val pressed = pressedStackIndex == index
@@ -4116,19 +4087,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             if (itemPressProgress > 0f) {
                 keyRect.offset(0f, dp(1f) * itemPressProgress)
             }
-            val selected = isActiveKey(key)
-            drawKeyShadow(canvas, keyRect, itemPressProgress > 0.5f)
+            drawKeyShadow(canvas, keyRect, style)
 
             paint.style = Paint.Style.FILL
             paint.color = keySurfaceColor(key, itemPressProgress)
-            canvas.drawRoundRect(keyRect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
-            drawKeyOutline(canvas, key, keyRect, itemPressProgress > 0.01f)
+            canvas.drawRoundRect(keyRect, dp(style.cornerRadius), dp(style.cornerRadius), paint)
+            drawKeyOutline(canvas, keyRect, style)
 
             val label = stackLabelForMode(item)
             val maxLabelWidth = keyRect.width() - dp(10f)
             textPaint.textAlign = Paint.Align.CENTER
-            textPaint.color = keyForegroundColor(key, selected, itemPressProgress)
-            var labelSize = sp(keyLabelSizeSp(label))
+            textPaint.color = keyForegroundColor(key, itemPressProgress)
+            var labelSize = sp(keyLabelSizeSp(label) * style.fontScale)
             textPaint.textSize = labelSize
             while (labelSize > sp(12f) && textPaint.measureText(label) > maxLabelWidth) {
                 labelSize -= dp(1f)
@@ -4139,42 +4109,23 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keySurfaceColor(key: KeySpec, pressProgress: Float): Int {
-        val active = isActiveKey(key)
-        val normal = if (active &&
-            (key.action.type != KeyCommandTypes.SHIFT || shiftState == KeyboardShiftState.LOCKED)
-        ) {
-            theme.keySelectedBackground.toArgb()
-        } else {
-            keyBackgroundColor(key)
-        }
-        if (pressProgress <= 0f) return normal
-        val pressed = when {
-            active -> blendColor(
-                theme.keyPressedBackground.toArgb(),
-                theme.keySelectedBackground.toArgb(),
-                0.52f,
-            )
-            isSoftAccentKey(key) -> blendColor(
-                theme.keyPressedBackground.toArgb(),
-                softenedAccentSurfaceColor(KeytaoImeInteractionTuning.SOFT_ACCENT_KEY_FILL_AMOUNT),
-                0.72f,
-            )
-            else -> theme.keyPressedBackground.toArgb()
-        }
-        return blendColor(pressed, normal, pressProgress)
+        val style = resolvedKeyStyle(key)
+        return (if (pressProgress > 0f) style.pressedBackground else style.background).toArgb()
     }
 
     private fun drawShiftStateDecoration(canvas: Canvas, key: KeySpec, rect: RectF) {
-        if (key.action.type != KeyCommandTypes.SHIFT || shiftState == KeyboardShiftState.OFF) return
-        paint.color = theme.candidateSelectedBorderColor.toArgb()
+        if (actionForMode(key).type != KeyCommandTypes.SHIFT || shiftState == KeyboardShiftState.OFF) return
+        val style = resolvedKeyStyle(key)
+        paint.color = style.borderColor.toArgb()
         if (shiftState == KeyboardShiftState.ONCE) {
+            if (style.borderWidth <= 0f) return
             paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(2f)
+            paint.strokeWidth = dp(style.borderWidth)
             val inset = dp(1.5f)
             canvas.drawRoundRect(
                 RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset),
-                dp(keyCornerRadiusDp()),
-                dp(keyCornerRadiusDp()),
+                dp(style.cornerRadius),
+                dp(style.cornerRadius),
                 paint,
             )
         } else {
@@ -4276,11 +4227,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun drawVoiceInputOverlay(canvas: Canvas) {
         if (voiceState == KeytaoVoiceInput.State.IDLE) return
         val card = voiceOverlayRect()
-        val radius = min(dp(18f * theme.panelCornerRadiusDp / 16f), card.height() / 2f)
-        drawSurfaceShadow(canvas, card, pressed = false)
+        val radius = min(dp(theme.panelCornerRadiusDp), card.height() / 2f)
+        drawSurfaceShadow(canvas, card)
         paint.style = Paint.Style.FILL
-        val background = panelBackgroundColor()
-        paint.color = Color.rgb(Color.red(background), Color.green(background), Color.blue(background))
+        paint.color = panelBackgroundColor()
         canvas.drawRoundRect(card, radius, radius, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(1f, dp(1f))
@@ -4346,6 +4296,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawKeyPreview(canvas: Canvas, key: KeyRect, text: String) {
+        val style = resolvedKeyStyle(key.spec)
         val margin = dp(keyPreviewMarginDp)
         val bubbleWidth = max(dp(keyPreviewMinimumWidthDp), key.rect.width() * 1.08f)
             .coerceAtMost((width.toFloat() - margin * 2f).coerceAtLeast(1f))
@@ -4355,25 +4306,23 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             .coerceIn(margin, width.toFloat() - margin - bubbleWidth)
         val top = (key.rect.top - bubbleHeight + dp(keyPreviewKeyOverlapDp)).coerceAtLeast(margin)
         val bubble = RectF(left, top, left + bubbleWidth, top + bubbleHeight)
-        drawSurfaceShadow(canvas, bubble, pressed = false)
+        drawKeyShadow(canvas, bubble, style)
         paint.style = Paint.Style.FILL
-        paint.color = theme.keyPressedBackground.toArgb()
-        canvas.drawRoundRect(bubble, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = max(1f, dp(1f))
-        paint.color = theme.candidateSelectedBorderColor.toArgb()
-        canvas.drawRoundRect(bubble, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
+        paint.color = style.pressedBackground.toArgb()
+        canvas.drawRoundRect(bubble, dp(style.cornerRadius), dp(style.cornerRadius), paint)
+        drawKeyOutline(canvas, bubble, style)
         textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = sp(keyPreviewTextSizeSp)
-        textPaint.color = theme.keySelectedForeground.toArgb()
+        textPaint.textSize = sp(keyPreviewTextSizeSp * style.fontScale)
+        textPaint.typeface = style.typeface
+        textPaint.color = style.pressedForeground.toArgb()
         canvas.drawText(text, bubble.centerX(), bubble.centerY() + textBaselineOffset(textPaint), textPaint)
     }
 
     private fun drawAlternatePanel(canvas: Canvas, panel: AlternatePanel) {
-        drawSurfaceShadow(canvas, panel.rect, pressed = false)
+        drawSurfaceShadow(canvas, panel.rect)
         paint.style = Paint.Style.FILL
         paint.color = panelBackgroundColor()
-        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
+        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
         val itemWidth = panel.rect.width() / panel.options.size
         for ((index, option) in panel.options.withIndex()) {
             val item = RectF(
@@ -4396,10 +4345,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
             canvas.drawText(option.label, item.centerX(), item.centerY() + textBaselineOffset(textPaint), textPaint)
         }
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = max(1f, dp(1f))
-        paint.color = theme.candidateSelectedBorderColor.toArgb()
-        canvas.drawRoundRect(panel.rect, dp(keyCornerRadiusDp() * 13f / 10f), dp(keyCornerRadiusDp() * 13f / 10f), paint)
+        drawKeyOutline(canvas, panel.rect, theme.key)
     }
 
     private fun resolveCommand(key: KeySpec, deltaY: Float, rect: RectF? = null, releaseY: Float? = null): KeyCommand {
@@ -4811,13 +4757,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(':')
             append(config.swipeThresholdDp)
             append('|')
-            append(theme.panelGapDp)
+            append(panelGapDp)
             append(':')
-            append(theme.fontSizeSp)
+            append(fontSizeSp)
             append(':')
-            append(theme.labelSizeSp)
+            append(labelSizeSp)
             append(':')
-            append(theme.commentSizeSp)
+            append(commentSizeSp)
             append('|')
             append(activeRows().hashCode())
             append('|')
@@ -5097,12 +5043,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawFloatingInteractionHints(canvas: Canvas) {
         if (keyboardLayoutMode != KeyboardLayoutMode.FLOATING) return
-        val color = Color.argb(
-            150,
-            theme.commentColor.red,
-            theme.commentColor.green,
-            theme.commentColor.blue,
-        )
+        val color = theme.toolbar.themeColor("foreground").toArgb()
         paint.style = Paint.Style.FILL
         paint.color = color
         val handleWidth = min(dp(30f), width * 0.12f)
@@ -5117,25 +5058,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             ),
             handleHeight / 2f,
             handleHeight / 2f,
-            paint,
-        )
-
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = max(dp(1.4f), dp(theme.candidateBorderWidthDp))
-        paint.strokeCap = Paint.Cap.ROUND
-        paint.strokeJoin = Paint.Join.ROUND
-        paint.color = Color.argb(
-            72,
-            theme.commentColor.red,
-            theme.commentColor.green,
-            theme.commentColor.blue,
-        )
-        val frameInset = paint.strokeWidth / 2f
-        val frameRadius = dp(theme.keyCornerRadiusDp).coerceAtMost(min(width, height) / 2f)
-        canvas.drawRoundRect(
-            RectF(frameInset, frameInset, width - frameInset, height - frameInset),
-            frameRadius,
-            frameRadius,
             paint,
         )
 
@@ -5617,7 +5539,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         activeSettingRect = candidate.drawingRect
         activeSettingOriginalValue = when (item.style) {
             PanelItemStyle.SLIDER -> item.value?.let(::serializeSettingNumber)
-            PanelItemStyle.SWATCHES -> theme.accentColor.toHex()
+            PanelItemStyle.SWATCHES -> (accentPreviewColor ?: theme.accentColor).toHex()
             PanelItemStyle.OPTION -> theme.uiColorScheme.takeIf { it in item.swatches } ?: "auto"
             else -> null
         }
@@ -5718,11 +5640,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
-    /**
-     * Leading-edge preview, then a trailing one so the last dragged colour always lands:
-     * the theme is re-derived at most once per [KeytaoImeInteractionTuning.COLOR_PREVIEW_THROTTLE_MS].
-     * Nothing is written to disk here — 确定 persists.
-     */
+    /** Coalesce swatch redraws while dragging; 确定 persists and resolves the theme in Rust. */
     private fun throttledAccentPreview(hex: String) {
         val now = SystemClock.uptimeMillis()
         val elapsed = now - accentPreviewLastAppliedMs
@@ -6065,12 +5983,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val thumbTop = viewportTop + dp(2f) + travel * (scrollY.coerceIn(0f, maximum) / maximum)
         val right = width.toFloat() - dp(2f)
         paint.style = Paint.Style.FILL
-        paint.color = Color.argb(
-            (scrollIndicatorAlpha * scrollIndicatorMaxAlpha).roundToInt().coerceIn(0, 255),
-            theme.commentColor.red,
-            theme.commentColor.green,
-            theme.commentColor.blue,
-        )
+        paint.color = theme.commentColor.toArgb()
         canvas.drawRoundRect(
             RectF(right - dp(scrollIndicatorWidthDp), thumbTop, right, thumbTop + thumbHeight),
             dp(scrollIndicatorWidthDp / 2f),
@@ -6957,132 +6870,47 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return abs(x - touch.downX) <= horizontalLimit
     }
 
-    private fun drawKeyShadow(canvas: Canvas, rect: RectF, pressed: Boolean) {
-        drawSurfaceShadow(canvas, rect, pressed)
-    }
+    private fun resolvedKeyStyle(key: KeySpec): KeytaoKeyStyle = theme.keyStyle(
+        actionForMode(key).type,
+        key.style == "accent",
+        isSoftAccentPunctuationKey(key),
+        isActiveKey(key),
+        isShiftActive(),
+    )
 
-    private fun drawSurfaceShadow(canvas: Canvas, rect: RectF, pressed: Boolean) {
+    private fun drawKeyShadow(canvas: Canvas, rect: RectF, style: KeytaoKeyStyle) {
         val shadow = RectF(rect)
-        shadow.offset(0f, dp(if (pressed) 0.8f else 1.6f))
+        shadow.offset(0f, dp(style.shadowOffsetY))
         paint.style = Paint.Style.FILL
-        paint.color = Color.argb(if (pressed) 18 else 28, 26, 34, 44)
-        canvas.drawRoundRect(shadow, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
+        paint.color = style.shadowColor.toArgb()
+        canvas.drawRoundRect(shadow, dp(style.cornerRadius), dp(style.cornerRadius), paint)
     }
 
-    private fun drawAccentToolbarBorder(canvas: Canvas, rect: RectF) {
-        val borderWidth = dp(KeytaoImeInteractionTuning.ACCENT_BORDER_WIDTH_DP)
-        val borderInset = borderWidth / 2f
-        val borderRect = RectF(
-            rect.left + borderInset,
-            rect.top + borderInset,
-            rect.right - borderInset,
-            rect.bottom - borderInset,
-        )
+    private fun drawSurfaceShadow(canvas: Canvas, rect: RectF) {
+        drawKeyShadow(canvas, rect, theme.key)
+    }
+
+    private fun drawKeyOutline(canvas: Canvas, rect: RectF, style: KeytaoKeyStyle) {
+        val borderWidth = dp(style.borderWidth)
+        if (borderWidth <= 0f) return
+        val outline = RectF(rect).apply { inset(borderWidth / 2f, borderWidth / 2f) }
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = borderWidth
-        paint.color = accentBorderColor(KeytaoImeInteractionTuning.ACCENT_TOOLBAR_BORDER_ALPHA)
-        val radius = dp(keyCornerRadiusDp())
-        canvas.drawRoundRect(borderRect, radius, radius, paint)
-    }
-
-    private fun drawKeyOutline(canvas: Canvas, key: KeySpec, rect: RectF, pressed: Boolean) {
-        val softAccent = isSoftAccentKey(key)
-        if (pressed && !softAccent) return
-        val inset = dp(1f)
-        val outline = RectF(
-            rect.left + inset,
-            rect.top + inset,
-            rect.right - inset,
-            rect.bottom - inset,
-        )
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = if (softAccent) {
-            dp(KeytaoImeInteractionTuning.ACCENT_BORDER_WIDTH_DP)
-        } else {
-            max(1f, dp(0.7f))
-        }
-        paint.color = if (softAccent) {
-            accentBorderColor(if (pressed) 1f else KeytaoImeInteractionTuning.SOFT_ACCENT_KEY_BORDER_ALPHA)
-        } else if (isDarkPanel()) {
-            Color.argb(22, 255, 255, 255)
-        } else {
-            Color.argb(28, 26, 34, 44)
-        }
-        val radius = dp(max(0f, keyCornerRadiusDp() - 1f))
+        paint.color = style.borderColor.toArgb()
+        val radius = dp(style.cornerRadius)
         canvas.drawRoundRect(outline, radius, radius, paint)
     }
 
-    private fun keyBackgroundColor(key: KeySpec? = null): Int {
-        if (isSoftAccentKey(key)) {
-            return softenedAccentSurfaceColor(KeytaoImeInteractionTuning.SOFT_ACCENT_KEY_FILL_AMOUNT)
-        }
-        if (key?.style == "accent") return theme.candidateSelectedBackground.toArgb()
-        if (theme.keyBackground.alpha > 0) return theme.keyBackground.toArgb()
-        return if (isDarkPanel()) {
-            Color.argb(170, 42, 48, 58)
-        } else {
-            Color.argb(210, 255, 255, 255)
-        }
-    }
+    private fun keyBackgroundColor(key: KeySpec? = null): Int =
+        (key?.let(::resolvedKeyStyle) ?: theme.key).background.toArgb()
 
-    private fun keyForegroundColor(key: KeySpec, selected: Boolean, pressProgress: Float = 0f): Int {
-        val normal = when {
-            selected -> theme.keySelectedForeground.toArgb()
-            key.style == "accent" -> theme.candidateSelectedForeground.toArgb()
-            else -> theme.keyForeground.toArgb()
-        }
-        if (pressProgress <= 0f) return normal
-        return blendColor(theme.keyPressedForeground.toArgb(), normal, pressProgress)
-    }
-
-    private fun isSoftAccentKey(key: KeySpec?): Boolean {
-        if (key == null) return false
-        val type = actionForMode(key).type
-        return key.style == "accent" ||
-            isSoftAccentPunctuationKey(key) ||
-            type == KeyCommandTypes.MODE ||
-            type == KeyCommandTypes.KEYBOARD_MODE ||
-            type == KeyCommandTypes.SPACE ||
-            type == KeyCommandTypes.ENTER ||
-            type == KeyCommandTypes.BACKSPACE
+    private fun keyForegroundColor(key: KeySpec, pressProgress: Float = 0f): Int {
+        val style = resolvedKeyStyle(key)
+        return (if (pressProgress > 0f) style.pressedForeground else style.foreground).toArgb()
     }
 
     private fun isSoftAccentPunctuationKey(key: KeySpec): Boolean {
         return labelForMode(key) in softAccentPunctuation || valueForMode(key) in softAccentPunctuation
-    }
-
-    private fun toolbarBackgroundColor(item: ToolbarRect, pressed: Boolean, forceAccent: Boolean = false): Int {
-        val useAccent = forceAccent || item.selected || isSoftAccentToolbar(item)
-        return when {
-            pressed && useAccent -> softenedAccentSurfaceColor(0.24f)
-            pressed -> theme.keySelectedBackground.toArgb()
-            useAccent -> softenedAccentSurfaceColor(if (item.selected) 0.18f else 0.13f)
-            item.selected -> theme.candidateSelectedBackground.toArgb()
-            else -> keyBackgroundColor()
-        }
-    }
-
-    private fun isSoftAccentToolbar(item: ToolbarRect): Boolean {
-        if (item.command.type in setOf(
-                KeyCommandTypes.MODE,
-                KeyCommandTypes.OPEN_PAGE,
-                KeyCommandTypes.KEYBOARD_MODE,
-                KeyCommandTypes.KEYBOARD_PICKER,
-                KeyCommandTypes.NEXT_INPUT_METHOD,
-            )
-        ) {
-            return true
-        }
-        if (item.command.type == KeyCommandTypes.PANEL && item.command.value in setOf(
-                "rime",
-                "clipboard",
-                "close",
-                "dismissClipboard",
-            )
-        ) {
-            return true
-        }
-        return false
     }
 
     private fun isToolbarPressed(item: ToolbarRect): Boolean {
@@ -7094,55 +6922,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         clearRecentClipboardSuggestion()
     }
 
-    private fun panelBackgroundColor(): Int {
-        return blendColor(
-            theme.selectedLabelColor.toArgb(),
-            theme.panelBackground.toArgb(),
-            0.07f,
-            theme.panelBackground.alpha,
-        )
-    }
+    private fun panelBackgroundColor(): Int = theme.keyboard.themeColor("background").toArgb()
 
-    private fun statusMessageColor(): Int {
-        return if (isDarkPanel()) {
-            Color.argb(235, 245, 247, 250)
-        } else {
-            Color.argb(224, 31, 41, 51)
-        }
-    }
-
-    private fun softenedAccentSurfaceColor(amount: Float): Int {
-        return blendColor(
-            theme.selectedLabelColor.toArgb(),
-            panelBackgroundColor(),
-            amount.coerceIn(0f, 1f),
-        )
-    }
-
-    private fun accentBorderColor(alpha: Float): Int {
-        val effectiveAlpha = alpha * if (isDarkPanel()) {
-            KeytaoImeInteractionTuning.DARK_ACCENT_BORDER_ALPHA_MULTIPLIER
-        } else {
-            1f
-        }
-        return blendColor(
-            theme.selectedLabelColor.toArgb(),
-            Color.TRANSPARENT,
-            1f,
-            (255f * effectiveAlpha.coerceIn(0f, 1f)).roundToInt(),
-        )
-    }
-
-    private fun blendColor(foreground: Int, background: Int, amount: Float, alpha: Int = Color.alpha(background)): Int {
-        val ratio = amount.coerceIn(0f, 1f)
-        val inverse = 1f - ratio
-        return Color.argb(
-            alpha.coerceIn(0, 255),
-            (Color.red(foreground) * ratio + Color.red(background) * inverse).roundToInt().coerceIn(0, 255),
-            (Color.green(foreground) * ratio + Color.green(background) * inverse).roundToInt().coerceIn(0, 255),
-            (Color.blue(foreground) * ratio + Color.blue(background) * inverse).roundToInt().coerceIn(0, 255),
-        )
-    }
+    private fun statusMessageColor(): Int = theme.candidateBar.themeColor("foreground").toArgb()
 
     private fun keyboardHorizontalGap(): Float {
         return dp(config.horizontalGapDp)
@@ -7226,11 +7008,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             val type = actionForMode(key).type
             type == KeyCommandTypes.SHIFT || type == KeyCommandTypes.BACKSPACE
         }
-    }
-
-    private fun isDarkPanel(): Boolean {
-        val luminance = (theme.panelBackground.red * 299 + theme.panelBackground.green * 587 + theme.panelBackground.blue * 114) / 1000
-        return luminance < 128
     }
 
     private fun textBaselineOffset(paint: Paint): Float {
@@ -7353,6 +7130,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     companion object {
         @Volatile private var cachedEmojiKeywordIndex: Map<String, List<String>>? = null
+        private const val fontSizeSp = 20f
+        private const val labelSizeSp = 15f
+        private const val commentSizeSp = 16f
+        private const val preeditSizeSp = 15f
+        private const val panelGapDp = 4f
         private const val keyPreviewMarginDp = 4f
         private const val keyPreviewMinimumWidthDp = 48f
         private const val keyPreviewMinimumHeightDp = 48f

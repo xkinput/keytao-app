@@ -1209,7 +1209,7 @@ pub fn resolve_candidate_panel_preview(
         corner_radius,
         &background_color,
     )?;
-    keytao_theme::resolved_theme_json(&theme).map_err(|error| error.to_string())
+    keytao_theme::resolved_renderer_theme_json(&theme).map_err(|error| error.to_string())
 }
 
 pub fn set_ime_ui_settings(

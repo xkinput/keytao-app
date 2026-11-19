@@ -7,7 +7,8 @@ class CandidatePanel: NSPanel {
     var onSelect: ((Int) -> Void)?
     var onPageChange: ((Bool) -> Void)?
 
-    private static let chromeInset: CGFloat = 8
+    private var chromeInset: CGFloat = 0
+    private var chromeConstraints: [NSLayoutConstraint] = []
 
     private let rootView = NSView()
     private let containerView = NSView()
@@ -39,7 +40,7 @@ class CandidatePanel: NSPanel {
         level = .popUpMenu
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        hasShadow = false
         isMovable = false
         hidesOnDeactivate = false
 
@@ -67,11 +68,13 @@ class CandidatePanel: NSPanel {
         stackTopConstraint = top
         stackBottomConstraint = bottom
 
-        NSLayoutConstraint.activate([
-            containerView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: Self.chromeInset),
-            containerView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -Self.chromeInset),
-            containerView.topAnchor.constraint(equalTo: rootView.topAnchor, constant: Self.chromeInset),
-            containerView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -Self.chromeInset),
+        chromeConstraints = [
+            containerView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            containerView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            containerView.topAnchor.constraint(equalTo: rootView.topAnchor),
+            containerView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(chromeConstraints + [
             leading,
             trailing,
             top,
@@ -87,12 +90,10 @@ class CandidatePanel: NSPanel {
     /// page availability are decided there, so every frontend shows the same
     /// candidate list.
     func update(model: KeyTaoPanelModel, theme: ImeTheme, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
-        let theme = theme.scaledCandidatePanel()
         level = windowLevel
         apply(theme, orientation: model.orientation)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let chromeInset = Self.chromeInset
         let maxWidth = max(1, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2)
         let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2 - chromeInset * 2))
 
@@ -107,7 +108,7 @@ class CandidatePanel: NSPanel {
                 let text = NSMutableAttributedString(attributedString: label.attributedStringValue)
                 text.addAttribute(
                     .foregroundColor,
-                    value: foreground.withAlphaComponent(foreground.alphaComponent * 0.35),
+                    value: theme.candidate.preeditCaretColor.nsColor,
                     range: caretRange
                 )
                 label.attributedStringValue = text
@@ -170,13 +171,24 @@ class CandidatePanel: NSPanel {
         origin.x = min(max(origin.x, visibleFrame.minX + margin), visibleFrame.maxX - windowSize.width - margin)
         origin.y = min(max(origin.y, visibleFrame.minY + margin), visibleFrame.maxY - windowSize.height - margin)
         setFrame(NSRect(origin: origin, size: windowSize), display: true, animate: false)
+        rootView.layoutSubtreeIfNeeded()
+        rootView.layer?.shadowPath = CGPath(roundedRect: containerView.frame, cornerWidth: theme.panel.cornerRadius, cornerHeight: theme.panel.cornerRadius, transform: nil)
 
         orderFront(nil)
     }
 
     private func apply(_ theme: ImeTheme, orientation: CandidatePanelOrientation) {
         self.orientation = orientation
-        hasShadow = theme.panel.shadow
+        hasShadow = false
+        let shadow = theme.panel.shadowStyle
+        chromeInset = theme.panel.shadow ? (shadow?.margin ?? 0) : 0
+        for (constraint, sign) in zip(chromeConstraints, [CGFloat(1), -1, 1, -1]) {
+            constraint.constant = chromeInset * sign
+        }
+        rootView.layer?.shadowOpacity = theme.panel.shadow ? 1 : 0
+        rootView.layer?.shadowColor = shadow?.color.cgColor
+        rootView.layer?.shadowOffset = CGSize(width: 0, height: -(shadow?.offsetY ?? 0))
+        rootView.layer?.shadowRadius = (shadow?.blurRadius ?? 0) / 2
         containerView.layer?.backgroundColor = theme.panel.background.cgColor
         containerView.layer?.cornerRadius = theme.panel.cornerRadius
         containerView.layer?.borderColor = theme.panel.borderColor.cgColor
@@ -269,6 +281,9 @@ private final class CandidateOptionView: NSControl {
     private var hovered = false {
         didSet { applyState() }
     }
+    private var pressed = false {
+        didSet { applyState() }
+    }
 
     init(label: String, text: String, comment: String, highlighted: Bool, theme: ImeTheme) {
         self.theme = theme
@@ -357,25 +372,33 @@ private final class CandidateOptionView: NSControl {
     }
 
     override func mouseDown(with event: NSEvent) {
-        sendAction(action, to: target)
+        pressed = true
+        defer { pressed = false }
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            pressed = bounds.contains(convert(next.locationInWindow, from: nil))
+            if next.type == .leftMouseUp {
+                if pressed { sendAction(action, to: target) }
+                break
+            }
+        }
     }
 
     private func applyState() {
         let option = theme.candidate
-        let background = isSelectedOption
-            ? option.selectedBackground
+        let background = pressed ? option.pressedBackground
+            : isSelectedOption ? option.selectedBackground
             : hovered ? option.hoverBackground : option.background
         layer?.backgroundColor = background.cgColor
         layer?.cornerRadius = option.cornerRadius
-        layer?.borderWidth = isSelectedOption ? Swift.max(option.borderWidth, 1) : option.borderWidth
+        layer?.borderWidth = option.borderWidth
         layer?.borderColor = (isSelectedOption ? option.selectedBorderColor : option.borderColor).cgColor
 
-        labelField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.labelSize, weight: .semiBold)
+        labelField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.labelSize, weight: theme.font.weight)
         textField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.size, weight: theme.font.weight)
-        commentField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.commentSize)
+        commentField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.commentSize, weight: theme.font.weight)
 
         labelField.textColor = (isSelectedOption ? option.selectedLabelColor : option.labelColor).nsColor
-        textField.textColor = (isSelectedOption ? option.selectedForeground : option.foreground).nsColor
+        textField.textColor = (pressed ? option.pressedForeground : isSelectedOption ? option.selectedForeground : option.foreground).nsColor
         commentField.textColor = (isSelectedOption ? option.selectedCommentColor : option.commentColor).nsColor
     }
 }

@@ -28,7 +28,7 @@ use xim::{
 use crate::{
     engine::{inline_preedit, shift_key_modifiers, CoreEngine, ImeSession},
     ibus_shared::is_shift_key,
-    panel::{load_font, PanelRenderer},
+    panel::{load_font, x11_panel_position, x11_panel_visual, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
 };
@@ -187,12 +187,13 @@ struct KeyTaoHandler {
 
 impl KeyTaoHandler {
     fn new(engine: CoreEngine, conn: Arc<XCBConnection>, screen_num: usize) -> Self {
-        let renderer = load_font().and_then(PanelRenderer::new_x11);
         let setup = conn.setup();
         let screen = &setup.roots[screen_num];
         let root = screen.root;
-        let visual = screen.root_visual;
-        let depth = screen.root_depth;
+        let (depth, visual, colormap, supports_alpha) =
+            x11_panel_visual(conn.as_ref(), screen, screen_num);
+        let renderer =
+            load_font().and_then(|source| PanelRenderer::new_x11(source, supports_alpha));
         let screen_width = screen.width_in_pixels as i32;
         let screen_height = screen.height_in_pixels as i32;
 
@@ -210,7 +211,9 @@ impl KeyTaoHandler {
             visual,
             &CreateWindowAux::new()
                 .override_redirect(1)
-                .background_pixel(0x1e1e2e)
+                .background_pixel(0)
+                .border_pixel(0)
+                .colormap(colormap)
                 .event_mask(
                     EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
                 ),
@@ -323,23 +326,22 @@ impl KeyTaoHandler {
             .unwrap_or((spot.x as i32, spot.y as i32))
     }
 
-    /// Keep the whole panel on screen: a caret near the right or bottom edge
-    /// would otherwise push half of it out of view.
-    fn clamp_to_screen(&self, x: i32, y: i32, w: u32, h: u32) -> (i32, i32) {
+    fn draw_panel(&mut self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32, inset: i32) {
+        if w == 0 || h == 0 {
+            return;
+        }
         let margin = self
             .renderer
             .as_ref()
             .map_or(0, PanelRenderer::screen_margin);
-        let max_x = (self.screen_width - w as i32 - margin).max(margin);
-        let max_y = (self.screen_height - h as i32).max(0);
-        (x.clamp(margin, max_x), y.clamp(0, max_y))
-    }
-
-    fn draw_panel(&mut self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) {
-        if w == 0 || h == 0 {
-            return;
-        }
-        let (x, y) = self.clamp_to_screen(x, y, w, h);
+        let (x, y) = x11_panel_position(
+            (x, y),
+            (w, h),
+            inset,
+            (self.screen_width, self.screen_height),
+            margin,
+            PANEL_CARET_GAP,
+        );
         self.conn
             .configure_window(
                 self.panel_win,
@@ -449,12 +451,13 @@ impl KeyTaoHandler {
         };
         let (pixels, w, h, hit_areas) =
             renderer.render_with_hit_areas(state, self.screen_width as f32);
+        let inset = renderer.candidate_shadow_inset();
         self.panel_hit_areas = hit_areas;
         let (root_x, root_y) = self.last_anchor;
         // The panel now holds a composition, so the hint deadline must not be
         // allowed to unmap it later on.
         self.mode_hint_until = None;
-        self.draw_panel(&pixels, w, h, root_x, root_y + PANEL_CARET_GAP);
+        self.draw_panel(&pixels, w, h, root_x, root_y, inset);
     }
 
     /// Primary-button press/release on the panel window, in window pixels.
@@ -498,11 +501,12 @@ impl KeyTaoHandler {
             return;
         };
         let (pixels, w, h) = renderer.render_mode_hint(ascii_mode);
+        let inset = renderer.hint_shadow_inset();
         let duration = renderer.mode_hint_duration();
         self.panel_hit_areas = PanelHitAreas::default();
         self.pressed_click = None;
         let (x, y) = self.last_anchor;
-        self.draw_panel(&pixels, w, h, x - w as i32 / 2, y + PANEL_CARET_GAP);
+        self.draw_panel(&pixels, w, h, x - (w as i32 - inset * 2) / 2, y, inset);
         self.mode_hint_until = Some(Instant::now() + duration);
     }
 
@@ -511,11 +515,12 @@ impl KeyTaoHandler {
             return;
         };
         let (pixels, w, h) = renderer.render_text_hint(text);
+        let inset = renderer.hint_shadow_inset();
         self.mode_hint_until = None;
         self.panel_hit_areas = PanelHitAreas::default();
         self.pressed_click = None;
         let (x, y) = self.last_anchor;
-        self.draw_panel(&pixels, w, h, x, y + PANEL_CARET_GAP);
+        self.draw_panel(&pixels, w, h, x, y, inset);
         self.conn.flush().ok();
     }
 

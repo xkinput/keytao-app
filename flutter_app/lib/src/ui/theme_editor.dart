@@ -222,7 +222,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 onPress:
                     _enabled &&
                         supported &&
-                        _at(_source, '$_target.$path') != null
+                        (_at(_source, '$_target.$path') != null ||
+                            _at(_source, path) != null)
                     ? () => _save(path, null)
                     : null,
                 child: Icon(

@@ -1179,6 +1179,32 @@ pub extern "C" fn keytao_resolve_theme_json_with_system_scheme(
     )
 }
 
+/// Resolve desktop renderer metadata and candidate metric scaling in Rust.
+#[no_mangle]
+pub extern "C" fn keytao_resolve_renderer_theme_json_with_system_scheme(
+    default_theme_path: *const c_char,
+    user_theme_path: *const c_char,
+    system_color_scheme: *const c_char,
+) -> *mut c_char {
+    guard(
+        "keytao_resolve_renderer_theme_json_with_system_scheme",
+        std::ptr::null_mut(),
+        || {
+            let default_path = optional_path_arg(default_theme_path);
+            let user_path = optional_path_arg(user_theme_path);
+            let theme = match optional_effective_color_scheme_arg(system_color_scheme) {
+                Some(scheme) => resolve_theme_from_paths_with_system_scheme(
+                    default_path.as_deref(),
+                    user_path.as_deref(),
+                    scheme,
+                ),
+                None => resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref()),
+            };
+            renderer_theme_json_cstring(&theme)
+        },
+    )
+}
+
 /// Persist the mobile theme color scheme and optionally its accent. A null
 /// accent preserves the key; an empty accent removes it.
 #[no_mangle]
@@ -1297,6 +1323,18 @@ fn theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
                 "keytao_resolve_theme_json: serialize failed: {e}"
             ));
             to_cstring("{}")
+        }
+    }
+}
+
+fn renderer_theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
+    match keytao_theme::resolved_renderer_theme_json(&keytao_theme::scaled_candidate_panel(theme)) {
+        Ok(json) => to_cstring(&json),
+        Err(error) => {
+            log_error(format_args!(
+                "keytao_resolve_renderer_theme_json: serialize failed: {error}"
+            ));
+            std::ptr::null_mut()
         }
     }
 }
@@ -1728,6 +1766,53 @@ mod smoke_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_json_ffi_resolves_desktop_scale_and_preserves_mobile_values() {
+        let dir = smoke_fixture::scratch_dir("ffi-renderer-theme");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("theme.yaml");
+        std::fs::write(&path, "font:\n  size: 30\n").unwrap();
+        let path_arg = CString::new(path.to_string_lossy().as_ref()).unwrap();
+        let scheme = CString::new("light").unwrap();
+        let theme = resolve_theme_from_paths_with_system_scheme(
+            None,
+            Some(&path),
+            EffectiveColorScheme::Light,
+        );
+        let expected = keytao_theme::scaled_candidate_panel(&theme);
+        let json = keytao_resolve_renderer_theme_json_with_system_scheme(
+            std::ptr::null(),
+            path_arg.as_ptr(),
+            scheme.as_ptr(),
+        );
+        assert!(!json.is_null());
+        let actual: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { free_cstring(json) };
+        assert_eq!(actual["font"]["labelSize"], expected.font.label_size);
+        assert_eq!(actual["panel"]["paddingX"], expected.panel.padding_x);
+        assert_eq!(actual["mobile"], theme.mobile);
+        assert_eq!(
+            actual["candidate"]["preeditCaretColor"],
+            serde_json::to_value(keytao_theme::preedit_caret_color(
+                theme.candidate.foreground
+            ))
+            .unwrap()
+        );
+        let json = keytao_resolve_theme_json_with_system_scheme(
+            std::ptr::null(),
+            path_arg.as_ptr(),
+            scheme.as_ptr(),
+        );
+        let legacy: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { free_cstring(json) };
+        assert_eq!(legacy["font"]["labelSize"], theme.font.label_size);
+        assert!(legacy["candidate"].get("preeditCaretColor").is_none());
+        assert!(legacy["panel"].get("shadowStyle").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn appearance_ffi_round_trip_preserves_old_writes_and_resets_overrides() {
