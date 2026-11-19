@@ -6,7 +6,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
-import 'package:keytao/src/ui/debug_page.dart';
+import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -74,7 +74,7 @@ Future<void> _show(WidgetTester tester, AppController controller) async {
       home: FScaffold(
         child: ListenableBuilder(
           listenable: controller,
-          builder: (_, _) => DebugPage(controller: controller),
+          builder: (_, _) => SchemePage(controller: controller),
         ),
       ),
     ),
@@ -104,20 +104,34 @@ void main() {
     BridgePlatform.android,
     BridgePlatform.ios,
   ]) {
-    testWidgets('sync section visibility on $platform', (tester) async {
+    testWidgets('sync dialog visibility on $platform', (tester) async {
       controller.dispose();
-      controller = _SyncController(platform)..rimeSyncSettings = _initial;
+      controller = _SyncController(platform);
       await _show(tester, controller);
       final mobile =
           platform == BridgePlatform.android || platform == BridgePlatform.ios;
-      expect(find.text('同步'), mobile ? findsNothing : findsOneWidget);
-      expect(find.text('同步文件夹名称'), mobile ? findsNothing : findsOneWidget);
-      expect(find.text('同步路径'), mobile ? findsNothing : findsOneWidget);
+      final button = find.byKey(const ValueKey('rime-sync-button'));
+      expect(button, mobile ? findsNothing : findsOneWidget);
+      expect(find.text('同步文件夹名称'), findsNothing);
+      expect(find.text('同步路径'), findsNothing);
       if (!mobile) {
         expect(
-          tester.getTopLeft(find.text('同步')).dy,
-          lessThan(tester.getTopLeft(find.text('运行日志')).dy),
+          tester.getTopLeft(button).dx,
+          greaterThan(
+            tester
+                .getTopRight(find.byKey(const ValueKey('addon-schemes-button')))
+                .dx,
+          ),
         );
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+        expect(find.byType(AppDialog), findsOneWidget);
+        expect(find.text('同步文件夹名称'), findsOneWidget);
+        expect(find.text('同步路径'), findsOneWidget);
+        expect(controller.rimeSyncSettings, _initial);
+        await tester.tap(find.text('关闭'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AppDialog), findsNothing);
       }
       await tester.pumpWidget(const SizedBox.shrink());
     });
@@ -126,10 +140,12 @@ void main() {
   testWidgets(
     'sync controls save, choose, reset, open and sync through controller',
     (tester) async {
-      await controller.refreshRimeSyncSettings();
       await _show(tester, controller);
+      await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+      await tester.pumpAndSettle();
       final id = find.byKey(const ValueKey('rime-sync-installation-id'));
       final path = find.byKey(const ValueKey('rime-sync-directory'));
+      expect(tester.widget<FTextField>(path).hint, _initial.effectiveSyncDir);
 
       await tester.enterText(id, 'new-desktop');
       await tester.tap(find.text('保存'));
@@ -152,6 +168,7 @@ void main() {
       await tester.tap(find.text('重置'));
       await tester.pumpAndSettle();
       expect(core.saves.last.syncDir, isEmpty);
+      expect(tester.widget<FTextField>(path).hint, _initial.effectiveSyncDir);
 
       await tester.enterText(path, '/isolated/manual-sync');
       await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -170,6 +187,7 @@ void main() {
       await tester.pump();
       expect(core.saves.last.syncDir, '/isolated/run-sync');
       expect(find.text('同步中'), findsOneWidget);
+      expect(find.byType(FProgress), findsWidgets);
       expect(controller.busy, isTrue);
       core.sync!.complete();
       await tester.pumpAndSettle();

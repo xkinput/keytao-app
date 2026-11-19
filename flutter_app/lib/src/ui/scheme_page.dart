@@ -6,6 +6,7 @@ import '../app/options.dart';
 import 'progress.dart';
 import 'package_orphans.dart';
 import 'package_schema_selection.dart';
+import 'rime_sync_dialog.dart';
 import 'settings.dart' show SchemaSwitchesSection, showCloudPackageTransfer;
 import 'theme.dart';
 import 'user_words.dart';
@@ -207,6 +208,14 @@ class _SchemePageState extends State<SchemePage> {
                       key: const ValueKey('addon-schemes-button'),
                       onPress: () => _showAddonSchemes(context, c),
                     ),
+                    if (!c.isMobile)
+                      ActionButton(
+                        AppStrings.rimeSync(Localizations.localeOf(context)),
+                        key: const ValueKey('rime-sync-button'),
+                        onPress: c.busy
+                            ? null
+                            : () => showRimeSyncDialog(context, c),
+                      ),
                     FTooltip(
                       tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
                       child: FButton.icon(
