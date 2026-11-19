@@ -272,19 +272,34 @@ fn schema_lua_switches_reinitialize_before_the_next_key() {
     session.state();
     session.reset().unwrap();
     let user_bytes = std::fs::read(dir.join("user.yaml")).unwrap();
-    std::fs::remove_file(dir.join("user.yaml")).unwrap();
-    std::fs::create_dir(dir.join("user.yaml")).unwrap();
+    let current_schema = dir.join(".keytao-current-schema");
+    std::fs::remove_file(&current_schema).unwrap();
+    // Linux librime must still be able to read user.yaml when rebuilding sessions.
+    std::fs::create_dir(&current_schema).unwrap();
     session.select_schema(ids[0]).unwrap();
-    assert!(
-        session.process_key_result(b'a' as u32, 0).is_some(),
-        "selection persistence failure stopped typing"
-    );
+    let retry = Some((dir.clone(), ids[0].to_owned()));
+    assert_eq!(*lock_ignore_poison(&rime_lua::SAVE_RETRY), retry);
+    // Keep the old on-disk selection so the rebuild must honor the pending save.
+    std::fs::write(dir.join("user.yaml"), &user_bytes).unwrap();
+    let key = session
+        .process_key_result(b'a' as u32, 0)
+        .expect("selection persistence failure stopped typing");
+    assert!(key.accepted);
+    assert_eq!(key.state.schema_id, ids[0]);
     assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
-    std::fs::remove_dir(dir.join("user.yaml")).unwrap();
-    std::fs::write(dir.join("user.yaml"), user_bytes).unwrap();
+    assert_eq!(*lock_ignore_poison(&rime_lua::SAVE_RETRY), retry);
+    std::fs::remove_dir(&current_schema).unwrap();
     *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
     runtime.prewarm(Some(&session)).unwrap();
     assert!(session.try_finish_lua_reload());
+    assert!(lock_ignore_poison(&rime_lua::SAVE_RETRY).is_none());
+    assert_eq!(std::fs::read_to_string(&current_schema).unwrap(), ids[0]);
+    let user: Value =
+        serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
+    assert_eq!(
+        user["var"]["previously_selected_schema"].as_str(),
+        Some(ids[0])
+    );
     assert_eq!(session.current_schema().unwrap().id, ids[0]);
     assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
     session.reset().unwrap();
