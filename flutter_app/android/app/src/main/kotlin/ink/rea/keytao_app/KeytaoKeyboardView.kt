@@ -1360,6 +1360,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         super.onDetachedFromWindow()
     }
 
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        if (!hasWindowFocus) listener?.onUserInteraction()
+        super.onWindowFocusChanged(hasWindowFocus)
+    }
+
     override fun onWindowVisibilityChanged(visibility: Int) {
         if (visibility != VISIBLE) {
             listener?.onUserInteraction()
