@@ -5,6 +5,8 @@
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub mod deploy_child;
 mod deployment_log;
+mod deployment_state;
+pub use deployment_state::{deployment_in_progress, mark_deployment_failed, DeploymentState};
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
@@ -49,7 +51,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         TryLockError, Weak,
     },
     time::{Duration, Instant},
@@ -80,6 +82,45 @@ fn try_lock_ignore_poison<T>(lock: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 
 fn write_ignore_poison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+struct EngineBuildLock {
+    busy: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl EngineBuildLock {
+    const fn new() -> Self {
+        Self {
+            busy: Mutex::new(false),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> Option<EngineBuildGuard<'_>> {
+        let (mut busy, _) = self
+            .ready
+            .wait_timeout_while(
+                lock_ignore_poison(&self.busy),
+                Duration::from_secs(20),
+                |busy| *busy,
+            )
+            .unwrap_or_else(PoisonError::into_inner);
+        if *busy {
+            return None;
+        }
+        *busy = true;
+        Some(EngineBuildGuard(self))
+    }
+}
+
+struct EngineBuildGuard<'a>(&'a EngineBuildLock);
+
+impl Drop for EngineBuildGuard<'_> {
+    fn drop(&mut self) {
+        *lock_ignore_poison(&self.0.busy) = false;
+        self.0.ready.notify_all();
+    }
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -1218,8 +1259,8 @@ mod desktop {
             "deploy_start",
             schema_count = schema_count
         );
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let result = (|| {
-            let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
             let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
             begin_deployment(Path::new(&user_data_dir))?;
 
@@ -1253,6 +1294,9 @@ mod desktop {
             }
             complete_deployment(Path::new(&user_data_dir))
         })();
+        if result.is_err() {
+            let _ = mark_deployment_failed(Path::new(&user_data_dir));
+        }
         if let Some(started) = started {
             crate::rt_log!(
                 Level::Info,
@@ -4735,6 +4779,66 @@ pub struct ImeRuntimeSession {
     inner: Arc<Mutex<ImeRuntimeSessionInner>>,
     policy: Arc<SessionInputPolicy>,
     context_ascii_mode: Arc<AtomicU8>,
+    pending: Arc<Mutex<PendingRuntimeInput>>,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+#[derive(Default)]
+struct PendingRuntimeInput {
+    state_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+#[derive(Clone, Copy)]
+enum RuntimeKey {
+    Key(u32, u32),
+    Enter,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+struct WeakRuntimeSession {
+    dirs: RimeDataDirs,
+    inner: Weak<Mutex<ImeRuntimeSessionInner>>,
+    policy: Weak<SessionInputPolicy>,
+    context_ascii_mode: Weak<AtomicU8>,
+    pending: Weak<Mutex<PendingRuntimeInput>>,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+impl WeakRuntimeSession {
+    fn upgrade(&self) -> Option<ImeRuntimeSession> {
+        Some(ImeRuntimeSession {
+            dirs: self.dirs.clone(),
+            inner: self.inner.upgrade()?,
+            policy: self.policy.upgrade()?,
+            context_ascii_mode: self.context_ascii_mode.upgrade()?,
+            pending: self.pending.upgrade()?,
+        })
+    }
 }
 
 #[cfg(any(
@@ -4796,7 +4900,9 @@ struct ProcessRimeState {
     reload_barrier: RwLock<()>,
     /// Every session handed out in this process. A teardown must drop their
     /// engines before finalizing librime; entries die with their session.
-    sessions: Mutex<Vec<Weak<Mutex<ImeRuntimeSessionInner>>>>,
+    sessions: Mutex<Vec<WeakRuntimeSession>>,
+    build: EngineBuildLock,
+    prewarm_scheduled: AtomicBool,
     lua_retry_after: Mutex<Option<(PathBuf, Instant)>>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     global_input: Mutex<Option<global_input::GlobalInput>>,
@@ -4814,6 +4920,8 @@ static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     generation: AtomicU64::new(0),
     reload_barrier: RwLock::new(()),
     sessions: Mutex::new(Vec::new()),
+    build: EngineBuildLock::new(),
+    prewarm_scheduled: AtomicBool::new(false),
     lua_retry_after: Mutex::new(None),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     global_input: Mutex::new(None),
@@ -4834,7 +4942,7 @@ impl ProcessRimeState {
     fn drop_live_engines(&self) {
         let mut sessions = lock_ignore_poison(&self.sessions);
         sessions.retain(|session| {
-            let Some(session) = session.upgrade() else {
+            let Some(session) = session.inner.upgrade() else {
                 return false;
             };
             let mut inner = lock_ignore_poison(&session);
@@ -4846,10 +4954,16 @@ impl ProcessRimeState {
         });
     }
 
-    fn register(&self, session: &Arc<Mutex<ImeRuntimeSessionInner>>) {
+    fn register(&self, session: &ImeRuntimeSession) {
         let mut sessions = lock_ignore_poison(&self.sessions);
-        sessions.retain(|session| session.strong_count() > 0);
-        sessions.push(Arc::downgrade(session));
+        sessions.retain(|session| session.inner.strong_count() > 0);
+        sessions.push(WeakRuntimeSession {
+            dirs: session.dirs.clone(),
+            inner: Arc::downgrade(&session.inner),
+            policy: Arc::downgrade(&session.policy),
+            context_ascii_mode: Arc::downgrade(&session.context_ascii_mode),
+            pending: Arc::downgrade(&session.pending),
+        });
     }
 
     /// Callers hold the reload barrier; acknowledge only after every live
@@ -4886,8 +5000,8 @@ impl ProcessRimeState {
             Ok(())
         };
         let mut applied = false;
-        for session in sessions.iter().filter_map(Weak::upgrade) {
-            let mut inner = lock_ignore_poison(&session);
+        for session in sessions.iter().filter_map(WeakRuntimeSession::upgrade) {
+            let mut inner = lock_ignore_poison(&session.inner);
             if !inner.ime_host || inner.user_data_dir != root {
                 continue;
             }
@@ -4970,12 +5084,19 @@ impl ProcessRimeState {
     target_os = "ios"
 ))]
 pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+    let _build = PROCESS_RIME
+        .build
+        .acquire()
+        .ok_or("Rime engine build timed out")?;
     let dirs = RimeDataDirs {
         user: PathBuf::from(&user_data_dir),
         shared: shared_data_dir.clone(),
     };
     let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
     let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+    if deployment_in_progress(&dirs.user) {
+        return Err("Rime deployment is busy".into());
+    }
     PROCESS_RIME.drop_live_engines();
     let result = desktop::reinitialize_rime(user_data_dir, shared_data_dir);
     PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
@@ -5098,7 +5219,16 @@ impl ImeRuntime {
     /// one pair of directories, so a second runtime asking for the ones it is
     /// already running for is a no-op instead of a second deployment.
     pub fn init(&self) -> Result<(), String> {
+        let _build = PROCESS_RIME
+            .build
+            .acquire()
+            .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if deployment_in_progress(&dirs.user)
+            && !deployment_state::failed_deployment_owned_by_process(&dirs.user)
+        {
+            return Err("Rime deployment is busy".into());
+        }
         runtime_log::init_for_engine(&dirs.user);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let mut deployed = false;
@@ -5109,6 +5239,11 @@ impl ImeRuntime {
             }
 
             let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+            if deployment_in_progress(&dirs.user)
+                && !deployment_state::failed_deployment_owned_by_process(&dirs.user)
+            {
+                return Err("Rime deployment is busy".into());
+            }
             PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
             deploy(
                 dirs.user.to_string_lossy().into_owned(),
@@ -5137,6 +5272,10 @@ impl ImeRuntime {
     }
 
     pub fn init_without_deploy(&self) -> Result<(), String> {
+        let _build = PROCESS_RIME
+            .build
+            .acquire()
+            .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
         runtime_log::init_for_engine(&dirs.user);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
@@ -5144,6 +5283,9 @@ impl ImeRuntime {
             let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
             if initialized.as_ref() == Some(&dirs) {
                 return Ok(());
+            }
+            if deployment_in_progress(&dirs.user) {
+                return Err("Rime deployment is busy".into());
             }
 
             let user_dir = dirs.user.clone();
@@ -5213,11 +5355,21 @@ impl ImeRuntime {
     }
 
     pub fn reload_without_deploy(&self) -> Result<(), String> {
+        let _build = PROCESS_RIME
+            .build
+            .acquire()
+            .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if deployment_in_progress(&dirs.user) {
+            return Err("Rime deployment is busy".into());
+        }
         runtime_log::init_for_engine(&dirs.user);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let result = (|| {
             let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+            if deployment_in_progress(&dirs.user) {
+                return Err("Rime deployment is busy".into());
+            }
             let schema_state = schema_install_state(&dirs.user);
             if schema_state.schemas.is_empty() {
                 if initialized.as_ref() == Some(&dirs) {
@@ -5236,6 +5388,9 @@ impl ImeRuntime {
             }
 
             let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+            if deployment_in_progress(&dirs.user) {
+                return Err("Rime deployment is busy".into());
+            }
             regenerate_rime_lua_for_ime(&dirs.user);
             // A schema signal can replace a deployment signal before the IME sees it.
             if self.0.ime_host
@@ -5291,13 +5446,121 @@ impl ImeRuntime {
         PROCESS_RIME.generation.load(Ordering::SeqCst)
     }
 
-    pub fn reload(&self) -> Result<(), String> {
+    /// Rebuild the focused engine first, then its peers, on the caller's worker.
+    /// Keys wait for this worker without holding engine/native locks.
+    /// Returns whether any session was rebuilt.
+    pub fn prewarm(&self, focused: Option<&ImeRuntimeSession>) -> Result<bool, String> {
         let dirs = self.data_dirs()?;
+        let Some(worker) = PROCESS_RIME.build.acquire() else {
+            PROCESS_RIME
+                .prewarm_scheduled
+                .store(false, Ordering::Release);
+            return Err("Rime engine build timed out".into());
+        };
+        PROCESS_RIME
+            .prewarm_scheduled
+            .store(true, Ordering::Release);
+        let initial_generation = self.generation();
+        let mut generation = initial_generation;
+        let mut changed = Vec::new();
+        let result = (|| {
+            if deployment_in_progress(&dirs.user) {
+                return Err("Rime deployment is busy".into());
+            }
+            let mut focused = focused.cloned();
+            loop {
+                let mut sessions: Vec<_> = lock_ignore_poison(&PROCESS_RIME.sessions)
+                    .iter()
+                    .filter_map(WeakRuntimeSession::upgrade)
+                    .filter(|session| session.dirs == dirs)
+                    .collect();
+                if let Some(first) = focused.take().filter(|session| session.dirs == dirs) {
+                    sessions.retain(|session| !Arc::ptr_eq(&session.inner, &first.inner));
+                    sessions.insert(0, first);
+                }
+                if self.generation() != generation {
+                    return Err("Rime generation changed".into());
+                }
+                // Lua refresh may finalize librime; never do it while holding
+                // the pending-input mutex needed by host callbacks.
+                if let Some(session) = sessions.first() {
+                    session.try_finish_lua_reload();
+                    generation = self.generation();
+                }
+                let mut worked = false;
+                for session in sessions {
+                    if self.generation() != generation {
+                        return Err("Rime generation changed".into());
+                    }
+                    let initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+                    if initialized.as_ref() != Some(&dirs) {
+                        return Err("librime is running for other data directories".into());
+                    }
+                    let barrier = PROCESS_RIME
+                        .reload_barrier
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    drop(initialized);
+                    let mut inner = lock_ignore_poison(&session.inner);
+                    if inner.generation != generation || inner.engine.is_none() {
+                        if deployment_in_progress(&dirs.user) {
+                            return Err("Rime deployment is busy".into());
+                        }
+                        let rime = desktop::rime_api_lock();
+                        if self.generation() != generation {
+                            return Err("Rime generation changed".into());
+                        }
+                        if deployment_in_progress(&dirs.user) {
+                            return Err("Rime deployment is busy".into());
+                        }
+                        ImeRuntimeSession::rebuild_engine(&mut inner, &dirs.user)?;
+                        drop(rime);
+                        changed.push(session.clone());
+                        worked = true;
+                    }
+                    drop(inner);
+                    drop(barrier);
+                    std::thread::yield_now();
+                }
+                if !worked {
+                    return Ok(generation != initial_generation || !changed.is_empty());
+                }
+            }
+        })();
+        PROCESS_RIME
+            .prewarm_scheduled
+            .store(false, Ordering::Release);
+        drop(worker);
+        for session in changed {
+            let callback = lock_ignore_poison(&session.pending).state_callback.clone();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+        result
+    }
+
+    pub fn reload(&self) -> Result<(), String> {
+        let _build = PROCESS_RIME
+            .build
+            .acquire()
+            .ok_or("Rime engine build timed out")?;
+        let dirs = self.data_dirs()?;
+        if deployment_in_progress(&dirs.user)
+            && !deployment_state::failed_deployment_owned_by_process(&dirs.user)
+        {
+            return Err("Rime deployment is busy".into());
+        }
         runtime_log::init_for_engine(&dirs.user);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
 
         let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+        if deployment_in_progress(&dirs.user)
+            && !deployment_state::failed_deployment_owned_by_process(&dirs.user)
+        {
+            return Err("Rime deployment is busy".into());
+        }
         PROCESS_RIME.drop_live_engines();
         // Deploying while an old session keeps librime's config and dictionary
         // caches alive would rebuild the artifacts but keep serving the stale
@@ -5351,12 +5614,15 @@ impl ImeRuntime {
     }
 
     /// Create a session after a worker initialized this runtime. UI callers
-    /// receive an error while initialization/deployment is busy and can retry;
-    /// this entry point never waits for a process-wide reload.
+    /// wait for an in-flight engine build, or receive an error after 20 seconds.
     pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
         let dirs = self.data_dirs()?;
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let result = (|| {
+            let _build = PROCESS_RIME
+                .build
+                .acquire()
+                .ok_or("Rime engine build timed out")?;
             // Pin the read barrier before releasing the directory check, so
             // teardown cannot race creation or block peers behind this session.
             let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)
@@ -5405,6 +5671,7 @@ impl ImeRuntime {
             if request.is_some() {
                 PROCESS_RIME.apply_switch_request(&dirs.user, Some(&engine), request.as_ref())?;
             }
+            deployment_state::engine_loaded(&dirs.user);
             let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
                 user_data_dir: dirs.user.clone(),
                 ime_host: self.0.ime_host,
@@ -5418,15 +5685,17 @@ impl ImeRuntime {
                 applied_input_version: 0,
                 last_input_state: None,
             }));
-            PROCESS_RIME.register(&inner);
-            drop(rime);
-            drop(barrier);
-            Ok(ImeRuntimeSession {
+            let session = ImeRuntimeSession {
                 dirs,
                 inner,
                 policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
                 context_ascii_mode: Arc::new(AtomicU8::new(0)),
-            })
+                pending: Arc::new(Mutex::new(PendingRuntimeInput::default())),
+            };
+            PROCESS_RIME.register(&session);
+            drop(rime);
+            drop(barrier);
+            Ok(session)
         })();
         if let Some(started) = started {
             crate::rt_log!(
@@ -5467,15 +5736,70 @@ impl ImeRuntimeSession {
             .unwrap_or_else(ImeState::empty)
     }
 
+    /// Called on the prewarm worker, without engine locks. Frontends can post
+    /// their existing reload notification to refresh candidates on the UI thread.
+    pub fn set_state_callback(&self, callback: Option<Arc<dyn Fn() + Send + Sync>>) {
+        lock_ignore_poison(&self.pending).state_callback = callback;
+    }
+
+    /// Inspect candidates without waiting for or rebuilding a busy engine.
+    pub fn peek_state(&self) -> ImeState {
+        let state =
+            self.with_engine_access_mode(false, false, false, |engine, _, _, _, _| engine.state());
+        if state.is_none() && self.runtime_can_resume() {
+            self.schedule_prewarm();
+        }
+        state.unwrap_or_else(ImeState::empty)
+    }
+
     pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
+        let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
+        let mask = rime_modifier_mask(mask) | (mask & RIME_MOD_LOCK);
+        self.process_runtime_key(RuntimeKey::Key(keycode, mask))
+    }
+
+    fn process_runtime_key(&self, key: RuntimeKey) -> Option<KeyProcessResult> {
         if !self.input_policy().composing {
             return Some(KeyProcessResult {
                 state: ImeState::empty(),
                 accepted: false,
             });
         }
-        let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
-        let mask = rime_modifier_mask(mask) | (mask & RIME_MOD_LOCK);
+        self.process_runtime_key_now(key)
+    }
+
+    fn runtime_can_resume(&self) -> bool {
+        try_lock_ignore_poison(&PROCESS_RIME.initialized)
+            .map(|initialized| initialized.as_ref() == Some(&self.dirs))
+            .unwrap_or(true)
+            || PROCESS_RIME.prewarm_scheduled.load(Ordering::Acquire)
+    }
+
+    fn schedule_prewarm(&self) {
+        if self.lua_reload_deferred() {
+            return;
+        }
+        if PROCESS_RIME.prewarm_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let focused = self.clone();
+        std::thread::spawn(move || {
+            let runtime =
+                ImeRuntime::with_dirs(focused.dirs.user.clone(), focused.dirs.shared.clone());
+            if let Err(error) = runtime.prewarm(Some(&focused)) {
+                crate::rt_log!(Level::Info, "error", "prewarm", msg = error);
+            }
+        });
+    }
+
+    fn process_runtime_key_now(&self, key: RuntimeKey) -> Option<KeyProcessResult> {
+        match key {
+            RuntimeKey::Key(keycode, mask) => self.process_key_now(keycode, mask),
+            RuntimeKey::Enter => self.process_enter_now(),
+        }
+    }
+
+    fn process_key_now(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
@@ -5484,81 +5808,97 @@ impl ImeRuntimeSession {
             // Physical Caps Lock supersedes a host's context-only language override.
             self.context_ascii_mode.store(0, Ordering::Release);
         }
-        self.with_engine_access(!caps, caps, |engine, policy, mode, ime_host, input| {
-            if policy.composing {
-                let desktop_dictionary = cfg!(not(any(target_os = "android", target_os = "ios")))
-                    && mode.mode == english_mode::EnglishMode::Schema
-                    && keycode != 0xffe5;
-                let before = engine.is_ascii_mode();
-                let mut result = if mask & !RIME_MOD_LOCK == 0 {
-                    key_policy::CandidateArrowAction::from_keycode(keycode)
-                        .map(|action| {
-                            use key_policy::CandidateArrowAction::*;
-                            let state = engine.state();
-                            let Some(index) = key_policy::highlighted_candidate_index(&state)
-                            else {
-                                return KeyProcessResult {
-                                    state,
-                                    accepted: false,
+        self.with_engine_access_mode(
+            !caps,
+            caps,
+            true,
+            |engine, policy, mode, ime_host, input| {
+                if policy.composing {
+                    let desktop_dictionary =
+                        cfg!(not(any(target_os = "android", target_os = "ios")))
+                            && mode.mode == english_mode::EnglishMode::Schema
+                            && keycode != 0xffe5;
+                    let before = engine.is_ascii_mode();
+                    let mut result = if mask & !RIME_MOD_LOCK == 0 {
+                        key_policy::CandidateArrowAction::from_keycode(keycode)
+                            .map(|action| {
+                                use key_policy::CandidateArrowAction::*;
+                                let state = engine.state();
+                                let Some(index) = key_policy::highlighted_candidate_index(&state)
+                                else {
+                                    return KeyProcessResult {
+                                        state,
+                                        accepted: false,
+                                    };
                                 };
-                            };
-                            let state = match action {
-                                PreviousCandidate if index > 0 => {
-                                    engine.highlight_candidate_on_page(index - 1)
+                                let state = match action {
+                                    PreviousCandidate if index > 0 => {
+                                        engine.highlight_candidate_on_page(index - 1)
+                                    }
+                                    NextCandidate if index + 1 < state.candidates.len() => {
+                                        engine.highlight_candidate_on_page(index + 1)
+                                    }
+                                    PreviousPage if state.page > 0 => engine.change_page(true),
+                                    NextPage if !state.is_last_page => engine.change_page(false),
+                                    _ => state,
+                                };
+                                KeyProcessResult {
+                                    state,
+                                    accepted: true,
                                 }
-                                NextCandidate if index + 1 < state.candidates.len() => {
-                                    engine.highlight_candidate_on_page(index + 1)
-                                }
-                                PreviousPage if state.page > 0 => engine.change_page(true),
-                                NextPage if !state.is_last_page => engine.change_page(false),
-                                _ => state,
-                            };
-                            KeyProcessResult {
-                                state,
-                                accepted: true,
-                            }
-                        })
-                        .unwrap_or_else(|| engine.process_key_result(keycode, mask))
+                            })
+                            .unwrap_or_else(|| engine.process_key_result(keycode, mask))
+                    } else {
+                        engine.process_key_result(keycode, mask)
+                    };
+                    if before != result.state.ascii_mode {
+                        self.context_ascii_mode.store(0, Ordering::Release);
+                    }
+                    // Mobile keyboards already select schemas themselves. Desktop
+                    // ascii_composer toggles become dictionary-mode switches only
+                    // when the user explicitly selected the schema preference.
+                    if desktop_dictionary {
+                        if let Err(error) = mode.reconcile_ascii_toggle(engine, before, &mut result)
+                        {
+                            crate::rt_log!(
+                                Level::Info,
+                                "error",
+                                "english_mode_switch",
+                                msg = error
+                            );
+                        }
+                    }
+                    if let Err(error) =
+                        self.apply_reset_switch_request(engine, ime_host, input, &mut result.state)
+                    {
+                        crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
+                    }
+                    result
                 } else {
-                    engine.process_key_result(keycode, mask)
-                };
-                if before != result.state.ascii_mode {
-                    self.context_ascii_mode.store(0, Ordering::Release);
-                }
-                // Mobile keyboards already select schemas themselves. Desktop
-                // ascii_composer toggles become dictionary-mode switches only
-                // when the user explicitly selected the schema preference.
-                if desktop_dictionary {
-                    if let Err(error) = mode.reconcile_ascii_toggle(engine, before, &mut result) {
-                        crate::rt_log!(Level::Info, "error", "english_mode_switch", msg = error);
+                    // A sensitive context never reaches librime: no composition, no
+                    // candidates and nothing for the user dictionary to learn.
+                    KeyProcessResult {
+                        state: engine.state(),
+                        accepted: false,
                     }
                 }
-                if let Err(error) =
-                    self.apply_reset_switch_request(engine, ime_host, input, &mut result.state)
-                {
-                    crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
-                }
-                result
-            } else {
-                // A sensitive context never reaches librime: no composition, no
-                // candidates and nothing for the user dictionary to learn.
-                KeyProcessResult {
-                    state: engine.state(),
-                    accepted: false,
-                }
-            }
-        })
+            },
+        )
     }
 
     /// `Return` handling shared by every frontend, see [`Engine::process_enter`].
     pub fn process_enter(&self) -> Option<KeyProcessResult> {
+        self.process_runtime_key(RuntimeKey::Enter)
+    }
+
+    fn process_enter_now(&self) -> Option<KeyProcessResult> {
         if !self.input_policy().composing {
             return Some(KeyProcessResult {
                 state: ImeState::empty(),
                 accepted: false,
             });
         }
-        self.with_engine_access(true, false, |engine, policy, _, ime_host, before| {
+        self.with_engine_access_mode(true, false, true, |engine, policy, _, ime_host, before| {
             if policy.composing {
                 let mut result = engine.process_enter();
                 if let Err(error) =
@@ -5593,7 +5933,7 @@ impl ImeRuntimeSession {
     /// a composing one.
     pub fn set_input_policy(&self, policy: InputContextPolicy) -> Option<ImeState> {
         self.policy.set(policy);
-        self.with_engine_and_policy(|engine, policy| {
+        self.with_engine_access_mode(false, false, false, |engine, policy, _, _, _| {
             if !policy.composing {
                 engine.clear_composition()
             } else {
@@ -5836,17 +6176,79 @@ impl ImeRuntimeSession {
             Option<&global_input::InputState>,
         ) -> T,
     ) -> Option<T> {
+        self.with_engine_access_mode(publish, invalidate_peers, true, action)
+    }
+
+    fn with_engine_access_mode<T>(
+        &self,
+        publish: bool,
+        invalidate_peers: bool,
+        rebuild: bool,
+        action: impl FnOnce(
+            &Engine,
+            InputContextPolicy,
+            &mut english_mode::EnglishModeController,
+            bool,
+            Option<&global_input::InputState>,
+        ) -> T,
+    ) -> Option<T> {
+        // Wait before taking any lock needed by the builder.
+        let _build = if rebuild {
+            Some(PROCESS_RIME.build.acquire()?)
+        } else {
+            None
+        };
         let ime_host = try_lock_ignore_poison(&self.inner)?.ime_host;
-        let lua_ready = !ime_host || self.try_finish_lua_reload();
-        let result = self.with_engine_access_inner(publish, invalidate_peers, lua_ready, action);
+        let pending_lua = !rebuild && ime_host && self.lua_reload_needed();
+        let lua_ready = !ime_host
+            || if rebuild {
+                self.try_finish_lua_reload()
+            } else {
+                !deployment_state::cached_deployment_in_progress(&self.dirs.user)
+                    && !self.lua_reload_deferred()
+                    && (!pending_lua || self.try_finish_lua_reload_mode(false))
+            };
+        if pending_lua && !lua_ready {
+            self.schedule_prewarm();
+            return None;
+        }
+        let result =
+            self.with_engine_access_inner(publish, invalidate_peers, lua_ready, rebuild, action);
         // F4 and mobile selection publish while holding session locks.
-        if ime_host {
+        if ime_host && rebuild {
             self.try_finish_lua_reload();
         }
         result
     }
 
+    fn lua_reload_needed(&self) -> bool {
+        if deployment_state::cached_deployment_in_progress(&self.dirs.user)
+            || self.lua_reload_deferred()
+        {
+            return false;
+        }
+        rime_lua::RELOAD_PENDING.load(Ordering::Acquire)
+            || schema_switch_request::pending_for_process(&self.dirs.user)
+                .ok()
+                .flatten()
+                .is_some_and(|request| request.schema_id.is_some())
+            || !desktop::loaded_lua_is_current(&self.dirs.user)
+    }
+
+    fn lua_reload_deferred(&self) -> bool {
+        lock_ignore_poison(&PROCESS_RIME.lua_retry_after)
+            .as_ref()
+            .is_some_and(|(root, after)| root == &self.dirs.user && Instant::now() < *after)
+    }
+
     fn try_finish_lua_reload(&self) -> bool {
+        self.try_finish_lua_reload_mode(true)
+    }
+
+    fn try_finish_lua_reload_mode(&self, reinitialize: bool) -> bool {
+        if deployment_state::cached_deployment_in_progress(&self.dirs.user) {
+            return false;
+        }
         let Some(initialized) = try_lock_ignore_poison(&PROCESS_RIME.initialized) else {
             return false;
         };
@@ -5862,7 +6264,7 @@ impl ImeRuntimeSession {
         }
         let result =
             schema_switch_request::pending_for_process(&self.dirs.user).and_then(|request| {
-                self.finish_lua_reload(request.and_then(|r| r.schema_id).as_deref())
+                self.finish_lua_reload(request.and_then(|r| r.schema_id).as_deref(), reinitialize)
             });
         match result {
             Ok(()) => {
@@ -5873,8 +6275,9 @@ impl ImeRuntimeSession {
                 ready
             }
             Err(error) => {
-                if try_lock_ignore_poison(&PROCESS_RIME.initialized)
-                    .is_some_and(|initialized| initialized.as_ref() == Some(&self.dirs))
+                if reinitialize
+                    && try_lock_ignore_poison(&PROCESS_RIME.initialized)
+                        .is_some_and(|initialized| initialized.as_ref() == Some(&self.dirs))
                 {
                     defer_rime_lua_reload(&self.dirs.user, &error);
                 }
@@ -5883,7 +6286,7 @@ impl ImeRuntimeSession {
         }
     }
 
-    fn finish_lua_reload(&self, requested: Option<&str>) -> Result<(), String> {
+    fn finish_lua_reload(&self, requested: Option<&str>, reinitialize: bool) -> Result<(), String> {
         let mut initialized =
             try_lock_ignore_poison(&PROCESS_RIME.initialized).ok_or("Rime is busy")?;
         if initialized.as_ref() != Some(&self.dirs) {
@@ -5899,6 +6302,9 @@ impl ImeRuntimeSession {
             .reload_barrier
             .try_write()
             .map_err(|_| "Rime is busy")?;
+        if deployment_in_progress(&self.dirs.user) {
+            return Err("Rime deployment is busy".into());
+        }
         let retry = lock_ignore_poison(&rime_lua::SAVE_RETRY).clone();
         let retry = retry.filter(|(root, _)| root == &self.dirs.user);
         let save_error = retry.as_ref().and_then(|(root, id)| {
@@ -5922,6 +6328,9 @@ impl ImeRuntimeSession {
             None => regenerate_active_rime_lua(&self.dirs.user)?,
         }
         if !desktop::loaded_lua_is_current(&self.dirs.user) {
+            if !reinitialize {
+                return Err("Rime Lua reload requires background rebuilding".into());
+            }
             PROCESS_RIME.drop_live_engines();
             let result = desktop::reinitialize_rime(
                 self.dirs.user.to_string_lossy().into_owned(),
@@ -5948,6 +6357,7 @@ impl ImeRuntimeSession {
         publish: bool,
         invalidate_peers: bool,
         lua_ready: bool,
+        rebuild: bool,
         action: impl FnOnce(
             &Engine,
             InputContextPolicy,
@@ -5975,17 +6385,40 @@ impl ImeRuntimeSession {
                 .is_some_and(|request| request.schema_id.is_some())
         {
             if let Ok(_barrier) = PROCESS_RIME.reload_barrier.try_write() {
+                if !rebuild {
+                    let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
+                    let sessions = try_lock_ignore_poison(&PROCESS_RIME.sessions)?;
+                    let current = sessions
+                        .iter()
+                        .filter_map(|session| session.inner.upgrade())
+                        .all(|session| {
+                            try_lock_ignore_poison(&session).is_some_and(|inner| {
+                                inner.user_data_dir != self.dirs.user
+                                    || (inner.generation == generation && inner.engine.is_some())
+                            })
+                        });
+                    if !current {
+                        self.schedule_prewarm();
+                        return None;
+                    }
+                }
+                let _rime = desktop::try_rime_api_lock()?;
                 PROCESS_RIME
                     .apply_pending_switch_request(&self.dirs.user)
                     .ok()?;
             }
         }
-        // A reload may compile dictionaries for many seconds. No synchronous
-        // host key/focus callback may wait for that worker's write lock.
+        // Builds have already been awaited without holding runtime locks.
         let _barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)?;
         drop(initialized);
         let mut inner = try_lock_ignore_poison(&self.inner)?;
         let _rime = desktop::try_rime_api_lock()?;
+        if !rebuild
+            && (inner.engine.is_none()
+                || inner.generation != PROCESS_RIME.generation.load(Ordering::SeqCst))
+        {
+            return None;
+        }
         self.refresh_if_needed(&mut inner).ok()?;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(id) = inner.pending_schema_id.clone() {
@@ -6146,6 +6579,7 @@ impl ImeRuntimeSession {
             inner.generation = current;
             inner.applied_input_version = 0;
             inner.last_input_state = None;
+            deployment_state::engine_loaded(root);
             Ok(())
         })();
         if let Some(started) = started {
@@ -6691,7 +7125,7 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
         .as_nanos();
     std::fs::write(&sentinel, format!("{timestamp}/{}\n", std::process::id()))
         .map_err(|error| format!("write {}: {error}", sentinel.display()))?;
-    for name in [DEPLOYED_FILE, SKIPPED_SCHEMAS_FILE] {
+    for name in [DEPLOYED_FILE, SKIPPED_SCHEMAS_FILE, ".keytao-deploy-failed"] {
         let marker = build.join(name);
         match std::fs::remove_file(&marker) {
             Ok(()) => {}
@@ -7397,10 +7831,8 @@ fn rewrite_lua_component_autoloads(
 }
 
 fn patch_keydo_helpers(content: &str) -> Option<String> {
-    const VULNERABLE: &str =
-        "    local target_key = string.char(key_event.keycode) -- 当前按键对应字符\n\n    -- 若无目标键位，则交由其它函数进行判断\n    if not key then\n        return true\n    end";
-    const PATCHED: &str =
-        "    -- A wildcard match does not need a printable character conversion.\n    if not key then\n        return true\n    end\n\n    local keycode = key_event.keycode\n    if type(keycode) ~= \"number\" or keycode < 0x20 or keycode >= 0x7f then\n        return false\n    end\n    local target_key = string.char(keycode) -- 当前按键对应字符";
+    const VULNERABLE: &str = "    local target_key = string.char(key_event.keycode) -- 当前按键对应字符\n\n    -- 若无目标键位，则交由其它函数进行判断\n    if not key then\n        return true\n    end";
+    const PATCHED: &str = "    -- A wildcard match does not need a printable character conversion.\n    if not key then\n        return true\n    end\n\n    local keycode = key_event.keycode\n    if type(keycode) ~= \"number\" or keycode < 0x20 or keycode >= 0x7f then\n        return false\n    end\n    local target_key = string.char(keycode) -- 当前按键对应字符";
 
     content
         .contains("local function is_key(key, key_event)")
@@ -8869,8 +9301,7 @@ mod tests {
 
     #[test]
     fn merge_default_custom_keeps_user_schemas() {
-        let existing =
-            "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao_old\n    - schema: txjx\n";
+        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao_old\n    - schema: txjx\n";
         let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n";
         let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
         assert_eq!(user, vec!["user_schema"]);
@@ -8938,8 +9369,7 @@ mod tests {
 
     #[test]
     fn merge_default_custom_accepts_non_keytao_package_schemas() {
-        let existing =
-            "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao\n    - schema: xmjd6\n";
+        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao\n    - schema: xmjd6\n";
         let package = "patch:\n  schema_list:\n    - schema: txjx\n";
         let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
         assert_eq!(user, vec!["user_schema"]);

@@ -2,9 +2,9 @@
 //! The host owns the cdylib; this module owns the IME runtime and JNI boundary.
 
 use jni::{
-    JNIEnv,
     objects::{JByteArray, JObject, JString},
     sys::{jboolean, jint, jlong, jstring},
+    JNIEnv,
 };
 use serde::Serialize;
 use std::{
@@ -159,6 +159,10 @@ static ANDROID_IME_RUNTIME: Mutex<Option<keytao_core::ImeRuntime>> = Mutex::new(
 /// whether it may reuse it instead of tearing librime down behind its back.
 #[cfg(target_os = "android")]
 static ANDROID_IME_RUNTIME_DIRS: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
+static ANDROID_DEPLOYMENT_STATE: std::sync::LazyLock<Mutex<keytao_core::DeploymentState>> =
+    std::sync::LazyLock::new(|| Mutex::new(keytao_core::DeploymentState::default()));
 
 #[cfg(target_os = "android")]
 static ANDROID_IME_USER_THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -784,6 +788,102 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHasDepl
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentInProgress(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeDeploymentInProgress", 0, || {
+        optional_jni_path(&mut env, user_dir)
+            .is_some_and(|root| keytao_core::deployment_in_progress(&root)) as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentHint(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeDeploymentHint", std::ptr::null_mut(), || {
+        let Some(root) = optional_jni_path(&mut env, user_dir) else {
+            return std::ptr::null_mut();
+        };
+        let hint = ANDROID_DEPLOYMENT_STATE
+            .lock()
+            .ok()
+            .and_then(|mut state| state.hint(&root));
+        hint.map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMarkDeploymentFailed(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeMarkDeploymentFailed", 0, || {
+        optional_jni_path(&mut env, user_dir)
+            .is_some_and(|root| keytao_core::mark_deployment_failed(&root).is_ok())
+            as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeRetainSession(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jlong {
+    android_jni_guard("nativeRetainSession", 0, || {
+        android_session(session)
+            .map(|session| Box::into_raw(Box::new(session.clone())) as jlong)
+            .unwrap_or(0)
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrewarm(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jboolean {
+    android_jni_guard("nativePrewarm", 0, || {
+        let runtime = ANDROID_IME_RUNTIME
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        let root = ANDROID_IME_RUNTIME_DIRS
+            .lock()
+            .ok()
+            .and_then(|dirs| dirs.as_ref().map(|(root, _)| root.clone()));
+        let (Some(runtime), Some(root)) = (runtime, root) else {
+            return 0;
+        };
+        let result = runtime.prewarm(android_session(session));
+        if let Ok(mut state) = ANDROID_DEPLOYMENT_STATE.lock() {
+            if result.is_ok() {
+                state.loaded(&root);
+            } else if !keytao_core::deployment_in_progress(&root)
+                && result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error != "Rime generation changed")
+            {
+                state.failed();
+            }
+        }
+        result.is_ok() as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCompleteDeployment(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -896,6 +996,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
                 android_set_user_theme_path(user_theme_path);
                 return 1;
             }
+            if keytao_core::deployment_in_progress(&user_dir) {
+                return 0;
+            }
         }
 
         if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
@@ -965,6 +1068,21 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSession
     session: jlong,
 ) -> jstring {
     android_jni_guard("nativeSessionState", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(session.peek_state(), false))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDrainPendingState(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    android_jni_guard("nativeDrainPendingState", std::ptr::null_mut(), || {
         let Some(session) = android_session(session) else {
             return std::ptr::null_mut();
         };

@@ -226,7 +226,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
     private var editorUpdatePending = false
-    private var editorUpdateGeneration = 0L
+    @Volatile private var editorUpdateGeneration = 0L
     private var rimeOptionsGeneration = 0L
     private var systemBottomInsetDp = -1
     private val graphemeIterator: BreakIterator by lazy {
@@ -238,6 +238,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         super.onCreate()
         KeytaoRuntimeLog.event("lifecycle", "ime_create")
         engine = KeytaoImeEngine(applicationContext)
+        engine.onReloadStarted = {
+            val generation = editorUpdateGeneration
+            val completed: (Long) -> Unit = { session ->
+                mainHandler.post {
+                    if (!serviceDestroyed && generation == editorUpdateGeneration && !editorUpdatePending) {
+                        engine.drainPendingState(session)?.let(::applyState)
+                        applyAvailability()
+                    }
+                }
+            }
+            completed
+        }
         clipboardManager = getSystemService(ClipboardManager::class.java)
         restoreClipboardHistory()
         scheduleAvailabilityRefresh()
@@ -2819,6 +2831,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
      */
     private fun applyAvailability(): Boolean {
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
+        keyboardView?.updateDeploymentHint(engine.deploymentHint)
         return inputAvailable
     }
 
@@ -2828,7 +2841,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
             else -> false
         }
-        if (pollReloadStamp && (!inputViewShown || !retryableReadiness)) return
+        if (pollReloadStamp && !inputViewShown) return
         availabilityRefreshPending = true
         val reloadPresentation = presentationLoadedWithoutRoot
         val retryReadiness = retryableReadiness &&
@@ -2838,6 +2851,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val signature = runCatching { engine.reloadStampSignature() }.getOrNull()
             val stampChanged = signature != lastReloadStampSignature
             lastReloadStampSignature = signature
+            engine.refreshDeploymentHint()
             val readiness = if (!pollReloadStamp || retryReadiness || stampChanged) {
                 runCatching { engine.refreshReadiness() }.getOrDefault(Readiness.NATIVE_UNAVAILABLE)
             } else null
@@ -2865,7 +2879,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 }
                 theme?.let { keyboardView?.updateTheme(it) }
                 if (config != null && theme != null) presentationLoadedWithoutRoot = false
-                if (readiness != null) applyReadiness(readiness) else scheduleReadinessRetry()
+                keyboardView?.updateDeploymentHint(engine.deploymentHint)
+                if (readiness != null && (!pollReloadStamp || readiness != Readiness.READY ||
+                        readiness != lastReadiness || stampChanged)) {
+                    applyReadiness(readiness)
+                } else scheduleReadinessRetry()
                 // The first view may have loaded defaults after this refresh was scheduled.
                 if (!reloadPresentation && presentationLoadedWithoutRoot && rootAvailable) {
                     scheduleAvailabilityRefresh()
@@ -2885,27 +2903,27 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
-            Readiness.DEPLOYING -> "正在部署方案…"
+            Readiness.DEPLOYING -> engine.deploymentHint ?: "请先在 KeyTao App 部署方案"
             Readiness.NATIVE_UNAVAILABLE -> "RIME 运行库未就绪，请重新安装 KeyTao"
             Readiness.READY -> ""
         }
         inputAvailable = message.isEmpty() && !editorUpdatePending && engine.nativeReady
         unavailableMessage = message.ifEmpty { preparingMessage }
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
+        keyboardView?.updateDeploymentHint(engine.deploymentHint)
         if (inputAvailable) refreshRimeOptions(inBackground = true)
         scheduleReadinessRetry()
     }
 
     private fun scheduleReadinessRetry() {
         mainHandler.removeCallbacks(readinessRetry)
-        val retryableReadiness = when (lastReadiness) {
-            Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
-            else -> false
-        }
-        if (inputViewShown && !serviceDestroyed && retryableReadiness) {
+        if (inputViewShown && !serviceDestroyed) {
             // Keep polling the stamp after the full readiness probe budget is exhausted.
-            mainHandler.postDelayed(readinessRetry, readinessRetryDelayMs)
-            readinessRetryDelayMs = (readinessRetryDelayMs * 2).coerceAtMost(5_000L)
+            val delayMs = if (lastReadiness == Readiness.READY || lastReadiness == Readiness.DEPLOYING) {
+                500L
+            } else readinessRetryDelayMs
+            mainHandler.postDelayed(readinessRetry, delayMs)
+            readinessRetryDelayMs = (delayMs * 2).coerceAtMost(5_000L)
         }
     }
 

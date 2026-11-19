@@ -15,9 +15,13 @@ final class ModeIndicatorPanel: NSPanel {
         configure()
     }
 
-    /// The hint text comes from keytao-theme's mode hint model, so macOS shows
-    /// exactly what the other frontends show.
-    func show(modeHint: KeyTaoModeHintModel, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
+    /// Mode and deployment hints share the frontend's existing panel.
+    func show(
+        modeHint: KeyTaoModeHintModel,
+        windowLevel: NSWindow.Level,
+        near cursorRect: NSRect,
+        persistent: Bool = false
+    ) {
         let theme = ImeThemeManager.shared.theme()
         level = windowLevel
         apply(theme)
@@ -35,8 +39,11 @@ final class ModeIndicatorPanel: NSPanel {
 
         var origin = NSPoint(
             x: anchor.midX - size.width / 2,
-            y: anchor.minY - size.height - 8
+            y: persistent ? anchor.maxY + 8 : anchor.minY - size.height - 8
         )
+        if persistent && origin.y + size.height > visibleFrame.maxY - 8 {
+            origin.y = anchor.minY - size.height - 8
+        }
         origin.x = min(max(origin.x, visibleFrame.minX + 8), visibleFrame.maxX - size.width - 8)
         origin.y = min(max(origin.y, visibleFrame.minY + 8), visibleFrame.maxY - size.height - 8)
 
@@ -44,6 +51,8 @@ final class ModeIndicatorPanel: NSPanel {
         orderFront(nil)
 
         hideTimer?.invalidate()
+        hideTimer = nil
+        guard !persistent else { return }
         hideTimer = Timer.scheduledTimer(withTimeInterval: theme.modeHint.duration, repeats: false) { [weak self] _ in
             self?.orderOut(nil)
         }

@@ -28,6 +28,40 @@ import java.util.concurrent.atomic.AtomicReference
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class KeytaoImeEngineInstrumentedTest {
     @Test
+    fun loadedSessionKeepsComposingDuringDeployment() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue(KeytaoSchemaFixture.install(context, allowSynthetic = true) != KeytaoSchemaFixture.Source.NONE)
+        val engine = KeytaoImeEngine(context)
+        val fresh = KeytaoImeEngine(context)
+        val root = requireNotNull(engine.userDir)
+        try {
+            assertTrue(engine.deployNow())
+            val schemaId = engine.setAsciiMode(false).schemaId
+            KeytaoAndroidPaths.beginDeployment(root)
+
+            assertTrue(KeytaoAndroidPaths.isDeploymentInProgress(root))
+            assertEquals(Readiness.READY, engine.refreshReadiness())
+            assertEquals("正在部署中", engine.deploymentHint)
+            val state = engine.processKey('a'.code, 0)
+            assertTrue("the loaded engine must keep handling keys", state.accepted)
+            assertEquals(schemaId, state.schemaId)
+            assertEquals(Readiness.DEPLOYING, fresh.refreshReadiness())
+            assertFalse("a new engine must not read a build in progress", fresh.ensureReady())
+            assertEquals(0L, KeytaoNativeBridge.createSession())
+
+            assertTrue(KeytaoNativeBridge.completeDeployment(root.absolutePath))
+            KeytaoAndroidPaths.reloadStampFile(context).writeText("deployment/${System.nanoTime()}")
+            assertTrue(engine.reload())
+            assertEquals("部署成功", engine.deploymentHint)
+            assertEquals(schemaId, engine.processKey('a'.code, 0).schemaId)
+        } finally {
+            KeytaoNativeBridge.completeDeployment(root.absolutePath)
+            fresh.close()
+            engine.close()
+        }
+    }
+
+    @Test
     fun sourceOnlyInstallDoesNotDeployOnEnsureReady() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         // A fresh install has an empty user directory — installing a scheme is a

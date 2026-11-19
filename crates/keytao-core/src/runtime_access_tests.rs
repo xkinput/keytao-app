@@ -119,7 +119,9 @@ fn schema_lua_switches_reinitialize_before_the_next_key() {
         std::fs::write(dir.join(format!("{id}.schema.yaml")), format!("schema:\n  schema_id: {id}\n  name: {id}\n  version: '1'\nswitches:\n  - name: ascii_mode\n    reset: 0\nengine:\n  processors: [ascii_composer, speller, express_editor]\n  segmentors: [ascii_segmentor, abc_segmentor, fallback_segmentor]\n  translators:\n{global}    - lua_translator@*probe\nspeller:\n  alphabet: a\n")).unwrap();
     }
     let lua = |label| {
-        format!("function probe_global(input, seg) yield(Candidate('probe',seg.start,seg._end,'{label}-GLOBAL','')) end\n")
+        format!(
+            "function probe_global(input, seg) yield(Candidate('probe',seg.start,seg._end,'{label}-GLOBAL','')) end\n"
+        )
     };
     for (key, label) in [("a", "A"), ("b", "B"), ("same", "B"), ("plain", "PLAIN")] {
         let source = dir.join(format!(".keytao-package-lua/{key}/lua"));
@@ -159,6 +161,7 @@ fn schema_lua_switches_reinitialize_before_the_next_key() {
     let session = runtime.create_session().unwrap();
     let peer = runtime.create_session().unwrap();
     let candidates = |session: &ImeRuntimeSession| {
+        runtime.prewarm(Some(session)).unwrap();
         session.reset().unwrap();
         session
             .process_key_result(b'a' as u32, 0)
@@ -265,6 +268,7 @@ fn schema_lua_switches_reinitialize_before_the_next_key() {
     assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
     session.reset().unwrap();
     session.select_schema(ids[2]).unwrap();
+    runtime.prewarm(Some(&session)).unwrap();
     session.state();
     session.reset().unwrap();
     let user_bytes = std::fs::read(dir.join("user.yaml")).unwrap();
@@ -279,6 +283,7 @@ fn schema_lua_switches_reinitialize_before_the_next_key() {
     std::fs::remove_dir(dir.join("user.yaml")).unwrap();
     std::fs::write(dir.join("user.yaml"), user_bytes).unwrap();
     *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+    runtime.prewarm(Some(&session)).unwrap();
     assert!(session.try_finish_lua_reload());
     assert_eq!(session.current_schema().unwrap().id, ids[0]);
     assert_eq!(candidates(&session), ["A-GLOBAL", "A-MODULE"]);
@@ -406,6 +411,7 @@ fn persisted_schema_selects_lua_before_startup() {
     assert_eq!(session.current_schema().unwrap().id, "keytao_lua_b");
     std::fs::write(snapshot, bytes).unwrap();
     *lock_ignore_poison(&PROCESS_RIME.lua_retry_after) = None;
+    runtime.prewarm(Some(&session)).unwrap();
     let texts: Vec<_> = session
         .process_key_result(b'a' as u32, 0)
         .unwrap()
@@ -418,8 +424,9 @@ fn persisted_schema_selects_lua_before_startup() {
 }
 
 #[test]
-fn plain_reload_rebuilds_only_the_next_used_session() {
-    let Some((runtime, dir)) = native_fixture("plain_reload_rebuilds_only_the_next_used_session")
+fn plain_reload_prewarm_rebuilds_focused_then_other_sessions() {
+    let Some((runtime, dir)) =
+        native_fixture("plain_reload_prewarm_rebuilds_focused_then_other_sessions")
     else {
         return;
     };
@@ -434,6 +441,26 @@ fn plain_reload_rebuilds_only_the_next_used_session() {
             .all(|session| lock_ignore_poison(&session.inner).engine.is_none()),
         "plain reload eagerly rebuilt a session"
     );
+    let (ready, started) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let worker_runtime = runtime.clone();
+    let focused = sessions[2].clone();
+    let worker = std::thread::spawn(move || {
+        ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = Some((ready, resumed)));
+        worker_runtime.prewarm(Some(&focused)).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        try_lock_ignore_poison(&sessions[2].inner).is_none(),
+        "focused session was not rebuilt first"
+    );
+    assert!(lock_ignore_poison(&sessions[0].inner).engine.is_none());
+    resume.send(()).unwrap();
+    worker.join().unwrap();
+    // A gate on the UI thread must never be reached after the worker warmed it.
+    let (ready, unexpected) = mpsc::channel();
+    let (_resume, resumed) = mpsc::channel();
+    ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = Some((ready, resumed)));
     assert!(
         sessions[0]
             .process_key_result(b'a' as u32, 0)
@@ -441,12 +468,16 @@ fn plain_reload_rebuilds_only_the_next_used_session() {
             .state
             .ascii_mode
     );
-    for (index, session) in sessions.iter().enumerate() {
+    ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = None);
+    assert!(unexpected.try_recv().is_err());
+    for session in &sessions {
         let inner = lock_ignore_poison(&session.inner);
-        assert_eq!(inner.engine.is_some(), index == 0);
-        assert_eq!(inner.generation == runtime.generation(), index == 0);
+        assert!(inner.engine.is_some());
+        assert_eq!(inner.generation, runtime.generation());
     }
     drop(sessions);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -475,56 +506,345 @@ fn a_switch_reload_rebuilds_every_session_before_acknowledging() {
 }
 
 #[test]
-fn keys_f4_and_creation_do_not_wait_for_another_sessions_rebuild() {
+fn f4_schema_calls_and_creation_wait_for_another_sessions_rebuild() {
     let Some((runtime, dir)) =
-        native_fixture("keys_f4_and_creation_do_not_wait_for_another_sessions_rebuild")
+        native_fixture("f4_schema_calls_and_creation_wait_for_another_sessions_rebuild")
     else {
         return;
     };
     let first = runtime.create_session().unwrap();
     let second = runtime.create_session().unwrap();
-    runtime.reload_without_deploy().unwrap();
-    // Force a rebuild even on the old eager path so this test also catches
-    // native-lock contention independently of the lazy-reload assertion.
-    lock_ignore_poison(&first.inner).generation = runtime.generation().wrapping_sub(1);
+    let path = dir.join("build/default.yaml");
+    let mut config: Value = serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["switcher"] =
+        serde_yaml::from_str("caption: Schemas\nhotkeys: [F4]\nsave_options: []\n").unwrap();
+    std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
     for creating in [false, true] {
-        let (ready, started) = mpsc::channel();
-        let (resume, resumed) = mpsc::channel();
-        let worker_runtime = runtime.clone();
-        let worker_session = first.clone();
-        let worker = std::thread::spawn(move || {
-            ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = Some((ready, resumed)));
-            if creating {
-                worker_runtime.create_session().is_ok()
-            } else {
-                worker_session.process_key_result(b'a' as u32, 0).is_some()
-            }
-        });
-        started.recv_timeout(Duration::from_secs(5)).unwrap();
-        let initialized_free = try_lock_ignore_poison(&PROCESS_RIME.initialized).is_some();
-        let (sent, received) = mpsc::channel();
-        let ui_runtime = runtime.clone();
-        let ui_session = second.clone();
-        let ui = std::thread::spawn(move || {
-            let key = ui_session.process_key_result(b'a' as u32, 0).is_none();
-            let f4 = ui_session
-                .process_key_result(key_policy::XK_F4, 0)
-                .is_none();
-            let creation = ui_runtime.create_session().is_err();
-            sent.send([key, f4, creation]).unwrap();
-        });
-        let result = received.recv_timeout(Duration::from_secs(1));
-        resume.send(()).unwrap();
-        assert!(worker.join().unwrap());
-        ui.join().unwrap();
-        assert!(initialized_free, "session build held the directory mutex");
-        assert!(result
-            .expect("another session waited for a native session build")
-            .into_iter()
-            .all(|ok| ok));
+        for operation in 0..4 {
+            runtime.reload_without_deploy().unwrap();
+            let (ready, started) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let (finished, completion) = mpsc::channel();
+            let worker_runtime = runtime.clone();
+            let worker_session = first.clone();
+            let worker = std::thread::spawn(move || {
+                ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = Some((ready, resumed)));
+                let result = if creating {
+                    worker_runtime.create_session().map(Some)
+                } else {
+                    worker_runtime.prewarm(Some(&worker_session)).map(|_| None)
+                };
+                finished.send(result).unwrap();
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            let initialized_free = try_lock_ignore_poison(&PROCESS_RIME.initialized).is_some();
+            let (sent, received) = mpsc::channel();
+            let (calling, called) = mpsc::channel();
+            let ui_runtime = runtime.clone();
+            let ui_session = second.clone();
+            let ui = std::thread::spawn(move || {
+                calling.send(()).unwrap();
+                let result = match operation {
+                    0 => ui_session
+                        .process_key_result(key_policy::XK_F4, 0)
+                        .is_some_and(|result| {
+                            result.accepted && result.state.schema_id == ".default"
+                        }),
+                    1 => ui_session.list_schemas().is_some_and(|schemas| {
+                        schemas
+                            .iter()
+                            .any(|schema| schema.id == smoke_fixture::SCHEMA_ID)
+                    }),
+                    2 => ui_runtime
+                        .create_session()
+                        .is_ok_and(|session| lock_ignore_poison(&session.inner).engine.is_some()),
+                    _ => ui_session.state().schema_id == smoke_fixture::SCHEMA_ID,
+                };
+                sent.send(result).unwrap();
+            });
+            called.recv_timeout(Duration::from_secs(1)).unwrap();
+            let early = received.recv_timeout(Duration::from_millis(200));
+            resume.send(()).unwrap();
+            let _created = completion
+                .recv_timeout(Duration::from_secs(5))
+                .expect("engine build deadlocked with a waiting session")
+                .unwrap();
+            worker.join().unwrap();
+            let waited = matches!(early, Err(mpsc::RecvTimeoutError::Timeout));
+            let result = early.unwrap_or_else(|_| {
+                received
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("session operation did not resume after rebuild")
+            });
+            ui.join().unwrap();
+            assert!(initialized_free, "session build held the directory mutex");
+            assert!(
+                waited,
+                "operation {operation} finished before rebuild (creating={creating})"
+            );
+            assert!(
+                result,
+                "operation {operation} failed after rebuild (creating={creating})"
+            );
+        }
     }
-    assert!(second.process_key_result(b'a' as u32, 0).is_some());
     drop((first, second));
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn key_on_another_session_waits_for_prewarm_and_gets_candidates() {
+    let Some((runtime, dir)) =
+        native_fixture("key_on_another_session_waits_for_prewarm_and_gets_candidates")
+    else {
+        return;
+    };
+    let focused = runtime.create_session().unwrap();
+    let session = runtime.create_session().unwrap();
+    runtime.reload_without_deploy().unwrap();
+    let (ready, started) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let worker_runtime = runtime.clone();
+    let worker_focused = focused.clone();
+    let worker = std::thread::spawn(move || {
+        ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = Some((ready, resumed)));
+        finished
+            .send(worker_runtime.prewarm(Some(&worker_focused)))
+            .unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (sent, received) = mpsc::channel();
+    let (calling, called) = mpsc::channel();
+    let key_session = session.clone();
+    let key = std::thread::spawn(move || {
+        calling.send(()).unwrap();
+        let first = key_session.process_key_result(b'a' as u32, 0);
+        let second = key_session.process_key_result(b'a' as u32, 0);
+        sent.send((first, second)).unwrap();
+    });
+    called.recv_timeout(Duration::from_secs(1)).unwrap();
+    let early = received.recv_timeout(Duration::from_millis(200));
+    resume.send(()).unwrap();
+    completion
+        .recv_timeout(Duration::from_secs(5))
+        .expect("prewarm deadlocked with a waiting key")
+        .unwrap();
+    worker.join().unwrap();
+    let waited = matches!(early, Err(mpsc::RecvTimeoutError::Timeout));
+    let (first, second) = early.unwrap_or_else(|_| {
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("key did not resume after prewarm")
+    });
+    key.join().unwrap();
+    assert!(
+        waited,
+        "another session processed keys before prewarm finished"
+    );
+    let first = first.expect("first key was forwarded to the host");
+    let second = second.expect("second key was forwarded to the host");
+    assert!(first.accepted && second.accepted);
+    assert!(first.state.committed.is_none() && second.state.committed.is_none());
+    assert_eq!(first.state.preedit, "a");
+    assert_eq!(second.state.preedit, smoke_fixture::CODE);
+    assert_eq!(second.state.candidates[0].text, smoke_fixture::WORDS[0]);
+    drop((focused, session));
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn failed_prewarm_key_rebuilds_engine_and_gets_candidates() {
+    let Some((runtime, dir)) =
+        native_fixture("failed_prewarm_key_rebuilds_engine_and_gets_candidates")
+    else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    runtime.reload_without_deploy().unwrap();
+    let compiled = dir.join(format!("build/{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+    let bytes = std::fs::read(&compiled).unwrap();
+    std::fs::remove_file(&compiled).unwrap();
+    assert!(runtime.prewarm(Some(&session)).is_err());
+    assert!(lock_ignore_poison(&session.inner).engine.is_none());
+    std::fs::write(&compiled, bytes).unwrap();
+    let first = session.process_key_result(b'a' as u32, 0).unwrap();
+    assert!(first.accepted);
+    assert!(
+        first.state.committed.is_none(),
+        "failed prewarm committed raw input"
+    );
+    assert_eq!(first.state.preedit, "a");
+    let second = session.process_key_result(b'a' as u32, 0).unwrap();
+    assert!(second.accepted);
+    assert!(second.state.committed.is_none());
+    assert_eq!(second.state.preedit, smoke_fixture::CODE);
+    assert_eq!(second.state.candidates[0].text, smoke_fixture::WORDS[0]);
+    assert!(lock_ignore_poison(&session.inner).engine.is_some());
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn key_during_prewarm_never_commits_raw_text() {
+    let Some((runtime, dir)) = native_fixture("key_during_prewarm_never_commits_raw_text") else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    session.process_key_result(b'a' as u32, 0).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    let (ready, started) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let worker_runtime = runtime.clone();
+    let focused = session.clone();
+    let worker = std::thread::spawn(move || {
+        ENGINE_CREATION_GATE.with(|gate| *gate.borrow_mut() = Some((ready, resumed)));
+        finished
+            .send(worker_runtime.prewarm(Some(&focused)))
+            .unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (sent, received) = mpsc::channel();
+    let (calling, called) = mpsc::channel();
+    let key_session = session.clone();
+    let key = std::thread::spawn(move || {
+        calling.send(()).unwrap();
+        sent.send(key_session.process_key_result(b'a' as u32, 0))
+            .unwrap();
+    });
+    called.recv_timeout(Duration::from_secs(1)).unwrap();
+    let early = received.recv_timeout(Duration::from_millis(200));
+    resume.send(()).unwrap();
+    completion
+        .recv_timeout(Duration::from_secs(5))
+        .expect("prewarm deadlocked with a waiting key")
+        .unwrap();
+    worker.join().unwrap();
+    let result = early
+        .unwrap_or_else(|_| received.recv_timeout(Duration::from_secs(5)).unwrap())
+        .expect("key was forwarded to the host");
+    key.join().unwrap();
+    assert!(result.accepted);
+    assert!(
+        result.state.committed.is_none(),
+        "key during prewarm committed raw input: {:?}",
+        result.state.committed
+    );
+    assert_eq!(result.state.preedit, "a");
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn busy_policy_change_cannot_restore_sensitive_composition() {
+    let Some((runtime, dir)) =
+        native_fixture("busy_policy_change_cannot_restore_sensitive_composition")
+    else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    session.process_key_result(b'a' as u32, 0).unwrap();
+    let (ready, started) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let worker_session = session.clone();
+    let worker = std::thread::spawn(move || {
+        worker_session
+            .with_engine(|engine| {
+                ready.send(()).unwrap();
+                resumed.recv_timeout(Duration::from_secs(5)).unwrap();
+                engine.state()
+            })
+            .unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(session
+        .set_input_policy(InputContextPolicy::sensitive())
+        .is_none());
+    assert!(session
+        .set_input_policy(InputContextPolicy::default())
+        .is_none());
+    resume.send(()).unwrap();
+    worker.join().unwrap();
+    let result = session.process_key_result(b'b' as u32, 0).unwrap();
+    assert!(result.state.committed.is_none());
+    assert_eq!(result.state.preedit, "b");
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn prewarm_reports_only_actual_rebuilds() {
+    let Some((runtime, dir)) = native_fixture("prewarm_reports_only_actual_rebuilds") else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    assert!(!runtime.prewarm(Some(&session)).unwrap());
+    runtime.reload_without_deploy().unwrap();
+    assert!(runtime.prewarm(Some(&session)).unwrap());
+    assert!(!runtime.prewarm(Some(&session)).unwrap());
+    std::fs::write(
+        dir.join(ACTIVE_SCHEME_MANIFEST),
+        serde_json::json!({"root": dir.canonicalize().unwrap(), "packages": {"smoke": {
+            "schemas": [smoke_fixture::SCHEMA_ID], "rime_lua": "prewarm_reloaded = true\n"
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    schema_switch_request::request_schema(&dir, smoke_fixture::SCHEMA_ID).unwrap();
+    rime_lua::RELOAD_PENDING.store(true, Ordering::Release);
+    assert!(runtime.prewarm(Some(&session)).unwrap());
+    assert!(!runtime.prewarm(Some(&session)).unwrap());
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_keeps_new_and_rebuilt_sessions_composing() {
+    let Some((runtime, dir)) =
+        native_fixture("deployment_keeps_new_and_rebuilt_sessions_composing")
+    else {
+        return;
+    };
+    let dropped = runtime.create_session().unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert!(lock_ignore_poison(&dropped.inner).engine.is_none());
+    let session = runtime.create_session().unwrap();
+    let generation = runtime.generation();
+    begin_deployment(&dir).unwrap();
+    assert!(deployment_in_progress(&dir));
+    let created = runtime
+        .create_session()
+        .expect("deployment rejected a new session");
+    assert!(runtime.reload_without_deploy().is_err());
+    assert!(runtime.prewarm(Some(&session)).is_err());
+    assert_eq!(runtime.generation(), generation);
+    for session in [&session, &created, &dropped] {
+        let result = session
+            .process_key_result(b'a' as u32, 0)
+            .expect("deployment forwarded the key to the host");
+        assert!(result.accepted);
+        assert!(
+            result.state.committed.is_none(),
+            "deployment committed raw input"
+        );
+        assert!(!result.state.preedit.is_empty());
+    }
+    std::fs::remove_file(dir.join("build").join(DEPLOYING_FILE)).unwrap();
+    drop((session, created, dropped));
+    runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -551,6 +871,7 @@ fn empty_runtime_session() -> (ImeRuntime, ImeRuntimeSession) {
         })),
         policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
         context_ascii_mode: Arc::new(AtomicU8::new(0)),
+        pending: Arc::new(Mutex::new(PendingRuntimeInput::default())),
     };
     (runtime, session)
 }

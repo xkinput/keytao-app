@@ -163,6 +163,21 @@ object KeytaoNativeBridge {
         return runCatching { nativeHasDeployedSchema(userDir) }.getOrDefault(false)
     }
 
+    fun deploymentInProgress(userDir: String): Boolean =
+        loaded && runCatching { nativeDeploymentInProgress(userDir) }.getOrDefault(false)
+
+    fun deploymentHint(userDir: String): String? =
+        if (loaded) runCatching { nativeDeploymentHint(userDir) }.getOrNull() else null
+
+    fun markDeploymentFailed(userDir: String): Boolean =
+        loaded && runCatching { nativeMarkDeploymentFailed(userDir) }.getOrDefault(false)
+
+    fun retainSession(session: Long): Long =
+        if (loaded && session != 0L) runCatching { nativeRetainSession(session) }.getOrDefault(0L) else 0L
+
+    fun prewarm(session: Long): Boolean =
+        loaded && runCatching { nativePrewarm(session) }.getOrDefault(false)
+
     fun completeDeployment(userDir: String): Boolean {
         if (!loaded) return false
         return runCatching { nativeCompleteDeployment(userDir) }.getOrDefault(false)
@@ -195,6 +210,11 @@ object KeytaoNativeBridge {
     fun sessionState(session: Long): KeytaoImeState? {
         if (!loaded || session == 0L) return null
         return KeytaoImeState.fromJson(runCatching { nativeSessionState(session) }.getOrNull())
+    }
+
+    fun drainPendingState(session: Long): KeytaoImeState? {
+        if (!loaded || session == 0L) return null
+        return KeytaoImeState.fromJson(runCatching { nativeDrainPendingState(session) }.getOrNull())
     }
 
     fun processKey(session: Long, keyValue: Int, modifiers: Int): KeytaoImeState? {
@@ -427,6 +447,16 @@ object KeytaoNativeBridge {
 
     external fun nativeHasDeployedSchema(userDir: String): Boolean
 
+    external fun nativeDeploymentInProgress(userDir: String): Boolean
+
+    external fun nativeDeploymentHint(userDir: String): String?
+
+    external fun nativeMarkDeploymentFailed(userDir: String): Boolean
+
+    external fun nativeRetainSession(session: Long): Long
+
+    external fun nativePrewarm(session: Long): Boolean
+
     external fun nativeCompleteDeployment(userDir: String): Boolean
 
     external fun nativeInit(userDir: String, sharedDir: String?, deploy: Boolean): Boolean
@@ -438,6 +468,8 @@ object KeytaoNativeBridge {
     external fun nativeDestroySession(session: Long)
 
     external fun nativeSessionState(session: Long): String?
+
+    external fun nativeDrainPendingState(session: Long): String?
 
     external fun nativeProcessKey(session: Long, keyValue: Int, modifiers: Int): String?
 

@@ -1,8 +1,12 @@
-use super::{begin_deployment, complete_deployment, schema_install_state};
+use super::deployment_state::cached_deployment_in_progress;
+use super::{
+    DeploymentState, begin_deployment, complete_deployment, deployment_in_progress,
+    schema_install_state,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn installed_schema() -> PathBuf {
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -207,6 +211,177 @@ fn deployment_marker_requires_compiled_schema() {
     fs::remove_file(dir.join("build/keytao.schema.yaml")).unwrap();
     assert!(!schema_install_state(&dir).deployed);
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_hint_waits_for_loaded_build_and_expires() {
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    complete_deployment(&dir).unwrap();
+    let mut state = DeploymentState::default();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    begin_deployment(&dir).unwrap();
+    assert!(deployment_in_progress(&dir));
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    complete_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署成功"));
+    assert_eq!(
+        state.hint_at(
+            &dir,
+            std::time::Instant::now() + std::time::Duration::from_secs(2)
+        ),
+        None
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_hint_failure_expires_and_new_deploy_can_retry() {
+    let dir = installed_schema();
+    let mut state = DeploymentState::default();
+    begin_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    state.failed();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
+    assert_eq!(
+        state.hint_at(
+            &dir,
+            std::time::Instant::now() + std::time::Duration::from_secs(2)
+        ),
+        None
+    );
+    begin_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    fs::remove_file(dir.join("build/.keytao-deploying")).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_sentinel_requires_live_owner_and_recent_timestamp() {
+    let dir = installed_schema();
+    let path = dir.join("build/.keytao-deploying");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    for timestamp in [now.as_nanos(), now.as_millis()] {
+        fs::write(&path, format!("{timestamp}/{}", std::process::id())).unwrap();
+        assert!(deployment_in_progress(&dir));
+    }
+    for content in [
+        "interrupted".to_owned(),
+        format!("{}/{}", now.as_nanos(), u32::MAX),
+        format!("{}/{}", now.as_nanos(), 0),
+        format!(
+            "{}/{}",
+            now.as_nanos() - 601_000_000_000,
+            std::process::id()
+        ),
+        format!("{}/{}", now.as_nanos() + 60_000_000_000, std::process::id()),
+    ] {
+        fs::write(&path, content).unwrap();
+        assert!(!deployment_in_progress(&dir));
+    }
+    let mut state = DeploymentState::default();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
+    assert_eq!(
+        state.hint_at(
+            &dir,
+            std::time::Instant::now() + std::time::Duration::from_secs(2)
+        ),
+        None
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_failure_hint_does_not_allow_reading_an_active_build() {
+    let dir = installed_schema();
+    begin_deployment(&dir).unwrap();
+    super::mark_deployment_failed(&dir).unwrap();
+    assert_eq!(
+        super::deployment_state::failed_deployment_owned_by_process(&dir),
+        !cfg!(target_os = "android")
+    );
+    let mut state = DeploymentState::default();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
+    assert!(deployment_in_progress(&dir));
+    assert_eq!(
+        state.hint_at(
+            &dir,
+            std::time::Instant::now() + std::time::Duration::from_secs(2)
+        ),
+        None
+    );
+    begin_deployment(&dir).unwrap();
+    assert!(!super::deployment_state::failed_deployment_owned_by_process(&dir));
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_hint_detects_a_build_replaced_between_watcher_ticks() {
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    complete_deployment(&dir).unwrap();
+    let mut state = DeploymentState::default();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    let marker = dir.join("build/.keytao-deployed");
+    let content = fs::read_to_string(&marker).unwrap();
+    fs::write(&marker, format!("{content}\n")).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署成功"));
+    begin_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_hint_refreshes_at_most_every_250ms() {
+    let dir = installed_schema();
+    let mut state = DeploymentState::default();
+    let now = Instant::now();
+    assert_eq!(state.cached_hint_at(&dir, now), None);
+    begin_deployment(&dir).unwrap();
+    assert_eq!(
+        state.cached_hint_at(&dir, now + Duration::from_millis(249)),
+        None
+    );
+    assert_eq!(state.cached_hint(), None);
+    assert!(!cached_deployment_in_progress(&dir));
+    assert_eq!(
+        state.cached_hint_at(&dir, now + Duration::from_millis(250)),
+        Some("正在部署中")
+    );
+    assert!(cached_deployment_in_progress(&dir));
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(state.cached_hint(), Some("正在部署中"));
+    assert_eq!(
+        state.cached_hint_at(&dir, now + Duration::from_millis(499)),
+        Some("正在部署中")
+    );
+    assert!(cached_deployment_in_progress(&dir));
+    assert_eq!(
+        state.cached_hint_at(&dir, now + Duration::from_millis(500)),
+        Some("部署失败")
+    );
+    assert!(!cached_deployment_in_progress(&dir));
+}
+
+#[test]
+fn deployment_live_checks_refresh_the_memory_cache() {
+    let dir = installed_schema();
+    begin_deployment(&dir).unwrap();
+    assert!(deployment_in_progress(&dir));
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(cached_deployment_in_progress(&dir));
+    assert!(!deployment_in_progress(&dir));
+    assert!(!cached_deployment_in_progress(&dir));
 }
 
 #[test]

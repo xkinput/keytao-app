@@ -87,6 +87,9 @@ final class KeyTaoRuntime {
 
     /// Posted on the main queue after the runtime became usable or reloaded.
     static let didReloadNotification = Notification.Name("ink.rea.keytao.runtimeDidReload")
+    static let deploymentDidChangeNotification = Notification.Name("ink.rea.keytao.deploymentDidChange")
+
+    private(set) var deploymentHint: String?
 
     /// How long to wait before retrying an initialization that failed, so a
     /// machine without deployed data does not rescan on every activation.
@@ -95,11 +98,14 @@ final class KeyTaoRuntime {
     private static let watchRetryInterval: TimeInterval = 5
 
     private let queue = DispatchQueue(label: "ink.rea.keytao.runtime")
+    private let deploymentQueue = DispatchQueue(label: "ink.rea.keytao.deployment")
     private let startLock = NSLock()
     private var started = false
 
     private var lastInitializationAttempt: Date?
     private var watchSource: DispatchSourceFileSystemObject?
+    private var deploymentWatchSource: DispatchSourceFileSystemObject?
+    private var deploymentTimer: DispatchSourceTimer?
 
     private init() {}
 
@@ -118,6 +124,14 @@ final class KeyTaoRuntime {
             self.initializeIfNeeded()
             self.startWatchingReloadStamp()
         }
+        deploymentQueue.async { [self] in
+            self.startWatchingDeployment()
+            let timer = DispatchSource.makeTimerSource(queue: self.deploymentQueue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(250))
+            timer.setEventHandler { [weak self] in self?.refreshDeploymentHint() }
+            self.deploymentTimer = timer
+            timer.resume()
+        }
     }
 
     /// Ask for a retry without blocking the caller. Key handling uses this when
@@ -130,6 +144,14 @@ final class KeyTaoRuntime {
     /// cheap because it happens off the caller's thread.
     func checkForReload() {
         queue.async { self.consumeReloadRequest() }
+    }
+
+    func requestPrewarm() {
+        queue.async {
+            if keytao_prewarm() {
+                self.postDidReload()
+            }
+        }
     }
 
     /// The input menu's explicit redeploy, which must reload even when the app
@@ -154,6 +176,7 @@ final class KeyTaoRuntime {
                 }
             }
             if reloaded {
+                _ = keytao_prewarm()
                 self.postDidReload()
             }
             let succeeded = reloaded
@@ -191,8 +214,54 @@ final class KeyTaoRuntime {
             return
         }
         if keytao_reload_if_stamp_changed() {
+            _ = keytao_prewarm()
             postDidReload()
         }
+    }
+
+    private func refreshDeploymentHint() {
+        let hint: String?
+        if let pointer = keytao_deployment_hint() {
+            hint = String(cString: pointer)
+            keytao_free_string(pointer)
+        } else {
+            hint = nil
+        }
+        DispatchQueue.main.async {
+            guard self.deploymentHint != hint else { return }
+            self.deploymentHint = hint
+            NotificationCenter.default.post(name: Self.deploymentDidChangeNotification, object: nil)
+        }
+    }
+
+    private func startWatchingDeployment() {
+        deploymentWatchSource?.cancel()
+        deploymentWatchSource = nil
+        guard let stampPath = reloadStampPath() else { return }
+        let root = (stampPath as NSString).deletingLastPathComponent
+        let build = (root as NSString).appendingPathComponent("build")
+        let watchedPath = FileManager.default.fileExists(atPath: build) ? build : root
+        let descriptor = open(watchedPath, O_EVTONLY)
+        guard descriptor >= 0 else {
+            deploymentQueue.asyncAfter(deadline: .now() + Self.watchRetryInterval) { [weak self] in
+                self?.startWatchingDeployment()
+            }
+            return
+        }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .delete, .rename, .revoke],
+            queue: deploymentQueue
+        )
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.refreshDeploymentHint()
+            self.startWatchingDeployment()
+        }
+        source.setCancelHandler { close(descriptor) }
+        deploymentWatchSource = source
+        source.resume()
+        refreshDeploymentHint()
     }
 
     private func startWatchingReloadStamp() {

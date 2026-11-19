@@ -128,6 +128,28 @@ char *keytao_reload_stamp_path_at(const char *user_dir);
 bool keytao_reload_if_stamp_changed(void);
 
 /**
+ * Whether the deployment sentinel belongs to a live deployer. This reads the filesystem.
+ */
+bool keytao_deployment_in_progress_at(const char *user_dir);
+
+/**
+ * Read the shared deployment hint off the key thread. Free with keytao_free_string().
+ * Returns null once the transient hint expires.
+ */
+char *keytao_deployment_hint(void);
+
+/**
+ * Remember a session clone for focused-first prewarming without retaining a raw handle.
+ */
+void keytao_set_focused_session(void *session);
+
+/**
+ * Rebuild sessions in focused-first order. Call on a background worker after reload.
+ * Returns true only when at least one session was rebuilt.
+ */
+bool keytao_prewarm(void);
+
+/**
  * Create a per-client input session. Returns null if keytao_init() has not
  * completed successfully. Destroy with keytao_destroy_session().
  *
