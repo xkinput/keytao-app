@@ -25,6 +25,7 @@ type Calls = Rc<RefCell<Vec<&'static str>>>;
 #[implement(ITfContext, ITfCompartmentMgr)]
 struct SpyContext {
     calls: Calls,
+    allow_input: bool,
 }
 
 macro_rules! spy_methods {
@@ -38,8 +39,22 @@ macro_rules! spy_methods {
 }
 
 impl ITfContext_Impl for SpyContext_Impl {
+    fn RequestEditSession(
+        &self,
+        _tid: u32,
+        _session: Option<&ITfEditSession>,
+        _flags: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
+    ) -> Result<HRESULT> {
+        self.calls.borrow_mut().push("RequestEditSession");
+        Err(if self.allow_input {
+            TS_E_SYNCHRONOUS
+        } else {
+            E_NOTIMPL
+        }
+        .into())
+    }
+
     spy_methods! {
-        fn RequestEditSession(&self, tid: u32, session: Option<&ITfEditSession>, flags: TF_CONTEXT_EDIT_CONTEXT_FLAGS) -> HRESULT;
         fn InWriteSession(&self, tid: u32) -> BOOL;
         fn GetSelection(&self, ec: u32, index: u32, count: u32, selection: *mut TF_SELECTION, fetched: *mut u32) -> ();
         fn SetSelection(&self, ec: u32, count: u32, selection: *const TF_SELECTION) -> ();
@@ -58,10 +73,31 @@ impl ITfContext_Impl for SpyContext_Impl {
 }
 
 impl ITfCompartmentMgr_Impl for SpyContext_Impl {
+    fn GetCompartment(&self, _guid: *const GUID) -> Result<ITfCompartment> {
+        self.calls.borrow_mut().push("GetCompartment");
+        if self.allow_input {
+            Ok(ClearCompartment.into())
+        } else {
+            Err(E_NOTIMPL.into())
+        }
+    }
+
     spy_methods! {
-        fn GetCompartment(&self, guid: *const GUID) -> ITfCompartment;
         fn ClearCompartment(&self, tid: u32, guid: *const GUID) -> ();
         fn EnumCompartments(&self) -> IEnumGUID;
+    }
+}
+
+#[implement(ITfCompartment)]
+struct ClearCompartment;
+
+impl ITfCompartment_Impl for ClearCompartment_Impl {
+    fn GetValue(&self) -> Result<windows::core::VARIANT> {
+        Ok(windows::core::VARIANT::from(0_i32))
+    }
+
+    fn SetValue(&self, _tid: u32, _value: *const windows::core::VARIANT) -> Result<()> {
+        Err(E_NOTIMPL.into())
     }
 }
 
@@ -165,6 +201,7 @@ fn application_shortcuts_pass_through_com_before_context_or_engine_work() {
         let calls = Calls::default();
         let context: ITfContext = SpyContext {
             calls: calls.clone(),
+            allow_input: false,
         }
         .into();
         let mut shortcuts = Vec::new();
@@ -288,6 +325,7 @@ fn control_shift_release_order_never_toggles_mode_or_probes_context() {
         let calls = Calls::default();
         let context: ITfContext = SpyContext {
             calls: calls.clone(),
+            allow_input: false,
         }
         .into();
         let control = RIME_MOD_CONTROL;
@@ -361,6 +399,8 @@ fn control_shift_release_order_never_toggles_mode_or_probes_context() {
                         assert_eq!(st.english_mode, ime.is_english_mode());
                         assert_eq!(st.ascii_mode, ime.ascii_mode);
                         assert!(!st.engine_building && st.session.is_none());
+                        assert!(st.key_context.is_none());
+                        assert!(st.deployment_hint.is_none());
                     }
                     assert!(
                         !state.borrow().shift_pressed_without_key,
@@ -374,6 +414,78 @@ fn control_shift_release_order_never_toggles_mode_or_probes_context() {
             initial_modules,
             "modifier test loaded Rime or installed TIP"
         );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn deployment_hint_entry_requires_a_handled_key_even_before_engine_ready() {
+    std::thread::spawn(|| {
+        let keyboard = KeyboardStateGuard::save();
+        let initial_modules = mapped_input_modules();
+        let calls = Calls::default();
+        // Clear compartments and a refused scope session allow the real hint
+        // entry to run, unlike the fail-closed spy in the shortcut tests.
+        let context: ITfContext = SpyContext {
+            calls: calls.clone(),
+            allow_input: true,
+        }
+        .into();
+        for (key, mods) in [
+            (VK_SHIFT, RIME_MOD_SHIFT),
+            (VK_LSHIFT, RIME_MOD_SHIFT),
+            (VK_RSHIFT, RIME_MOD_SHIFT),
+            (VK_CONTROL, RIME_MOD_CONTROL),
+            (VK_MENU, RIME_MOD_ALT),
+            (VK_LWIN, RIME_MOD_SUPER),
+            (VK_A, RIME_MOD_CONTROL),
+            (VK_F4, RIME_MOD_ALT),
+            (VK_INSERT, RIME_MOD_SHIFT),
+            (VK_LEFT, 0),
+            (VK_RETURN, 0),
+            (VK_F1, 0),
+        ] {
+            for test_callback in [true, false] {
+                keyboard.set(key, mods);
+                let (state, sink) = state_and_sink(ImeState::empty());
+                {
+                    let mut st = state.borrow_mut();
+                    st.engine_building = true;
+                    st.deployment_hint = Some("正在部署中");
+                }
+                let eaten = unsafe {
+                    if test_callback {
+                        sink.OnTestKeyDown(&context, WPARAM(key.0 as usize), LPARAM(0))
+                    } else {
+                        sink.OnKeyDown(&context, WPARAM(key.0 as usize), LPARAM(0))
+                    }
+                }
+                .unwrap()
+                .as_bool();
+                assert!(!eaten, "vk={}, test={test_callback}", key.0);
+                assert!(calls.borrow().is_empty(), "{:?}", calls.borrow());
+                let st = state.borrow();
+                assert!(st.key_context.is_none(), "passthrough requested a hint");
+                assert_eq!(st.deployment_hint, Some("正在部署中"));
+                assert!(st.runtime.is_none() && st.session.is_none());
+            }
+        }
+
+        // OnTestKeyDown only retains key_context through deployment_key_pressed.
+        // Typing must still reach that entry while a deployment delays warmup.
+        keyboard.set(VK_A, 0);
+        let (state, sink) = state_and_sink(ImeState::empty());
+        state.borrow_mut().engine_building = true;
+        assert!(
+            !unsafe { sink.OnTestKeyDown(&context, WPARAM(VK_A.0 as usize), LPARAM(0)) }
+                .unwrap()
+                .as_bool()
+        );
+        let st = state.borrow();
+        assert!(st.key_context.is_some(), "typing skipped the hint entry");
+        assert!(st.runtime.is_none() && st.session.is_none());
+        assert_eq!(mapped_input_modules(), initial_modules);
     })
     .join()
     .unwrap();

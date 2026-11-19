@@ -2262,14 +2262,18 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
-                if !input_is_blocked(&state, pic) {
-                    crate::state::deployment_key_pressed(&state, pic);
-                }
                 append_key_diagnostic!("OnTestKeyDown modifier pending=true eat=false");
                 return Ok(BOOL::from(false));
             }
             prime_theme_resolver();
             poll_engine_builds(&state);
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
+            if !should_eat_key(vk, composing, mods)
+                && !cached_ime_state(&state)
+                    .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
+            {
+                return Ok(BOOL::from(false));
+            }
             // An unanswered probe counts as blocked, so the retry has to run before
             // the check that consumes it: TSF skips `OnKeyDown` for a key this
             // callback declines, and a stale `Unknown` would never be revisited.
@@ -2410,9 +2414,14 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
-                if !input_is_blocked(&state, pic) {
-                    crate::state::deployment_key_pressed(&state, pic);
-                }
+                return Ok(BOOL::from(false));
+            }
+            poll_engine_builds(&state);
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
+            if !should_eat_key(vk, composing, mods)
+                && !cached_ime_state(&state)
+                    .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
+            {
                 return Ok(BOOL::from(false));
             }
             let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
