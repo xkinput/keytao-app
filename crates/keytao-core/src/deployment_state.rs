@@ -1,0 +1,254 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const HINT_DURATION: Duration = Duration::from_millis(1500);
+const HINT_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+static LOADED_BUILD: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+static DEPLOYING: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn cached_deployment_in_progress(root: &Path) -> bool {
+    crate::lock_ignore_poison(&DEPLOYING)
+        .get(root)
+        .copied()
+        .unwrap_or(false)
+}
+
+fn cache_deployment(root: &Path, active: bool) {
+    crate::lock_ignore_poison(&DEPLOYING).insert(root.to_path_buf(), active);
+}
+
+pub(crate) fn engine_loaded(root: &Path) {
+    if sentinel(root).is_some() {
+        return;
+    }
+    if let Some(marker) = marker(root) {
+        *crate::lock_ignore_poison(&LOADED_BUILD) = Some((root.to_path_buf(), marker));
+    }
+}
+
+/// Both native deployers (nanoseconds) and older Android deployers (milliseconds)
+/// publish a timestamp and the process that owns the build directory.
+pub fn deployment_in_progress(root: &Path) -> bool {
+    let active = sentinel_in_progress(sentinel(root).as_deref());
+    cache_deployment(root, active);
+    active
+}
+
+fn sentinel_in_progress(content: Option<&str>) -> bool {
+    let Some(content) = content else {
+        return false;
+    };
+    let Some((started, pid)) = content.trim().split_once('/') else {
+        return false;
+    };
+    let (Ok(started), Ok(pid)) = (started.parse::<u128>(), pid.parse::<u32>()) else {
+        return false;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let started = if started < 100_000_000_000_000 {
+        started.saturating_mul(1_000_000)
+    } else {
+        started
+    };
+    now.as_nanos()
+        .checked_sub(started)
+        .is_some_and(|age| age <= Duration::from_secs(600).as_nanos())
+        && process_alive(pid)
+}
+
+fn sentinel(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join("build/.keytao-deploying")).ok()
+}
+
+/// Keep the owner sentinel intact: a failed/timed-out deploy worker may still
+/// be writing artifacts, so failure must not permit runtime teardown.
+pub fn mark_deployment_failed(root: &Path) -> Result<(), String> {
+    let Some(token) = sentinel(root) else {
+        return Ok(());
+    };
+    crate::write_file_atomic(&root.join("build/.keytao-deploy-failed"), token.as_bytes())
+        .map_err(|error| format!("publish deployment failure: {error}"))
+}
+
+pub(crate) fn failed_deployment_owned_by_process(root: &Path) -> bool {
+    // Android's coordinator can time out while its deploy worker still writes.
+    if cfg!(target_os = "android") {
+        return false;
+    }
+    let Some(token) = sentinel(root) else {
+        return false;
+    };
+    token
+        .trim()
+        .split_once('/')
+        .and_then(|(_, pid)| pid.parse::<u32>().ok())
+        == Some(std::process::id())
+        && std::fs::read_to_string(root.join("build/.keytao-deploy-failed")).ok() == Some(token)
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    pid > 0
+        && pid <= i32::MAX as u32
+        && (unsafe { kill(pid as i32, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(1))
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn GetExitCodeProcess(handle: *mut std::ffi::c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+    if handle.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() == Some(5);
+    }
+    let mut code = 0;
+    let running = unsafe { GetExitCodeProcess(handle, &mut code) } != 0 && code == 259;
+    unsafe { CloseHandle(handle) };
+    running
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Per-IME presentation state; success means this IME loaded the new build.
+#[derive(Clone, Default)]
+pub struct DeploymentState {
+    observed: bool,
+    loaded_marker: Option<String>,
+    pending: Option<String>,
+    failed_sentinel: Option<String>,
+    transient: Option<(&'static str, Instant)>,
+    refreshed_at: Option<Instant>,
+    hint: Option<&'static str>,
+}
+
+impl DeploymentState {
+    pub fn hint(&mut self, root: &Path) -> Option<&'static str> {
+        self.cached_hint_at(root, Instant::now())
+    }
+
+    pub(crate) fn cached_hint_at(&mut self, root: &Path, now: Instant) -> Option<&'static str> {
+        if self
+            .refreshed_at
+            .is_none_or(|checked| now.saturating_duration_since(checked) >= HINT_REFRESH_INTERVAL)
+        {
+            self.hint_at(root, now);
+        }
+        self.hint.filter(|hint| {
+            self.transient
+                .is_none_or(|(transient, until)| *hint != transient || now < until)
+        })
+    }
+
+    pub fn cached_hint(&self) -> Option<&'static str> {
+        self.hint.filter(|hint| {
+            self.transient
+                .is_none_or(|(transient, until)| *hint != transient || Instant::now() < until)
+        })
+    }
+
+    pub(crate) fn hint_at(&mut self, root: &Path, now: Instant) -> Option<&'static str> {
+        self.hint = self.refresh_hint_at(root, now);
+        self.refreshed_at = Some(now);
+        self.hint
+    }
+
+    fn refresh_hint_at(&mut self, root: &Path, now: Instant) -> Option<&'static str> {
+        if !self.observed {
+            self.loaded_marker = marker(root);
+            self.observed = true;
+        }
+        let current = sentinel(root);
+        let active = sentinel_in_progress(current.as_deref());
+        cache_deployment(root, active);
+        if current.is_none() {
+            let loaded = crate::lock_ignore_poison(&LOADED_BUILD)
+                .as_ref()
+                .is_some_and(|(loaded_root, loaded_marker)| {
+                    loaded_root == root && marker(root).as_ref() == Some(loaded_marker)
+                });
+            if loaded {
+                self.loaded(root);
+            }
+        }
+        if current.is_some()
+            && current != self.failed_sentinel
+            && std::fs::read_to_string(root.join("build/.keytao-deploy-failed")).ok() == current
+        {
+            self.pending = current.clone();
+            self.failed();
+        }
+        if current.is_some() && current != self.failed_sentinel {
+            if active {
+                self.pending = current;
+                self.transient = None;
+                return Some("正在部署中");
+            }
+            if self.pending != current {
+                self.pending = current.clone();
+            }
+            self.failed();
+            self.failed_sentinel = current;
+        } else if self.pending.is_some() && current.is_none() {
+            if marker(root).is_none() {
+                self.failed();
+            } else {
+                return Some("正在部署中");
+            }
+        }
+        self.transient
+            .filter(|(_, until)| now < *until)
+            .map(|(hint, _)| hint)
+    }
+
+    pub fn loaded(&mut self, root: &Path) {
+        if deployment_in_progress(root) {
+            return;
+        }
+        let marker = marker(root);
+        if marker.is_none() && self.pending.is_some() {
+            self.failed();
+            return;
+        }
+        let changed = self.pending.is_some()
+            || (self.observed && marker.is_some() && marker != self.loaded_marker);
+        self.observed = true;
+        self.loaded_marker = marker;
+        self.pending = None;
+        self.failed_sentinel = None;
+        if changed {
+            self.transient = Some(("部署成功", Instant::now() + HINT_DURATION));
+            self.hint = Some("部署成功");
+        }
+        self.refreshed_at = None;
+    }
+
+    pub fn failed(&mut self) {
+        self.failed_sentinel = self.pending.take();
+        self.transient = Some(("部署失败", Instant::now() + HINT_DURATION));
+        self.hint = Some("部署失败");
+        self.refreshed_at = None;
+    }
+}
+
+fn marker(root: &Path) -> Option<String> {
+    crate::ReloadStamp::signature_at(&root.join("build/.keytao-deployed"))
+}

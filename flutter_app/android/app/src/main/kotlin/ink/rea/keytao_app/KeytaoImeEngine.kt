@@ -50,7 +50,10 @@ class KeytaoImeEngine(context: Context) {
     /** A failed resolution is retried; only the shared external root is cached. */
     val userDir: File? get() = KeytaoAndroidPaths.userRootOrNull(appContext)
     private var warmupComplete = false
-    private var session: Long = 0L
+    @Volatile private var session: Long = 0L
+    @Volatile private var closed = false
+    @Volatile var deploymentHint: String? = null
+        private set
     private var lastState = KeytaoImeState.empty()
     private var lastDisplaySchemaName = ""
     private val schemaDisplayNames = mutableMapOf<String, String>()
@@ -71,6 +74,7 @@ class KeytaoImeEngine(context: Context) {
     @Volatile var schemaLogo: Bitmap? = null
         private set
     @Volatile var onSchemaLogoChanged: (() -> Unit)? = null
+    @Volatile var onReloadStarted: (() -> ((Long) -> Unit))? = null
 
     /**
      * Everything that touches the filesystem or librime runs here: the IME main
@@ -127,7 +131,6 @@ class KeytaoImeEngine(context: Context) {
      * Probe the data directory and bring librime up if it is usable. Blocking:
      * call it from [runInBackground], never from a lifecycle callback.
      */
-    @Synchronized
     fun refreshReadiness(): Readiness {
         val root = userDir ?: run {
             schemaLogoKey = null
@@ -139,7 +142,11 @@ class KeytaoImeEngine(context: Context) {
                 else -> Readiness.STORAGE_NOT_READY
             }
         }
+        refreshDeploymentHint()
         warmUpIfStorageReady()
+        if (KeytaoAndroidPaths.isDeploymentInProgress(root)) {
+            return if (nativeReady && session != 0L) Readiness.READY else Readiness.DEPLOYING
+        }
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
         if (!hasInstalledSchema()) {
             if (session != 0L) reload()
@@ -147,6 +154,7 @@ class KeytaoImeEngine(context: Context) {
         }
         if (!warmupComplete) return Readiness.NOT_DEPLOYED
         if (!hasDeployedSchema()) {
+            if (nativeReady && session != 0L) return Readiness.READY
             val schemas = KeytaoAndroidPaths.configuredSchemas(root)
             if (KeytaoNativeBridge.loaded && claimUpgradeDeployment(root, bundledVersion, schemas)) {
                 KeytaoRimeDeployClient.deploy(
@@ -160,7 +168,12 @@ class KeytaoImeEngine(context: Context) {
             } else Readiness.NOT_DEPLOYED
         }
         reloadIfNeeded()
+        deploymentHint = KeytaoNativeBridge.deploymentHint(root.absolutePath)
         return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
+    }
+
+    fun refreshDeploymentHint() {
+        deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentHint(it.absolutePath) }
     }
 
     @Synchronized
@@ -170,6 +183,16 @@ class KeytaoImeEngine(context: Context) {
             ?.withoutTransientCommit()
             ?: lastState.withoutTransientCommit()
         return lastState
+    }
+
+    @Synchronized
+    fun drainPendingState(expectedSession: Long): KeytaoImeState? {
+        if (closed || session != expectedSession) return null
+        val state = KeytaoNativeBridge.drainPendingState(session)
+            ?.let { stableSchemaState(it) }
+            ?: lastState.withoutTransientCommit()
+        lastState = state.withoutTransientCommit()
+        return state
     }
 
     @Synchronized
@@ -295,21 +318,41 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
-    @Synchronized
     fun reload(): Boolean {
-        val ok = initializeRuntime(deploy = false, reinitialize = true)
-        if (ok) {
-            reloadStampSignature = reloadStampSignature()
-            lastState = KeytaoNativeBridge.sessionState(session)
-                ?.let { stableSchemaState(it) }
-                ?.withoutTransientCommit()
-                ?: lastState.withoutTransientCommit()
+        val snapshot = synchronized(this) {
+            val root = userDir ?: return false
+            if (closed || KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
+            if (!nativeReady || session == 0L || !hasInstalledSchema()) {
+                return initializeRuntime(deploy = false, reinitialize = true)
+            }
+            val retained = KeytaoNativeBridge.retainSession(session)
+            if (retained == 0L) return false
+            Triple(session, retained, root)
         }
-        return ok
+        val completed = onReloadStarted?.invoke()
+        try {
+            // Retain the session under the monitor, then let keys wait in core during prewarm.
+            val ok = KeytaoNativeBridge.reinitialize(snapshot.third.absolutePath, sharedDataDir?.absolutePath)
+            if (ok) KeytaoNativeBridge.prewarm(snapshot.second)
+            synchronized(this) {
+                if (closed || session != snapshot.first) return false
+                if (ok) {
+                    invalidateSchemaNameCache()
+                    schemaLogoGeneration++
+                    schemaLogoKey = null
+                    schemaLogoRequest = null
+                    reloadStampSignature = reloadStampSignature()
+                }
+                deploymentHint = KeytaoNativeBridge.deploymentHint(snapshot.third.absolutePath)
+            }
+            if (ok) completed?.invoke(snapshot.first)
+            return ok
+        } finally {
+            KeytaoNativeBridge.destroySession(snapshot.second)
+        }
     }
 
     /** Blocking: reloading finalizes librime, so keep it off the main thread. */
-    @Synchronized
     fun reloadIfNeeded(): Boolean {
         if (!nativeReady || session == 0L) return ensureReady()
         val signature = reloadStampSignature() ?: return false
@@ -405,6 +448,7 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun close() {
+        closed = true
         nativeReady = false
         KeytaoNativeBridge.destroySession(session)
         session = 0L
@@ -463,6 +507,7 @@ class KeytaoImeEngine(context: Context) {
                 ?.let { stableSchemaState(it) }
                 ?: KeytaoImeState.empty()
             reloadStampSignature = reloadStampSignature()
+            deploymentHint = KeytaoNativeBridge.deploymentHint(root.absolutePath)
             nativeReady = session != 0L
             success = nativeReady
             return nativeReady

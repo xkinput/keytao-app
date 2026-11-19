@@ -95,6 +95,7 @@ fn sessions_and_new_clients_share_language_schema_and_declared_switches() {
     second.set_english_mode(false).unwrap();
     assert_eq!(first.state().schema_id, "keytao_other");
     runtime.reload_without_deploy().unwrap();
+    runtime.prewarm(Some(&first)).unwrap();
     assert_eq!(fresh.state().schema_id, "keytao_other");
     assert!(fresh.get_option("full_shape"));
     drop((first, second, fresh));
@@ -159,6 +160,7 @@ fn secure_and_host_context_overrides_never_change_global_input() {
     second.set_context_ascii_mode(Some(true)).unwrap();
     second.process_key_result(b'a' as u32, 0).unwrap();
     runtime.reload_without_deploy().unwrap();
+    runtime.prewarm(Some(&second)).unwrap();
     assert!(second.state().ascii_mode);
     assert!(!first.state().ascii_mode);
     second.set_context_ascii_mode(None).unwrap();
@@ -217,6 +219,7 @@ fn app_schema_requests_apply_on_the_next_key_without_interrupting_composition() 
     keytao_core::ReloadStamp::write(&dir).unwrap();
     runtime.reload_without_deploy().unwrap();
     assert!(runtime.generation() > generation);
+    runtime.prewarm(Some(&fresh)).unwrap();
     assert_eq!(fresh.state().schema_id, "keytao_other");
     drop((first, second, fresh));
     keytao_core::runtime_log::flush_blocking(std::time::Duration::from_secs(1));

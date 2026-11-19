@@ -30,6 +30,9 @@ fn compose(session: &ImeRuntimeSession) -> Result<Option<usize>, String> {
         let Some(result) = session.process_key_result(character as u32, 0) else {
             return Ok(None);
         };
+        if !result.accepted {
+            return Err("a fixture key was not handled".into());
+        }
         state = Some(result.state);
     }
     let state = state.ok_or("fixture code is empty")?;
@@ -202,21 +205,11 @@ fn concurrent_reloads_from_two_runtimes_keep_sessions_alive() {
         let session = sessions[index].clone();
         let typing_stop = stop.clone();
         let typing_failures = failures.clone();
-        let typing_reloads = reloads.clone();
         workers.push(std::thread::spawn(move || {
             while !typing_stop.load(Ordering::Relaxed) {
-                // A reload legitimately throws the composition in flight away,
-                // so only a run that no reload completed during has to produce
-                // candidates.
-                let before = typing_reloads.load(Ordering::SeqCst);
                 match compose(&session) {
-                    Ok(Some(0)) if typing_reloads.load(Ordering::SeqCst) == before => report(
-                        &typing_failures,
-                        format!("runtime {index}: no candidates without a concurrent reload"),
-                    ),
-                    // Contending keys now pass through instead of waiting for
-                    // deployment. The checks after the storm still require
-                    // every session to recover and produce real candidates.
+                    // Handled keys may be queued until prewarm completes; the
+                    // checks after the storm require real candidates again.
                     Ok(_) => {}
                     Err(error) => report(&typing_failures, format!("runtime {index}: {error}")),
                 }
@@ -263,6 +256,7 @@ fn concurrent_reloads_from_two_runtimes_keep_sessions_alive() {
 
     // The sessions that were live through every one of those reloads still
     // belong to the librime that is up now.
+    first.prewarm(None).expect("warm sessions after the reload storm");
     for (index, session) in sessions.iter().enumerate() {
         assert_composes(session, &format!("runtime {index} after the reload storm"));
     }

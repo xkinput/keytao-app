@@ -43,6 +43,8 @@ final class KeyTaoInputController: IMKInputController {
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
     private var reloadObserver: NSObjectProtocol?
+    private var deploymentObserver: NSObjectProtocol?
+    private var showingDeploymentHint = false
     private let inputContextGeneration = KeyTaoInputContextGeneration()
 
     // MARK: Lifecycle
@@ -61,12 +63,23 @@ final class KeyTaoInputController: IMKInputController {
         ) { [weak self] _ in
             self?.runtimeDidReload()
         }
+        deploymentObserver = NotificationCenter.default.addObserver(
+            forName: KeyTaoRuntime.deploymentDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.isActive else { return }
+            self.showDeploymentIndicator(client: self.client())
+        }
     }
 
     deinit {
         chordReleaseTimer?.invalidate()
         if let reloadObserver {
             NotificationCenter.default.removeObserver(reloadObserver)
+        }
+        if let deploymentObserver {
+            NotificationCenter.default.removeObserver(deploymentObserver)
         }
         if let session {
             keytao_destroy_session(session)
@@ -90,7 +103,9 @@ final class KeyTaoInputController: IMKInputController {
         isActive = true
         lastModifierFlags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         KeyTaoRuntime.shared.checkForReload()
+        let hadSession = session != nil
         ensureSession()
+        if hadSession { KeyTaoRuntime.shared.requestPrewarm() }
         refreshSessionState(from: client)
     }
 
@@ -343,6 +358,7 @@ final class KeyTaoInputController: IMKInputController {
         } else {
             showCandidates(panelModel(for: state, theme: theme), client: client, theme: theme)
         }
+        showDeploymentIndicator(client: client)
     }
 
     private func clearMarkedText(client: IMKTextInput?) {
@@ -501,14 +517,29 @@ final class KeyTaoInputController: IMKInputController {
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = modeIndicatorPanel ?? ModeIndicatorPanel()
         modeIndicatorPanel = panel
+        let deploymentHint = KeyTaoRuntime.shared.deploymentHint
+        showingDeploymentHint = deploymentHint != nil
+        let anchor = showingDeploymentHint
+            ? (candidatePanel.flatMap { $0.isVisible ? $0.frame : nil } ?? rect)
+            : rect
         panel.show(
-            modeHint: modeHint,
+            modeHint: deploymentHint.map { KeyTaoModeHintModel(asciiMode: asciiMode, text: $0) } ?? modeHint,
             windowLevel: windowLevel,
-            near: rect
+            near: anchor,
+            persistent: deploymentHint != nil
         )
     }
 
+    private func showDeploymentIndicator(client: IMKTextInput?) {
+        if let hint = KeyTaoRuntime.shared.deploymentHint {
+            showModeIndicator(KeyTaoModeHintModel(asciiMode: asciiMode, text: hint), client: client)
+        } else if showingDeploymentHint {
+            hideModeIndicator()
+        }
+    }
+
     private func hideModeIndicator() {
+        showingDeploymentHint = false
         modeIndicatorPanel?.orderOut(nil)
     }
 
@@ -628,6 +659,7 @@ final class KeyTaoInputController: IMKInputController {
     @discardableResult
     private func ensureSession() -> UnsafeMutableRawPointer? {
         if let session {
+            if isActive { keytao_set_focused_session(session) }
             return session
         }
         session = keytao_create_session()
@@ -635,6 +667,10 @@ final class KeyTaoInputController: IMKInputController {
             // The runtime is not up yet; retrying happens in the background so
             // this callback stays cheap and keys keep reaching the application.
             KeyTaoRuntime.shared.requestInitialization()
+        }
+        if let session, isActive {
+            keytao_set_focused_session(session)
+            KeyTaoRuntime.shared.requestPrewarm()
         }
         return session
     }
@@ -649,30 +685,15 @@ final class KeyTaoInputController: IMKInputController {
             return
         }
 
-        let client = client()
-        if hasComposition {
-            clearMarkedText(client: client)
-        }
-        guard inputContextGeneration.isCurrent(generation) else { return }
-        hideCandidates()
-        hideModeIndicator()
-        ensureSession()
-        refreshSessionState(from: client)
+        guard inputContextGeneration.isCurrent(generation), let session = ensureSession(),
+              let state = KeyTaoImeState.consuming(keytao_session_state_json(session)) else { return }
+        apply(state, to: client())
     }
 
     private func refreshSessionState(from client: IMKTextInput?) {
         guard let session = ensureSession() else { return }
         guard let state = KeyTaoImeState.consuming(keytao_session_state_json(session)) else { return }
-        let theme = ImeThemeManager.shared.theme()
-        hasComposition = state.hasComposition
-        englishMode = state.englishMode
-        asciiMode = state.asciiMode
-        chordComposer = state.chordComposer
-        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || theme.ui.effectiveEmbeddedComposition) {
-            hideCandidates()
-        } else {
-            showCandidates(panelModel(for: state, theme: theme), client: client, theme: theme)
-        }
+        apply(state, to: client)
     }
 
     // MARK: Modifier handling

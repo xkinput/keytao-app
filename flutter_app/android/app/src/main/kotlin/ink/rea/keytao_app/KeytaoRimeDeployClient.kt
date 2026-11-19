@@ -263,6 +263,7 @@ object KeytaoRimeDeployClient {
         private fun finish(result: Result) {
             if (!finished.compareAndSet(false, true)) return
             handler.removeCallbacks(timeout)
+            if (!result.success) KeytaoNativeBridge.markDeploymentFailed(userRoot.absolutePath)
             runCatching {
                 logStepResult(result.success, 0)
                 val success = result.success

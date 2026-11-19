@@ -309,12 +309,14 @@ mod tests {
             // An app preview may reload, but it must not claim an IME request.
             let preview = crate::ImeRuntime::with_dirs(&user, shared.to_string_lossy());
             preview.reload_without_deploy().unwrap();
+            preview.prewarm(Some(&session)).unwrap();
             assert!(read_user_data_sync_result(&user).unwrap().is_none());
             assert!(pending(&user).unwrap());
             // Reopen the table translator's live userdb before the IME owns the sync.
             assert!(session.process_key_result(b'a' as u32, 0).unwrap().accepted);
             assert_eq!(session.state().candidates[0].text, "hello");
             runtime.reload_without_deploy().unwrap();
+            runtime.prewarm(Some(&session)).unwrap();
             let result = read_user_data_sync_result(&user).unwrap().unwrap();
             assert_eq!(result.generation, generation);
             assert!(result.ok, "{:?}", result.error);
@@ -357,6 +359,7 @@ mod tests {
             let remote_generation = request_user_data_sync(&user).unwrap();
             crate::ReloadStamp::write(&user).unwrap();
             runtime.reload_without_deploy().unwrap();
+            runtime.prewarm(Some(&session)).unwrap();
             let result = read_user_data_sync_result(&user).unwrap().unwrap();
             assert_eq!(result.generation, remote_generation);
             assert!(result.ok, "{:?}", result.error);

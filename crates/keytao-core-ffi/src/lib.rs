@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use keytao_core::{
-    key_policy, EngineCapabilities, ImeRuntime, ImeRuntimeSession, ImeState, InputContextPolicy,
-    KeyProcessResult, ReloadStamp,
+    key_policy, DeploymentState, EngineCapabilities, ImeRuntime, ImeRuntimeSession, ImeState,
+    InputContextPolicy, KeyProcessResult, ReloadStamp,
 };
 use keytao_theme::{
     resolve_theme_from_paths, resolve_theme_from_paths_with_system_scheme, resolved_theme_json,
@@ -25,6 +25,7 @@ struct Global {
     /// keytao_init() for the same ones is recognized as a no-op.
     dirs: Option<InitDirs>,
     runtime: Option<ImeRuntime>,
+    focused: Option<ImeRuntimeSession>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -44,7 +45,36 @@ static GLOBAL: Mutex<Global> = Mutex::new(Global {
     initialized: false,
     dirs: None,
     runtime: None,
+    focused: None,
 });
+
+struct DeploymentStatus {
+    root: PathBuf,
+    state: DeploymentState,
+    hint: Option<&'static str>,
+}
+
+static DEPLOYMENT_STATUS: Mutex<Option<DeploymentStatus>> = Mutex::new(None);
+
+fn update_deployment_status(
+    root: &Path,
+    update: impl FnOnce(&mut DeploymentState),
+) -> Option<&'static str> {
+    let mut status = lock_ignore_poison(&DEPLOYMENT_STATUS);
+    if status.as_ref().is_none_or(|status| status.root != root) {
+        let mut state = DeploymentState::default();
+        state.hint(root);
+        *status = Some(DeploymentStatus {
+            root: root.to_path_buf(),
+            state,
+            hint: None,
+        });
+    }
+    let status = status.as_mut().unwrap();
+    update(&mut status.state);
+    status.hint = status.state.hint(root);
+    status.hint
+}
 
 /// Serializes keytao_init(). Frontends do initialize concurrently — iOS runs a
 /// synchronous and an asynchronous startup path against the same engine — and
@@ -406,6 +436,9 @@ pub extern "C" fn keytao_run_deploy_child() -> bool {
         match result {
             Ok(()) => true,
             Err(error) => {
+                if let Some(root) = deployment_root() {
+                    update_deployment_status(&root, DeploymentState::failed);
+                }
                 log_error(format_args!("keytao_run_deploy_child: {error}"));
                 false
             }
@@ -497,6 +530,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         // Reads the stamp, so it is built before the lock is taken.
         let signal = ReloadSignal::new(&dirs.user);
         *lock_ignore_poison(&RELOAD_SIGNAL) = Some(signal);
+        update_deployment_status(&dirs.user, |_| {});
         let mut g = lock_ignore_poison(&GLOBAL);
         g.initialized = true;
         g.dirs = Some(dirs);
@@ -516,12 +550,13 @@ fn retire_unavailable_runtime(previous: Option<&ImeRuntime>, epoch: &mut u64) {
 /// down under them. The pieces are dropped after the lock is released.
 fn clear_global() {
     lock_ignore_poison(&RELOAD_SIGNAL).take();
-    let runtime = {
+    let (runtime, focused) = {
         let mut g = lock_ignore_poison(&GLOBAL);
         g.initialized = false;
         g.dirs = None;
-        g.runtime.take()
+        (g.runtime.take(), g.focused.take())
     };
+    drop(focused);
     drop(runtime);
 }
 
@@ -568,6 +603,14 @@ fn reload_now() -> bool {
             true
         }
         Err(e) => {
+            if !matches!(
+                e.as_str(),
+                "Rime deployment is busy" | "Rime generation changed"
+            ) {
+                if let Some(root) = deployment_root() {
+                    update_deployment_status(&root, DeploymentState::failed);
+                }
+            }
             log_error(format_args!("keytao_reload: runtime reload failed: {e}"));
             false
         }
@@ -644,6 +687,88 @@ pub extern "C" fn keytao_reload_if_stamp_changed() -> bool {
         // The request is only marked as seen once the reload really ran, so a
         // transient failure is retried on the next tick instead of swallowed.
         stamp_changed_peek().is_some() && reload_now()
+    })
+}
+
+fn deployment_root() -> Option<PathBuf> {
+    lock_ignore_poison(&GLOBAL)
+        .dirs
+        .as_ref()
+        .map(|dirs| dirs.user.clone())
+}
+
+/// Whether the deployment sentinel belongs to a live deployer. This reads the filesystem.
+#[no_mangle]
+pub extern "C" fn keytao_deployment_in_progress_at(user_dir: *const c_char) -> bool {
+    guard("keytao_deployment_in_progress_at", false, || {
+        c_string_arg(user_dir, "user_dir")
+            .is_ok_and(|root| keytao_core::deployment_in_progress(Path::new(&root)))
+    })
+}
+
+/// Read the shared deployment hint off the key thread. Free with keytao_free_string().
+/// Returns null once the transient hint expires.
+#[no_mangle]
+pub extern "C" fn keytao_deployment_hint() -> *mut c_char {
+    guard("keytao_deployment_hint", std::ptr::null_mut(), || {
+        let Some(root) = deployment_root() else {
+            return std::ptr::null_mut();
+        };
+        update_deployment_status(&root, |_| {})
+            .map(to_cstring)
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
+/// Remember a session clone for focused-first prewarming without retaining a raw handle.
+#[no_mangle]
+pub extern "C" fn keytao_set_focused_session(session: *mut c_void) {
+    guard("keytao_set_focused_session", (), || {
+        let Some(handle) = session_handle(session) else {
+            return;
+        };
+        let previous = lock_ignore_poison(&GLOBAL)
+            .focused
+            .replace(handle.session.clone());
+        drop(previous);
+    });
+}
+
+/// Rebuild sessions in focused-first order. Call on a background worker after reload.
+/// Returns true only when at least one session was rebuilt.
+#[no_mangle]
+pub extern "C" fn keytao_prewarm() -> bool {
+    guard("keytao_prewarm", false, || {
+        let _epoch = read_ignore_poison(&SESSION_EPOCH);
+        let (runtime, focused) = {
+            let g = lock_ignore_poison(&GLOBAL);
+            (g.runtime.clone(), g.focused.clone())
+        };
+        let Some(runtime) = runtime else {
+            return false;
+        };
+        match runtime.prewarm(focused.as_ref()) {
+            Ok(rebuilt) => {
+                if let Some(root) = deployment_root() {
+                    update_deployment_status(&root, |_| {});
+                }
+                rebuilt
+            }
+            Err(error) => {
+                if !matches!(
+                    error.as_str(),
+                    "Rime deployment is busy"
+                        | "Rime generation changed"
+                        | "Rime engine build timed out"
+                ) {
+                    if let Some(root) = deployment_root() {
+                        update_deployment_status(&root, DeploymentState::failed);
+                    }
+                }
+                log_error(format_args!("keytao_prewarm: {error}"));
+                false
+            }
+        }
     })
 }
 
@@ -1486,7 +1611,13 @@ fn state_json(state: ImeState, accepted: bool) -> String {
         &ui_capabilities,
     );
     let english_mode = state.is_english_mode();
-    let mode_hint = theme.mode_hint_model(english_mode);
+    let mut mode_hint = theme.mode_hint_model(english_mode);
+    if let Some(hint) = lock_ignore_poison(&DEPLOYMENT_STATUS)
+        .as_ref()
+        .and_then(|status| status.state.cached_hint())
+    {
+        mode_hint.text = hint.into();
+    }
     let value = serde_json::json!({
         "preedit": state.preedit,
         "commitPreview": state.commit_preview,
