@@ -147,6 +147,101 @@ public struct KeyTaoImeTheme: Codable {
         public var englishText: String
     }
 
+    public struct KeyStyle: Codable {
+        public var background: KeyTaoThemeColor
+        public var foreground: KeyTaoThemeColor
+        public var hintForeground: KeyTaoThemeColor
+        public var pressedBackground: KeyTaoThemeColor
+        public var pressedForeground: KeyTaoThemeColor
+        public var borderColor: KeyTaoThemeColor
+        public var borderWidth: CGFloat
+        public var cornerRadius: CGFloat
+        public var shadowColor: KeyTaoThemeColor
+        public var shadowOffsetY: CGFloat
+        public var fontScale: CGFloat
+        public var hintFontScale: CGFloat
+        public var fontWeight: KeyTaoThemeFontWeight
+        public var swipeHintForeground: KeyTaoThemeColor
+        public var swipeHintVisible: Bool
+
+        func applying(_ overlay: KeyStyleOverride?) -> KeyStyle {
+            guard let overlay else { return self }
+            var style = self
+            style.background = overlay.background ?? background
+            style.foreground = overlay.foreground ?? foreground
+            style.hintForeground = overlay.hintForeground ?? hintForeground
+            style.pressedBackground = overlay.pressedBackground ?? pressedBackground
+            style.pressedForeground = overlay.pressedForeground ?? pressedForeground
+            style.borderColor = overlay.borderColor ?? borderColor
+            style.borderWidth = overlay.borderWidth ?? borderWidth
+            style.cornerRadius = overlay.cornerRadius ?? cornerRadius
+            style.shadowColor = overlay.shadowColor ?? shadowColor
+            style.shadowOffsetY = overlay.shadowOffsetY ?? shadowOffsetY
+            style.fontScale = overlay.fontScale ?? fontScale
+            style.hintFontScale = overlay.hintFontScale ?? hintFontScale
+            style.fontWeight = overlay.fontWeight ?? fontWeight
+            return style
+        }
+    }
+
+    public struct KeyStyleOverride: Codable {
+        public var background: KeyTaoThemeColor?
+        public var foreground: KeyTaoThemeColor?
+        public var hintForeground: KeyTaoThemeColor?
+        public var pressedBackground: KeyTaoThemeColor?
+        public var pressedForeground: KeyTaoThemeColor?
+        public var borderColor: KeyTaoThemeColor?
+        public var borderWidth: CGFloat?
+        public var cornerRadius: CGFloat?
+        public var shadowColor: KeyTaoThemeColor?
+        public var shadowOffsetY: CGFloat?
+        public var fontScale: CGFloat?
+        public var hintFontScale: CGFloat?
+        public var fontWeight: KeyTaoThemeFontWeight?
+        public var softBackground: KeyTaoThemeColor?
+    }
+
+    public struct Mobile: Codable {
+        public struct Keyboard: Codable {
+            public struct Toolbar: Codable {
+                public var background: KeyTaoThemeColor
+                public var foreground: KeyTaoThemeColor
+                public var selectedForeground: KeyTaoThemeColor
+            }
+
+            public struct Floating: Codable {
+                public var borderColor: KeyTaoThemeColor
+                public var shadowColor: KeyTaoThemeColor
+            }
+
+            public var background: KeyTaoThemeColor
+            public var pageBackground: KeyTaoThemeColor
+            public var key: KeyStyle
+            public var keyTypes: [String: KeyStyleOverride]
+            public var keyClasses: [String: KeyStyleOverride]
+            public var keyStates: [String: KeyStyleOverride]
+            public var toolbar: Toolbar
+            public var floating: Floating
+        }
+
+        public struct CandidateBar: Codable {
+            public var background: KeyTaoThemeColor
+            public var foreground: KeyTaoThemeColor
+            public var selectedForeground: KeyTaoThemeColor
+            public var selectedBackground: KeyTaoThemeColor
+            public var commentColor: KeyTaoThemeColor
+            public var fontScale: CGFloat
+            public var showComment: Bool
+            public var preeditForeground: KeyTaoThemeColor
+            public var preeditBackground: KeyTaoThemeColor
+            public var expandedBackground: KeyTaoThemeColor
+        }
+
+        public var isDark: Bool
+        public var keyboard: Keyboard
+        public var candidateBar: CandidateBar
+    }
+
     public var version: Int
     public var ui: Ui
     public var font: Font
@@ -154,109 +249,17 @@ public struct KeyTaoImeTheme: Codable {
     public var candidate: Candidate
     public var navigation: Navigation
     public var modeHint: ModeHint
+    public var mobile: Mobile
 
-    public static let fallback = KeyTaoImeTheme(
-        version: 2,
-        ui: Ui(colorScheme: "auto", effectiveColorScheme: "light", accentColor: nil),
-        font: Font(family: nil, size: 18, labelSize: 14, commentSize: 13, preeditSize: 15, weight: .medium),
-        panel: Panel(
-            orientation: "horizontal",
-            background: KeyTaoThemeColor(red: 0xF8, green: 0xFA, blue: 0xFF, alpha: 0xF2),
-            borderColor: KeyTaoThemeColor(red: 0xD8, green: 0xE2, blue: 0xF1, alpha: 0xFF),
-            borderWidth: 1,
-            cornerRadius: 16,
-            paddingX: 8,
-            paddingY: 7,
-            gap: 6,
-            minWidth: 96,
-            maxWidth: 820,
-            maxHeight: 460,
-            screenMargin: 8,
-            shadow: true
-        ),
-        candidate: Candidate(
-            background: KeyTaoThemeColor(red: 0, green: 0, blue: 0, alpha: 0),
-            hoverBackground: KeyTaoThemeColor(red: 0xF1, green: 0xF6, blue: 0xFF, alpha: 0xFF),
-            pressedBackground: KeyTaoThemeColor(red: 0xD4, green: 0xE7, blue: 0xFF, alpha: 0xFF),
-            pressedForeground: KeyTaoThemeColor(red: 0x14, green: 0x23, blue: 0x3B, alpha: 0xFF),
-            selectedBackground: KeyTaoThemeColor(red: 0xE6, green: 0xF0, blue: 0xFF, alpha: 0xFF),
-            foreground: KeyTaoThemeColor(red: 0x1F, green: 0x29, blue: 0x33, alpha: 0xFF),
-            selectedForeground: KeyTaoThemeColor(red: 0x14, green: 0x23, blue: 0x3B, alpha: 0xFF),
-            labelColor: KeyTaoThemeColor(red: 0x6B, green: 0x77, blue: 0x85, alpha: 0xFF),
-            selectedLabelColor: KeyTaoThemeColor(red: 0x3B, green: 0x73, blue: 0xD9, alpha: 0xFF),
-            commentColor: KeyTaoThemeColor(red: 0x7A, green: 0x87, blue: 0x90, alpha: 0xFF),
-            selectedCommentColor: KeyTaoThemeColor(red: 0x52, green: 0x6A, blue: 0x91, alpha: 0xFF),
-            borderColor: KeyTaoThemeColor(red: 0, green: 0, blue: 0, alpha: 0),
-            selectedBorderColor: KeyTaoThemeColor(red: 0xA8, green: 0xC7, blue: 0xFA, alpha: 0xFF),
-            borderWidth: 0,
-            cornerRadius: 11,
-            paddingX: 11,
-            paddingY: 6,
-            inlineGap: 5,
-            minHeight: 32,
-            maxWidth: 210,
-            separatorVisible: false,
-            separatorColor: KeyTaoThemeColor(red: 0xDC, green: 0xE7, blue: 0xF7, alpha: 0xFF),
-            labelSuffix: "."
-        ),
-        navigation: Navigation(
-            foreground: KeyTaoThemeColor(red: 0x4A, green: 0x59, blue: 0x66, alpha: 0xFF),
-            disabledForeground: KeyTaoThemeColor(red: 0xA5, green: 0xB0, blue: 0xB8, alpha: 0xFF),
-            hoverBackground: KeyTaoThemeColor(red: 0xF1, green: 0xF6, blue: 0xFF, alpha: 0xFF),
-            buttonSize: 28,
-            cornerRadius: 10
-        ),
-        modeHint: ModeHint(
-            background: KeyTaoThemeColor(red: 0xE6, green: 0xF0, blue: 0xFF, alpha: 0xF2),
-            foreground: KeyTaoThemeColor(red: 0x2F, green: 0x5F, blue: 0xB8, alpha: 0xFF),
-            fontSize: 24,
-            width: 72,
-            height: 48,
-            cornerRadius: 14,
-            duration: 0.75,
-            shadow: true,
-            chineseText: "中",
-            englishText: "英"
-        )
-    )
-
-    func withAccent(hex: String) -> KeyTaoImeTheme {
-        guard let accent = KeyTaoThemeColor.from(hex: hex) else { return self }
-        var next = self
-        let dark = ui.effectiveColorScheme == "dark"
-        next.ui.accentColor = accent
-        next.candidate.selectedLabelColor = accent
-        next.candidate.selectedBorderColor = accent
-        next.candidate.selectedBackground = Self.mix(
-            base: panel.background,
-            accent: accent,
-            weight: dark ? 0.42 : 0.18
-        )
-        next.candidate.pressedBackground = Self.mix(
-            base: panel.background,
-            accent: accent,
-            weight: dark ? 0.54 : 0.28
-        )
-        next.candidate.hoverBackground = Self.mix(
-            base: panel.background,
-            accent: accent,
-            weight: dark ? 0.22 : 0.09
-        )
-        return next
-    }
-
-    private static func mix(base: KeyTaoThemeColor, accent: KeyTaoThemeColor, weight: CGFloat) -> KeyTaoThemeColor {
-        let ratio = max(0, min(weight, 1))
-        func channel(_ baseValue: Int, _ accentValue: Int) -> Int {
-            Int((CGFloat(baseValue) * (1 - ratio) + CGFloat(accentValue) * ratio).rounded())
+    public static let fallback: KeyTaoImeTheme = {
+        if let theme = KeyTaoIOSThemeResolver.decode(
+            json: KeyTaoIOSThemeResolver.resolveJson(userThemePath: nil, systemColorScheme: .light)
+        ) {
+            return theme
         }
-        return KeyTaoThemeColor(
-            red: channel(base.red, accent.red),
-            green: channel(base.green, accent.green),
-            blue: channel(base.blue, accent.blue),
-            alpha: 0xFF
-        )
-    }
+        let url = KeyTaoIOSBundle.url(forResource: "default-theme-light", withExtension: "json")!
+        return try! JSONDecoder().decode(KeyTaoImeTheme.self, from: Data(contentsOf: url))
+    }()
 }
 
 public enum KeyTaoEffectiveColorScheme: String {

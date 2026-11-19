@@ -220,6 +220,24 @@ pub fn preedit_caret_color(text_color: RgbaColor) -> RgbaColor {
     with_alpha(text_color, (text_color.alpha as f32 * 0.35).round() as u8)
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelShadow {
+    pub color: RgbaColor,
+    pub offset_y: f32,
+    pub blur_radius: f32,
+    pub margin: f32,
+}
+
+pub fn resolved_panel_shadow(enabled: bool) -> Option<PanelShadow> {
+    enabled.then_some(PanelShadow {
+        color: rgba(0, 0, 0, 40),
+        offset_y: 8.0,
+        blur_radius: 16.0,
+        margin: 24.0,
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedImeTheme {
@@ -633,7 +651,6 @@ pub fn resolve_theme_from_paths_with_system_scheme(
 
 /// Scale candidate spacing and secondary fonts from the default candidate size.
 pub fn scaled_candidate_panel(theme: &ResolvedImeTheme) -> ResolvedImeTheme {
-    // Keep in sync with crates/keytao-macos-ime/Sources/KeyTaoIME/ImeTheme.swift::scaledCandidatePanel.
     let scale = theme.font.size / ResolvedImeTheme::default().font.size;
     let mut theme = theme.clone();
     theme.font.label_size *= scale;
@@ -908,7 +925,22 @@ fn resolve_legacy_partials(
 }
 
 pub fn resolved_theme_json(theme: &ResolvedImeTheme) -> Result<String, serde_json::Error> {
-    serde_json::to_string(theme)
+    let mut resolved = serde_json::to_value(theme)?;
+    resolved["font"]["family"] =
+        serde_json::Value::String(theme.font.family.clone().unwrap_or_default());
+    serde_json::to_string(&resolved)
+}
+
+/// Renderer metadata is separate from the frozen v2 resolved-theme contract.
+pub fn resolved_renderer_theme_json(theme: &ResolvedImeTheme) -> Result<String, serde_json::Error> {
+    let mut resolved: serde_json::Value = serde_json::from_str(&resolved_theme_json(theme)?)?;
+    resolved["candidate"]["preeditCaretColor"] =
+        serde_json::to_value(preedit_caret_color(theme.candidate.foreground))?;
+    resolved["panel"]["shadowStyle"] =
+        serde_json::to_value(resolved_panel_shadow(theme.panel.shadow))?;
+    resolved["modeHint"]["shadowStyle"] =
+        serde_json::to_value(resolved_panel_shadow(theme.mode_hint.shadow))?;
+    serde_json::to_string(&resolved)
 }
 
 impl ResolvedImeTheme {

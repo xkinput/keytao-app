@@ -537,14 +537,14 @@ private class KeyboardSideSwitchView(context: Context) : View(context) {
             invalidate()
         }
 
-    private var theme = KeytaoImeTheme.fallback()
+    private var theme = KeytaoImeTheme.fallback(context)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     init {
         isClickable = true
         isFocusable = true
         destination = KeyboardSide.LEFT
-        elevation = dp(2f)
+        elevation = 0f
     }
 
     fun updateTheme(next: KeytaoImeTheme) {
@@ -558,20 +558,23 @@ private class KeyboardSideSwitchView(context: Context) : View(context) {
         val radius = dp(theme.keyCornerRadiusDp)
 
         paint.style = Paint.Style.FILL
+        paint.color = theme.key.shadowColor.toArgb()
+        val shadow = RectF(rect).apply { offset(0f, dp(theme.key.shadowOffsetY)) }
+        canvas.drawRoundRect(shadow, radius, radius, paint)
         paint.color = if (isPressed) {
-            theme.keySelectedBackground.toArgb()
+            theme.key.pressedBackground.toArgb()
         } else {
-            theme.panelBackground.toArgb()
+            theme.key.background.toArgb()
         }
         canvas.drawRoundRect(rect, radius, radius, paint)
 
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(theme.candidateBorderWidthDp.coerceAtLeast(1f))
-        paint.color = theme.panelBorder.toArgb()
-        canvas.drawRoundRect(rect, radius, radius, paint)
+        paint.strokeWidth = dp(theme.key.borderWidth)
+        paint.color = theme.key.borderColor.toArgb()
+        if (paint.strokeWidth > 0f) canvas.drawRoundRect(rect, radius, radius, paint)
 
         paint.color = if (isPressed) {
-            theme.keySelectedForeground.toArgb()
+            theme.key.pressedForeground.toArgb()
         } else {
             theme.keyForeground.toArgb()
         }

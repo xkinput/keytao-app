@@ -2614,11 +2614,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             for: .normal
         )
         button.accessibilityLabel = destination == .left ? "切换到左侧单手键盘" : "切换到右侧单手键盘"
-        button.tintColor = currentTheme.candidate.labelColor.uiColor
-        button.backgroundColor = currentTheme.panel.background.uiColor.withAlphaComponent(0.82)
-        button.layer.cornerRadius = min(8, size * 0.24) * currentTheme.panel.cornerRadius / 16
-        button.layer.borderWidth = max(0.5, currentTheme.panel.borderWidth)
-        button.layer.borderColor = currentTheme.panel.borderColor.uiColor.cgColor
+        button.tintColor = currentTheme.mobile.keyboard.key.foreground.uiColor
+        button.backgroundColor = currentTheme.mobile.keyboard.key.background.uiColor
+        button.layer.cornerRadius = currentTheme.mobile.keyboard.key.cornerRadius
+        button.layer.borderWidth = currentTheme.mobile.keyboard.key.borderWidth
+        button.layer.borderColor = currentTheme.mobile.keyboard.key.borderColor.uiColor.cgColor
         button.isHidden = false
         self.view.bringSubviewToFront(button)
     }
@@ -2648,10 +2648,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         keyboardView.layer.cornerRadius = radius
         keyboardView.layer.cornerCurve = .continuous
         keyboardView.layer.masksToBounds = compact
-        container.layer.shadowColor = UIColor.black.cgColor
-        container.layer.shadowOpacity = compact && currentTheme.panel.shadow ? 0.2 : 0
-        container.layer.shadowRadius = compact ? 9 : 0
-        container.layer.shadowOffset = compact ? CGSize(width: 0, height: 3) : .zero
+        container.layer.shadowColor = currentTheme.mobile.keyboard.floating.shadowColor.uiColor.cgColor
+        container.layer.shadowOpacity = compact ? 1 : 0
+        container.layer.shadowRadius = 0
+        container.layer.shadowOffset = compact ? CGSize(width: 0, height: currentTheme.mobile.keyboard.key.shadowOffsetY) : .zero
         container.layer.shadowPath = compact
             ? UIBezierPath(roundedRect: container.bounds, cornerRadius: radius).cgPath
             : nil

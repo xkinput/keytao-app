@@ -73,6 +73,13 @@ struct ThemeColor: Codable {
 }
 
 struct ImeTheme: Codable {
+    struct ShadowStyle: Codable {
+        var color: ThemeColor
+        var offsetY: CGFloat
+        var blurRadius: CGFloat
+        var margin: CGFloat
+    }
+
     struct Ui: Codable {
         var colorScheme: ThemeColorScheme
         var effectiveColorScheme: EffectiveThemeColorScheme
@@ -109,11 +116,15 @@ struct ImeTheme: Codable {
         var maxHeight: CGFloat
         var screenMargin: CGFloat
         var shadow: Bool
+        var shadowStyle: ShadowStyle?
     }
 
     struct CandidateOption: Codable {
         var background: ThemeColor
         var hoverBackground: ThemeColor
+        var pressedBackground: ThemeColor
+        var pressedForeground: ThemeColor
+        var preeditCaretColor: ThemeColor
         var selectedBackground: ThemeColor
         var foreground: ThemeColor
         var selectedForeground: ThemeColor
@@ -154,6 +165,7 @@ struct ImeTheme: Codable {
         var cornerRadius: CGFloat
         var duration: TimeInterval
         var shadow: Bool
+        var shadowStyle: ShadowStyle?
         var chineseText: String
         var englishText: String
     }
@@ -166,105 +178,21 @@ struct ImeTheme: Codable {
     var navigation: Navigation
     var modeHint: ModeHint
 
-    func scaledCandidatePanel() -> ImeTheme {
-        // Theme spacing and secondary fonts are specified at the default candidate size.
-        let scale = font.size / Self.default.font.size
-        var theme = self
-        theme.font.labelSize *= scale
-        theme.font.commentSize *= scale
-        theme.font.preeditSize *= scale
-        theme.panel.paddingX *= scale
-        theme.panel.paddingY *= scale
-        theme.panel.gap *= scale
-        theme.panel.preeditGap *= scale
-        theme.candidate.paddingX *= scale
-        theme.candidate.paddingY *= scale
-        theme.candidate.inlineGap *= scale
-        theme.candidate.minHeight *= scale
-        theme.navigation.buttonSize *= scale
-        return theme
-    }
+    static let `default`: ImeTheme = {
+        let json: String? = "light".withCString { schemePtr in
+            guard let ptr = keytao_resolve_renderer_theme_json_with_system_scheme(nil, nil, schemePtr) else {
+                return nil
+            }
+            defer { keytao_free_string(ptr) }
+            return String(cString: ptr)
+        }
+        if let json, let theme = try? JSONDecoder().decode(ImeTheme.self, from: Data(json.utf8)) {
+            return theme
+        }
+        return try! JSONDecoder().decode(ImeTheme.self, from: Data(fallbackJSON.utf8))
+    }()
 
-    static var `default`: ImeTheme {
-        ImeTheme(
-            version: 2,
-            ui: Ui(
-                colorScheme: .auto,
-                effectiveColorScheme: .light,
-                accentColor: nil,
-                embeddedComposition: true,
-                hideCandidatePanel: false
-            ),
-            font: Font(
-                family: nil,
-                size: 20,
-                labelSize: 15,
-                commentSize: 16,
-                preeditSize: 15,
-                weight: .semiBold
-            ),
-            panel: Panel(
-                orientation: .horizontal,
-                background: ThemeColor(red: 0xF8, green: 0xFA, blue: 0xFF, alpha: 0xF2),
-                borderColor: ThemeColor(red: 0xB8, green: 0xC3, blue: 0xD0, alpha: 0xFF),
-                borderWidth: 1,
-                cornerRadius: 16,
-                paddingX: 10,
-                paddingY: 10,
-                gap: 4,
-                preeditGap: 10,
-                minWidth: 128,
-                maxWidth: 320,
-                maxHeight: 460,
-                screenMargin: 8,
-                shadow: true
-            ),
-            candidate: CandidateOption(
-                background: ThemeColor(red: 0, green: 0, blue: 0, alpha: 0),
-                hoverBackground: ThemeColor(red: 0xF1, green: 0xF6, blue: 0xFF, alpha: 0xFF),
-                selectedBackground: ThemeColor(red: 0xE6, green: 0xF0, blue: 0xFF, alpha: 0xFF),
-                foreground: ThemeColor(red: 0x26, green: 0x34, blue: 0x42, alpha: 0xFF),
-                selectedForeground: ThemeColor(red: 0x24, green: 0x32, blue: 0x41, alpha: 0xFF),
-                labelColor: ThemeColor(red: 0x7F, green: 0x8D, blue: 0x9C, alpha: 0xFF),
-                selectedLabelColor: ThemeColor(red: 0x4A, green: 0x8D, blue: 0xF6, alpha: 0xFF),
-                commentColor: ThemeColor(red: 0x84, green: 0x92, blue: 0x9E, alpha: 0xFF),
-                selectedCommentColor: ThemeColor(red: 0x61, green: 0x72, blue: 0x86, alpha: 0xFF),
-                borderColor: ThemeColor(red: 0, green: 0, blue: 0, alpha: 0),
-                selectedBorderColor: ThemeColor(red: 0x5D, green: 0xA7, blue: 0xD7, alpha: 0xFF),
-                borderWidth: 1,
-                cornerRadius: 11,
-                paddingX: 10,
-                paddingY: 5,
-                inlineGap: 4,
-                minHeight: 34,
-                maxWidth: 190,
-                separatorVisible: false,
-                separatorColor: ThemeColor(red: 0xDC, green: 0xE7, blue: 0xF7, alpha: 0xFF),
-                labelSuffix: "."
-            ),
-            navigation: Navigation(
-                foreground: ThemeColor(red: 0x68, green: 0x76, blue: 0x84, alpha: 0xFF),
-                disabledForeground: ThemeColor(red: 0xA5, green: 0xB0, blue: 0xB8, alpha: 0xFF),
-                hoverBackground: ThemeColor(red: 0xF1, green: 0xF6, blue: 0xFF, alpha: 0xFF),
-                buttonSize: 28,
-                cornerRadius: 10
-            ),
-            modeHint: ModeHint(
-                background: ThemeColor(red: 0x2D, green: 0x4B, blue: 0x63, alpha: 0xFF),
-                foreground: ThemeColor(red: 0xFF, green: 0xFF, blue: 0xFF, alpha: 0xFF),
-                borderColor: ThemeColor(red: 0x5D, green: 0xA7, blue: 0xD7, alpha: 0xFF),
-                borderWidth: 1,
-                fontSize: 24,
-                width: 72,
-                height: 44,
-                cornerRadius: 14,
-                duration: 0.75,
-                shadow: true,
-                chineseText: "中",
-                englishText: "英"
-            )
-        )
-    }
+    private static let fallbackJSON = #"{"candidate":{"background":{"alpha":0,"blue":0,"green":0,"red":0},"borderColor":{"alpha":0,"blue":0,"green":0,"red":0},"borderWidth":1.0,"commentColor":{"alpha":255,"blue":94,"green":78,"red":63},"cornerRadius":11.0,"foreground":{"alpha":255,"blue":66,"green":52,"red":38},"hoverBackground":{"alpha":255,"blue":255,"green":246,"red":241},"inlineGap":4.0,"labelColor":{"alpha":255,"blue":156,"green":141,"red":127},"labelSuffix":".","maxWidth":190.0,"minHeight":34.0,"paddingX":10.0,"paddingY":5.0,"preeditCaretColor":{"alpha":89,"blue":66,"green":52,"red":38},"pressedBackground":{"alpha":255,"blue":255,"green":231,"red":212},"pressedForeground":{"alpha":255,"blue":59,"green":35,"red":20},"selectedBackground":{"alpha":255,"blue":255,"green":240,"red":230},"selectedBorderColor":{"alpha":255,"blue":215,"green":167,"red":93},"selectedCommentColor":{"alpha":255,"blue":80,"green":62,"red":46},"selectedForeground":{"alpha":255,"blue":65,"green":50,"red":36},"selectedLabelColor":{"alpha":255,"blue":246,"green":141,"red":74},"separatorColor":{"alpha":255,"blue":247,"green":231,"red":220},"separatorVisible":false},"font":{"commentSize":16.0,"family":"","labelSize":15.0,"preeditSize":15.0,"size":20.0,"weight":"semibold"},"mobile":{"candidateBar":{"background":{"alpha":0,"blue":0,"green":0,"red":0},"commentColor":{"alpha":255,"blue":94,"green":78,"red":63},"expandedBackground":{"alpha":242,"blue":254,"green":242,"red":236},"fontScale":1.0,"foreground":{"alpha":255,"blue":66,"green":52,"red":38},"preeditBackground":{"alpha":0,"blue":0,"green":0,"red":0},"preeditForeground":{"alpha":255,"blue":66,"green":52,"red":38},"selectedBackground":{"alpha":255,"blue":255,"green":240,"red":230},"selectedForeground":{"alpha":255,"blue":65,"green":50,"red":36},"showComment":true},"isDark":false,"keyboard":{"background":{"alpha":242,"blue":254,"green":242,"red":236},"floating":{"borderColor":{"alpha":28,"blue":44,"green":34,"red":26},"shadowColor":{"alpha":0,"blue":0,"green":0,"red":0}},"key":{"background":{"alpha":210,"blue":255,"green":255,"red":255},"borderColor":{"alpha":28,"blue":44,"green":34,"red":26},"borderWidth":1.0,"cornerRadius":10.0,"fontScale":1.0,"fontWeight":"semibold","foreground":{"alpha":255,"blue":66,"green":52,"red":38},"hintFontScale":1.0,"hintForeground":{"alpha":255,"blue":94,"green":78,"red":63},"pressedBackground":{"alpha":255,"blue":255,"green":240,"red":230},"pressedForeground":{"alpha":255,"blue":59,"green":35,"red":20},"shadowColor":{"alpha":0,"blue":0,"green":0,"red":0},"shadowOffsetY":1.0,"swipeHintForeground":{"alpha":255,"blue":94,"green":78,"red":63},"swipeHintVisible":true},"keyClasses":{"accent":{"background":{"alpha":255,"blue":253,"green":226,"red":210}},"accentPunctuation":{"background":{"alpha":255,"blue":253,"green":226,"red":210}}},"keyStates":{"selected":{"background":{"alpha":158,"blue":255,"green":240,"red":230},"foreground":{"alpha":255,"blue":65,"green":50,"red":36},"softBackground":{"alpha":255,"blue":253,"green":224,"red":206}},"shiftOn":{"background":{"alpha":255,"blue":253,"green":226,"red":210}}},"keyTypes":{"backspace":{},"character":{},"enter":{},"function":{"background":{"alpha":255,"blue":253,"green":226,"red":210}},"shift":{},"space":{}},"pageBackground":{"alpha":242,"blue":254,"green":242,"red":236},"toolbar":{"background":{"alpha":0,"blue":0,"green":0,"red":0},"foreground":{"alpha":255,"blue":132,"green":118,"red":104},"selectedForeground":{"alpha":255,"blue":246,"green":141,"red":74}}}},"modeHint":{"background":{"alpha":255,"blue":99,"green":75,"red":45},"borderColor":{"alpha":255,"blue":215,"green":167,"red":93},"borderWidth":1.0,"chineseText":"中","cornerRadius":14.0,"duration":0.75,"englishText":"英","fontSize":24.0,"foreground":{"alpha":255,"blue":255,"green":255,"red":255},"height":44.0,"shadow":true,"shadowStyle":{"blurRadius":16.0,"color":{"alpha":40,"blue":0,"green":0,"red":0},"margin":24.0,"offsetY":8.0},"width":72.0},"navigation":{"buttonSize":28.0,"cornerRadius":10.0,"disabledForeground":{"alpha":255,"blue":184,"green":176,"red":165},"foreground":{"alpha":255,"blue":132,"green":118,"red":104},"hoverBackground":{"alpha":255,"blue":255,"green":246,"red":241}},"panel":{"background":{"alpha":242,"blue":255,"green":250,"red":248},"borderColor":{"alpha":255,"blue":208,"green":195,"red":184},"borderWidth":1.0,"cornerRadius":16.0,"gap":4.0,"maxHeight":460.0,"maxWidth":320.0,"minWidth":128.0,"orientation":"vertical","paddingX":10.0,"paddingY":10.0,"preeditGap":10.0,"screenMargin":8.0,"shadow":true,"shadowStyle":{"blurRadius":16.0,"color":{"alpha":40,"blue":0,"green":0,"red":0},"margin":24.0,"offsetY":8.0}},"ui":{"accentColor":null,"backgroundColor":null,"colorScheme":"auto","cornerRadius":null,"effectiveColorScheme":"light","effectiveEmbeddedComposition":false,"embeddedComposition":false,"hideCandidatePanel":false,"showTrayModeIndicator":true},"version":2}"#
 }
 
 extension ImeTheme.Ui {
@@ -378,7 +306,7 @@ final class ImeThemeManager {
     ) -> String? {
         let ptr: UnsafeMutablePointer<CChar>? = withOptionalCString(userThemePath) { userPtr in
             systemColorScheme.withCString { schemePtr in
-                keytao_resolve_theme_json_with_system_scheme(defaultThemePath, userPtr, schemePtr)
+                keytao_resolve_renderer_theme_json_with_system_scheme(defaultThemePath, userPtr, schemePtr)
             }
         }
 

@@ -189,16 +189,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   });
 
   Future<void> _openFile() => _perform(() async {
-    final file = await openFile(
-      acceptedTypeGroups: [
-        const XTypeGroup(
-          label: '主题文件',
-          extensions: ['json'],
-          mimeTypes: ['application/json'],
-          uniformTypeIdentifiers: ['public.json'],
-        ),
-      ],
-    );
+    final file = await openFile();
     if (file == null) return;
     if (await file.length() > 96 * 1024) {
       throw StateError('主题文件超过大小上限');

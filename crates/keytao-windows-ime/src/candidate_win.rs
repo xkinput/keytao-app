@@ -22,7 +22,10 @@ use keytao_core::{
     runtime_log::{self, Level},
     ImeState,
 };
-use keytao_theme::panel_hit::{PanelClick as PanelHit, PanelHitAreas};
+use keytao_theme::{
+    panel_hit::{PanelClick as PanelHit, PanelHitAreas},
+    CandidatePanelModel, ResolvedImeTheme,
+};
 use windows::{
     core::Result,
     Win32::{
@@ -36,7 +39,9 @@ use windows::{
         System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
         System::LibraryLoader::GetModuleHandleW,
         UI::Accessibility::NotifyWinEvent,
+        UI::Controls::WM_MOUSELEAVE,
         UI::HiDpi::{GetDpiForSystem, GetDpiForWindow},
+        UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT},
         UI::Shell::{FrameworkInputPane, IFrameworkInputPane},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
@@ -45,8 +50,9 @@ use windows::{
             EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE, EVENT_OBJECT_IME_SHOW, GWLP_HWNDPARENT,
             GWLP_USERDATA, MA_NOACTIVATE, OBJID_CLIENT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
             SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP,
-            WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_TIMER,
+            WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
 };
@@ -65,7 +71,6 @@ const CARET_RETRY_TIMER_ID: usize = 2;
 const LAYOUT_REPOSITION_TIMER_ID: usize = 3;
 const DEPLOYMENT_HINT_TIMER_ID: usize = 4;
 const PENDING_IME_UI_MESSAGE: u32 = WM_APP + 0x4B;
-const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CARET_RETRY_DELAYS_MS: [u32; 5] = [16, 32, 64, 128, 256];
 
@@ -130,9 +135,9 @@ fn dpi_scale(owner_hwnd: HWND) -> f32 {
 
 fn render_scale_for_dpi(dpi: u32) -> f32 {
     if dpi == 0 {
-        WINDOWS_CANDIDATE_DENSITY
+        1.0
     } else {
-        (dpi as f32 / 96.0).clamp(1.0, 3.0) * WINDOWS_CANDIDATE_DENSITY
+        (dpi as f32 / 96.0).clamp(1.0, 3.0)
     }
 }
 
@@ -180,11 +185,13 @@ fn popup_position_in(
     width: u32,
     height: u32,
     gap: i32,
+    shadow_inset: u32,
 ) -> POINT {
+    let inset = shadow_inset as i32;
     let max_x = (work.right - width as i32).max(work.left);
-    let x = caret_x.clamp(work.left, max_x);
-    let below = caret_y + gap;
-    let above = caret_y - height as i32 - gap;
+    let x = (caret_x - inset).clamp(work.left, max_x);
+    let below = caret_y + gap - inset;
+    let above = caret_y - height as i32 - gap + inset;
     let y = if below + height as i32 <= work.bottom {
         below
     } else {
@@ -200,6 +207,24 @@ struct ClickTarget {
     state: WeakState,
     hit_areas: RefCell<PanelHitAreas>,
     caret_reprobe_pending: Cell<bool>,
+    hovered: Cell<Option<PanelHit>>,
+    pressed: Cell<Option<PanelHit>>,
+}
+
+struct CachedPanel {
+    model: CandidatePanelModel,
+    theme: ResolvedImeTheme,
+    scale: f32,
+    available_width: f32,
+    preedit_caret: Option<usize>,
+    position: POINT,
+}
+
+fn refresh_pointer(hwnd: HWND) {
+    let Some(state) = click_target(hwnd).and_then(|target| target.state.upgrade()) else {
+        return;
+    };
+    crate::state::with_detached_windows(&state, false, |window, _| window.refresh_pointer());
 }
 
 fn click_target<'a>(hwnd: HWND) -> Option<&'a ClickTarget> {
@@ -265,7 +290,40 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
         // Selecting a candidate must never move the caret out of the host.
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as _),
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_MOUSELEAVE => {
+            if let Some(target) = click_target(hwnd) {
+                let hovered = if msg == WM_MOUSELEAVE {
+                    None
+                } else {
+                    let x = (lparam.0 & 0xFFFF) as i16;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16;
+                    let _ = TrackMouseEvent(&mut TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        ..Default::default()
+                    });
+                    target.hit_areas.borrow().click_at(x as f64, y as f64)
+                };
+                let changed = target.hovered.replace(hovered) != hovered;
+                let pressed = if msg == WM_LBUTTONDOWN {
+                    hovered
+                } else if msg == WM_MOUSELEAVE {
+                    None
+                } else {
+                    target.pressed.get()
+                };
+                if target.pressed.replace(pressed) != pressed || changed {
+                    refresh_pointer(hwnd);
+                }
+            }
+            return LRESULT(0);
+        }
         WM_LBUTTONUP => {
+            if let Some(target) = click_target(hwnd) {
+                target.pressed.set(None);
+            }
+            refresh_pointer(hwnd);
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let clicked = click_target(hwnd).and_then(|target| {
@@ -312,7 +370,8 @@ pub struct CandidateWindow {
     input_pane_rect: Option<RECT>,
     input_pane_queried_at: Option<Instant>,
     last_upload: Option<PanelUploadSignature>,
-    last_upload_size: (u32, u32),
+    last_upload_geometry: (u32, u32, u32),
+    cached_panel: Option<CachedPanel>,
 }
 
 impl CandidateWindow {
@@ -329,7 +388,8 @@ impl CandidateWindow {
             input_pane_rect: None,
             input_pane_queried_at: None,
             last_upload: None,
-            last_upload_size: (0, 0),
+            last_upload_geometry: (0, 0, 0),
+            cached_panel: None,
         }
     }
 
@@ -350,7 +410,8 @@ impl CandidateWindow {
             self.owner_hwnd = HWND(std::ptr::null_mut());
             self.visible = false;
             self.last_upload = None;
-            self.last_upload_size = (0, 0);
+            self.last_upload_geometry = (0, 0, 0);
+            self.cached_panel = None;
         }
     }
 
@@ -401,6 +462,8 @@ impl CandidateWindow {
                     },
                     hit_areas: RefCell::new(PanelHitAreas::default()),
                     caret_reprobe_pending: Cell::new(false),
+                    hovered: Cell::new(None),
+                    pressed: Cell::new(None),
                 });
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(target) as _);
@@ -647,8 +710,10 @@ impl CandidateWindow {
         work.left += margin;
         work.right = (work.right - margin).max(work.left + 1);
         let available_width = (work.right - work.left) as f32;
+        let hovered = click_target(self.hwnd).and_then(|target| target.hovered.get());
+        let pressed = click_target(self.hwnd).and_then(|target| target.pressed.get());
         let mut signature = PanelUploadSignature {
-            model: value_signature(&(&model, available_width, preedit_caret)),
+            model: value_signature(&(&model, available_width, preedit_caret, hovered, pressed)),
             position: (0, 0),
             scale: scale.to_bits(),
             theme: value_signature(&theme),
@@ -667,8 +732,8 @@ impl CandidateWindow {
                 && previous.scale == signature.scale
                 && previous.theme == signature.theme
             {
-                let (w, h) = self.last_upload_size;
-                let position = popup_position_in(work, caret_x, caret_y, w, h, gap);
+                let (w, h, inset) = self.last_upload_geometry;
+                let position = popup_position_in(work, caret_x, caret_y, w, h, gap, inset);
                 signature.position = (position.x, position.y);
                 if can_skip_panel_upload(self.visible, self.last_upload, signature) {
                     return self.has_live_window();
@@ -678,12 +743,21 @@ impl CandidateWindow {
         let Some(renderer) = &self.renderer else {
             return false;
         };
-        let rendered = renderer.render(&model, scale, theme, available_width, preedit_caret);
+        let rendered = renderer.render_with_pointer(
+            &model,
+            scale,
+            theme.clone(),
+            available_width,
+            preedit_caret,
+            hovered,
+            pressed,
+        );
         let (w, h) = (rendered.width, rendered.height);
         if w == 0 || h == 0 {
             return false;
         }
-        let position = popup_position_in(work, caret_x, caret_y, w, h, gap);
+        let inset = rendered.shadow_inset;
+        let position = popup_position_in(work, caret_x, caret_y, w, h, gap, inset);
         signature.position = (position.x, position.y);
         if diagnostics_enabled() {
             append_diagnostic(format!(
@@ -699,7 +773,15 @@ impl CandidateWindow {
             *target.hit_areas.borrow_mut() = rendered.hit_areas;
         }
         self.last_upload = Some(signature);
-        self.last_upload_size = (w, h);
+        self.last_upload_geometry = (w, h, inset);
+        self.cached_panel = Some(CachedPanel {
+            model,
+            theme,
+            scale,
+            available_width,
+            preedit_caret,
+            position,
+        });
         if !self.visible {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -733,6 +815,11 @@ impl CandidateWindow {
         let started = (self.visible && !self.click_through && runtime_log::enabled(Level::Info))
             .then(Instant::now);
         self.last_upload = None;
+        self.cached_panel = None;
+        if let Some(target) = click_target(self.hwnd) {
+            target.hovered.set(None);
+            target.pressed.set(None);
+        }
         if !self.hwnd.0.is_null() {
             self.disarm_caret_reprobe();
             self.disarm_layout_reposition();
@@ -757,6 +844,33 @@ impl CandidateWindow {
         }
     }
 
+    fn refresh_pointer(&mut self) {
+        let (Some(cached), Some(renderer), Some(target)) =
+            (&self.cached_panel, &self.renderer, click_target(self.hwnd))
+        else {
+            return;
+        };
+        let rendered = renderer.render_with_pointer(
+            &cached.model,
+            cached.scale,
+            cached.theme.clone(),
+            cached.available_width,
+            cached.preedit_caret,
+            target.hovered.get(),
+            target.pressed.get(),
+        );
+        unsafe {
+            self.upload_pixels(
+                &rendered.pixels,
+                rendered.width,
+                rendered.height,
+                cached.position.x,
+                cached.position.y,
+            );
+        }
+        self.last_upload = None;
+    }
+
     pub fn show_mode_hint(
         &mut self,
         ascii_mode: bool,
@@ -775,21 +889,30 @@ impl CandidateWindow {
         let scale = dpi_scale(self.owner_hwnd);
         let theme = current_theme();
         let hint_duration_ms = PanelRenderer::mode_hint_duration_ms(&theme);
-        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode, scale, theme);
+        let rendered = renderer.render_mode_hint(ascii_mode, scale, theme);
+        let (w, h) = (rendered.width, rendered.height);
         if w == 0 || h == 0 {
             return;
         }
 
-        let anchor_x = caret_x - w as i32 / 2;
+        let inset = rendered.shadow_inset;
+        let anchor_x = caret_x - (w - inset * 2) as i32 / 2;
         let work = self.available_area(POINT {
             x: anchor_x,
             y: caret_y,
         });
-        let position =
-            popup_position_in(work, anchor_x, caret_y, w, h, (8.0 * scale).round() as i32);
+        let position = popup_position_in(
+            work,
+            anchor_x,
+            caret_y,
+            w,
+            h,
+            (8.0 * scale).round() as i32,
+            inset,
+        );
 
         unsafe {
-            if !self.upload_pixels(&pixels, w, h, position.x, position.y) {
+            if !self.upload_pixels(&rendered.pixels, w, h, position.x, position.y) {
                 return;
             }
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -1190,10 +1313,10 @@ mod tests {
     }
 
     #[test]
-    fn render_scale_combines_monitor_dpi_with_compact_windows_density() {
-        assert!((render_scale_for_dpi(96) - 0.82).abs() < 0.001);
-        assert!((render_scale_for_dpi(144) - 1.23).abs() < 0.001);
-        assert!((render_scale_for_dpi(192) - 1.64).abs() < 0.001);
+    fn render_scale_converts_resolved_dips_to_monitor_pixels() {
+        assert!((render_scale_for_dpi(96) - 1.0).abs() < 0.001);
+        assert!((render_scale_for_dpi(144) - 1.5).abs() < 0.001);
+        assert!((render_scale_for_dpi(192) - 2.0).abs() < 0.001);
     }
 
     #[test]
@@ -1244,8 +1367,50 @@ mod tests {
                 bottom: 1080,
             },
         );
-        let position = popup_position_in(work, 300, 660, 400, 120, 4);
+        let position = popup_position_in(work, 300, 660, 400, 120, 4, 0);
         assert!(position.y + 120 <= 700, "panel must stay above the pane");
+    }
+
+    #[test]
+    fn shadow_inset_keeps_the_panel_body_at_the_caret() {
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let inset = (24.0 * scale).ceil() as i32;
+            let width = (200.0 * scale) as u32 + 2 * inset as u32;
+            let height = (80.0 * scale) as u32 + 2 * inset as u32;
+            let gap = (4.0 * scale).round() as i32;
+            let below = popup_position_in(work_area(), 300, 200, width, height, gap, inset as u32);
+            assert_eq!((below.x + inset, below.y + inset), (300, 200 + gap));
+            let caret_y = work_area().bottom - inset - gap;
+            let above = popup_position_in(work_area(), 300, caret_y, width, height, gap, inset as u32);
+            assert_eq!(above.x + inset, 300);
+            assert_eq!(above.y + height as i32 - inset, caret_y - gap);
+        }
+    }
+
+    #[test]
+    fn shadow_window_clamps_to_the_work_area_and_centers_mode_hint_body() {
+        let work = work_area();
+        let (width, height, inset) = (248, 128, 24);
+        for caret_x in [-20, 1910] {
+            let position = popup_position_in(work, caret_x, 200, width, height, 4, inset);
+            assert!(position.x >= work.left);
+            assert!(position.x + width as i32 <= work.right);
+        }
+        for caret_y in [0, 2000] {
+            let position = popup_position_in(work, 300, caret_y, width, height, 4, inset);
+            assert!(position.y >= work.top);
+            assert!(position.y + height as i32 <= work.bottom);
+        }
+        let anchor_x = 300 - (width - inset * 2) as i32 / 2;
+        for caret_y in [200, 1050] {
+            let position = popup_position_in(work, anchor_x, caret_y, width, height, 8, inset);
+            assert_eq!(position.x + width as i32 / 2, 300);
+            if caret_y == 200 {
+                assert_eq!(position.y + inset as i32, caret_y + 8);
+            } else {
+                assert_eq!(position.y + height as i32 - inset as i32, caret_y - 8);
+            }
+        }
     }
 
     #[test]

@@ -197,12 +197,9 @@ class MobileKeyboardPreview extends StatelessWidget {
                             Expanded(
                               child: Container(
                                 height: _candidateBarHeight,
-                                color: _color(
-                                  candidateBar,
-                                  index == 0
-                                      ? 'selectedBackground'
-                                      : 'background',
-                                ),
+                                color: index == 0
+                                    ? _color(candidateBar, 'selectedBackground')
+                                    : null,
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 4,
                                 ),

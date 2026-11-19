@@ -175,7 +175,6 @@ fn installed_sources(theme_path: &Path) -> Result<Vec<ThemeSource>, String> {
     }
     ids.sort();
     for id in ids {
-        check_store_path(theme_path, &source_path(theme_path, &id))?;
         if let Ok(source) = read_source(theme_path, &id) {
             sources.push(source);
         }

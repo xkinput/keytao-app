@@ -1,6 +1,7 @@
 import Cocoa
 
 final class ModeIndicatorPanel: NSPanel {
+    private let rootView = NSView()
     private let containerView = NSView()
     private let label = NSTextField(labelWithString: "")
     private var hideTimer: Timer?
@@ -25,10 +26,11 @@ final class ModeIndicatorPanel: NSPanel {
         apply(theme)
 
         label.stringValue = modeHint.text
+        let margin = theme.modeHint.shadow ? (theme.modeHint.shadowStyle?.margin ?? 0) : 0
+        let padding = theme.modeHint.fontSize / 3
         let contentSize = label.intrinsicContentSize
-        let padding = theme.font.size / 3
-        let size = NSSize(width: contentSize.width + padding * 2, height: contentSize.height + padding * 2)
-        containerView.layer?.cornerRadius = min(theme.modeHint.cornerRadius, size.height / 2)
+        let bodySize = NSSize(width: max(theme.modeHint.width, contentSize.width + padding * 2), height: max(theme.modeHint.height, contentSize.height + padding * 2))
+        let size = NSSize(width: bodySize.width + margin * 2, height: bodySize.height + margin * 2)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let anchor = cursorRect.isUsableTextInputRect
@@ -37,12 +39,14 @@ final class ModeIndicatorPanel: NSPanel {
 
         var origin = NSPoint(
             x: anchor.midX - size.width / 2,
-            y: anchor.minY - size.height - 8
+            y: anchor.minY - bodySize.height - margin - 8
         )
         origin.x = min(max(origin.x, visibleFrame.minX + 8), visibleFrame.maxX - size.width - 8)
         origin.y = min(max(origin.y, visibleFrame.minY + 8), visibleFrame.maxY - size.height - 8)
 
         setFrame(NSRect(origin: origin, size: size), display: true, animate: false)
+        containerView.frame = NSRect(origin: NSPoint(x: margin, y: margin), size: bodySize)
+        rootView.layer?.shadowPath = CGPath(roundedRect: containerView.frame, cornerWidth: theme.modeHint.cornerRadius, cornerHeight: theme.modeHint.cornerRadius, transform: nil)
         orderFront(nil)
 
         hideTimer?.invalidate()
@@ -77,16 +81,23 @@ final class ModeIndicatorPanel: NSPanel {
             label.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
         ])
 
-        contentView = containerView
+        rootView.wantsLayer = true
+        rootView.addSubview(containerView)
+        contentView = rootView
     }
 
     private func apply(_ theme: ImeTheme) {
-        hasShadow = theme.modeHint.shadow
+        hasShadow = false
+        let shadow = theme.modeHint.shadowStyle
+        rootView.layer?.shadowOpacity = theme.modeHint.shadow ? 1 : 0
+        rootView.layer?.shadowColor = shadow?.color.cgColor
+        rootView.layer?.shadowOffset = CGSize(width: 0, height: -(shadow?.offsetY ?? 0))
+        rootView.layer?.shadowRadius = (shadow?.blurRadius ?? 0) / 2
         containerView.layer?.backgroundColor = theme.modeHint.background.cgColor
         containerView.layer?.borderColor = theme.modeHint.borderColor.cgColor
         containerView.layer?.borderWidth = theme.modeHint.borderWidth
         containerView.layer?.cornerRadius = theme.modeHint.cornerRadius
-        label.font = .systemFont(ofSize: theme.font.size, weight: .semibold)
+        label.font = .keytaoThemeFont(family: theme.font.family, size: theme.modeHint.fontSize, weight: theme.font.weight)
         label.textColor = theme.modeHint.foreground.nsColor
     }
 }
