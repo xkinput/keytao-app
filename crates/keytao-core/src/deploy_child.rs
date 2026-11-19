@@ -94,90 +94,13 @@ fn windows_schema_build_outputs(
     schemas: &[String],
     require_current_inputs: bool,
 ) -> Option<std::collections::BTreeSet<String>> {
-    let fingerprints = if require_current_inputs {
-        Some(crate::schema_input_fingerprints(user_dir, schemas).ok()?)
-    } else {
-        None
-    };
-    let mut pending = schemas.to_vec();
-    let mut visited = std::collections::BTreeSet::new();
-    let mut outputs = std::collections::BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !crate::valid_rime_build_id(&id) {
-            return None;
-        }
-        if !visited.insert(id.clone()) {
-            continue;
-        }
-        if fingerprints
-            .as_ref()
-            .is_some_and(|saved| !saved.get(&id).is_some_and(Option::is_some))
-        {
-            return None;
-        }
-        let path = format!("{id}.schema.yaml");
-        let bytes = std::fs::read(user_dir.join("build").join(&path)).ok()?;
-        let value: serde_yaml::Value = serde_yaml::from_slice(&bytes).ok()?;
-        if value["schema"]["schema_id"].as_str()? != id {
-            return None;
-        }
-        if !value["schema"]["dependencies"].is_null() {
-            for dependency in value["schema"]["dependencies"].as_sequence()? {
-                pending.push(dependency.as_str()?.to_owned());
-            }
-        }
-        collect_windows_dictionary_outputs(&value, &mut outputs, require_current_inputs)?;
-        outputs.insert(path);
-    }
-    Some(outputs)
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn collect_windows_dictionary_outputs(
-    value: &serde_yaml::Value,
-    outputs: &mut std::collections::BTreeSet<String>,
-    protect_references: bool,
-) -> Option<()> {
-    use serde_yaml::Value;
-    fn build_id(value: &Value) -> Option<&str> {
-        value.as_str().filter(|id| crate::valid_rime_build_id(id))
-    }
-    match value {
-        Value::Mapping(mapping) => {
-            if let Some(dictionary) = value.get("dictionary") {
-                if dictionary.as_str() != Some("") {
-                    let id = build_id(dictionary)?;
-                    outputs.extend([format!("{id}.table.bin"), format!("{id}.reverse.bin")]);
-                    let prism = value.get("prism").map_or(Some(id), build_id)?;
-                    outputs.insert(format!("{prism}.prism.bin"));
-                }
-            }
-            if let Some(packs) = value.get("packs") {
-                for pack in packs.as_sequence()? {
-                    let id = build_id(pack)?;
-                    outputs.insert(format!("{id}.table.bin"));
-                    // Packs own tables only; retained references also protect dictionary bins.
-                    if protect_references {
-                        outputs.insert(format!("{id}.reverse.bin"));
-                    }
-                }
-            }
-            for (key, value) in mapping {
-                // Unresolved directives cannot establish exclusive output ownership.
-                if matches!(key.as_str(), Some("__include" | "__patch")) {
-                    return None;
-                }
-                collect_windows_dictionary_outputs(value, outputs, protect_references)?;
-            }
-        }
-        Value::Sequence(values) => {
-            for value in values {
-                collect_windows_dictionary_outputs(value, outputs, protect_references)?;
-            }
-        }
-        _ => {}
-    }
-    Some(())
+    crate::build_prune::reachable_rime_build_outputs(
+        user_dir,
+        None,
+        schemas,
+        require_current_inputs,
+        false,
+    )
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -187,11 +110,8 @@ fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), Strin
     crate::clear_windows_rime_build_repair_marker(user_dir)?;
     crate::ReloadStamp::write(user_dir)?;
     match cleanup {
-        Some(paths) => {
-            for path in paths {
-                crate::remove_rime_build_artifact(&user_dir.join("build").join(path))?;
-            }
-        }
+        // Obsolete outputs are pruned only after the deployment succeeds.
+        Some(_) => {}
         None => {
             crate::remove_rime_build_artifact(&user_dir.join("build/.keytao-desktop-inputs.json"))?;
             crate::invalidate_active_windows_rime_build(user_dir)?;
@@ -920,11 +840,41 @@ mod tests {
                 .collect();
             prepare_windows_deploy(&root, &signature).unwrap();
             for name in outputs {
-                assert!(!root.join("build").join(name).exists());
+                assert!(root.join("build").join(name).exists());
             }
             for (path, bytes) in retained {
                 assert_eq!(std::fs::read(path).unwrap(), bytes);
             }
+            std::fs::write(
+                root.join("build/default.yaml"),
+                "schema_list: [{schema: keytao}]\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("rime.lua"), "require('keytao_filter')\n").unwrap();
+            std::fs::create_dir_all(root.join("lua")).unwrap();
+            std::fs::write(root.join("lua/keytao_filter.lua"), "local dict = env.engine.schema.config:get_string('translator/dictionary')\nlocal db = ReverseDb('build/' .. dict .. '.reverse.bin')\nlocal arithmetic = load('return 1 + 1')\n").unwrap();
+            crate::begin_deployment(&root).unwrap();
+            crate::complete_deployment_with_cleanup(&root, || {
+                crate::prune_rime_build_artifacts(&root, None).map(|_| ())
+            })
+            .unwrap();
+            let removed = matches!(mode, "exclusive" | "removed_pack");
+            for suffix in ["schema.yaml", "table.bin", "reverse.bin", "prism.bin"] {
+                assert_eq!(
+                    root.join(format!("build/keydo.{suffix}")).exists(),
+                    !removed,
+                    "{mode}: {suffix}"
+                );
+            }
+            assert!(root.join("build/keytao.schema.yaml").is_file());
+            assert!(root.join(format!("build/{dictionary}.table.bin")).is_file());
+            if mode == "removed_pack" {
+                assert!(!root.join("build/extra.table.bin").exists());
+                assert!(!root.join("build/extra.reverse.bin").exists());
+            }
+            assert!(crate::schema_install_state(&root).deployed);
+            assert!(!root.join("build/.keytao-deploying").exists());
+            assert!(crate::ReloadStamp::path(&root).is_file());
             for (path, content) in preserved {
                 assert_eq!(std::fs::read(root.join(path)).unwrap(), content.as_bytes());
             }

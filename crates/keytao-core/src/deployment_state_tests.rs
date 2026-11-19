@@ -63,6 +63,40 @@ fn schema_install_state_rejects_partial_and_interrupted_builds() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn completion_succeeds_and_keeps_stale_file_when_prune_cannot_remove_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    fs::write(
+        dir.join("build/default.yaml"),
+        "schema_list: [{schema: keytao}]\n",
+    )
+    .unwrap();
+    let stale = dir.join("build/stale.table.bin");
+    fs::write(&stale, b"stale").unwrap();
+    begin_deployment(&dir).unwrap();
+    super::complete_deployment_with_cleanup(&dir, || {
+        assert!(deployment_in_progress(&dir));
+        assert!(!dir.join("build/.keytao-deployed").exists());
+        let build = dir.join("build");
+        let permissions = fs::metadata(&build).unwrap().permissions();
+        fs::set_permissions(&build, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = super::prune_rime_build_artifacts(&dir, None);
+        fs::set_permissions(&build, permissions).unwrap();
+        result.map(|_| ())
+    })
+    .unwrap();
+    assert_eq!(fs::read(stale).unwrap(), b"stale");
+    assert!(!deployment_in_progress(&dir));
+    assert!(!dir.join("build/.keytao-deploying").exists());
+    assert!(dir.join("build/.keytao-deployed").is_file());
+    assert!(schema_install_state(&dir).deployed);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn schema_install_state_accepts_successful_deployment_marker() {
     let dir = installed_schema();

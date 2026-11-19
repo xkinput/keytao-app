@@ -380,7 +380,7 @@ fn public_build_key(
         .into_iter()
         .collect();
     let inputs = serde_json::to_vec(&(
-        1,
+        2,
         snapshot_hash(files.iter().filter(|(path, _)| !path.starts_with("build"))),
         version.trim(),
         shared.to_string_lossy(),

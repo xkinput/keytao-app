@@ -68,6 +68,11 @@ pub fn record_android_result(
     if !success {
         return Ok(());
     }
+    verify_android_deployment(root)?;
+    record_result(core, root, true)
+}
+
+pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), CoreError> {
     let config = [
         "build/default.yaml",
         "default.custom.yaml",
@@ -77,8 +82,7 @@ pub fn record_android_result(
     .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
     .ok_or_else(|| CoreError::Other("Android RIME 部署缺少方案配置".into()))?;
     let schemas = crate::scheme_files::parse_schema_list(&config);
-    crate::upload_bundle::verify_deploy_artifacts(root, Some(&root.join("rime-data")), &schemas)?;
-    record_result(core, root, true)
+    crate::upload_bundle::verify_deploy_artifacts(root, Some(&root.join("rime-data")), &schemas)
 }
 
 pub fn render_user_schema_logos(user_dir: &std::path::Path) {
