@@ -199,6 +199,128 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
 }
 
 #[tokio::test]
+async fn reactivation_preserves_identical_mtimes_and_rewrites_changed_files() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let mut entries = files("alpha");
+    store(&host, "keytao", entries.clone());
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    // The first reactivation also normalizes the active Lua manifest.
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    let mut paths: Vec<_> = [
+        "alpha.schema.yaml", "alpha.custom.yaml", "lua/alpha.lua", "shared.txt",
+        "default.custom.yaml", "rime.lua", keytao_core::ACTIVE_SCHEME_MANIFEST,
+        ".keytao-package-lua/keytao/lua/alpha.lua",
+    ].into_iter().map(|path| host.root.join(path)).collect();
+    paths.push(PackageStore::new(&host.core).checked_activation_path().unwrap());
+    let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    for path in &paths {
+        fs::File::options().write(true).open(path).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified)).unwrap();
+    }
+    let before = snapshot(&host.root);
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert_eq!(snapshot(&host.root), before);
+    for path in &paths {
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified, "{}", path.display());
+    }
+
+    for (path, content) in [
+        ("alpha.user.dict.yaml", b"name: alpha.user\n".as_slice()),
+        ("alpha.userdb/data", b"user database"),
+        ("user.custom.yaml", b"patch: {menu/page_size: 9}\n"),
+    ] {
+        write(&host.root, path, content);
+    }
+    let user_files = snapshot(&host.root);
+    entries.iter_mut().find(|(path, _)| path == "alpha.schema.yaml").unwrap().1
+        .extend_from_slice(b"menu: {page_size: 8}\n");
+    write(&host.root, "build/alpha.schema.yaml", b"stale schema");
+    write(&host.root, "build/alpha.prism.bin", b"stale prism");
+    store(&host, "keytao", entries.clone());
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    let schema = host.root.join("alpha.schema.yaml");
+    assert_eq!(fs::read(&schema).unwrap(), entries[0].1);
+    assert_ne!(fs::metadata(schema).unwrap().modified().unwrap(), modified);
+    assert!(!host.root.join("build/alpha.schema.yaml").exists());
+    assert!(!host.root.join("build/alpha.prism.bin").exists());
+    let after = snapshot(&host.root);
+    for path in ["alpha.user.dict.yaml", "alpha.userdb/data", "user.custom.yaml"] {
+        assert_eq!(after[path], user_files[path], "{path}");
+    }
+}
+
+#[tokio::test]
+async fn reactivation_invalidates_only_changed_or_unknown_schema_builds() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let mut entries = files("alpha");
+    entries.push(("beta.schema.yaml".into(), b"schema: {schema_id: beta}\n".to_vec()));
+    store(&host, "keytao", entries.clone());
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    let compiled = |id: &str| {
+        let custom_stamp = u8::from(host.root.join(format!("{id}.custom.yaml")).is_file());
+        let mut bytes = format!("__build_info: {{timestamps: {{{id}.schema: 1, {id}.custom: {custom_stamp}}}}}\n").into_bytes();
+        bytes.extend_from_slice(&fs::read(host.root.join(format!("{id}.schema.yaml"))).unwrap());
+        write(&host.root, &format!("build/{id}.schema.yaml"), &bytes);
+        write(&host.root, &format!("build/{id}.prism.bin"), b"compiled prism");
+    };
+    compiled("alpha");
+    compiled("beta");
+    keytao_core::record_schema_input_fingerprints(&host.root, &["alpha".into(), "beta".into()]).unwrap();
+    let build_paths: Vec<_> = ["alpha", "beta"].into_iter()
+        .flat_map(|id| [format!("build/{id}.schema.yaml"), format!("build/{id}.prism.bin")])
+        .map(|name| host.root.join(name)).collect();
+    let before: Vec<_> = build_paths.iter().map(|path| fs::metadata(path).unwrap().modified().unwrap()).collect();
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    for (path, modified) in build_paths.iter().zip(before) {
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified, "{}", path.display());
+    }
+    for (name, bytes) in [
+        ("alpha.user.dict.yaml", b"keep words".as_slice()),
+        ("alpha.userdb/data", b"keep database"),
+        ("user.custom.yaml", b"patch: {keep: true}\n"),
+    ] {
+        write(&host.root, name, bytes);
+    }
+    entries.iter_mut().find(|(name, _)| name == "alpha.schema.yaml").unwrap().1.extend_from_slice(b"menu: {page_size: 9}\n");
+    store(&host, "keytao", entries);
+    let result = activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert!(!host.root.join("build/alpha.schema.yaml").exists(), "{:?}", result.logs);
+    assert!(!host.root.join("build/alpha.prism.bin").exists());
+    assert!(host.root.join("build/beta.schema.yaml").exists(), "{:?}", result.logs);
+    assert!(host.root.join("build/beta.prism.bin").exists());
+    compiled("alpha");
+    keytao_core::record_schema_input_fingerprints(&host.root, &["alpha".into(), "beta".into()]).unwrap();
+    write(&host.root, "build/alpha.schema.yaml", b"schema: {schema_id: alpha}\n");
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert!(!host.root.join("build/alpha.schema.yaml").exists());
+    assert!(!host.root.join("build/alpha.prism.bin").exists());
+    assert!(host.root.join("build/beta.schema.yaml").exists());
+    assert!(host.root.join("build/beta.prism.bin").exists());
+    compiled("alpha");
+    write(&host.root, "beta.custom.yaml", b"patch: {user_value: 2}\n");
+    // A successful alpha-only deployment must not certify beta's stale build.
+    keytao_core::record_schema_input_fingerprints(&host.root, &["alpha".into()]).unwrap();
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert!(host.root.join("build/alpha.schema.yaml").exists());
+    assert!(host.root.join("build/alpha.prism.bin").exists());
+    assert!(!host.root.join("build/beta.schema.yaml").exists());
+    assert!(!host.root.join("build/beta.prism.bin").exists());
+    assert!(fs::read_to_string(host.root.join("beta.custom.yaml")).unwrap().contains("user_value: 2"));
+    for (name, bytes) in [
+        ("alpha.user.dict.yaml", b"keep words".as_slice()),
+        ("alpha.userdb/data", b"keep database"),
+        ("user.custom.yaml", b"patch: {keep: true}\n"),
+    ] {
+        assert_eq!(fs::read(host.root.join(name)).unwrap(), bytes, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn installed_package_updates_preserve_selected_schema_and_other_activations() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     for updated in ["keytao", "xmjd"] {
@@ -1003,7 +1125,10 @@ async fn switching_keeps_installed_package_dictionary_binaries() {
         .await
         .unwrap();
     let schema_source = fs::read(host.root.join("alpha.schema.yaml")).unwrap();
-    write(&host.root, "build/alpha.schema.yaml", &schema_source);
+    let mut compiled = b"__build_info: {timestamps: {alpha.schema: 1, alpha.custom: 1}}\n".to_vec();
+    compiled.extend_from_slice(&schema_source);
+    write(&host.root, "build/alpha.schema.yaml", &compiled);
+    keytao_core::record_schema_input_fingerprints(&host.root, &["alpha".into()]).unwrap();
     for dictionary in ["shared", "alpha_only"] {
         for extension in ["table", "prism", "reverse"] {
             write(

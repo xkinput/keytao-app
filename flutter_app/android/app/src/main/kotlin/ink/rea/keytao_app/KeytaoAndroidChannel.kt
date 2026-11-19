@@ -28,9 +28,13 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.DataInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
+import java.security.DigestInputStream
 import java.security.DigestOutputStream
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -682,7 +686,35 @@ class KeytaoAndroidChannel(
                     }
                     return current
                 }
+                fun matchesExisting(existingUri: Uri?, content: () -> InputStream): Boolean {
+                    if (existingUri == null) return false
+                    try {
+                        val existing = activity.contentResolver.openInputStream(existingUri) ?: return false
+                        DataInputStream(existing).use { current ->
+                            content().use { expected ->
+                                val currentBytes = ByteArray(65536)
+                                val expectedBytes = ByteArray(65536)
+                                while (true) {
+                                    val count = expected.read(expectedBytes)
+                                    if (count == -1) return current.read() == -1
+                                    current.readFully(currentBytes, 0, count)
+                                    for (index in 0 until count) {
+                                        if (currentBytes[index] != expectedBytes[index]) return false
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: IOException) {
+                        return false
+                    } catch (_: SecurityException) {
+                        return false
+                    }
+                }
                 fun writeToDir(dir: DocumentFile, filename: String, content: ByteArray, relative: String, merged: Boolean = false) {
+                    if (matchesExisting(getCachedFileMap(dir)[filename]) { content.inputStream() }) {
+                        logs.add(if (merged) "[MERGED] $relative" else "[OK] $relative")
+                        return
+                    }
                     val outUri = getOrCreateFileUri(dir, filename)
                         ?: throw Exception("Failed to create: $filename")
                     val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
@@ -801,14 +833,20 @@ class KeytaoAndroidChannel(
                                     processed++; emitProgress(filename)
                                     continue
                                 }
-                                val outUri = getOrCreateFileUri(dir, filename)
-                                    ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread reply.error("Failed to create: $filename") }
-                                val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
-                                if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
                                 val digest = MessageDigest.getInstance("SHA-256")
-                                pfd.use {
-                                    DigestOutputStream(FileOutputStream(it.fileDescriptor), digest).buffered(65536).use { out ->
-                                        zip.getInputStream(entry).use { input -> input.copyTo(out, 65536) }
+                                val unchanged = matchesExisting(getCachedFileMap(dir)[filename]) {
+                                    DigestInputStream(zip.getInputStream(entry), digest)
+                                }
+                                if (!unchanged) {
+                                    digest.reset()
+                                    val outUri = getOrCreateFileUri(dir, filename)
+                                        ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread reply.error("Failed to create: $filename") }
+                                    val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                                    if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
+                                    pfd.use {
+                                        DigestOutputStream(FileOutputStream(it.fileDescriptor), digest).buffered(65536).use { out ->
+                                            zip.getInputStream(entry).use { input -> input.copyTo(out, 65536) }
+                                        }
                                     }
                                 }
                                 if (!decision.isProtected && isPackageManifestPath(relative)) {
@@ -831,6 +869,11 @@ class KeytaoAndroidChannel(
                         for ((newName, bytes) in renamedLuaFiles) {
                             val fname = "$newName.lua"
                             val existing = luaDir.findFile(fname)
+                            if (matchesExisting(existing?.uri) { bytes.inputStream() }) {
+                                logs.add("[RENAMED] lua/$fname")
+                                packageManifest.remove("lua/$fname")
+                                continue
+                            }
                             val outUri = if (existing != null) existing.uri
                             else luaDir.createFile("application/octet-stream", fname)?.uri
                             if (outUri == null) { logs.add("[ERROR] createFile for renamed: lua/$fname"); continue }

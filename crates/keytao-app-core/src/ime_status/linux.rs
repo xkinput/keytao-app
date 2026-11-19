@@ -20,7 +20,6 @@ pub struct LinuxImeStatus {
 #[derive(Clone)]
 struct KeytaoImeProcess {
     pid: u32,
-    line: String,
     kde_native: bool,
 }
 
@@ -409,7 +408,6 @@ fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
                     }
                     Some(KeytaoImeProcess {
                         pid,
-                        line: line.to_owned(),
                         kde_native: process_has_wayland_socket(pid),
                     })
                 })
@@ -494,6 +492,38 @@ fn stop_external_keytao_ime_processes() {
 fn process_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
+
+fn same_executable(running: &std::path::Path, expected: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(running), std::fs::metadata(expected)) {
+        (Ok(running), Ok(expected)) => {
+            running.dev() == expected.dev() && running.ino() == expected.ino()
+        }
+        _ => false,
+    }
+}
+
+fn running_ime_matches_command(pid: u32, command: &std::process::Command) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let program = std::path::Path::new(command.get_program());
+    let expected = if program.components().count() > 1 {
+        program.to_path_buf()
+    } else {
+        let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).map(|dir| dir.join(program)).find(|path| {
+                std::fs::metadata(path).is_ok_and(|meta| {
+                    meta.is_file() && meta.permissions().mode() & 0o111 != 0
+                })
+            })
+        }) else {
+            return false;
+        };
+        path
+    };
+    // /proc keeps the old inode after an executable is replaced at the same path.
+    same_executable(std::path::Path::new(&format!("/proc/{pid}/exe")), &expected)
+}
+
 pub fn launch_keytao_ime(
     core: &Core,
     host: &impl ImeHost,
@@ -506,16 +536,8 @@ pub fn launch_keytao_ime(
         keytao_ime_ready_path(false).ok_or("启动 keytao-ime 失败：无法确定运行时目录")?;
     let processes = keytao_ime_process_entries();
     let ready_pid = ready_keytao_ime_pid(&processes, false);
-    if !restart && ready_pid.is_some() {
-        let same_binary = ime_display == "keytao-ime"
-            || processes.iter().any(|process| {
-                Some(process.pid) == ready_pid && process.line.contains(&ime_display)
-            });
-        let message = if same_binary {
-            format!("keytao-ime 已在运行：{ime_display}")
-        } else {
-            format!("已有其他 keytao-ime 进程在运行，当前 app 期望使用：{ime_display}")
-        };
+    if !restart && ready_pid.is_some_and(|pid| running_ime_matches_command(pid, &ime_cmd)) {
+        let message = format!("keytao-ime 已在运行：{ime_display}");
         return Ok(linux_ime_status_with_message(core, host, message));
     }
     if restart || processes.iter().any(|process| !process.kde_native) {
@@ -543,7 +565,6 @@ pub fn launch_keytao_ime(
         }
         let process = KeytaoImeProcess {
             pid,
-            line: String::new(),
             kde_native: process_has_wayland_socket(pid),
         };
         if ready_keytao_ime_pid(&[process], false) == Some(pid) {
@@ -574,10 +595,24 @@ mod tests {
     use super::{KeytaoImeProcess, is_upgrade_deploy_command_line, matching_ready_pid};
 
     #[test]
+    fn executable_identity_detects_replacement_at_the_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().join("keytao-ime");
+        let running = dir.path().join("running");
+        std::fs::write(&expected, "old").unwrap();
+        std::fs::hard_link(&expected, &running).unwrap();
+        assert!(super::same_executable(&running, &expected));
+        let replacement = dir.path().join("new");
+        std::fs::write(&replacement, "new").unwrap();
+        std::fs::rename(replacement, &expected).unwrap();
+        assert!(!super::same_executable(&running, &expected));
+        assert!(!super::same_executable(&running, &dir.path().join("missing")));
+    }
+
+    #[test]
     fn ready_record_requires_matching_process_and_backend_role() {
         let processes = [KeytaoImeProcess {
             pid: 42,
-            line: "42 /usr/bin/keytao-ime".into(),
             kde_native: false,
         }];
         assert_eq!(
@@ -597,7 +632,6 @@ mod tests {
     fn ready_record_rejects_incomplete_or_invalid_data() {
         let processes = [KeytaoImeProcess {
             pid: 42,
-            line: String::new(),
             kde_native: false,
         }];
         for content in [

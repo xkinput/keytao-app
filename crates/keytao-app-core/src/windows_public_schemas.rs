@@ -21,6 +21,7 @@ use std::{
 static PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
+const PUBLIC_BUILD_KEY_FILE: &str = "public-build-key.txt";
 const LUA_SNAPSHOTS: &str = ".keytao-package-lua";
 const CURRENT_SCHEMA: &str = ".keytao-current-schema";
 
@@ -87,7 +88,7 @@ pub struct PublicSchemaUpdate {
     root: PathBuf,
     previous: GenerationPointers,
     _backup_lock: Option<std::fs::File>,
-    backup: Option<tempfile::TempDir>,
+    _backup: Option<tempfile::TempDir>,
     published: GenerationPointers,
     published_sources: String,
 }
@@ -136,6 +137,8 @@ impl PublicSchemaCheckpoint {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         std::fs::create_dir_all(&self.root).map_err(|error| error.to_string())?;
+        #[cfg(target_os = "windows")]
+        grant_appcontainer_read(&self.root, false)?;
         for generation in self.previous.generations() {
             if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err("invalid public schema checkpoint identifier".into());
@@ -148,10 +151,10 @@ impl PublicSchemaCheckpoint {
                 link_snapshot(&backup.join(generation), &stage.path().join(generation))?;
                 std::fs::rename(stage.path().join(generation), self.root.join(generation))
                     .map_err(|error| error.to_string())?;
+                #[cfg(target_os = "windows")]
+                grant_appcontainer_read(&self.root.join(generation), true)?;
             }
         }
-        #[cfg(target_os = "windows")]
-        grant_appcontainer_read(&self.root)?;
         self.previous.write(&self.root)?;
         prune_snapshots(&self.root);
         Ok(())
@@ -214,11 +217,7 @@ impl PublicSchemaUpdate {
         for generation in self.previous.generations() {
             let snapshot = self.root.join(generation);
             if !snapshot.exists() {
-                std::fs::rename(
-                    self.backup.as_ref().unwrap().path().join(generation),
-                    snapshot,
-                )
-                .map_err(|error| format!("restore public schema snapshot: {error}"))?;
+                return Err("retained public schema snapshot is missing".into());
             }
         }
         self.previous.write(&self.root)?;
@@ -249,11 +248,8 @@ fn update_public_schemas_at(
             let lease = std::fs::File::create(backup.path().join("lease"))
                 .map_err(|error| error.to_string())?;
             lease.lock().map_err(|error| error.to_string())?;
-            for generation in previous.generations() {
-                if !backup.path().join(generation).exists() {
-                    link_snapshot(&root.join(generation), &backup.path().join(generation))?;
-                }
-            }
+            // Keep generations in place while the child publishes; no per-file backup is needed.
+            previous.write(backup.path())?;
             Ok::<_, String>((lease, backup))
         })()?)
     } else {
@@ -271,7 +267,7 @@ fn update_public_schemas_at(
         ),
         previous,
         _backup_lock,
-        backup,
+        _backup: backup,
         root,
     };
     if let Err(error) = result {
@@ -320,15 +316,86 @@ pub fn deploy_and_publish() -> Result<(), String> {
     let version =
         keytao_core::librime_runtime_version().ok_or("无法读取 librime 版本，需要重新部署")?;
     let shared = keytao_core::default_shared_data_dir();
-    deploy_and_publish_at(&public_root()?, &version, true, |stage| {
-        let user = stage.to_string_lossy().into_owned();
-        keytao_core::deploy(user, shared)
-    })
+    deploy_and_publish_at(
+        &public_root()?,
+        &version,
+        Path::new(&shared),
+        true,
+        |stage| {
+            let user = stage.to_string_lossy().into_owned();
+            keytao_core::deploy_for_process(
+                user,
+                shared.clone(),
+                keytao_core::DeployProcess::PublicDeploy,
+            )
+        },
+    )
+}
+
+fn shared_data_hash(root: &Path) -> Result<String, String> {
+    fn collect(
+        root: &Path,
+        dir: &Path,
+        files: &mut BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_dir() {
+                collect(root, &entry.path(), files)?;
+            } else if kind.is_file() {
+                let file = std::fs::File::open(entry.path()).map_err(|error| error.to_string())?;
+                let hash =
+                    crate::packages::sha256_reader(file).map_err(|error| error.to_string())?;
+                files.insert(
+                    entry.path().strip_prefix(root).unwrap().into(),
+                    hash.into_bytes(),
+                );
+            } else {
+                return Err("unsupported file in shared Rime data".into());
+            }
+        }
+        Ok(())
+    }
+    let mut files = BTreeMap::new();
+    if !root.as_os_str().is_empty() {
+        collect(root, root, &mut files)?;
+    }
+    Ok(snapshot_hash(files.iter()))
+}
+
+fn public_build_key(
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+    version: &str,
+    shared: &Path,
+    app_version: &str,
+) -> Result<String, String> {
+    let selected: BTreeSet<_> = files
+        .get(Path::new("default.custom.yaml"))
+        .or_else(|| files.get(Path::new("default.yaml")))
+        .map(|content| std::str::from_utf8(content).map(crate::scheme_files::parse_schema_list))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let inputs = serde_json::to_vec(&(
+        1,
+        snapshot_hash(files.iter().filter(|(path, _)| !path.starts_with("build"))),
+        version.trim(),
+        shared.to_string_lossy(),
+        shared_data_hash(shared)?,
+        app_version,
+        selected,
+    ))
+    .map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(inputs)))
 }
 
 fn deploy_and_publish_at(
     root: &Path,
     version: &str,
+    shared: &Path,
     grant_access: bool,
     deploy: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -337,6 +404,26 @@ fn deploy_and_publish_at(
         path.components().count() == 1 && path.to_string_lossy().ends_with(".schema.yaml")
     }) {
         return Ok(());
+    }
+    let key = public_build_key(&files, version, shared, env!("CARGO_PKG_VERSION"))
+        .inspect_err(|error| tracing::warn!(%error, "Public build cache is unavailable"))
+        .ok();
+    let pointers = GenerationPointers::read(root)?;
+    let receipt = root.join(PUBLIC_BUILD_KEY_FILE);
+    if let (Some(key), Some(current), None) = (&key, &pointers.current, &pointers.pending) {
+        if compiled_generation(root, current)?
+            && snapshot_hash(files.iter()) == *current
+            && std::fs::read_to_string(&receipt).ok().as_deref()
+                == Some(format!("{current}\n{key}").as_str())
+        {
+            return Ok(());
+        }
+    }
+    // A failed attempt must not leave an earlier success eligible for reuse.
+    match std::fs::remove_file(&receipt) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("invalidate-public-build-key: {error}")),
     }
     files.retain(|path, _| !path.starts_with("build"));
     // The stage never receives desktop sources, customizations, or learned words.
@@ -357,6 +444,7 @@ fn deploy_and_publish_at(
     trim_missing_dependencies(stage.path())
         .map_err(|error| format!("prepare-dependencies: {error}"))?;
     deploy(stage.path()).map_err(|error| format!("compile: {error}"))?;
+    let complete = keytao_core::deployment_warning(stage.path()).is_none();
     let build = stage.path().join("build");
     let mut compiled = BTreeMap::new();
     read_snapshot_files(stage.path(), &build, &mut compiled)
@@ -372,7 +460,23 @@ fn deploy_and_publish_at(
         LIBRIME_VERSION_FILE.into(),
         version.trim().as_bytes().to_vec(),
     );
-    store_snapshot(root, &files, grant_access).map_err(|error| format!("publish: {error}"))
+    store_snapshot(root, &files, grant_access).map_err(|error| format!("publish: {error}"))?;
+    if let Some(key) = key.filter(|key| {
+        complete
+            && public_build_key(&files, version, shared, env!("CARGO_PKG_VERSION"))
+                .ok()
+                .as_ref()
+                == Some(key)
+    }) {
+        let generation = snapshot_hash(files.iter());
+        if let Err(error) = crate::scheme_files::write_file_atomic(
+            &receipt,
+            format!("{generation}\n{key}").as_bytes(),
+        ) {
+            tracing::warn!(%error, "Could not cache successful public build");
+        }
+    }
+    Ok(())
 }
 
 fn trim_missing_dependencies(stage: &Path) -> Result<(), String> {
@@ -1402,15 +1506,33 @@ fn store_snapshot(
             .unwrap_or(false);
     let generation = snapshot_hash(files.iter());
     let snapshot = root.join(&generation);
-    std::fs::create_dir_all(&snapshot).map_err(|error| error.to_string())?;
-    for (path, content) in files {
-        let output = snapshot.join(path);
-        std::fs::create_dir_all(output.parent().unwrap()).map_err(|error| error.to_string())?;
-        crate::scheme_files::write_file_atomic(&output, content)
-            .map_err(|error| error.to_string())?;
+    let mut existing = BTreeMap::new();
+    if snapshot.exists() {
+        if std::fs::symlink_metadata(&snapshot)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("symbolic link at public schema snapshot root".into());
+        }
+        read_snapshot_files(&snapshot, &snapshot, &mut existing)?;
     }
+    let changed = !snapshot.exists() || existing != *files;
     if grant_access {
-        grant_appcontainer_read(root)?;
+        std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+        grant_appcontainer_read(root, false)?;
+    }
+    if changed {
+        std::fs::create_dir_all(&snapshot).map_err(|error| error.to_string())?;
+        for (path, content) in files {
+            let output = snapshot.join(path);
+            std::fs::create_dir_all(output.parent().unwrap()).map_err(|error| error.to_string())?;
+            crate::scheme_files::write_file_atomic(&output, content)
+                .map_err(|error| error.to_string())?;
+        }
+        if grant_access {
+            grant_appcontainer_read(&snapshot, true)?;
+        }
     }
     let next = if preserve_current {
         GenerationPointers {
@@ -1461,6 +1583,36 @@ fn prune_snapshots(root: &Path) {
         }
     };
     let cleanup = || -> std::io::Result<()> {
+        let mut retained: BTreeSet<_> = pointers.generations().cloned().collect();
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir()
+                || !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rollback-")
+            {
+                continue;
+            }
+            // A live transaction retains its old generations, including across child processes.
+            let lease = match std::fs::File::open(entry.path().join("lease")) {
+                Ok(lease) if lease.try_lock().is_ok() => Some(lease),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                _ => {
+                    retained.extend(
+                        GenerationPointers::read(&entry.path())
+                            .map_err(std::io::Error::other)?
+                            .generations()
+                            .cloned(),
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                tracing::warn!(%error, "abandoned public schema rollback lease will be removed on the next publication");
+            }
+            drop(lease);
+        }
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -1468,27 +1620,15 @@ fn prune_snapshots(root: &Path) {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let old_snapshot = !pointers
-                .generations()
-                .any(|generation| generation == name.as_ref())
+            let old_snapshot = !retained.contains(name.as_ref())
                 && name.len() == 64
                 && name.bytes().all(|byte| byte.is_ascii_hexdigit());
-            // A live transaction holds the lease; crashes release it for the next cleanup.
-            let lease = if name.starts_with(".rollback-") {
-                match std::fs::File::open(entry.path().join("lease")) {
-                    Ok(lease) if lease.try_lock().is_ok() => Some(lease),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    _ => continue,
-                }
-            } else if old_snapshot {
-                None
-            } else {
+            if !old_snapshot {
                 continue;
-            };
+            }
             if let Err(error) = std::fs::remove_dir_all(entry.path()) {
                 tracing::warn!(%error, "old public schema snapshot will be removed on the next publication");
             }
-            drop(lease);
         }
         Ok(())
     };
@@ -1498,15 +1638,20 @@ fn prune_snapshots(root: &Path) {
 }
 
 #[cfg(target_os = "windows")]
-fn grant_appcontainer_read(root: &Path) -> Result<(), String> {
+fn grant_appcontainer_read(root: &Path, recursive: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let icacls = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .ok_or("SystemRoot is unavailable")?
         .join("System32/icacls.exe");
-    let output = std::process::Command::new(icacls)
+    let mut command = std::process::Command::new(icacls);
+    command
         .arg(root)
-        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"])
+        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/Q"]);
+    if recursive {
+        command.arg("/T");
+    }
+    let output = command
         .creation_flags(0x08000000)
         .output()
         .map_err(|error| format!("grant public schema read access: {error}"))?;
@@ -1521,7 +1666,7 @@ fn grant_appcontainer_read(root: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn grant_appcontainer_read(_root: &Path) -> Result<(), String> {
+fn grant_appcontainer_read(_root: &Path, _recursive: bool) -> Result<(), String> {
     Err("public schema ACLs require Windows".into())
 }
 
@@ -1970,7 +2115,7 @@ mod tests {
         )
         .unwrap();
         let warning = "方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit";
-        deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+        deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
             std::fs::create_dir(stage.join("build")).unwrap();
             std::fs::write(
                 stage.join("build/keytao_good.schema.yaml"),
@@ -1996,6 +2141,10 @@ mod tests {
             keytao_core::deployment_warning(&snapshot).as_deref(),
             Some(warning)
         );
+        assert!(!root.path().join(PUBLIC_BUILD_KEY_FILE).exists());
+        assert!(deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
+            Err("retry skipped schemas".into())
+        }).is_err());
         let state = keytao_core::schema_install_state(&snapshot);
         assert!(state.installed);
         assert_eq!(state.schemas, ["keytao_good"]);
@@ -2125,7 +2274,7 @@ mod tests {
         .unwrap();
         let pending = std::fs::read(root.path().join("pending.txt")).unwrap();
         let result = after_private_deploy(Ok(()), || {
-            deploy_and_publish_at(root.path(), "1.0", false, |_| {
+            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
                 Err("new main scheme compile failed".into())
             })
         });
@@ -2196,7 +2345,7 @@ mod tests {
                 )
             })
             .unwrap();
-            deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
                 std::fs::create_dir(stage.join("build")).unwrap();
                 std::fs::write(
                     stage.join("build/keytao.schema.yaml"),
@@ -2252,7 +2401,7 @@ mod tests {
         )
         .unwrap();
         let result = after_private_deploy(Ok(()), || {
-            deploy_and_publish_at(root.path(), "1.0", false, |_| {
+            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
                 panic!("invalid dependency must not reach librime")
             })
         });
@@ -2289,7 +2438,7 @@ mod tests {
                     )],
                     false,
                 )?;
-                deploy_and_publish_at(root.path(), "1.0", false, |_| {
+                deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
                     Err("xmjd6 dictionary compile failed".into())
                 })
             })
@@ -2334,7 +2483,7 @@ mod tests {
             false,
         )
         .unwrap();
-        deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+        deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
             let schema: serde_yaml::Value =
                 serde_yaml::from_slice(&std::fs::read(stage.join("keytao.schema.yaml")).unwrap())
                     .unwrap();
@@ -2374,7 +2523,7 @@ mod tests {
         .unwrap();
         let generation = read_generation(root.path()).unwrap();
         let result = after_private_deploy(Ok(()), || {
-            deploy_and_publish_at(root.path(), "1.0", true, |stage| {
+            deploy_and_publish_at(root.path(), "1.0", Path::new(""), true, |stage| {
                 std::fs::create_dir(stage.join("build")).unwrap();
                 std::fs::write(
                     stage.join("build/keytao.schema.yaml"),
@@ -2517,7 +2666,7 @@ mod tests {
         std::fs::create_dir(&unrelated).unwrap();
         let mut generation = None;
         for _ in 0..3 {
-            deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
                 let modified = std::fs::metadata(stage.join("keytao.schema.yaml"))
                     .unwrap()
                     .modified()
@@ -2541,7 +2690,7 @@ mod tests {
             }
             generation = Some(current);
             assert!(!root.path().join(&sources).exists());
-            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4);
             assert!(unrelated.is_dir());
         }
     }
@@ -2555,6 +2704,7 @@ mod tests {
             false,
         )
         .unwrap();
+        let previous = read_generation(root.path()).unwrap().unwrap();
         let update = update_public_schemas_at(root.path().into(), || {
             publish_at(
                 root.path(),
@@ -2563,8 +2713,14 @@ mod tests {
             )
         })
         .unwrap();
-        let live = update.backup.as_ref().unwrap().path().to_owned();
+        let live = update._backup.as_ref().unwrap().path().to_owned();
         assert!(live.is_dir());
+        assert!(root.path().join(&previous).is_dir());
+        assert!(!live.join(&previous).exists());
+        assert_eq!(
+            GenerationPointers::read(&live).unwrap().current.as_deref(),
+            Some(previous.as_str())
+        );
         let abandoned = tempfile::Builder::new()
             .prefix(".rollback-")
             .tempdir_in(root.path())
@@ -2578,9 +2734,53 @@ mod tests {
         )
         .unwrap();
         assert!(live.is_dir());
+        assert!(root.path().join(&previous).is_dir());
         assert!(!abandoned.exists());
         drop(update);
         assert!(!live.exists());
+        prune_snapshots(root.path());
+        assert!(!root.path().join(previous).exists());
+    }
+
+    #[test]
+    fn existing_public_snapshot_is_reused_and_partial_writes_are_repaired() {
+        let root = tempfile::tempdir().unwrap();
+        let files = BTreeMap::from([
+            ("keytao.schema.yaml".into(), b"schema source".to_vec()),
+            (
+                "build/keytao.schema.yaml".into(),
+                b"compiled schema".to_vec(),
+            ),
+            (LIBRIME_VERSION_FILE.into(), b"1.0".to_vec()),
+        ]);
+        store_snapshot(root.path(), &files, false).unwrap();
+        let generation = read_generation(root.path()).unwrap().unwrap();
+        let snapshot = root.path().join(&generation);
+        for path in files.keys() {
+            std::fs::File::options()
+                .write(true)
+                .open(snapshot.join(path))
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH)
+                .unwrap();
+        }
+        store_snapshot(root.path(), &files, false).unwrap();
+        for path in files.keys() {
+            assert_eq!(
+                std::fs::metadata(snapshot.join(path))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                std::time::UNIX_EPOCH
+            );
+        }
+        std::fs::remove_file(snapshot.join("build/keytao.schema.yaml")).unwrap();
+        store_snapshot(root.path(), &files, false).unwrap();
+        assert_eq!(read_snapshot(root.path()).unwrap(), files);
+        assert_eq!(
+            read_generation(root.path()).unwrap().as_deref(),
+            Some(generation.as_str())
+        );
     }
 
     #[test]
@@ -2662,7 +2862,7 @@ mod tests {
         ]);
         store_snapshot(root.path(), &files, false).unwrap();
         let before = std::fs::read(root.path().join("current.txt")).unwrap();
-        let failure = deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+        let failure = deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
             assert!(!stage.join("build").exists());
             assert!(!stage.join("keytao.userdb").exists());
             assert_eq!(
@@ -2676,7 +2876,7 @@ mod tests {
             std::fs::read(root.path().join("current.txt")).unwrap(),
             before
         );
-        deploy_and_publish_at(root.path(), "1.0", false, |stage| {
+        deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
             assert!(!stage.join("build").exists());
             std::fs::create_dir(stage.join("build")).unwrap();
             std::fs::write(
@@ -2740,6 +2940,211 @@ mod tests {
         );
     }
 
+    fn compile_public_fixture(stage: &Path) -> Result<(), String> {
+        assert!(!stage.join("build").exists());
+        std::fs::create_dir(stage.join("build")).unwrap();
+        std::fs::write(stage.join("build/keytao.schema.yaml"), "compiled schema").unwrap();
+        Ok(())
+    }
+
+    #[test]
+    fn public_build_key_covers_sources_versions_shared_data_and_selection() {
+        let shared = tempfile::tempdir().unwrap();
+        let other_shared = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::from([
+            (
+                "keytao.schema.yaml".into(),
+                b"schema: {schema_id: keytao}".to_vec(),
+            ),
+            (
+                "default.custom.yaml".into(),
+                b"patch: {schema_list: [{schema: keytao}]}".to_vec(),
+            ),
+        ]);
+        let key = public_build_key(&files, "1.0", shared.path(), "2.0").unwrap();
+        assert_eq!(
+            public_build_key(&files, "1.0", shared.path(), "2.0").unwrap(),
+            key
+        );
+        for (rime, app, dir) in [
+            ("1.1", "2.0", shared.path()),
+            ("1.0", "2.1", shared.path()),
+            ("1.0", "2.0", other_shared.path()),
+        ] {
+            assert_ne!(public_build_key(&files, rime, dir, app).unwrap(), key);
+        }
+        for path in [
+            "keytao.schema.yaml",
+            "lua/helper.lua",
+            "keytao-ime.json",
+            "default.custom.yaml",
+        ] {
+            let mut changed = files.clone();
+            changed.insert(
+                path.into(),
+                b"patch: {schema_list: [{schema: another}]}".to_vec(),
+            );
+            assert_ne!(
+                public_build_key(&changed, "1.0", shared.path(), "2.0").unwrap(),
+                key,
+                "{path}"
+            );
+        }
+        files.insert("build/keytao.schema.yaml".into(), b"output".to_vec());
+        assert_eq!(
+            public_build_key(&files, "1.0", shared.path(), "2.0").unwrap(),
+            key
+        );
+        std::fs::create_dir(shared.path().join("nested")).unwrap();
+        let path = shared.path().join("nested/.version");
+        std::fs::write(&path, "one").unwrap();
+        let first = public_build_key(&files, "1.0", shared.path(), "2.0").unwrap();
+        assert_ne!(first, key);
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "two").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_ne!(
+            public_build_key(&files, "1.0", shared.path(), "2.0").unwrap(),
+            first
+        );
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            public_build_key(&files, "1.0", shared.path(), "2.0").unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn public_build_cache_requires_success_without_pending_and_rebuilds_changed_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let calls = std::cell::Cell::new(0);
+        let compile = |stage: &Path| {
+            calls.set(calls.get() + 1);
+            compile_public_fixture(stage)
+        };
+        publish_at(
+            root.path(),
+            &[(
+                "keytao.schema.yaml".into(),
+                b"schema: {schema_id: keytao}".to_vec(),
+            )],
+            false,
+        )
+        .unwrap();
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, &compile).unwrap();
+        let receipt = std::fs::read(root.path().join(PUBLIC_BUILD_KEY_FILE)).unwrap();
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, |_| {
+            panic!("unchanged inputs must skip compile")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join(PUBLIC_BUILD_KEY_FILE)).unwrap(),
+            receipt
+        );
+
+        let mut pointers = GenerationPointers::read(root.path()).unwrap();
+        pointers.pending = pointers.current.clone();
+        pointers.write(root.path()).unwrap();
+        assert!(
+            deploy_and_publish_at(root.path(), "1.0", shared.path(), false, |_| Err(
+                "pending compile failed".into()
+            ))
+            .is_err()
+        );
+        assert!(!root.path().join(PUBLIC_BUILD_KEY_FILE).exists());
+        pointers.pending = None;
+        pointers.write(root.path()).unwrap();
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, &compile).unwrap();
+        assert_eq!(calls.get(), 2);
+
+        // Even a restored old success cannot hide a failed attempt with new inputs.
+        assert!(
+            deploy_and_publish_at(root.path(), "2.0", shared.path(), false, |_| Err(
+                "compile failed".into()
+            ))
+            .is_err()
+        );
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, &compile).unwrap();
+        assert_eq!(calls.get(), 3);
+        std::fs::write(shared.path().join("default.yaml"), "config_version: '2'").unwrap();
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, &compile).unwrap();
+        assert_eq!(calls.get(), 4);
+        deploy_and_publish_at(root.path(), "2.0", shared.path(), false, |stage| {
+            std::fs::write(shared.path().join("default.yaml"), "config_version: '3'").unwrap();
+            compile_public_fixture(stage)
+        })
+        .unwrap();
+        assert!(!root.path().join(PUBLIC_BUILD_KEY_FILE).exists());
+        publish_at(
+            root.path(),
+            &[(
+                "keytao.schema.yaml".into(),
+                b"schema: {schema_id: keytao, version: '2'}".to_vec(),
+            )],
+            false,
+        )
+        .unwrap();
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, |stage| {
+            assert!(
+                std::fs::read_to_string(stage.join("keytao.schema.yaml"))
+                    .unwrap()
+                    .contains("version: '2'")
+            );
+            compile(stage)
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 5);
+        let generation = read_generation(root.path()).unwrap().unwrap();
+        std::fs::remove_file(
+            root.path()
+                .join(generation)
+                .join("build/keytao.schema.yaml"),
+        )
+        .unwrap();
+        deploy_and_publish_at(root.path(), "1.0", shared.path(), false, &compile).unwrap();
+        assert_eq!(calls.get(), 6);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn failed_public_publish_cannot_seed_the_build_cache() {
+        let root = tempfile::tempdir().unwrap();
+        publish_at(
+            root.path(),
+            &[(
+                "keytao.schema.yaml".into(),
+                b"schema: {schema_id: keytao}".to_vec(),
+            )],
+            false,
+        )
+        .unwrap();
+        assert!(
+            deploy_and_publish_at(
+                root.path(),
+                "1.0",
+                Path::new(""),
+                true,
+                compile_public_fixture
+            )
+            .is_err()
+        );
+        assert!(!root.path().join(PUBLIC_BUILD_KEY_FILE).exists());
+        deploy_and_publish_at(
+            root.path(),
+            "1.0",
+            Path::new(""),
+            false,
+            compile_public_fixture,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn incoming_builds_cannot_forge_a_stamp_and_candidate_changes_invalidate_builds() {
         let root = tempfile::tempdir().unwrap();
@@ -2779,7 +3184,7 @@ mod tests {
             false,
         )
         .unwrap();
-        deploy_and_publish_at(empty.path(), "1.0", false, |_| {
+        deploy_and_publish_at(empty.path(), "1.0", Path::new(""), false, |_| {
             panic!("no public schemas to compile")
         })
         .unwrap();

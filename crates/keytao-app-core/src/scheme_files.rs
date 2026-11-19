@@ -1,6 +1,9 @@
 pub use keytao_core::parse_schema_list;
 
 pub fn write_file_atomic(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
     crate::package_fs::retry_windows(|| {
         #[cfg(target_os = "windows")]
         crate::package_fs::clear_readonly(path)?;
@@ -27,6 +30,23 @@ pub fn yaml_child_mapping<'a>(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn atomic_write_preserves_identical_mtime_and_rewrites_changed_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("example.schema.yaml");
+        write_file_atomic(&path, b"original").unwrap();
+        let modified = std::time::UNIX_EPOCH;
+        fs::File::options().write(true).open(&path).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified)).unwrap();
+
+        write_file_atomic(&path, b"original").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+
+        write_file_atomic(&path, b"replacement").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_ne!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    }
 
     #[test]
     fn atomic_write_replaces_readonly_target_with_writable_file() {
