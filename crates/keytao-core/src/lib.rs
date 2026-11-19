@@ -2,6 +2,8 @@
 //! Every consumer (the Flutter app via keytao-app-bridge, the C FFI and the
 //! platform IMEs) links against this crate as its rime back-end.
 
+mod build_prune;
+pub use build_prune::prune_rime_build_artifacts;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub mod deploy_child;
 mod deployment_log;
@@ -1372,7 +1374,7 @@ mod desktop {
 
             #[cfg(target_os = "android")]
             {
-                setup_only_for_process(user_data_dir.clone(), shared_data_dir, process)?;
+                setup_only_for_process(user_data_dir.clone(), shared_data_dir.clone(), process)?;
                 deploy_android_staged(&user_data_dir)
                     .map_err(|error| deploy_log.failure_message(Some(&error)))?;
             }
@@ -1413,13 +1415,19 @@ mod desktop {
                     deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
                 })?;
             }
-            complete_deployment(Path::new(&user_data_dir))?;
-            #[cfg(not(target_os = "android"))]
-            record_desktop_deployment(
-                Path::new(&user_data_dir),
-                Path::new(&shared_data_dir),
-                input_snapshot.as_ref(),
-            )?;
+            complete_deployment_with_cleanup(Path::new(&user_data_dir), || {
+                #[cfg(not(target_os = "android"))]
+                record_desktop_deployment(
+                    Path::new(&user_data_dir),
+                    Path::new(&shared_data_dir),
+                    input_snapshot.as_ref(),
+                )?;
+                prune_rime_build_artifacts(
+                    Path::new(&user_data_dir),
+                    Some(Path::new(&shared_data_dir)),
+                )
+                .map(|_| ())
+            })?;
             Ok(())
         })();
         if result.is_err() {
@@ -1479,7 +1487,12 @@ mod desktop {
             .map_err(|error| deploy_log.failure_message(Some(&format!("依赖部署失败：{error}"))))?;
         validate_deployed_schema_files(user_dir)
             .map_err(|error| deploy_log.failure_message(Some(&format!("部署验证失败：{error}"))))?;
-        complete_deployment(user_dir)
+        complete_deployment_with_cleanup(user_dir, || {
+            prune_rime_build_artifacts(user_dir, Some(Path::new(&shared_data_dir))).map(|_| ())
+        })
+        .inspect_err(|_| {
+            let _ = mark_deployment_failed(user_dir);
+        })
     }
 
     #[cfg(target_os = "android")]
@@ -7639,6 +7652,14 @@ fn persist_standalone_addon_selection(user_data_dir: &Path) -> Result<(), String
 
 /// Publish readiness only after every deployment step has succeeded.
 pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
+    complete_deployment_with_cleanup(user_data_dir, || Ok(()))
+}
+
+/// Keep deployment gated until verification and compiled-output cleanup finish.
+pub fn complete_deployment_with_cleanup(
+    user_data_dir: &Path,
+    cleanup: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let schemas = managed_primary_schemas(user_data_dir, true);
     if schemas.is_empty()
         || !schemas.iter().all(|schema| {
@@ -7668,6 +7689,7 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
             msg = error
         );
     }
+    cleanup()?;
     write_deployed_marker(user_data_dir, &schemas)?;
     let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
     match std::fs::remove_file(&sentinel) {

@@ -893,9 +893,16 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeComplet
         let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
-        match keytao_core::complete_deployment(&user_dir) {
+        let result = keytao_core::complete_deployment_with_cleanup(&user_dir, || {
+            crate::deploy::verify_android_deployment(&user_dir)
+                .map_err(|error| error.to_string())?;
+            keytao_core::prune_rime_build_artifacts(&user_dir, Some(&user_dir.join("rime-data")))
+                .map(|_| ())
+        });
+        match result {
             Ok(()) => 1,
             Err(error) => {
+                let _ = keytao_core::mark_deployment_failed(&user_dir);
                 android_log::error(&format!("complete deployment: {error}"));
                 0
             }
