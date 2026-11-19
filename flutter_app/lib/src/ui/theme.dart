@@ -124,7 +124,7 @@ class KeyTaoTheme extends StatelessWidget {
               card: palette.surface,
               border: palette.hairline,
             );
-    final typeface = FTypeface.inherit(
+    final defaults = FTypeface.inherit(
       colors: colors,
       touch: touch,
       fontFamily: platform == BridgePlatform.windows
@@ -134,49 +134,129 @@ class KeyTaoTheme extends StatelessWidget {
           ? _windowsFontFallback
           : null,
     );
+    final typeface = defaults
+        .scale(sizeScalar: .875)
+        .copyWith(
+          sm: defaults.sm.copyWith(fontSize: touch ? 14 : 13),
+          xs: defaults.xs.copyWith(fontSize: 12),
+        );
+    final typography = FTypography(display: typeface, body: typeface);
     // Rebuild component styles too: they capture the typeface at creation.
     return FThemeData(
       colors: colors,
       touch: touch,
-      typography: FTypography(display: typeface, body: typeface),
+      typography: typography,
+      style:
+          FStyle.inherit(
+            colors: colors,
+            typography: typography,
+            touch: touch,
+          ).copyWith(
+            iconStyle: const IconThemeDataDelta.delta(size: 20),
+            pagePadding: const EdgeInsetsDelta.value(
+              EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+            ),
+          ),
     );
   }
 
-  ThemeData _materialTheme(AppPalette palette, Brightness brightness) =>
-      ThemeData(
-        brightness: brightness,
-        fontFamily: platform == BridgePlatform.windows
-            ? _windowsFontFamily
-            : FTypeface.defaultFontFamily,
-        fontFamilyFallback: platform == BridgePlatform.windows
-            ? _windowsFontFallback
-            : null,
-        scaffoldBackgroundColor: palette.ground,
-        canvasColor: palette.ground,
-        dividerColor: palette.hairline,
-        disabledColor: palette.unselected,
-        colorScheme:
-            ColorScheme.fromSeed(
-              seedColor: palette.ink,
-              brightness: brightness,
-            ).copyWith(
-              primary: palette.ink,
-              onPrimary: palette.ground,
-              secondary: palette.controlSurface,
-              onSecondary: palette.ink,
-              surface: palette.surface,
-              onSurface: palette.ink,
-              onSurfaceVariant: palette.muted,
-              surfaceContainerLowest: palette.ground,
-              surfaceContainerLow: palette.surface,
-              surfaceContainer: palette.surface,
-              surfaceContainerHigh: palette.controlSurface,
-              surfaceContainerHighest: palette.controlSurface,
-              outline: palette.hairline,
-              outlineVariant: palette.hairline,
-              error: palette.error,
-            ),
-      );
+  ThemeData _materialTheme(AppPalette palette, Brightness brightness) {
+    final touch =
+        platform == BridgePlatform.android || platform == BridgePlatform.ios;
+    final buttonStyle = ButtonStyle(
+      minimumSize: WidgetStatePropertyAll(Size(40, touch ? 44 : 36)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+    );
+    final theme = ThemeData(
+      brightness: brightness,
+      fontFamily: platform == BridgePlatform.windows
+          ? _windowsFontFamily
+          : FTypeface.defaultFontFamily,
+      fontFamilyFallback: platform == BridgePlatform.windows
+          ? _windowsFontFallback
+          : null,
+      scaffoldBackgroundColor: palette.ground,
+      canvasColor: palette.ground,
+      dividerColor: palette.hairline,
+      disabledColor: palette.unselected,
+      colorScheme:
+          ColorScheme.fromSeed(
+            seedColor: palette.ink,
+            brightness: brightness,
+          ).copyWith(
+            primary: palette.ink,
+            onPrimary: palette.ground,
+            secondary: palette.controlSurface,
+            onSecondary: palette.ink,
+            surface: palette.surface,
+            onSurface: palette.ink,
+            onSurfaceVariant: palette.muted,
+            surfaceContainerLowest: palette.ground,
+            surfaceContainerLow: palette.surface,
+            surfaceContainer: palette.surface,
+            surfaceContainerHigh: palette.controlSurface,
+            surfaceContainerHighest: palette.controlSurface,
+            outline: palette.hairline,
+            outlineVariant: palette.hairline,
+            error: palette.error,
+          ),
+    );
+    final textTheme = theme.typography.englishLike.merge(theme.textTheme);
+    return theme.copyWith(
+      textTheme: textTheme
+          .apply(fontSizeFactor: .875)
+          .copyWith(
+            bodyMedium: textTheme.bodyMedium!.copyWith(fontSize: 13),
+            bodySmall: textTheme.bodySmall!.copyWith(fontSize: 12),
+            titleMedium: textTheme.titleMedium!.copyWith(fontSize: 15),
+          ),
+      iconTheme: const IconThemeData(size: 20),
+      visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
+      materialTapTargetSize: touch
+          ? MaterialTapTargetSize.padded
+          : MaterialTapTargetSize.shrinkWrap,
+      listTileTheme: ListTileThemeData(
+        dense: true,
+        minTileHeight: touch ? 44 : 36,
+        minVerticalPadding: 4,
+        minLeadingWidth: 24,
+        horizontalTitleGap: 12,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+        iconColor: palette.muted,
+      ),
+      cardTheme: const CardThemeData(margin: EdgeInsets.all(6)),
+      filledButtonTheme: FilledButtonThemeData(style: buttonStyle),
+      outlinedButtonTheme: OutlinedButtonThemeData(style: buttonStyle),
+      textButtonTheme: TextButtonThemeData(style: buttonStyle),
+      elevatedButtonTheme: ElevatedButtonThemeData(style: buttonStyle),
+      iconButtonTheme: IconButtonThemeData(style: buttonStyle),
+      inputDecorationTheme: InputDecorationThemeData(
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 10,
+        ),
+        constraints: BoxConstraints(minHeight: touch ? 44 : 36),
+      ),
+      chipTheme: const ChipThemeData(
+        padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        labelPadding: EdgeInsets.symmetric(horizontal: 4),
+      ),
+      navigationRailTheme: const NavigationRailThemeData(
+        minWidth: 64,
+        minExtendedWidth: 160,
+        selectedIconTheme: IconThemeData(size: 20),
+        unselectedIconTheme: IconThemeData(size: 20),
+      ),
+      navigationBarTheme: const NavigationBarThemeData(
+        height: 64,
+        iconTheme: WidgetStatePropertyAll(IconThemeData(size: 20)),
+        labelTextStyle: WidgetStatePropertyAll(TextStyle(fontSize: 12)),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -86,7 +86,7 @@ class InputPage extends StatelessWidget {
           HairlineGridCell(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              spacing: 24,
+              spacing: 18,
               children: [
                 if (controller.isAndroid)
                   AndroidImeCard(controller: controller),
@@ -207,8 +207,8 @@ class _CurrentSchemeHero extends StatelessWidget {
     return Container(
       margin: desktop ? EdgeInsets.zero : const EdgeInsets.only(top: 4),
       padding: desktop
-          ? const EdgeInsets.symmetric(horizontal: 32, vertical: 40)
-          : const EdgeInsets.all(16),
+          ? const EdgeInsets.symmetric(horizontal: 24, vertical: 30)
+          : const EdgeInsets.all(12),
       decoration: desktop
           ? null
           : BoxDecoration(
@@ -218,15 +218,15 @@ class _CurrentSchemeHero extends StatelessWidget {
             ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: desktop ? 20 : 12,
+        spacing: desktop ? 15 : 9,
         children: [
           EyebrowLabel(
             desktop ? '当前方案 · ${c.aboutValues['平台']} 系统输入法' : '当前方案',
           ),
           Row(
-            spacing: 16,
+            spacing: 12,
             children: [
-              SchemaLogo(controller: c, size: desktop ? 52 : 36),
+              SchemaLogo(controller: c, size: desktop ? 40 : 30),
               Expanded(
                 child: FPopoverMenu(
                   menuAnchor: Alignment.topLeft,
@@ -270,7 +270,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                             title,
                             style: context.theme.typography.body.sm.copyWith(
                               color: palette.ink,
-                              fontSize: desktop ? 56 : 32,
+                              fontSize: desktop ? 44 : 28,
                               fontWeight: FontWeight.w700,
                               height: 1.05,
                               letterSpacing: desktop ? -1.12 : -.32,
@@ -280,7 +280,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                         if (c.schemas.isNotEmpty)
                           Icon(
                             FLucideIcons.chevronDown,
-                            size: desktop ? 24 : 20,
+                            size: desktop ? 20 : 18,
                             color: palette.muted,
                           ),
                       ],

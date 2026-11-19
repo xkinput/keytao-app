@@ -293,9 +293,9 @@ class _SettingsCardState extends State<SettingsCard> {
       children: [
         if (controller.isMobile) ...[
           ?widget.hero,
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           _preview(context, keyboard: true),
-          const SizedBox(height: 24),
+          const SizedBox(height: 18),
           _mobile(context),
         ] else
           _desktop(context),
@@ -446,7 +446,7 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget _settingsCell(String label, List<Widget> children) => HairlineGridCell(
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 14,
+      spacing: 10,
       children: [EyebrowLabel(label), ...children],
     ),
   );
@@ -547,9 +547,9 @@ class _SettingsCardState extends State<SettingsCard> {
     return CustomPaint(
       painter: _PreviewDots(AppPalette.of(context).hairline),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 380),
+        constraints: const BoxConstraints(minHeight: 285),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(32, 40, 32, 20),
+          padding: const EdgeInsets.fromLTRB(24, 30, 24, 15),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -562,7 +562,7 @@ class _SettingsCardState extends State<SettingsCard> {
                     current ?? const SizedBox.shrink(),
                 child: preview,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 18),
               Align(
                 alignment: Alignment.centerRight,
                 child: Text(
@@ -637,7 +637,7 @@ class _SettingsCardState extends State<SettingsCard> {
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 24,
+      spacing: 18,
       children: [
         if (c.uiSettings != null)
           Section(title: '外观', children: _appearanceControls()),
