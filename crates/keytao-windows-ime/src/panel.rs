@@ -6,8 +6,8 @@
 use keytao_core::ImeState;
 use keytao_theme::{
     panel_hit::{layout, PanelGeometry, PanelHitAreas},
-    scaled_candidate_panel, CandidatePanelInput, CandidatePanelModel, PanelOrientation,
-    ResolvedImeTheme, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
+    preedit_caret_color, scaled_candidate_panel, CandidatePanelInput, CandidatePanelModel,
+    PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use std::path::PathBuf;
 use tiny_skia::*;
@@ -129,6 +129,7 @@ impl PanelRenderer {
         scale: f32,
         theme: ResolvedImeTheme,
         available_width: f32,
+        preedit_caret: Option<usize>,
     ) -> RenderedPanel {
         let mut theme = scaled_candidate_panel(&theme);
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
@@ -235,13 +236,19 @@ impl PanelRenderer {
 
         let mut y = panel_pad_y;
         if let Some(preedit) = model.preedit.as_ref() {
-            self.draw_text(
+            self.draw_text_with_caret(
                 &mut pm,
                 preedit,
                 panel_pad_x,
                 y + preedit_size,
                 bgra(theme.candidate.selected_label_color),
                 preedit_size,
+                preedit_caret.map(|index| {
+                    (
+                        index,
+                        bgra(preedit_caret_color(theme.candidate.selected_label_color)),
+                    )
+                }),
             );
             y += preedit_height;
         }
@@ -465,12 +472,25 @@ impl PanelRenderer {
         &self,
         pm: &mut Pixmap,
         text: &str,
-        mut x: f32,
+        x: f32,
         baseline: f32,
         color: [u8; 4],
         size: f32,
     ) {
-        for ch in text.chars() {
+        self.draw_text_with_caret(pm, text, x, baseline, color, size, None);
+    }
+
+    fn draw_text_with_caret(
+        &self,
+        pm: &mut Pixmap,
+        text: &str,
+        mut x: f32,
+        baseline: f32,
+        color: [u8; 4],
+        size: f32,
+        caret: Option<(usize, [u8; 4])>,
+    ) {
+        for (index, ch) in text.chars().enumerate() {
             if is_zero_width_emoji_component(ch) {
                 continue;
             }
@@ -480,6 +500,12 @@ impl PanelRenderer {
             };
             let gx = (x + metrics.xmin as f32) as i32;
             let gy = (baseline - metrics.height as f32 - metrics.ymin as f32) as i32;
+            let (color, opacity) = match caret {
+                Some((caret_index, caret_color)) if caret_index == index => {
+                    (caret_color, caret_color[3] as f32 / 255.0)
+                }
+                _ => (color, 1.0),
+            };
             for row in 0..metrics.height {
                 for col in 0..metrics.width {
                     let alpha = bitmap[row * metrics.width + col];
@@ -491,7 +517,7 @@ impl PanelRenderer {
                     if px < 0 || py < 0 || px >= pm.width() as i32 || py >= pm.height() as i32 {
                         continue;
                     }
-                    let a = alpha as f32 / 255.0;
+                    let a = alpha as f32 / 255.0 * opacity;
                     let off = (py as usize * pm.width() as usize + px as usize) * 4;
                     let d = pm.data_mut();
                     d[off] = lerp(d[off], color[0], a); // R
@@ -788,7 +814,7 @@ mod tests {
                     &UiCapabilities::full_custom(),
                 );
                 for scale in [1.0, 2.0] {
-                    let panel = renderer.render(&model, scale, theme.clone(), 1920.0);
+                    let panel = renderer.render(&model, scale, theme.clone(), 1920.0, None);
                     assert!(panel.width > 320);
                     assert_eq!(
                         panel.pixels.len(),
@@ -796,7 +822,7 @@ mod tests {
                     );
                     let offset = ((panel.height / 2 * panel.width + 321) * 4) as usize;
                     assert!(panel.pixels[offset + 3] > 0);
-                    let constrained = renderer.render(&model, scale, theme.clone(), 480.0);
+                    let constrained = renderer.render(&model, scale, theme.clone(), 480.0, None);
                     assert_eq!(constrained.width, 480);
                 }
             }
@@ -830,11 +856,11 @@ mod tests {
                 },
                 &UiCapabilities::full_custom(),
             );
-            let baseline = renderer.render(&model, 1.0, theme.clone(), 1920.0);
+            let baseline = renderer.render(&model, 1.0, theme.clone(), 1920.0, None);
             for font_size in [10.0, 20.0, 36.0] {
                 for dpi_scale in [1.0, 2.0] {
                     theme.font.size = font_size;
-                    let rendered = renderer.render(&model, dpi_scale, theme.clone(), 1920.0);
+                    let rendered = renderer.render(&model, dpi_scale, theme.clone(), 1920.0, None);
                     let ratio = font_size / default_theme.font.size * dpi_scale;
                     let original = baseline
                         .hit_areas
@@ -886,7 +912,7 @@ mod tests {
                 },
                 &UiCapabilities::full_custom(),
             );
-            renderer.render(&model, 1.0, theme, 1920.0)
+            renderer.render(&model, 1.0, theme, 1920.0, None)
         };
         let rounded = render();
         keytao_theme::write_ime_ui_settings_to_path(
@@ -966,6 +992,90 @@ mod tests {
         state.cursor = 10;
 
         assert_eq!(state_to_panel_input(&state, false).preedit, "ni|");
+    }
+
+    #[test]
+    fn preedit_caret_mutes_only_its_glyph_without_moving_letters() {
+        let renderer = PanelRenderer::new(load_font().expect("load Windows candidate fonts"));
+        for (background, foreground) in [
+            ([248, 250, 255, 255], [74, 141, 246, 255]),
+            ([23, 26, 32, 255], [182, 227, 255, 255]),
+        ] {
+            for (text, caret_index) in [
+                ("|ab", 0),
+                ("a||b", 1),
+                ("a||b", 2),
+                ("ab|", 2),
+                ("中|文", 1),
+                ("a😀|b", 2),
+            ] {
+                let mut original = tiny_skia::Pixmap::new(200, 40).unwrap();
+                original.fill(tiny_skia::Color::from_rgba8(
+                    background[0],
+                    background[1],
+                    background[2],
+                    background[3],
+                ));
+                let mut muted = original.clone();
+                let mut mask = original.clone();
+                let caret_color = keytao_theme::preedit_caret_color(keytao_theme::RgbaColor {
+                    red: foreground[0],
+                    green: foreground[1],
+                    blue: foreground[2],
+                    alpha: foreground[3],
+                });
+                renderer.draw_text(&mut original, text, 4.0, 30.0, foreground, 24.0);
+                renderer.draw_text_with_caret(
+                    &mut muted,
+                    text,
+                    4.0,
+                    30.0,
+                    foreground,
+                    24.0,
+                    Some((
+                        caret_index,
+                        [
+                            caret_color.red,
+                            caret_color.green,
+                            caret_color.blue,
+                            caret_color.alpha,
+                        ],
+                    )),
+                );
+                let prefix: String = text.chars().take(caret_index).collect();
+                renderer.draw_text(
+                    &mut mask,
+                    "|",
+                    4.0 + renderer.text_width(&prefix, 24.0),
+                    30.0,
+                    foreground,
+                    24.0,
+                );
+                let mut changed = 0;
+                for ((original, muted), mask) in original
+                    .data()
+                    .chunks_exact(4)
+                    .zip(muted.data().chunks_exact(4))
+                    .zip(mask.data().chunks_exact(4))
+                {
+                    assert_eq!(original[3], muted[3]);
+                    if mask == background {
+                        assert_eq!(original, muted, "letters moved or changed color: {text}");
+                    } else {
+                        changed += usize::from(original != muted);
+                        for channel in 0..3 {
+                            let expected = super::lerp(
+                                background[channel],
+                                original[channel],
+                                caret_color.alpha as f32 / 255.0,
+                            );
+                            assert!((muted[channel] as i16 - expected as i16).abs() <= 1);
+                        }
+                    }
+                }
+                assert!(changed > 0, "caret was not muted: {text}");
+            }
+        }
     }
 
     #[test]

@@ -215,6 +215,10 @@ pub struct RgbaColor {
     pub alpha: u8,
 }
 
+pub fn preedit_caret_color(text_color: RgbaColor) -> RgbaColor {
+    with_alpha(text_color, (text_color.alpha as f32 * 0.35).round() as u8)
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedImeTheme {
@@ -1750,6 +1754,24 @@ fn with_alpha(color: RgbaColor, alpha: u8) -> RgbaColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preedit_caret_preserves_rgb_and_reduces_existing_alpha() {
+        for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+            let theme = resolve_theme_from_paths_with_system_scheme(None, None, scheme);
+            for text in [
+                theme.candidate.foreground,
+                theme.candidate.selected_label_color,
+            ] {
+                for alpha in [0, 128, 255] {
+                    let text = with_alpha(text, alpha);
+                    let caret = preedit_caret_color(text);
+                    assert_eq!(opaque(caret), opaque(text));
+                    assert_eq!(caret.alpha, (alpha as f32 * 0.35).round() as u8);
+                }
+            }
+        }
+    }
 
     #[test]
     fn appearance_defaults_match_existing_light_and_dark_themes() {

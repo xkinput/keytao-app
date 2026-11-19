@@ -600,6 +600,11 @@ impl CandidateWindow {
         let scale = dpi_scale(self.owner_hwnd);
         let theme = current_theme();
         let model = candidate_panel_model(ime_state, embedded, &theme);
+        let preedit_caret = model.preedit.as_ref().map(|preedit| {
+            ime_state
+                .cursor
+                .min(preedit.chars().count().saturating_sub(1))
+        });
         let mut work = self.available_area(POINT {
             x: caret_x,
             y: caret_y,
@@ -609,7 +614,7 @@ impl CandidateWindow {
         work.right = (work.right - margin).max(work.left + 1);
         let available_width = (work.right - work.left) as f32;
         let mut signature = PanelUploadSignature {
-            model: value_signature(&(&model, available_width)),
+            model: value_signature(&(&model, available_width, preedit_caret)),
             position: (0, 0),
             scale: scale.to_bits(),
             theme: value_signature(&theme),
@@ -639,7 +644,7 @@ impl CandidateWindow {
         let Some(renderer) = &self.renderer else {
             return false;
         };
-        let rendered = renderer.render(&model, scale, theme, available_width);
+        let rendered = renderer.render(&model, scale, theme, available_width, preedit_caret);
         let (w, h) = (rendered.width, rendered.height);
         if w == 0 || h == 0 {
             return false;

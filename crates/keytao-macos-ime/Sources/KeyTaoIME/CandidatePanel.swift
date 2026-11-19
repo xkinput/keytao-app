@@ -101,7 +101,17 @@ class CandidatePanel: NSPanel {
         if let preedit = model.preedit, !preedit.isEmpty {
             let label = NSTextField(labelWithString: preedit)
             label.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.preeditSize, weight: theme.font.weight)
-            label.textColor = theme.candidate.foreground.nsColor
+            let foreground = theme.candidate.foreground.nsColor
+            label.textColor = foreground
+            if let caretRange = model.preeditCaretRange {
+                let text = NSMutableAttributedString(attributedString: label.attributedStringValue)
+                text.addAttribute(
+                    .foregroundColor,
+                    value: foreground.withAlphaComponent(foreground.alphaComponent * 0.35),
+                    range: caretRange
+                )
+                label.attributedStringValue = text
+            }
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
