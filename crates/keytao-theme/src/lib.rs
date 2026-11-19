@@ -917,7 +917,7 @@ impl ResolvedImeTheme {
                 weight: FontWeight::SemiBold,
             },
             panel: PanelTheme {
-                orientation: PanelOrientation::Vertical,
+                orientation: PanelOrientation::Horizontal,
                 background: rgba(0xF8, 0xFA, 0xFF, 0xF2),
                 border_color: rgba(0xB8, 0xC3, 0xD0, 0xFF),
                 border_width: 1.0,
@@ -1157,7 +1157,7 @@ impl Default for UiTheme {
             accent_color: None,
             corner_radius: None,
             background_color: None,
-            embedded_composition: false,
+            embedded_composition: true,
             hide_candidate_panel: false,
             show_tray_mode_indicator: true,
         }

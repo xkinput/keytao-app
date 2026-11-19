@@ -192,7 +192,7 @@ struct ImeTheme: Codable {
                 colorScheme: .auto,
                 effectiveColorScheme: .light,
                 accentColor: nil,
-                embeddedComposition: false,
+                embeddedComposition: true,
                 hideCandidatePanel: false
             ),
             font: Font(
@@ -204,7 +204,7 @@ struct ImeTheme: Codable {
                 weight: .semiBold
             ),
             panel: Panel(
-                orientation: .vertical,
+                orientation: .horizontal,
                 background: ThemeColor(red: 0xF8, green: 0xFA, blue: 0xFF, alpha: 0xF2),
                 borderColor: ThemeColor(red: 0xB8, green: 0xC3, blue: 0xD0, alpha: 0xFF),
                 borderWidth: 1,
