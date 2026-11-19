@@ -16,6 +16,45 @@ pub const DEPLOY_SUBCOMMAND: &str = "--deploy";
 pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_BUILD_SIGNATURE: &str = "build/.keytao-windows-build-signature.json";
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec<u8>, String> {
+    let mut schemas = crate::configured_schema_list_from_dir(user_dir);
+    schemas.sort();
+    schemas.dedup();
+    serde_json::to_vec(&(
+        crate::deployment_fingerprint(user_dir)?,
+        librime_version,
+        schemas,
+    ))
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_build_needs_repair(user_dir: &Path, signature: &[u8]) -> bool {
+    !std::fs::read_to_string(user_dir.join(crate::WINDOWS_RIME_BUILD_REPAIR_MARKER))
+        .is_ok_and(|content| content == crate::WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
+        || !crate::schema_install_state(user_dir).deployed
+        || std::fs::read(user_dir.join(WINDOWS_BUILD_SIGNATURE))
+            .ok()
+            .as_deref()
+            != Some(signature)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), String> {
+    // Decide before closing the runtime gate; failures must leave the next deploy in repair mode.
+    let repair = windows_build_needs_repair(user_dir, signature);
+    crate::clear_windows_rime_build_repair_marker(user_dir)?;
+    crate::ReloadStamp::write(user_dir)?;
+    if repair {
+        crate::invalidate_active_windows_rime_build(user_dir)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 const LOCK_FD_ENV: &str = "KEYTAO_LIBRIME_UPGRADE_LOCK_FD";
 
@@ -97,13 +136,23 @@ pub fn run_deploy_child_main() -> i32 {
             .ok_or("cannot determine the librime user data directory")?;
         let shared_dir = crate::default_shared_data_dir();
         #[cfg(target_os = "windows")]
-        {
-            crate::clear_windows_rime_build_repair_marker(&user_dir)?;
-            crate::invalidate_active_windows_rime_build(&user_dir)?;
-        }
-        crate::deploy(user_dir.to_string_lossy().into_owned(), shared_dir)?;
+        let signature = windows_build_signature(
+            &user_dir,
+            &crate::librime_runtime_version().ok_or("cannot determine the librime version")?,
+        )?;
         #[cfg(target_os = "windows")]
-        crate::mark_windows_rime_build_repair_complete(&user_dir)?;
+        prepare_windows_deploy(&user_dir, &signature)?;
+        crate::deploy_for_process(
+            user_dir.to_string_lossy().into_owned(),
+            shared_dir,
+            crate::DeployProcess::DeployChild,
+        )?;
+        #[cfg(target_os = "windows")]
+        {
+            crate::write_file_atomic(&user_dir.join(WINDOWS_BUILD_SIGNATURE), &signature)
+                .map_err(|error| format!("write Windows build signature: {error}"))?;
+            crate::mark_windows_rime_build_repair_complete(&user_dir)?;
+        }
         Ok(())
     })
 }
@@ -492,6 +541,101 @@ fn wait_for_child_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_deploy_reuses_only_trusted_builds() {
+        let root =
+            std::env::temp_dir().join(format!("keytao-windows-incremental-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let preserved = [
+            (
+                "default.custom.yaml",
+                "patch:\n  schema_list: [{schema: keydo}]\n",
+            ),
+            (
+                "keydo.schema.yaml",
+                "schema: {schema_id: keydo}\ntranslator: {dictionary: keydo}\n",
+            ),
+            ("keydo.custom.yaml", "patch: {menu/page_size: 7}\n"),
+            ("keydo.user.dict.yaml", "user words"),
+            ("keydo.userdb/data", "learned words"),
+        ];
+        std::fs::create_dir_all(root.join("keydo.userdb")).unwrap();
+        for (path, content) in preserved {
+            std::fs::write(root.join(path), content).unwrap();
+        }
+        std::fs::write(
+            root.join("build/keydo.schema.yaml"),
+            "schema: {schema_id: keydo}\n",
+        )
+        .unwrap();
+        let signature = windows_build_signature(&root, "1.17.0").unwrap();
+        let trust = || {
+            crate::write_deployed_marker(&root, &["keydo".into()]).unwrap();
+            crate::mark_windows_rime_build_repair_complete(&root).unwrap();
+            std::fs::write(root.join(WINDOWS_BUILD_SIGNATURE), &signature).unwrap();
+        };
+        trust();
+        assert!(!windows_build_needs_repair(&root, &signature));
+        assert!(windows_build_needs_repair(
+            &root,
+            &windows_build_signature(&root, "1.18.0").unwrap()
+        ));
+        for path in [
+            crate::WINDOWS_RIME_BUILD_REPAIR_MARKER,
+            "build/.keytao-deployed",
+            WINDOWS_BUILD_SIGNATURE,
+        ] {
+            std::fs::remove_file(root.join(path)).unwrap();
+            assert!(
+                windows_build_needs_repair(&root, &signature),
+                "missing {path}"
+            );
+            std::fs::write(root.join(path), b"invalid marker").unwrap();
+            assert!(
+                windows_build_needs_repair(&root, &signature),
+                "invalid {path}"
+            );
+            trust();
+        }
+        std::fs::write(root.join("build/.keytao-deploying"), "interrupted").unwrap();
+        assert!(windows_build_needs_repair(&root, &signature));
+        std::fs::remove_file(root.join("build/.keytao-deploying")).unwrap();
+        std::fs::write(
+            root.join("default.custom.yaml"),
+            "patch:\n  schema_list: [{schema: keydo}, {schema: keytao}]\n",
+        )
+        .unwrap();
+        let changed = windows_build_signature(&root, "1.17.0").unwrap();
+        assert_ne!(signature, changed);
+        assert!(windows_build_needs_repair(&root, &changed));
+        std::fs::write(root.join("default.custom.yaml"), preserved[0].1).unwrap();
+
+        for suffix in ["prism", "table", "reverse"] {
+            std::fs::write(root.join(format!("build/keydo.{suffix}.bin")), suffix).unwrap();
+        }
+        prepare_windows_deploy(&root, &signature).unwrap();
+        for suffix in ["prism", "table", "reverse"] {
+            assert_eq!(
+                std::fs::read(root.join(format!("build/keydo.{suffix}.bin"))).unwrap(),
+                suffix.as_bytes()
+            );
+        }
+        // A failed/interrupted deploy leaves the gate closed and forces the next repair.
+        assert!(windows_build_needs_repair(&root, &signature));
+        prepare_windows_deploy(&root, &signature).unwrap();
+        for suffix in ["prism", "table", "reverse"] {
+            assert!(!root.join(format!("build/keydo.{suffix}.bin")).exists());
+        }
+        for (path, content) in preserved {
+            assert_eq!(
+                std::fs::read(root.join(path)).unwrap(),
+                content.as_bytes(),
+                "{path}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn protocol_golden_cases() {

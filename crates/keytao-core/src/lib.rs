@@ -24,6 +24,8 @@ mod global_input;
 #[cfg(test)]
 mod grammar_tests;
 mod reload_stamp_cache;
+mod schema_inputs;
+pub use schema_inputs::{record_schema_input_fingerprints, schema_input_fingerprints};
 mod rime_lua;
 #[cfg(all(
     test,
@@ -56,6 +58,20 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy)]
+pub enum DeployProcess {
+    InProcess,
+    DeployChild,
+    AndroidDeployer,
+    PublicDeploy,
+}
+
+impl DeployProcess {
+    fn needs_user_dictionary_cache(self) -> bool {
+        matches!(self, Self::InProcess)
+    }
+}
 
 /// A poisoned lock only means some other caller panicked while holding it; the
 /// input method must keep working, so the data is recovered instead of
@@ -672,6 +688,10 @@ fn wanxiang_grammar_enabled(user_dir: &Path) -> bool {
 // shortcut: Octagram still selects BeamSearch, so equal-weight sentences may reorder;
 // exact 1.2.7 tie parity needs a schema-aware C++ factory unavailable through RimeApi.
 fn patch_neutral_grammar(user_dir: &Path) {
+    update_neutral_grammar(user_dir, true);
+}
+
+fn update_neutral_grammar(user_dir: &Path, enabled: bool) {
     if !wanxiang_grammar_enabled(user_dir) {
         return;
     }
@@ -706,6 +726,29 @@ fn patch_neutral_grammar(user_dir: &Path) {
             }
             let mut content = std::fs::read(&path)
                 .map_err(|error| format!("read {}: {error}", path.display()))?;
+            let grammar = format!(
+                "grammar:\n  language: \"\"\n  non_collocation_penalty: {NEUTRAL_GRAMMAR_PENALTY}\n"
+            );
+            let block = format!("# KeyTao neutral grammar\n{grammar}");
+            let block_with_newline =
+                format!("\n# KeyTao neutral grammar (added newline)\n{grammar}");
+            if !enabled {
+                // Legacy patches added a separator to librime's unterminated YAML.
+                let legacy = format!("\n{grammar}");
+                let original = content
+                    .strip_suffix(block_with_newline.as_bytes())
+                    .or_else(|| {
+                        content
+                            .strip_suffix(block.as_bytes())
+                            .filter(|bytes| bytes.is_empty() || bytes.ends_with(b"\n"))
+                    })
+                    .or_else(|| content.strip_suffix(legacy.as_bytes()));
+                if let Some(original) = original {
+                    write_file_atomic(&path, original)
+                        .map_err(|error| format!("write {}: {error}", path.display()))?;
+                }
+                return Ok(());
+            }
             if content
                 .split(|byte| *byte == b'\n')
                 .any(|line| line.starts_with(b"grammar:"))
@@ -730,13 +773,11 @@ fn patch_neutral_grammar(user_dir: &Path) {
                 };
             }
             // Compiled YAML scalars must never pass through a serializer.
-            if !content.ends_with(b"\n") {
-                content.push(b'\n');
-            }
-            content.extend_from_slice(
-                format!("grammar:\n  language: \"\"\n  non_collocation_penalty: {NEUTRAL_GRAMMAR_PENALTY}\n")
-                    .as_bytes(),
-            );
+            content.extend_from_slice(if content.ends_with(b"\n") {
+                block.as_bytes()
+            } else {
+                block_with_newline.as_bytes()
+            });
             write_file_atomic(&path, &content)
                 .map_err(|error| format!("write {}: {error}", path.display()))
         })();
@@ -1097,6 +1138,14 @@ mod desktop {
     }
 
     pub fn setup_only(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+        setup_only_for_process(user_data_dir, shared_data_dir, DeployProcess::InProcess)
+    }
+
+    fn setup_only_for_process(
+        user_data_dir: String,
+        shared_data_dir: String,
+        process: DeployProcess,
+    ) -> Result<(), String> {
         runtime_log::init_for_engine(Path::new(&user_data_dir));
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         crate::rt_log!(Level::Info, "rime", "setup_start");
@@ -1112,7 +1161,7 @@ mod desktop {
                 true
             }
         };
-        if initialized_now {
+        if initialized_now && process.needs_user_dictionary_cache() {
             initialize_user_dictionary_cache(Path::new(&user_data_dir));
         }
         if let Some(started) = started {
@@ -1271,6 +1320,14 @@ mod desktop {
     /// exhausting the app process while producing the same build artifacts.
     /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
     pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+        deploy_for_process(user_data_dir, shared_data_dir, DeployProcess::InProcess)
+    }
+
+    pub fn deploy_for_process(
+        user_data_dir: String,
+        shared_data_dir: String,
+        process: DeployProcess,
+    ) -> Result<(), String> {
         runtime_log::init_for_engine(Path::new(&user_data_dir));
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let schema_count = started
@@ -1292,15 +1349,15 @@ mod desktop {
 
             #[cfg(target_os = "android")]
             {
-                setup_only(user_data_dir.clone(), shared_data_dir)?;
+                setup_only_for_process(user_data_dir.clone(), shared_data_dir, process)?;
                 deploy_android_staged(&user_data_dir)
                     .map_err(|error| deploy_log.failure_message(Some(&error)))?;
             }
 
             #[cfg(not(target_os = "android"))]
             {
-                setup_only(user_data_dir.clone(), shared_data_dir)?;
-                if !full_deploy_and_wait()
+                setup_only_for_process(user_data_dir.clone(), shared_data_dir, process)?;
+                if !full_deploy_and_wait(Path::new(&user_data_dir))
                     .map_err(|error| deploy_log.failure_message(Some(&error)))?
                 {
                     return Err(deploy_log.failure_message(None));
@@ -1364,7 +1421,9 @@ mod desktop {
             // setup_only exports user dictionaries; Lua initialization can run user code.
             initialize_rime(&user_data_dir, &shared_data_dir, true);
         }
-        if !full_deploy_and_wait().map_err(|error| deploy_log.failure_message(Some(&error)))? {
+        if !full_deploy_and_wait(user_dir)
+            .map_err(|error| deploy_log.failure_message(Some(&error)))?
+        {
             return Err(deploy_log.failure_message(None));
         }
         deploy_desktop_schema_dependencies(user_dir)
@@ -1383,7 +1442,7 @@ mod desktop {
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         begin_deployment(Path::new(&user_data_dir))?;
-        setup_only(user_data_dir.clone(), shared_data_dir)?;
+        setup_only_for_process(user_data_dir.clone(), shared_data_dir, DeployProcess::AndroidDeployer)?;
         deploy_config_file("default.yaml", "config_version")
             .map_err(|error| deploy_log.failure_message(Some(&error)))?;
         let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
@@ -1404,7 +1463,7 @@ mod desktop {
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         regenerate_active_rime_lua(Path::new(&user_data_dir))?;
-        setup_only(user_data_dir.clone(), shared_data_dir)?;
+        setup_only_for_process(user_data_dir.clone(), shared_data_dir, DeployProcess::AndroidDeployer)?;
         let user_dir = Path::new(&user_data_dir);
         if parse_schema_list_from_dir(user_dir).contains(&schema_id) {
             if !deploy_listed_schema(user_dir, &schema_id)? {
@@ -2403,7 +2462,7 @@ mod desktop {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn full_deploy_and_wait() -> Result<bool, String> {
+    fn full_deploy_and_wait(user_dir: &Path) -> Result<bool, String> {
         let _rime = rime_api_lock();
         // RimeFinalize does not reset glog's process-wide log directory. A
         // previous user root may have been removed after switching runtimes;
@@ -2421,7 +2480,9 @@ mod desktop {
             let mut result = lock_ignore_poison(&DEPLOY_RESULT);
             *result = None;
         }
-        unsafe {
+        // Keep the runtime-only grammar block out of librime's prism checksum.
+        update_neutral_grammar(user_dir, false);
+        let result = (|| unsafe {
             let api = rime_get_api();
             let Some(start_maintenance) = (*api).start_maintenance else {
                 return Ok(false);
@@ -2432,8 +2493,10 @@ mod desktop {
             if let Some(join_maintenance_thread) = (*api).join_maintenance_thread {
                 join_maintenance_thread();
             }
-        }
-        Ok(*lock_ignore_poison(&DEPLOY_RESULT) == Some(true))
+            Ok(*lock_ignore_poison(&DEPLOY_RESULT) == Some(true))
+        })();
+        patch_neutral_grammar(user_dir);
+        result
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -3883,7 +3946,7 @@ pub use desktop::deploy_for_upgrade;
     target_os = "android",
     target_os = "ios"
 ))]
-pub use desktop::{deploy, setup_only};
+pub use desktop::{deploy, deploy_for_process, setup_only};
 
 #[cfg(any(
     target_os = "linux",
@@ -5127,6 +5190,21 @@ pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<()
     PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
     *initialized = result.is_ok().then_some(dirs);
     result
+}
+
+/// Release every session and mapped build before a deployment child writes them.
+#[cfg(target_os = "windows")]
+pub fn prepare_server_deploy() -> Result<(), String> {
+    let _build = PROCESS_RIME
+        .build
+        .acquire()
+        .ok_or("Rime engine build timed out")?;
+    let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+    let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+    PROCESS_RIME.drop_live_engines();
+    *initialized = None;
+    PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+    desktop::finalize_rime()
 }
 
 #[cfg(any(
@@ -7158,6 +7236,10 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
             Err(error) => return Err(format!("remove {}: {error}", marker.display())),
         }
     }
+    schema_inputs::invalidate_changed_deploy_schemas(
+        user_data_dir,
+        &configured_schema_list_from_dir(user_data_dir),
+    )?;
     regenerate_active_rime_lua(user_data_dir)
 }
 
@@ -7265,6 +7347,9 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
     }
     patch_neutral_grammar(user_data_dir);
     persist_standalone_addon_selection(user_data_dir)?;
+    if let Err(error) = record_schema_input_fingerprints(user_data_dir, &effective) {
+        crate::rt_log!(Level::Info, "rime", "schema_input_cache_write_failed", msg = error);
+    }
     write_deployed_marker(user_data_dir, &schemas)?;
     let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
     match std::fs::remove_file(&sentinel) {

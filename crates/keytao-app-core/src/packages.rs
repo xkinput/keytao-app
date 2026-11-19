@@ -260,7 +260,8 @@ pub(crate) fn archive_from_files(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>,
     let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (path, bytes) in files {
         archive
-            .start_file(path, zip::write::SimpleFileOptions::default())
+            .start_file(path, zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored))
             .map_err(|error| CoreError::Other(error.to_string()))?;
         archive.write_all(bytes)?;
     }
@@ -290,21 +291,24 @@ fn rime_lua_from_reader(reader: impl Read + Seek) -> Result<Option<String>, Stri
 pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), CoreError> {
     let mut records = crate::package_activation::read_all(core, root)?;
     if !records.is_empty() {
+        let mut verified = BTreeMap::new();
         for (key, record) in &mut records {
-            let (files, meta) = match PackageStore::new(core).read_files(key) {
+            let (mut files, meta) = match PackageStore::new(core).read_files(key) {
                 Ok(files) => files,
                 Err(error) => {
                     tracing::warn!(%key, %error, "Skipping active Lua refresh: no verified stored package");
                     return Ok(());
                 }
             };
-            record.rime_lua = files.into_iter().find(|(path, _)| path == "rime.lua")
-                .map(|(_, bytes)| String::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string())))
+            record.rime_lua = files.iter().find(|(path, _)| path == "rime.lua")
+                .map(|(_, bytes)| String::from_utf8(bytes.clone()).map_err(|error| CoreError::Other(error.to_string())))
                 .transpose()?;
             if record.manifest.is_empty() { record.manifest = meta.manifest; }
+            files.retain(|(path, _)| path.starts_with("lua/"));
+            verified.insert(key.clone(), files);
         }
         for record in records.values() { crate::package_activation::write(core, record)?; }
-        publish_active_manifest(core, root, &records)?;
+        publish_active_manifest(core, root, &records, Some(&verified))?;
         return keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other);
     }
     let addon_only = ["default.custom.yaml", "default-custom.yaml"]
@@ -321,7 +325,7 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
     let Some(scheme_key) = core.state().active_scheme else {
         return Ok(());
     };
-    let (files, meta) = match PackageStore::new(core).read_files(&scheme_key) {
+    let (mut files, meta) = match PackageStore::new(core).read_files(&scheme_key) {
         Ok(files) => files,
         Err(error) => {
             tracing::warn!(%scheme_key, %error, "Skipping active rime.lua snapshot refresh: no verified stored archive");
@@ -337,16 +341,18 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
         }).collect(),
         manifest: meta.manifest,
         rime_lua: files
-            .into_iter()
+            .iter()
             .find(|(path, _)| path == "rime.lua")
             .map(|(_, bytes)| {
-                String::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string()))
+                String::from_utf8(bytes.clone()).map_err(|error| CoreError::Other(error.to_string()))
             })
             .transpose()?,
         ..Default::default()
     };
     crate::package_activation::write(core, &active)?;
-    publish_active_manifest(core, root, &crate::package_activation::read_all(core, root)?)?;
+    files.retain(|(path, _)| path.starts_with("lua/"));
+    let verified = BTreeMap::from([(active.key.clone(), files)]);
+    publish_active_manifest(core, root, &crate::package_activation::read_all(core, root)?, Some(&verified))?;
     keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other)
 }
 
@@ -354,6 +360,7 @@ fn publish_active_manifest(
     core: &Core,
     root: &Path,
     records: &BTreeMap<String, crate::package_activation::Activation>,
+    verified: Option<&BTreeMap<String, Vec<(String, Vec<u8>)>>>,
 ) -> Result<(), CoreError> {
     let path = safe_path(root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?;
     let previous = match fs::read(&path) {
@@ -368,8 +375,15 @@ fn publish_active_manifest(
     };
     for (key, record) in records {
         crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
-        let store = PackageStore::new(core);
-        let (files, _) = PackageStore::read_files_at(&store.checked_package_path(key)?, key)?;
+        let stored;
+        let files = match verified.and_then(|packages| packages.get(key)) {
+            Some(files) => files,
+            None => {
+                let store = PackageStore::new(core);
+                stored = PackageStore::read_files_at(&store.checked_package_path(key)?, key)?.0;
+                &stored
+            }
+        };
         let mut lua_files = BTreeMap::new();
         for (relative, bytes) in files.iter().filter(|(path, _)| path.starts_with("lua/")) {
             let snapshot = format!(".keytao-package-lua/{key}/{relative}");
@@ -832,7 +846,7 @@ pub(crate) fn finalize_pending(
                 }
             }
             let records = crate::package_activation::read_all(core, root)?;
-            publish_active_manifest(core, root, &records)?;
+            publish_active_manifest(core, root, &records, None)?;
             keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other)?;
         }
     }
@@ -1265,7 +1279,7 @@ async fn remove_owned_package(
     refresh_generated(core, root, &mut inactive)?;
     crate::package_activation::remove(core, root, scheme_key, &inactive)?;
     let records = crate::package_activation::read_all(core, root)?;
-    publish_active_manifest(core, root, &records)?;
+    publish_active_manifest(core, root, &records, None)?;
     if records.is_empty() {
         let path = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
         let mut marker: ActiveManifest = serde_json::from_slice(&fs::read(&path)?)?;
@@ -1552,6 +1566,41 @@ mod tests {
             sha256_file(file.path()).unwrap(),
             format!("{:x}", Sha256::digest(fs::read(file.path()).unwrap()))
         );
+    }
+
+    #[test]
+    fn deploy_preparation_preserves_lua_snapshots_and_checks_stored_lua_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let root = dir.path().join("rime");
+        fs::create_dir_all(&root).unwrap();
+        let files = vec![
+            ("rime.lua".into(), b"helper = require('helper')\n".to_vec()),
+            ("lua/helper.lua".into(), b"return 1\n".to_vec()),
+            ("keytao.schema.yaml".into(), b"schema: {schema_id: keytao}\n".to_vec()),
+            ("default.custom.yaml".into(), b"patch: {schema_list: [{schema: keytao}]}\n".to_vec()),
+        ];
+        let archive = archive_from_files(&files).unwrap();
+        store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &archive, &root).unwrap();
+        record_package(&core, "keytao", Some("v1"), true).unwrap();
+        fs::write(root.join("default.custom.yaml"), &files[3].1).unwrap();
+        prepare_active_rime_lua(&core, &root).unwrap();
+        let snapshot = root.join(".keytao-package-lua/keytao/lua/helper.lua");
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        fs::File::options().write(true).open(&snapshot).unwrap().set_modified(modified).unwrap();
+        prepare_active_rime_lua(&core, &root).unwrap();
+        assert_eq!(fs::metadata(&snapshot).unwrap().modified().unwrap(), modified);
+        let manifest_path = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
+        let manifest = fs::read(&manifest_path).unwrap();
+        for relative in ["rime.lua", "lua/helper.lua"] {
+            let stored = PackageStore::new(&core).package_path("keytao").join("files").join(relative);
+            let original = fs::read(&stored).unwrap();
+            fs::write(&stored, vec![b'x'; original.len()]).unwrap();
+            prepare_active_rime_lua(&core, &root).unwrap();
+            assert_eq!(fs::read(&snapshot).unwrap(), b"return 1\n");
+            assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+            fs::write(stored, original).unwrap();
+        }
     }
 
     #[test]

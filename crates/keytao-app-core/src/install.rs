@@ -327,6 +327,10 @@ fn rime_package_build_ids(zip_bytes: &[u8]) -> Result<(Vec<String>, Vec<String>)
 /// On Linux, triggers a polkit (pkexec) root-auth dialog if the file is root-owned.
 /// Returns a tag for logging: "" (normal), " [forced]", or " [root]".
 fn write_file_force(path: &std::path::Path, content: &[u8]) -> Result<&'static str, String> {
+    // Rime uses source mtimes to decide which schemas to rebuild.
+    if std::fs::read(path).is_ok_and(|existing| existing == content) {
+        return Ok("");
+    }
     if let Some(p) = path.parent() {
         if let Err(error) = std::fs::create_dir_all(p) {
             return write_file_privileged_fallback(path, content, error);
@@ -580,6 +584,8 @@ fn smart_install_entries(
         } else {
             None
         };
+        let (mut package_schema_ids, mut package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
+        let schema_inputs_before = keytao_core::schema_input_fingerprints(&dest, &package_schema_ids)?;
         let mut paths =
             crate::package_activation::transaction_paths(&dest, &files, previous.as_ref())
                 .map_err(|e| e.to_string())?;
@@ -664,7 +670,6 @@ fn smart_install_entries(
                 activation.backups.push(backup);
             }
         }
-        let (package_schema_ids, mut package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
         if let Some(changed) = changed_dictionaries {
             package_dictionary_ids.retain(|id| changed.contains(id));
         }
@@ -852,6 +857,12 @@ fn smart_install_entries(
                     .map(|p| format!("[REMOVED BUILD] {p}")),
             );
         }
+
+        let schema_inputs_after = keytao_core::schema_input_fingerprints(&dest, &package_schema_ids)?;
+        package_schema_ids = schema_inputs_before.into_iter()
+            .filter(|(id, before)| before.is_none() || schema_inputs_after.get(id) != Some(before))
+            .map(|(id, _)| id)
+            .collect();
 
         #[cfg(not(target_os = "windows"))]
         logs.extend(

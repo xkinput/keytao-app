@@ -191,11 +191,7 @@ impl InProcEngine {
     pub fn prepare_server_deploy(&self) -> Result<(), String> {
         let _inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _init_guard = EngineInitGuard::acquire(false)?;
-        let user_dir = default_user_data_dir().ok_or("cannot determine KeyTao data directory")?;
-        keytao_core::reinitialize(
-            user_dir.to_string_lossy().into_owned(),
-            server_shared_data_dir(),
-        )
+        keytao_core::prepare_server_deploy()
     }
 
     /// Only the short-lived `--deploy` entry point may call this.

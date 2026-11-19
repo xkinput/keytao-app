@@ -24,6 +24,15 @@ pub struct DeployRecord {
 }
 
 pub fn record_result(core: &Core, root: &std::path::Path, success: bool) -> Result<(), CoreError> {
+    record_result_inner(core, root, success, true)
+}
+
+fn record_result_inner(
+    core: &Core,
+    root: &std::path::Path,
+    success: bool,
+    prepare_lua: bool,
+) -> Result<(), CoreError> {
     let root = match root.canonicalize() {
         Ok(root) => root,
         Err(error)
@@ -41,7 +50,7 @@ pub fn record_result(core: &Core, root: &std::path::Path, success: bool) -> Resu
         });
     })?;
     // Hosts also use this preparation before deploying through a native IME process.
-    if !success && root.is_dir() {
+    if prepare_lua && !success && root.is_dir() {
         crate::packages::prepare_active_rime_lua(core, &root)?;
     }
     if root.is_dir() {
@@ -55,7 +64,7 @@ pub fn record_android_result(
     root: &std::path::Path,
     success: bool,
 ) -> Result<(), CoreError> {
-    record_result(core, root, false)?;
+    record_result_inner(core, root, false, false)?;
     if !success {
         return Ok(());
     }
@@ -451,7 +460,9 @@ pub(crate) async fn rime_deploy_default_inner(
             record_result(core, &root, true).map_err(|e| e.to_string())?;
             core.emit(CoreEvent::DeployProgress("部署完成".into()));
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            match write_keytao_ime_reload_stamp() {
+            let reload_stamp_result = write_keytao_ime_reload_stamp();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            match &reload_stamp_result {
                 Ok(()) => {
                     core.emit(CoreEvent::DeployProgress("已通知系统输入法重载".into()));
                     tracing::info!("IME reload stamp written after deploy");
@@ -469,7 +480,7 @@ pub(crate) async fn rime_deploy_default_inner(
                 core.emit(CoreEvent::DeployProgress(warning.clone()));
             }
             #[cfg(target_os = "linux")]
-            match launch_keytao_ime(core, &host, true) {
+            match launch_keytao_ime(core, &host, reload_stamp_result.is_err()) {
                 Ok(status) => {
                     core.emit(CoreEvent::DeployProgress(status.message));
                 }

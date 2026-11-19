@@ -122,7 +122,11 @@ fn neutral_grammar_appends_without_changing_existing_bytes() {
             bytes,
             format!(
                 "{content}{}grammar:\n  language: \"\"\n  non_collocation_penalty: -13.815510557964274\n",
-                if content.ends_with('\n') { "" } else { "\n" }
+                if content.ends_with('\n') {
+                    "# KeyTao neutral grammar\n"
+                } else {
+                    "\n# KeyTao neutral grammar (added newline)\n"
+                }
             ).as_bytes(),
             "{id}"
         );
@@ -154,6 +158,35 @@ fn neutral_grammar_appends_without_changing_existing_bytes() {
     for (path, bytes) in patched {
         assert_eq!(fs::read(path).unwrap(), bytes);
     }
+    super::update_neutral_grammar(&dir, false);
+    for (id, content) in originals {
+        assert_eq!(
+            fs::read(dir.join(format!("build/{id}.schema.yaml"))).unwrap(),
+            content.as_bytes()
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn neutral_grammar_removes_legacy_separator_without_matching_nested_keys() {
+    let dir = scratch_dir();
+    enable_wanxiang(&dir);
+    fs::write(
+        dir.join("default.custom.yaml"),
+        "patch:\n  schema_list:\n    - schema: keydo\n",
+    )
+    .unwrap();
+    let path = dir.join("build/keydo.schema.yaml");
+    let grammar = "grammar:\n  language: \"\"\n  non_collocation_penalty: -13.815510557964274\n";
+    fs::write(&path, format!("schema: {{schema_id: keydo}}\n{grammar}")).unwrap();
+    super::update_neutral_grammar(&dir, false);
+    assert_eq!(fs::read(&path).unwrap(), b"schema: {schema_id: keydo}");
+    let nested = format!("my{grammar}");
+    fs::write(&path, &nested).unwrap();
+    super::update_neutral_grammar(&dir, false);
+    assert_eq!(fs::read(&path).unwrap(), nested.as_bytes());
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -292,6 +325,167 @@ fn neutral_grammar_is_noop_without_enabled_model() {
     assert_eq!(
         fs::read_to_string(dir.join("build/keydo.schema.yaml")).unwrap(),
         content
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn real_librime_grammar_redeploy_preserves_builds_and_rebuilds_changed_inputs() {
+    const CHILD: &str = "KEYTAO_GRAMMAR_REDEPLOY_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let dir = PathBuf::from(root);
+        enable_wanxiang(&dir);
+        let sources = [
+            ("default.yaml", "config_version: '1'\nschema_list:\n  - schema: keytao\n"),
+            ("default.custom.yaml", "patch:\n  schema_list:\n    - schema: keytao\n"),
+            ("keytao.custom.yaml", "patch:\n  menu/page_size: 7\n"),
+            ("keytao.schema.yaml", "schema:\n  schema_id: keytao\n  name: Grammar Redeploy\n  version: '1'\n\
+                engine:\n  processors: [speller, selector, express_editor]\n  \
+                segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\n\
+                speller:\n  alphabet: abcde\ntranslator:\n  dictionary: keytao\n  enable_user_dict: false\n"),
+            ("keytao.dict.yaml", "---\nname: keytao\nversion: '1'\nsort: by_weight\n\
+                use_preset_vocabulary: false\n...\n甲\ta\t100\n乙\tb\t100\n"),
+        ];
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for (name, content) in sources {
+            let path = dir.join(name);
+            fs::write(&path, content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        let user_files = [
+            ("personal.user.dict.yaml", "# User dictionary\n"),
+            ("personal.userdb/data", "user database fixture"),
+            ("personal.custom.yaml", "patch: {menu/page_size: 9}\n"),
+        ];
+        fs::create_dir_all(dir.join("personal.userdb")).unwrap();
+        for (name, content) in user_files {
+            fs::write(dir.join(name), content).unwrap();
+        }
+        let deploy = || {
+            let started = std::time::Instant::now();
+            super::deploy(
+                dir.to_string_lossy().into_owned(),
+                dir.to_string_lossy().into_owned(),
+            )
+            .expect("deploy with grammar enabled");
+            started.elapsed()
+        };
+        let first = deploy();
+        let binaries = ["keytao.table.bin", "keytao.prism.bin", "keytao.reverse.bin"]
+            .map(|name| dir.join("build").join(name));
+        for path in &binaries {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        let second = deploy();
+        println!("grammar deploy: first={first:?}, unchanged={second:?}");
+        for path in &binaries {
+            assert_eq!(
+                fs::metadata(path).unwrap().modified().unwrap(),
+                old,
+                "unchanged grammar deploy rebuilt {}",
+                path.display()
+            );
+        }
+        let compiled = || -> Value {
+            serde_yaml::from_slice(&fs::read(dir.join("build/keytao.schema.yaml")).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            compiled()["grammar"]["non_collocation_penalty"].as_f64(),
+            Some(NEUTRAL_GRAMMAR_PENALTY)
+        );
+        fs::write(
+            dir.join("keytao.dict.yaml"),
+            format!("{}丙\tc\t100\n", sources[4].1),
+        )
+        .unwrap();
+        deploy();
+        for path in &binaries {
+            assert_ne!(
+                fs::metadata(path).unwrap().modified().unwrap(),
+                old,
+                "dictionary change did not rebuild {}",
+                path.display()
+            );
+        }
+        fs::File::options()
+            .write(true)
+            .open(&binaries[1])
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        fs::write(
+            dir.join("keytao.custom.yaml"),
+            "patch:\n  menu/page_size: 8\n",
+        )
+        .unwrap();
+        fs::File::options().write(true).open(dir.join("keytao.custom.yaml"))
+            .unwrap().set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        deploy();
+        assert_ne!(fs::metadata(&binaries[1]).unwrap().modified().unwrap(), old);
+        assert_eq!(compiled()["menu"]["page_size"].as_u64(), Some(8));
+        let runtime = super::ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+        runtime.reload_without_deploy().unwrap();
+        let session = runtime.create_session().unwrap();
+        session.select_schema("keytao").unwrap();
+        session.process_key_result(u32::from(b'a'), 0).unwrap();
+        let state = session.state();
+        assert_eq!(state.page_size, 8);
+        assert_eq!(state.candidates.first().unwrap().text, "甲");
+        drop(session);
+        runtime.shutdown().unwrap();
+        for (name, content) in user_files.into_iter().chain(sources[..2].iter().copied()) {
+            assert_eq!(
+                fs::read(dir.join(name)).unwrap(),
+                content.as_bytes(),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("keytao.custom.yaml")).unwrap(),
+            "patch:\n  menu/page_size: 8\n"
+        );
+        let write_old = |name: &str, content: &str| {
+            let path = dir.join(name);
+            fs::write(&path, content).unwrap();
+            fs::File::options().write(true).open(path).unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        };
+        write_old("keytao_dep.schema.yaml", &sources[3].1.replace("schema_id: keytao", "schema_id: keytao_dep"));
+        write_old("keytao_dep.custom.yaml", "patch: {menu/page_size: 3}\n");
+        write_old("default.custom.yaml", "patch: {schema_list: [{schema: keytao}, {schema: keytao_dep}]}\n");
+        deploy();
+        write_old("default.custom.yaml", sources[1].1);
+        deploy();
+        write_old("keytao_dep.custom.yaml", "patch: {menu/page_size: 9}\n");
+        write_old("keytao.custom.yaml", "patch: {menu/page_size: 8, schema/dependencies: [keytao_dep]}\n");
+        deploy();
+        let dependency: Value = serde_yaml::from_slice(&fs::read(dir.join("build/keytao_dep.schema.yaml")).unwrap()).unwrap();
+        assert_eq!(dependency["menu"]["page_size"].as_u64(), Some(9), "a newly referenced inactive dependency must compile its same-mtime custom patch");
+        return;
+    }
+    let dir = scratch_dir();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "grammar_tests::real_librime_grammar_redeploy_preserves_builds_and_rebuilds_changed_inputs", "--nocapture"])
+        .env(CHILD, &dir)
+        .output().unwrap();
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "librime child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(dir).unwrap();
 }

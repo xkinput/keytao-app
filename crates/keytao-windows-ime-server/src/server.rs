@@ -334,37 +334,107 @@ fn ensure_deploy_job() -> Result<(), String> {
     .map_err(Clone::clone)
 }
 
+fn finish_deploy(
+    deployment: Result<(), String>,
+    failed_child: bool,
+    user_dir: Option<&Path>,
+    mut reload: impl FnMut() -> Result<(), String>,
+    redeploy: impl FnOnce() -> Result<(), String>,
+) -> (Result<(), String>, bool) {
+    let reloaded = reload().or_else(|error| {
+        if !failed_child
+            || !user_dir.is_some_and(|dir| !keytao_core::schema_install_state(dir).deployed)
+        {
+            return Err(error);
+        }
+        // A failed child may have removed readiness and outputs; rebuild before reopening sessions.
+        redeploy()
+            .and_then(|()| reload())
+            .map_err(|recovery| format!("{error}; recovery deployment: {recovery}"))
+    });
+    let ready = reloaded.is_ok();
+    let result = match (deployment, reloaded) {
+        (Err(error), Err(recovery)) => Err(format!("{error}; recover server engine: {recovery}")),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    };
+    (result, ready)
+}
+
 impl Runtime {
     fn deploy(&mut self) -> Result<(), String> {
         self.ready = false;
         self.generation = self.generation.wrapping_add(1);
+        let mut prepared = false;
+        let mut executable = None;
+        let mut user_dir = None;
+        let mut failed_child = false;
         let result = (|| {
             ensure_deploy_job()?;
-            let exe = std::env::current_exe()
-                .map_err(|error| format!("resolve deploy child executable: {error}"))?;
+            executable = Some(
+                std::env::current_exe()
+                    .map_err(|error| format!("resolve deploy child executable: {error}"))?,
+            );
+            user_dir = Some(
+                keytao_core::default_user_data_dir()
+                    .ok_or("cannot determine KeyTao user directory")?,
+            );
             if let Some(engine) = &self.engine {
+                prepared = true;
                 engine.prepare_server_deploy()?;
             }
-            keytao_core::deploy_child::run_deploy_child(&exe, Duration::from_secs(600))?;
-            let user_dir = keytao_core::default_user_data_dir()
-                .ok_or("cannot determine KeyTao user directory")?;
-            keytao_core::ReloadStamp::write(&user_dir)?;
-            if let Some(engine) = &self.engine {
-                engine.reload_server()?;
-            } else {
-                let engine = InProcEngine::default();
-                engine.build_server()?;
-                self.engine = Some(engine);
-            }
+            let child = keytao_core::deploy_child::run_deploy_child(
+                executable.as_deref().unwrap(),
+                Duration::from_secs(600),
+            );
+            failed_child = child.is_err();
+            child?;
+            keytao_core::ReloadStamp::write(user_dir.as_deref().unwrap())?;
             Ok(())
         })();
-        self.ready = result.is_ok();
+        let result = if prepared || failed_child || result.is_ok() {
+            let (result, ready) = finish_deploy(
+                result,
+                failed_child,
+                user_dir.as_deref(),
+                || {
+                    if let Some(engine) = &self.engine {
+                        engine.reload_server()?;
+                    } else {
+                        let engine = InProcEngine::default();
+                        engine.build_server()?;
+                        self.engine = Some(engine);
+                    }
+                    Ok(())
+                },
+                || {
+                    keytao_core::deploy_child::run_deploy_child(
+                        executable.as_deref().unwrap(),
+                        Duration::from_secs(600),
+                    )?;
+                    if let Err(error) =
+                        keytao_core::ReloadStamp::write(user_dir.as_deref().unwrap())
+                    {
+                        keytao_core::rt_log!(
+                            Level::Info,
+                            "ipc",
+                            "recovery_reload_stamp_failed",
+                            msg = error
+                        );
+                    }
+                    Ok(())
+                },
+            );
+            self.ready = ready;
+            result
+        } else {
+            result
+        };
         self.write_status(
             result.as_ref().err().map(String::as_str),
-            result
-                .as_ref()
-                .ok()
-                .and_then(|()| self.engine.as_ref().map(|engine| engine.state().schema_id)),
+            self.ready
+                .then(|| self.engine.as_ref().map(|engine| engine.state().schema_id))
+                .flatten(),
         );
         result
     }
@@ -799,6 +869,127 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_failure_reloads_and_only_marks_a_recovered_engine_ready() {
+        for deployment_ok in [false, true] {
+            for reload_ok in [false, true] {
+                let calls = std::cell::Cell::new(0);
+                let deployment = if deployment_ok {
+                    Ok(())
+                } else {
+                    Err("child failed".into())
+                };
+                let (result, ready) = finish_deploy(
+                    deployment,
+                    false,
+                    None,
+                    || {
+                        calls.set(calls.get() + 1);
+                        if reload_ok {
+                            Ok(())
+                        } else {
+                            Err("invalid build".into())
+                        }
+                    },
+                    || panic!("reload-only failures must not redeploy"),
+                );
+                assert_eq!(calls.get(), 1);
+                assert_eq!(ready, reload_ok);
+                match (deployment_ok, reload_ok) {
+                    (false, false) => assert_eq!(
+                        result.unwrap_err(),
+                        "child failed; recover server engine: invalid build"
+                    ),
+                    (false, true) => assert_eq!(result.unwrap_err(), "child failed"),
+                    (true, false) => assert_eq!(result.unwrap_err(), "invalid build"),
+                    (true, true) => assert!(result.is_ok()),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_child_rebuilds_invalid_artifacts_once_and_keeps_completed_builds() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-server-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(
+            dir.join("keytao.schema.yaml"),
+            "schema: {schema_id: keytao}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch: {schema_list: [{schema: keytao}]}\n",
+        )
+        .unwrap();
+        for scenario in [
+            "spawn",
+            "stamp",
+            "failed-marker",
+            "missing-artifact",
+            "persistent-error",
+        ] {
+            std::fs::write(
+                dir.join("build/keytao.schema.yaml"),
+                "schema: {schema_id: keytao}\n",
+            )
+            .unwrap();
+            keytao_core::complete_deployment(&dir).unwrap();
+            if matches!(scenario, "failed-marker" | "persistent-error") {
+                std::fs::remove_file(dir.join("build/.keytao-deployed")).unwrap();
+                std::fs::write(dir.join("build/.keytao-deploying"), "interrupted child").unwrap();
+            } else if scenario == "missing-artifact" {
+                std::fs::remove_file(dir.join("build/keytao.schema.yaml")).unwrap();
+            }
+            let reloads = std::cell::Cell::new(0);
+            let recoveries = std::cell::Cell::new(0);
+            let invalid = !keytao_core::schema_install_state(&dir).deployed;
+            let (result, ready) = finish_deploy(
+                Err(format!("{scenario} failed")),
+                scenario != "stamp",
+                Some(&dir),
+                || {
+                    reloads.set(reloads.get() + 1);
+                    if keytao_core::schema_install_state(&dir).deployed {
+                        Ok(())
+                    } else {
+                        Err("invalid build".into())
+                    }
+                },
+                || {
+                    recoveries.set(recoveries.get() + 1);
+                    if scenario == "persistent-error" {
+                        return Err("disk write failed".into());
+                    }
+                    std::fs::write(
+                        dir.join("build/keytao.schema.yaml"),
+                        "schema: {schema_id: keytao}\n",
+                    )
+                    .unwrap();
+                    keytao_core::complete_deployment(&dir)
+                },
+            );
+            assert_eq!(recoveries.get(), usize::from(invalid), "{scenario}");
+            if scenario == "persistent-error" {
+                assert!(!ready);
+                assert_eq!(reloads.get(), 1);
+                assert_eq!(result.unwrap_err(), "persistent-error failed; recover server engine: invalid build; recovery deployment: disk write failed");
+            } else {
+                assert!(ready, "{scenario}");
+                assert_eq!(reloads.get(), if invalid { 2 } else { 1 }, "{scenario}");
+                assert_eq!(result.unwrap_err(), format!("{scenario} failed"));
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn reload_notification_rearms_after_stamp_changes() {

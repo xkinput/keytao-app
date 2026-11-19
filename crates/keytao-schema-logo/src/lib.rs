@@ -164,7 +164,7 @@ fn render_schema_logos_inner(
             let _ = fs::remove_file(output.join(format!("{schema_id}.png")));
             continue;
         }
-        if let Some((png, fingerprint)) = render_schema_logo_inner(
+        match render_schema_logo_inner(
             &root,
             schema_id,
             schema_name,
@@ -174,18 +174,22 @@ fn render_schema_logos_inner(
             &limits,
             started,
         )? {
-            if let Err(error) = write_cache_file(&output, &format!("{schema_id}.png"), &png) {
-                eprintln!("Could not write schema logo {schema_id:?}: {error}");
-            } else {
-                write_cache_file(
-                    &output,
-                    &format!("{schema_id}.source"),
-                    fingerprint.as_bytes(),
-                )?;
+            Some(LogoRender::Cached) => {}
+            Some(LogoRender::Rendered(png, fingerprint)) => {
+                if let Err(error) = write_cache_file(&output, &format!("{schema_id}.png"), &png) {
+                    eprintln!("Could not write schema logo {schema_id:?}: {error}");
+                } else {
+                    write_cache_file(
+                        &output,
+                        &format!("{schema_id}.source"),
+                        fingerprint.as_bytes(),
+                    )?;
+                }
             }
-        } else {
-            for extension in ["png", "source"] {
-                let _ = fs::remove_file(output.join(format!("{schema_id}.{extension}")));
+            None => {
+                for extension in ["png", "source"] {
+                    let _ = fs::remove_file(output.join(format!("{schema_id}.{extension}")));
+                }
             }
         }
     }
@@ -210,6 +214,11 @@ fn write_cache_file(output: &Path, filename: &str, bytes: &[u8]) -> io::Result<(
     result
 }
 
+enum LogoRender {
+    Cached,
+    Rendered(Vec<u8>, String),
+}
+
 fn render_schema_logo_inner(
     user_dir: &Path,
     schema_id: &str,
@@ -219,7 +228,7 @@ fn render_schema_logo_inner(
     skipped: &mut HashSet<String>,
     limits: &Limits,
     started: Instant,
-) -> io::Result<Option<(Vec<u8>, String)>> {
+) -> io::Result<Option<LogoRender>> {
     let size = size_px.clamp(16, 256);
     let marker = output.join(".rendering");
     let candidates: Vec<_> = schema_logo_candidates(
@@ -245,8 +254,16 @@ fn render_schema_logo_inner(
         == Some(&fingerprint)
     {
         if let Some(cached) = read_candidate(output, &format!("{schema_id}.png")) {
-            if cached.bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-                return Ok(Some((cached.bytes, fingerprint)));
+            let mut reader = ImageReader::with_format(Cursor::new(&cached.bytes), ImageFormat::Png);
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(size);
+            limits.max_image_height = Some(size);
+            reader.limits(limits);
+            if reader
+                .decode()
+                .is_ok_and(|image| image.width() == size && image.height() == size)
+            {
+                return Ok(Some(LogoRender::Cached));
             }
         }
     }
@@ -311,7 +328,7 @@ fn render_schema_logo_inner(
         }
         fs::remove_file(&marker)?;
         match rendered {
-            Ok(Ok(Some(png))) => return Ok(Some((png, fingerprint))),
+            Ok(Ok(Some(png))) => return Ok(Some(LogoRender::Rendered(png, fingerprint))),
             Ok(Ok(None)) => eprintln!("Unusable schema logo {:?}", candidate.path),
             Ok(Err(_)) => eprintln!("Schema logo renderer panicked for {:?}", candidate.path),
             Err(RecvTimeoutError::Timeout) => {
@@ -540,6 +557,57 @@ mod tests {
             render_schema_logo(dir.path(), "id", "Name", 48),
             Some(changed)
         );
+    }
+
+    #[test]
+    fn cache_hits_preserve_mtimes_and_missing_or_corrupt_cache_is_repaired() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("id.svg"), svg("red")).unwrap();
+        let expected = render_schema_logo(dir.path(), "id", "Name", 48).unwrap();
+        let output = dir.path().join(".keytao-logo");
+        let png_path = output.join("id.png");
+        let source_path = output.join("id.source");
+        let expected_source = fs::read(&source_path).unwrap();
+        let modified = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1234);
+        for path in [&png_path, &source_path] {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        }
+        assert_eq!(
+            render_schema_logo(dir.path(), "id", "Name", 48),
+            Some(expected.clone())
+        );
+        for path in [&png_path, &source_path] {
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+        }
+        for path in [&png_path, &source_path] {
+            fs::remove_file(path).unwrap();
+            assert_eq!(
+                render_schema_logo(dir.path(), "id", "Name", 48),
+                Some(expected.clone())
+            );
+            assert_eq!(fs::read(&source_path).unwrap(), expected_source);
+        }
+        for corrupt in [
+            b"\x89PNG\r\n\x1a\n".to_vec(),
+            render_svg(&svg("red"), 16).unwrap(),
+        ] {
+            fs::write(&png_path, corrupt).unwrap();
+            assert_eq!(
+                render_schema_logo(dir.path(), "id", "Name", 48),
+                Some(expected.clone())
+            );
+        }
+        fs::write(&source_path, b"stale").unwrap();
+        assert_eq!(
+            render_schema_logo(dir.path(), "id", "Name", 48),
+            Some(expected)
+        );
+        assert_eq!(fs::read(source_path).unwrap(), expected_source);
     }
 
     #[test]

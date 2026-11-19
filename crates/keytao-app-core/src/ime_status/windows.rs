@@ -1488,13 +1488,11 @@ pub fn windows_deploy_rime_blocking(
     _shared_data_dir: String,
 ) -> Result<Option<String>, String> {
     crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
-    keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
+    // The child reads the previous repair gate before clearing it, after hosts release their maps.
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     let deployed_by_server = server::deploy_if_available()?;
     if !deployed_by_server {
         let exe = server::installed_server_exe()?;
-        write_keytao_ime_reload_stamp()
-            .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
         keytao_core::deploy_child::run_deploy_child(&exe, std::time::Duration::from_secs(600))?;
     }
     crate::deploy::render_user_schema_logos(&user_dir);
