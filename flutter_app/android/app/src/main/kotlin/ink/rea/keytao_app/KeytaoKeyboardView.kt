@@ -307,6 +307,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var schemaReady = true
     private var statusMessage: String? = null
     private var deploymentHint: String? = null
+    private val visibleDeploymentHint: String?
+        get() = deploymentHint?.takeIf { it == "正在部署中" || state.candidatePanel.candidates.isEmpty() }
     private var systemBottomInsetDp = -1
     private var enterLabelOverride: String? = null
     private var editorRequestedLayer: String? = null
@@ -712,6 +714,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             resetExpandedCandidateScroll()
         }
         state = next
+        ViewCompat.setStateDescription(this, visibleDeploymentHint)
         invalidateKeyboardLayoutCache()
         if (schemaReady) statusMessage = null
         if (wasExpanded != candidatePanelExpanded) {
@@ -734,6 +737,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     fun updateDeploymentHint(message: String?) {
         if (deploymentHint == message) return
         deploymentHint = message
+        ViewCompat.setStateDescription(this, visibleDeploymentHint)
         rebuildInteractiveRects()
         invalidate()
     }
@@ -1093,9 +1097,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val panelModel = state.candidatePanel
         val message = statusMessage?.takeIf(String::isNotBlank)
         return when {
+            visibleDeploymentHint != null -> CandidateBarContent.STATUS_MESSAGE
             candidateMenu != null -> CandidateBarContent.CANDIDATE_MENU
-            !schemaReady || message != null -> CandidateBarContent.STATUS_MESSAGE
-            deploymentHint != null && panelModel.candidates.isEmpty() -> CandidateBarContent.STATUS_MESSAGE
+            message != null -> CandidateBarContent.STATUS_MESSAGE
             functionPanelActive -> CandidateBarContent.FUNCTION_PANEL
             usesFullHeightSymbolKeyboard() -> CandidateBarContent.FULL_HEIGHT_SYMBOL_KEYBOARD
             panelModel.candidates.isNotEmpty() -> CandidateBarContent.CANDIDATES
@@ -1125,10 +1129,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val itemWidths = items.map(::candidateWidth)
         candidateContentWidth = itemWidths.sum() + gap * (itemWidths.size - 1).coerceAtLeast(0)
         coerceCandidateScroll()
-        val hintHeight = if (deploymentHint != null) dp(16f) else 0f
-        val verticalGap = if (deploymentHint != null) 0f else gap * 1.8f
-        val candidateHeight = minOf(dp(38f), barHeight - hintHeight - verticalGap)
-        val candidateTop = hintHeight + (barHeight - hintHeight - candidateHeight) / 2f
+        val candidateHeight = minOf(dp(38f), barHeight - gap * 1.8f)
+        val candidateTop = (barHeight - candidateHeight) / 2f
         val nextVisibleGlobalIndexes = mutableSetOf<Int>()
         var contentX = viewportLeft - candidateScrollX
         val rects = items.zip(itemWidths).mapNotNull { (item, requestedWidth) ->
@@ -1680,7 +1682,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val gap = dp(theme.panelGapDp)
         val leftPadding = gap * 1.5f
         val centerY = barHeight / 2f
-        val message = statusMessage?.takeIf { it.isNotBlank() } ?: deploymentHint
+        val message = visibleDeploymentHint ?: statusMessage?.takeIf { it.isNotBlank() }
         when (candidateBarContent()) {
             CandidateBarContent.CANDIDATE_MENU -> {
                 candidateMenu?.let { drawCandidateMenu(canvas, it) }
@@ -1732,12 +1734,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawCandidateOption(canvas, item, layout.drawingRect, pressed)
         }
         canvas.restore()
-        deploymentHint?.let { hint ->
-            textPaint.textSize = sp(11f)
-            textPaint.color = statusMessageColor()
-            textPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText(hint, leftPadding, dp(8f) + textBaselineOffset(textPaint), textPaint)
-        }
     }
 
     private fun drawCandidateMenu(
@@ -2666,9 +2662,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun candidateFontHeightLimitSp(): Float {
-        val verticalInset = if (deploymentHint != null) 16f else theme.panelGapDp * 1.8f
+        val verticalInset = theme.panelGapDp * 1.8f
         val inlineHeightPx = minOf(dp(38f), dp(config.candidateBarHeightDp - verticalInset))
-            .coerceAtLeast(dp(if (deploymentHint != null) 16f else 24f))
+            .coerceAtLeast(dp(24f))
         return inlineHeightPx / resources.displayMetrics.scaledDensity * 0.72f
     }
 

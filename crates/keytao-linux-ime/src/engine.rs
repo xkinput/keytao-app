@@ -5,7 +5,53 @@
 
 pub use keytao_core::ImeRuntime as CoreEngine;
 use keytao_core::{ImeState, InputContextPolicy};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+pub struct DeploymentHint {
+    root: Option<std::path::PathBuf>,
+    state: Mutex<keytao_core::DeploymentState>,
+}
+
+impl Default for DeploymentHint {
+    fn default() -> Self {
+        let root = keytao_core::default_user_data_dir();
+        let mut state = keytao_core::DeploymentState::default();
+        if let Some(root) = &root {
+            state.hint(root);
+        }
+        Self {
+            root,
+            state: Mutex::new(state),
+        }
+    }
+}
+
+impl DeploymentHint {
+    pub fn key_pressed(&self) -> Option<&'static str> {
+        let root = self.root.as_ref()?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.key_pressed(root);
+        state.cached_hint()
+    }
+
+    pub fn hint(&self) -> Option<&'static str> {
+        let root = self.root.as_ref()?;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hint(root)
+    }
+
+    pub fn reset(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reset_input();
+    }
+}
 
 pub type ImeSession = Arc<keytao_core::ImeRuntimeSession>;
 

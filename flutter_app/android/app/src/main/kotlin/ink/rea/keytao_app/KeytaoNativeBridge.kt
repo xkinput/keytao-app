@@ -169,6 +169,13 @@ object KeytaoNativeBridge {
     fun deploymentHint(userDir: String): String? =
         if (loaded) runCatching { nativeDeploymentHint(userDir) }.getOrNull() else null
 
+    fun deploymentKeyPressed(userDir: String): String? =
+        if (loaded) runCatching { nativeDeploymentKeyPressed(userDir) }.getOrNull() else null
+
+    fun resetDeploymentInput() {
+        if (loaded) runCatching { nativeResetDeploymentInput() }
+    }
+
     fun markDeploymentFailed(userDir: String): Boolean =
         loaded && runCatching { nativeMarkDeploymentFailed(userDir) }.getOrDefault(false)
 
@@ -450,6 +457,10 @@ object KeytaoNativeBridge {
     external fun nativeDeploymentInProgress(userDir: String): Boolean
 
     external fun nativeDeploymentHint(userDir: String): String?
+
+    external fun nativeDeploymentKeyPressed(userDir: String): String?
+
+    external fun nativeResetDeploymentInput()
 
     external fun nativeMarkDeploymentFailed(userDir: String): Boolean
 

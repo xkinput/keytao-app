@@ -21,8 +21,146 @@ use keytao_core::{key_policy, ImeState, InputContextPolicy, KeyProcessResult, RI
 use keytao_theme::{
     CandidateOptionModel, CandidatePanelModel, PanelOrientation, ThemeResolver, UiCapabilities,
 };
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use zbus::zvariant;
+
+pub struct IbusDeploymentHint {
+    deployment: crate::engine::DeploymentHint,
+    generation: AtomicU64,
+    context: Option<zbus::object_server::SignalContext<'static>>,
+    aux_context: Option<zbus::object_server::SignalContext<'static>>,
+    interface: &'static str,
+    overlay: Option<std::sync::mpsc::Sender<crate::panel::OverlayPanelMessage>>,
+    cursor_x: Arc<AtomicI32>,
+    cursor_y: Arc<AtomicI32>,
+    normal_state: Mutex<Option<ImeState>>,
+    publication: tokio::sync::Mutex<()>,
+}
+
+impl IbusDeploymentHint {
+    pub fn new(
+        context: Option<zbus::object_server::SignalContext<'static>>,
+        aux_context: Option<zbus::object_server::SignalContext<'static>>,
+        interface: &'static str,
+        overlay: Option<std::sync::mpsc::Sender<crate::panel::OverlayPanelMessage>>,
+        cursor_x: Arc<AtomicI32>,
+        cursor_y: Arc<AtomicI32>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            deployment: crate::engine::DeploymentHint::default(),
+            generation: AtomicU64::new(0),
+            context,
+            aux_context,
+            interface,
+            overlay,
+            cursor_x,
+            cursor_y,
+            normal_state: Mutex::new(None),
+            publication: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    pub async fn reset(&self) {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.deployment.reset();
+        *self
+            .normal_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.publish(None, generation).await;
+    }
+
+    pub async fn key_pressed(self: &Arc<Self>) {
+        let Some(hint) = self.deployment.key_pressed() else {
+            return;
+        };
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.publish(Some(hint), generation).await;
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut previous = Some(hint);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if this.generation.load(Ordering::Acquire) != generation {
+                    break;
+                }
+                let current = this.deployment.hint();
+                if current != previous {
+                    this.publish(current, generation).await;
+                }
+                previous = current;
+                if current.is_none() {
+                    break;
+                }
+            }
+        });
+    }
+
+    pub async fn apply_state(&self, state: &ImeState) {
+        let generation = self.generation.load(Ordering::Acquire);
+        *self
+            .normal_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state.clone());
+        if let Some(hint) = self.deployment.hint() {
+            self.publish(Some(hint), generation).await;
+        }
+    }
+
+    async fn publish(&self, hint: Option<&'static str>, generation: u64) {
+        let _publication = self.publication.lock().await;
+        if self.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        let state = self
+            .normal_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let has_candidates = state
+            .as_ref()
+            .is_some_and(|state| !state.candidates.is_empty());
+        let hint = keytao_core::DeploymentState::visible_hint(hint, has_candidates);
+        if let Some(context) = &self.context {
+            let _ = context
+                .connection()
+                .emit_signal(
+                    None::<&str>,
+                    context.path(),
+                    self.interface,
+                    "UpdateAuxiliaryText",
+                    &(
+                        ibus_text_variant(hint.unwrap_or_default()),
+                        hint.is_some() && self.overlay.is_none(),
+                    ),
+                )
+                .await;
+        }
+        if let Some(context) = &self.aux_context {
+            let visible = hint.is_some() && self.overlay.is_none();
+            let _ =
+                crate::kimpanel::Kimpanel::update_aux(context, hint.unwrap_or_default(), "").await;
+            let _ = crate::kimpanel::Kimpanel::show_aux(context, visible).await;
+        }
+        if let Some(overlay) = &self.overlay {
+            let x = self.cursor_x.load(Ordering::Relaxed);
+            let y = self.cursor_y.load(Ordering::Relaxed) + 24;
+            let message = match hint {
+                Some(text) => crate::panel::OverlayPanelMessage::DeploymentHint { text, x, y },
+                None if has_candidates => crate::panel::OverlayPanelMessage::Show {
+                    state: state.unwrap(),
+                    x,
+                    y,
+                },
+                None => crate::panel::OverlayPanelMessage::Hide,
+            };
+            let _ = overlay.send(message);
+        }
+    }
+}
 
 // ── Key state machine ─────────────────────────────────────────────────────────
 

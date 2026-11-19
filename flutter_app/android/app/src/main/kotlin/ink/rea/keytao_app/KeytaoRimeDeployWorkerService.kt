@@ -109,12 +109,12 @@ class KeytaoRimeDeployWorkerService : Service() {
             val notification = buildNotification()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
-                    notificationId,
+                    KeytaoRimeDeployContract.notificationId,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
                 )
             } else {
-                startForeground(notificationId, notification)
+                startForeground(KeytaoRimeDeployContract.notificationId, notification)
             }
         }.onFailure { error ->
             runCatching { Log.w(tag, "Failed to enter foreground for deployment", error) }
@@ -157,6 +157,7 @@ class KeytaoRimeDeployWorkerService : Service() {
             .setContentText(getString(R.string.keytao_deploy_notification_text))
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
     }
 
@@ -231,6 +232,5 @@ class KeytaoRimeDeployWorkerService : Service() {
         private const val tag = "KeytaoRimeDeployWorker"
         private const val processExitDelayMs = 150L
         private const val notificationChannelId = "keytao_rime_deploy"
-        private const val notificationId = 1001
     }
 }

@@ -150,6 +150,9 @@ type MyServer = X11rbServer<Arc<XCBConnection>>;
 
 struct KeyTaoHandler {
     engine: CoreEngine,
+    deployment: crate::engine::DeploymentHint,
+    deployment_text: Option<&'static str>,
+    deployment_input_state: Option<ImeState>,
     renderer: Option<PanelRenderer>,
     conn: Arc<XCBConnection>,
     root: Window,
@@ -260,6 +263,9 @@ impl KeyTaoHandler {
 
         Self {
             engine,
+            deployment: crate::engine::DeploymentHint::default(),
+            deployment_text: None,
+            deployment_input_state: None,
             renderer,
             conn,
             root,
@@ -292,6 +298,8 @@ impl KeyTaoHandler {
         tracing::info!("XIM: hiding candidates after librime reload");
         self.reload_epoch = self.reload_epoch.wrapping_add(1);
         self.hide_panel();
+        self.deployment_text = None;
+        self.deployment_input_state = None;
     }
 
     /// Where the candidate window belongs, in root coordinates.
@@ -388,6 +396,25 @@ impl KeyTaoHandler {
     }
 
     fn show_panel(&mut self, user_ic: &UserInputContext<IcData>, state: &ImeState) {
+        self.last_anchor = self.anchor_point(user_ic);
+        if self.deployment_text.is_some() {
+            self.deployment_input_state = Some(state.clone());
+        }
+        if !self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
+            self.panel_owner = Some(PanelOwner {
+                session: user_ic.user_data.session.clone(),
+                client_win: user_ic.ic.client_win(),
+                input_method_id: user_ic.ic.input_method_id(),
+                input_context_id: user_ic.ic.input_context_id(),
+            });
+        }
+        if let Some(text) = keytao_core::DeploymentState::visible_hint(
+            self.deployment_text,
+            !state.candidates.is_empty(),
+        ) {
+            self.show_deployment_hint(text);
+            return;
+        }
         // Under both offered styles the preedit lives in this window, so a
         // composition without candidates still has to be visible.
         if state.preedit.is_empty() && state.candidates.is_empty() {
@@ -398,14 +425,6 @@ impl KeyTaoHandler {
         }
         let (root_x, root_y) = self.anchor_point(user_ic);
         self.last_anchor = (root_x, root_y);
-        if !self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
-            self.panel_owner = Some(PanelOwner {
-                session: user_ic.user_data.session.clone(),
-                client_win: user_ic.ic.client_win(),
-                input_method_id: user_ic.ic.input_method_id(),
-                input_context_id: user_ic.ic.input_context_id(),
-            });
-        }
         self.draw_composition(state);
     }
 
@@ -487,6 +506,48 @@ impl KeyTaoHandler {
         self.mode_hint_until = Some(Instant::now() + duration);
     }
 
+    fn show_deployment_hint(&mut self, text: &str) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (pixels, w, h) = renderer.render_text_hint(text);
+        self.mode_hint_until = None;
+        self.panel_hit_areas = PanelHitAreas::default();
+        self.pressed_click = None;
+        let (x, y) = self.last_anchor;
+        self.draw_panel(&pixels, w, h, x, y + PANEL_CARET_GAP);
+        self.conn.flush().ok();
+    }
+
+    fn refresh_deployment_hint(&mut self) {
+        let hint = self.deployment.hint();
+        if hint != self.deployment_text {
+            self.deployment_text = hint;
+            if let Some(text) = hint {
+                let state = self.deployment_input_state.clone();
+                if keytao_core::DeploymentState::visible_hint(
+                    Some(text),
+                    state
+                        .as_ref()
+                        .is_some_and(|state| !state.candidates.is_empty()),
+                )
+                .is_some()
+                {
+                    self.show_deployment_hint(text);
+                } else if let Some(state) = state {
+                    self.draw_composition(&state);
+                }
+            } else {
+                self.hide_panel();
+                if let Some(state) = self.deployment_input_state.take() {
+                    if !state.preedit.is_empty() || !state.candidates.is_empty() {
+                        self.draw_composition(&state);
+                    }
+                }
+            }
+        }
+    }
+
     fn update_ascii_mode(&mut self, ascii_mode: bool) {
         if ascii_mode == self.ascii_mode {
             return;
@@ -529,7 +590,11 @@ impl KeyTaoHandler {
     /// Milliseconds until the mode hint expires, or -1 when none is showing.
     fn poll_timeout_ms(&self) -> i32 {
         let Some(deadline) = self.mode_hint_until else {
-            return -1;
+            return if self.deployment_text.is_some() {
+                250
+            } else {
+                -1
+            };
         };
         let now = Instant::now();
         if deadline <= now {
@@ -625,6 +690,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
         tracing::info!("XIM DestroyIC client_win={}", user_ic.ic.client_win());
+        self.deployment.reset();
+        self.deployment_text = None;
+        self.deployment_input_state = None;
         runtime_log::drain_key_stats();
         user_ic.user_data.session.clear_composition();
         if self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
@@ -641,6 +709,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<String, ServerError> {
         tracing::info!("XIM ResetIC client_win={}", user_ic.ic.client_win());
+        self.deployment.reset();
+        self.deployment_text = None;
+        self.deployment_input_state = None;
         user_ic.user_data.session.clear_composition();
         user_ic.user_data.last_state = None;
         self.hide_panel();
@@ -679,6 +750,11 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
         tracing::info!("XIM SetFocus client_win={}", user_ic.ic.client_win());
+        self.deployment.reset();
+        self.deployment_text = None;
+        self.deployment_input_state = None;
+        self.panel_owner = None;
+        self.hide_panel();
         Ok(())
     }
 
@@ -689,6 +765,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     ) -> Result<(), ServerError> {
         tracing::info!("XIM UnsetFocus client_win={}", user_ic.ic.client_win());
         runtime_log::drain_key_stats();
+        self.deployment.reset();
+        self.deployment_text = None;
+        self.deployment_input_state = None;
         // The composition never reached the client, so dropping it is the
         // "discard" half of the shared focus-loss contract.
         user_ic.user_data.session.clear_composition();
@@ -779,13 +858,31 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
             mods
         };
 
+        self.last_anchor = self.anchor_point(user_ic);
+        self.deployment_text = self.deployment.key_pressed();
+        if self.deployment_text.is_some() {
+            self.deployment_input_state = user_ic.user_data.last_state.clone();
+        }
+        if let Some(text) = keytao_core::DeploymentState::visible_hint(
+            self.deployment_text,
+            self.deployment_input_state
+                .as_ref()
+                .is_some_and(|state| !state.candidates.is_empty()),
+        ) {
+            self.show_deployment_hint(text);
+        }
         let before_state = user_ic.user_data.session.state();
+        self.refresh_deployment_hint();
         if key_policy::should_bypass_empty_composition(keysym, effective_mods, &before_state) {
             // System-reserved chords also bypass Rime while composing. They
             // must not hide UI for a composition the session still retains.
             if before_state.preedit.is_empty() && before_state.candidates.is_empty() {
                 user_ic.user_data.last_state = None;
-                self.hide_panel();
+                if let Some(text) = self.deployment_text {
+                    self.show_deployment_hint(text);
+                } else {
+                    self.hide_panel();
+                }
                 draw_client_preedit(server, &mut user_ic.ic, "")?;
             }
             return Ok(false);
@@ -892,6 +989,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
             }
         }
 
+        handler.refresh_deployment_hint();
         handler.expire_mode_hint();
         if let Err(e) = conn.flush() {
             tracing::warn!("X11 flush error: {e}");

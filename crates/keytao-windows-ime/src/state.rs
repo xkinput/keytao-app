@@ -3,7 +3,7 @@
 use keytao_core::{
     default_user_data_dir,
     runtime_log::{self, Level},
-    ImeState, InputContextPolicy,
+    DeploymentState, ImeState, InputContextPolicy,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -135,6 +135,8 @@ pub struct TsfState {
     pub embedded_mode_cached: bool,
     pub layout_reposition_pending: bool,
     pub ime_state: Option<ImeState>,
+    deployment_state: DeploymentState,
+    pub(crate) deployment_hint: Option<&'static str>,
     pub candidate_win: Option<crate::candidate_win::CandidateWindow>,
     pub mode_hint_win: Option<crate::candidate_win::CandidateWindow>,
     pub windows_dirty: bool,
@@ -293,6 +295,8 @@ impl TsfState {
             embedded_mode_cached: false,
             layout_reposition_pending: false,
             ime_state: None,
+            deployment_state: DeploymentState::default(),
+            deployment_hint: None,
             candidate_win: Some(crate::candidate_win::CandidateWindow::new()),
             mode_hint_win: Some(crate::candidate_win::CandidateWindow::new_mode_hint()),
             windows_dirty: false,
@@ -391,6 +395,13 @@ impl TsfState {
         self.engine_retry_after = None;
         self.engine_failures = 0;
         self.reload_retry_after = None;
+        self.deployment_loaded();
+    }
+
+    pub(crate) fn deployment_loaded(&mut self) {
+        if let Some(root) = default_user_data_dir() {
+            self.deployment_state.loaded(&root);
+        }
     }
 
     pub(crate) fn engine_ready(&self) -> bool {
@@ -1403,6 +1414,25 @@ pub(crate) fn update_ime_windows(
     show_mode_hint: bool,
     embedded: bool,
 ) -> bool {
+    let (deployment_hint, input_generation) = {
+        let st = shared_state.borrow();
+        (
+            keytao_core::DeploymentState::visible_hint(
+                st.deployment_hint,
+                !ime_state.candidates.is_empty(),
+            ),
+            st.input_generation,
+        )
+    };
+    let hint_state = deployment_hint.map(|hint| {
+        let mut state = ImeState::empty();
+        state.candidates.push(keytao_core::Candidate {
+            text: hint.to_string(),
+            comment: None,
+        });
+        state
+    });
+    let ime_state = hint_state.as_ref().unwrap_or(ime_state);
     let (thread_mgr, allow_fallback_window) = {
         let st = shared_state.borrow();
         let uiless = host_is_uiless(&st);
@@ -1415,15 +1445,25 @@ pub(crate) fn update_ime_windows(
             ime_state,
             allow_fallback_window,
         );
-        if shared_state.borrow().ime_state.is_none() {
+        let st = shared_state.borrow();
+        if st.input_generation != input_generation
+            || (st.ime_state.is_none() && st.deployment_hint.is_none())
+        {
+            drop(st);
             candidate_ui.end();
             false
         } else {
             allow
         }
-    }) && !current_theme().ui.hide_candidate_panel;
-    if shared_state.borrow().ime_state.is_none() {
-        return true;
+    }) && (!current_theme().ui.hide_candidate_panel
+        || deployment_hint.is_some());
+    {
+        let st = shared_state.borrow();
+        if st.input_generation != input_generation
+            || (st.ime_state.is_none() && st.deployment_hint.is_none())
+        {
+            return true;
+        }
     }
     keytao_core::rt_log!(
         Level::Verbose,
@@ -1434,7 +1474,9 @@ pub(crate) fn update_ime_windows(
     );
     let weak_state = Rc::downgrade(shared_state);
     with_detached_windows(shared_state, false, |candidate_win, mode_hint_win| {
-        let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
+        let show = deployment_hint.is_some()
+            || !ime_state.candidates.is_empty()
+            || !ime_state.preedit.is_empty();
         if show && allow_candidate_window {
             if let Some((caret, _)) = caret {
                 if candidate_win.show(
@@ -1444,6 +1486,7 @@ pub(crate) fn update_ime_windows(
                     caret.owner_hwnd,
                     &weak_state,
                     embedded,
+                    deployment_hint,
                 ) {
                     shared_state.borrow_mut().last_shown_caret = Some(caret);
                 }
@@ -1478,7 +1521,9 @@ pub(crate) fn update_ime_windows(
             }
         }
         if let Some((caret, _)) = caret.filter(|(_, source)| {
-            show_mode_hint && !matches!(source, CaretSource::View | CaretSource::Window)
+            deployment_hint.is_none()
+                && show_mode_hint
+                && !matches!(source, CaretSource::View | CaretSource::Window)
         }) {
             mode_hint_win.show_mode_hint(
                 ime_state.is_english_mode(),
@@ -1494,6 +1539,72 @@ pub(crate) fn update_ime_windows(
 
 fn should_start_caret_reprobe(armed: bool, source: Option<CaretSource>, visible: bool) -> bool {
     !armed && visible && should_arm_caret_reprobe(source)
+}
+
+pub(crate) fn deployment_key_pressed(
+    shared_state: &SharedState,
+    context: Option<&ITfContext>,
+) -> bool {
+    let input_generation = {
+        let mut st = shared_state.borrow_mut();
+        if let Some(root) = default_user_data_dir() {
+            st.deployment_state.key_pressed(&root);
+        }
+        if let Some(context) = context {
+            st.key_context = Some(context.clone());
+        }
+        st.input_generation
+    };
+    refresh_deployment_hint(shared_state);
+    shared_state.borrow().input_generation == input_generation
+}
+
+pub(crate) fn poll_deployment_hint(shared_state: &SharedState) {
+    let ready = shared_state.try_borrow().is_ok_and(|st| {
+        !st.ime_write_session_active
+            && !st.caret_probe_session_in_progress
+            && st.candidate_win.is_some()
+            && st.deployment_hint.is_some()
+    });
+    if !ready {
+        return;
+    }
+    poll_engine_builds(shared_state);
+    start_reload_if_needed(shared_state);
+    refresh_deployment_hint(shared_state);
+}
+
+pub(crate) fn refresh_deployment_hint(shared_state: &SharedState) {
+    let (hint, changed, context, has_candidates) = {
+        let mut st = shared_state.borrow_mut();
+        let hint = default_user_data_dir().and_then(|root| st.deployment_state.hint(&root));
+        let changed = st.deployment_hint != hint;
+        st.deployment_hint = hint;
+        if changed {
+            st.last_shown_caret = None;
+        }
+        (
+            hint,
+            changed,
+            st.key_context.clone().or_else(|| st.panel_context.clone()),
+            st.ime_state
+                .as_ref()
+                .is_some_and(|state| !state.preedit.is_empty() || !state.candidates.is_empty()),
+        )
+    };
+    if hint.is_none() && !changed {
+        return;
+    }
+    if hint.is_none() && !has_candidates {
+        hide_candidate_window(shared_state);
+    } else if let Some(context) = context {
+        crate::key_event_sink::reposition_ime_windows(shared_state, &context, false);
+    }
+    let weak_state = Rc::downgrade(shared_state);
+    let _ = with_detached_windows(shared_state, false, |candidate_win, _| {
+        let active = shared_state.borrow().deployment_hint.is_some();
+        candidate_win.set_deployment_hint_polling(&weak_state, active);
+    });
 }
 
 pub(crate) fn host_is_uiless(state: &TsfState) -> bool {
@@ -1517,12 +1628,17 @@ pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
     let _ = with_detached_windows(shared_state, true, |candidate_win, mode_hint_win| {
         candidate_win.hide();
         mode_hint_win.hide();
+        if shared_state.borrow().deployment_hint.is_none() {
+            candidate_win.set_deployment_hint_polling(&Rc::downgrade(shared_state), false);
+        }
     });
 }
 
 pub(crate) fn defer_ime_ui_hide(shared_state: &SharedState) {
     let mut st = shared_state.borrow_mut();
     st.session_reset_pending = true;
+    st.deployment_state.reset_input();
+    st.deployment_hint = None;
     st.panel_context = None;
     st.pending_window_update = None;
     st.windows_dirty = true;
@@ -1718,6 +1834,8 @@ fn take_active_composition(
     let shift_pending = st.shift_pressed_without_key;
     st.shift_pressed_without_key = false;
     st.session_reset_pending = true;
+    st.deployment_state.reset_input();
+    st.deployment_hint = None;
     let active_composition = st
         .composition
         .take()

@@ -105,6 +105,8 @@ fn retire_proxy(proxy: impl Proxy) {
 
 struct App {
     session: ImeSession,
+    deployment: crate::engine::DeploymentHint,
+    deployment_text: Option<&'static str>,
     theme_resolver: ThemeResolver,
     seat: Option<WlSeat>,
     input_method: Option<ZwpInputMethodV1>,
@@ -157,6 +159,8 @@ impl App {
         let renderer = load_font().and_then(PanelRenderer::new);
         Self {
             session,
+            deployment: crate::engine::DeploymentHint::default(),
+            deployment_text: None,
             theme_resolver: ThemeResolver::from_default_locations(),
             seat: None,
             input_method: None,
@@ -200,6 +204,11 @@ impl App {
 
     /// Stop using the context as soon as KWin deactivates or replaces it.
     fn reset_context_state(&mut self) {
+        self.deployment.reset();
+        self.deployment_text = None;
+        if let Some(kimpanel) = &self.kimpanel {
+            kimpanel.show_deployment_hint(None);
+        }
         self.active = false;
         self.mode_hint_until = None;
         self.key_repeat.cancel();
@@ -234,7 +243,34 @@ impl App {
 
     /// Milliseconds until the next timer fires, or -1 when nothing is pending.
     fn poll_timeout_ms(&self) -> i32 {
-        poll_timeout_ms([self.mode_hint_until, self.key_repeat.next_deadline()])
+        let timeout = poll_timeout_ms([self.mode_hint_until, self.key_repeat.next_deadline()]);
+        if self.deployment_text.is_some() && (timeout < 0 || timeout > 250) {
+            250
+        } else {
+            timeout
+        }
+    }
+
+    fn refresh_deployment_hint(&mut self, qh: &QueueHandle<Self>) {
+        let hint = self.deployment.hint();
+        if hint != self.deployment_text {
+            self.deployment_text = hint;
+            self.show_panel(self.ime_state.clone().unwrap_or_else(ImeState::empty), qh);
+        }
+    }
+
+    fn sync_deployment_aux(&self) {
+        if self.renderer.is_none() || self.panel_surface.is_none() {
+            if let Some(kimpanel) = &self.kimpanel {
+                let hint = keytao_core::DeploymentState::visible_hint(
+                    self.deployment_text,
+                    self.ime_state
+                        .as_ref()
+                        .is_some_and(|state| !state.candidates.is_empty()),
+                );
+                kimpanel.show_deployment_hint(hint);
+            }
+        }
     }
 
     /// Drop the UI built from the dictionaries a reload just replaced.
@@ -246,12 +282,20 @@ impl App {
         self.clear_kimpanel();
         self.mode_hint_until = None;
         self.hide_panel_popup();
+        self.deployment_text = None;
     }
 
     /// Apply a `content_type` event: password fields stop composing so that no
     /// secret reaches librime, the candidate window or Kimpanel.
     fn apply_content_type(&mut self, hint: u32, purpose: u32) {
         let policy = content_type_policy(hint, purpose);
+        if !policy.composing {
+            self.deployment.reset();
+            self.deployment_text = None;
+            if let Some(kimpanel) = &self.kimpanel {
+                kimpanel.show_deployment_hint(None);
+            }
+        }
         let previous = self.session.input_policy();
         self.session.set_input_policy(policy);
         if previous.composing && !policy.composing {
@@ -324,7 +368,10 @@ impl App {
             .renderer
             .as_ref()
             .is_some_and(PanelRenderer::hide_candidate_panel);
-        if hide_candidates && !deadline_active(self.mode_hint_until) {
+        if hide_candidates
+            && !deadline_active(self.mode_hint_until)
+            && self.deployment_text.is_none()
+        {
             self.hide_panel_popup();
             return;
         }
@@ -342,7 +389,9 @@ impl App {
             .ime_state
             .as_ref()
             .filter(|state| !hide_candidates && !state.candidates.is_empty());
-        if state.is_none() && !show_hint {
+        let deployment_hint =
+            keytao_core::DeploymentState::visible_hint(self.deployment_text, state.is_some());
+        if state.is_none() && !show_hint && deployment_hint.is_none() {
             return;
         }
         let WaylandPanel {
@@ -357,6 +406,7 @@ impl App {
             self.ascii_mode,
             self.panel_scale.scale(surface),
             self.panel_scale.screen_width(),
+            deployment_hint,
         );
         if w == 0 || h == 0 {
             return;
@@ -432,7 +482,7 @@ impl App {
         }
         let show_hint = deadline_active(self.mode_hint_until);
         self.ime_state = Some(state);
-        if has_content || show_hint {
+        if has_content || show_hint || self.deployment_text.is_some() {
             if self.panel_surface.is_none() {
                 self.create_panel_popup(qh);
             }
@@ -441,6 +491,7 @@ impl App {
         } else {
             self.hide_panel_popup();
         }
+        self.sync_deployment_aux();
     }
 
     fn update_ascii_mode(&mut self, ascii_mode: bool, qh: &QueueHandle<Self>) {
@@ -575,7 +626,19 @@ impl App {
             self.mods
         };
 
+        self.deployment_text = self.deployment.key_pressed();
+        if self.deployment_text.is_some() {
+            self.show_panel(self.ime_state.clone().unwrap_or_else(ImeState::empty), qh);
+            if let Some(backend) = self
+                .panel_surface
+                .as_ref()
+                .and_then(|surface| surface.backend().upgrade())
+            {
+                backend.flush().ok();
+            }
+        }
         let before_state = self.session.state();
+        self.refresh_deployment_hint(qh);
         if key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
             self.forward_key_press(evdev_keycode);
             return;
@@ -831,6 +894,11 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for App {
                 state.apply_content_type(hint, purpose);
             }
             zwp_input_method_context_v1::Event::Reset => {
+                state.deployment.reset();
+                state.deployment_text = None;
+                if let Some(kimpanel) = &state.kimpanel {
+                    kimpanel.show_deployment_hint(None);
+                }
                 state.key_repeat.cancel();
                 state.session.reset();
                 state.clear_context_preedit();
@@ -1174,6 +1242,7 @@ fn run_event_loop(
         queue
             .dispatch_pending(app)
             .map_err(|e| format!("KDE Wayland dispatch: {e}"))?;
+        app.refresh_deployment_hint(&qh);
         if take_expired_deadline(&mut app.mode_hint_until) {
             app.show_panel(ImeState::empty(), &qh);
         }

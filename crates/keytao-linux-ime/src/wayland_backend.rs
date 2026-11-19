@@ -120,6 +120,8 @@ fn unhandled_keysym_text(sym: u32, mods: u32) -> Option<char> {
 
 struct App {
     session: ImeSession,
+    deployment: crate::engine::DeploymentHint,
+    deployment_text: Option<&'static str>,
     renderer: Option<PanelRenderer>,
     panel_scale: WaylandPanelScale,
     theme_resolver: ThemeResolver,
@@ -183,6 +185,8 @@ impl App {
         }
         Self {
             session,
+            deployment: crate::engine::DeploymentHint::default(),
+            deployment_text: None,
             renderer,
             panel_scale: WaylandPanelScale::default(),
             theme_resolver: ThemeResolver::from_default_locations(),
@@ -325,7 +329,10 @@ impl App {
             .renderer
             .as_ref()
             .is_some_and(PanelRenderer::hide_candidate_panel);
-        if hide_candidates && !deadline_active(self.mode_hint_until) {
+        if hide_candidates
+            && !deadline_active(self.mode_hint_until)
+            && self.deployment_text.is_none()
+        {
             self.hide_panel_popup();
             return;
         }
@@ -343,7 +350,9 @@ impl App {
             .ime_state
             .as_ref()
             .filter(|state| !hide_candidates && !state.candidates.is_empty());
-        if state.is_none() && !show_hint {
+        let deployment_hint =
+            keytao_core::DeploymentState::visible_hint(self.deployment_text, state.is_some());
+        if state.is_none() && !show_hint && deployment_hint.is_none() {
             return;
         }
         let WaylandPanel {
@@ -358,6 +367,7 @@ impl App {
             self.ascii_mode,
             self.panel_scale.scale(surface),
             self.panel_scale.screen_width(),
+            deployment_hint,
         );
         if w == 0 || h == 0 {
             return;
@@ -421,7 +431,7 @@ impl App {
         }
         let show_hint = deadline_active(self.mode_hint_until);
         self.ime_state = Some(state);
-        if has_content || show_hint {
+        if has_content || show_hint || self.deployment_text.is_some() {
             if self.panel_surface.is_none() {
                 self.create_panel_popup(qh);
             }
@@ -489,6 +499,10 @@ impl App {
     /// Apply a `content_type` that `done` made current.
     fn apply_content_type(&mut self, hint: u32, purpose: u32) {
         let policy = content_type_policy(hint, purpose);
+        if !policy.composing {
+            self.deployment.reset();
+            self.deployment_text = None;
+        }
         let previous = self.session.input_policy();
         self.session.set_input_policy(policy);
         if !policy.composing {
@@ -512,11 +526,24 @@ impl App {
 
     /// Milliseconds until the next timer fires, or -1 when nothing is pending.
     fn poll_timeout_ms(&self) -> i32 {
-        poll_timeout_ms([
+        let timeout = poll_timeout_ms([
             self.mode_hint_until,
             self.deactivate_deadline,
             self.key_repeat.next_deadline(),
-        ])
+        ]);
+        if self.deployment_text.is_some() && (timeout < 0 || timeout > 250) {
+            250
+        } else {
+            timeout
+        }
+    }
+
+    fn refresh_deployment_hint(&mut self, qh: &QueueHandle<Self>) {
+        let hint = self.deployment.hint();
+        if hint != self.deployment_text {
+            self.deployment_text = hint;
+            self.show_panel(self.ime_state.clone().unwrap_or_else(ImeState::empty), qh);
+        }
     }
 
     /// Drop the UI built from the dictionaries a reload just replaced.
@@ -527,6 +554,7 @@ impl App {
         self.clear_client_preedit();
         self.mode_hint_until = None;
         self.hide_panel_popup();
+        self.deployment_text = None;
     }
 
     fn handle_key_event(
@@ -597,7 +625,19 @@ impl App {
             self.mods
         };
 
+        self.deployment_text = self.deployment.key_pressed();
+        if self.deployment_text.is_some() {
+            self.show_panel(self.ime_state.clone().unwrap_or_else(ImeState::empty), qh);
+            if let Some(backend) = self
+                .panel_surface
+                .as_ref()
+                .and_then(|surface| surface.backend().upgrade())
+            {
+                backend.flush().ok();
+            }
+        }
         let before_state = self.session.state();
+        self.refresh_deployment_hint(qh);
         if key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
             self.forward_unhandled_key(evdev_keycode, sym_raw);
             return;
@@ -951,11 +991,23 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 let next_active = state.pending_active.take();
                 match next_active {
                     Some(true) => {
+                        let had_deployment_hint = state.deployment_text.is_some();
+                        state.deployment.reset();
+                        state.deployment_text = None;
+                        if had_deployment_hint {
+                            state.hide_panel_popup();
+                        }
                         state.deactivate_deadline = None;
                         state.active = true;
                         tracing::debug!("IME activated");
                     }
                     Some(false) => {
+                        let had_deployment_hint = state.deployment_text.is_some();
+                        state.deployment.reset();
+                        state.deployment_text = None;
+                        if had_deployment_hint {
+                            state.hide_panel_popup();
+                        }
                         state.surrounding_text.invalidate();
                         state.deactivate_deadline = Some(Instant::now() + DEACTIVATE_DEBOUNCE);
                         tracing::debug!("IME deactivation deferred for debounce");
@@ -1370,6 +1422,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
             return Ok(());
         }
 
+        app.refresh_deployment_hint(&qh);
         if take_expired_deadline(&mut app.mode_hint_until) {
             app.show_panel(ImeState::empty(), &qh);
         }

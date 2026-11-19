@@ -720,6 +720,26 @@ pub extern "C" fn keytao_deployment_hint() -> *mut c_char {
     })
 }
 
+/// Record a key before waiting for deployment or engine rebuilding.
+#[no_mangle]
+pub extern "C" fn keytao_deployment_key_pressed() {
+    guard("keytao_deployment_key_pressed", (), || {
+        if let Some(root) = deployment_root() {
+            update_deployment_status(&root, |state| state.key_pressed(&root));
+        }
+    });
+}
+
+/// Clear deployment presentation when focus or the input session changes.
+#[no_mangle]
+pub extern "C" fn keytao_deployment_reset_input() {
+    guard("keytao_deployment_reset_input", (), || {
+        if let Some(root) = deployment_root() {
+            update_deployment_status(&root, DeploymentState::reset_input);
+        }
+    });
+}
+
 /// Remember a session clone for focused-first prewarming without retaining a raw handle.
 #[no_mangle]
 pub extern "C" fn keytao_set_focused_session(session: *mut c_void) {

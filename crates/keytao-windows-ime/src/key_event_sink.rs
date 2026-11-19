@@ -1270,7 +1270,7 @@ fn window_update_is_current(
     }
     let st = shared_state.borrow();
     window_update_context_matches(
-        st.ime_state.is_some(),
+        st.ime_state.is_some() || st.deployment_hint.is_some(),
         update.context.as_raw() as usize,
         st.key_context
             .as_ref()
@@ -1301,11 +1301,13 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
     if !window_update_is_current(shared_state, &update, generation) {
         return;
     }
+    let has_visible_panel =
+        has_visible_state(&update.ime_state) || shared_state.borrow().deployment_hint.is_some();
     let caret = resolve_caret(
         shared_state,
         update.caret.clone(),
         update.embedded,
-        has_visible_state(&update.ime_state),
+        has_visible_panel,
     );
     // Accessibility providers can synchronously reenter TSF and move focus,
     // even to another document in the same HWND. Never resurrect the old panel
@@ -1316,7 +1318,7 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
     let caret_source = caret.map(|(_, source)| source);
     {
         let mut st = shared_state.borrow_mut();
-        if st.ime_state.is_none() {
+        if st.ime_state.is_none() && st.deployment_hint.is_none() {
             return;
         }
         if caret_source == Some(CaretSource::Probe) {
@@ -1324,13 +1326,15 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
             st.caret_retry_active = false;
         }
         st.caret_retry_mode_hint = update.show_mode_hint && should_arm_caret_reprobe(caret_source);
-        st.panel_context = has_visible_state(&update.ime_state).then(|| update.context.clone());
+        st.panel_context = (has_visible_state(&update.ime_state) || st.deployment_hint.is_some())
+            .then(|| update.context.clone());
     }
     if caret_source == Some(CaretSource::Probe) {
         crate::state::stop_caret_reprobe(shared_state);
     }
     if update.reposition_only
         && !update.show_mode_hint
+        && shared_state.borrow().deployment_hint.is_none()
         && caret.map(|(position, _)| position) == shared_state.borrow().last_shown_caret
     {
         return;
@@ -1806,7 +1810,7 @@ fn apply_ime_state(
 ///
 /// Hosts that answered `TF_E_NOLAYOUT` earlier call `OnLayoutChange` once the
 /// text is laid out; scrolling and window moves report the same way.
-fn reposition_ime_windows(
+pub(crate) fn reposition_ime_windows(
     shared_state: &SharedState,
     context: &ITfContext,
     show_mode_hint: bool,
@@ -1818,7 +1822,9 @@ fn reposition_ime_windows(
         let st = shared_state.borrow();
         (
             st.client_id,
-            st.ime_state.clone(),
+            st.ime_state
+                .clone()
+                .or_else(|| st.deployment_hint.map(|_| ImeState::empty())),
             st.composition.clone().or_else(|| {
                 st.panel_anchor
                     .as_ref()
@@ -1832,7 +1838,11 @@ fn reposition_ime_windows(
     let Some(ime_state) = ime_state else {
         return true;
     };
-    if client_id == 0 || (!has_visible_state(&ime_state) && !show_mode_hint) {
+    if client_id == 0
+        || (!has_visible_state(&ime_state)
+            && !show_mode_hint
+            && shared_state.borrow().deployment_hint.is_none())
+    {
         return true;
     }
     let owner_hwnd = unsafe {
@@ -2252,6 +2262,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
+                if !input_is_blocked(&state, pic) {
+                    crate::state::deployment_key_pressed(&state, pic);
+                }
                 append_key_diagnostic!("OnTestKeyDown modifier pending=true eat=false");
                 return Ok(BOOL::from(false));
             }
@@ -2265,6 +2278,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 // The host may have revoked the keyboard while a composition was up
                 // and `OnKeyDown` will not run to clean it away.
                 clear_input_for_blocked_context(&state);
+                return Ok(BOOL::from(false));
+            }
+            if !crate::state::deployment_key_pressed(&state, pic) {
                 return Ok(BOOL::from(false));
             }
             let (engine_ready, reload_needed, cached_state, persisted_ascii_mode) = {
@@ -2284,6 +2300,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 if reload_needed {
                     start_reload_if_needed(&state);
                 }
+                crate::state::refresh_deployment_hint(&state);
                 append_key_diagnostic!(
                     "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing=false eat=false"
                 );
@@ -2343,6 +2360,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 append_key_diagnostic!("OnTestKeyUp shift={is_shift} blocked=true eat=false");
                 return Ok(BOOL::from(false));
             }
+            let input_generation = state.borrow().input_generation;
+            crate::state::refresh_deployment_hint(&state);
+            if state.borrow().input_generation != input_generation {
+                return Ok(BOOL::from(false));
+            }
             let (should_eat, should_retry, should_reload) = {
                 let mut st = state.borrow_mut();
                 let reload_needed = st.reload_needed_cached();
@@ -2388,6 +2410,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
+                if !input_is_blocked(&state, pic) {
+                    crate::state::deployment_key_pressed(&state, pic);
+                }
                 return Ok(BOOL::from(false));
             }
             let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
@@ -2395,6 +2420,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             retry_input_context_if_unknown(&state, Some(&context));
             if input_is_blocked(&state, Some(&context)) {
                 reset_input_for_focus_change(&state);
+                return Ok(BOOL::from(false));
+            }
+            if !crate::state::deployment_key_pressed(&state, Some(&context)) {
                 return Ok(BOOL::from(false));
             }
 
@@ -2460,9 +2488,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     // new public snapshot. Core declines without waiting for
                     // its reload lock; do not leave obsolete candidates up.
                     hide_candidate_window(&state);
+                    crate::state::refresh_deployment_hint(&state);
                     return Ok(BOOL::from(consumed));
                 }
             };
+            state.borrow_mut().deployment_loaded();
             complete_unhandled_key(keysym, mods, &mut result);
             let ime_state = result.state;
 
@@ -2535,6 +2565,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             if input_is_blocked(&state, Some(&context)) {
                 return Ok(BOOL::from(false));
             }
+            let input_generation = state.borrow().input_generation;
+            crate::state::refresh_deployment_hint(&state);
+            if state.borrow().input_generation != input_generation {
+                return Ok(BOOL::from(false));
+            }
             let prepared_engine = {
                 let mut st = state.borrow_mut();
                 if is_shift && !st.shift_pressed_without_key {
@@ -2568,10 +2603,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(result) = result else {
                 append_key_diagnostic!("OnKeyUp shift={is_shift} result=false");
                 hide_candidate_window(&state);
+                crate::state::refresh_deployment_hint(&state);
                 return Ok(BOOL::from(
                     runtime_session(&state).is_some_and(|session| session.consume_failed_key()),
                 ));
             };
+            state.borrow_mut().deployment_loaded();
             append_key_diagnostic!(
                 "OnKeyUp shift={is_shift} accepted={} ascii={}->{}",
                 result.accepted,

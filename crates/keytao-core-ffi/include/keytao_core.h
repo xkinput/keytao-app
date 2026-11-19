@@ -139,6 +139,16 @@ bool keytao_deployment_in_progress_at(const char *user_dir);
 char *keytao_deployment_hint(void);
 
 /**
+ * Record a key before waiting for deployment or engine rebuilding.
+ */
+void keytao_deployment_key_pressed(void);
+
+/**
+ * Clear deployment presentation when focus or the input session changes.
+ */
+void keytao_deployment_reset_input(void);
+
+/**
  * Remember a session clone for focused-first prewarming without retaining a raw handle.
  */
 void keytao_set_focused_session(void *session);

@@ -219,6 +219,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var configurationChanging = false
     private var panelBackDownConsumed = false
     private var serviceDestroyed = false
+    private var deploymentInputGeneration = 0L
+    private var deploymentKeyScheduled = false
+    private var runningDeferredDeploymentKey = false
+    private val deferredDeploymentKeys = ArrayDeque<() -> Unit>()
     private var readinessRetryCount = 0
     private var readinessRetryDelayMs = 500L
     private var lastReloadStampSignature: String? = null
@@ -260,6 +264,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onDestroy() {
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
+        resetDeploymentInput()
         cancelVoiceInput()
         discardPendingHostBackspace(resetOutstanding = true)
         serviceDestroyed = true
@@ -358,6 +363,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         } finally {
             releasingPreviousInput = false
         }
+        resetDeploymentInput()
         cancelVoiceInput()
         voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
         val started = System.nanoTime()
@@ -908,6 +914,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onFinishInput() {
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
+        resetDeploymentInput()
         cancelVoiceInput()
         onEmojiSearchRequested(false)
         val started = System.nanoTime()
@@ -939,9 +946,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onEvaluateFullscreenMode(): Boolean = false
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (!runningDeferredDeploymentKey) inputCounts.record("key_down")
+        val deferredEvent = KeyEvent(event)
+        if (deferDeploymentKey(markPressed = false) {
+                if (!onKeyDown(keyCode, deferredEvent)) currentInputConnection?.sendKeyEvent(deferredEvent)
+            }) return true
         onUserInteraction()
         discardPendingHostBackspace()
-        inputCounts.record("key_down")
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (panelBackDownConsumed || keyboardView?.closeOverlayPanel() == true) {
                 panelBackDownConsumed = true
@@ -964,6 +975,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     else -> if (!event.isCtrlPressed && !event.isMetaPressed && !event.isAltPressed) {
                         val key = AndroidKeyMapper.fromAndroidKeyEvent(event)
                         if (key != null && !bypassesComposition() && !engine.shouldBypassKey(key.keyCode, key.modifiers)) {
+                            if (deferDeploymentKey { onKeyDown(keyCode, deferredEvent) }) return true
                             val result = engine.processKey(key.keyCode, key.modifiers)
                             hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
                             applyState(result)
@@ -989,12 +1001,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             pendingShiftKeyCode = 0
         }
         if (!inputAvailable || event.isMetaPressed) {
+            if (lastReadiness == Readiness.DEPLOYING) showUnavailableMessage()
             return passKeyDownToHost(keyCode, event)
         }
         val key = AndroidKeyMapper.fromAndroidKeyEvent(event) ?: return passKeyDownToHost(keyCode, event)
         if (!privacyMode.allowsComposing || directInputEditor) {
             return passKeyDownToHost(keyCode, event)
         }
+        if (deferDeploymentKey {
+                if (!onKeyDown(keyCode, deferredEvent)) currentInputConnection?.sendKeyEvent(deferredEvent)
+            }) return true
         // ascii_mode deliberately plays no part here: English mode still needs
         // librime's ascii_composer to see the key. keytao-core owns the rule.
         if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
@@ -1023,7 +1039,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        inputCounts.record("key_up")
+        if (!runningDeferredDeploymentKey) inputCounts.record("key_up")
+        val deferredEvent = KeyEvent(event)
+        if (deferDeploymentKey(markPressed = false) {
+                if (!onKeyUp(keyCode, deferredEvent)) currentInputConnection?.sendKeyEvent(deferredEvent)
+            }) return true
         if (keyCode == KeyEvent.KEYCODE_BACK && panelBackDownConsumed) {
             panelBackDownConsumed = false
             return true
@@ -1038,6 +1058,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode &&
             AndroidKeyMapper.permitsSoloShift(event)
+        if (shouldToggle && !bypassesComposition() &&
+            deferDeploymentKey { onKeyUp(keyCode, deferredEvent) }
+        ) return true
         shiftPressedWithoutKey = false
         pendingShiftKeyCode = 0
         if (!shouldToggle) return super.onKeyUp(keyCode, event)
@@ -1078,6 +1101,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onChordKey(text: String, released: Boolean) {
+        if (deferDeploymentKey(markPressed = false) { onChordKey(text, released) }) return
         if (!released && !inputAvailable) {
             showUnavailableMessage()
             return
@@ -1086,6 +1110,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             commitDirect(text)
             return
         }
+        if (!released && deferDeploymentKey { onChordKey(text, released) }) return
         if (!released) discardPendingHostBackspace()
         val modifiers = if (released) AndroidKeyMapper.RIME_RELEASE_MASK else 0
         val result = engine.processKey(text.single().code, modifiers)
@@ -1096,9 +1121,19 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyCommand(command: KeyCommand) {
+        if (!runningDeferredDeploymentKey) inputCounts.recordCommand(command.type)
+        if (deferDeploymentKey(markPressed = false) { onKeyCommand(command) }) return
         onUserInteraction()
         if (command.type != KeyCommandTypes.BACKSPACE) discardPendingHostBackspace()
-        inputCounts.recordCommand(command.type)
+        val inputKey = when (command.type) {
+            KeyCommandTypes.INPUT, KeyCommandTypes.RIME_INPUT,
+            KeyCommandTypes.BACKSPACE, KeyCommandTypes.BACKSPACE_GESTURE,
+            KeyCommandTypes.ENTER, KeyCommandTypes.SPACE -> true
+            else -> false
+        }
+        if (inputKey && privacyMode.allowsComposing && !directInputEditor &&
+            deferDeploymentKey { onKeyCommand(command) }
+        ) return
         if (!inputAvailable && command.requiresInstalledSchema()) {
             showUnavailableMessage()
             return
@@ -2905,12 +2940,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
-            Readiness.DEPLOYING -> engine.deploymentHint ?: "请先在 KeyTao App 部署方案"
+            Readiness.DEPLOYING -> ""
             Readiness.NATIVE_UNAVAILABLE -> "RIME 运行库未就绪，请重新安装 KeyTao"
             Readiness.READY -> ""
         }
-        inputAvailable = message.isEmpty() && !editorUpdatePending && engine.nativeReady
-        unavailableMessage = message.ifEmpty { preparingMessage }
+        inputAvailable = readiness == Readiness.READY && !editorUpdatePending && engine.nativeReady
+        unavailableMessage = if (readiness == Readiness.DEPLOYING) "" else message.ifEmpty { preparingMessage }
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
         keyboardView?.updateDeploymentHint(engine.deploymentHint)
         if (inputAvailable) refreshRimeOptions(inBackground = true)
@@ -2942,8 +2977,50 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun showUnavailableMessage() {
+        engine.deploymentKeyPressed()
         scheduleAvailabilityRefresh()
+        keyboardView?.updateDeploymentHint(engine.deploymentHint)
         keyboardView?.showMessage(unavailableMessage)
+    }
+
+    private fun resetDeploymentInput() {
+        deploymentInputGeneration++
+        deferredDeploymentKeys.clear()
+        deploymentKeyScheduled = false
+        engine.resetDeploymentInput()
+        keyboardView?.updateDeploymentHint(null)
+    }
+
+    private fun deferDeploymentKey(markPressed: Boolean = true, action: () -> Unit): Boolean {
+        if (runningDeferredDeploymentKey || (!markPressed && !deploymentKeyScheduled)) return false
+        if (markPressed) engine.deploymentKeyPressed()
+        keyboardView?.updateDeploymentHint(engine.deploymentHint)
+        if (!deploymentKeyScheduled && engine.deploymentHint != "正在部署中") return false
+        val view = keyboardView?.takeIf { it.isAttachedToWindow && it.isShown } ?: return false
+        deferredDeploymentKeys.addLast(action)
+        if (deploymentKeyScheduled) return true
+        deploymentKeyScheduled = true
+        val generation = deploymentInputGeneration
+        // Let the candidate hint paint before the existing synchronous key wait.
+        view.postOnAnimation {
+            view.post {
+                if (generation != deploymentInputGeneration || serviceDestroyed) return@post
+                deploymentKeyScheduled = false
+                runningDeferredDeploymentKey = true
+                try {
+                    while (generation == deploymentInputGeneration && deferredDeploymentKeys.isNotEmpty()) {
+                        deferredDeploymentKeys.removeFirst().invoke()
+                    }
+                } finally {
+                    runningDeferredDeploymentKey = false
+                    if (generation == deploymentInputGeneration) {
+                        engine.refreshDeploymentHint()
+                        keyboardView?.updateDeploymentHint(engine.deploymentHint)
+                    }
+                }
+            }
+        }
+        return true
     }
 
     /**
