@@ -392,6 +392,7 @@ pub struct LinuxImeStatusDto {
 pub struct ComponentVersionsDto {
     pub app_version: String,
     pub librime_version: Option<String>,
+    pub librime_lua_version: Option<String>,
     pub opencc_version: Option<String>,
     pub data_dir: Option<String>,
 }

@@ -369,12 +369,14 @@ class CloudTransferProgressDto {
 class ComponentVersionsDto {
   final String appVersion;
   final String? librimeVersion;
+  final String? librimeLuaVersion;
   final String? openccVersion;
   final String? dataDir;
 
   const ComponentVersionsDto({
     required this.appVersion,
     this.librimeVersion,
+    this.librimeLuaVersion,
     this.openccVersion,
     this.dataDir,
   });
@@ -383,6 +385,7 @@ class ComponentVersionsDto {
   int get hashCode =>
       appVersion.hashCode ^
       librimeVersion.hashCode ^
+      librimeLuaVersion.hashCode ^
       openccVersion.hashCode ^
       dataDir.hashCode;
 
@@ -393,6 +396,7 @@ class ComponentVersionsDto {
           runtimeType == other.runtimeType &&
           appVersion == other.appVersion &&
           librimeVersion == other.librimeVersion &&
+          librimeLuaVersion == other.librimeLuaVersion &&
           openccVersion == other.openccVersion &&
           dataDir == other.dataDir;
 }
