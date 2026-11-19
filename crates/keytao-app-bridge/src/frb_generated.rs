@@ -4594,11 +4594,13 @@ impl SseDecode for crate::api::types::ComponentVersionsDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_appVersion = <String>::sse_decode(deserializer);
         let mut var_librimeVersion = <Option<String>>::sse_decode(deserializer);
+        let mut var_librimeLuaVersion = <Option<String>>::sse_decode(deserializer);
         let mut var_openccVersion = <Option<String>>::sse_decode(deserializer);
         let mut var_dataDir = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::ComponentVersionsDto {
             app_version: var_appVersion,
             librime_version: var_librimeVersion,
+            librime_lua_version: var_librimeLuaVersion,
             opencc_version: var_openccVersion,
             data_dir: var_dataDir,
         };
@@ -6291,6 +6293,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ComponentVersionsDto {
         [
             self.app_version.into_into_dart().into_dart(),
             self.librime_version.into_into_dart().into_dart(),
+            self.librime_lua_version.into_into_dart().into_dart(),
             self.opencc_version.into_into_dart().into_dart(),
             self.data_dir.into_into_dart().into_dart(),
         ]
@@ -7498,6 +7501,7 @@ impl SseEncode for crate::api::types::ComponentVersionsDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.app_version, serializer);
         <Option<String>>::sse_encode(self.librime_version, serializer);
+        <Option<String>>::sse_encode(self.librime_lua_version, serializer);
         <Option<String>>::sse_encode(self.opencc_version, serializer);
         <Option<String>>::sse_encode(self.data_dir, serializer);
     }

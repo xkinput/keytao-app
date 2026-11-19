@@ -603,6 +603,31 @@ pub fn librime_runtime_version() -> Option<String> {
     None
 }
 
+/// Check whether the loaded librime has registered its Lua module without loading it.
+pub fn librime_lua_available() -> bool {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    ))]
+    {
+        let _rime = desktop::rime_api_lock();
+        unsafe { desktop::lua_module_registered() }
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    )))]
+    {
+        false
+    }
+}
+
 /// Probe the optional grammar plugin without initializing its grammar component.
 /// macOS preflights loadability; other desktop platforms check module/file presence
 /// because loading a separate plugin runs its registration constructor.
@@ -732,8 +757,6 @@ fn patch_neutral_grammar(user_dir: &Path) {
 ))]
 mod desktop {
     use super::*;
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    use librime_sys::RimeFindModule;
     use librime_sys::{
         rime_get_api, RimeApi, RimeCandidateListIterator, RimeConfig, RimeConfigIterator,
         RimeContext, RimeLeversApi, RimeTraits, RimeUserDictIterator,
@@ -1874,9 +1897,10 @@ mod desktop {
     )))]
     unsafe fn require_lua_module() {}
 
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    unsafe fn lua_module_registered() -> bool {
-        !RimeFindModule(c"lua".as_ptr()).is_null()
+    pub(super) unsafe fn lua_module_registered() -> bool {
+        let api = rime_get_api();
+        rime_api_member!(api, find_module)
+            .is_some_and(|find_module| !find_module(c"lua".as_ptr()).is_null())
     }
 
     #[cfg(not(target_os = "ios"))]
@@ -2457,6 +2481,7 @@ mod desktop {
                     load_unix_lua_plugin().expect("load librime-lua plugin");
                 }
             }
+            assert!(crate::librime_lua_available());
         }
 
         #[cfg(target_os = "macos")]

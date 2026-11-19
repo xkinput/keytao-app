@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct ComponentVersions {
     pub app_version: String,
     pub librime_version: Option<String>,
+    pub librime_lua_version: Option<String>,
     pub opencc_version: Option<String>,
     pub data_dir: Option<String>,
 }
@@ -270,6 +271,8 @@ pub fn get_component_versions(
     ComponentVersions {
         app_version: core.env().app_version.clone(),
         librime_version: librime_version(&core, rime_version),
+        librime_lua_version: keytao_core::librime_lua_available()
+            .then(|| env!("KEYTAO_LIBRIME_LUA_VERSION").to_owned()),
         opencc_version: opencc_version(&core, opencc_version_hint),
         data_dir,
     }

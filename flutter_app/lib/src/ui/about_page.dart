@@ -134,6 +134,10 @@ class AboutPage extends StatelessWidget {
               c.versions?.librimeVersion ?? '—',
             ),
             ValueRow(
+              AppStrings.librimeLuaVersion,
+              c.versions?.librimeLuaVersion ?? '—',
+            ),
+            ValueRow(
               AppStrings.openccVersion,
               c.versions?.openccVersion ?? '—',
             ),

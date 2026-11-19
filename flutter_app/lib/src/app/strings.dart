@@ -222,6 +222,7 @@ abstract final class AppStrings {
   static const clear = '清空';
   static const keytaoVersion = 'KeyTao 版本';
   static const librimeVersion = 'librime 版本';
+  static const librimeLuaVersion = 'librime-lua';
   static const openccVersion = 'OpenCC 版本';
   static const platform = '平台';
   static const keytaoDirectory = '键道目录';
