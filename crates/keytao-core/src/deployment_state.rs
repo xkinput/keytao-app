@@ -20,6 +20,31 @@ fn cache_deployment(root: &Path, active: bool) {
     crate::lock_ignore_poison(&DEPLOYING).insert(root.to_path_buf(), active);
 }
 
+fn engine_rebuilding() -> bool {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    ))]
+    {
+        crate::PROCESS_RIME
+            .prewarm_scheduled
+            .load(std::sync::atomic::Ordering::Acquire)
+            || crate::try_lock_ignore_poison(&crate::PROCESS_RIME.build.busy)
+                .is_none_or(|busy| *busy)
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    )))]
+    false
+}
+
 pub(crate) fn engine_loaded(root: &Path) {
     if sentinel(root).is_some() {
         return;
@@ -131,6 +156,7 @@ fn process_alive(_pid: u32) -> bool {
 /// Per-IME presentation state; success means this IME loaded the new build.
 #[derive(Clone, Default)]
 pub struct DeploymentState {
+    hint_requested: bool,
     observed: bool,
     loaded_marker: Option<String>,
     pending: Option<String>,
@@ -141,6 +167,26 @@ pub struct DeploymentState {
 }
 
 impl DeploymentState {
+    pub fn visible_hint(hint: Option<&str>, has_candidates: bool) -> Option<&str> {
+        hint.filter(|hint| *hint == "正在部署中" || !has_candidates)
+    }
+
+    /// Call before a key can wait for deployment or the following engine rebuild.
+    pub fn key_pressed(&mut self, root: &Path) {
+        self.hint_at(root, Instant::now());
+        if self.pending.is_some() && self.pending != self.failed_sentinel {
+            self.hint_requested = true;
+            self.hint = Some("正在部署中");
+        }
+    }
+
+    pub fn reset_input(&mut self) {
+        self.hint_requested = false;
+        self.transient = None;
+        self.hint = None;
+        self.refreshed_at = None;
+    }
+
     pub fn hint(&mut self, root: &Path) -> Option<&'static str> {
         self.cached_hint_at(root, Instant::now())
     }
@@ -166,12 +212,28 @@ impl DeploymentState {
     }
 
     pub(crate) fn hint_at(&mut self, root: &Path, now: Instant) -> Option<&'static str> {
-        self.hint = self.refresh_hint_at(root, now);
+        self.hint_at_with_build(root, now, engine_rebuilding())
+    }
+
+    pub(crate) fn hint_at_with_build(
+        &mut self,
+        root: &Path,
+        now: Instant,
+        rebuilding: bool,
+    ) -> Option<&'static str> {
+        self.hint = self
+            .refresh_hint_at(root, now, rebuilding)
+            .filter(|hint| *hint != "正在部署中" || self.hint_requested);
         self.refreshed_at = Some(now);
         self.hint
     }
 
-    fn refresh_hint_at(&mut self, root: &Path, now: Instant) -> Option<&'static str> {
+    fn refresh_hint_at(
+        &mut self,
+        root: &Path,
+        now: Instant,
+        rebuilding: bool,
+    ) -> Option<&'static str> {
         if !self.observed {
             self.loaded_marker = marker(root);
             self.observed = true;
@@ -185,7 +247,7 @@ impl DeploymentState {
                 .is_some_and(|(loaded_root, loaded_marker)| {
                     loaded_root == root && marker(root).as_ref() == Some(loaded_marker)
                 });
-            if loaded {
+            if loaded && !rebuilding {
                 self.loaded(root);
             }
         }
@@ -198,6 +260,9 @@ impl DeploymentState {
         }
         if current.is_some() && current != self.failed_sentinel {
             if active {
+                if self.pending != current {
+                    self.hint_requested = false;
+                }
                 self.pending = current;
                 self.transient = None;
                 return Some("正在部署中");
@@ -207,8 +272,20 @@ impl DeploymentState {
             }
             self.failed();
             self.failed_sentinel = current;
-        } else if self.pending.is_some() && current.is_none() {
-            if marker(root).is_none() {
+        } else if current.is_none() {
+            let marker = marker(root);
+            if self.pending.is_none() && marker.is_some() && marker != self.loaded_marker {
+                self.pending = marker.clone();
+                self.hint_requested = false;
+                self.transient = None;
+            }
+            if self.pending.is_none() {
+                return self
+                    .transient
+                    .filter(|(_, until)| now < *until)
+                    .map(|(hint, _)| hint);
+            }
+            if marker.is_none() {
                 self.failed();
             } else {
                 return Some("正在部署中");
@@ -234,17 +311,21 @@ impl DeploymentState {
         self.loaded_marker = marker;
         self.pending = None;
         self.failed_sentinel = None;
-        if changed {
+        if changed && self.hint_requested {
             self.transient = Some(("部署成功", Instant::now() + HINT_DURATION));
             self.hint = Some("部署成功");
         }
+        self.hint_requested = false;
         self.refreshed_at = None;
     }
 
     pub fn failed(&mut self) {
         self.failed_sentinel = self.pending.take();
-        self.transient = Some(("部署失败", Instant::now() + HINT_DURATION));
-        self.hint = Some("部署失败");
+        if self.hint_requested {
+            self.transient = Some(("部署失败", Instant::now() + HINT_DURATION));
+            self.hint = Some("部署失败");
+        }
+        self.hint_requested = false;
         self.refreshed_at = None;
     }
 }

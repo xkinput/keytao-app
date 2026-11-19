@@ -52,6 +52,7 @@ class KeytaoImeEngine(context: Context) {
     private var warmupComplete = false
     @Volatile private var session: Long = 0L
     @Volatile private var closed = false
+    private val deploymentHintLock = Any()
     @Volatile var deploymentHint: String? = null
         private set
     private var lastState = KeytaoImeState.empty()
@@ -168,12 +169,27 @@ class KeytaoImeEngine(context: Context) {
             } else Readiness.NOT_DEPLOYED
         }
         reloadIfNeeded()
-        deploymentHint = KeytaoNativeBridge.deploymentHint(root.absolutePath)
+        refreshDeploymentHint()
         return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
     }
 
     fun refreshDeploymentHint() {
-        deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentHint(it.absolutePath) }
+        synchronized(deploymentHintLock) {
+            deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentHint(it.absolutePath) }
+        }
+    }
+
+    fun deploymentKeyPressed() {
+        synchronized(deploymentHintLock) {
+            deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentKeyPressed(it.absolutePath) }
+        }
+    }
+
+    fun resetDeploymentInput() {
+        synchronized(deploymentHintLock) {
+            KeytaoNativeBridge.resetDeploymentInput()
+            deploymentHint = null
+        }
     }
 
     @Synchronized
@@ -197,6 +213,7 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun processKey(keyCode: Int, modifiers: Int): KeytaoImeState {
+        if (modifiers and AndroidKeyMapper.RIME_RELEASE_MASK == 0) deploymentKeyPressed()
         if (!nativeReady || session == 0L) return KeytaoImeState.empty(asciiMode = lastState.asciiMode)
         val state = KeytaoNativeBridge.processKey(session, keyCode, modifiers)
             ?.let { stableSchemaState(it) }
@@ -208,6 +225,7 @@ class KeytaoImeEngine(context: Context) {
     /** The single Enter implementation: Rime first, core falls back to the raw input. */
     @Synchronized
     fun processEnter(): KeytaoImeState {
+        deploymentKeyPressed()
         val state = KeytaoNativeBridge.processEnter(session)
             ?.let { stableSchemaState(it) }
             ?: return KeytaoImeState.empty(asciiMode = lastState.asciiMode)
@@ -343,7 +361,7 @@ class KeytaoImeEngine(context: Context) {
                     schemaLogoRequest = null
                     reloadStampSignature = reloadStampSignature()
                 }
-                deploymentHint = KeytaoNativeBridge.deploymentHint(snapshot.third.absolutePath)
+                refreshDeploymentHint()
             }
             if (ok) completed?.invoke(snapshot.first)
             return ok
@@ -507,7 +525,7 @@ class KeytaoImeEngine(context: Context) {
                 ?.let { stableSchemaState(it) }
                 ?: KeytaoImeState.empty()
             reloadStampSignature = reloadStampSignature()
-            deploymentHint = KeytaoNativeBridge.deploymentHint(root.absolutePath)
+            refreshDeploymentHint()
             nativeReady = session != 0L
             success = nativeReady
             return nativeReady

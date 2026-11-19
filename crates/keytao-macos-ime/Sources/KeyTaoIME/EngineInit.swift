@@ -219,7 +219,11 @@ final class KeyTaoRuntime {
         }
     }
 
-    private func refreshDeploymentHint() {
+    func refreshDeploymentHint() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.refreshDeploymentHint() }
+            return
+        }
         let hint: String?
         if let pointer = keytao_deployment_hint() {
             hint = String(cString: pointer)
@@ -227,11 +231,9 @@ final class KeyTaoRuntime {
         } else {
             hint = nil
         }
-        DispatchQueue.main.async {
-            guard self.deploymentHint != hint else { return }
-            self.deploymentHint = hint
-            NotificationCenter.default.post(name: Self.deploymentDidChangeNotification, object: nil)
-        }
+        guard deploymentHint != hint else { return }
+        deploymentHint = hint
+        NotificationCenter.default.post(name: Self.deploymentDidChangeNotification, object: nil)
     }
 
     private func startWatchingDeployment() {

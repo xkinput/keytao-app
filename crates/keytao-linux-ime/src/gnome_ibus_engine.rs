@@ -197,14 +197,25 @@ impl IBusFactory {
         let session = crate::engine::create_session(&self.engine)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         let signal_ctxt = SignalContext::new(connection, path.clone()).ok();
+        let cursor_x = Arc::new(AtomicI32::new(0));
+        let cursor_y = Arc::new(AtomicI32::new(0));
+        let deployment = ibus_shared::IbusDeploymentHint::new(
+            signal_ctxt.clone(),
+            None,
+            "org.freedesktop.IBus.Engine",
+            self.x11_panel_tx.clone(),
+            cursor_x.clone(),
+            cursor_y.clone(),
+        );
         server
             .at(
                 path.clone(),
                 IBusEngine {
                     session: session.clone(),
                     theme_resolver: self.theme_resolver.clone(),
-                    cursor_x: Arc::new(AtomicI32::new(0)),
-                    cursor_y: Arc::new(AtomicI32::new(0)),
+                    cursor_x,
+                    cursor_y,
+                    deployment: deployment.clone(),
                     mode: ModeIndicator::new(),
                     x11_panel_tx: self.x11_panel_tx.clone(),
                     content_type: ContentTypeState::new(),
@@ -220,6 +231,7 @@ impl IBusFactory {
                 path.clone(),
                 IBusEngineService {
                     session,
+                    deployment,
                     x11_panel_tx: self.x11_panel_tx.clone(),
                 },
             )
@@ -246,6 +258,7 @@ impl IBusFactoryService {
 
 pub struct IBusEngine {
     session: ImeSession,
+    deployment: Arc<ibus_shared::IbusDeploymentHint>,
     theme_resolver: Arc<ThemeResolver>,
     cursor_x: Arc<AtomicI32>,
     cursor_y: Arc<AtomicI32>,
@@ -366,6 +379,7 @@ impl IBusEngine {
 
         self.apply_mode_change(ascii_mode, !has_candidates, ctxt)
             .await;
+        self.deployment.apply_state(&ime_state).await;
     }
 
     async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) {
@@ -394,6 +408,9 @@ impl IBusEngine {
     async fn apply_content_type(&self, purpose: u32, hints: u32) {
         let _activity = crate::hot_update::activity();
         let change = self.content_type.set(purpose, hints);
+        if change.turned_sensitive {
+            self.deployment.reset().await;
+        }
         self.session.set_input_policy(change.policy);
         if change.turned_sensitive {
             tracing::debug!("IBus Engine: sensitive content type, passing keys through");
@@ -475,6 +492,9 @@ impl IBusEngine {
     ) -> crate::hot_update::KeyReply {
         let activity = crate::hot_update::activity();
         let started = Instant::now();
+        if state & keytao_core::RIME_RELEASE_MASK == 0 && self.session.input_policy().composing {
+            self.deployment.key_pressed().await;
+        }
         // The decision is shared with the standalone IBus shim; this object only
         // publishes the outcome over org.freedesktop.IBus.Engine.
         let outcome =
@@ -482,7 +502,10 @@ impl IBusEngine {
         let accepted = outcome.accepted();
         match outcome {
             KeyOutcome::Forward => {}
-            KeyOutcome::ClearUi => self.clear_ui(&ctxt).await,
+            KeyOutcome::ClearUi => {
+                self.clear_ui(&ctxt).await;
+                self.deployment.apply_state(&ImeState::empty()).await;
+            }
             KeyOutcome::Publish { state, .. } => {
                 self.apply_ime_state(*state, &ctxt).await;
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
@@ -493,11 +516,13 @@ impl IBusEngine {
 
     async fn focus_in(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus Engine: FocusIn");
+        self.deployment.reset().await;
         self.register_mode_property(&ctxt).await;
     }
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
+        self.deployment.reset().await;
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
         runtime_log::drain_key_stats();
@@ -505,17 +530,20 @@ impl IBusEngine {
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
+        self.deployment.reset().await;
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
     }
 
     async fn enable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus Engine: Enable");
+        self.deployment.reset().await;
         self.register_mode_property(&ctxt).await;
     }
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
+        self.deployment.reset().await;
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
         runtime_log::drain_key_stats();
@@ -588,6 +616,7 @@ impl IBusEngine {
 /// answering it would leak one object and one librime session per input context.
 pub struct IBusEngineService {
     session: ImeSession,
+    deployment: Arc<ibus_shared::IbusDeploymentHint>,
     x11_panel_tx: Option<std::sync::mpsc::Sender<OverlayPanelMessage>>,
 }
 
@@ -602,6 +631,7 @@ impl IBusEngineService {
         let _activity = crate::hot_update::activity();
         tracing::info!("IBus Engine: Destroy {}", ctxt.path());
         runtime_log::drain_key_stats();
+        self.deployment.reset().await;
         self.session.clear_composition();
         if let Some(tx) = &self.x11_panel_tx {
             let _ = tx.send(OverlayPanelMessage::Hide);
@@ -757,9 +787,12 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     let has_display = std::env::var_os("DISPLAY").is_some();
     let x11_panel_tx = if should_draw_overlay(force_overlay, has_panel, has_display) {
         let (tx, rx) = std::sync::mpsc::channel::<OverlayPanelMessage>();
-        spawn_x11_overlay_panel(rx);
-        tracing::info!("IBus engine backend: drawing candidates in the X11 overlay");
-        Some(tx)
+        if spawn_x11_overlay_panel(rx) {
+            tracing::info!("IBus engine backend: drawing candidates in the X11 overlay");
+            Some(tx)
+        } else {
+            None
+        }
     } else {
         tracing::info!("IBus engine backend: candidates rendered by the desktop IBus panel");
         None

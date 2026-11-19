@@ -70,10 +70,14 @@ impl Kimpanel {
     pub(crate) async fn show_preedit(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn show_aux(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
+    pub(crate) async fn show_aux(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn update_aux(ctxt: &SignalContext<'_>, text: &str, attr: &str) -> zbus::Result<()>;
+    pub(crate) async fn update_aux(
+        ctxt: &SignalContext<'_>,
+        text: &str,
+        attr: &str,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn enable(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
@@ -93,6 +97,7 @@ pub struct KimpanelHandle {
     ctxt: SignalContext<'static>,
     _conn: Connection,
     theme_resolver: Arc<ThemeResolver>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl KimpanelHandle {
@@ -135,6 +140,7 @@ impl KimpanelHandle {
             ctxt,
             _conn: conn,
             theme_resolver: Arc::new(ThemeResolver::from_default_locations()),
+            runtime: tokio::runtime::Handle::current(),
         };
         handle.register_status().await;
         Some(handle)
@@ -148,6 +154,13 @@ impl KimpanelHandle {
         let _ = Kimpanel::update_preedit_caret(&self.ctxt, 0).await;
         let _ = Kimpanel::show_preedit(&self.ctxt, false).await;
         let _ = Kimpanel::show_lookup_table(&self.ctxt, false).await;
+    }
+
+    pub fn show_deployment_hint(&self, text: Option<&str>) {
+        self.runtime.block_on(async {
+            let _ = Kimpanel::update_aux(&self.ctxt, text.unwrap_or_default(), "").await;
+            let _ = Kimpanel::show_aux(&self.ctxt, text.is_some()).await;
+        });
     }
 
     pub async fn update_state(&self, state: &ImeState) {

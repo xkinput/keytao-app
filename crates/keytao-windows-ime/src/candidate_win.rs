@@ -28,9 +28,9 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-            MonitorFromPoint, ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, MONITORINFO,
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC,
+            GetMonitorInfoW, MonitorFromPoint, ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER,
+            BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, MONITORINFO,
             MONITOR_DEFAULTTONEAREST,
         },
         System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
@@ -63,6 +63,7 @@ const CLASS_NAME: &str = "KeyTaoCandidate\0";
 const MODE_HINT_TIMER_ID: usize = 1;
 const CARET_RETRY_TIMER_ID: usize = 2;
 const LAYOUT_REPOSITION_TIMER_ID: usize = 3;
+const DEPLOYMENT_HINT_TIMER_ID: usize = 4;
 const PENDING_IME_UI_MESSAGE: u32 = WM_APP + 0x4B;
 const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -254,6 +255,12 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         WM_TIMER if wparam.0 == MODE_HINT_TIMER_ID => {
             let _ = KillTimer(hwnd, MODE_HINT_TIMER_ID);
             let _ = ShowWindow(hwnd, SW_HIDE);
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == DEPLOYMENT_HINT_TIMER_ID => {
+            if let Some(state) = click_target(hwnd).and_then(|target| target.state.upgrade()) {
+                crate::state::poll_deployment_hint(&state);
+            }
             return LRESULT(0);
         }
         // Selecting a candidate must never move the caret out of the host.
@@ -545,6 +552,20 @@ impl CandidateWindow {
         unsafe { PostMessageW(self.hwnd, PENDING_IME_UI_MESSAGE, WPARAM(0), LPARAM(0)).is_ok() }
     }
 
+    pub(crate) fn set_deployment_hint_polling(&mut self, state: &WeakState, active: bool) {
+        if active {
+            if self.has_live_window()
+                || self.ensure_window(crate::state::fallback_focus_window(), state)
+            {
+                unsafe { SetTimer(self.hwnd, DEPLOYMENT_HINT_TIMER_ID, 250, None) };
+            }
+        } else if self.has_live_window() {
+            unsafe {
+                let _ = KillTimer(self.hwnd, DEPLOYMENT_HINT_TIMER_ID);
+            }
+        }
+    }
+
     pub fn arm_layout_reposition(&mut self, state: &WeakState) -> bool {
         if !self.has_live_window()
             && !self.ensure_window(crate::state::fallback_focus_window(), state)
@@ -587,9 +608,12 @@ impl CandidateWindow {
         owner_hwnd: HWND,
         state: &WeakState,
         embedded: bool,
+        deployment_hint: Option<&str>,
     ) -> bool {
         let started = (!self.visible && runtime_log::enabled(Level::Info)).then(Instant::now);
-        let has_content = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
+        let has_content = deployment_hint.is_some()
+            || !ime_state.candidates.is_empty()
+            || !ime_state.preedit.is_empty();
         if !has_content {
             self.hide();
             return false;
@@ -599,12 +623,22 @@ impl CandidateWindow {
         }
         let scale = dpi_scale(self.owner_hwnd);
         let theme = current_theme();
-        let model = candidate_panel_model(ime_state, embedded, &theme);
-        let preedit_caret = model.preedit.as_ref().map(|preedit| {
-            ime_state
-                .cursor
-                .min(preedit.chars().count().saturating_sub(1))
-        });
+        let mut model = candidate_panel_model(ime_state, embedded, &theme);
+        if let Some(hint) = deployment_hint {
+            model.preedit = Some(hint.to_string());
+            model.candidates.clear();
+            model.navigation.can_go_previous = false;
+            model.navigation.can_go_next = false;
+        }
+        let preedit_caret = model
+            .preedit
+            .as_ref()
+            .filter(|_| deployment_hint.is_none())
+            .map(|preedit| {
+                ime_state
+                    .cursor
+                    .min(preedit.chars().count().saturating_sub(1))
+            });
         let mut work = self.available_area(POINT {
             x: caret_x,
             y: caret_y,
@@ -666,7 +700,6 @@ impl CandidateWindow {
         }
         self.last_upload = Some(signature);
         self.last_upload_size = (w, h);
-
         if !self.visible {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -685,6 +718,11 @@ impl CandidateWindow {
                     candidates = ime_state.candidates.len(),
                     preedit_len = ime_state.preedit.chars().count(),
                 );
+            }
+        }
+        if deployment_hint.is_some() {
+            unsafe {
+                let _ = GdiFlush();
             }
         }
         self.has_live_window()

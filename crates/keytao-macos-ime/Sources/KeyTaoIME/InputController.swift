@@ -2,6 +2,7 @@ import Cocoa
 import InputMethodKit
 import Carbon
 import CKeytaoCore
+import QuartzCore
 
 private let rimeModifierShift: UInt32 = 0x0001
 private let rimeModifierLock: UInt32 = 0x0002
@@ -45,6 +46,7 @@ final class KeyTaoInputController: IMKInputController {
     private var reloadObserver: NSObjectProtocol?
     private var deploymentObserver: NSObjectProtocol?
     private var showingDeploymentHint = false
+    private var normalCandidateModel: KeyTaoPanelModel?
     private let inputContextGeneration = KeyTaoInputContextGeneration()
 
     // MARK: Lifecycle
@@ -98,6 +100,7 @@ final class KeyTaoInputController: IMKInputController {
 
     override func activateServer(_ sender: Any!) {
         inputContextGeneration.invalidate()
+        resetDeploymentInput()
         clearPendingChordReleases()
         let client = sender as? IMKTextInput
         isActive = true
@@ -114,6 +117,7 @@ final class KeyTaoInputController: IMKInputController {
         let generation = inputContextGeneration.invalidate()
         clearPendingChordReleases()
         isActive = false
+        resetDeploymentInput()
         // The composition belongs to the client that is going away, so it has to
         // be handed back before the session is dropped; otherwise the client
         // keeps underlined marked text nobody owns any more.
@@ -139,6 +143,7 @@ final class KeyTaoInputController: IMKInputController {
 
     /// The system asks for every visible piece of input method UI to go away.
     override func hidePalettes() {
+        resetDeploymentInput()
         hideCandidates()
         hideModeIndicator()
         super.hidePalettes()
@@ -172,6 +177,9 @@ final class KeyTaoInputController: IMKInputController {
             return state.accepted
         }
         guard event.type == .keyDown else { return false }
+        let generation = inputContextGeneration.current
+        deploymentKeyPressed(client: sender as? IMKTextInput)
+        guard inputContextGeneration.isCurrent(generation) else { return false }
 
         // Every key press ends the solo-Shift window, chords included. Deciding
         // this from lastModifierFlags at release time loses Cmd+Shift+key, whose
@@ -270,6 +278,7 @@ final class KeyTaoInputController: IMKInputController {
 
     override func commitComposition(_ sender: Any!) {
         let generation = inputContextGeneration.invalidate()
+        resetDeploymentInput()
         clearPendingChordReleases()
         guard hasComposition else {
             hideCandidates()
@@ -284,6 +293,7 @@ final class KeyTaoInputController: IMKInputController {
 
     override func cancelComposition() {
         let generation = inputContextGeneration.invalidate()
+        resetDeploymentInput()
         endComposition(commit: false, client: client())
         guard inputContextGeneration.isCurrent(generation) else { return }
         hideCandidates()
@@ -354,10 +364,11 @@ final class KeyTaoInputController: IMKInputController {
         if !chordComposer || asciiMode { clearPendingChordReleases() }
 
         if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || theme.ui.effectiveEmbeddedComposition) {
-            hideCandidates()
+            normalCandidateModel = nil
         } else {
-            showCandidates(panelModel(for: state, theme: theme), client: client, theme: theme)
+            normalCandidateModel = panelModel(for: state, theme: theme)
         }
+        KeyTaoRuntime.shared.refreshDeploymentHint()
         showDeploymentIndicator(client: client)
     }
 
@@ -480,7 +491,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func showCandidates(_ model: KeyTaoPanelModel, client: IMKTextInput?, theme: ImeTheme) {
         let generation = inputContextGeneration.current
-        guard isActive, !theme.ui.hideCandidatePanel else {
+        guard isActive, !theme.ui.hideCandidatePanel || showingDeploymentHint else {
             hideCandidates()
             return
         }
@@ -516,37 +527,60 @@ final class KeyTaoInputController: IMKInputController {
 
     private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?) {
         let generation = inputContextGeneration.current
-        guard isActive else { return }
+        guard isActive, !showingDeploymentHint else { return }
         let windowLevel = panelLevel(for: client)
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let rect = cursorRect(for: client)
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = modeIndicatorPanel ?? ModeIndicatorPanel()
         modeIndicatorPanel = panel
-        let deploymentHint = KeyTaoRuntime.shared.deploymentHint
-        showingDeploymentHint = deploymentHint != nil
-        let anchor = showingDeploymentHint
-            ? (candidatePanel.flatMap { $0.isVisible ? $0.frame : nil } ?? rect)
-            : rect
         panel.show(
-            modeHint: deploymentHint.map { KeyTaoModeHintModel(asciiMode: asciiMode, text: $0) } ?? modeHint,
+            modeHint: modeHint,
             windowLevel: windowLevel,
-            near: anchor,
-            persistent: deploymentHint != nil
+            near: rect
         )
     }
 
     private func showDeploymentIndicator(client: IMKTextInput?) {
-        if let hint = KeyTaoRuntime.shared.deploymentHint {
-            showModeIndicator(KeyTaoModeHintModel(asciiMode: asciiMode, text: hint), client: client)
-        } else if showingDeploymentHint {
+        let theme = ImeThemeManager.shared.theme()
+        if let hint = KeyTaoRuntime.shared.deploymentHint,
+           hint == "正在部署中" || normalCandidateModel?.candidates.isEmpty != false {
+            showingDeploymentHint = true
             hideModeIndicator()
+            var model = KeyTaoPanelModel.empty
+            model.preedit = hint
+            showCandidates(model, client: client, theme: theme)
+            candidatePanel?.onSelect = nil
+            candidatePanel?.onPageChange = nil
+            candidatePanel?.displayIfNeeded()
+            // Submit layer updates before the key can block on the engine rebuild.
+            CATransaction.flush()
+        } else {
+            showingDeploymentHint = false
+            if let model = normalCandidateModel {
+                showCandidates(model, client: client, theme: theme)
+            } else {
+                hideCandidates()
+            }
         }
     }
 
     private func hideModeIndicator() {
-        showingDeploymentHint = false
         modeIndicatorPanel?.orderOut(nil)
+    }
+
+    private func deploymentKeyPressed(client: IMKTextInput?) {
+        keytao_deployment_key_pressed()
+        KeyTaoRuntime.shared.refreshDeploymentHint()
+        if KeyTaoRuntime.shared.deploymentHint != nil {
+            showDeploymentIndicator(client: client)
+        }
+    }
+
+    private func resetDeploymentInput() {
+        keytao_deployment_reset_input()
+        normalCandidateModel = nil
+        KeyTaoRuntime.shared.refreshDeploymentHint()
     }
 
     /// IMKit tells the input method which level the client's window sits at, and
@@ -712,6 +746,10 @@ final class KeyTaoInputController: IMKInputController {
         // Install before calling the host. A reentrant focus reset must not
         // later be overwritten by a defer from the obsolete flags callback.
         lastModifierFlags = newFlags
+        if !newFlags.subtracting(previousFlags).isEmpty || Int(event.keyCode) == kVK_CapsLock {
+            deploymentKeyPressed(client: client)
+            guard inputContextGeneration.isCurrent(generation) else { return false }
+        }
 
         if !newFlags.isDisjoint(with: chordModifiers) {
             shiftPressedWithoutKey = false

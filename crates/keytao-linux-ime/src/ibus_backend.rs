@@ -28,6 +28,7 @@ use zbus::{connection, interface, object_server::SignalContext, zvariant};
 
 struct InputContext {
     session: ImeSession,
+    deployment: Arc<ibus_shared::IbusDeploymentHint>,
     kimpanel_ctxt: Option<SignalContext<'static>>,
     cursor_x: Arc<AtomicI32>,
     cursor_y: Arc<AtomicI32>,
@@ -91,6 +92,9 @@ impl InputContext {
     async fn apply_content_type(&self, purpose: u32, hints: u32) {
         let _activity = crate::hot_update::activity();
         let change = self.content_type.set(purpose, hints);
+        if change.turned_sensitive {
+            self.deployment.reset().await;
+        }
         self.session.set_input_policy(change.policy);
         if change.turned_sensitive {
             tracing::debug!("IBus InputContext: sensitive content type, passing keys through");
@@ -182,13 +186,14 @@ impl InputContext {
             let cx = self.cursor_x.load(Ordering::Relaxed);
             let cy = self.cursor_y.load(Ordering::Relaxed);
             let _ = self.x11_panel_tx.send(OverlayPanelMessage::Show {
-                state: ime_state,
+                state: ime_state.clone(),
                 x: cx,
                 y: cy + 24,
             });
         }
 
         self.apply_mode_change(ascii_mode, !has_candidates).await;
+        self.deployment.apply_state(&ime_state).await;
     }
 
     async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) {
@@ -220,11 +225,13 @@ impl InputContext {
 impl InputContext {
     async fn focus_in(&self) {
         tracing::debug!("IBus InputContext: FocusIn");
+        self.deployment.reset().await;
         self.publish_current_mode().await;
     }
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
+        self.deployment.reset().await;
         tracing::debug!("IBus InputContext: FocusOut");
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
@@ -233,6 +240,7 @@ impl InputContext {
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
+        self.deployment.reset().await;
         tracing::debug!("IBus InputContext: Reset");
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
@@ -269,11 +277,13 @@ impl InputContext {
 
     async fn enable(&self) {
         tracing::debug!("IBus InputContext: Enable");
+        self.deployment.reset().await;
         self.publish_current_mode().await;
     }
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
+        self.deployment.reset().await;
         tracing::debug!("IBus InputContext: Disable");
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
@@ -320,6 +330,9 @@ impl InputContext {
     ) -> crate::hot_update::KeyReply {
         let activity = crate::hot_update::activity();
         let started = Instant::now();
+        if state & keytao_core::RIME_RELEASE_MASK == 0 && self.session.input_policy().composing {
+            self.deployment.key_pressed().await;
+        }
         // The decision is shared with the GNOME engine backend; this object only
         // publishes the outcome over org.freedesktop.IBus.InputContext.
         let outcome =
@@ -327,7 +340,10 @@ impl InputContext {
         let accepted = outcome.accepted();
         match outcome {
             KeyOutcome::Forward => {}
-            KeyOutcome::ClearUi => self.clear_ui(&ctxt).await,
+            KeyOutcome::ClearUi => {
+                self.clear_ui(&ctxt).await;
+                self.deployment.apply_state(&ImeState::empty()).await;
+            }
             KeyOutcome::Publish { state, .. } => {
                 self.apply_ime_state(*state, &ctxt).await;
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
@@ -374,6 +390,7 @@ impl InputContext {
 /// client drops leaks a D-Bus object and a librime session.
 struct InputContextService {
     session: ImeSession,
+    deployment: Arc<ibus_shared::IbusDeploymentHint>,
     kimpanel_ctxt: Option<SignalContext<'static>>,
     x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
 }
@@ -389,6 +406,7 @@ impl InputContextService {
         let _activity = crate::hot_update::activity();
         tracing::info!("IBus InputContext: Destroy {}", ctxt.path());
         runtime_log::drain_key_stats();
+        self.deployment.reset().await;
         self.session.clear_composition();
         if let Some(kctxt) = &self.kimpanel_ctxt {
             let _ = Kimpanel::show_preedit(kctxt, false).await;
@@ -429,6 +447,7 @@ struct IBusBus {
     ctx_counter: Arc<AtomicU64>,
     kimpanel_ctxt: Option<SignalContext<'static>>,
     x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
+    x11_panel_available: bool,
     theme_resolver: Arc<ThemeResolver>,
 }
 
@@ -450,16 +469,28 @@ impl IBusBus {
 
         let session = crate::engine::create_session(&self.engine)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        let cursor_x = Arc::new(AtomicI32::new(0));
+        let cursor_y = Arc::new(AtomicI32::new(0));
+        let signal_ctxt = SignalContext::new(connection, path_str.clone()).ok();
+        let deployment = ibus_shared::IbusDeploymentHint::new(
+            signal_ctxt.clone(),
+            self.kimpanel_ctxt.clone(),
+            "org.freedesktop.IBus.InputContext",
+            self.x11_panel_available.then(|| self.x11_panel_tx.clone()),
+            cursor_x.clone(),
+            cursor_y.clone(),
+        );
         let ctx = InputContext {
             session: session.clone(),
+            deployment: deployment.clone(),
             kimpanel_ctxt: self.kimpanel_ctxt.clone(),
-            cursor_x: Arc::new(AtomicI32::new(0)),
-            cursor_y: Arc::new(AtomicI32::new(0)),
+            cursor_x,
+            cursor_y,
             mode: ModeIndicator::new(),
             x11_panel_tx: self.x11_panel_tx.clone(),
             theme_resolver: self.theme_resolver.clone(),
             content_type: ContentTypeState::new(),
-            signal_ctxt: SignalContext::new(connection, path_str.clone()).ok(),
+            signal_ctxt,
         };
         server
             .at(path.clone(), ctx)
@@ -472,6 +503,7 @@ impl IBusBus {
                 path.clone(),
                 InputContextService {
                     session,
+                    deployment,
                     kimpanel_ctxt: self.kimpanel_ctxt.clone(),
                     x11_panel_tx: self.x11_panel_tx.clone(),
                 },
@@ -638,7 +670,7 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     };
 
     let (tx, rx) = std::sync::mpsc::channel::<OverlayPanelMessage>();
-    spawn_x11_overlay_panel(rx);
+    let x11_panel_available = spawn_x11_overlay_panel(rx);
 
     // Avoid reusing paths held by clients across re-exec, which keeps the PID.
     let ctx_seed = SystemTime::now()
@@ -665,6 +697,7 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
                 ctx_counter,
                 kimpanel_ctxt: kimpanel_ctxt.clone(),
                 x11_panel_tx: tx,
+                x11_panel_available,
                 theme_resolver,
             },
         )

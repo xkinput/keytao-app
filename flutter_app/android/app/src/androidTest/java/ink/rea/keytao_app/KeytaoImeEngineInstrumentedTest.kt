@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.FixMethodOrder
@@ -41,10 +42,16 @@ class KeytaoImeEngineInstrumentedTest {
 
             assertTrue(KeytaoAndroidPaths.isDeploymentInProgress(root))
             assertEquals(Readiness.READY, engine.refreshReadiness())
-            assertEquals("正在部署中", engine.deploymentHint)
+            assertNull("deployment stays silent until a key arrives", engine.deploymentHint)
             val state = engine.processKey('a'.code, 0)
+            assertEquals("正在部署中", engine.deploymentHint)
             assertTrue("the loaded engine must keep handling keys", state.accepted)
             assertEquals(schemaId, state.schemaId)
+            engine.resetDeploymentInput()
+            engine.refreshDeploymentHint()
+            assertNull("a new input session starts silent", engine.deploymentHint)
+            engine.processKey('a'.code, 0)
+            assertEquals("正在部署中", engine.deploymentHint)
             assertEquals(Readiness.DEPLOYING, fresh.refreshReadiness())
             assertFalse("a new engine must not read a build in progress", fresh.ensureReady())
             assertEquals(0L, KeytaoNativeBridge.createSession())

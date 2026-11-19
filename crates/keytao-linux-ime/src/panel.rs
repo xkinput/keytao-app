@@ -367,6 +367,7 @@ struct GlyphLayout<'a> {
 pub enum OverlayPanelMessage {
     Show { state: ImeState, x: i32, y: i32 },
     ModeHint { ascii_mode: bool, x: i32, y: i32 },
+    DeploymentHint { text: &'static str, x: i32, y: i32 },
     Hide,
 }
 
@@ -468,6 +469,16 @@ impl X11OverlayPanel {
 
     pub fn show_mode_hint(&mut self, ascii_mode: bool, x: i32, y: i32) -> Option<Instant> {
         let (pixels, w, h) = self.renderer.render_mode_hint(ascii_mode);
+        self.show_hint_pixels(&pixels, w, h, x, y);
+        Some(Instant::now() + self.renderer.mode_hint_duration())
+    }
+
+    pub fn show_deployment_hint(&mut self, text: &str, x: i32, y: i32) {
+        let (pixels, w, h) = self.renderer.render_text_hint(text);
+        self.show_hint_pixels(&pixels, w, h, x, y);
+    }
+
+    fn show_hint_pixels(&mut self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) {
         let x = (x - w as i32 / 2).max(0);
         self.conn
             .configure_window(
@@ -492,11 +503,10 @@ impl X11OverlayPanel {
                 0,
                 0,
                 self.depth,
-                &pixels,
+                pixels,
             )
             .ok();
         self.conn.flush().ok();
-        Some(Instant::now() + self.renderer.mode_hint_duration())
     }
 
     pub fn hide(&mut self) {
@@ -516,9 +526,11 @@ impl Drop for X11OverlayPanel {
     }
 }
 
-pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) {
+pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) -> bool {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     thread::spawn(move || {
         let mut panel = X11OverlayPanel::new();
+        let _ = ready_tx.send(panel.is_some());
         if panel.is_none() {
             tracing::warn!("X11 overlay panel unavailable; falling back to system lookup UI");
         }
@@ -554,6 +566,10 @@ pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) {
                     OverlayPanelMessage::ModeHint { ascii_mode, x, y } => {
                         mode_hint_until = panel.show_mode_hint(ascii_mode, x, y);
                     }
+                    OverlayPanelMessage::DeploymentHint { text, x, y } => {
+                        mode_hint_until = None;
+                        panel.show_deployment_hint(text, x, y);
+                    }
                     OverlayPanelMessage::Hide => {
                         mode_hint_until = None;
                         panel.hide();
@@ -562,6 +578,7 @@ pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) {
             }
         }
     });
+    ready_rx.recv().unwrap_or(false)
 }
 
 impl PanelRenderer {
@@ -609,9 +626,13 @@ impl PanelRenderer {
         ascii_mode: bool,
         scale: f32,
         screen_width: f32,
+        deployment_hint: Option<&str>,
     ) -> WaylandPanel {
         self.scale = scale;
-        let (pixels, width, height, mut hit_areas) = if let Some(state) = state {
+        let (pixels, width, height, mut hit_areas) = if let Some(text) = deployment_hint {
+            let (pixels, width, height) = self.render_text_hint(text);
+            (pixels, width, height, PanelHitAreas::default())
+        } else if let Some(state) = state {
             self.render_with_hit_areas(state, screen_width * scale)
         } else {
             let (pixels, width, height) = self.render_mode_hint(ascii_mode);
@@ -848,9 +869,13 @@ impl PanelRenderer {
     pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
         let model = theme.mode_hint_model(ascii_mode);
+        self.render_text_hint(&model.text)
+    }
+
+    pub fn render_text_hint(&self, label: &str) -> (Vec<u8>, u32, u32) {
+        let theme = self.theme_resolver.current();
         let hint_size = self.s(theme.font.size);
         let padding = hint_size / 3.0;
-        let label = model.text;
         let (left, top, right, bottom) = self.text_bounds(&label, hint_size);
         let text_width = right - left;
         let text_height = bottom - top;

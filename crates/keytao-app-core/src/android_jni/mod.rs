@@ -820,6 +820,38 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploym
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentKeyPressed(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeDeploymentKeyPressed", std::ptr::null_mut(), || {
+        let Some(root) = optional_jni_path(&mut env, user_dir) else {
+            return std::ptr::null_mut();
+        };
+        let hint = ANDROID_DEPLOYMENT_STATE.lock().ok().and_then(|mut state| {
+            state.key_pressed(&root);
+            state.cached_hint()
+        });
+        hint.map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResetDeploymentInput(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) {
+    android_jni_guard("nativeResetDeploymentInput", (), || {
+        if let Ok(mut state) = ANDROID_DEPLOYMENT_STATE.lock() {
+            state.reset_input();
+        }
+    });
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMarkDeploymentFailed(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

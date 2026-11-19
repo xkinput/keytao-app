@@ -300,6 +300,7 @@ object KeytaoRimeDeployClient {
 }
 
 internal object KeytaoRimeDeployContract {
+    const val notificationId = 1002
     const val extraTestRoot = "ink.rea.keytao_app.extra.TEST_ROOT"
     const val extraReceiver = "ink.rea.keytao_app.extra.RIME_DEPLOY_RECEIVER"
     const val extraSchemaId = "ink.rea.keytao_app.extra.RIME_DEPLOY_SCHEMA_ID"

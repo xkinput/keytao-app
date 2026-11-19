@@ -44,6 +44,22 @@ fn compiled_schema(dir: &Path) {
 }
 
 #[test]
+fn only_transient_deployment_hints_yield_to_real_candidates() {
+    for hint in ["部署成功", "部署失败"] {
+        assert_eq!(DeploymentState::visible_hint(Some(hint), false), Some(hint));
+        assert_eq!(DeploymentState::visible_hint(Some(hint), true), None);
+    }
+    for has_candidates in [false, true] {
+        assert_eq!(
+            DeploymentState::visible_hint(Some("正在部署中"), has_candidates),
+            Some("正在部署中")
+        );
+    }
+    assert_eq!(DeploymentState::visible_hint(None, false), None);
+    assert_eq!(DeploymentState::visible_hint(None, true), None);
+}
+
+#[test]
 fn schema_install_state_rejects_partial_and_interrupted_builds() {
     let dir = installed_schema();
     fs::copy(
@@ -224,6 +240,8 @@ fn deployment_hint_waits_for_loaded_build_and_expires() {
     assert_eq!(state.hint_at(&dir, Instant::now()), None);
     begin_deployment(&dir).unwrap();
     assert!(deployment_in_progress(&dir));
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    state.key_pressed(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
     complete_deployment(&dir).unwrap();
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
@@ -244,6 +262,7 @@ fn deployment_hint_failure_expires_and_new_deploy_can_retry() {
     let dir = installed_schema();
     let mut state = DeploymentState::default();
     begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
     state.failed();
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
@@ -255,6 +274,7 @@ fn deployment_hint_failure_expires_and_new_deploy_can_retry() {
         None
     );
     begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
     fs::remove_file(dir.join("build/.keytao-deploying")).unwrap();
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
@@ -285,7 +305,7 @@ fn deployment_sentinel_requires_live_owner_and_recent_timestamp() {
         assert!(!deployment_in_progress(&dir));
     }
     let mut state = DeploymentState::default();
-    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
     assert_eq!(
         state.hint_at(
             &dir,
@@ -300,12 +320,13 @@ fn deployment_sentinel_requires_live_owner_and_recent_timestamp() {
 fn deployment_failure_hint_does_not_allow_reading_an_active_build() {
     let dir = installed_schema();
     begin_deployment(&dir).unwrap();
+    let mut state = DeploymentState::default();
+    state.key_pressed(&dir);
     super::mark_deployment_failed(&dir).unwrap();
     assert_eq!(
         super::deployment_state::failed_deployment_owned_by_process(&dir),
         !cfg!(target_os = "android")
     );
-    let mut state = DeploymentState::default();
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署失败"));
     assert!(deployment_in_progress(&dir));
     assert_eq!(
@@ -317,6 +338,7 @@ fn deployment_failure_hint_does_not_allow_reading_an_active_build() {
     );
     begin_deployment(&dir).unwrap();
     assert!(!super::deployment_state::failed_deployment_owned_by_process(&dir));
+    state.key_pressed(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
     fs::remove_dir_all(dir).unwrap();
 }
@@ -332,9 +354,12 @@ fn deployment_hint_detects_a_build_replaced_between_watcher_ticks() {
     let content = fs::read_to_string(&marker).unwrap();
     fs::write(&marker, format!("{content}\n")).unwrap();
     assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    state.key_pressed(&dir);
+    assert_eq!(state.cached_hint(), Some("正在部署中"));
     state.loaded(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署成功"));
     begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
     state.loaded(&dir);
     assert_eq!(state.hint_at(&dir, Instant::now()), Some("正在部署中"));
@@ -356,21 +381,94 @@ fn deployment_hint_refreshes_at_most_every_250ms() {
     assert!(!cached_deployment_in_progress(&dir));
     assert_eq!(
         state.cached_hint_at(&dir, now + Duration::from_millis(250)),
-        Some("正在部署中")
+        None
     );
     assert!(cached_deployment_in_progress(&dir));
+    state.key_pressed(&dir);
+    let now = Instant::now();
     fs::remove_dir_all(&dir).unwrap();
     assert_eq!(state.cached_hint(), Some("正在部署中"));
     assert_eq!(
-        state.cached_hint_at(&dir, now + Duration::from_millis(499)),
+        state.cached_hint_at(&dir, now + Duration::from_millis(249)),
         Some("正在部署中")
     );
     assert!(cached_deployment_in_progress(&dir));
     assert_eq!(
-        state.cached_hint_at(&dir, now + Duration::from_millis(500)),
+        state.cached_hint_at(&dir, now + Duration::from_millis(251)),
         Some("部署失败")
     );
     assert!(!cached_deployment_in_progress(&dir));
+}
+
+#[test]
+fn deployment_without_a_waiting_key_stays_silent_even_after_loading() {
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    complete_deployment(&dir).unwrap();
+    let mut state = DeploymentState::default();
+    state.key_pressed(&dir);
+    begin_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    complete_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_input_reset_hides_pending_and_success_hints() {
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    complete_deployment(&dir).unwrap();
+    let mut state = DeploymentState::default();
+    state.hint_at(&dir, Instant::now());
+    begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
+    assert_eq!(state.cached_hint(), Some("正在部署中"));
+    state.reset_input();
+    assert_eq!(state.cached_hint(), None);
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    complete_deployment(&dir).unwrap();
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+
+    begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
+    complete_deployment(&dir).unwrap();
+    state.loaded(&dir);
+    assert_eq!(state.hint_at(&dir, Instant::now()), Some("部署成功"));
+    state.reset_input();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+
+    begin_deployment(&dir).unwrap();
+    assert_eq!(state.hint_at(&dir, Instant::now()), None);
+    state.key_pressed(&dir);
+    assert_eq!(state.cached_hint(), Some("正在部署中"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn deployment_hint_waits_for_the_entire_prewarm_worker() {
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    complete_deployment(&dir).unwrap();
+    let mut state = DeploymentState::default();
+    state.hint_at(&dir, Instant::now());
+    begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
+    complete_deployment(&dir).unwrap();
+    super::deployment_state::engine_loaded(&dir);
+    let hint = state.hint_at_with_build(&dir, Instant::now(), true);
+    assert_eq!(hint, Some("正在部署中"));
+    assert_eq!(
+        DeploymentState::visible_hint(hint, true),
+        Some("正在部署中")
+    );
+    let hint = state.hint_at_with_build(&dir, Instant::now(), false);
+    assert_eq!(hint, Some("部署成功"));
+    assert_eq!(DeploymentState::visible_hint(hint, true), None);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
