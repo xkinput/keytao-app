@@ -233,6 +233,33 @@ fn deployment_skips_a_broken_listed_schema_and_selects_the_first_compiled_schema
 }
 
 #[test]
+fn deployment_skips_a_missing_listed_schema_source() {
+    if run_in_fresh_process("deployment_skips_a_missing_listed_schema_source") {
+        return;
+    }
+    let dir = broken_schema_fixture("deploy-missing-source", &["keytao_good", "keytao_missing"]);
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    runtime
+        .init()
+        .expect("a missing listed source must not block the working schema");
+    assert!(keytao_core::schema_install_state(&dir).deployed);
+    assert!(!dir.join("build/.keytao-deploy-failed").exists());
+    let warning = keytao_core::deployment_warning(&dir).unwrap();
+    assert!(warning.contains("keytao_missing"), "{warning}");
+    assert!(warning.contains("missing schema source"), "{warning}");
+    let session = runtime.create_session().unwrap();
+    assert_eq!(session.current_schema().unwrap().id, "keytao_good");
+    assert_eq!(librime_schema_ids(), ["keytao_good"]);
+    for character in smoke_fixture::CODE.chars() {
+        session.process_key_result(character as u32, 0).unwrap();
+    }
+    assert_eq!(session.state().candidates[0].text, smoke_fixture::WORDS[0]);
+    drop(session);
+    assert!(dir.join("keytao_good.schema.yaml").is_file());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn deployment_fails_when_all_listed_schemas_are_broken() {
     if run_in_fresh_process("deployment_fails_when_all_listed_schemas_are_broken") {
         return;

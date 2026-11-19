@@ -1757,6 +1757,14 @@ mod desktop {
                 }
                 index += 1;
             }
+            let fingerprints = schema_input_fingerprints(user_dir, &schemas)?;
+            let desktop_changed = desktop_inputs::changed_schema_inputs(user_dir, shared_dir);
+            schemas.retain(|id| {
+                fingerprints.get(id).is_none_or(Option::is_none)
+                    || desktop_changed
+                        .as_ref()
+                        .is_some_and(|changed| changed.contains(id))
+            });
             schemas
         };
         begin_deployment_with_invalidation(user_dir, changed.is_none())?;

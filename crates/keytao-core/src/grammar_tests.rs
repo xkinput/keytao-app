@@ -430,8 +430,12 @@ fn real_librime_grammar_redeploy_preserves_builds_and_rebuilds_changed_inputs() 
             "patch:\n  menu/page_size: 8\n",
         )
         .unwrap();
-        fs::File::options().write(true).open(dir.join("keytao.custom.yaml"))
-            .unwrap().set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.join("keytao.custom.yaml"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
         deploy();
         assert_ne!(fs::metadata(&binaries[1]).unwrap().modified().unwrap(), old);
         assert_eq!(compiled()["menu"]["page_size"].as_u64(), Some(8));
@@ -459,20 +463,41 @@ fn real_librime_grammar_redeploy_preserves_builds_and_rebuilds_changed_inputs() 
         let write_old = |name: &str, content: &str| {
             let path = dir.join(name);
             fs::write(&path, content).unwrap();
-            fs::File::options().write(true).open(path).unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
         };
-        write_old("keytao_dep.schema.yaml", &sources[3].1.replace("schema_id: keytao", "schema_id: keytao_dep"));
+        write_old(
+            "keytao_dep.schema.yaml",
+            &sources[3]
+                .1
+                .replace("schema_id: keytao", "schema_id: keytao_dep"),
+        );
         write_old("keytao_dep.custom.yaml", "patch: {menu/page_size: 3}\n");
-        write_old("default.custom.yaml", "patch: {schema_list: [{schema: keytao}, {schema: keytao_dep}]}\n");
+        write_old(
+            "default.custom.yaml",
+            "patch: {schema_list: [{schema: keytao}, {schema: keytao_dep}]}\n",
+        );
         deploy();
         write_old("default.custom.yaml", sources[1].1);
         deploy();
         write_old("keytao_dep.custom.yaml", "patch: {menu/page_size: 9}\n");
-        write_old("keytao.custom.yaml", "patch: {menu/page_size: 8, schema/dependencies: [keytao_dep]}\n");
+        write_old(
+            "keytao.custom.yaml",
+            "patch: {menu/page_size: 8, schema/dependencies: [keytao_dep]}\n",
+        );
         deploy();
-        let dependency: Value = serde_yaml::from_slice(&fs::read(dir.join("build/keytao_dep.schema.yaml")).unwrap()).unwrap();
-        assert_eq!(dependency["menu"]["page_size"].as_u64(), Some(9), "a newly referenced inactive dependency must compile its same-mtime custom patch");
+        let dependency: Value =
+            serde_yaml::from_slice(&fs::read(dir.join("build/keytao_dep.schema.yaml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            dependency["menu"]["page_size"].as_u64(),
+            Some(9),
+            "a newly referenced inactive dependency must compile its same-mtime custom patch"
+        );
         return;
     }
     let dir = scratch_dir();

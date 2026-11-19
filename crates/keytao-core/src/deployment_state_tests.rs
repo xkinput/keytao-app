@@ -1,7 +1,7 @@
 use super::deployment_state::cached_deployment_in_progress;
 use super::{
-    DeploymentState, begin_deployment, complete_deployment, deployment_in_progress,
-    schema_install_state,
+    begin_deployment, complete_deployment, deployment_in_progress, schema_install_state,
+    DeploymentState,
 };
 use std::fs;
 use std::path::{Path, PathBuf};

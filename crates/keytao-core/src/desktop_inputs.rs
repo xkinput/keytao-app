@@ -11,10 +11,55 @@ use std::{
 const RECEIPT: &str = "build/.keytao-desktop-inputs.json";
 const LEGACY_RECEIPT: &str = "build/.keytao-schema-inputs.json";
 
-pub(crate) type SourceSnapshot = BTreeMap<String, [u8; 32]>;
+pub(crate) type SourceSnapshot = BTreeMap<String, InputFile>;
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+pub(crate) struct InputFile {
+    hash: [u8; 32],
+    stat: Option<StatKey>,
+    dictionary_header: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+struct StatKey {
+    size: u64,
+    mtime: i64,
+    mtime_ns: i64,
+    ctime: i64,
+    ctime_ns: i64,
+    inode: u64,
+    device: u64,
+}
+
+fn stat_key(metadata: &fs::Metadata) -> Option<StatKey> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(StatKey {
+            size: metadata.len(),
+            mtime: metadata.mtime(),
+            mtime_ns: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_ns: metadata.ctime_nsec(),
+            inode: metadata.ino(),
+            device: metadata.dev(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // shortcut: without Unix ctime, hash every input until an equally safe key is available.
+        let _ = metadata;
+        None
+    }
+}
 
 pub(crate) fn snapshot(root: &Path, shared: &Path) -> Option<SourceSnapshot> {
-    fn collect(root: &Path, directory: &Path, files: &mut SourceSnapshot) -> Option<()> {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        files: &mut SourceSnapshot,
+        cache: &SourceSnapshot,
+    ) -> Option<()> {
         for entry in fs::read_dir(directory).ok()? {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -26,25 +71,33 @@ pub(crate) fn snapshot(root: &Path, shared: &Path) -> Option<SourceSnapshot> {
                     && !name.starts_with('.')
                     && !name.ends_with(".userdb")
                 {
-                    collect(root, &path, files)?;
+                    collect(root, &path, files, cache)?;
                 }
             } else if kind.is_file()
                 && (name.ends_with(".dict.yaml")
                     || directory == root && (name.ends_with(".yaml") || name.ends_with(".txt")))
             {
                 let name = path.strip_prefix(root).ok()?.to_str()?.replace('\\', "/");
-                files.insert(
-                    name.clone(),
-                    Sha256::digest(read_regular(root, &name).ok()??).into(),
-                );
+                if files.contains_key(&name) {
+                    continue;
+                }
+                let input = input_file(root, &name, cache.get(&name)).ok()??;
+                files.insert(name, input);
             }
         }
         Some(())
     }
+    let cache = read_regular(root, RECEIPT)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok())
+        .filter(|saved| shared.to_str() == Some(&saved.shared))
+        .map(|saved| saved.files)
+        .unwrap_or_default();
     let mut files = BTreeMap::new();
-    collect(shared, shared, &mut files)?;
+    collect(root, root, &mut files, &cache)?;
     if root != shared {
-        collect(root, root, &mut files)?;
+        collect(shared, shared, &mut files, &cache)?;
     }
     Some(files)
 }
@@ -57,6 +110,8 @@ struct Receipt {
     selected: BTreeSet<String>,
     schemas: BTreeMap<String, SchemaInputs>,
     default_inputs: [u8; 32],
+    #[serde(default)]
+    files: SourceSnapshot,
 }
 
 #[derive(Deserialize, Serialize, PartialEq)]
@@ -145,7 +200,7 @@ pub(crate) fn changed_schemas(
             changed.insert(id.clone());
             continue;
         }
-        let current = schema_inputs(root, shared, id, None)?;
+        let current = schema_inputs(root, shared, id, None, &saved.files)?;
         if current.dependencies != previous.dependencies
             || current.dependency_inputs != previous.dependency_inputs
             || !previous
@@ -159,11 +214,19 @@ pub(crate) fn changed_schemas(
             changed.insert(id.clone());
         }
     }
+    include_dependency_consumers(&mut changed, &saved.schemas);
+    Some(changed.into_iter().collect())
+}
+
+fn include_dependency_consumers(
+    changed: &mut BTreeSet<String>,
+    schemas: &BTreeMap<String, SchemaInputs>,
+) {
     // A dependency edit must rebuild its consumers too, including transitive consumers.
     loop {
         let before = changed.len();
-        for (id, schema) in &saved.schemas {
-            if !schema.dependencies.is_disjoint(&changed) {
+        for (id, schema) in schemas {
+            if !schema.dependencies.is_disjoint(changed) {
                 changed.insert(id.clone());
             }
         }
@@ -171,7 +234,23 @@ pub(crate) fn changed_schemas(
             break;
         }
     }
-    Some(changed.into_iter().collect())
+}
+
+pub(crate) fn changed_schema_inputs(root: &Path, shared: &Path) -> Option<BTreeSet<String>> {
+    let saved: Receipt = serde_json::from_slice(&read_regular(root, RECEIPT).ok()??).ok()?;
+    if saved.shared != shared.to_str()? {
+        return None;
+    }
+    let mut changed = saved
+        .schemas
+        .iter()
+        .filter(|(id, previous)| {
+            schema_inputs(root, shared, id, None, &saved.files).as_ref() != Some(previous)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    include_dependency_consumers(&mut changed, &saved.schemas);
+    Some(changed)
 }
 
 pub(crate) fn record(
@@ -189,7 +268,7 @@ pub(crate) fn record(
             if schemas.contains_key(&id) {
                 continue;
             }
-            let inputs = schema_inputs(root, shared, &id, Some(snapshot))?;
+            let inputs = schema_inputs(root, shared, &id, Some(snapshot), snapshot)?;
             if !outputs_present(root, &inputs.outputs)? {
                 return None;
             }
@@ -203,10 +282,12 @@ pub(crate) fn record(
             selected: selected.iter().cloned().collect(),
             schemas,
             default_inputs: default_inputs(root, shared, Some(snapshot))?,
+            files: snapshot.clone(),
         })
     };
     let path = root.join(RECEIPT);
     let Some(receipt) = collect() else {
+        discard_unverified_legacy_inputs(root, shared, snapshot)?;
         return match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -220,11 +301,43 @@ pub(crate) fn record(
     Ok(())
 }
 
+fn discard_unverified_legacy_inputs(
+    root: &Path,
+    shared: &Path,
+    snapshot: Option<&SourceSnapshot>,
+) -> Result<(), String> {
+    let Some(bytes) = read_regular(root, LEGACY_RECEIPT)? else {
+        return Ok(());
+    };
+    let mut trusted: BTreeMap<String, [u8; 32]> =
+        serde_json::from_slice(&bytes).unwrap_or_default();
+    let mut untrusted = BTreeSet::new();
+    let mut schemas = BTreeMap::new();
+    for id in trusted.keys().filter(|id| valid_rime_build_id(id)) {
+        let inputs =
+            snapshot.and_then(|snapshot| schema_inputs(root, shared, id, Some(snapshot), snapshot));
+        if let Some(inputs) = inputs {
+            schemas.insert(id.clone(), inputs);
+        } else {
+            untrusted.insert(id.clone());
+        }
+    }
+    include_dependency_consumers(&mut untrusted, &schemas);
+    if !untrusted.is_empty() {
+        // complete_deployment may have paired post-compile edits with older build outputs.
+        trusted.retain(|id, _| !untrusted.contains(id));
+        let bytes = serde_json::to_vec(&trusted).map_err(|error| error.to_string())?;
+        write_file_atomic(&root.join(LEGACY_RECEIPT), &bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn schema_inputs(
     root: &Path,
     shared: &Path,
     id: &str,
     snapshot: Option<&SourceSnapshot>,
+    cache: &SourceSnapshot,
 ) -> Option<SchemaInputs> {
     if !valid_rime_build_id(id) {
         return None;
@@ -244,6 +357,7 @@ fn schema_inputs(
         files: BTreeMap::new(),
         dependency_inputs: BTreeMap::new(),
         snapshot,
+        cache,
     };
     for (name, timestamp) in timestamps {
         let name = name.as_str()?;
@@ -292,6 +406,7 @@ struct Inputs<'a> {
     files: BTreeMap<String, Option<[u8; 32]>>,
     dependency_inputs: BTreeMap<String, Vec<String>>,
     snapshot: Option<&'a SourceSnapshot>,
+    cache: &'a SourceSnapshot,
 }
 
 impl Inputs<'_> {
@@ -439,12 +554,10 @@ impl Inputs<'_> {
             visiting.remove(id);
             return Some(());
         }
-        let bytes = resolve(self.root, self.shared, &name, self.snapshot).ok()??;
-        self.files.insert(name, Some(Sha256::digest(&bytes).into()));
-        let text = std::str::from_utf8(&bytes).ok()?;
-        let end = text.lines().position(|line| line.trim_end() == "...")?;
-        let header = text.lines().take(end + 1).collect::<Vec<_>>().join("\n");
-        let header: Value = serde_yaml::from_str(&header).ok()?;
+        let input =
+            resolve_input(self.root, self.shared, &name, self.cache, self.snapshot).ok()??;
+        self.files.insert(name, Some(input.hash));
+        let header: Value = serde_yaml::from_str(input.dictionary_header.as_deref()?).ok()?;
         // GetTables uses the header name as its first data source, not the requested filename.
         if primary && header["name"].as_str()? != id {
             return None;
@@ -472,8 +585,9 @@ impl Inputs<'_> {
                 return None;
             }
             let name = format!("{id}.txt");
-            let bytes = resolve(self.root, self.shared, &name, self.snapshot).ok()??;
-            self.files.insert(name, Some(Sha256::digest(bytes).into()));
+            let input =
+                resolve_input(self.root, self.shared, &name, self.cache, self.snapshot).ok()??;
+            self.files.insert(name, Some(input.hash));
         }
         visiting.remove(id);
         Some(())
@@ -530,7 +644,7 @@ fn safe_relative(name: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn read_regular(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+fn regular_metadata(root: &Path, name: &str) -> Result<Option<fs::Metadata>, String> {
     if !safe_relative(name) {
         return Err("unsupported input path".into());
     }
@@ -544,13 +658,94 @@ fn read_regular(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
                     metadata.is_file()
                 } else {
                     metadata.is_dir()
-                } => {}
+                } =>
+            {
+                if index + 1 == components.len() {
+                    return Ok(Some(metadata));
+                }
+            }
             Ok(_) => return Err("non-regular input".into()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.to_string()),
         }
     }
-    fs::read(path).map(Some).map_err(|error| error.to_string())
+    Err("empty input path".into())
+}
+
+fn read_regular(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    if regular_metadata(root, name)?.is_none() {
+        return Ok(None);
+    }
+    #[cfg(test)]
+    INPUT_READS.with(|reads| *reads.borrow_mut().entry(root.join(name)).or_default() += 1);
+    fs::read(root.join(name))
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    static INPUT_READS: std::cell::RefCell<BTreeMap<std::path::PathBuf, usize>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+fn input_file(
+    root: &Path,
+    name: &str,
+    cached: Option<&InputFile>,
+) -> Result<Option<InputFile>, String> {
+    let cache_cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|now| i64::try_from(now.as_secs()).ok())
+        .and_then(|now| now.checked_sub(2));
+    let Some(metadata) = regular_metadata(root, name)? else {
+        return Ok(None);
+    };
+    let stat = stat_key(&metadata);
+    // Coarse timestamps can hide same-tick rewrites, so only cache hashes of older inputs.
+    let cache_stat = stat.clone().filter(|stat| {
+        cache_cutoff.is_some_and(|cutoff| stat.mtime < cutoff && stat.ctime < cutoff)
+    });
+    if let Some(cached) = cached.filter(|cached| cache_stat.is_some() && cached.stat == cache_stat)
+    {
+        return Ok(Some(cached.clone()));
+    }
+    let bytes = read_regular(root, name)?.ok_or("input disappeared while hashing")?;
+    let dictionary_header = if name.ends_with(".dict.yaml") {
+        std::str::from_utf8(&bytes).ok().and_then(|text| {
+            let end = text.lines().position(|line| line.trim_end() == "...")?;
+            Some(text.lines().take(end + 1).collect::<Vec<_>>().join("\n"))
+        })
+    } else {
+        None
+    };
+    if stat != regular_metadata(root, name)?.as_ref().and_then(stat_key) {
+        return Err("input changed while hashing".into());
+    }
+    Ok(Some(InputFile {
+        hash: Sha256::digest(bytes).into(),
+        stat: cache_stat,
+        dictionary_header,
+    }))
+}
+
+fn resolve_input(
+    root: &Path,
+    shared: &Path,
+    name: &str,
+    cache: &SourceSnapshot,
+    snapshot: Option<&SourceSnapshot>,
+) -> Result<Option<InputFile>, String> {
+    let input = match input_file(root, name, cache.get(name))? {
+        Some(input) => Some(input),
+        None => input_file(shared, name, cache.get(name))?,
+    };
+    let content = |file: &InputFile| (file.hash, file.dictionary_header.clone());
+    if snapshot.is_some_and(|saved| input.as_ref().map(content) != saved.get(name).map(content)) {
+        return Err("deployment inputs changed during compilation".into());
+    }
+    Ok(input)
 }
 
 fn resolve(
@@ -569,7 +764,7 @@ fn resolve(
             .as_ref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)))
             .as_ref()
-            != saved.get(name)
+            != saved.get(name).map(|input| &input.hash)
     }) {
         return Err("deployment inputs changed during compilation".into());
     }
@@ -690,6 +885,84 @@ mod tests {
         assert!(fixture.0.join("sync/installation/data").is_file());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn recent_inputs_reject_matching_stats_and_do_not_certify_edits() {
+        let fixture = Fixture::new();
+        let shared = fixture.0.join("shared");
+        let name = "one.dict.yaml";
+        let path = fixture.0.join(name);
+        let mut saved = snapshot(&fixture.0, &shared).unwrap();
+        let bytes = fs::read_to_string(&path).unwrap().replace("word", "edit");
+        fixture.write(name, &bytes);
+        // Simulate a same-tick stat collision on a filesystem with coarse timestamps.
+        saved.get_mut(name).unwrap().stat = stat_key(&fs::metadata(&path).unwrap());
+        let current = input_file(&fixture.0, name, saved.get(name))
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.hash, <[u8; 32]>::from(Sha256::digest(&bytes)));
+        assert!(current.stat.is_none());
+        record(
+            &fixture.0,
+            &shared,
+            &["one".into(), "two".into()],
+            "librime-1",
+            Some(&saved),
+        )
+        .unwrap();
+        assert!(!fixture.0.join(RECEIPT).exists());
+        assert!(fixture.changed().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_stats_reuse_dictionary_hashes_without_reading_the_files() {
+        let fixture = Fixture::new();
+        fixture.write("shared/one.dict.yaml", "shadowed dictionary\n");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        fixture.record();
+        let path = fixture.0.join("one.dict.yaml");
+        let reads = || INPUT_READS.with(|reads| reads.borrow().get(&path).copied().unwrap_or(0));
+        assert!(reads() > 0);
+        let before = reads();
+        let shadowed = fixture.0.join("shared/one.dict.yaml");
+        let shadowed_before = INPUT_READS.with(|reads| reads.borrow()[&shadowed]);
+        assert_eq!(fixture.changed(), Some(vec![]));
+        fixture.record();
+        assert_eq!(reads(), before);
+        assert_eq!(
+            INPUT_READS.with(|reads| reads.borrow()[&shadowed]),
+            shadowed_before
+        );
+
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let bytes = fs::read_to_string(&path).unwrap().replace("word", "edit");
+        fixture.write("one.dict.yaml", &bytes);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(fixture.changed(), Some(vec!["one".into()]));
+        assert!(reads() > before);
+    }
+
+    #[test]
+    fn receipts_without_a_file_cache_still_hash_all_inputs() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join(RECEIPT);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved.as_object_mut().unwrap().remove("files");
+        fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let dictionary = fixture.0.join("one.dict.yaml");
+        let before = INPUT_READS.with(|reads| reads.borrow()[&dictionary]);
+        assert_eq!(fixture.changed(), Some(vec![]));
+        fixture.record();
+        assert!(INPUT_READS.with(|reads| reads.borrow()[&dictionary]) > before);
+    }
+
     #[test]
     fn inputs_edited_during_deployment_are_not_certified() {
         for (name, before, after) in [
@@ -725,6 +998,8 @@ mod tests {
                 .unwrap()
                 .set_modified(modified)
                 .unwrap();
+            crate::record_schema_input_fingerprints(&fixture.0, &["one".into(), "two".into()])
+                .unwrap();
             record(
                 &fixture.0,
                 &fixture.0.join("shared"),
@@ -734,11 +1009,23 @@ mod tests {
             )
             .unwrap();
             assert_ne!(fixture.changed(), Some(vec![]), "{name}");
+            let fingerprints =
+                crate::schema_input_fingerprints(&fixture.0, &["one".into(), "two".into()])
+                    .unwrap();
+            assert!(fingerprints["one"].is_none(), "{name}");
+            assert!(fingerprints["two"].is_some(), "{name}");
             assert_eq!(
                 fs::read(fixture.0.join("build/one.schema.yaml")).unwrap(),
                 compiled
             );
             assert_eq!(fs::read_to_string(fixture.0.join(name)).unwrap(), after);
+            crate::schema_inputs::invalidate_changed_deploy_schemas(
+                &fixture.0,
+                &["one".into(), "two".into()],
+            )
+            .unwrap();
+            assert!(!fixture.0.join("build/one.schema.yaml").exists());
+            assert!(fixture.0.join("build/two.schema.yaml").is_file());
         }
     }
 
@@ -974,6 +1261,14 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("build/one.schema.yaml", "__build_info: {timestamps: {one.schema: 1}}\nschema: {schema_id: one, dependencies: [two]}\ntranslator: {dictionary: one}\n");
         fixture.record();
+        fixture.write(
+            "two.dict.yaml",
+            "---\nname: two\nversion: '1'\n...\nedit\tw\t1\n",
+        );
+        assert_eq!(
+            changed_schema_inputs(&fixture.0, &fixture.0.join("shared")),
+            Some(BTreeSet::from(["one".into(), "two".into()]))
+        );
         fixture.write("two.custom.yaml", "patch: {menu/page_size: 8}\n");
         assert_eq!(fixture.changed(), Some(vec!["one".into(), "two".into()]));
         fs::remove_file(fixture.0.join("two.schema.yaml")).unwrap();

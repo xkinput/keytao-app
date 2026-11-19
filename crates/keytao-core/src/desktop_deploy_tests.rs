@@ -127,6 +127,66 @@ fn desktop_deploy_rebuilds_only_changed_schemas_and_falls_back_safely() {
     );
     assert_eq!(modified("keytao_one"), old);
     assert_eq!(modified("keytao_two"), old);
+    let prism_modified = |id: &str| {
+        fs::metadata(root.join(format!("build/{id}.prism.bin")))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    fs::write(
+        root.join("keytao_one.custom.yaml"),
+        "patch: {menu/page_size: 6}\n",
+    )
+    .unwrap();
+    fs::remove_file(root.join("build/.keytao-desktop-inputs.json")).unwrap();
+    assert!(desktop_deploy_plan(&root, &root).is_none());
+    deploy();
+    assert_ne!(prism_modified("keytao_one"), old);
+    assert_eq!(prism_modified("keytao_two"), old);
+    stamp("keytao_one");
+    let dictionary = root.join("keytao_one.dict.yaml");
+    let dictionary_mtime = fs::metadata(&dictionary).unwrap().modified().unwrap();
+    let bytes = fs::read_to_string(&dictionary).unwrap().replace("甲", "乙");
+    fs::write(&dictionary, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&dictionary)
+        .unwrap()
+        .set_modified(dictionary_mtime)
+        .unwrap();
+    fs::write(root.join("build/.keytao-deploy-failed"), "repair").unwrap();
+    assert!(desktop_deploy_plan(&root, &root).is_none());
+    deploy();
+    assert_ne!(prism_modified("keytao_one"), old);
+    assert_eq!(prism_modified("keytao_two"), old);
+    stamp("keytao_one");
+    let table_before = fs::read(root.join("build/keytao_one.table.bin")).unwrap();
+    let bytes = fs::read_to_string(&dictionary).unwrap().replace("乙", "丙");
+    fs::write(&dictionary, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&dictionary)
+        .unwrap()
+        .set_modified(dictionary_mtime)
+        .unwrap();
+    fs::remove_file(root.join("build/.keytao-desktop-inputs.json")).unwrap();
+    assert!(desktop_deploy_plan(&root, &root).is_none());
+    deploy();
+    assert_ne!(
+        fs::read(root.join("build/keytao_one.table.bin")).unwrap(),
+        table_before
+    );
+    assert_eq!(prism_modified("keytao_two"), old);
+    let engine = Engine::new_with_user_data_dir(&root).unwrap();
+    engine.select_schema("keytao_one").unwrap();
+    engine.process_key_result('a' as u32, 0);
+    let state = engine.process_key_result('a' as u32, 0).state;
+    assert_eq!(
+        state.candidates.first().map(|candidate| candidate.text.as_str()),
+        Some("丙")
+    );
+    drop(engine);
+    stamp("keytao_one");
     assert_eq!(
         validation_schema_list(
             &["keytao_one".into(), "keytao_two".into()],

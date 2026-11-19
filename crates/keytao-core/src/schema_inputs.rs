@@ -184,7 +184,11 @@ fn fingerprint(
     let mut hash = Sha256::new();
     if shared.is_some() {
         // Keep Android deploy trust separate from the installer's source comparison.
-        paths.extend(["default.yaml".into(), "default.custom.yaml".into(), "default-custom.yaml".into()]);
+        paths.extend([
+            "default.yaml".into(),
+            "default.custom.yaml".into(),
+            "default-custom.yaml".into(),
+        ]);
         hash.update(b"keytao-android-schema-inputs/v1");
         hash.update(crate::librime_runtime_version()?.as_bytes());
     } else {
@@ -343,7 +347,11 @@ mod tests {
         fs::remove_file(fixture.0.join("shared.yaml")).unwrap();
         assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
         assert!(!schema_input_is_current(&fixture.0, "missing", &fixture.0));
-        assert!(!schema_input_is_current(&fixture.0, "../outside", &fixture.0));
+        assert!(!schema_input_is_current(
+            &fixture.0,
+            "../outside",
+            &fixture.0
+        ));
         let fixture = Fixture::new();
         fs::remove_file(fixture.0.join(RECEIPT)).unwrap();
         assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
@@ -361,7 +369,11 @@ mod tests {
         assert!(!schema_input_is_current(&fixture.0, "two", &fixture.0));
         let mut legacy = read_receipt(&fixture.0);
         legacy.retain(|id, _| !id.starts_with("android:"));
-        fs::write(fixture.0.join(RECEIPT), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::write(
+            fixture.0.join(RECEIPT),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
         assert_eq!(schema_input_fingerprints(&fixture.0, &[]).unwrap(), before);
         assert!(!schema_input_is_current(&fixture.0, "one", &fixture.0));
     }
