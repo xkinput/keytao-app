@@ -329,7 +329,14 @@ fn validate_leaf(
             {
                 return None;
             }
-            parse_color(&expanded).map(|c| json!(color_hex(c)))
+            parse_color(&expanded).map(|c| {
+                // Keep omitted background alpha distinct from an explicit FF.
+                if path.ends_with("common.backgroundColor") && expanded.len() == 7 {
+                    json!(expanded.to_ascii_uppercase())
+                } else {
+                    json!(color_hex(c))
+                }
+            })
         }
         "weight" => serde_json::from_value::<FontWeight>(value.clone())
             .ok()
@@ -520,7 +527,13 @@ pub fn resolve_theme_source(
     theme.ui.accent_color = common["accentColor"].as_str().and_then(parse_color);
     theme.ui.corner_radius = common["cornerRadius"].as_f64().map(|v| v as f32);
     theme.ui.background_color = common["backgroundColor"].as_str().and_then(parse_color);
-    if let Some(bg) = theme.ui.background_color {
+    if let Some(mut bg) = theme.ui.background_color {
+        if common["backgroundColor"]
+            .as_str()
+            .is_some_and(|s| s.len() == 7)
+        {
+            bg.alpha = theme.panel.background.alpha;
+        }
         let bg = v
             .pointer("/pc/panel/background")
             .and_then(Value::as_str)
@@ -766,6 +779,49 @@ mod tests {
         for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
             let t = resolve_theme_source(&s, scheme);
             assert!(contrast_ratio(t.panel.background, t.candidate.foreground) >= 3.0);
+        }
+    }
+    #[test]
+    fn common_background_defaults_alpha_unless_explicit() {
+        for (patch, expected) in [
+            (json!({"common":{"backgroundColor":"#654321"}}), "#654321F2"),
+            (json!({"common":{"backgroundColor":"#632"}}), "#663322F2"),
+            (
+                json!({"common":{"backgroundColor":"#654321FF"}}),
+                "#654321FF",
+            ),
+            (
+                json!({"common":{"backgroundColor":"#65432180"}}),
+                "#65432180",
+            ),
+            (
+                json!({"common":{"backgroundColor":"transparent"}}),
+                "#00000000",
+            ),
+            (
+                json!({"light":{"common":{"backgroundColor":"#654321"}},"dark":{"common":{"backgroundColor":"#654321"}}}),
+                "#654321F2",
+            ),
+            (
+                json!({"common":{"backgroundColor":"#654321"},"pc":{"panel":{"background":"#112233"}}}),
+                "#112233FF",
+            ),
+            (
+                json!({"common":{"backgroundColor":"#654321"},"pc":{"panel":{"background":"#11223340"}}}),
+                "#11223340",
+            ),
+        ] {
+            let source = source(patch);
+            let source = parse_theme_source_yaml(&source.to_yaml().unwrap()).unwrap();
+            let compiled = compile_theme(&source, "").unwrap();
+            for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+                for theme in [
+                    resolve_theme_source(&source, scheme),
+                    crate::resolve_compiled_theme_yaml(&compiled, scheme),
+                ] {
+                    assert_eq!(theme.panel.background, parse_color(expected).unwrap());
+                }
+            }
         }
     }
     #[test]

@@ -1093,7 +1093,7 @@ mod tests {
             );
             assert_eq!(
                 theme.panel.background,
-                crate::parse_color("#F0EEE8").unwrap()
+                crate::parse_color("#F0EEE8F2").unwrap()
             );
         }
         let source = parse_source_value(json!({"version":3,"meta":{"id":"my.explicit","name":"Explicit"},"common":{"accentColor":"#123456","cornerRadius":24},"pc":{"candidate":{"selectedBackground":"#22334455","cornerRadius":3}}})).unwrap();
