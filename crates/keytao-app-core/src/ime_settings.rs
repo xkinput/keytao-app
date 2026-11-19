@@ -90,6 +90,11 @@ fn ime_ui_settings_from_paths(
     reload_stamp_path: Option<PathBuf>,
     message: String,
 ) -> Result<ImeUiSettings, String> {
+    if theme_path.is_file() {
+        if let Err(error) = keytao_theme::theme_store::refresh_current_theme(&theme_path) {
+            tracing::warn!(%error, "Failed to refresh theme; reading with resolver defaults");
+        }
+    }
     let theme = keytao_theme::ThemeResolver::new(None, Some(theme_path.clone())).current();
     let (reload_stamp_path, reload_stamp_signature) = reload_stamp_path
         .map(|path| {
@@ -1129,6 +1134,21 @@ pub fn set_ime_ui_settings(
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_theme_read_falls_back_to_defaults_without_rewriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.yaml");
+        let defaults = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+        for yaml in ["ui: [", "- not-a-mapping"] {
+            std::fs::write(&path, yaml).unwrap();
+            let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+            assert_eq!(settings.font_size, defaults.font_size);
+            assert_eq!(settings.accent_color, defaults.accent_color);
+            assert_eq!(settings.hide_candidate_panel, defaults.hide_candidate_panel);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+        }
+    }
+
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
     fn desktop_ui_saves_leave_reload_stamp_unchanged() {
@@ -1526,18 +1546,25 @@ mod tests {
             .unwrap();
             let root: serde_yaml::Value =
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(root["version"].as_u64(), Some(7));
+            assert_eq!(root["version"].as_u64(), Some(2));
             assert_eq!(root["ui"]["hideCandidatePanel"].as_bool(), Some(hide));
             assert!(root["ui"].get("hide_candidate_panel").is_none());
             assert_eq!(root["ui"]["embeddedComposition"].as_bool(), Some(false));
-            assert_eq!(root["ui"]["accentColor"].as_str(), Some("#123456"));
+            assert!(root["ui"].get("accentColor").is_none());
+            let source = keytao_theme::theme_store::read_current_theme_source(&path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                source.value()["common"]["accentColor"].as_str(),
+                Some("#123456FF")
+            );
             assert_eq!(root["candidate"]["labelSuffix"].as_str(), Some(")"));
             let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
             assert_eq!(settings.hide_candidate_panel, hide);
             assert!(!settings.embedded_composition);
             assert_eq!(settings.effective_embedded_composition, hide);
         }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1604,7 +1631,14 @@ mod tests {
             assert_eq!(settings.background_color, "#654321");
             let written: serde_yaml::Value =
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(written["ui"]["accentColor"].as_str(), accent.as_deref());
+            assert!(written["ui"].get("accentColor").is_none());
+            let source = keytao_theme::theme_store::read_current_theme_source(&path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                source.value()["common"]["accentColor"].as_str(),
+                accent.as_ref().map(|value| format!("{value}FF")).as_deref()
+            );
         }
     }
 

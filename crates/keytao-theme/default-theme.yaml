@@ -2,7 +2,7 @@
 # Copy this file to the platform user data directory as theme.yaml and edit it
 # to override the bundled style.
 #
-# This document only describes the shared candidate panel and mode hint style.
+# This document defines shared desktop and mobile appearance defaults.
 # The mobile soft keyboard layout lives in keyboard.yaml (see
 # default-keyboard.yaml).
 
@@ -84,7 +84,33 @@ modeHint:
   chineseText: "中"
   englishText: "英"
 
+mobile:
+  keyboard:
+    key:
+      background: "#FFFFFFD2"
+      borderColor: "#1A222C1C"
+      borderWidth: 1
+      shadowColor: transparent
+      shadowOffsetY: 1
+      fontScale: 1
+      hintFontScale: 1
+      swipeHintVisible: true
+    toolbar:
+      background: transparent
+    floating:
+      shadowColor: transparent
+  candidateBar:
+    background: transparent
+    fontScale: 1
+    showComment: true
+    preeditBackground: transparent
+
 dark:
+  mobile:
+    keyboard:
+      key:
+        background: "#2A303AAA"
+        borderColor: "#FFFFFF16"
   panel:
     background: "#171A20F2"
     borderColor: "#3E4652"
