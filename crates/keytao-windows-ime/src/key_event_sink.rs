@@ -83,6 +83,38 @@ fn upgrade_state(state: &WeakState) -> Option<SharedState> {
 
 // ── Composition helpers ───────────────────────────────────────────────────────
 
+fn normalize_commit_newlines(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut previous = '\0';
+    for character in text.chars() {
+        if character == '\n' && previous != '\r' {
+            normalized.push('\r');
+        }
+        normalized.push(character);
+        previous = character;
+    }
+    normalized
+}
+
+#[cfg(test)]
+mod commit_text_tests {
+    use super::normalize_commit_newlines;
+
+    #[test]
+    fn commit_newlines_preserve_existing_carriage_returns_and_unicode() {
+        for (input, expected) in [
+            ("a\nb", "a\r\nb"),
+            ("a\r\nb", "a\r\nb"),
+            ("\n\n", "\r\n\r\n"),
+            ("a\u{200b}\nb", "a\u{200b}\r\nb"),
+            ("a\rb", "a\rb"),
+            ("甲😀\n乙", "甲😀\r\n乙"),
+        ] {
+            assert_eq!(normalize_commit_newlines(input), expected);
+        }
+    }
+}
+
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
@@ -195,7 +227,9 @@ fn end_composition_with_commit_tracking(
         require_current_input(input)?;
         clear_composition_display_attribute(ec, context, &range);
         require_current_input(input)?;
-        let wide = committed.map(to_wide).unwrap_or_default();
+        let wide = committed
+            .map(|text| to_wide(&normalize_commit_newlines(text)))
+            .unwrap_or_default();
         range.SetText(ec, 0, &wide)?;
         if committed.is_some() {
             if let Some(written) = written {

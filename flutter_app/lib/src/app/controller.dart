@@ -161,7 +161,8 @@ class AppController extends ChangeNotifier {
   bool _managingWindowsIme = false;
   static const _windowsChannel = MethodChannel('keytao/windows');
   bool _disposed = false;
-  bool _refreshWhenIdle = false;
+  bool _refreshSchemasWhenIdle = false;
+  bool _resumeRefreshInFlight = false;
   bool _manuallySelectedScheme = false;
   bool _startupStarted = false;
   final Set<String> _iosUpgradeDeploymentAttempts = {};
@@ -381,10 +382,11 @@ class AppController extends ChangeNotifier {
       _pendingUserWordDeletes.add(key);
     } else {
       _pendingUserWordDeletes.remove(key);
-      if (_refreshWhenIdle && !_disposed) {
-        _refreshWhenIdle = false;
-        unawaited(refreshState());
-      } else if (_logsWhenIdle && !_disposed) {
+      if (_refreshSchemasWhenIdle && !_disposed) {
+        _refreshSchemasWhenIdle = false;
+        unawaited(refreshSchemas());
+      }
+      if (_logsWhenIdle && !_disposed) {
         _logsWhenIdle = false;
         if (activePage == AppPage.debug) unawaited(refreshLogs());
       }
@@ -973,10 +975,11 @@ class AppController extends ChangeNotifier {
     } finally {
       busy = false;
       _changed();
-      if (_refreshWhenIdle && !_disposed) {
-        _refreshWhenIdle = false;
-        unawaited(refreshState());
-      } else if (_logsWhenIdle && !_disposed) {
+      if (_refreshSchemasWhenIdle && !_disposed) {
+        _refreshSchemasWhenIdle = false;
+        unawaited(refreshSchemas());
+      }
+      if (_logsWhenIdle && !_disposed) {
         _logsWhenIdle = false;
         if (activePage == AppPage.debug) unawaited(refreshLogs());
       }
@@ -1065,7 +1068,7 @@ class AppController extends ChangeNotifier {
   Future<void> refreshSchemas() async {
     if (_disposed) return;
     if (busy) {
-      _refreshWhenIdle = true;
+      _refreshSchemasWhenIdle = true;
       return;
     }
     try {
@@ -1083,7 +1086,7 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _readState() async {
+  Future<void> _readState({bool quiet = false}) async {
     final errors = <String>[];
     Future<void> read(Future<void> Function() action) async {
       try {
@@ -1138,9 +1141,6 @@ class AppController extends ChangeNotifier {
         }
       });
     }
-    local = null;
-    addon = null;
-    candidatePageSize = null;
     await Future.wait([
       read(_readLocal),
       read(_readInstalledPackages),
@@ -1211,7 +1211,14 @@ class AppController extends ChangeNotifier {
       androidSettings = null;
       uiSettings = null;
     }
-    if (errors.isNotEmpty) error = errors.toSet().join('\n');
+    if (errors.isNotEmpty) {
+      final message = errors.toSet().join('\n');
+      if (quiet) {
+        debugPrint('Resume refresh failed: $message');
+      } else {
+        error = message;
+      }
+    }
     if (isAndroid && setupReady && !onboardingCompleted) {
       await core.completeOnboarding();
       onboardingCompleted = true;
@@ -1455,10 +1462,19 @@ class AppController extends ChangeNotifier {
   void onResume() {
     _foreground = true;
     _startUserDictionaryPull(resumed: true);
-    if (busy) {
-      _refreshWhenIdle = true;
-    } else {
-      unawaited(refreshState());
+    unawaited(_refreshOnResume());
+  }
+
+  Future<void> _refreshOnResume() async {
+    if (busy || _resumeRefreshInFlight || _disposed) return;
+    _resumeRefreshInFlight = true;
+    try {
+      await _readState(quiet: true);
+    } catch (failure) {
+      debugPrint('Resume refresh failed: ${errorText(failure)}');
+    } finally {
+      _resumeRefreshInFlight = false;
+      _changed();
     }
   }
 

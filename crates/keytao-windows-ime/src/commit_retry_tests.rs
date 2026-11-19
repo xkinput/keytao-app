@@ -398,10 +398,10 @@ fn a_current_retry_still_commits_once() {
 
 #[test]
 fn multiline_commits_keep_the_full_utf16_text_and_end_in_a_separate_session() {
-    for text in [
-        "甲😀尾\n乙末\n丙终",
-        "甲😀尾\r\n乙末\r\n丙终",
-        "甲😀尾\r乙末\r丙终",
+    for (text, expected) in [
+        ("甲😀尾\n乙末\n丙终", "甲😀尾\r\n乙末\r\n丙终"),
+        ("甲😀尾\r\n乙末\r\n丙终", "甲😀尾\r\n乙末\r\n丙终"),
+        ("甲😀尾\r乙末\r丙终", "甲😀尾\r乙末\r丙终"),
     ] {
         let (host, context, state) = fixture();
         let frame = ImeState {
@@ -409,7 +409,7 @@ fn multiline_commits_keep_the_full_utf16_text_and_end_in_a_separate_session() {
             ..ImeState::empty()
         };
         apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
-        assert_eq!(&*host.writes.borrow(), &[text]);
+        assert_eq!(&*host.writes.borrow(), &[expected]);
         assert_eq!(&*host.collapses.borrow(), &[TF_ANCHOR_END]);
         assert_eq!(&*host.selection_anchors.borrow(), &[TF_AE_NONE]);
         assert_eq!(host.end_count.get(), 0);
@@ -425,7 +425,7 @@ fn multiline_commits_keep_the_full_utf16_text_and_end_in_a_separate_session() {
         host.run_queued();
         assert_eq!(host.end_count.get(), 1);
         assert!(state.borrow().pending_composition_ends.is_empty());
-        assert_eq!(&*host.text.borrow(), text);
+        assert_eq!(&*host.text.borrow(), expected);
     }
 }
 
@@ -449,7 +449,7 @@ fn a_committed_composition_ending_later_does_not_clear_new_input() {
         state.borrow().ime_state.as_ref().unwrap().preedit,
         "new input"
     );
-    assert_eq!(&*host.text.borrow(), "甲\n乙😀");
+    assert_eq!(&*host.text.borrow(), "甲\r\n乙😀");
     assert_eq!(host.writes.borrow().len(), 1);
 }
 
@@ -464,7 +464,7 @@ fn losing_thread_focus_terminates_queued_ends_without_erasing_the_commit() {
     terminate_input_now(&state);
     assert_eq!(host.terminate_count.get(), 1);
     assert!(state.borrow().pending_composition_ends.is_empty());
-    assert_eq!(&*host.text.borrow(), "甲\n乙😀");
+    assert_eq!(&*host.text.borrow(), "甲\r\n乙😀");
     host.run_queued();
     assert_eq!(host.end_count.get(), 0);
     assert_eq!(host.writes.borrow().len(), 1);
@@ -521,7 +521,7 @@ fn a_following_preedit_starts_after_the_old_composition_ends() {
     };
     apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
     assert_eq!(host.starts.get(), 1);
-    assert_eq!(&*host.writes.borrow(), &["甲\n乙😀"]);
+    assert_eq!(&*host.writes.borrow(), &["甲\r\n乙😀"]);
     host.run_queued();
     assert_eq!(host.starts.get(), 2);
     assert_eq!(host.end_count.get(), 1);
@@ -567,7 +567,7 @@ fn a_rejected_async_end_falls_back_without_retaining_or_replaying_the_commit() {
     assert_eq!(host.end_count.get(), 1);
     assert!(state.borrow().pending_composition_ends.is_empty());
     assert!(state.borrow().pending_commit_retry.is_none());
-    assert_eq!(&*host.text.borrow(), "甲\n乙😀");
+    assert_eq!(&*host.text.borrow(), "甲\r\n乙😀");
     assert_eq!(host.writes.borrow().len(), 1);
 }
 
