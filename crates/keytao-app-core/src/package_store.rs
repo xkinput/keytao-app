@@ -302,11 +302,32 @@ impl<'a> PackageStore<'a> {
         path: &Path,
         key: &str,
     ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
+        Self::read_files_at_inner(path, key, false)
+    }
+
+    pub(crate) fn read_lua_files_at(
+        path: &Path,
+        key: &str,
+    ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
+        Self::read_files_at_inner(path, key, true)
+    }
+
+    fn read_files_at_inner(
+        path: &Path,
+        key: &str,
+        lua_only: bool,
+    ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
         let metadata_path = safe_path(path, "package.json").map_err(CoreError::Other)?;
-        let stored: StoredPackage = serde_json::from_slice(
+        let mut stored: StoredPackage = serde_json::from_slice(
             &fs::read(&metadata_path).map_err(|error| context("读取", &metadata_path, error))?,
         )?;
         validate_metadata(key, &stored)?;
+        if lua_only {
+            stored.files.retain(|entry| entry.path == "rime.lua" || entry.path.starts_with("lua/"));
+            if stored.files.is_empty() {
+                return Ok((Vec::new(), stored.meta));
+            }
+        }
         let root = safe_path(path, "files").map_err(CoreError::Other)?;
         let mut expected = BTreeSet::new();
         let mut entries = Vec::with_capacity(stored.files.len());
@@ -329,7 +350,7 @@ impl<'a> PackageStore<'a> {
             entries.push((entry.path.clone(), bytes));
         }
         let mut actual = BTreeSet::new();
-        collect_files(&root, &root, &mut actual)?;
+        collect_files(&root, &root, &mut actual, lua_only)?;
         if actual != expected {
             return Err(CoreError::Other("Package file count mismatch".into()));
         }
@@ -346,6 +367,18 @@ impl<'a> PackageStore<'a> {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         Self::read_files_at(&self.checked_package_path(key)?, key)
+    }
+
+    pub(crate) fn read_lua_files(
+        &self,
+        key: &str,
+    ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
+        let _guard = self
+            .core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::read_lua_files_at(&self.checked_package_path(key)?, key)
     }
 
     pub(crate) fn write_archive(
@@ -829,10 +862,16 @@ fn collect_files(
     root: &Path,
     directory: &Path,
     files: &mut BTreeSet<String>,
+    lua_only: bool,
 ) -> Result<(), CoreError> {
     for entry in fs::read_dir(directory).map_err(|error| context("读取目录", directory, error))?
     {
         let entry = entry.map_err(|error| context("读取目录项", directory, error))?;
+        if lua_only && directory == root
+            && !matches!(entry.file_name().to_str(), Some("rime.lua" | "lua"))
+        {
+            continue;
+        }
         let path = entry.path();
         let metadata =
             fs::symlink_metadata(&path).map_err(|error| context("读取文件属性", &path, error))?;
@@ -840,7 +879,7 @@ fn collect_files(
             return Err(CoreError::Other("Package contains a symlink".into()));
         }
         if metadata.is_dir() {
-            collect_files(root, &entry.path(), files)?;
+            collect_files(root, &entry.path(), files, lua_only)?;
         } else if metadata.is_file() {
             files.insert(
                 entry
@@ -994,6 +1033,65 @@ mod tests {
         )
         .unwrap();
         let _ = fs::remove_file(store.root().join(".layout-v2"));
+    }
+
+    #[test]
+    fn lua_reads_skip_non_lua_files_and_verify_lua_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        for with_lua in [false, true] {
+            let mut entries: Vec<(&str, &[u8])> = vec![("large.dict.yaml", b"dictionary")];
+            if with_lua {
+                entries.extend([("rime.lua", b"return 1".as_slice()), ("lua/nested/data.tsv", b"data".as_slice())]);
+            }
+            let bytes = archive(&entries);
+            store.write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None).unwrap();
+            let root = store.package_path("keytao").join("files");
+            fs::remove_file(root.join("large.dict.yaml")).unwrap();
+            assert!(store.read_files("keytao").is_err());
+            let files = store.read_lua_files("keytao").unwrap().0;
+            assert_eq!(files.len(), if with_lua { 2 } else { 0 });
+            if with_lua {
+                assert!(files.contains(&("rime.lua".into(), b"return 1".to_vec())));
+                assert!(files.contains(&("lua/nested/data.tsv".into(), b"data".to_vec())));
+                fs::write(root.join("rime.lua"), b"return 2").unwrap();
+                assert!(store.read_lua_files("keytao").err().unwrap().to_string().contains("checksum mismatch"));
+                fs::write(root.join("rime.lua"), b"short").unwrap();
+                assert!(store.read_lua_files("keytao").err().unwrap().to_string().contains("size mismatch"));
+                fs::write(root.join("rime.lua"), b"return 1").unwrap();
+                fs::write(root.join("lua/nested/extra.lua"), b"unlisted").unwrap();
+                assert!(store.read_lua_files("keytao").err().unwrap().to_string().contains("count mismatch"));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual large-package timing fixture"]
+    fn lua_read_large_non_lua_package_timing() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("large.dict.yaml", b"")]);
+        store.write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None).unwrap();
+        let path = store.package_path("keytao").join("files/large.dict.yaml");
+        let size = 128 * 1024 * 1024;
+        fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(size).unwrap();
+        let mut stored: StoredPackage = serde_json::from_slice(&store.read_metadata_bytes("keytao").unwrap()).unwrap();
+        stored.files[0].size = size;
+        stored.files[0].sha256 = sha256_reader(fs::File::open(&path).unwrap()).unwrap();
+        fs::write(store.checked_metadata_path("keytao").unwrap(), serde_json::to_vec(&stored).unwrap()).unwrap();
+        for lua_only in [false, true] {
+            let mut elapsed = Vec::new();
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                let files = if lua_only { store.read_lua_files("keytao") } else { store.read_files("keytao") }.unwrap().0;
+                elapsed.push(start.elapsed());
+                assert_eq!(files.len(), if lua_only { 0 } else { 1 });
+            }
+            elapsed.sort();
+            eprintln!("128 MiB non-Lua package, lua_only={lua_only}, median of 5: {:?}", elapsed[2]);
+        }
     }
 
     #[test]

@@ -17,6 +17,13 @@ pub use preview::{CandidatePreview, PreviewCandidate, PreviewRequest};
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
+    target_os = "ios"
+))]
+mod desktop_inputs;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
     target_os = "android",
     target_os = "ios"
 ))]
@@ -1342,6 +1349,22 @@ mod desktop {
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let result = (|| {
             let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
+            #[cfg(not(target_os = "android"))]
+            let input_snapshot = if cfg!(target_os = "ios") {
+                None
+            } else {
+                desktop_inputs::snapshot(Path::new(&user_data_dir), Path::new(&shared_data_dir))
+            };
+            #[cfg(not(target_os = "android"))]
+            let selective =
+                desktop_deploy_plan(Path::new(&user_data_dir), Path::new(&shared_data_dir));
+            #[cfg(not(target_os = "android"))]
+            begin_desktop_deployment(
+                Path::new(&user_data_dir),
+                Path::new(&shared_data_dir),
+                selective.as_deref(),
+            )?;
+            #[cfg(target_os = "android")]
             begin_deployment(Path::new(&user_data_dir))?;
 
             #[cfg(target_os = "windows")]
@@ -1356,23 +1379,48 @@ mod desktop {
 
             #[cfg(not(target_os = "android"))]
             {
-                setup_only_for_process(user_data_dir.clone(), shared_data_dir, process)?;
-                if !full_deploy_and_wait(Path::new(&user_data_dir))
-                    .map_err(|error| deploy_log.failure_message(Some(&error)))?
-                {
-                    return Err(deploy_log.failure_message(None));
-                }
-
                 let user_dir = Path::new(&user_data_dir);
-                deploy_desktop_schema_dependencies(user_dir).map_err(|error| {
+                setup_only_for_process(user_data_dir.clone(), shared_data_dir.clone(), process)?;
+                let selective_requested = selective.is_some();
+                let deployed = if let Some(changed) = selective {
+                    deploy_desktop_selective(user_dir, &changed)
+                } else {
+                    Ok(None)
+                }
+                .map_err(|error| {
                     deploy_log.failure_message(Some(&format!("依赖部署失败：{error}")))
                 })?;
+                let deployed = if let Some(deployed) = deployed {
+                    deployed
+                } else {
+                    if selective_requested {
+                        begin_desktop_deployment(user_dir, Path::new(&shared_data_dir), None)?;
+                    }
+                    prepare_missing_desktop_schemas(user_dir, Path::new(&shared_data_dir))?;
+                    if !full_deploy_and_wait(user_dir)
+                        .map_err(|error| deploy_log.failure_message(Some(&error)))?
+                    {
+                        return Err(deploy_log.failure_message(None));
+                    }
+                    deploy_desktop_schema_dependencies(user_dir, None)
+                        .map_err(|error| {
+                            deploy_log.failure_message(Some(&format!("依赖部署失败：{error}")))
+                        })?
+                        .ok_or("full deployment did not finish")?
+                };
                 patch_neutral_grammar(user_dir);
-                validate_deployed_schemas(user_dir).map_err(|error| {
+                validate_deployed_schemas(user_dir, &deployed).map_err(|error| {
                     deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
                 })?;
             }
-            complete_deployment(Path::new(&user_data_dir))
+            complete_deployment(Path::new(&user_data_dir))?;
+            #[cfg(not(target_os = "android"))]
+            record_desktop_deployment(
+                Path::new(&user_data_dir),
+                Path::new(&shared_data_dir),
+                input_snapshot.as_ref(),
+            )?;
+            Ok(())
         })();
         if result.is_err() {
             let _ = mark_deployment_failed(Path::new(&user_data_dir));
@@ -1400,7 +1448,7 @@ mod desktop {
         runtime_log::init_for_engine(user_dir);
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let deploy_log = capture_deployment_log(user_dir);
-        begin_deployment(user_dir)?;
+        begin_desktop_deployment(user_dir, Path::new(&shared_data_dir), None)?;
         {
             let _rime = rime_api_lock();
             if *lock_ignore_poison(&RIME_SETUP_COMPLETE) || *lock_ignore_poison(&RIME_INITIALIZED) {
@@ -1421,12 +1469,13 @@ mod desktop {
             // setup_only exports user dictionaries; Lua initialization can run user code.
             initialize_rime(&user_data_dir, &shared_data_dir, true);
         }
+        prepare_missing_desktop_schemas(user_dir, Path::new(&shared_data_dir))?;
         if !full_deploy_and_wait(user_dir)
             .map_err(|error| deploy_log.failure_message(Some(&error)))?
         {
             return Err(deploy_log.failure_message(None));
         }
-        deploy_desktop_schema_dependencies(user_dir)
+        deploy_desktop_schema_dependencies(user_dir, None)
             .map_err(|error| deploy_log.failure_message(Some(&format!("依赖部署失败：{error}"))))?;
         validate_deployed_schema_files(user_dir)
             .map_err(|error| deploy_log.failure_message(Some(&format!("部署验证失败：{error}"))))?;
@@ -1442,7 +1491,11 @@ mod desktop {
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         begin_deployment(Path::new(&user_data_dir))?;
-        setup_only_for_process(user_data_dir.clone(), shared_data_dir, DeployProcess::AndroidDeployer)?;
+        setup_only_for_process(
+            user_data_dir.clone(),
+            shared_data_dir,
+            DeployProcess::AndroidDeployer,
+        )?;
         deploy_config_file("default.yaml", "config_version")
             .map_err(|error| deploy_log.failure_message(Some(&error)))?;
         let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
@@ -1463,7 +1516,11 @@ mod desktop {
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         regenerate_active_rime_lua(Path::new(&user_data_dir))?;
-        setup_only_for_process(user_data_dir.clone(), shared_data_dir, DeployProcess::AndroidDeployer)?;
+        setup_only_for_process(
+            user_data_dir.clone(),
+            shared_data_dir,
+            DeployProcess::AndroidDeployer,
+        )?;
         let user_dir = Path::new(&user_data_dir);
         if parse_schema_list_from_dir(user_dir).contains(&schema_id) {
             if !deploy_listed_schema(user_dir, &schema_id)? {
@@ -1586,7 +1643,10 @@ mod desktop {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn deploy_desktop_schema_dependencies(user_dir: &Path) -> Result<(), String> {
+    fn deploy_desktop_schema_dependencies(
+        user_dir: &Path,
+        changed: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, String> {
         let initial_schemas = parse_schema_list_from_dir(user_dir);
         if initial_schemas.is_empty() {
             return Err("no schema selected in default.custom.yaml".into());
@@ -1594,12 +1654,20 @@ mod desktop {
 
         let mut visited: HashSet<String> = initial_schemas.iter().cloned().collect();
         let mut pending = std::collections::VecDeque::new();
+        let mut deployed = Vec::new();
+        let trusted = changed.and_then(|_| desktop_inputs::recorded_schema_ids(user_dir));
         for schema_id in &initial_schemas {
             let compiled = compiled_schema_path(user_dir, schema_id);
-            if !deploy_listed_schema(user_dir, schema_id)? {
+            let needs_deploy = changed.is_some_and(|ids| ids.contains(schema_id))
+                || !compiled.is_file()
+                || cfg!(target_os = "ios");
+            if needs_deploy && !deploy_listed_schema(user_dir, schema_id)? {
                 continue;
             }
             require_compiled_schema(&compiled, schema_id)?;
+            if changed.is_none() || needs_deploy {
+                deployed.push(schema_id.clone());
+            }
             pending.extend(schema_dependencies_from_file(&compiled));
         }
         require_any_compiled_schema(user_dir, &initial_schemas)?;
@@ -1609,18 +1677,199 @@ mod desktop {
                 continue;
             }
 
+            if changed.is_some() && !trusted.as_ref().is_some_and(|ids| ids.contains(&schema_id)) {
+                // New dependency edges can expose stale inactive builds, even through includes.
+                return Ok(None);
+            }
+
             let source = user_dir.join(format!("{schema_id}.schema.yaml"));
             if !source.is_file() {
                 continue;
             }
             let compiled = compiled_schema_path(user_dir, &schema_id);
-            if !compiled.is_file() {
+            if !compiled.is_file() || changed.is_some_and(|ids| ids.contains(&schema_id)) {
                 deploy_schema_file(&source)?;
+                deployed.push(schema_id.clone());
+            } else if changed.is_none() {
+                deployed.push(schema_id.clone());
             }
             require_compiled_schema(&compiled, &schema_id)?;
             pending.extend(schema_dependencies_from_file(&compiled));
         }
+        Ok(Some(deployed))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn desktop_deploy_signature(user_dir: &Path, shared_dir: &Path) -> Result<String, String> {
+        Ok(format!(
+            "{};librime/{};shared/{}",
+            deployment_fingerprint(user_dir)?,
+            librime_runtime_version().ok_or("librime version is unavailable")?,
+            shared_dir.display()
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn desktop_deploy_plan(user_dir: &Path, shared_dir: &Path) -> Option<Vec<String>> {
+        if cfg!(target_os = "ios")
+            || user_dir.join("build").join(DEPLOYING_FILE).exists()
+            || user_dir.join("build/.keytao-deploy-failed").exists()
+            || !user_dir.join("build").join(DEPLOYED_FILE).is_file()
+        {
+            return None;
+        }
+        let changed = desktop_inputs::changed_schemas(
+            user_dir,
+            shared_dir,
+            &parse_schema_list_from_dir(user_dir),
+            &desktop_deploy_signature(user_dir, shared_dir).ok()?,
+        )?;
+        // The granular schema deployer accepts user sources; shared-only changes use maintenance.
+        changed
+            .iter()
+            .all(|id| user_dir.join(format!("{id}.schema.yaml")).is_file())
+            .then_some(changed)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn begin_desktop_deployment(
+        user_dir: &Path,
+        shared_dir: &Path,
+        changed: Option<&[String]>,
+    ) -> Result<(), String> {
+        if cfg!(target_os = "ios") {
+            return begin_deployment(user_dir);
+        }
+        let config_current =
+            changed.is_some() && desktop_inputs::default_config_is_current(user_dir, shared_dir);
+        let schemas = if let Some(changed) = changed {
+            changed.to_vec()
+        } else {
+            let mut schemas = parse_schema_list_from_dir(user_dir);
+            let mut index = 0;
+            while index < schemas.len() {
+                for dependency in
+                    schema_dependencies_from_file(&compiled_schema_path(user_dir, &schemas[index]))
+                {
+                    if !schemas.contains(&dependency) {
+                        schemas.push(dependency);
+                    }
+                }
+                index += 1;
+            }
+            schemas
+        };
+        begin_deployment_with_invalidation(user_dir, changed.is_none())?;
+        invalidate_rime_build_artifacts(user_dir, &schemas, &[])?;
+        // ConfigFileUpdate only checks timestamps; content receipts also catch same-mtime edits.
+        if !config_current {
+            remove_rime_build_artifact(&user_dir.join("build/default.yaml"))?;
+        }
         Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn record_desktop_deployment(
+        user_dir: &Path,
+        shared_dir: &Path,
+        snapshot: Option<&desktop_inputs::SourceSnapshot>,
+    ) -> Result<(), String> {
+        if cfg!(target_os = "ios") {
+            return Ok(());
+        }
+        desktop_inputs::record(
+            user_dir,
+            shared_dir,
+            &parse_schema_list_from_dir(user_dir),
+            &desktop_deploy_signature(user_dir, shared_dir)?,
+            snapshot,
+        )
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn prepare_missing_desktop_schemas(user_dir: &Path, shared_dir: &Path) -> Result<(), String> {
+        if cfg!(target_os = "ios") {
+            return Ok(());
+        }
+        let schemas = parse_schema_list_from_dir(user_dir);
+        let mut missing = false;
+        for id in &schemas {
+            let name = format!("{id}.schema.yaml");
+            if !user_dir.join(&name).is_file() && !shared_dir.join(&name).is_file() {
+                deploy_listed_schema(user_dir, id)?;
+                missing = true;
+            }
+        }
+        if missing {
+            let _rime = rime_api_lock();
+            unsafe {
+                let initialize = rime_api_member!(rime_get_api(), deployer_initialize)
+                    .ok_or("librime deployer initialization API is unavailable")?;
+                initialize(std::ptr::null_mut());
+            }
+            deploy_config_file("default.yaml", "config_version")?;
+            write_effective_default_schema_list(
+                user_dir,
+                &effective_schema_list(user_dir, schemas),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn deploy_desktop_selective(
+        user_dir: &Path,
+        changed: &[String],
+    ) -> Result<Option<Vec<String>>, String> {
+        {
+            let _rime = rime_api_lock();
+            prepare_deployment_log_directory()?;
+            unsafe {
+                let api = rime_get_api();
+                let initialize = rime_api_member!(api, deployer_initialize)
+                    .ok_or("librime deployer initialization API is unavailable")?;
+                let run = rime_api_member!(api, run_task)
+                    .ok_or("librime deployment task API is unavailable")?;
+                initialize(std::ptr::null_mut());
+                run(c"clean_old_log_files".as_ptr());
+                if run(c"installation_update".as_ptr()) == 0 {
+                    return Err("failed to update Rime installation".into());
+                }
+            }
+        }
+        // A trusted same-version full deployment already upgraded legacy userdbs;
+        // new legacy databases force full maintenance. Trash cleanup only moves old files.
+        update_neutral_grammar(user_dir, false);
+        let result = (|| {
+            deploy_config_file("default.yaml", "config_version")?;
+            let deployed = deploy_desktop_schema_dependencies(user_dir, Some(changed))?;
+            let _rime = rime_api_lock();
+            unsafe {
+                let api = rime_get_api();
+                let open = rime_api_member!(api, user_config_open)
+                    .ok_or("librime user config API is unavailable")?;
+                let close = rime_api_member!(api, config_close)
+                    .ok_or("librime config close API is unavailable")?;
+                let set = rime_api_member!(api, config_set_int)
+                    .ok_or("librime config setter is unavailable")?;
+                let mut config: RimeConfig = std::mem::zeroed();
+                if open(c"user".as_ptr(), &mut config) == 0 {
+                    return Err("cannot open Rime user config".into());
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i32;
+                let saved = set(&mut config, c"var/last_build_time".as_ptr(), now);
+                close(&mut config);
+                if saved == 0 {
+                    return Err("cannot save Rime last build time".into());
+                }
+            }
+            Ok(deployed)
+        })();
+        patch_neutral_grammar(user_dir);
+        result
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1636,9 +1885,8 @@ mod desktop {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn validate_deployed_schemas(user_dir: &Path) -> Result<(), String> {
+    fn validate_deployed_schemas(user_dir: &Path, deployed: &[String]) -> Result<(), String> {
         let schemas = validate_deployed_schema_files(user_dir)?;
-        let _rime = rime_api_lock();
         // Validation selections persist in user.yaml, even when validation fails.
         let schema_to_keep = if schemas.iter().all(|schema| is_addon_schema(schema)) {
             schemas.first().cloned()
@@ -1647,15 +1895,36 @@ mod desktop {
                 .filter(|schema| schemas.contains(schema))
                 .or_else(|| preferred_schema_from_list(schemas.clone()))
         };
+        let schemas = validation_schema_list(&schemas, deployed, schema_to_keep.as_deref());
+        let _rime = rime_api_lock();
         let session =
             create_session().map_err(|error| format!("create validation session: {error:?}"))?;
         let result = schemas
             .iter()
             .try_for_each(|schema_id| select_schema_checked(&session, schema_id));
-        let restored = schema_to_keep.as_deref().map_or(Ok(()), |schema_id| {
-            select_schema_checked(&session, schema_id)
-        });
+        let restored = schema_to_keep
+            .as_deref()
+            .filter(|id| result.is_err() || schemas.last().map(String::as_str) != Some(id))
+            .map_or(Ok(()), |schema_id| {
+                select_schema_checked(&session, schema_id)
+            });
         result.and(restored)
+    }
+
+    fn validation_schema_list(
+        schemas: &[String],
+        deployed: &[String],
+        active: Option<&str>,
+    ) -> Vec<String> {
+        let mut validate: Vec<_> = schemas
+            .iter()
+            .filter(|id| deployed.contains(id) && Some(id.as_str()) != active)
+            .cloned()
+            .collect();
+        if let Some(active) = active {
+            validate.push(active.to_owned());
+        }
+        validate
     }
 
     #[cfg(target_os = "android")]
@@ -1706,12 +1975,47 @@ mod desktop {
         Ok(())
     }
 
+    #[cfg(test)]
+    mod listed_schema_tests {
+        include!("listed_schema_tests.rs");
+    }
+
+    #[cfg(all(
+        test,
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    mod desktop_deploy_tests {
+        include!("desktop_deploy_tests.rs");
+    }
+
     fn deploy_listed_schema(user_dir: &Path, schema_id: &str) -> Result<bool, String> {
+        let shared_dir = if cfg!(target_os = "android") {
+            let _rime = rime_api_lock();
+            unsafe {
+                rime_api_member!(rime_get_api(), get_shared_data_dir)
+                    .and_then(|get| cstr_to_str(get()))
+                    .map(PathBuf::from)
+            }
+        } else {
+            None
+        };
+        deploy_listed_schema_with_reuse(user_dir, schema_id, shared_dir.as_deref())
+    }
+
+    fn deploy_listed_schema_with_reuse(
+        user_dir: &Path,
+        schema_id: &str,
+        shared_dir: Option<&Path>,
+    ) -> Result<bool, String> {
         let log = capture_deployment_log(user_dir);
         let source = user_dir.join(format!("{schema_id}.schema.yaml"));
         let compiled = compiled_schema_path(user_dir, schema_id);
         // librime can leave a previous build behind when a new config fails to compile.
-        remove_rime_build_artifact(&compiled)?;
+        if !shared_dir.is_some_and(|shared| {
+            schema_inputs::schema_input_is_current(user_dir, schema_id, shared)
+        }) {
+            remove_rime_build_artifact(&compiled)?;
+        }
         #[cfg(target_os = "android")]
         let _dictionary_override =
             if source.is_file() && user_dir.join("liangfen.dict.yaml").is_file() {
@@ -1754,7 +2058,6 @@ mod desktop {
         }
     }
 
-    #[cfg(target_os = "android")]
     fn deploy_config_file(file_name: &str, version_key: &str) -> Result<(), String> {
         let _rime = rime_api_lock();
         let file_name = CString::new(file_name).map_err(|_| "invalid config file name")?;
@@ -2462,8 +2765,7 @@ mod desktop {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn full_deploy_and_wait(user_dir: &Path) -> Result<bool, String> {
-        let _rime = rime_api_lock();
+    fn prepare_deployment_log_directory() -> Result<(), String> {
         // RimeFinalize does not reset glog's process-wide log directory. A
         // previous user root may have been removed after switching runtimes;
         // librime 1.10's synchronous clean_old_log_files task would then throw
@@ -2476,6 +2778,13 @@ mod desktop {
                 )
             })?;
         }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn full_deploy_and_wait(user_dir: &Path) -> Result<bool, String> {
+        let _rime = rime_api_lock();
+        prepare_deployment_log_directory()?;
         {
             let mut result = lock_ignore_poison(&DEPLOY_RESULT);
             *result = None;
@@ -7190,7 +7499,6 @@ fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
 }
 
 fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<String> {
-    let package_schemas = active_package_schema_ids(user_data_dir);
     let schemas: Vec<_> = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
@@ -7204,6 +7512,11 @@ fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<Strin
     } else {
         schemas
     };
+    managed_primary_schemas_from_list(user_data_dir, schemas)
+}
+
+fn managed_primary_schemas_from_list(user_data_dir: &Path, schemas: Vec<String>) -> Vec<String> {
+    let package_schemas = active_package_schema_ids(user_data_dir);
     let has_primary = schemas
         .iter()
         .any(|schema| is_keytao_managed_schema(schema) || package_schemas.contains(schema));
@@ -7218,6 +7531,13 @@ fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<Strin
 }
 
 fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
+    begin_deployment_with_invalidation(user_data_dir, true)
+}
+
+fn begin_deployment_with_invalidation(
+    user_data_dir: &Path,
+    invalidate: bool,
+) -> Result<(), String> {
     let build = user_data_dir.join("build");
     std::fs::create_dir_all(&build)
         .map_err(|error| format!("create {}: {error}", build.display()))?;
@@ -7236,10 +7556,12 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
             Err(error) => return Err(format!("remove {}: {error}", marker.display())),
         }
     }
-    schema_inputs::invalidate_changed_deploy_schemas(
-        user_data_dir,
-        &configured_schema_list_from_dir(user_data_dir),
-    )?;
+    if invalidate {
+        schema_inputs::invalidate_changed_deploy_schemas(
+            user_data_dir,
+            &configured_schema_list_from_dir(user_data_dir),
+        )?;
+    }
     regenerate_active_rime_lua(user_data_dir)
 }
 
@@ -7327,6 +7649,30 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
         user_data_dir,
         configured_schema_list_from_dir(user_data_dir),
     );
+    write_effective_default_schema_list(user_data_dir, &effective)?;
+    patch_neutral_grammar(user_data_dir);
+    persist_standalone_addon_selection(user_data_dir)?;
+    if let Err(error) = record_schema_input_fingerprints(user_data_dir, &effective) {
+        crate::rt_log!(
+            Level::Info,
+            "rime",
+            "schema_input_cache_write_failed",
+            msg = error
+        );
+    }
+    write_deployed_marker(user_data_dir, &schemas)?;
+    let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
+    match std::fs::remove_file(&sentinel) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove {}: {error}", sentinel.display())),
+    }
+}
+
+fn write_effective_default_schema_list(
+    user_data_dir: &Path,
+    effective: &[String],
+) -> Result<(), String> {
     let default_path = user_data_dir.join("build/default.yaml");
     if default_path.is_file() {
         let content = std::fs::read(&default_path).map_err(|error| error.to_string())?;
@@ -7338,25 +7684,14 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
                 .ok_or("deployed default.yaml must be a mapping")?
                 .insert(
                     Value::String("schema_list".into()),
-                    make_schema_list_value(&effective),
+                    make_schema_list_value(effective),
                 );
             let content = serde_yaml::to_string(&default).map_err(|error| error.to_string())?;
             write_file_atomic(&default_path, content.as_bytes())
                 .map_err(|error| format!("save effective schema list: {error}"))?;
         }
     }
-    patch_neutral_grammar(user_data_dir);
-    persist_standalone_addon_selection(user_data_dir)?;
-    if let Err(error) = record_schema_input_fingerprints(user_data_dir, &effective) {
-        crate::rt_log!(Level::Info, "rime", "schema_input_cache_write_failed", msg = error);
-    }
-    write_deployed_marker(user_data_dir, &schemas)?;
-    let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
-    match std::fs::remove_file(&sentinel) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", sentinel.display())),
-    }
+    Ok(())
 }
 
 pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {

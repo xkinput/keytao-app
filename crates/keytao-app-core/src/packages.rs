@@ -293,7 +293,7 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
     if !records.is_empty() {
         let mut verified = BTreeMap::new();
         for (key, record) in &mut records {
-            let (mut files, meta) = match PackageStore::new(core).read_files(key) {
+            let (mut files, meta) = match PackageStore::new(core).read_lua_files(key) {
                 Ok(files) => files,
                 Err(error) => {
                     tracing::warn!(%key, %error, "Skipping active Lua refresh: no verified stored package");
@@ -325,7 +325,7 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
     let Some(scheme_key) = core.state().active_scheme else {
         return Ok(());
     };
-    let (mut files, meta) = match PackageStore::new(core).read_files(&scheme_key) {
+    let (mut files, meta) = match PackageStore::new(core).read_lua_files(&scheme_key) {
         Ok(files) => files,
         Err(error) => {
             tracing::warn!(%scheme_key, %error, "Skipping active rime.lua snapshot refresh: no verified stored archive");
@@ -380,7 +380,7 @@ fn publish_active_manifest(
             Some(files) => files,
             None => {
                 let store = PackageStore::new(core);
-                stored = PackageStore::read_files_at(&store.checked_package_path(key)?, key)?.0;
+                stored = PackageStore::read_lua_files_at(&store.checked_package_path(key)?, key)?.0;
                 &stored
             }
         };
@@ -1579,6 +1579,7 @@ mod tests {
             ("lua/helper.lua".into(), b"return 1\n".to_vec()),
             ("keytao.schema.yaml".into(), b"schema: {schema_id: keytao}\n".to_vec()),
             ("default.custom.yaml".into(), b"patch: {schema_list: [{schema: keytao}]}\n".to_vec()),
+            ("large.dict.yaml".into(), vec![b'x'; 1024 * 1024]),
         ];
         let archive = archive_from_files(&files).unwrap();
         store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &archive, &root).unwrap();
@@ -1586,6 +1587,10 @@ mod tests {
         fs::write(root.join("default.custom.yaml"), &files[3].1).unwrap();
         prepare_active_rime_lua(&core, &root).unwrap();
         let snapshot = root.join(".keytao-package-lua/keytao/lua/helper.lua");
+        fs::remove_file(PackageStore::new(&core).package_path("keytao").join("files/large.dict.yaml")).unwrap();
+        fs::remove_file(&snapshot).unwrap();
+        prepare_active_rime_lua(&core, &root).unwrap();
+        assert_eq!(fs::read(&snapshot).unwrap(), b"return 1\n");
         let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
         fs::File::options().write(true).open(&snapshot).unwrap().set_modified(modified).unwrap();
         prepare_active_rime_lua(&core, &root).unwrap();

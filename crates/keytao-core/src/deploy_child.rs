@@ -33,24 +33,169 @@ fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_build_needs_repair(user_dir: &Path, signature: &[u8]) -> bool {
-    !std::fs::read_to_string(user_dir.join(crate::WINDOWS_RIME_BUILD_REPAIR_MARKER))
-        .is_ok_and(|content| content == crate::WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
-        || !crate::schema_install_state(user_dir).deployed
-        || std::fs::read(user_dir.join(WINDOWS_BUILD_SIGNATURE))
-            .ok()
-            .as_deref()
-            != Some(signature)
+fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String>> {
+    // None retains the old full repair path; Some lists only proven obsolete outputs.
+    if std::fs::read_to_string(user_dir.join(crate::WINDOWS_RIME_BUILD_REPAIR_MARKER)).ok()?
+        != crate::WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT
+        || user_dir.join("build").join(crate::DEPLOYING_FILE).exists()
+    {
+        return None;
+    }
+    let previous = std::fs::read(user_dir.join(WINDOWS_BUILD_SIGNATURE)).ok()?;
+    let previous: (String, String, Vec<String>) = serde_json::from_slice(&previous).ok()?;
+    let current: (String, String, Vec<String>) = serde_json::from_slice(signature).ok()?;
+    if previous.0 != current.0
+        || previous.1 != current.1
+        || previous
+            .2
+            .iter()
+            .chain(&current.2)
+            .any(|id| !crate::valid_rime_build_id(id))
+    {
+        return None;
+    }
+    if previous.2 == current.2 {
+        return crate::schema_install_state(user_dir)
+            .deployed
+            .then(Vec::new);
+    }
+
+    // A newly selected schema has no build yet: validate the *previous* deployment.
+    let marker = std::fs::read(user_dir.join("build").join(crate::DEPLOYED_FILE)).ok()?;
+    let marker: crate::DeploymentMarker = serde_json::from_slice(&marker).ok()?;
+    let deployed = crate::effective_schema_list(user_dir, previous.2.clone());
+    if marker.fingerprint != previous.0
+        || deployed.is_empty()
+        || marker.schemas.is_empty()
+        || crate::managed_primary_schemas_from_list(user_dir, deployed.clone())
+            .iter()
+            .any(|id| !marker.schemas.contains(id))
+        || deployed
+            .iter()
+            .any(|id| !user_dir.join(format!("build/{id}.schema.yaml")).is_file())
+        || marker.schemas.iter().any(|id| {
+            !previous.2.contains(id) || !user_dir.join(format!("build/{id}.schema.yaml")).is_file()
+        })
+    {
+        return None;
+    }
+    if previous.2.iter().all(|id| current.2.contains(id)) {
+        return Some(Vec::new());
+    }
+
+    let before = windows_schema_build_outputs(user_dir, &deployed, false)?;
+    let after = windows_schema_build_outputs(user_dir, &current.2, true)?;
+    Some(before.difference(&after).cloned().collect())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_schema_build_outputs(
+    user_dir: &Path,
+    schemas: &[String],
+    require_current_inputs: bool,
+) -> Option<std::collections::BTreeSet<String>> {
+    let fingerprints = if require_current_inputs {
+        Some(crate::schema_input_fingerprints(user_dir, schemas).ok()?)
+    } else {
+        None
+    };
+    let mut pending = schemas.to_vec();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut outputs = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !crate::valid_rime_build_id(&id) {
+            return None;
+        }
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        if fingerprints
+            .as_ref()
+            .is_some_and(|saved| !saved.get(&id).is_some_and(Option::is_some))
+        {
+            return None;
+        }
+        let path = format!("{id}.schema.yaml");
+        let bytes = std::fs::read(user_dir.join("build").join(&path)).ok()?;
+        let value: serde_yaml::Value = serde_yaml::from_slice(&bytes).ok()?;
+        if value["schema"]["schema_id"].as_str()? != id {
+            return None;
+        }
+        if !value["schema"]["dependencies"].is_null() {
+            for dependency in value["schema"]["dependencies"].as_sequence()? {
+                pending.push(dependency.as_str()?.to_owned());
+            }
+        }
+        collect_windows_dictionary_outputs(&value, &mut outputs, require_current_inputs)?;
+        outputs.insert(path);
+    }
+    Some(outputs)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn collect_windows_dictionary_outputs(
+    value: &serde_yaml::Value,
+    outputs: &mut std::collections::BTreeSet<String>,
+    protect_references: bool,
+) -> Option<()> {
+    use serde_yaml::Value;
+    fn build_id(value: &Value) -> Option<&str> {
+        value.as_str().filter(|id| crate::valid_rime_build_id(id))
+    }
+    match value {
+        Value::Mapping(mapping) => {
+            if let Some(dictionary) = value.get("dictionary") {
+                if dictionary.as_str() != Some("") {
+                    let id = build_id(dictionary)?;
+                    outputs.extend([format!("{id}.table.bin"), format!("{id}.reverse.bin")]);
+                    let prism = value.get("prism").map_or(Some(id), build_id)?;
+                    outputs.insert(format!("{prism}.prism.bin"));
+                }
+            }
+            if let Some(packs) = value.get("packs") {
+                for pack in packs.as_sequence()? {
+                    let id = build_id(pack)?;
+                    outputs.insert(format!("{id}.table.bin"));
+                    // Packs own tables only; retained references also protect dictionary bins.
+                    if protect_references {
+                        outputs.insert(format!("{id}.reverse.bin"));
+                    }
+                }
+            }
+            for (key, value) in mapping {
+                // Unresolved directives cannot establish exclusive output ownership.
+                if matches!(key.as_str(), Some("__include" | "__patch")) {
+                    return None;
+                }
+                collect_windows_dictionary_outputs(value, outputs, protect_references)?;
+            }
+        }
+        Value::Sequence(values) => {
+            for value in values {
+                collect_windows_dictionary_outputs(value, outputs, protect_references)?;
+            }
+        }
+        _ => {}
+    }
+    Some(())
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), String> {
     // Decide before closing the runtime gate; failures must leave the next deploy in repair mode.
-    let repair = windows_build_needs_repair(user_dir, signature);
+    let cleanup = windows_build_cleanup(user_dir, signature);
     crate::clear_windows_rime_build_repair_marker(user_dir)?;
     crate::ReloadStamp::write(user_dir)?;
-    if repair {
-        crate::invalidate_active_windows_rime_build(user_dir)?;
+    match cleanup {
+        Some(paths) => {
+            for path in paths {
+                crate::remove_rime_build_artifact(&user_dir.join("build").join(path))?;
+            }
+        }
+        None => {
+            crate::remove_rime_build_artifact(&user_dir.join("build/.keytao-desktop-inputs.json"))?;
+            crate::invalidate_active_windows_rime_build(user_dir)?;
+        }
     }
     Ok(())
 }
@@ -576,11 +721,11 @@ mod tests {
             std::fs::write(root.join(WINDOWS_BUILD_SIGNATURE), &signature).unwrap();
         };
         trust();
-        assert!(!windows_build_needs_repair(&root, &signature));
-        assert!(windows_build_needs_repair(
-            &root,
-            &windows_build_signature(&root, "1.18.0").unwrap()
-        ));
+        assert_eq!(windows_build_cleanup(&root, &signature), Some(vec![]));
+        assert_eq!(
+            windows_build_cleanup(&root, &windows_build_signature(&root, "1.18.0").unwrap()),
+            None
+        );
         for path in [
             crate::WINDOWS_RIME_BUILD_REPAIR_MARKER,
             "build/.keytao-deployed",
@@ -588,18 +733,18 @@ mod tests {
         ] {
             std::fs::remove_file(root.join(path)).unwrap();
             assert!(
-                windows_build_needs_repair(&root, &signature),
+                windows_build_cleanup(&root, &signature).is_none(),
                 "missing {path}"
             );
             std::fs::write(root.join(path), b"invalid marker").unwrap();
             assert!(
-                windows_build_needs_repair(&root, &signature),
+                windows_build_cleanup(&root, &signature).is_none(),
                 "invalid {path}"
             );
             trust();
         }
         std::fs::write(root.join("build/.keytao-deploying"), "interrupted").unwrap();
-        assert!(windows_build_needs_repair(&root, &signature));
+        assert!(windows_build_cleanup(&root, &signature).is_none());
         std::fs::remove_file(root.join("build/.keytao-deploying")).unwrap();
         std::fs::write(
             root.join("default.custom.yaml"),
@@ -608,7 +753,7 @@ mod tests {
         .unwrap();
         let changed = windows_build_signature(&root, "1.17.0").unwrap();
         assert_ne!(signature, changed);
-        assert!(windows_build_needs_repair(&root, &changed));
+        assert_eq!(windows_build_cleanup(&root, &changed), Some(vec![]));
         std::fs::write(root.join("default.custom.yaml"), preserved[0].1).unwrap();
 
         for suffix in ["prism", "table", "reverse"] {
@@ -622,7 +767,7 @@ mod tests {
             );
         }
         // A failed/interrupted deploy leaves the gate closed and forces the next repair.
-        assert!(windows_build_needs_repair(&root, &signature));
+        assert!(windows_build_cleanup(&root, &signature).is_none());
         prepare_windows_deploy(&root, &signature).unwrap();
         for suffix in ["prism", "table", "reverse"] {
             assert!(!root.join(format!("build/keydo.{suffix}.bin")).exists());
@@ -634,6 +779,211 @@ mod tests {
                 "{path}"
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_schema_removal_keeps_referenced_outputs_and_user_data() {
+        for mode in [
+            "exclusive",
+            "shared",
+            "shared_prism",
+            "dependency",
+            "packs",
+            "removed_pack",
+            "custom",
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "keytao-windows-removal-{mode}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(root.join("build")).unwrap();
+            let selection = |schemas: &[&str]| {
+                let schemas: Vec<_> = schemas
+                    .iter()
+                    .map(|id| serde_json::json!({"schema": id}))
+                    .collect();
+                std::fs::write(
+                    root.join("default.custom.yaml"),
+                    serde_json::json!({"patch": {"schema_list": schemas}}).to_string(),
+                )
+                .unwrap();
+            };
+            selection(&["keydo", "keytao"]);
+            let dictionary = if matches!(mode, "shared" | "shared_prism") {
+                "keydo"
+            } else {
+                "keytao"
+            };
+            let extra = match mode {
+                "dependency" => "  dependencies: [keydo]\n",
+                _ => "",
+            };
+            for (id, dictionary, extra) in [("keydo", "keydo", ""), ("keytao", dictionary, extra)] {
+                let source = format!("schema:\n  schema_id: {id}\n{extra}translator:\n  dictionary: {dictionary}\n  prism: {id}\n");
+                std::fs::write(root.join(format!("{id}.schema.yaml")), &source).unwrap();
+                let mut compiled = source;
+                if mode == "shared_prism" {
+                    compiled = compiled.replace(&format!("  prism: {id}\n"), "");
+                }
+                if id == "keytao" && mode == "packs" {
+                    compiled.push_str("  packs: [keydo]\n");
+                }
+                if id == "keydo" && mode == "removed_pack" {
+                    compiled.push_str("  packs: [extra]\n");
+                    for suffix in ["table", "reverse"] {
+                        std::fs::write(root.join(format!("build/extra.{suffix}.bin")), suffix)
+                            .unwrap();
+                    }
+                }
+                if id == "keytao" && mode == "custom" {
+                    compiled = compiled.replace("dictionary: keytao", "dictionary: keydo");
+                    std::fs::write(
+                        root.join("keytao.custom.yaml"),
+                        "patch: {translator/dictionary: keydo}\n",
+                    )
+                    .unwrap();
+                }
+                compiled.push_str(&format!(
+                    "__build_info:\n  timestamps:\n    {id}.schema: 1\n    {id}.custom: 0\n"
+                ));
+                std::fs::write(root.join(format!("build/{id}.schema.yaml")), compiled).unwrap();
+                for suffix in ["prism", "table", "reverse"] {
+                    std::fs::write(root.join(format!("build/{id}.{suffix}.bin")), suffix).unwrap();
+                }
+            }
+            let preserved = [
+                ("keydo.custom.yaml", "patch: {menu/page_size: 7}\n"),
+                ("keydo.user.dict.yaml", "user words"),
+                ("keydo.userdb/data", "learned words"),
+                ("sync/device/words", "synced words"),
+            ];
+            for (path, content) in preserved {
+                std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+                std::fs::write(root.join(path), content).unwrap();
+            }
+            crate::record_schema_input_fingerprints(&root, &["keydo".into(), "keytao".into()])
+                .unwrap();
+            crate::write_deployed_marker(&root, &["keydo".into(), "keytao".into()]).unwrap();
+            crate::mark_windows_rime_build_repair_complete(&root).unwrap();
+            let signature = windows_build_signature(&root, "1.17.0").unwrap();
+            std::fs::write(root.join(WINDOWS_BUILD_SIGNATURE), &signature).unwrap();
+            selection(&["keytao"]);
+            let signature = windows_build_signature(&root, "1.17.0").unwrap();
+            let expected = match mode {
+                "dependency" => vec![],
+                "shared_prism" => vec!["keydo.schema.yaml"],
+                "exclusive" => vec![
+                    "keydo.prism.bin",
+                    "keydo.reverse.bin",
+                    "keydo.schema.yaml",
+                    "keydo.table.bin",
+                ],
+                "removed_pack" => vec![
+                    "extra.table.bin",
+                    "keydo.prism.bin",
+                    "keydo.reverse.bin",
+                    "keydo.schema.yaml",
+                    "keydo.table.bin",
+                ],
+                _ => vec!["keydo.prism.bin", "keydo.schema.yaml"],
+            };
+            let outputs = windows_build_cleanup(&root, &signature).unwrap();
+            assert_eq!(outputs, expected, "{mode}");
+            if mode == "exclusive" {
+                let custom = root.join("keytao.custom.yaml");
+                std::fs::write(&custom, "patch: {translator/dictionary: keydo}\n").unwrap();
+                assert!(windows_build_cleanup(&root, &signature).is_none());
+                std::fs::remove_file(custom).unwrap();
+                let receipt = root.join("build/.keytao-schema-inputs.json");
+                let saved = std::fs::read(&receipt).unwrap();
+                std::fs::remove_file(&receipt).unwrap();
+                assert!(windows_build_cleanup(&root, &signature).is_none());
+                std::fs::write(receipt, saved).unwrap();
+                selection(&["keytao", "keytao_new"]);
+                assert!(windows_build_cleanup(
+                    &root,
+                    &windows_build_signature(&root, "1.17.0").unwrap()
+                )
+                .is_none());
+                selection(&["keytao"]);
+                assert_eq!(windows_build_cleanup(&root, &signature).unwrap(), outputs);
+            }
+            let retained: Vec<_> = std::fs::read_dir(root.join("build"))
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .filter(|(path, _)| !outputs.iter().any(|name| path.ends_with(name)))
+                .collect();
+            prepare_windows_deploy(&root, &signature).unwrap();
+            for name in outputs {
+                assert!(!root.join("build").join(name).exists());
+            }
+            for (path, bytes) in retained {
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+            }
+            for (path, content) in preserved {
+                assert_eq!(std::fs::read(root.join(path)).unwrap(), content.as_bytes());
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn windows_schema_selection_accepts_primary_only_deployment_marker() {
+        let root =
+            std::env::temp_dir().join(format!("keytao-windows-addon-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let selection = |ids: &[&str]| {
+            let schemas: Vec<_> = ids
+                .iter()
+                .map(|id| serde_json::json!({"schema": id}))
+                .collect();
+            std::fs::write(
+                root.join("default.custom.yaml"),
+                serde_json::json!({"patch": {"schema_list": schemas}}).to_string(),
+            )
+            .unwrap();
+        };
+        selection(&["keydo", "easy_en"]);
+        for id in ["keydo", "easy_en"] {
+            let source = format!("schema: {{schema_id: {id}}}\ntranslator: {{dictionary: {id}}}\n");
+            std::fs::write(root.join(format!("{id}.schema.yaml")), &source).unwrap();
+            std::fs::write(
+                root.join(format!("build/{id}.schema.yaml")),
+                format!("{source}__build_info:\n  timestamps: {{{id}.schema: 1}}\n"),
+            )
+            .unwrap();
+        }
+        crate::complete_deployment(&root).unwrap();
+        let marker = std::fs::read(root.join("build").join(crate::DEPLOYED_FILE)).unwrap();
+        let marker: crate::DeploymentMarker = serde_json::from_slice(&marker).unwrap();
+        assert_eq!(marker.schemas, ["keydo"]);
+        crate::mark_windows_rime_build_repair_complete(&root).unwrap();
+        std::fs::write(
+            root.join(WINDOWS_BUILD_SIGNATURE),
+            windows_build_signature(&root, "1.17.0").unwrap(),
+        )
+        .unwrap();
+        selection(&["keydo", "easy_en", "keytao_new"]);
+        assert_eq!(
+            windows_build_cleanup(&root, &windows_build_signature(&root, "1.17.0").unwrap()),
+            Some(vec![])
+        );
+        selection(&["keydo"]);
+        assert_eq!(
+            windows_build_cleanup(&root, &windows_build_signature(&root, "1.17.0").unwrap())
+                .unwrap(),
+            [
+                "easy_en.prism.bin",
+                "easy_en.reverse.bin",
+                "easy_en.schema.yaml",
+                "easy_en.table.bin"
+            ]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
