@@ -207,6 +207,14 @@ public struct KeyTaoImeTheme: Codable {
                 public var background: KeyTaoThemeColor
                 public var foreground: KeyTaoThemeColor
                 public var selectedForeground: KeyTaoThemeColor
+                public var buttonBackground: KeyTaoThemeColor
+                public var buttonBorderColor: KeyTaoThemeColor
+                public var activeBackground: KeyTaoThemeColor
+                public var selectedBackground: KeyTaoThemeColor
+                public var pressedBackground: KeyTaoThemeColor
+                public var activeBorderColor: KeyTaoThemeColor
+                public var buttonBorderWidth: CGFloat
+                public var buttonCornerRadius: CGFloat
             }
 
             public struct Floating: Codable {
@@ -226,10 +234,21 @@ public struct KeyTaoImeTheme: Codable {
 
         public struct CandidateBar: Codable {
             public var background: KeyTaoThemeColor
+            public var itemBackground: KeyTaoThemeColor
             public var foreground: KeyTaoThemeColor
             public var selectedForeground: KeyTaoThemeColor
             public var selectedBackground: KeyTaoThemeColor
             public var commentColor: KeyTaoThemeColor
+            public var selectedCommentColor: KeyTaoThemeColor
+            public var labelColor: KeyTaoThemeColor
+            public var selectedLabelColor: KeyTaoThemeColor
+            public var borderColor: KeyTaoThemeColor
+            public var selectedBorderColor: KeyTaoThemeColor
+            public var borderWidth: CGFloat
+            public var selectedBorderWidth: CGFloat
+            public var cornerRadius: CGFloat
+            public var paddingX: CGFloat
+            public var inlineGap: CGFloat
             public var fontScale: CGFloat
             public var showComment: Bool
             public var preeditForeground: KeyTaoThemeColor

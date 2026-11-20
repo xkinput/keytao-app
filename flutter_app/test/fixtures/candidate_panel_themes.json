@@ -117,12 +117,20 @@
           "green": 0,
           "red": 0
         },
+        "borderColor": {
+          "alpha": 62,
+          "blue": 217,
+          "green": 115,
+          "red": 59
+        },
+        "borderWidth": 1.0,
         "commentColor": {
           "alpha": 255,
           "blue": 220,
           "green": 211,
           "red": 201
         },
+        "cornerRadius": 8.0,
         "expandedBackground": {
           "alpha": 242,
           "blue": 45,
@@ -136,6 +144,20 @@
           "green": 243,
           "red": 238
         },
+        "inlineGap": 4.0,
+        "itemBackground": {
+          "alpha": 0,
+          "blue": 0,
+          "green": 0,
+          "red": 0
+        },
+        "labelColor": {
+          "alpha": 255,
+          "blue": 181,
+          "green": 168,
+          "red": 154
+        },
+        "paddingX": 9.0,
         "preeditBackground": {
           "alpha": 0,
           "blue": 0,
@@ -154,11 +176,30 @@
           "green": 63,
           "red": 38
         },
+        "selectedBorderColor": {
+          "alpha": 255,
+          "blue": 217,
+          "green": 115,
+          "red": 59
+        },
+        "selectedBorderWidth": 1.0,
+        "selectedCommentColor": {
+          "alpha": 255,
+          "blue": 250,
+          "green": 242,
+          "red": 233
+        },
         "selectedForeground": {
           "alpha": 255,
           "blue": 255,
           "green": 255,
           "red": 255
+        },
+        "selectedLabelColor": {
+          "alpha": 255,
+          "blue": 217,
+          "green": 115,
+          "red": 59
         },
         "showComment": true
       },
@@ -200,7 +241,7 @@
           "borderWidth": 1.0,
           "cornerRadius": 10.0,
           "fontScale": 1.0,
-          "fontWeight": "semibold",
+          "fontWeight": "regular",
           "foreground": {
             "alpha": 255,
             "blue": 247,
@@ -216,9 +257,9 @@
           },
           "pressedBackground": {
             "alpha": 255,
-            "blue": 110,
-            "green": 63,
-            "red": 38
+            "blue": 132,
+            "green": 74,
+            "red": 42
           },
           "pressedForeground": {
             "alpha": 255,
@@ -227,12 +268,12 @@
             "red": 255
           },
           "shadowColor": {
-            "alpha": 0,
-            "blue": 0,
-            "green": 0,
-            "red": 0
+            "alpha": 28,
+            "blue": 44,
+            "green": 34,
+            "red": 26
           },
-          "shadowOffsetY": 1.0,
+          "shadowOffsetY": 1.6,
           "swipeHintForeground": {
             "alpha": 255,
             "blue": 220,
@@ -244,25 +285,57 @@
         "keyClasses": {
           "accent": {
             "background": {
+              "alpha": 242,
+              "blue": 83,
+              "green": 50,
+              "red": 33
+            },
+            "borderColor": {
+              "alpha": 107,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "borderWidth": 1.0,
+            "foreground": {
               "alpha": 255,
-              "blue": 73,
-              "green": 46,
-              "red": 31
+              "blue": 255,
+              "green": 255,
+              "red": 255
+            },
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 118,
+              "green": 67,
+              "red": 39
             }
           },
           "accentPunctuation": {
             "background": {
-              "alpha": 255,
-              "blue": 73,
-              "green": 46,
-              "red": 31
+              "alpha": 242,
+              "blue": 83,
+              "green": 50,
+              "red": 33
+            },
+            "borderColor": {
+              "alpha": 107,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "borderWidth": 1.0,
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 118,
+              "green": 67,
+              "red": 39
             }
           }
         },
         "keyStates": {
           "selected": {
             "background": {
-              "alpha": 122,
+              "alpha": 255,
               "blue": 110,
               "green": 63,
               "red": 38
@@ -273,19 +346,43 @@
               "green": 255,
               "red": 255
             },
+            "pressedBackground": {
+              "alpha": 255,
+              "blue": 121,
+              "green": 69,
+              "red": 40
+            },
             "softBackground": {
               "alpha": 255,
-              "blue": 76,
-              "green": 47,
-              "red": 32
+              "blue": 110,
+              "green": 63,
+              "red": 38
             }
           },
           "shiftOn": {
             "background": {
+              "alpha": 170,
+              "blue": 58,
+              "green": 48,
+              "red": 42
+            },
+            "borderColor": {
               "alpha": 255,
-              "blue": 73,
-              "green": 46,
-              "red": 31
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "foreground": {
+              "alpha": 255,
+              "blue": 255,
+              "green": 255,
+              "red": 255
+            },
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 118,
+              "green": 67,
+              "red": 39
             }
           }
         },
@@ -295,10 +392,23 @@
           "enter": {},
           "function": {
             "background": {
-              "alpha": 255,
-              "blue": 73,
-              "green": 46,
-              "red": 31
+              "alpha": 242,
+              "blue": 83,
+              "green": 50,
+              "red": 33
+            },
+            "borderColor": {
+              "alpha": 107,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "borderWidth": 1.0,
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 118,
+              "green": 67,
+              "red": 39
             }
           },
           "shift": {},
@@ -311,23 +421,61 @@
           "red": 26
         },
         "toolbar": {
+          "activeBackground": {
+            "alpha": 242,
+            "blue": 67,
+            "green": 43,
+            "red": 30
+          },
+          "activeBorderColor": {
+            "alpha": 107,
+            "blue": 217,
+            "green": 115,
+            "red": 59
+          },
           "background": {
             "alpha": 0,
             "blue": 0,
             "green": 0,
             "red": 0
           },
+          "buttonBackground": {
+            "alpha": 170,
+            "blue": 58,
+            "green": 48,
+            "red": 42
+          },
+          "buttonBorderColor": {
+            "alpha": 22,
+            "blue": 255,
+            "green": 255,
+            "red": 255
+          },
+          "buttonBorderWidth": 1.0,
+          "buttonCornerRadius": 10.0,
           "foreground": {
             "alpha": 255,
-            "blue": 218,
-            "green": 210,
-            "red": 200
+            "blue": 247,
+            "green": 243,
+            "red": 238
+          },
+          "pressedBackground": {
+            "alpha": 242,
+            "blue": 86,
+            "green": 52,
+            "red": 34
+          },
+          "selectedBackground": {
+            "alpha": 242,
+            "blue": 76,
+            "green": 47,
+            "red": 32
           },
           "selectedForeground": {
             "alpha": 255,
-            "blue": 217,
-            "green": 115,
-            "red": 59
+            "blue": 255,
+            "green": 255,
+            "red": 255
           }
         }
       }
@@ -470,15 +618,49 @@
         "mobile.keyboard.key.hintFontScale",
         "mobile.keyboard.keyTypes.function.background",
         "mobile.keyboard.keyTypes.function.foreground",
+        "mobile.keyboard.keyTypes.function.borderColor",
+        "mobile.keyboard.keyTypes.function.borderWidth",
         "mobile.keyboard.keyTypes.space.background",
         "mobile.keyboard.keyTypes.space.foreground",
+        "mobile.keyboard.keyTypes.space.borderColor",
+        "mobile.keyboard.keyTypes.space.borderWidth",
         "mobile.keyboard.keyTypes.enter.background",
         "mobile.keyboard.keyTypes.enter.foreground",
+        "mobile.keyboard.keyTypes.enter.borderColor",
+        "mobile.keyboard.keyTypes.enter.borderWidth",
         "mobile.keyboard.keyClasses.accent.background",
         "mobile.keyboard.keyClasses.accent.foreground",
+        "mobile.keyboard.keyClasses.accent.borderColor",
+        "mobile.keyboard.keyClasses.accent.borderWidth",
+        "mobile.keyboard.toolbar.background",
+        "mobile.keyboard.toolbar.foreground",
+        "mobile.keyboard.toolbar.selectedForeground",
+        "mobile.keyboard.toolbar.buttonBackground",
+        "mobile.keyboard.toolbar.buttonBorderColor",
+        "mobile.keyboard.toolbar.activeBackground",
+        "mobile.keyboard.toolbar.selectedBackground",
+        "mobile.keyboard.toolbar.pressedBackground",
+        "mobile.keyboard.toolbar.activeBorderColor",
+        "mobile.keyboard.toolbar.buttonBorderWidth",
+        "mobile.keyboard.toolbar.buttonCornerRadius",
         "mobile.candidateBar.fontScale",
         "mobile.candidateBar.showComment",
-        "mobile.candidateBar.background"
+        "mobile.candidateBar.background",
+        "mobile.candidateBar.itemBackground",
+        "mobile.candidateBar.foreground",
+        "mobile.candidateBar.selectedForeground",
+        "mobile.candidateBar.selectedBackground",
+        "mobile.candidateBar.borderColor",
+        "mobile.candidateBar.selectedBorderColor",
+        "mobile.candidateBar.labelColor",
+        "mobile.candidateBar.selectedLabelColor",
+        "mobile.candidateBar.commentColor",
+        "mobile.candidateBar.selectedCommentColor",
+        "mobile.candidateBar.borderWidth",
+        "mobile.candidateBar.selectedBorderWidth",
+        "mobile.candidateBar.cornerRadius",
+        "mobile.candidateBar.paddingX",
+        "mobile.candidateBar.inlineGap"
       ]
     },
     "ios": {
@@ -501,15 +683,49 @@
         "mobile.keyboard.key.hintFontScale",
         "mobile.keyboard.keyTypes.function.background",
         "mobile.keyboard.keyTypes.function.foreground",
+        "mobile.keyboard.keyTypes.function.borderColor",
+        "mobile.keyboard.keyTypes.function.borderWidth",
         "mobile.keyboard.keyTypes.space.background",
         "mobile.keyboard.keyTypes.space.foreground",
+        "mobile.keyboard.keyTypes.space.borderColor",
+        "mobile.keyboard.keyTypes.space.borderWidth",
         "mobile.keyboard.keyTypes.enter.background",
         "mobile.keyboard.keyTypes.enter.foreground",
+        "mobile.keyboard.keyTypes.enter.borderColor",
+        "mobile.keyboard.keyTypes.enter.borderWidth",
         "mobile.keyboard.keyClasses.accent.background",
         "mobile.keyboard.keyClasses.accent.foreground",
+        "mobile.keyboard.keyClasses.accent.borderColor",
+        "mobile.keyboard.keyClasses.accent.borderWidth",
+        "mobile.keyboard.toolbar.background",
+        "mobile.keyboard.toolbar.foreground",
+        "mobile.keyboard.toolbar.selectedForeground",
+        "mobile.keyboard.toolbar.buttonBackground",
+        "mobile.keyboard.toolbar.buttonBorderColor",
+        "mobile.keyboard.toolbar.activeBackground",
+        "mobile.keyboard.toolbar.selectedBackground",
+        "mobile.keyboard.toolbar.pressedBackground",
+        "mobile.keyboard.toolbar.activeBorderColor",
+        "mobile.keyboard.toolbar.buttonBorderWidth",
+        "mobile.keyboard.toolbar.buttonCornerRadius",
         "mobile.candidateBar.fontScale",
         "mobile.candidateBar.showComment",
-        "mobile.candidateBar.background"
+        "mobile.candidateBar.background",
+        "mobile.candidateBar.itemBackground",
+        "mobile.candidateBar.foreground",
+        "mobile.candidateBar.selectedForeground",
+        "mobile.candidateBar.selectedBackground",
+        "mobile.candidateBar.borderColor",
+        "mobile.candidateBar.selectedBorderColor",
+        "mobile.candidateBar.labelColor",
+        "mobile.candidateBar.selectedLabelColor",
+        "mobile.candidateBar.commentColor",
+        "mobile.candidateBar.selectedCommentColor",
+        "mobile.candidateBar.borderWidth",
+        "mobile.candidateBar.selectedBorderWidth",
+        "mobile.candidateBar.cornerRadius",
+        "mobile.candidateBar.paddingX",
+        "mobile.candidateBar.inlineGap"
       ]
     },
     "linux": {
@@ -527,6 +743,7 @@
         "pc.panel.paddingY",
         "pc.panel.gap",
         "pc.panel.preeditGap",
+        "pc.panel.shadow",
         "pc.font.size",
         "pc.font.labelSize",
         "pc.font.commentSize",
@@ -552,7 +769,6 @@
         "pc.modeHint.width",
         "pc.modeHint.height",
         "pc.modeHint.cornerRadius",
-        "pc.panel.shadow",
         "pc.modeHint.shadow"
       ]
     },
@@ -626,6 +842,7 @@
         "pc.panel.paddingY",
         "pc.panel.gap",
         "pc.panel.preeditGap",
+        "pc.panel.shadow",
         "pc.font.size",
         "pc.font.labelSize",
         "pc.font.commentSize",
@@ -638,6 +855,7 @@
         "pc.candidate.selectedLabelColor",
         "pc.candidate.commentColor",
         "pc.candidate.selectedCommentColor",
+        "pc.candidate.hoverBackground",
         "pc.candidate.borderColor",
         "pc.candidate.selectedBorderColor",
         "pc.candidate.borderWidth",
@@ -651,9 +869,7 @@
         "pc.modeHint.width",
         "pc.modeHint.height",
         "pc.modeHint.cornerRadius",
-        "pc.panel.shadow",
-        "pc.modeHint.shadow",
-        "pc.candidate.hoverBackground"
+        "pc.modeHint.shadow"
       ]
     }
   },
@@ -775,12 +991,20 @@
           "green": 0,
           "red": 0
         },
+        "borderColor": {
+          "alpha": 89,
+          "blue": 217,
+          "green": 115,
+          "red": 59
+        },
+        "borderWidth": 1.0,
         "commentColor": {
           "alpha": 255,
           "blue": 94,
           "green": 78,
           "red": 63
         },
+        "cornerRadius": 8.0,
         "expandedBackground": {
           "alpha": 242,
           "blue": 252,
@@ -794,6 +1018,20 @@
           "green": 52,
           "red": 38
         },
+        "inlineGap": 4.0,
+        "itemBackground": {
+          "alpha": 0,
+          "blue": 0,
+          "green": 0,
+          "red": 0
+        },
+        "labelColor": {
+          "alpha": 255,
+          "blue": 156,
+          "green": 141,
+          "red": 127
+        },
+        "paddingX": 9.0,
         "preeditBackground": {
           "alpha": 0,
           "blue": 0,
@@ -812,11 +1050,30 @@
           "green": 226,
           "red": 214
         },
+        "selectedBorderColor": {
+          "alpha": 255,
+          "blue": 217,
+          "green": 115,
+          "red": 59
+        },
+        "selectedBorderWidth": 1.0,
+        "selectedCommentColor": {
+          "alpha": 255,
+          "blue": 80,
+          "green": 62,
+          "red": 46
+        },
         "selectedForeground": {
           "alpha": 255,
           "blue": 65,
           "green": 50,
           "red": 36
+        },
+        "selectedLabelColor": {
+          "alpha": 255,
+          "blue": 217,
+          "green": 115,
+          "red": 59
         },
         "showComment": true
       },
@@ -858,7 +1115,7 @@
           "borderWidth": 1.0,
           "cornerRadius": 10.0,
           "fontScale": 1.0,
-          "fontWeight": "semibold",
+          "fontWeight": "regular",
           "foreground": {
             "alpha": 255,
             "blue": 66,
@@ -874,9 +1131,9 @@
           },
           "pressedBackground": {
             "alpha": 255,
-            "blue": 248,
-            "green": 226,
-            "red": 214
+            "blue": 244,
+            "green": 212,
+            "red": 195
           },
           "pressedForeground": {
             "alpha": 255,
@@ -885,12 +1142,12 @@
             "red": 20
           },
           "shadowColor": {
-            "alpha": 0,
-            "blue": 0,
-            "green": 0,
-            "red": 0
+            "alpha": 28,
+            "blue": 44,
+            "green": 34,
+            "red": 26
           },
-          "shadowOffsetY": 1.0,
+          "shadowOffsetY": 1.6,
           "swipeHintForeground": {
             "alpha": 255,
             "blue": 94,
@@ -902,25 +1159,57 @@
         "keyClasses": {
           "accent": {
             "background": {
+              "alpha": 242,
+              "blue": 244,
+              "green": 213,
+              "red": 196
+            },
+            "borderColor": {
+              "alpha": 153,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "borderWidth": 1.0,
+            "foreground": {
               "alpha": 255,
-              "blue": 247,
-              "green": 220,
-              "red": 206
+              "blue": 65,
+              "green": 50,
+              "red": 36
+            },
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 244,
+              "green": 212,
+              "red": 195
             }
           },
           "accentPunctuation": {
             "background": {
-              "alpha": 255,
-              "blue": 247,
-              "green": 220,
-              "red": 206
+              "alpha": 242,
+              "blue": 244,
+              "green": 213,
+              "red": 196
+            },
+            "borderColor": {
+              "alpha": 153,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "borderWidth": 1.0,
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 244,
+              "green": 212,
+              "red": 195
             }
           }
         },
         "keyStates": {
           "selected": {
             "background": {
-              "alpha": 158,
+              "alpha": 255,
               "blue": 248,
               "green": 226,
               "red": 214
@@ -931,19 +1220,43 @@
               "green": 50,
               "red": 36
             },
-            "softBackground": {
+            "pressedBackground": {
               "alpha": 255,
               "blue": 246,
-              "green": 218,
-              "red": 203
+              "green": 219,
+              "red": 204
+            },
+            "softBackground": {
+              "alpha": 255,
+              "blue": 248,
+              "green": 226,
+              "red": 214
             }
           },
           "shiftOn": {
             "background": {
+              "alpha": 210,
+              "blue": 255,
+              "green": 255,
+              "red": 255
+            },
+            "borderColor": {
               "alpha": 255,
-              "blue": 247,
-              "green": 220,
-              "red": 206
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "foreground": {
+              "alpha": 255,
+              "blue": 65,
+              "green": 50,
+              "red": 36
+            },
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 244,
+              "green": 212,
+              "red": 195
             }
           }
         },
@@ -953,10 +1266,23 @@
           "enter": {},
           "function": {
             "background": {
-              "alpha": 255,
-              "blue": 247,
-              "green": 220,
-              "red": 206
+              "alpha": 242,
+              "blue": 244,
+              "green": 213,
+              "red": 196
+            },
+            "borderColor": {
+              "alpha": 153,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
+            "borderWidth": 1.0,
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 244,
+              "green": 212,
+              "red": 195
             }
           },
           "shift": {},
@@ -969,23 +1295,61 @@
           "red": 235
         },
         "toolbar": {
+          "activeBackground": {
+            "alpha": 242,
+            "blue": 247,
+            "green": 225,
+            "red": 212
+          },
+          "activeBorderColor": {
+            "alpha": 153,
+            "blue": 217,
+            "green": 115,
+            "red": 59
+          },
           "background": {
             "alpha": 0,
             "blue": 0,
             "green": 0,
             "red": 0
           },
+          "buttonBackground": {
+            "alpha": 210,
+            "blue": 255,
+            "green": 255,
+            "red": 255
+          },
+          "buttonBorderColor": {
+            "alpha": 28,
+            "blue": 44,
+            "green": 34,
+            "red": 26
+          },
+          "buttonBorderWidth": 1.0,
+          "buttonCornerRadius": 10.0,
           "foreground": {
             "alpha": 255,
-            "blue": 132,
-            "green": 118,
-            "red": 104
+            "blue": 66,
+            "green": 52,
+            "red": 38
+          },
+          "pressedBackground": {
+            "alpha": 242,
+            "blue": 244,
+            "green": 211,
+            "red": 193
+          },
+          "selectedBackground": {
+            "alpha": 242,
+            "blue": 246,
+            "green": 218,
+            "red": 203
           },
           "selectedForeground": {
             "alpha": 255,
-            "blue": 217,
-            "green": 115,
-            "red": 59
+            "blue": 65,
+            "green": 50,
+            "red": 36
           }
         }
       }
@@ -1117,12 +1481,20 @@
             "green": 0,
             "red": 0
           },
+          "borderColor": {
+            "alpha": 62,
+            "blue": 217,
+            "green": 115,
+            "red": 59
+          },
+          "borderWidth": 1.0,
           "commentColor": {
             "alpha": 255,
             "blue": 220,
             "green": 211,
             "red": 201
           },
+          "cornerRadius": 8.0,
           "expandedBackground": {
             "alpha": 242,
             "blue": 60,
@@ -1136,6 +1508,20 @@
             "green": 243,
             "red": 238
           },
+          "inlineGap": 4.0,
+          "itemBackground": {
+            "alpha": 0,
+            "blue": 0,
+            "green": 0,
+            "red": 0
+          },
+          "labelColor": {
+            "alpha": 255,
+            "blue": 181,
+            "green": 168,
+            "red": 154
+          },
+          "paddingX": 9.0,
           "preeditBackground": {
             "alpha": 0,
             "blue": 0,
@@ -1154,11 +1540,30 @@
             "green": 67,
             "red": 34
           },
+          "selectedBorderColor": {
+            "alpha": 255,
+            "blue": 217,
+            "green": 115,
+            "red": 59
+          },
+          "selectedBorderWidth": 1.0,
+          "selectedCommentColor": {
+            "alpha": 255,
+            "blue": 250,
+            "green": 242,
+            "red": 233
+          },
           "selectedForeground": {
             "alpha": 255,
             "blue": 255,
             "green": 255,
             "red": 255
+          },
+          "selectedLabelColor": {
+            "alpha": 255,
+            "blue": 217,
+            "green": 115,
+            "red": 59
           },
           "showComment": true
         },
@@ -1200,7 +1605,7 @@
             "borderWidth": 1.0,
             "cornerRadius": 10.0,
             "fontScale": 1.0,
-            "fontWeight": "semibold",
+            "fontWeight": "regular",
             "foreground": {
               "alpha": 255,
               "blue": 247,
@@ -1216,9 +1621,9 @@
             },
             "pressedBackground": {
               "alpha": 255,
-              "blue": 119,
-              "green": 67,
-              "red": 34
+              "blue": 139,
+              "green": 77,
+              "red": 39
             },
             "pressedForeground": {
               "alpha": 255,
@@ -1227,12 +1632,12 @@
               "red": 255
             },
             "shadowColor": {
-              "alpha": 0,
-              "blue": 0,
-              "green": 0,
-              "red": 0
+              "alpha": 28,
+              "blue": 44,
+              "green": 34,
+              "red": 26
             },
-            "shadowOffsetY": 1.0,
+            "shadowOffsetY": 1.6,
             "swipeHintForeground": {
               "alpha": 255,
               "blue": 220,
@@ -1244,25 +1649,57 @@
           "keyClasses": {
             "accent": {
               "background": {
+                "alpha": 242,
+                "blue": 95,
+                "green": 55,
+                "red": 28
+              },
+              "borderColor": {
+                "alpha": 107,
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "borderWidth": 1.0,
+              "foreground": {
                 "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "blue": 255,
+                "green": 255,
+                "red": 255
+              },
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             },
             "accentPunctuation": {
               "background": {
-                "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "alpha": 242,
+                "blue": 95,
+                "green": 55,
+                "red": 28
+              },
+              "borderColor": {
+                "alpha": 107,
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "borderWidth": 1.0,
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             }
           },
           "keyStates": {
             "selected": {
               "background": {
-                "alpha": 122,
+                "alpha": 255,
                 "blue": 119,
                 "green": 67,
                 "red": 34
@@ -1273,19 +1710,43 @@
                 "green": 255,
                 "red": 255
               },
+              "pressedBackground": {
+                "alpha": 255,
+                "blue": 129,
+                "green": 72,
+                "red": 37
+              },
               "softBackground": {
                 "alpha": 255,
-                "blue": 89,
-                "green": 52,
-                "red": 26
+                "blue": 119,
+                "green": 67,
+                "red": 34
               }
             },
             "shiftOn": {
               "background": {
+                "alpha": 170,
+                "blue": 58,
+                "green": 48,
+                "red": 42
+              },
+              "borderColor": {
                 "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "foreground": {
+                "alpha": 255,
+                "blue": 255,
+                "green": 255,
+                "red": 255
+              },
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             }
           },
@@ -1295,10 +1756,23 @@
             "enter": {},
             "function": {
               "background": {
-                "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "alpha": 242,
+                "blue": 95,
+                "green": 55,
+                "red": 28
+              },
+              "borderColor": {
+                "alpha": 107,
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "borderWidth": 1.0,
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             },
             "shift": {},
@@ -1311,23 +1785,61 @@
             "red": 19
           },
           "toolbar": {
+            "activeBackground": {
+              "alpha": 242,
+              "blue": 80,
+              "green": 48,
+              "red": 24
+            },
+            "activeBorderColor": {
+              "alpha": 107,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
             "background": {
               "alpha": 0,
               "blue": 0,
               "green": 0,
               "red": 0
             },
+            "buttonBackground": {
+              "alpha": 170,
+              "blue": 58,
+              "green": 48,
+              "red": 42
+            },
+            "buttonBorderColor": {
+              "alpha": 22,
+              "blue": 255,
+              "green": 255,
+              "red": 255
+            },
+            "buttonBorderWidth": 1.0,
+            "buttonCornerRadius": 10.0,
             "foreground": {
               "alpha": 255,
-              "blue": 218,
-              "green": 210,
-              "red": 200
+              "blue": 247,
+              "green": 243,
+              "red": 238
+            },
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 98,
+              "green": 56,
+              "red": 29
+            },
+            "selectedBackground": {
+              "alpha": 242,
+              "blue": 88,
+              "green": 52,
+              "red": 26
             },
             "selectedForeground": {
               "alpha": 255,
-              "blue": 217,
-              "green": 115,
-              "red": 59
+              "blue": 255,
+              "green": 255,
+              "red": 255
             }
           }
         }
@@ -1346,12 +1858,20 @@
             "green": 0,
             "red": 0
           },
+          "borderColor": {
+            "alpha": 89,
+            "blue": 217,
+            "green": 115,
+            "red": 59
+          },
+          "borderWidth": 1.0,
           "commentColor": {
             "alpha": 255,
             "blue": 220,
             "green": 211,
             "red": 201
           },
+          "cornerRadius": 8.0,
           "expandedBackground": {
             "alpha": 242,
             "blue": 60,
@@ -1365,6 +1885,20 @@
             "green": 243,
             "red": 238
           },
+          "inlineGap": 4.0,
+          "itemBackground": {
+            "alpha": 0,
+            "blue": 0,
+            "green": 0,
+            "red": 0
+          },
+          "labelColor": {
+            "alpha": 255,
+            "blue": 181,
+            "green": 168,
+            "red": 154
+          },
+          "paddingX": 9.0,
           "preeditBackground": {
             "alpha": 0,
             "blue": 0,
@@ -1383,11 +1917,30 @@
             "green": 67,
             "red": 34
           },
+          "selectedBorderColor": {
+            "alpha": 255,
+            "blue": 217,
+            "green": 115,
+            "red": 59
+          },
+          "selectedBorderWidth": 1.0,
+          "selectedCommentColor": {
+            "alpha": 255,
+            "blue": 250,
+            "green": 242,
+            "red": 233
+          },
           "selectedForeground": {
             "alpha": 255,
             "blue": 255,
             "green": 255,
             "red": 255
+          },
+          "selectedLabelColor": {
+            "alpha": 255,
+            "blue": 217,
+            "green": 115,
+            "red": 59
           },
           "showComment": true
         },
@@ -1429,7 +1982,7 @@
             "borderWidth": 1.0,
             "cornerRadius": 10.0,
             "fontScale": 1.0,
-            "fontWeight": "semibold",
+            "fontWeight": "regular",
             "foreground": {
               "alpha": 255,
               "blue": 247,
@@ -1445,9 +1998,9 @@
             },
             "pressedBackground": {
               "alpha": 255,
-              "blue": 119,
-              "green": 67,
-              "red": 34
+              "blue": 139,
+              "green": 77,
+              "red": 39
             },
             "pressedForeground": {
               "alpha": 255,
@@ -1456,12 +2009,12 @@
               "red": 255
             },
             "shadowColor": {
-              "alpha": 0,
-              "blue": 0,
-              "green": 0,
-              "red": 0
+              "alpha": 28,
+              "blue": 44,
+              "green": 34,
+              "red": 26
             },
-            "shadowOffsetY": 1.0,
+            "shadowOffsetY": 1.6,
             "swipeHintForeground": {
               "alpha": 255,
               "blue": 220,
@@ -1473,25 +2026,57 @@
           "keyClasses": {
             "accent": {
               "background": {
+                "alpha": 242,
+                "blue": 95,
+                "green": 55,
+                "red": 28
+              },
+              "borderColor": {
+                "alpha": 153,
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "borderWidth": 1.0,
+              "foreground": {
                 "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "blue": 255,
+                "green": 255,
+                "red": 255
+              },
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             },
             "accentPunctuation": {
               "background": {
-                "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "alpha": 242,
+                "blue": 95,
+                "green": 55,
+                "red": 28
+              },
+              "borderColor": {
+                "alpha": 153,
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "borderWidth": 1.0,
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             }
           },
           "keyStates": {
             "selected": {
               "background": {
-                "alpha": 158,
+                "alpha": 255,
                 "blue": 119,
                 "green": 67,
                 "red": 34
@@ -1502,19 +2087,43 @@
                 "green": 255,
                 "red": 255
               },
+              "pressedBackground": {
+                "alpha": 255,
+                "blue": 129,
+                "green": 72,
+                "red": 37
+              },
               "softBackground": {
                 "alpha": 255,
-                "blue": 89,
-                "green": 52,
-                "red": 26
+                "blue": 119,
+                "green": 67,
+                "red": 34
               }
             },
             "shiftOn": {
               "background": {
+                "alpha": 210,
+                "blue": 255,
+                "green": 255,
+                "red": 255
+              },
+              "borderColor": {
                 "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "foreground": {
+                "alpha": 255,
+                "blue": 255,
+                "green": 255,
+                "red": 255
+              },
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             }
           },
@@ -1524,10 +2133,23 @@
             "enter": {},
             "function": {
               "background": {
-                "alpha": 255,
-                "blue": 85,
-                "green": 50,
-                "red": 25
+                "alpha": 242,
+                "blue": 95,
+                "green": 55,
+                "red": 28
+              },
+              "borderColor": {
+                "alpha": 153,
+                "blue": 217,
+                "green": 115,
+                "red": 59
+              },
+              "borderWidth": 1.0,
+              "pressedBackground": {
+                "alpha": 242,
+                "blue": 127,
+                "green": 71,
+                "red": 36
               }
             },
             "shift": {},
@@ -1540,23 +2162,61 @@
             "red": 19
           },
           "toolbar": {
+            "activeBackground": {
+              "alpha": 242,
+              "blue": 80,
+              "green": 48,
+              "red": 24
+            },
+            "activeBorderColor": {
+              "alpha": 153,
+              "blue": 217,
+              "green": 115,
+              "red": 59
+            },
             "background": {
               "alpha": 0,
               "blue": 0,
               "green": 0,
               "red": 0
             },
+            "buttonBackground": {
+              "alpha": 210,
+              "blue": 255,
+              "green": 255,
+              "red": 255
+            },
+            "buttonBorderColor": {
+              "alpha": 28,
+              "blue": 44,
+              "green": 34,
+              "red": 26
+            },
+            "buttonBorderWidth": 1.0,
+            "buttonCornerRadius": 10.0,
             "foreground": {
               "alpha": 255,
-              "blue": 218,
-              "green": 210,
-              "red": 200
+              "blue": 247,
+              "green": 243,
+              "red": 238
+            },
+            "pressedBackground": {
+              "alpha": 242,
+              "blue": 98,
+              "green": 56,
+              "red": 29
+            },
+            "selectedBackground": {
+              "alpha": 242,
+              "blue": 88,
+              "green": 52,
+              "red": 26
             },
             "selectedForeground": {
               "alpha": 255,
-              "blue": 217,
-              "green": 115,
-              "red": 59
+              "blue": 255,
+              "green": 255,
+              "red": 255
             }
           }
         }

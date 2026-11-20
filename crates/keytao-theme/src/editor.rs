@@ -67,15 +67,49 @@ const FIELDS: &[(&str, u8)] = &[
     ("mobile.keyboard.key.hintFontScale", MOBILE),
     ("mobile.keyboard.keyTypes.function.background", MOBILE),
     ("mobile.keyboard.keyTypes.function.foreground", MOBILE),
+    ("mobile.keyboard.keyTypes.function.borderColor", MOBILE),
+    ("mobile.keyboard.keyTypes.function.borderWidth", MOBILE),
     ("mobile.keyboard.keyTypes.space.background", MOBILE),
     ("mobile.keyboard.keyTypes.space.foreground", MOBILE),
+    ("mobile.keyboard.keyTypes.space.borderColor", MOBILE),
+    ("mobile.keyboard.keyTypes.space.borderWidth", MOBILE),
     ("mobile.keyboard.keyTypes.enter.background", MOBILE),
     ("mobile.keyboard.keyTypes.enter.foreground", MOBILE),
+    ("mobile.keyboard.keyTypes.enter.borderColor", MOBILE),
+    ("mobile.keyboard.keyTypes.enter.borderWidth", MOBILE),
     ("mobile.keyboard.keyClasses.accent.background", MOBILE),
     ("mobile.keyboard.keyClasses.accent.foreground", MOBILE),
+    ("mobile.keyboard.keyClasses.accent.borderColor", MOBILE),
+    ("mobile.keyboard.keyClasses.accent.borderWidth", MOBILE),
+    ("mobile.keyboard.toolbar.background", MOBILE),
+    ("mobile.keyboard.toolbar.foreground", MOBILE),
+    ("mobile.keyboard.toolbar.selectedForeground", MOBILE),
+    ("mobile.keyboard.toolbar.buttonBackground", MOBILE),
+    ("mobile.keyboard.toolbar.buttonBorderColor", MOBILE),
+    ("mobile.keyboard.toolbar.activeBackground", MOBILE),
+    ("mobile.keyboard.toolbar.selectedBackground", MOBILE),
+    ("mobile.keyboard.toolbar.pressedBackground", MOBILE),
+    ("mobile.keyboard.toolbar.activeBorderColor", MOBILE),
+    ("mobile.keyboard.toolbar.buttonBorderWidth", MOBILE),
+    ("mobile.keyboard.toolbar.buttonCornerRadius", MOBILE),
     ("mobile.candidateBar.fontScale", MOBILE),
     ("mobile.candidateBar.showComment", MOBILE),
     ("mobile.candidateBar.background", MOBILE),
+    ("mobile.candidateBar.itemBackground", MOBILE),
+    ("mobile.candidateBar.foreground", MOBILE),
+    ("mobile.candidateBar.selectedForeground", MOBILE),
+    ("mobile.candidateBar.selectedBackground", MOBILE),
+    ("mobile.candidateBar.borderColor", MOBILE),
+    ("mobile.candidateBar.selectedBorderColor", MOBILE),
+    ("mobile.candidateBar.labelColor", MOBILE),
+    ("mobile.candidateBar.selectedLabelColor", MOBILE),
+    ("mobile.candidateBar.commentColor", MOBILE),
+    ("mobile.candidateBar.selectedCommentColor", MOBILE),
+    ("mobile.candidateBar.borderWidth", MOBILE),
+    ("mobile.candidateBar.selectedBorderWidth", MOBILE),
+    ("mobile.candidateBar.cornerRadius", MOBILE),
+    ("mobile.candidateBar.paddingX", MOBILE),
+    ("mobile.candidateBar.inlineGap", MOBILE),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,7 +292,7 @@ mod tests {
         let mut unique = std::collections::HashSet::new();
         for (path, _) in FIELDS {
             assert!(unique.insert(path));
-            assert!(!path.contains("pressed"));
+            assert!(!path.starts_with("pc.") || !path.contains("pressed"));
             assert!(!path.contains("maxWidth"));
         }
     }
@@ -274,8 +308,11 @@ mod tests {
             "size" | "labelSize" | "commentSize" | "preeditSize" | "fontSize" => json!(21),
             "width" => json!(60),
             "height" => json!(40),
-            "cornerRadius" | "paddingX" | "paddingY" | "gap" | "preeditGap" => json!(7),
-            "borderWidth" | "shadowOffsetY" => json!(1),
+            "cornerRadius" | "buttonCornerRadius" | "paddingX" | "paddingY" | "gap"
+            | "inlineGap" | "preeditGap" => json!(7),
+            "borderWidth" | "selectedBorderWidth" | "buttonBorderWidth" | "shadowOffsetY" => {
+                json!(1)
+            }
             _ => json!("#98765432"),
         }
     }

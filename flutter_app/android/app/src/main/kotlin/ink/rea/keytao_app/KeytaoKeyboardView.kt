@@ -1872,14 +1872,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawCandidateExpandButton(canvas: Canvas, rect: RectF) {
-        drawSurfaceShadow(canvas, rect)
-        paint.style = Paint.Style.FILL
-        paint.color = if (candidateExpandPressed) {
-            theme.keySelectedBackground.toArgb()
-        } else {
-            keyBackgroundColor()
-        }
-        canvas.drawRoundRect(rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
+        drawToolbarSurface(canvas, rect, candidateExpandPressed)
 
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(fontSizeSp)
@@ -2721,11 +2714,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
-    private fun candidatePaddingXDp(): Float = 9f
+    private fun candidatePaddingXDp(): Float = theme.candidatePaddingXDp
 
-    private fun candidateInlineGapDp(): Float = 4f
+    private fun candidateInlineGapDp(): Float = theme.candidateInlineGapDp
 
-    private fun candidateCornerRadiusDp(): Float = theme.key.cornerRadius
+    private fun candidateCornerRadiusDp(): Float = theme.candidateCornerRadiusDp
 
     private fun keyCornerRadiusDp(): Float = theme.key.cornerRadius
 
@@ -2747,10 +2740,19 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawRimeEmptyState(canvas, item, rect)
             return
         }
-        if (item.selected || pressed) {
-            paint.style = Paint.Style.FILL
-            paint.color = theme.candidateSelectedBackground.toArgb()
-            canvas.drawRect(rect, paint)
+        val selected = item.selected || pressed
+        val radius = dp(candidateCornerRadiusDp())
+        if (item.command != null || selected) drawSurfaceShadow(canvas, rect)
+        paint.style = Paint.Style.FILL
+        paint.color = (if (selected) theme.candidateSelectedBackground else theme.candidateBackground).toArgb()
+        canvas.drawRoundRect(rect, radius, radius, paint)
+        val borderWidth = dp(if (selected) theme.candidateSelectedBorderWidthDp else theme.candidateBorderWidthDp)
+        if (borderWidth > 0f) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = borderWidth
+            paint.color = (if (selected) theme.candidateSelectedBorderColor else theme.candidateBorderColor).toArgb()
+            val borderRect = RectF(rect).apply { inset(borderWidth / 2f, borderWidth / 2f) }
+            canvas.drawRoundRect(borderRect, radius, radius, paint)
         }
 
         val displayItem = if (pressed && !item.selected) item.copy(selected = true) else item
@@ -3502,6 +3504,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawClipboardPasteChip(canvas: Canvas, item: ToolbarRect, preview: String) {
         val pressed = isToolbarPressed(item)
+        drawToolbarSurface(canvas, item.rect, pressed, active = true)
 
         val padding = dp(13f)
         val inlineGap = dp(8f)
@@ -3640,6 +3643,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawToolbarChip(canvas: Canvas, item: ToolbarRect) {
         val pressed = isToolbarPressed(item)
+        drawToolbarSurface(canvas, item.rect, pressed, isSoftAccentToolbar(item), item.selected)
 
         textPaint.textAlign = Paint.Align.CENTER
         val secondary = item.secondaryLabel?.takeIf { it.isNotBlank() }
@@ -3666,9 +3670,51 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.drawText(item.label, primaryX, item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
 
             textPaint.textSize = sp(commentSizeSp)
-            textPaint.color = theme.toolbar.themeColor(if (pressed || item.selected) "selectedForeground" else "foreground").toArgb()
+            textPaint.color = (if (pressed) theme.toolbar.themeColor("selectedForeground") else theme.key.hintForeground).toArgb()
             canvas.drawText(secondary, secondaryX, item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
         }
+    }
+
+    private fun drawToolbarSurface(
+        canvas: Canvas,
+        rect: RectF,
+        pressed: Boolean,
+        active: Boolean = false,
+        selected: Boolean = false,
+    ) {
+        drawSurfaceShadow(canvas, rect)
+        val accented = active || selected
+        val background = when {
+            pressed && accented -> theme.toolbar.themeColor("pressedBackground")
+            pressed -> theme.keyPressedBackground
+            selected -> theme.toolbar.themeColor("selectedBackground")
+            active -> theme.toolbar.themeColor("activeBackground")
+            else -> theme.toolbar.themeColor("buttonBackground")
+        }
+        val radius = dp(theme.toolbar.getDouble("buttonCornerRadius").toFloat())
+        paint.style = Paint.Style.FILL
+        paint.color = background.toArgb()
+        canvas.drawRoundRect(rect, radius, radius, paint)
+        val borderWidth = dp(theme.toolbar.getDouble("buttonBorderWidth").toFloat())
+        if (borderWidth > 0f) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = borderWidth
+            paint.color = theme.toolbar.themeColor(if (accented) "activeBorderColor" else "buttonBorderColor").toArgb()
+            val borderRect = RectF(rect).apply { inset(borderWidth / 2f, borderWidth / 2f) }
+            canvas.drawRoundRect(borderRect, radius, radius, paint)
+        }
+    }
+
+    private fun isSoftAccentToolbar(item: ToolbarRect): Boolean {
+        return item.command.type in setOf(
+            KeyCommandTypes.MODE,
+            KeyCommandTypes.OPEN_PAGE,
+            KeyCommandTypes.KEYBOARD_MODE,
+            KeyCommandTypes.KEYBOARD_PICKER,
+            KeyCommandTypes.NEXT_INPUT_METHOD,
+        ) || (item.command.type == KeyCommandTypes.PANEL && item.command.value in setOf(
+            "rime", "clipboard", "close", "dismissClipboard",
+        ))
     }
 
     private fun drawToolbarIcon(canvas: Canvas, icon: ToolbarIcon, rect: RectF, color: Int) {

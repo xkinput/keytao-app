@@ -77,7 +77,7 @@ class KeytaoImeTheme private constructor(root: JSONObject) {
     val effectiveColorScheme = ui.getString("effectiveColorScheme")
     val accentColor = ui.optJSONObject("accentColor")?.let {
         KeytaoColor(it.getInt("red"), it.getInt("green"), it.getInt("blue"), it.getInt("alpha"))
-    } ?: toolbar.themeColor("selectedForeground")
+    } ?: candidateBar.themeColor("selectedLabelColor")
     val panelBackground = keyboard.themeColor("background")
     val panelBorder = key.borderColor
     val keyBackground = key.background
@@ -86,13 +86,18 @@ class KeytaoImeTheme private constructor(root: JSONObject) {
     val keySelectedBackground = keyboard.getJSONObject("keyStates").getJSONObject("selected").themeColor("background")
     val keyForeground = key.foreground
     val keySelectedForeground = keyboard.getJSONObject("keyStates").getJSONObject("selected").themeColor("foreground")
-    val labelColor = candidateBar.themeColor("commentColor")
-    val selectedLabelColor = toolbar.themeColor("selectedForeground")
+    val labelColor = candidateBar.themeColor("labelColor")
+    val selectedLabelColor = candidateBar.themeColor("selectedLabelColor")
     val commentColor = candidateBar.themeColor("commentColor")
-    val selectedCommentColor = commentColor
-    val candidateBorderColor = key.borderColor
-    val candidateSelectedBorderColor = key.borderColor
-    val candidateBorderWidthDp = key.borderWidth
+    val selectedCommentColor = candidateBar.themeColor("selectedCommentColor")
+    val candidateBackground = candidateBar.themeColor("itemBackground")
+    val candidateBorderColor = candidateBar.themeColor("borderColor")
+    val candidateSelectedBorderColor = candidateBar.themeColor("selectedBorderColor")
+    val candidateBorderWidthDp = candidateBar.getDouble("borderWidth").toFloat()
+    val candidateSelectedBorderWidthDp = candidateBar.getDouble("selectedBorderWidth").toFloat()
+    val candidateCornerRadiusDp = candidateBar.getDouble("cornerRadius").toFloat()
+    val candidatePaddingXDp = candidateBar.getDouble("paddingX").toFloat()
+    val candidateInlineGapDp = candidateBar.getDouble("inlineGap").toFloat()
     val candidateSelectedBackground = candidateBar.themeColor("selectedBackground")
     val candidateSelectedForeground = candidateBar.themeColor("selectedForeground")
     val candidateForeground = candidateBar.themeColor("foreground")

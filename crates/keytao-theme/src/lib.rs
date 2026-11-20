@@ -810,7 +810,13 @@ fn restore_compiled_theme(theme: &mut ResolvedImeTheme, compiled: &serde_json::V
     } else {
         compiled.get("mobile")
     } {
-        theme.mobile = mobile.clone();
+        theme.mobile = mobile_theme::resolve_mobile_theme(
+            theme,
+            mobile,
+            theme.ui.effective_color_scheme == EffectiveColorScheme::Dark,
+        );
+        // Keep compiled-only states intact while filling newly added fields.
+        source::merge(&mut theme.mobile, mobile);
     }
 }
 

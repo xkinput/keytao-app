@@ -636,10 +636,18 @@ void main() {
       expect(decoration(panel).color!.a, originalColor!.a);
       expect(controller.uiSettings!.backgroundColor, isEmpty);
       if (controller.isMobile) {
+        final resolved = tester
+            .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
+            .theme['mobile']['keyboard']['key']['background'];
         expect(
           decoration(find.byKey(const ValueKey('keyboard-preview-key-q')))
               .color,
-          const Color(0xAA2A303A),
+          Color.fromARGB(
+            resolved['alpha'] as int,
+            resolved['red'] as int,
+            resolved['green'] as int,
+            resolved['blue'] as int,
+          ),
         );
       }
       await tester.tap(find.text(AppStrings.cancel));

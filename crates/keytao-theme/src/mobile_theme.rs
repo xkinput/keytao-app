@@ -45,24 +45,27 @@ fn resolve_mobile_theme_for_platform(
         mix_color(pc.panel.background, accent, 0.07),
         pc.panel.background.alpha,
     );
-    let soft_background = if ios {
-        // UIKit kept both blends unrounded until the final resolved color.
-        with_alpha(
-            mix_color(pc.panel.background, accent, 0.07 + 0.93 * 0.22),
-            (255.0_f32
-                * if is_dark {
-                    0.66 + 0.36 * 0.22
-                } else {
-                    0.44 + 0.72 * 0.22
-                })
-            .round() as u8,
-        )
-    } else {
-        with_alpha(
-            mix_color(keyboard_background, accent, 0.22),
-            pc.panel.background.alpha,
-        )
+    let accent_surface = |amount: f32| {
+        if ios {
+            // UIKit kept both blends unrounded until the final resolved color.
+            with_alpha(
+                mix_color(pc.panel.background, accent, 0.07 + 0.93 * amount),
+                (255.0_f32
+                    * if is_dark {
+                        (0.66 + 0.36 * amount).min(0.82)
+                    } else {
+                        (0.44 + 0.72 * amount).min(0.66)
+                    })
+                .round() as u8,
+            )
+        } else {
+            with_alpha(
+                mix_color(keyboard_background, accent, amount),
+                pc.panel.background.alpha,
+            )
+        }
     };
+    let soft_background = accent_surface(0.22);
     let mut soft_key = json!({
         "background": color(soft_background),
         "pressedBackground": color(with_alpha(
@@ -144,12 +147,32 @@ fn resolve_mobile_theme_for_platform(
             .remove("pressedBackground");
     }
     mobile["keyboard"]["toolbar"]["foreground"] = color(pc.candidate.foreground);
-    mobile["keyboard"]["toolbar"]["selectedForeground"] = color(accent);
+    mobile["keyboard"]["toolbar"]["selectedForeground"] = color(pc.candidate.selected_foreground);
+    for (field, value) in [
+        ("activeBackground", color(accent_surface(0.13))),
+        ("selectedBackground", color(accent_surface(0.18))),
+        ("pressedBackground", color(accent_surface(0.24))),
+        (
+            "activeBorderColor",
+            color(with_alpha(accent, if is_dark { 107 } else { 153 })),
+        ),
+    ] {
+        mobile["keyboard"]["toolbar"][field] = value;
+    }
     for (field, value) in [
         ("foreground", pc.candidate.foreground),
         ("selectedForeground", pc.candidate.selected_foreground),
         ("selectedBackground", pc.candidate.selected_background),
         ("commentColor", pc.candidate.comment_color),
+        ("selectedCommentColor", pc.candidate.selected_comment_color),
+        ("labelColor", pc.candidate.label_color),
+        ("selectedLabelColor", pc.candidate.selected_label_color),
+        ("itemBackground", pc.candidate.background),
+        (
+            "borderColor",
+            with_alpha(accent, if is_dark { 62 } else { 89 }),
+        ),
+        ("selectedBorderColor", pc.candidate.selected_border_color),
         (
             "preeditForeground",
             if ios {
@@ -160,6 +183,15 @@ fn resolve_mobile_theme_for_platform(
         ),
     ] {
         mobile["candidateBar"][field] = color(value);
+    }
+    for (field, value) in [
+        ("borderWidth", 1.0),
+        ("selectedBorderWidth", pc.candidate.border_width.max(1.0)),
+        ("cornerRadius", pc.candidate.corner_radius * 8.0 / 11.0),
+        ("paddingX", pc.candidate.padding_x.clamp(7.0, 9.0)),
+        ("inlineGap", pc.candidate.inline_gap.clamp(2.0, 4.0)),
+    ] {
+        mobile["candidateBar"][field] = json!(value);
     }
 
     let mut overrides = overrides.clone();
@@ -176,12 +208,31 @@ fn resolve_mobile_theme_for_platform(
             "/keyboard/key/borderColor",
         ),
         ("/candidateBar/expandedBackground", "/keyboard/background"),
+        (
+            "/keyboard/toolbar/buttonBackground",
+            "/keyboard/key/background",
+        ),
+        (
+            "/keyboard/toolbar/buttonBorderColor",
+            "/keyboard/key/borderColor",
+        ),
+        (
+            "/keyboard/toolbar/buttonBorderWidth",
+            "/keyboard/key/borderWidth",
+        ),
+        (
+            "/keyboard/toolbar/buttonCornerRadius",
+            "/keyboard/key/cornerRadius",
+        ),
     ] {
         if overrides.pointer(target).is_none() {
             let inherited = mobile.pointer(inherited).unwrap().clone();
             let (parent, field) = target.rsplit_once('/').unwrap();
             mobile.pointer_mut(parent).unwrap()[field] = inherited;
         }
+    }
+    if ios && overrides.pointer("/candidateBar/itemBackground").is_none() {
+        mobile["candidateBar"]["itemBackground"] = mobile["keyboard"]["key"]["background"].clone();
     }
     if let Some(background) = overrides.pointer("/keyboard/keyStates/selected/background") {
         mobile["keyboard"]["keyStates"]["selected"]["softBackground"] = background.clone();
@@ -192,7 +243,10 @@ fn resolve_mobile_theme_for_platform(
         "background".into(),
         mobile["keyboard"]["key"]["background"].clone(),
     );
-    shift_on.insert("borderColor".into(), color(pc.candidate.selected_border_color));
+    shift_on.insert(
+        "borderColor".into(),
+        color(pc.candidate.selected_border_color),
+    );
     overlay_colors(
         &mut shift_on,
         &overrides["keyboard"]["keyStates"]["shiftOn"],
@@ -274,8 +328,11 @@ pub fn resolve_mobile_key_style(
 /// Shared source-validation and final-resolution ranges for mobile appearance.
 pub(crate) fn sanitize_mobile_number(field: &str, value: f64) -> Option<f64> {
     let (min, max) = match field {
-        "borderWidth" => (0.0, 2.0),
-        "cornerRadius" => (0.0, 24.0),
+        "borderWidth" | "buttonBorderWidth" => (0.0, 2.0),
+        "selectedBorderWidth" => (0.0, 3.0),
+        "cornerRadius" | "buttonCornerRadius" => (0.0, 24.0),
+        "paddingX" => (0.0, 28.0),
+        "inlineGap" => (0.0, 18.0),
         "shadowOffsetY" => (0.0, 4.0),
         "fontScale" | "hintFontScale" => (0.8, 1.3),
         _ => return None,
@@ -323,6 +380,15 @@ fn is_color_field(field: &str) -> bool {
             | "swipeHintForeground"
             | "selectedForeground"
             | "selectedBackground"
+            | "itemBackground"
+            | "selectedBorderColor"
+            | "labelColor"
+            | "selectedLabelColor"
+            | "selectedCommentColor"
+            | "buttonBackground"
+            | "buttonBorderColor"
+            | "activeBackground"
+            | "activeBorderColor"
             | "commentColor"
             | "preeditForeground"
             | "preeditBackground"
@@ -411,6 +477,100 @@ mod tests {
             false,
             false,
         )
+    }
+
+    #[test]
+    fn alpha1_mobile_surfaces_follow_accent_and_preserve_explicit_overrides() {
+        for dark in [false, true] {
+            let scheme = if dark {
+                EffectiveColorScheme::Dark
+            } else {
+                EffectiveColorScheme::Light
+            };
+            let mut pc = resolve_theme_with_pending_settings(None, None, scheme, None);
+            pc.ui.accent_color = parse_color("#8060C080");
+            for ios in [false, true] {
+                let mobile = resolve_mobile_theme_for_platform(&pc, &json!({}), dark, ios);
+                let candidate = &mobile["candidateBar"];
+                let toolbar = &mobile["keyboard"]["toolbar"];
+                assert_eq!(
+                    candidate["borderColor"],
+                    color(parse_color(if dark { "#8060C03E" } else { "#8060C059" }).unwrap())
+                );
+                assert_eq!(
+                    toolbar["activeBorderColor"],
+                    color(parse_color(if dark { "#8060C06B" } else { "#8060C099" }).unwrap())
+                );
+                assert_eq!(candidate["cornerRadius"], 8.0);
+                assert_eq!(candidate["paddingX"], 9.0);
+                assert_eq!(candidate["inlineGap"], 4.0);
+                assert_eq!(
+                    candidate["selectedBorderColor"],
+                    color(pc.candidate.selected_border_color)
+                );
+                assert_eq!(
+                    candidate["itemBackground"],
+                    if ios {
+                        mobile["keyboard"]["key"]["background"].clone()
+                    } else {
+                        color(pc.candidate.background)
+                    }
+                );
+                assert_eq!(
+                    toolbar["buttonBackground"],
+                    mobile["keyboard"]["key"]["background"]
+                );
+                assert_eq!(toolbar["buttonCornerRadius"], 10.0);
+                let explicit = json!({"candidateBar":{"itemBackground":"#11223304","borderColor":"#22334405","selectedBorderColor":"#33445506","labelColor":"#44556607","selectedLabelColor":"#55667708","selectedCommentColor":"#66778809","paddingX":100,"inlineGap":-1},"keyboard":{"toolbar":{"buttonBackground":"#7788990A","activeBackground":"#8899AA0B","selectedBackground":"#99AABB0C","pressedBackground":"#AABBCC0D","buttonBorderColor":"#BBCCDD0E","activeBorderColor":"#CCDDEE0F"}}});
+                let resolved = resolve_mobile_theme_for_platform(&pc, &explicit, dark, ios);
+                for (section, fields) in [
+                    (&resolved["candidateBar"], &explicit["candidateBar"]),
+                    (
+                        &resolved["keyboard"]["toolbar"],
+                        &explicit["keyboard"]["toolbar"],
+                    ),
+                ] {
+                    for (field, value) in fields.as_object().unwrap() {
+                        if let Some(value) = value.as_str() {
+                            assert_eq!(
+                                section[field],
+                                color(parse_color(value).unwrap()),
+                                "{field}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(resolved["candidateBar"]["paddingX"], 28.0);
+                assert_eq!(resolved["candidateBar"]["inlineGap"], 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn old_compiled_mobile_keeps_custom_colors_and_receives_new_surfaces() {
+        for (scheme, variant) in [
+            (EffectiveColorScheme::Light, "mobile"),
+            (EffectiveColorScheme::Dark, "dark"),
+        ] {
+            let mut theme = resolve_theme_with_pending_settings(None, None, scheme, None);
+            let custom = color(parse_color("#11223344").unwrap());
+            let selected = color(parse_color("#55667788").unwrap());
+            let soft = color(parse_color("#99AABBCC").unwrap());
+            let mut compiled = json!({"mobile":{"keyboard":{"key":{"background":custom},"keyStates":{"selected":{"background":selected,"softBackground":soft}}}}});
+            if variant == "dark" {
+                compiled = json!({"dark":compiled});
+            }
+            crate::restore_compiled_theme(&mut theme, &compiled);
+            assert_eq!(theme.mobile["keyboard"]["key"]["background"], custom);
+            assert_eq!(theme.mobile["keyboard"]["keyStates"]["selected"]["background"], selected);
+            assert_eq!(theme.mobile["keyboard"]["keyStates"]["selected"]["softBackground"], soft);
+            assert_eq!(
+                theme.mobile["keyboard"]["toolbar"]["buttonBackground"],
+                custom
+            );
+            assert!(theme.mobile["candidateBar"]["borderWidth"].is_number());
+            assert!(theme.mobile["candidateBar"]["selectedBorderColor"].is_object());
+        }
     }
 
     #[test]

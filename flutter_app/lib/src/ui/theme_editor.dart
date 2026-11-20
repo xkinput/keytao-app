@@ -893,10 +893,26 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                     for (final color in const {
                       'background': '底色',
                       'foreground': '字色',
+                      'borderColor': '边框',
                     }.entries)
                       'mobile.keyboard.${entry.key}.${color.key}':
                           '${entry.value}${color.value}',
                 }),
+                _compactRows([
+                  for (final entry in const {
+                    'keyTypes.function': '功能键',
+                    'keyTypes.space': '空格',
+                    'keyTypes.enter': '回车',
+                    'keyClasses.accent': '强调键',
+                  }.entries)
+                    _slider(
+                      '${entry.value}边框宽度',
+                      'mobile.keyboard.${entry.key}.borderWidth',
+                      0,
+                      2,
+                      4,
+                    ),
+                ]),
               ]),
               _group('按键细节', [
                 _colors(const {
@@ -917,8 +933,34 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 ]),
               ]),
               _group('候选栏', [
+                _colors({
+                  for (final entry in const {
+                    'background': '栏背景',
+                    'itemBackground': '候选底色',
+                    'foreground': '候选字色',
+                    'selectedBackground': '高亮底色',
+                    'selectedForeground': '高亮字色',
+                    'borderColor': '候选边框',
+                    'selectedBorderColor': '高亮边框',
+                    'labelColor': '序号字色',
+                    'selectedLabelColor': '高亮序号',
+                    'commentColor': '注释字色',
+                    'selectedCommentColor': '高亮注释',
+                  }.entries)
+                    'mobile.candidateBar.${entry.key}': entry.value,
+                }),
                 _compactRows([
-                  _color('背景', 'mobile.candidateBar.background'),
+                  _slider('边框宽度', 'mobile.candidateBar.borderWidth', 0, 2, 4),
+                  _slider(
+                    '高亮边框宽度',
+                    'mobile.candidateBar.selectedBorderWidth',
+                    0,
+                    3,
+                    6,
+                  ),
+                  _slider('圆角', 'mobile.candidateBar.cornerRadius', 0, 24, 24),
+                  _slider('横向内边距', 'mobile.candidateBar.paddingX', 0, 28, 28),
+                  _slider('文字间距', 'mobile.candidateBar.inlineGap', 0, 18, 18),
                   _slider(
                     '字号缩放',
                     'mobile.candidateBar.fontScale',
@@ -928,6 +970,38 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                     scale: true,
                   ),
                   _toggle('显示注释', 'mobile.candidateBar.showComment'),
+                ]),
+              ]),
+              _group('工具栏', [
+                _colors({
+                  for (final entry in const {
+                    'background': '栏背景',
+                    'foreground': '图标字色',
+                    'selectedForeground': '选中字色',
+                    'buttonBackground': '按钮底色',
+                    'buttonBorderColor': '按钮边框',
+                    'activeBackground': '强调底色',
+                    'selectedBackground': '选中底色',
+                    'pressedBackground': '按下底色',
+                    'activeBorderColor': '强调边框',
+                  }.entries)
+                    'mobile.keyboard.toolbar.${entry.key}': entry.value,
+                }),
+                _compactRows([
+                  _slider(
+                    '边框宽度',
+                    'mobile.keyboard.toolbar.buttonBorderWidth',
+                    0,
+                    2,
+                    4,
+                  ),
+                  _slider(
+                    '按钮圆角',
+                    'mobile.keyboard.toolbar.buttonCornerRadius',
+                    0,
+                    24,
+                    24,
+                  ),
                 ]),
               ]),
             ],
