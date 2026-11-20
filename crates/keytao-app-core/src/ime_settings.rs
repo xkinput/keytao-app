@@ -892,12 +892,15 @@ pub fn get_schemas(host: impl ImeHost) -> Result<SchemaList, CoreError> {
 
 pub fn select_schema(host: impl ImeHost, schema_id: &str) -> Result<(), CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?;
-    keytao_core::request_schema(&root, schema_id).map_err(CoreError::Other)?;
-    keytao_core::write_current_schema(&root, schema_id).map_err(CoreError::Other)?;
-    #[cfg(target_os = "windows")]
-    host.publish_schema_switches().map_err(CoreError::Other)?;
-    keytao_core::ReloadStamp::write_schema(&root).map_err(CoreError::Other)?;
-    Ok(())
+    keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
+        keytao_core::request_schema(&root, schema_id)?;
+        keytao_core::write_current_schema(&root, schema_id)?;
+        #[cfg(target_os = "windows")]
+        host.publish_schema_switches()?;
+        keytao_core::ReloadStamp::write_schema(&root)?;
+        Ok(())
+    })
+    .map_err(CoreError::Other)
 }
 
 pub fn get_schema_switches(
@@ -925,12 +928,14 @@ pub fn set_schema_switch(
     value: usize,
 ) -> Result<Vec<keytao_core::SchemaSwitchSetting>, CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?;
-    let switches =
-        keytao_core::set_schema_switch(&root, schema_id, name, value).map_err(CoreError::Other)?;
-    #[cfg(target_os = "windows")]
-    host.publish_schema_switches().map_err(CoreError::Other)?;
-    host.write_reload_stamp(&root).map_err(CoreError::Other)?;
-    Ok(switches)
+    keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
+        let switches = keytao_core::set_schema_switch(&root, schema_id, name, value)?;
+        #[cfg(target_os = "windows")]
+        host.publish_schema_switches()?;
+        host.write_reload_stamp(&root)?;
+        Ok(switches)
+    })
+    .map_err(CoreError::Other)
 }
 
 pub async fn set_desktop_english_mode(

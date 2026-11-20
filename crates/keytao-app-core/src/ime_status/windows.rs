@@ -981,7 +981,7 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
     let engine_error = match keytao_core::default_user_data_dir() {
         Some(user_dir) => windows_ime_engine_error(
             &user_dir.join("keytao-ime-engine.json"),
-            keytao_core::schema_install_state(&user_dir).deployed,
+            keytao_core::schema_build_is_available(&user_dir),
         ),
         None => Some("无法确定输入法数据目录".into()),
     };
@@ -1504,17 +1504,33 @@ pub fn windows_deploy_rime_blocking(
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn windows_server_executable() -> Result<PathBuf, String> {
+    server::installed_server_exe()
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn windows_deploy_packages_blocking(
     user_dir: &Path,
     plan: &str,
+    publish_deploy: bool,
     mut progress: impl FnMut(&keytao_core::DeployProgress),
 ) -> Result<Option<String>, String> {
     use keytao_core::{DeployStep, deploy_child};
 
-    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
+    let profile_guard = publish_deploy
+        .then(WindowsImeProfileDeploymentGuard::suspend)
+        .transpose()?;
     let mut reload_warning = None;
+    let mut ready = Vec::new();
     let mut report = |event: &keytao_core::DeployProgress| {
-        if event.legacy_message.is_none() && event.index == 1 && event.step == DeployStep::Done {
+        if publish_deploy && matches!(event.step, DeployStep::Done | DeployStep::Skip) {
+            ready.push(event.package_key.clone());
+        }
+        if publish_deploy
+            && event.legacy_message.is_none()
+            && event.index == 1
+            && event.step == DeployStep::Done
+        {
             reload_warning = keytao_core::ReloadStamp::write(user_dir)
                 .err()
                 .map(|error| format!("系统输入法重载通知失败：{error}"));
@@ -1530,8 +1546,25 @@ pub(crate) fn windows_deploy_packages_blocking(
             report,
         )?;
     }
-    let public_warning = finish_windows_deploy(user_dir, profile_guard)?
-        .map(|warning| format!("系统搜索框方案未更新：{warning}"));
+    let mut public_warning = None;
+    if let Some(profile_guard) = profile_guard {
+        let active = keytao_core::RuntimeDirs::active_package_key(user_dir);
+        if active.is_none() {
+            public_warning = finish_windows_deploy(user_dir, profile_guard)?;
+        } else {
+            keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
+            profile_guard.resume()?;
+        }
+        for key in ready {
+            if let Err(error) = crate::windows_public_schemas::publish_isolated_package(
+                &key,
+                active.as_deref() == Some(&key),
+            ) {
+                public_warning = Some(error);
+            }
+        }
+    }
+    let public_warning = public_warning.map(|warning| format!("系统搜索框方案未更新：{warning}"));
     Ok(match (reload_warning, public_warning) {
         (Some(reload), Some(public)) => Some(format!("{reload}\n{public}")),
         (reload, public) => reload.or(public),

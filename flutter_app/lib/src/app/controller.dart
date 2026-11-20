@@ -47,10 +47,11 @@ enum ImeBadgeState {
 }
 
 class DeployStep {
-  const DeployStep(this.message, this.state, {this.packageKey});
+  const DeployStep(this.message, this.state, {this.packageKey, this.error});
   final String message;
   final DeployStepState state;
   final String? packageKey;
+  final String? error;
 }
 
 LogLineKind operationLogKind(String line) {
@@ -283,8 +284,12 @@ class AppController extends ChangeNotifier {
     };
   }
 
-  String? packageDeployError(String key) =>
-      _packageDeployProgress[_packageDeployKey(key)]?.error;
+  String? packageDeployError(String key) {
+    final package =
+        deploySteps.where((step) => step.packageKey == key).firstOrNull ??
+        deploySteps.where((step) => step.packageKey == 'builtin/$key').firstOrNull;
+    return package?.error;
+  }
 
   String _packageDeployKey(String key) =>
       _packageDeployProgress.containsKey(key) ? key : 'builtin/$key';
@@ -964,6 +969,7 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    if (operation == null) return;
     if (value.index == 1 && value.step == DeployStepDto.materialize) {
       _packageDeployProgress
         ..clear()
@@ -986,6 +992,7 @@ class AppController extends ChangeNotifier {
         '${value.packageName}：${value.error ?? AppStrings.deployFailed}',
         DeployStepState.failed,
         packageKey: value.packageKey,
+        error: value.error,
       ),
       _ => DeployStep(
         heading,
@@ -1059,6 +1066,7 @@ class AppController extends ChangeNotifier {
       error = _isInlineError(message) ? null : message;
       return false;
     } finally {
+      _packageDeployProgress.clear();
       busy = false;
       _changed();
       if (_refreshSchemasWhenIdle && !_disposed) {
@@ -1981,6 +1989,9 @@ class AppController extends ChangeNotifier {
       if (package?.hasPackageZip != true) return false;
       if (package!.inUse) return true;
     }
+    if (local?.runtimeIsolation == true) {
+      return run(() => _switchSchemePackage(key));
+    }
     if (package?.active == true || addonStatus?.installed == true) {
       return run(() async {
         if (addonStatus?.deployed == false || local?.deployed == false) {
@@ -2031,6 +2042,10 @@ class AppController extends ChangeNotifier {
   });
 
   Future<void> _activateSchemePackage(String key) async {
+    if (local?.runtimeIsolation == true) {
+      await _switchSchemePackage(key);
+      return;
+    }
     final wasActive = installedPackageFor(key)?.active == true;
     packageError = null;
     _invalidateSchemeUpdates();
@@ -2068,6 +2083,33 @@ class AppController extends ChangeNotifier {
     if (verification.every((entry) => entry.ok)) {
       await _deploy(schemeKey: key);
       scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
+    }
+  }
+
+  Future<void> _switchSchemePackage(String key) async {
+    packageError = null;
+    deployingSchemeKey = key;
+    _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      await core.switchPackage(packageKey: key, androidDeploy: _androidDeploy);
+      verification = [];
+      if (schemeAssets.containsKey(key) || isLocalScheme(key)) {
+        _manuallySelectedScheme = true;
+        scheme = key;
+        latestRelease = null;
+        schemeRelease = null;
+      }
+      _invalidateSchemeUpdates();
+      await _readInstalledPackages();
+      await _readLocal();
+      scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
+    } finally {
+      deployingSchemeKey = null;
+      operation = null;
     }
   }
 
@@ -2233,6 +2275,7 @@ class AppController extends ChangeNotifier {
       addOperationLogs(['[DEPLOY ERROR] ${errorText(failure)}']);
       rethrow;
     } finally {
+      _packageDeployProgress.clear();
       deployingSchemeKey = null;
       operation = null;
     }

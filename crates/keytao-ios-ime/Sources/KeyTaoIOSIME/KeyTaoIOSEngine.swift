@@ -253,7 +253,18 @@ enum KeyTaoIOSPaths {
         userRoot.appendingPathComponent("ios_ime.json")
     }
 
+    private static func isolatedSchemaState(userRoot: URL) -> Int32? {
+        let state = userRoot.path.withCString { user in
+            guard let shared = sharedDataDir(userRoot: userRoot) else {
+                return keytao_isolated_schema_state_at(user, nil)
+            }
+            return shared.path.withCString { keytao_isolated_schema_state_at(user, $0) }
+        }
+        return state >= 0 ? state : nil
+    }
+
     static func hasInstalledSchema(userRoot: URL) -> Bool {
+        if let state = isolatedSchemaState(userRoot: userRoot) { return state > 0 }
         let schemas = configuredSchemas(userRoot: userRoot)
         return !schemas.isEmpty && schemas.allSatisfy {
             FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
@@ -261,6 +272,7 @@ enum KeyTaoIOSPaths {
     }
 
     static func hasDeployedSchema(userRoot: URL) -> Bool {
+        if let state = isolatedSchemaState(userRoot: userRoot) { return state == 2 }
         let schemas = configuredSchemas(userRoot: userRoot)
         let build = userRoot.appendingPathComponent("build", isDirectory: true)
         let bundle = Bundle.main
@@ -289,7 +301,10 @@ enum KeyTaoIOSPaths {
     }
 
     static func isDeploying(userRoot: URL) -> Bool {
-        FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("build/.keytao-deploying").path)
+        if isolatedSchemaState(userRoot: userRoot) != nil {
+            return userRoot.path.withCString { keytao_deployment_in_progress_at($0) }
+        }
+        return FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("build/.keytao-deploying").path)
     }
 
     private static func configuredSchemas(userRoot: URL) -> [String] {

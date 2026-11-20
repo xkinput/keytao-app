@@ -344,7 +344,7 @@ fn finish_deploy(
 ) -> (Result<(), String>, bool) {
     let reloaded = reload().or_else(|error| {
         if !failed_child
-            || !user_dir.is_some_and(|dir| !keytao_core::schema_install_state(dir).deployed)
+            || !user_dir.is_some_and(|dir| !keytao_core::schema_build_is_available(dir))
         {
             return Err(error);
         }
@@ -368,16 +368,29 @@ fn deploy(
     progress: impl FnMut(&DeployProgress),
 ) -> Result<(), String> {
     let _deploy = MAINTENANCE_LOCK.lock();
+    if let Some(plan) = package_plan {
+        // A new build generation never changes the artifacts mapped by live hosts.
+        ensure_deploy_job()?;
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let mut command = std::process::Command::new(executable);
+        command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
+        return deploy_child::run_deploy_child_command_with_progress(
+            &mut command,
+            Duration::from_secs(600),
+            progress,
+        );
+    }
+    let root = keytao_core::default_user_data_dir().ok_or("cannot determine Rime directory")?;
+    crate::staged_deploy::flat_deploy_dirs(&root)?;
     {
         let mut runtime = runtime.lock();
-        if !runtime.should_stage_deploy(package_plan.is_some()) {
-            return runtime.deploy(package_plan, progress);
+        if !runtime.should_stage_deploy(false) {
+            return runtime.deploy(progress);
         }
         runtime.deploying = true;
     }
     let result = (|| {
         ensure_deploy_job()?;
-        let root = keytao_core::default_user_data_dir().ok_or("cannot determine Rime directory")?;
         let stage = crate::staged_deploy::Stage::create(&root)?;
         keytao_core::rebase_active_scheme_manifest(stage.path())?;
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -446,7 +459,6 @@ fn deploy(
 impl Runtime {
     fn deploy(
         &mut self,
-        package_plan: Option<&str>,
         progress: impl FnMut(&DeployProgress),
     ) -> Result<(), String> {
         self.ready = false;
@@ -470,9 +482,6 @@ impl Runtime {
                 engine.prepare_server_deploy()?;
             }
             let mut command = std::process::Command::new(executable.as_deref().unwrap());
-            if let Some(plan) = package_plan {
-                command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
-            }
             let child = deploy_child::run_deploy_child_command_with_progress(
                 &mut command,
                 Duration::from_secs(600),
@@ -480,15 +489,13 @@ impl Runtime {
             );
             failed_child = child.is_err();
             child?;
-            if package_plan.is_none() {
-                keytao_core::ReloadStamp::write(user_dir.as_deref().unwrap())?;
-            }
+            keytao_core::ReloadStamp::write(user_dir.as_deref().unwrap())?;
             Ok(())
         })();
         let result = if prepared || failed_child || result.is_ok() {
             let (result, ready) = finish_deploy(
                 result,
-                failed_child && package_plan.is_none(),
+                failed_child,
                 user_dir.as_deref(),
                 || {
                     if let Some(engine) = &self.engine {

@@ -450,11 +450,10 @@ pub extern "C" fn keytao_run_deploy_child() -> bool {
 /// Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
 /// Returns true on success.
 ///
-/// Calls are serialized and a repeat for the directories already running is a
-/// no-op, so a frontend that initializes from two paths at once keeps the
-/// session it is composing in. Switching to different directories takes
-/// librime down and back up: sessions created before the switch stop answering
-/// and have to be recreated with keytao_create_session().
+/// Calls are serialized. A repeat for the running directories keeps its
+/// session unless an isolated reload is pending. Switching to different
+/// control directories retires old handles, which must be recreated with
+/// keytao_create_session().
 #[no_mangle]
 pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char) -> bool {
     guard("keytao_init", false, || {
@@ -482,6 +481,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
             user: PathBuf::from(&user),
             shared: shared.clone(),
         };
+        let isolated = keytao_core::RuntimeDirs::isolation_enabled(&dirs.user);
         update_deployment_status(&dirs.user, |_| {});
         let (previous, previous_runtime, same_ready_runtime) = {
             let g = lock_ignore_poison(&GLOBAL);
@@ -496,6 +496,12 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
                 .as_ref()
                 .is_some_and(ImeRuntime::is_initialized)
         {
+            if isolated && stamp_changed_peek().is_some() {
+                return reload_now()
+                    || previous_runtime
+                        .as_ref()
+                        .is_some_and(ImeRuntime::is_initialized);
+            }
             return true;
         }
 
@@ -504,6 +510,8 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         // and brought back up, so the whole rebuild runs under the write guard.
         // `GLOBAL` was released above: it is only ever taken below this lock.
         let mut epoch = write_ignore_poison(&SESSION_EPOCH);
+        // A package switch during startup has to remain pending.
+        let signal_at_start = isolated.then(|| ReloadSignal::new(&dirs.user));
         let runtime = ImeRuntime::with_dirs(user, shared).with_ime_host();
         if let Err(e) = runtime.init_without_deploy() {
             log_error(format_args!("keytao_init: runtime init failed: {e}"));
@@ -529,7 +537,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         drop(epoch);
 
         // Reads the stamp, so it is built before the lock is taken.
-        let signal = ReloadSignal::new(&dirs.user);
+        let signal = signal_at_start.unwrap_or_else(|| ReloadSignal::new(&dirs.user));
         *lock_ignore_poison(&RELOAD_SIGNAL) = Some(signal);
         update_deployment_status(&dirs.user, |_| {});
         let mut g = lock_ignore_poison(&GLOBAL);
@@ -688,6 +696,26 @@ pub extern "C" fn keytao_reload_if_stamp_changed() -> bool {
         // The request is only marked as seen once the reload really ran, so a
         // transient failure is retried on the next tick instead of swallowed.
         stamp_changed_peek().is_some() && reload_now()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn keytao_isolated_schema_state_at(
+    user_dir: *const c_char,
+    shared_dir: *const c_char,
+) -> i32 {
+    guard("keytao_isolated_schema_state_at", 0, || {
+        let Ok(user_dir) = c_string_arg(user_dir, "user_dir") else {
+            return 0;
+        };
+        let user_dir = Path::new(&user_dir);
+        let shared_dir = optional_path_arg(shared_dir);
+        let shared_dir = shared_dir.as_deref().unwrap_or(user_dir);
+        match keytao_core::isolated_ime_schema_state(user_dir, shared_dir) {
+            None => -1,
+            Some(state) if state.deployed => 2,
+            Some(state) => i32::from(state.installed),
+        }
     })
 }
 

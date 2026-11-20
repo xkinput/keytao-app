@@ -98,11 +98,10 @@ bool keytao_run_deploy_child(void);
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.
  *
- * Calls are serialized and a repeat for the directories already running is a
- * no-op, so a frontend that initializes from two paths at once keeps the
- * session it is composing in. Switching to different directories takes
- * librime down and back up: sessions created before the switch stop answering
- * and have to be recreated with keytao_create_session().
+ * Calls are serialized. A repeat for the running directories keeps its
+ * session unless an isolated reload is pending. Switching to different
+ * control directories retires old handles, which must be recreated with
+ * keytao_create_session().
  */
 bool keytao_init(const char *user_dir, const char *shared_dir);
 
@@ -126,6 +125,8 @@ char *keytao_reload_stamp_path_at(const char *user_dir);
  * ran. Cheap enough for a timer, but not for the key path: it stats a file.
  */
 bool keytao_reload_if_stamp_changed(void);
+
+int32_t keytao_isolated_schema_state_at(const char *user_dir, const char *shared_dir);
 
 /**
  * Cached shared key gate, including failed initialization before a session exists.

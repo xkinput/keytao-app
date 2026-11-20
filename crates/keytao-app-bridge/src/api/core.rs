@@ -23,12 +23,16 @@ pub fn core_events(sink: StreamSink<BridgeEvent>) -> Result<(), String> {
 
 pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
     let state = runtime::state()?;
+    let root = state.host.user_root()?;
     let local =
-        keytao_app_core::scheme::check_local_schema(&state.core, Some(state.host.user_root()?))
+        keytao_app_core::scheme::check_local_schema(&state.core, Some(root.clone()))
             .map_err(|error| error.to_string())?;
     let app_state = state.core.state();
-    let installed_scheme_version = app_state
-        .active_scheme
+    let runtime_isolation = keytao_core::RuntimeDirs::isolation_enabled(&root).then_some(true);
+    let installed_scheme = runtime_isolation
+        .and_then(|_| keytao_core::RuntimeDirs::active_package_key(&root))
+        .or(app_state.active_scheme);
+    let installed_scheme_version = installed_scheme
         .as_ref()
         .and_then(|scheme| app_state.installed_packages.get(scheme))
         .and_then(|package| package.version.clone());
@@ -37,8 +41,9 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         deployed: local.deployed,
         version: local.version,
         schemas: local.schemas,
-        installed_scheme: app_state.active_scheme,
+        installed_scheme,
         installed_scheme_version,
+        runtime_isolation,
     })
 }
 
@@ -85,6 +90,9 @@ pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result
     let root = state.host.user_root()?;
     keytao_app_core::package_schemas::set_package_schemas(&state.core, &scheme_key, &ids)
         .map_err(|error| error.to_string())?;
+    if keytao_core::RuntimeDirs::isolation_enabled(&root) {
+        return Ok(keytao_core::RuntimeDirs::active_package_key(&root).as_deref() == Some(&scheme_key));
+    }
     if keytao_app_core::packages::list_installed_packages(&state.core)
         .map_err(|error| error.to_string())?
         .iter()
@@ -113,10 +121,18 @@ pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result
 
 pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     let state = runtime::state()?;
-    runtime::dto(
-        keytao_app_core::packages::list_installed_packages(&state.core)
-            .map_err(|error| error.to_string())?,
-    )
+    let root = state.host.user_root()?;
+    let mut packages = keytao_app_core::packages::list_installed_packages(&state.core)
+        .map_err(|error| error.to_string())?;
+    if keytao_core::RuntimeDirs::isolation_enabled(&root) {
+        if let Some(key) = keytao_core::RuntimeDirs::active_package_key(&root) {
+            for package in &mut packages {
+                package.in_use = package.scheme_key == key;
+                package.active |= package.in_use;
+            }
+        }
+    }
+    runtime::dto(packages)
 }
 
 pub async fn package_orphan_report() -> Result<PackageOrphanReportDto, String> {
@@ -512,6 +528,26 @@ pub async fn activate_scheme(
     .await
     .map_err(|error| error.to_string())?;
     Ok(install_result_dto(result))
+}
+
+pub async fn switch_package(
+    package_key: String,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
+) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    #[cfg(target_os = "windows")]
+    state.host.require_default_windows_root()?;
+    #[cfg(not(target_os = "android"))]
+    let _ = android_deploy;
+    keytao_app_core::deploy::switch_package(
+        &state.core,
+        &state.host.user_root()?,
+        &package_key,
+        #[cfg(target_os = "android")]
+        android_deploy,
+    )
+    .await
 }
 
 pub async fn remove_scheme_package(

@@ -782,7 +782,26 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHasDepl
         let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
-        keytao_core::schema_install_state(&user_dir).deployed as jboolean
+        keytao_core::schema_build_is_available(&user_dir) as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeIsolatedSchemaState(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jint {
+    android_jni_guard("nativeIsolatedSchemaState", 0, || {
+        let Some(root) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        match keytao_core::isolated_ime_schema_state(&root, &root.join("rime-data")) {
+            None => -1,
+            Some(state) if state.deployed => 2,
+            Some(state) => jint::from(state.installed),
+        }
     })
 }
 
@@ -1037,7 +1056,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployP
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
-    data_dir: JString<'_>,
 ) -> jstring {
     android_jni_guard("nativeDeployPackages", std::ptr::null_mut(), || {
         use crate::deploy::{ANDROID_DEPLOY_PLAN_FILE, ANDROID_DEPLOY_PROGRESS_FILE};
@@ -1046,7 +1064,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployP
 
         let result = (|| {
             let root = optional_jni_path(&mut env, user_dir).ok_or("missing user directory")?;
-            let data = optional_jni_path(&mut env, data_dir).ok_or("missing package data directory")?;
             if !keytao_core::RuntimeDirs::isolation_enabled(&root) {
                 return Err("package isolation is disabled".to_string());
             }
@@ -1074,13 +1091,17 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployP
             let result = deploy_packages(
                 &root,
                 &root.join("rime-data"),
-                Some(&data),
+                None,
                 &targets,
                 |progress| {
-                    if progress.index == 1 && progress.step == keytao_core::DeployStep::Done {
-                        stamp_error = keytao_core::ReloadStamp::write(&root)
-                            .err()
-                            .map(|error| format!("系统输入法重载通知失败：{error}"));
+                    if progress.step == keytao_core::DeployStep::Done
+                        && keytao_core::RuntimeDirs::active_package_key(&root).as_deref()
+                            == Some(progress.package_key.as_str())
+                    {
+                        stamp_error =
+                            keytao_core::ReloadStamp::write_package(&root, &progress.package_key)
+                                .err()
+                                .map(|error| format!("系统输入法重载通知失败：{error}"));
                     }
                     if journal_error.is_none() {
                         journal_error = (|| -> std::io::Result<()> {
@@ -1151,6 +1172,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
         };
         let user_theme_path = user_dir.join("theme.yaml");
         let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
+        let isolated = keytao_core::RuntimeDirs::isolation_enabled(&user_dir);
 
         // The runtime knows every session it handed out, so reloading through it
         // drops their engines before librime is finalized. Going around it would
@@ -1160,18 +1182,23 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
                 android_set_user_theme_path(user_theme_path);
                 return 1;
             }
-            if keytao_core::deployment_in_progress(&user_dir) {
+            if isolated || keytao_core::deployment_in_progress(&user_dir) {
                 return 0;
             }
         }
 
-        if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
-            *slot = None;
-        }
-        if keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared_dir.clone())
+        if !isolated {
+            if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
+                *slot = None;
+            }
+            if keytao_core::reinitialize(
+                user_dir.to_string_lossy().into_owned(),
+                shared_dir.clone(),
+            )
             .is_err()
-        {
-            return 0;
+            {
+                return 0;
+            }
         }
 
         let runtime = android_new_runtime(&user_dir, &shared_dir);

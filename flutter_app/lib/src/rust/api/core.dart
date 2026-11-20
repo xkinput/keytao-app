@@ -241,6 +241,14 @@ Future<InstallResultDto> activateScheme({
   androidExtract: androidExtract,
 );
 
+Future<void> switchPackage({
+  required String packageKey,
+  required FutureOr<String> Function(bool) androidDeploy,
+}) => RustLib.instance.api.crateApiCoreSwitchPackage(
+  packageKey: packageKey,
+  androidDeploy: androidDeploy,
+);
+
 Future<List<String>> removeSchemePackage({
   required String schemeKey,
   required FutureOr<String> Function(bool) androidDeploy,

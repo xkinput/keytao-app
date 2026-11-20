@@ -10,9 +10,17 @@ const PREFIX: &str = ".keytao-ime-deploy-";
 
 pub struct Stage(PathBuf);
 
+pub(crate) fn flat_deploy_dirs(root: &Path) -> Result<keytao_core::RuntimeDirs, String> {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root)?;
+    if dirs.active_package_key.is_some() {
+        return Err("isolated deployment requires a package plan".into());
+    }
+    Ok(dirs)
+}
+
 impl Stage {
     pub fn create(source: &Path) -> Result<Self, String> {
-        let dirs = keytao_core::RuntimeDirs::resolve(source, source);
+        let dirs = flat_deploy_dirs(source)?;
         let source = dirs.user_data_dir.as_path();
         let staging = dirs
             .staging_dir
@@ -43,7 +51,7 @@ impl Stage {
         root: &Path,
         mut reload: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
-        let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+        let dirs = flat_deploy_dirs(root)?;
         let current = dirs.staging_dir;
         let staging = current
             .strip_prefix(&dirs.user_data_dir)
@@ -129,7 +137,7 @@ fn checked_directory(source: &Path, name: &str) -> Result<PathBuf, String> {
     {
         return Err("invalid deployment stage".into());
     }
-    let dirs = keytao_core::RuntimeDirs::resolve(source, source);
+    let dirs = flat_deploy_dirs(source)?;
     let parent = dirs
         .user_data_dir
         .parent()

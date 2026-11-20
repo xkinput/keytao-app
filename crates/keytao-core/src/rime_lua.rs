@@ -229,8 +229,15 @@ fn read_manifest(root: &Path) -> Result<Option<Value>, String> {
 }
 
 pub(crate) fn signature(root: &Path) -> Result<Option<String>, String> {
-    let dirs = crate::RuntimeDirs::resolve(root, root);
-    if let Some(key) = dirs.active_package_key {
+    let dirs = crate::RuntimeDirs::resolve(root, root)?;
+    signature_for_runtime(root, &dirs)
+}
+
+pub(crate) fn signature_for_runtime(
+    root: &Path,
+    dirs: &crate::RuntimeDirs,
+) -> Result<Option<String>, String> {
+    if let Some(key) = &dirs.active_package_key {
         let manifest = dirs.user_data_dir.join(crate::RuntimeDirs::MANIFEST_FILE);
         let signature = crate::ReloadStamp::signature_at(&manifest).unwrap_or_default();
         return Ok(Some(format!("{key}:{signature}")));
@@ -263,7 +270,8 @@ pub(crate) fn rebase_manifest(root: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn regenerate(root: &Path) -> Result<(), String> {
-    if crate::RuntimeDirs::resolve(root, root).active_package_key.is_some() {
+    let dirs = crate::RuntimeDirs::resolve(root, root)?;
+    if dirs.active_package_key.is_some() {
         return Ok(());
     }
     let Some(_) = read_manifest(root)? else {
@@ -279,10 +287,7 @@ pub(crate) fn regenerate(root: &Path) -> Result<(), String> {
             .and_then(|request| request.schema_id)
             .filter(|id| {
                 crate::valid_rime_build_id(id)
-                    && crate::RuntimeDirs::resolve(root, root)
-                        .staging_dir
-                        .join(format!("{id}.schema.yaml"))
-                        .is_file()
+                    && dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file()
                     && crate::deployed_schemas(root)
                         .iter()
                         .any(|schema| schema.id == *id)
@@ -293,7 +298,7 @@ pub(crate) fn regenerate(root: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
-    let dirs = crate::RuntimeDirs::resolve(root, root);
+    let dirs = crate::RuntimeDirs::resolve(root, root)?;
     if dirs.active_package_key.is_some() {
         return Ok(false);
     }

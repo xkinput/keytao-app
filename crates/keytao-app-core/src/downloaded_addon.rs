@@ -114,8 +114,12 @@ impl Addon {
             installed,
             deployed: installed
                 && !selected.is_empty()
-                && selected.iter().all(|id| dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file())
-                && (!selected.contains(&self.id) || dirs.staging_dir.join(format!("{}.table.bin", self.dictionary)).is_file()),
+                && dirs.is_ok_and(|dirs| {
+                    selected.iter().all(|id| {
+                        dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file()
+                    }) && (!selected.contains(&self.id)
+                        || dirs.staging_dir.join(format!("{}.table.bin", self.dictionary)).is_file())
+                }),
             version: manifest.map_or_else(String::new, |manifest| manifest.version),
             variant: String::new(),
         }

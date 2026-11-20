@@ -253,7 +253,9 @@ pub fn addon_schema_source_files(id: &str) -> [(&'static str, String); 4] {
 }
 
 pub fn deployed_english_schema_available(root: &Path) -> bool {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    let Ok(dirs) = keytao_core::RuntimeDirs::resolve(root, root) else {
+        return false;
+    };
     let schemas = [
         dirs.user_data_dir.join("default.custom.yaml"),
         dirs.user_data_dir.join("default-custom.yaml"),
@@ -305,10 +307,7 @@ pub fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
             .iter()
             .all(|(_, relative)| root.join(relative).is_file());
     let deployed = installed
-        && dirs
-            .staging_dir
-            .join(format!("{id}.schema.yaml"))
-            .is_file();
+        && dirs.is_ok_and(|dirs| dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file());
     AddonSchemaStatus {
         installed,
         deployed,

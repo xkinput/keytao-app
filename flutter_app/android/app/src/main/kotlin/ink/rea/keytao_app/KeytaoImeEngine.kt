@@ -153,12 +153,16 @@ class KeytaoImeEngine(context: Context) {
             }
         }
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
-        if (!hasInstalledSchema()) {
+        val isolated = KeytaoNativeBridge.isolatedSchemaState(root.absolutePath)
+        if (isolated != null && isolated != Readiness.READY) {
+            return if (nativeReady && session != 0L) Readiness.READY else isolated
+        }
+        if (isolated == null && !KeytaoAndroidPaths.hasInstalledSchema(root)) {
             if (session != 0L) reload()
             return Readiness.NOT_INSTALLED
         }
         if (!warmupComplete) return Readiness.NOT_DEPLOYED
-        if (!hasDeployedSchema()) {
+        if (isolated == null && !hasDeployedSchema()) {
             if (nativeReady && session != 0L) return Readiness.READY
             val schemas = KeytaoAndroidPaths.configuredSchemas(root)
             if (KeytaoNativeBridge.loaded && claimUpgradeDeployment(root, bundledVersion, schemas)) {
@@ -347,7 +351,9 @@ class KeytaoImeEngine(context: Context) {
         val snapshot = synchronized(this) {
             val root = userDir ?: return false
             if (closed || KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
-            if (!nativeReady || session == 0L || !hasInstalledSchema()) {
+            val isolated = KeytaoNativeBridge.isolatedSchemaState(root.absolutePath)
+            if (isolated != null && isolated != Readiness.READY) return false
+            if (!nativeReady || session == 0L || (isolated == null && !KeytaoAndroidPaths.hasInstalledSchema(root))) {
                 return initializeRuntime(deploy = false, reinitialize = true)
             }
             val retained = KeytaoNativeBridge.retainSession(session)
@@ -357,6 +363,7 @@ class KeytaoImeEngine(context: Context) {
         val completed = onReloadStarted?.invoke()
         try {
             // Retain the session under the monitor, then let keys wait in core during prewarm.
+            val requestedSignature = reloadStampSignature()
             val ok = KeytaoNativeBridge.reinitialize(snapshot.third.absolutePath, sharedDataDir?.absolutePath)
             if (ok) KeytaoNativeBridge.prewarm(snapshot.second)
             synchronized(this) {
@@ -366,7 +373,7 @@ class KeytaoImeEngine(context: Context) {
                     schemaLogoGeneration++
                     schemaLogoKey = null
                     schemaLogoRequest = null
-                    reloadStampSignature = reloadStampSignature()
+                    reloadStampSignature = requestedSignature
                 }
                 refreshDeploymentHint()
             }
@@ -385,7 +392,12 @@ class KeytaoImeEngine(context: Context) {
         return reload()
     }
 
-    fun hasInstalledSchema(): Boolean = userDir?.let(KeytaoAndroidPaths::hasInstalledSchema) ?: false
+    fun hasInstalledSchema(): Boolean {
+        val root = userDir ?: return false
+        val isolated = KeytaoNativeBridge.isolatedSchemaState(root.absolutePath)
+        if (isolated != null) return isolated != Readiness.NOT_INSTALLED
+        return KeytaoAndroidPaths.hasInstalledSchema(root)
+    }
 
     fun hasDeployedSchema(): Boolean = userDir?.let(KeytaoAndroidPaths::hasDeployedSchema) ?: false
 
@@ -510,6 +522,7 @@ class KeytaoImeEngine(context: Context) {
                 KeytaoNativeBridge.destroySession(session)
                 session = 0L
             }
+            val requestedSignature = reloadStampSignature()
             val initialized = if (reinitialize) {
                 KeytaoNativeBridge.reinitialize(root.absolutePath, sharedDir.absolutePath)
             } else {
@@ -531,7 +544,7 @@ class KeytaoImeEngine(context: Context) {
             lastState = KeytaoNativeBridge.sessionState(session)
                 ?.let { stableSchemaState(it) }
                 ?: KeytaoImeState.empty()
-            reloadStampSignature = reloadStampSignature()
+            reloadStampSignature = requestedSignature
             refreshDeploymentHint()
             nativeReady = session != 0L
             success = nativeReady

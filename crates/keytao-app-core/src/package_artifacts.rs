@@ -20,7 +20,7 @@ pub(crate) fn owned_artifact_paths(
     root: &Path,
     schema_ids: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, CoreError> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    let dirs = keytao_core::RuntimeDirs::flat(root, root);
     let build = staging_relative(root, &dirs);
     let references = references(root, &build, schema_ids.clone(), &BTreeMap::new())?;
     let mut paths = references.binaries;
