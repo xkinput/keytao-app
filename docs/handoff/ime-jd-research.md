@@ -136,3 +136,10 @@ ime-jd 接入设计（只读，未改仓库，未下载）
 4. 上游 0.x 阶段 ABI 不稳定、每周发版。是否接受每次更新钉值都要回归测试？
 5. 用户自定义词是否同步给 libjd？上限 10000 条，超出部分怎么处理？
 6. libjd 的词库与 KeyTao 当前词库版本可能不一致，需不需要在 UI 上提示？
+---
+# Owner decisions (2026-11-21)
+1. Not bundled in any KeyTao build. The user clicks to download libjd from the hronro/ime-jd GitHub releases; the owner's position is that this does not trigger GPL obligations for KeyTao.
+2. Version: whatever GitHub reports as the latest release at the moment the user clicks (no pinned tag). Still verify the downloaded asset against the GitHub API `digest` (sha256) and check `jd_abi_layout`; never update silently.
+3. Platforms: every platform libjd publishes a loadable binary for — macOS (arm64/x86_64 dylib), Linux (x86_64/arm64 so), Windows (x86_64/arm64 dll, server/pipe mode only), Android (arm64/x86_64 so). iOS only ships a static .a, which cannot be downloaded at runtime, so iOS is out.
+4. KeyTao custom words are NOT fed into libjd.
+5. Once the 键道6 card is switched to ime-jd, that card no longer offers scheme download/update: it shows only the current libjd version and an '更新 ime-jd' action (plus '切回 Rime').
