@@ -1167,6 +1167,10 @@ pub fn duplicate_theme(id: String) -> Result<String, String> {
     keytao_app_core::theme_library::duplicate_theme(theme_library_host()?, &id)
 }
 
+pub fn rename_theme(id: String, name: String) -> Result<(), String> {
+    keytao_app_core::theme_library::rename_theme(theme_library_host()?, &id, &name)
+}
+
 pub fn delete_theme(id: String) -> Result<(), String> {
     keytao_app_core::theme_library::delete_theme(theme_library_host()?, &id)
 }

@@ -123,6 +123,48 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
     if (mounted) _notice('已复制 ${theme.name}');
   });
 
+  Future<void> _rename(ThemeSummaryDto theme) => _perform(() async {
+    if (theme.builtIn) return;
+    var draft = theme.name;
+    final name = await showFDialog<String>(
+      context: context,
+      builder: (context, _, animation) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final trimmed = draft.trim();
+          final valid = trimmed.isNotEmpty && trimmed.characters.length <= 64;
+          void save() {
+            if (valid) Navigator.pop(context, trimmed);
+          }
+
+          return AppDialog(
+            title: '重命名',
+            animation: animation,
+            actions: [
+              ActionButton('取消', onPress: () => Navigator.pop(context)),
+              ActionButton('保存', primary: true, onPress: valid ? save : null),
+            ],
+            child: Semantics(
+              label: '主题名',
+              child: FTextField(
+                autofocus: true,
+                hint: '主题名',
+                control: FTextFieldControl.managed(
+                  initial: TextEditingValue(text: theme.name),
+                  onChange: (value) => setDialogState(() => draft = value.text),
+                ),
+                onSubmit: (_) => save(),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    if (name == null || name == theme.name) return;
+    await _controller.themeLibraryAction(
+      () => core.renameTheme(id: theme.id, name: name),
+    );
+  });
+
   Future<void> _delete(ThemeSummaryDto theme) => _perform(() async {
     final confirmed = await showFDialog<bool>(
       context: context,
@@ -276,6 +318,24 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
           _action('导入文件', FLucideIcons.upload, _enabled ? _openFile : null),
         ],
       ),
+      if (_current case final theme?)
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                theme.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (!theme.builtIn)
+              _action(
+                '重命名',
+                FLucideIcons.pencil,
+                _enabled ? () => _rename(theme) : null,
+              ),
+          ],
+        ),
       if (_loading || _working) const FProgress(),
       if (_themes.isNotEmpty)
         SizedBox(

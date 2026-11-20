@@ -27,6 +27,56 @@ String _hex(Color color) {
       .toUpperCase();
 }
 
+class ThemeColorSwatch extends StatelessWidget {
+  const ThemeColorSwatch({
+    super.key,
+    required this.value,
+    this.size = 22,
+    this.child,
+  });
+
+  final String value;
+  final double size;
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    clipBehavior: Clip.antiAlias,
+    decoration: BoxDecoration(
+      border: Border.all(color: AppPalette.of(context).hairline),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Stack(
+      fit: StackFit.expand,
+      children: [
+        Column(
+          children: [
+            for (var row = 0; row < 4; row++)
+              Expanded(
+                child: Row(
+                  children: [
+                    for (var column = 0; column < 4; column++)
+                      Expanded(
+                        child: ColoredBox(
+                          color: (row + column).isEven
+                              ? Colors.white
+                              : const Color(0xFFBDBDBD),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        ColoredBox(color: parseAccentColor(value)),
+        if (child case final overlay?) Center(child: overlay),
+      ],
+    ),
+  );
+}
+
 Future<String?> showThemeColorPicker(
   BuildContext context, {
   required String initial,
@@ -165,13 +215,9 @@ class AccentPicker extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Center(
-                child: Container(
-                  width: touch ? 32 : 24,
-                  height: touch ? 32 : 24,
-                  decoration: BoxDecoration(
-                    color: parseAccentColor(hex),
-                    borderRadius: BorderRadius.circular(custom ? 8 : 16),
-                  ),
+                child: ThemeColorSwatch(
+                  value: hex,
+                  size: touch ? 32 : 24,
                   child: custom || reset || selected == hex
                       ? Icon(
                           reset

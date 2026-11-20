@@ -294,6 +294,38 @@ pub fn duplicate_theme(theme_path: &Path, id: &str) -> Result<String, String> {
     Ok(source.id().into())
 }
 
+/// Rename an editable source without changing its identity or compiled appearance.
+pub fn rename_theme(theme_path: &Path, id: &str, name: &str) -> Result<(), String> {
+    let _lock = lock_store();
+    crate::source::validate_theme_id(id)?;
+    if is_built_in(id) {
+        return Err("Built-in themes cannot be renamed".into());
+    }
+    let name = name.trim();
+    if name.is_empty() || name.graphemes(true).count() > 64 {
+        return Err("Theme name must contain 1–64 characters".into());
+    }
+    let source = read_source(theme_path, id)?;
+    let mut renamed = source.value.clone();
+    renamed["meta"]["name"] = json!(name);
+    let renamed = parse_source_value(renamed)?;
+    if renamed.name() != name {
+        return Err("Theme name contains unsupported characters".into());
+    }
+    check_store_path(theme_path, theme_path)?;
+    let mut base = read_base(theme_path)?;
+    if base.get("themeId").and_then(Value::as_str) == Some(id)
+        && base.get("compiledHash").is_none()
+        && !compiled_theme_has_manual_edits(&source, &value_yaml(&base)?)?
+    {
+        // Preserve legacy appearance identity before the source name changes its hash.
+        base["compiledHash"] = json!(crate::source::compiled_appearance_hash(&base)?);
+        let base = serde_yaml::to_value(base).map_err(|error| error.to_string())?;
+        crate::write_theme_yaml_atomic(theme_path, &base)?;
+    }
+    save_library_source(theme_path, &renamed)
+}
+
 /// Deleting the active installed theme safely selects the embedded default.
 pub fn delete_theme(theme_path: &Path, id: &str) -> Result<(), String> {
     let _lock = lock_store();
@@ -2355,6 +2387,102 @@ mod tests {
             EffectiveColorScheme::Light,
         );
         assert_eq!(compiled.ui.accent_color, crate::parse_color("#AABBCC"));
+    }
+
+    #[test]
+    fn library_rename_validates_and_persists_without_changing_theme_identity() {
+        let dir = TempDir::new();
+        import_theme(
+            &dir.theme(),
+            &import_source(
+                "my.mint",
+                json!({"common":{"accentColor":"#123"},"future":{"keep":true}}),
+            ),
+            false,
+        )
+        .unwrap();
+        apply_theme(&dir.theme(), "my.mint").unwrap();
+        let path = source_path(&dir.theme(), "my.mint");
+        let original_source = fs::read_to_string(&path).unwrap();
+        let original_compiled = fs::read_to_string(dir.theme()).unwrap();
+        for name in ["".into(), "   ".into(), "x".repeat(65), "a\nb".into()] {
+            assert!(rename_theme(&dir.theme(), "my.mint", &name).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original_source);
+            assert_eq!(fs::read_to_string(dir.theme()).unwrap(), original_compiled);
+        }
+        assert!(rename_theme(&dir.theme(), DEFAULT_THEME_ID, "Renamed").is_err());
+        assert!(!source_path(&dir.theme(), DEFAULT_THEME_ID).exists());
+        rename_theme(&dir.theme(), "my.mint", "  新主题  ").unwrap();
+        let mut expected = parse_theme_source_yaml(&original_source).unwrap().value;
+        expected["meta"]["name"] = json!("新主题");
+        let persisted = read_source(&dir.theme(), "my.mint").unwrap();
+        assert_eq!(persisted.value, expected);
+        assert_eq!(persisted.name(), "新主题");
+        assert_eq!(fs::read_to_string(dir.theme()).unwrap(), original_compiled);
+        let library = list_themes(&dir.theme()).unwrap();
+        let renamed = library.iter().find(|theme| theme.id == "my.mint").unwrap();
+        assert_eq!(renamed.name, "新主题");
+        assert!(renamed.current && !renamed.built_in);
+
+        for manual_edit in [false, true] {
+            let dir = TempDir::new();
+            import_theme(&dir.theme(), &original_source, false).unwrap();
+            apply_theme(&dir.theme(), "my.mint").unwrap();
+            let mut legacy = read_base(&dir.theme()).unwrap();
+            legacy.as_object_mut().unwrap().remove("compiledHash");
+            if manual_edit {
+                legacy["panel"]["paddingX"] = json!(99);
+            }
+            let legacy_yaml = value_yaml(&legacy).unwrap();
+            fs::write(dir.theme(), &legacy_yaml).unwrap();
+            assert_eq!(
+                compiled_theme_has_manual_edits(
+                    &read_source(&dir.theme(), "my.mint").unwrap(),
+                    &legacy_yaml,
+                )
+                .unwrap(),
+                manual_edit,
+            );
+            assert!(rename_theme(&dir.theme(), "my.mint", " ").is_err());
+            assert_eq!(fs::read_to_string(dir.theme()).unwrap(), legacy_yaml);
+            rename_theme(&dir.theme(), "my.mint", "新主题").unwrap();
+            if manual_edit {
+                assert_eq!(fs::read_to_string(dir.theme()).unwrap(), legacy_yaml);
+                assert!(compiled_theme_has_manual_edits(
+                    &read_source(&dir.theme(), "my.mint").unwrap(),
+                    &legacy_yaml,
+                )
+                .unwrap());
+            } else {
+                let mut upgraded = read_base(&dir.theme()).unwrap();
+                assert!(upgraded
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("compiledHash")
+                    .is_some());
+                assert_eq!(upgraded, legacy);
+                assert!(!compiled_theme_has_manual_edits(
+                    &read_source(&dir.theme(), "my.mint").unwrap(),
+                    &fs::read_to_string(dir.theme()).unwrap(),
+                )
+                .unwrap());
+                let snapshot = update_theme_editor(
+                    &dir.theme(),
+                    crate::editor::EditorPlatform::Macos,
+                    "light",
+                    "common.accentColor",
+                    Some(json!("#ABCDEF")),
+                )
+                .unwrap();
+                let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+                assert_eq!(snapshot["source"]["meta"]["id"], "my.mint");
+                assert!(fs::read_dir(&dir.0).unwrap().all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("theme.yaml.manual-")));
+            }
+        }
     }
 
     #[test]

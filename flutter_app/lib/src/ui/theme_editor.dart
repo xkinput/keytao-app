@@ -613,8 +613,9 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       path,
       FTooltip(
         tipBuilder: (_, _) => Text('$label $value'),
-        child: FButton.icon(
+        child: FButton(
           variant: FButtonVariant.ghost,
+          mainAxisSize: MainAxisSize.min,
           onPress: _enabled && _supported(path)
               ? () async {
                   final color = await showThemeColorPicker(
@@ -634,14 +635,13 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           child: Semantics(
             label: '选择$label',
             value: value,
-            child: Container(
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                color: parseAccentColor(value),
-                border: Border.all(color: AppPalette.of(context).hairline),
-                borderRadius: BorderRadius.circular(4),
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 6,
+              children: [
+                ThemeColorSwatch(value: value),
+                Text(value.isEmpty ? '默认' : value),
+              ],
             ),
           ),
         ),
@@ -650,16 +650,21 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     );
   }
 
-  Widget _colors(Map<String, String> fields) => LayoutBuilder(
+  Widget _colors(Map<String, String> fields) => _compactRows([
+    for (final entry in fields.entries) _color(entry.value, entry.key),
+  ]);
+
+  Widget _compactRows(List<Widget> children) => LayoutBuilder(
     builder: (context, constraints) {
-      final columns = constraints.maxWidth >= 340 ? 2 : 1;
+      final columns = !_controller.isMobile && constraints.maxWidth >= 640
+          ? 2
+          : 1;
       final width = (constraints.maxWidth - (columns - 1) * 12) / columns;
       return Wrap(
         spacing: 12,
         runSpacing: 2,
         children: [
-          for (final entry in fields.entries)
-            SizedBox(width: width, child: _color(entry.value, entry.key)),
+          for (final child in children) SizedBox(width: width, child: child),
         ],
       );
     },
@@ -784,21 +789,22 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             _group('字体', [
               if (!mobile) _fontFamily(),
               _fontWeight(),
-              if (!mobile) ...[
-                _slider(
-                  AppStrings.candidateFontSize,
-                  'pc.font.size',
-                  10,
-                  36,
-                  26,
-                ),
-                for (final entry in const {
-                  'labelSize': '序号字号',
-                  'commentSize': '注释字号',
-                  'preeditSize': '编码字号',
-                }.entries)
-                  _slider(entry.value, 'pc.font.${entry.key}', 9, 28, 19),
-              ],
+              if (!mobile)
+                _compactRows([
+                  _slider(
+                    AppStrings.candidateFontSize,
+                    'pc.font.size',
+                    10,
+                    36,
+                    26,
+                  ),
+                  for (final entry in const {
+                    'labelSize': '序号字号',
+                    'commentSize': '注释字号',
+                    'preeditSize': '编码字号',
+                  }.entries)
+                    _slider(entry.value, 'pc.font.${entry.key}', 9, 28, 19),
+                ]),
             ]),
             if (!mobile) ...[
               _choice('方向', 'pc.panel.orientation', const {
@@ -810,13 +816,15 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   'pc.panel.background': '面板背景',
                   'pc.panel.borderColor': '面板边框',
                 }),
-                _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
-                _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
-                _slider('横向内边距', 'pc.panel.paddingX', 0, 32, 32),
-                _slider('纵向内边距', 'pc.panel.paddingY', 0, 28, 28),
-                _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
-                _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
-                _toggle('面板阴影', 'pc.panel.shadow'),
+                _compactRows([
+                  _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
+                  _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
+                  _slider('横向内边距', 'pc.panel.paddingX', 0, 32, 32),
+                  _slider('纵向内边距', 'pc.panel.paddingY', 0, 28, 28),
+                  _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
+                  _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
+                  _toggle('面板阴影', 'pc.panel.shadow'),
+                ]),
               ]),
               _group('候选', [
                 _colors({
@@ -835,8 +843,10 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   }.entries)
                     'pc.candidate.${entry.key}': entry.value,
                 }),
-                _slider('边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
-                _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
+                _compactRows([
+                  _slider('边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
+                  _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
+                ]),
                 _text('序号后缀', 'pc.candidate.labelSuffix'),
               ]),
               _group('模式提示', [
@@ -845,12 +855,14 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   'pc.modeHint.foreground': '字色',
                   'pc.modeHint.borderColor': '边框',
                 }),
-                _slider('边框宽度', 'pc.modeHint.borderWidth', 0, 4, 8),
-                _slider('字号', 'pc.modeHint.fontSize', 12, 42, 30),
-                _slider('宽度', 'pc.modeHint.width', 36, 180, 144),
-                _slider('高度', 'pc.modeHint.height', 28, 140, 112),
-                _slider('圆角', 'pc.modeHint.cornerRadius', 0, 32, 32),
-                _toggle('阴影', 'pc.modeHint.shadow'),
+                _compactRows([
+                  _slider('边框宽度', 'pc.modeHint.borderWidth', 0, 4, 8),
+                  _slider('字号', 'pc.modeHint.fontSize', 12, 42, 30),
+                  _slider('宽度', 'pc.modeHint.width', 36, 180, 144),
+                  _slider('高度', 'pc.modeHint.height', 28, 140, 112),
+                  _slider('圆角', 'pc.modeHint.cornerRadius', 0, 32, 32),
+                  _toggle('阴影', 'pc.modeHint.shadow'),
+                ]),
               ]),
             ] else ...[
               _colors(const {
@@ -859,15 +871,17 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 'mobile.keyboard.key.foreground': '按键字色',
                 'mobile.keyboard.key.hintForeground': '提示字色',
               }),
-              _slider('按键圆角', 'mobile.keyboard.key.cornerRadius', 0, 24, 24),
-              _slider(
-                '按键字号',
-                'mobile.keyboard.key.fontScale',
-                80,
-                130,
-                50,
-                scale: true,
-              ),
+              _compactRows([
+                _slider('按键圆角', 'mobile.keyboard.key.cornerRadius', 0, 24, 24),
+                _slider(
+                  '按键字号',
+                  'mobile.keyboard.key.fontScale',
+                  80,
+                  130,
+                  50,
+                  scale: true,
+                ),
+              ]),
               _group('功能键', [
                 _colors({
                   for (final entry in const {
@@ -889,28 +903,32 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   'mobile.keyboard.key.borderColor': '边框',
                   'mobile.keyboard.key.shadowColor': '阴影',
                 }),
-                _slider('边框宽度', 'mobile.keyboard.key.borderWidth', 0, 2, 4),
-                _slider('阴影偏移', 'mobile.keyboard.key.shadowOffsetY', 0, 4, 8),
-                _slider(
-                  '提示字号',
-                  'mobile.keyboard.key.hintFontScale',
-                  80,
-                  130,
-                  50,
-                  scale: true,
-                ),
+                _compactRows([
+                  _slider('边框宽度', 'mobile.keyboard.key.borderWidth', 0, 2, 4),
+                  _slider('阴影偏移', 'mobile.keyboard.key.shadowOffsetY', 0, 4, 8),
+                  _slider(
+                    '提示字号',
+                    'mobile.keyboard.key.hintFontScale',
+                    80,
+                    130,
+                    50,
+                    scale: true,
+                  ),
+                ]),
               ]),
               _group('候选栏', [
-                _color('背景', 'mobile.candidateBar.background'),
-                _slider(
-                  '字号缩放',
-                  'mobile.candidateBar.fontScale',
-                  80,
-                  130,
-                  50,
-                  scale: true,
-                ),
-                _toggle('显示注释', 'mobile.candidateBar.showComment'),
+                _compactRows([
+                  _color('背景', 'mobile.candidateBar.background'),
+                  _slider(
+                    '字号缩放',
+                    'mobile.candidateBar.fontScale',
+                    80,
+                    130,
+                    50,
+                    scale: true,
+                  ),
+                  _toggle('显示注释', 'mobile.candidateBar.showComment'),
+                ]),
               ]),
             ],
           ],
@@ -958,8 +976,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               spacing: 16,
               children: [
-                SizedBox(width: 380, child: preview),
                 Expanded(child: controls),
+                SizedBox(width: 360, child: preview),
               ],
             )
           : Column(

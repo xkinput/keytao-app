@@ -456,6 +456,9 @@ Future<void> applyTheme({required String id}) =>
 Future<String> duplicateTheme({required String id}) =>
     RustLib.instance.api.crateApiCoreDuplicateTheme(id: id);
 
+Future<void> renameTheme({required String id, required String name}) =>
+    RustLib.instance.api.crateApiCoreRenameTheme(id: id, name: name);
+
 Future<void> deleteTheme({required String id}) =>
     RustLib.instance.api.crateApiCoreDeleteTheme(id: id);
 

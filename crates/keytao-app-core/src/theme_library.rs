@@ -112,6 +112,10 @@ pub fn duplicate_theme(host: impl ImeHost, id: &str) -> Result<String, String> {
     theme_store::duplicate_theme(&theme_path(&host)?, id)
 }
 
+pub fn rename_theme(host: impl ImeHost, id: &str, name: &str) -> Result<(), String> {
+    theme_store::rename_theme(&theme_path(&host)?, id, name)
+}
+
 pub fn delete_theme(host: impl ImeHost, id: &str) -> Result<(), String> {
     let path = theme_path(&host)?;
     theme_store::delete_theme(&path, id)?;
