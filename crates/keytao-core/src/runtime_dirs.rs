@@ -96,7 +96,6 @@ impl RuntimeDirs {
         (marker["version"].as_u64()? == 1).then_some(marker)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub(crate) fn flat_active_package_key(control_root: &Path) -> Option<String> {
         let local = control_root.join(crate::ACTIVE_SCHEME_MANIFEST);
         Self::package_stores(control_root)
@@ -153,12 +152,15 @@ impl RuntimeDirs {
         Self::isolated(control_root, shared, Some(&store), key).ok()
     }
 
-    pub(crate) fn package_stores(control_root: &Path) -> impl Iterator<Item = PathBuf> {
-        let app_root = (crate::default_user_data_dir().as_deref() == Some(control_root))
+    pub(crate) fn app_data_root(control_root: &Path) -> Option<PathBuf> {
+        (crate::default_user_data_dir().as_deref() == Some(control_root))
             .then(|| dirs::data_local_dir().map(|root| root.join("ink.rea.keytao-app")))
-            .flatten();
+            .flatten()
+    }
+
+    pub(crate) fn package_stores(control_root: &Path) -> impl Iterator<Item = PathBuf> {
         std::iter::once(crate::package_store::root(control_root))
-            .chain(app_root.map(|root| crate::package_store::root(&root)))
+            .chain(Self::app_data_root(control_root).map(|root| crate::package_store::root(&root)))
             .filter(|store| fs::symlink_metadata(store).is_ok_and(|entry| entry.is_dir()))
     }
 

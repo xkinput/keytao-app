@@ -325,6 +325,7 @@ mod tests {
             selected_schemas: None,
             meta: PackageMeta {
                 scheme_key: key.into(),
+                engine: Default::default(),
                 version: None,
                 installed_at_unix: 0,
                 source: "local".into(),

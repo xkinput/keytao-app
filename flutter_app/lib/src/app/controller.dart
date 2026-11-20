@@ -24,6 +24,7 @@ import 'strings.dart';
 
 enum OperationKind {
   install,
+  libjd,
   deploy,
   addon,
   wanxiang,
@@ -225,6 +226,7 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? rimeLsspProgress;
   final List<DeployStep> deploySteps = [];
   final _packageDeployProgress = <String, DeployProgressDto?>{};
+  LibjdStatusDto? libjd;
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
@@ -471,10 +473,18 @@ class AppController extends ChangeNotifier {
     return null;
   }
 
-  bool get hasSchemeUpdates => schemeUpdates.any((update) => update.hasUpdate);
+  bool usesLibjd(String key) =>
+      key == 'keytao' &&
+      libjd?.available == true &&
+      installedPackageFor(key)?.engine == 'libjd';
+
+  bool get hasSchemeUpdates => schemeUpdates.any(
+    (update) => update.hasUpdate && !usesLibjd(update.schemeKey),
+  );
   List<SchemeUpdateDto> get visibleSchemeUpdates => [
     for (final update in schemeUpdates)
       if (update.hasUpdate &&
+          !usesLibjd(update.schemeKey) &&
           _normalizedVersion(dismissedSchemeUpdates[update.schemeKey] ?? '') !=
               _normalizedVersion(update.latestVersion))
         update,
@@ -482,8 +492,10 @@ class AppController extends ChangeNotifier {
   static String _normalizedVersion(String version) =>
       version.startsWith('v') ? version.substring(1) : version;
   bool get isInstalling => operation == OperationKind.install;
+  bool get isManagingLibjd => operation == OperationKind.libjd;
   bool get canCancelDownload =>
-      isInstalling && installProgress?.stage == 'downloading';
+      (isInstalling || isManagingLibjd) &&
+      installProgress?.stage == 'downloading';
   bool get isDeploying => operation == OperationKind.deploy;
   bool get isManagingAddon => operation == OperationKind.addon;
   bool get isManagingWanxiang => operation == OperationKind.wanxiang;
@@ -1564,8 +1576,17 @@ class AppController extends ChangeNotifier {
         await FileImage(File(path)).evict();
       }
     }
+    LibjdStatusDto? libjdStatus;
+    if (!isIos && packages.any((package) => package.schemeKey == 'keytao')) {
+      try {
+        libjdStatus = await core.libjdStatus();
+      } catch (failure) {
+        debugPrint('ime-jd status refresh failed: ${errorText(failure)}');
+      }
+    }
     if (_disposed || request != _schemeUpdatesRequest) return;
     installedPackages = packages;
+    libjd = libjdStatus;
     schemeUpdates = [
       for (final update in schemeUpdates)
         if (packages.any(
@@ -1784,6 +1805,46 @@ class AppController extends ChangeNotifier {
 
   Future<void> cancelDownload() async {
     if (canCancelDownload) await core.cancelSchemeDownload();
+  }
+
+  Future<String?> downloadLibjd(
+    Future<bool> Function(LibjdReleaseDto) confirm,
+  ) => _changeLibjd(() async {
+    _startOperation(OperationKind.libjd, '正在查询 ime-jd…');
+    final release = await core.libjdRelease();
+    if (usesLibjd('keytao') && libjd?.installedVersion == release.version) {
+      return 'ime-jd 已是最新版本';
+    }
+    if (!await confirm(release)) return null;
+    progress = '正在下载 ime-jd…';
+    _changed();
+    libjd = await core.installOrUpdateLibjd(release: release);
+    return null;
+  });
+
+  Future<String?> revertLibjd() => _changeLibjd(() async {
+    await core.setPackageEngine(key: 'keytao', engine: 'rime');
+    return null;
+  });
+
+  Future<String?> _changeLibjd(Future<String?> Function() action) async {
+    String? notice;
+    await run(() async {
+      try {
+        notice = await action();
+      } catch (failure) {
+        notice = errorText(failure).split('\n').first;
+      } finally {
+        operation = null;
+        try {
+          await _readInstalledPackages();
+        } catch (failure) {
+          notice ??= '刷新键道6状态失败';
+        }
+        _refreshSchemasWhenIdle = true;
+      }
+    });
+    return notice;
   }
 
   Future<void> cancelWanxiangGrammarDownload() async {

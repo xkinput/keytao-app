@@ -103,6 +103,7 @@ class KeytaoAndroidChannel(
     }
 
     private fun paths(reply: Reply) {
+        KeytaoNativeBridge.configureLibjd(activity.dataDir.absolutePath)
         // These are path lookups only; never resolve or probe the shared directory.
         reply.success(mapOf(
             "dataDir" to activity.dataDir.absolutePath,

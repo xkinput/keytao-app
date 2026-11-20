@@ -615,6 +615,68 @@ pub async fn set_package_easy_english(
         .await
 }
 
+pub fn libjd_status() -> Result<LibjdStatusDto, String> {
+    let status = keytao_app_core::libjd::libjd_status(&runtime::state()?.core);
+    Ok(LibjdStatusDto {
+        available: status.available,
+        installed_version: status.installed_version,
+    })
+}
+
+pub async fn libjd_release() -> Result<LibjdReleaseDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    let release = keytao_app_core::libjd::libjd_release(&state.core)
+        .await
+        .map_err(|error| libjd_failure(&state.core, &root, error))?;
+    Ok(LibjdReleaseDto(release))
+}
+
+/// Download progress uses core_events. Cancel with cancel_scheme_download.
+pub async fn install_or_update_libjd(release: LibjdReleaseDto) -> Result<LibjdStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    let status = keytao_app_core::libjd::install_or_update_libjd(&state.core, release.0)
+        .await
+        .map_err(|error| libjd_failure(&state.core, &root, error))?;
+    keytao_app_core::packages::set_package_engine(
+        &state.core, &root, keytao_core::engine_choice::PACKAGE_KEY, "libjd",
+    )
+    .map_err(|error| libjd_failure(&state.core, &root, error))?;
+    Ok(LibjdStatusDto {
+        available: status.available,
+        installed_version: status.installed_version,
+    })
+}
+
+fn libjd_failure(core: &keytao_app_core::Core, root: &std::path::Path, error: keytao_app_core::CoreError) -> String {
+    use keytao_app_core::CoreError;
+    use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine, read};
+    eprintln!("ime-jd operation failed: {error}");
+    if read(root, Some(PACKAGE_KEY)) == PackageEngine::Libjd {
+        if let Err(rollback) = keytao_app_core::packages::set_package_engine(core, root, PACKAGE_KEY, "rime") {
+            eprintln!("ime-jd rollback failed: {rollback}");
+            return "ime-jd 操作失败，无法切回 Rime".into();
+        }
+    }
+    match error {
+        CoreError::Network(_) => "查询 ime-jd 版本失败".into(),
+        CoreError::Io(_) | CoreError::Parse(_) => "无法保存 ime-jd 设置或文件".into(),
+        CoreError::Other(message) | CoreError::Unsupported(message) => message,
+        _ => "ime-jd 操作失败".into(),
+    }
+}
+
+pub async fn set_package_engine(key: String, engine: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    keytao_app_core::packages::set_package_engine(&state.core, &root, &key, &engine)
+        .map_err(|error| error.to_string())
+}
+
 pub async fn remove_scheme_package(
     scheme_key: String,
     android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,

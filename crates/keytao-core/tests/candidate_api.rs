@@ -58,6 +58,78 @@ fn type_code(session: &ImeRuntimeSession) -> ImeState {
 }
 
 #[test]
+fn smoke_key_sequence_matches_rime_golden_states() {
+    let _serialized = serialized();
+    let (runtime, dir) = deployed_runtime("rime-golden");
+    let session = runtime.create_session().expect("create a session");
+    let states = b"aa ".map(|key| session.process_key_result(u32::from(key), 0).unwrap().state);
+    drop(session);
+    drop(runtime);
+    std::fs::remove_dir_all(dir).unwrap();
+
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("support/rime_smoke_golden.json")).unwrap();
+    assert_eq!(serde_json::to_value(states).unwrap(), golden);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn runtime_routes_libjd_and_falls_back_when_loading_fails() {
+    use keytao_core::libjd;
+
+    let _serialized = serialized();
+    let (_, dir) = deployed_runtime("libjd-routing");
+    let package_store = keytao_core::package_store::root(&dir);
+    std::fs::create_dir_all(&package_store).unwrap();
+    std::fs::write(
+        package_store.join("active-manifest.json"),
+        br#"{"active_package":"keytao"}"#,
+    )
+    .unwrap();
+    let settings = dir.join(keytao_core::english_mode::SETTINGS_FILE);
+    std::fs::write(&settings, br#"{"engines":{"keytao":"libjd"}}"#).unwrap();
+    let platform = libjd::platform().unwrap();
+    let tag = "v0.0.0";
+    let library = libjd::library_path(&dir, tag).unwrap();
+    std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+    std::fs::write(&library, b"invalid dylib").unwrap();
+    std::fs::write(
+        library.with_file_name("manifest.json"),
+        serde_json::to_vec(&libjd::LibjdManifest {
+            tag: tag.into(),
+            asset: platform.asset_name(tag),
+            sha256: "0".repeat(64),
+            abi_layout: serde_json::json!({}),
+            installed_at: 0,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(platform.current_path(&libjd::engine_root(&dir).unwrap()), tag).unwrap();
+
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+    runtime.reload_without_deploy().unwrap();
+    let session = runtime.create_session().unwrap();
+    assert_eq!(type_code(&session).schema_id, smoke_fixture::SCHEMA_ID);
+
+    if std::env::var("LIBJD_TEST").as_deref() == Ok("1") {
+        let verified_library = std::env::var_os("LIBJD_TEST_LIBRARY").expect("verified libjd path");
+        std::fs::copy(verified_library, &library).unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert_eq!(session.state().schema_name, keytao_core::jd_backend::SCHEMA_NAME);
+        let peer = runtime.create_session().unwrap();
+        assert_eq!(peer.process_key_result('a' as u32, 0).unwrap().state.preedit, "a");
+        assert!(session.state().preedit.is_empty());
+
+        std::fs::write(&settings, b"{}").unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert_eq!(type_code(&session).schema_id, smoke_fixture::SCHEMA_ID);
+    }
+    runtime.shutdown().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn chord_keys_accumulate_until_release_and_schema_switches_update_capability() {
     let _serialized = serialized();
     let dir = smoke_fixture::scratch_dir("chord-release");

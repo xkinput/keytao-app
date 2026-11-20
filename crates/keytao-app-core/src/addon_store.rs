@@ -399,6 +399,7 @@ impl AddonStore {
             },
             meta: PackageMeta {
                 scheme_key: self.id.clone(),
+                engine: Default::default(),
                 version: value["version"].as_str().map(str::to_owned),
                 installed_at_unix: timestamp,
                 source: value["source"].as_str().unwrap_or_default().into(),
@@ -765,6 +766,7 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
         let bytes = crate::packages::archive_from_files(&files)?;
         let meta = PackageMeta {
             scheme_key: key.into(),
+            engine: Default::default(),
             version: stored.meta.version.clone(),
             installed_at_unix: stored.meta.installed_at_unix,
             source: "official".into(),

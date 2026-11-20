@@ -1,4 +1,4 @@
-//! Entry point: detect display server, deploy librime, launch correct backend.
+//! Entry point: detect the display server, initialize the engine, and launch frontends.
 
 #[cfg(target_os = "linux")]
 mod engine;
@@ -205,18 +205,14 @@ fn remove_legacy_kde_env_file() {
 }
 
 #[cfg(target_os = "linux")]
-fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
-    let Some(user_data_dir) = keytao_core::default_user_data_dir() else {
-        tracing::warn!("cannot determine reload stamp path; dictionary reload watcher disabled");
+fn install_reload_watcher(
+    engine: engine::CoreEngine,
+    gate: Option<keytao_core::ReloadStampGate>,
+) -> bool {
+    let Some(mut gate) = gate else {
+        tracing::warn!("cannot determine reload stamp path; engine reload watcher disabled");
         return false;
     };
-
-    // Seeded here rather than inside the thread: the caller has just finished
-    // initialising librime, so this is the last moment at which the stamp on
-    // disk still describes the deployment the daemon actually loaded. A stamp
-    // written while the thread was waiting to be scheduled would otherwise be
-    // adopted as already loaded and never reloaded.
-    let mut gate = keytao_core::ReloadStampGate::new(&user_data_dir);
 
     if let Err(e) = std::thread::Builder::new()
         .name("reload-watcher".into())
@@ -233,14 +229,16 @@ fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
                     Ok(reloaded) => {
                         gate.commit(requested);
                         if reloaded {
-                            tracing::info!("librime reloaded after deploy stamp change");
-                            // Drop preedit and candidates from the previous build.
+                            tracing::info!("input engine reloaded after stamp change");
                             reload_bus::notify();
+                            if let Err(error) = engine.prewarm(None) {
+                                tracing::warn!("cannot prewarm reloaded input sessions: {error}");
+                            }
                         }
                     }
                     // The request stays pending: the next tick retries it.
                     Err(e) if e == keytao_core::PACKAGE_SWITCH_PENDING => {}
-                    Err(e) => tracing::error!("librime reload failed: {e}"),
+                    Err(e) => tracing::error!("input engine reload failed: {e}"),
                 }
             }
         })
@@ -358,13 +356,17 @@ fn main() {
                 None
             }
         };
+        // Preserve any engine switch requested while the process initializes.
+        let reload_gate = keytao_core::default_user_data_dir()
+            .as_deref()
+            .map(keytao_core::ReloadStampGate::new);
         let engine = engine::CoreEngine::new().with_ime_host();
         if let Err(e) = engine.init_without_deploy() {
-            tracing::error!("librime init failed: {e}");
+            tracing::error!("input engine init failed: {e}");
             std::process::exit(1);
         }
-        tracing::info!("librime ready");
-        let reload_watcher_ready = install_reload_watcher(engine.clone());
+        tracing::info!("input engine ready");
+        let reload_watcher_ready = install_reload_watcher(engine.clone(), reload_gate);
         if let Some(upgrade) = upgrade {
             if reload_watcher_ready {
                 upgrade.spawn();

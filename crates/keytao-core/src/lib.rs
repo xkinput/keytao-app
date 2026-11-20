@@ -821,6 +821,17 @@ fn update_neutral_grammar(user_dir: &Path, enabled: bool) {
     }
 }
 
+pub mod engine_choice;
+pub mod libjd;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android"))]
+pub mod jd_backend;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android", target_os = "ios"))]
+mod runtime_libjd;
+#[cfg(target_os = "android")]
+pub use runtime_libjd::{android_libjd_enabled, android_libjd_ready, set_android_libjd_data_root};
+
 // ── Native desktop engine (guarded at the module level) ──────────────────────
 
 #[cfg(any(
@@ -830,7 +841,49 @@ fn update_neutral_grammar(user_dir: &Path, enabled: bool) {
     target_os = "android",
     target_os = "ios"
 ))]
+/// Operations on a single input session. The runtime owns input policy,
+/// batching across policy changes, and the backend's lifecycle.
+pub(crate) trait ImeBackend: Send + Sync + english_mode::EnglishBackend {
+    fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult;
+    #[allow(dead_code, reason = "The runtime applies input policy between keys in a batch")]
+    fn process_keys_result(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
+        key_batch::process_keys(keys, |keycode, mask| self.process_key_result(keycode, mask))
+    }
+    fn process_enter(&self) -> KeyProcessResult;
+    fn open_schema_switcher(&self) -> ImeState;
+    fn select_candidate_on_page(&self, index: usize) -> ImeState;
+    fn select_candidate_global(&self, index: usize) -> ImeState;
+    fn highlight_candidate_on_page(&self, index: usize) -> ImeState;
+    fn candidate_is_user_phrase_on_page(&self, index: usize) -> bool;
+    fn delete_candidate_on_page_result(&self, index: usize) -> (ImeState, bool);
+    fn all_candidates_limited(&self, max_count: usize) -> Vec<Candidate>;
+    fn change_page(&self, backward: bool) -> ImeState;
+    fn reset(&self) -> ImeState;
+    fn clear_composition(&self) -> ImeState;
+    fn commit_composition(&self) -> ImeState;
+    fn raw_input(&self) -> Option<String>;
+    fn commit_raw_input(&self) -> ImeState;
+    fn list_schemas(&self) -> Vec<SchemaInfo>;
+    fn apply_switch_request(
+        &self,
+        request: &SchemaSwitchRequest,
+        reset_only: bool,
+    ) -> Result<(), String>;
+    fn apply_reset_switch_request(&self, root: &Path) -> Result<(), String>;
+    fn is_ascii_mode(&self) -> bool;
+    fn is_composing(&self) -> bool;
+    fn capabilities(&self) -> EngineCapabilities;
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
 mod desktop {
+    use super::english_mode::EnglishBackend;
     use super::*;
     use librime_sys::{
         rime_get_api, RimeApi, RimeCandidateListIterator, RimeConfig, RimeConfigIterator,
@@ -3150,7 +3203,7 @@ mod desktop {
     });
 
     /// An active rime input session.
-    pub struct Engine {
+    pub struct RimeBackend {
         session: ManuallyDrop<rime_api::Session>,
         chord_schema: RefCell<(String, bool)>,
         user_data_dir: Option<PathBuf>,
@@ -3161,10 +3214,10 @@ mod desktop {
     // thread-safe, so every method — including `Drop`, which destroys the
     // session — serializes on `RIME_API_LOCK` before touching rime_api or the
     // per-session chord cache.
-    unsafe impl Send for Engine {}
-    unsafe impl Sync for Engine {}
+    unsafe impl Send for RimeBackend {}
+    unsafe impl Sync for RimeBackend {}
 
-    impl Drop for Engine {
+    impl Drop for RimeBackend {
         fn drop(&mut self) {
             let _rime = rime_api_lock();
             // SAFETY: `session` is initialized in `new_with_user_data_dir` and
@@ -3207,14 +3260,7 @@ mod desktop {
         }
     }
 
-    impl Engine {
-        /// What this librime can do natively, see [`EngineCapabilities`].
-        pub fn capabilities(&self) -> EngineCapabilities {
-            let mut capabilities = engine_capabilities();
-            capabilities.candidate_deletion &= self.user_dictionary_source_available;
-            capabilities
-        }
-
+    impl RimeBackend {
         pub(crate) fn prepare_switch_request(
             root: &Path,
         ) -> Result<Option<SchemaSwitchRequest>, String> {
@@ -3289,7 +3335,100 @@ mod desktop {
             })
         }
 
-        pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
+        fn user_dictionary_contains(&self, dictionaries: &[String], text: &str) -> bool {
+            if !self.user_dictionary_source_available {
+                return false;
+            }
+            let cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+            if cache.user_data_dir.as_deref() != self.user_data_dir.as_deref()
+                || !cache.source_available
+            {
+                return false;
+            }
+            dictionaries.iter().any(|dictionary| {
+                cache
+                    .entries
+                    .get(dictionary)
+                    .is_some_and(|words| words.contains(text))
+            })
+        }
+
+        /// Fallback for ABIs without `select_candidate_on_current_page`.
+        fn send_select_key(&self, index: usize) {
+            let select_keys = session_select_keys(&self.session);
+            let select_keys = select_keys.as_deref().unwrap_or(DEFAULT_SELECT_KEYS);
+            if let Some(key) = select_keys.chars().nth(index) {
+                self.session.process_key(key_event(key as u32, 0));
+            }
+        }
+
+        fn remember_committed_user_phrase(&self, state: &ImeState) {
+            if !self.user_dictionary_source_available {
+                return;
+            }
+            let Some(committed) = state.committed.as_ref().filter(|text| !text.is_empty()) else {
+                return;
+            };
+            let Ok(status) = self.session.status() else {
+                return;
+            };
+            let dictionaries = schema_user_dictionary_names_locked(status.schema_id());
+            let mut cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+            if !cache.source_available
+                || cache.user_data_dir.as_deref() != self.user_data_dir.as_deref()
+            {
+                return;
+            }
+            for dictionary in dictionaries {
+                cache
+                    .entries
+                    .entry(dictionary)
+                    .or_default()
+                    .insert(committed.clone());
+            }
+        }
+
+        fn clear_composition_impl(&self, consume_commit: bool) -> ImeState {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held; a missing pointer falls back to
+            // the historical synthetic key.
+            let handled = unsafe {
+                let api = rime_get_api();
+                rime_api_member!(api, clear_composition).map(|clear| {
+                    clear(self.session.session_id);
+                })
+            };
+            if handled.is_none() {
+                self.session
+                    .process_key(key_event(key_policy::XK_ESCAPE, 0));
+            }
+            if consume_commit {
+                extract_state_with_commit(self)
+            } else {
+                extract_state_readonly(self)
+            }
+        }
+
+        fn raw_input_locked(&self) -> Option<String> {
+            // SAFETY: the librime lock is held; the pointer is checked and the
+            // returned buffer is owned by librime and only read here.
+            unsafe {
+                let api = rime_get_api();
+                let get_input = rime_api_member!(api, get_input)?;
+                cstr_to_str(get_input(self.session.session_id))
+            }
+        }
+    }
+
+    impl ImeBackend for RimeBackend {
+        /// What this librime can do natively, see [`EngineCapabilities`].
+        fn capabilities(&self) -> EngineCapabilities {
+            let mut capabilities = engine_capabilities();
+            capabilities.candidate_deletion &= self.user_dictionary_source_available;
+            capabilities
+        }
+
+        fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             let status = self.session.process_key(key_event(keycode, mask));
@@ -3327,14 +3466,7 @@ mod desktop {
             result
         }
 
-        /// Read-only snapshot: `RimeGetCommit` consumes the pending commit, so a
-        /// query must never call it or the text would never reach the client.
-        pub fn state(&self) -> ImeState {
-            let _rime = rime_api_lock();
-            extract_state_readonly(self)
-        }
-
-        pub(super) fn open_schema_switcher(&self) -> ImeState {
+        fn open_schema_switcher(&self) -> ImeState {
             let _rime = rime_api_lock();
             let mut hotkeys = Vec::new();
             // SAFETY: config and session access are serialized by the librime lock.
@@ -3378,7 +3510,7 @@ mod desktop {
         /// Pick the `index`-th candidate of the current page through librime's
         /// own API, so that selection does not depend on `menu/select_keys`
         /// being long enough or on the schema's alphabet.
-        pub fn select_candidate_on_page(&self, index: usize) -> ImeState {
+        fn select_candidate_on_page(&self, index: usize) -> ImeState {
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; the entry point is optional in
@@ -3408,7 +3540,7 @@ mod desktop {
         }
 
         /// Move the highlight without committing, for hover/arrow interactions.
-        pub fn highlight_candidate_on_page(&self, index: usize) -> ImeState {
+        fn highlight_candidate_on_page(&self, index: usize) -> ImeState {
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; the pointer is checked.
             unsafe {
@@ -3423,7 +3555,7 @@ mod desktop {
 
         /// Whether the `index`-th candidate on the current page is backed by an
         /// entry in one of the active schema's user dictionaries.
-        pub fn candidate_is_user_phrase_on_page(&self, index: usize) -> bool {
+        fn candidate_is_user_phrase_on_page(&self, index: usize) -> bool {
             let candidate = {
                 let _rime = rime_api_lock();
                 let state = extract_state_readonly(self);
@@ -3441,27 +3573,9 @@ mod desktop {
             self.user_dictionary_contains(&candidate.1, &candidate.0)
         }
 
-        fn user_dictionary_contains(&self, dictionaries: &[String], text: &str) -> bool {
-            if !self.user_dictionary_source_available {
-                return false;
-            }
-            let cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
-            if cache.user_data_dir.as_deref() != self.user_data_dir.as_deref()
-                || !cache.source_available
-            {
-                return false;
-            }
-            dictionaries.iter().any(|dictionary| {
-                cache
-                    .entries
-                    .get(dictionary)
-                    .is_some_and(|words| words.contains(text))
-            })
-        }
-
         /// Forget the `index`-th candidate of the current page, but only after
         /// the active user dictionary confirms that it is a learned phrase.
-        pub fn delete_candidate_on_page_result(&self, index: usize) -> (ImeState, bool) {
+        fn delete_candidate_on_page_result(&self, index: usize) -> (ImeState, bool) {
             let (before, candidate_text, dictionaries) = {
                 let _rime = rime_api_lock();
                 let before = extract_state_readonly(self);
@@ -3514,42 +3628,7 @@ mod desktop {
             (extract_state_with_commit(self), deleted)
         }
 
-        /// Fallback for ABIs without `select_candidate_on_current_page`.
-        fn send_select_key(&self, index: usize) {
-            let select_keys = session_select_keys(&self.session);
-            let select_keys = select_keys.as_deref().unwrap_or(DEFAULT_SELECT_KEYS);
-            if let Some(key) = select_keys.chars().nth(index) {
-                self.session.process_key(key_event(key as u32, 0));
-            }
-        }
-
-        fn remember_committed_user_phrase(&self, state: &ImeState) {
-            if !self.user_dictionary_source_available {
-                return;
-            }
-            let Some(committed) = state.committed.as_ref().filter(|text| !text.is_empty()) else {
-                return;
-            };
-            let Ok(status) = self.session.status() else {
-                return;
-            };
-            let dictionaries = schema_user_dictionary_names_locked(status.schema_id());
-            let mut cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
-            if !cache.source_available
-                || cache.user_data_dir.as_deref() != self.user_data_dir.as_deref()
-            {
-                return;
-            }
-            for dictionary in dictionaries {
-                cache
-                    .entries
-                    .entry(dictionary)
-                    .or_default()
-                    .insert(committed.clone());
-            }
-        }
-
-        pub fn select_candidate_global(&self, index: usize) -> ImeState {
+        fn select_candidate_global(&self, index: usize) -> ImeState {
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; the pointer is checked.
@@ -3575,7 +3654,7 @@ mod desktop {
             state
         }
 
-        pub fn all_candidates_limited(&self, max_count: usize) -> Vec<Candidate> {
+        fn all_candidates_limited(&self, max_count: usize) -> Vec<Candidate> {
             let _rime = rime_api_lock();
             extract_all_candidates(&self.session, max_count).unwrap_or_default()
         }
@@ -3583,7 +3662,7 @@ mod desktop {
         /// Turn a candidate page through librime instead of replaying the
         /// `-`/`=` bindings, which only exist when a schema imports the default
         /// `key_binder` paging preset.
-        pub fn change_page(&self, backward: bool) -> ImeState {
+        fn change_page(&self, backward: bool) -> ImeState {
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; a missing pointer falls back to
             // the historical synthetic key.
@@ -3602,47 +3681,20 @@ mod desktop {
 
         /// Drop the composition without committing anything.
         ///
-        /// Kept as the historical name of [`Engine::clear_composition`].
-        pub fn reset(&self) -> ImeState {
+        /// Kept as the historical name of [`RimeBackend::clear_composition`].
+        fn reset(&self) -> ImeState {
             self.clear_composition()
         }
 
         /// Discard the composition through librime, so that the outcome does
         /// not depend on how a schema bound `Escape`.
-        pub fn clear_composition(&self) -> ImeState {
+        fn clear_composition(&self) -> ImeState {
             self.clear_composition_impl(true)
-        }
-
-        /// Clear preedit without consuming a pending commit during a schema
-        /// transition that can still fail and roll back.
-        pub(crate) fn discard_composition(&self) {
-            self.clear_composition_impl(false);
-        }
-
-        fn clear_composition_impl(&self, consume_commit: bool) -> ImeState {
-            let _rime = rime_api_lock();
-            // SAFETY: the librime lock is held; a missing pointer falls back to
-            // the historical synthetic key.
-            let handled = unsafe {
-                let api = rime_get_api();
-                rime_api_member!(api, clear_composition).map(|clear| {
-                    clear(self.session.session_id);
-                })
-            };
-            if handled.is_none() {
-                self.session
-                    .process_key(key_event(key_policy::XK_ESCAPE, 0));
-            }
-            if consume_commit {
-                extract_state_with_commit(self)
-            } else {
-                extract_state_readonly(self)
-            }
         }
 
         /// Commit whatever librime currently holds, the way a frontend has to
         /// finish a composition when the input context goes away.
-        pub fn commit_composition(&self) -> ImeState {
+        fn commit_composition(&self) -> ImeState {
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; a missing pointer falls back to
@@ -3672,19 +3724,9 @@ mod desktop {
 
         /// The raw input string librime is composing from, before any editor or
         /// filter rewrote it for display.
-        pub fn raw_input(&self) -> Option<String> {
+        fn raw_input(&self) -> Option<String> {
             let _rime = rime_api_lock();
             self.raw_input_locked()
-        }
-
-        fn raw_input_locked(&self) -> Option<String> {
-            // SAFETY: the librime lock is held; the pointer is checked and the
-            // returned buffer is owned by librime and only read here.
-            unsafe {
-                let api = rime_get_api();
-                let get_input = rime_api_member!(api, get_input)?;
-                cstr_to_str(get_input(self.session.session_id))
-            }
         }
 
         /// Commit the raw input and drop the composition.
@@ -3692,7 +3734,7 @@ mod desktop {
         /// This is the documented fallback for `Return` when the schema's
         /// editor passes the key back: the typed code must reach the client
         /// instead of being thrown away with the composition.
-        pub fn commit_raw_input(&self) -> ImeState {
+        fn commit_raw_input(&self) -> ImeState {
             let _rime = rime_api_lock();
             let raw = self.raw_input_locked().unwrap_or_default();
             if raw.is_empty() {
@@ -3709,8 +3751,8 @@ mod desktop {
 
         /// `Return` handling shared by every frontend: librime decides first,
         /// and only when it passes the key while a composition exists does the
-        /// raw input get committed (see [`Engine::commit_raw_input`]).
-        pub fn process_enter(&self) -> KeyProcessResult {
+        /// raw input get committed (see [`RimeBackend::commit_raw_input`]).
+        fn process_enter(&self) -> KeyProcessResult {
             let _rime = rime_api_lock();
             let composing = !extract_state_readonly(self).preedit.is_empty();
             let result = self.process_key_result(key_policy::XK_RETURN, 0);
@@ -3733,7 +3775,7 @@ mod desktop {
             }
         }
 
-        pub fn list_schemas(&self) -> Vec<SchemaInfo> {
+        fn list_schemas(&self) -> Vec<SchemaInfo> {
             let Some(user_data_dir) = self.user_data_dir.as_deref() else {
                 return Vec::new();
             };
@@ -3745,29 +3787,7 @@ mod desktop {
             deployed_schemas(user_data_dir)
         }
 
-        pub fn current_schema(&self) -> Option<SchemaInfo> {
-            let _rime = rime_api_lock();
-            self.session.status().ok().map(|status| SchemaInfo {
-                id: status.schema_id().to_string(),
-                name: status.schema_name().to_string(),
-            })
-        }
-
-        pub fn schema_switches(&self) -> Vec<SchemaSwitch> {
-            let _rime = rime_api_lock();
-            let Ok(status) = self.session.status() else {
-                return Vec::new();
-            };
-            read_schema_switches_locked(status.schema_id())
-        }
-
-        pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
-            let _rime = rime_api_lock();
-            select_schema_checked(&self.session, schema_id)?;
-            Ok(extract_state_readonly(self))
-        }
-
-        pub(crate) fn apply_switch_request(
+        fn apply_switch_request(
             &self,
             request: &SchemaSwitchRequest,
             reset_only: bool,
@@ -3802,12 +3822,12 @@ mod desktop {
             Ok(())
         }
 
-        pub(crate) fn apply_reset_switch_request(&self, root: &Path) -> Result<(), String> {
+        fn apply_reset_switch_request(&self, root: &Path) -> Result<(), String> {
             // A schema reset overrides save_options whenever librime loads it.
             self.apply_switch_request(&schema_switch_request::read_at(root)?, true)
         }
 
-        pub fn is_ascii_mode(&self) -> bool {
+        fn is_ascii_mode(&self) -> bool {
             let _rime = rime_api_lock();
             self.session
                 .status()
@@ -3815,33 +3835,70 @@ mod desktop {
                 .unwrap_or(false)
         }
 
-        pub(crate) fn is_composing(&self) -> bool {
+        fn is_composing(&self) -> bool {
             let _rime = rime_api_lock();
             self.session
                 .status()
                 .map(|s| s.is_composing)
                 .unwrap_or(true)
         }
+    }
+
+    impl EnglishBackend for RimeBackend {
+        /// Read-only snapshot: `RimeGetCommit` consumes the pending commit, so a
+        /// query must never call it or the text would never reach the client.
+        fn state(&self) -> ImeState {
+            let _rime = rime_api_lock();
+            extract_state_readonly(self)
+        }
+
+        /// Clear preedit without consuming a pending commit during a schema
+        /// transition that can still fail and roll back.
+        fn discard_composition(&self) {
+            self.clear_composition_impl(false);
+        }
+
+        fn current_schema(&self) -> Option<SchemaInfo> {
+            let _rime = rime_api_lock();
+            self.session.status().ok().map(|status| SchemaInfo {
+                id: status.schema_id().to_string(),
+                name: status.schema_name().to_string(),
+            })
+        }
+
+        fn schema_switches(&self) -> Vec<SchemaSwitch> {
+            let _rime = rime_api_lock();
+            let Ok(status) = self.session.status() else {
+                return Vec::new();
+            };
+            read_schema_switches_locked(status.schema_id())
+        }
+
+        fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
+            let _rime = rime_api_lock();
+            select_schema_checked(&self.session, schema_id)?;
+            Ok(extract_state_readonly(self))
+        }
 
         /// Set the session option without reading any state back, so that a
-        /// pending commit stays pending (see [`Engine::state`]).
-        pub fn apply_ascii_mode(&self, enabled: bool) {
+        /// pending commit stays pending (see [`RimeBackend::state`]).
+        fn apply_ascii_mode(&self, enabled: bool) {
             let _rime = rime_api_lock();
             set_session_option(&self.session, "ascii_mode", enabled);
         }
 
-        pub fn set_ascii_mode(&self, enabled: bool) -> ImeState {
+        fn set_ascii_mode(&self, enabled: bool) -> ImeState {
             let _rime = rime_api_lock();
             set_session_option(&self.session, "ascii_mode", enabled);
             extract_state_with_commit(self)
         }
 
-        pub fn get_option(&self, option_name: &str) -> bool {
+        fn get_option(&self, option_name: &str) -> bool {
             let _rime = rime_api_lock();
             get_session_option(&self.session, option_name)
         }
 
-        pub fn set_option(&self, option_name: &str, enabled: bool) -> ImeState {
+        fn set_option(&self, option_name: &str, enabled: bool) -> ImeState {
             let _rime = rime_api_lock();
             set_session_option(&self.session, option_name, enabled);
             extract_state_readonly(self)
@@ -4438,14 +4495,14 @@ mod desktop {
     }
 
     /// Snapshot after a state-changing call: takes the pending commit with it.
-    fn extract_state_with_commit(engine: &Engine) -> ImeState {
+    fn extract_state_with_commit(engine: &RimeBackend) -> ImeState {
         let committed = engine.session.commit().map(|c| c.text().to_string());
         extract_state(engine, committed)
     }
 
     /// Snapshot for read-only queries: leaves the pending commit for the next
     /// key event so that no text is dropped on the floor.
-    fn extract_state_readonly(engine: &Engine) -> ImeState {
+    fn extract_state_readonly(engine: &RimeBackend) -> ImeState {
         extract_state(engine, None)
     }
 
@@ -4454,7 +4511,7 @@ mod desktop {
         ctx.menu().select_keys.map(|keys: &str| keys.to_string())
     }
 
-    fn extract_state(engine: &Engine, committed: Option<String>) -> ImeState {
+    fn extract_state(engine: &RimeBackend, committed: Option<String>) -> ImeState {
         let session = &engine.session;
         let status = session.status().ok();
         let ascii_mode = status.as_ref().map(|s| s.is_ascii_mode).unwrap_or(false);
@@ -4615,7 +4672,7 @@ pub use desktop::{deploy, deploy_for_process, setup_only};
     target_os = "android",
     target_os = "ios"
 ))]
-pub(crate) use desktop::Engine;
+pub(crate) use desktop::RimeBackend;
 
 #[cfg(any(
     target_os = "linux",
@@ -4640,7 +4697,7 @@ fn with_schema_switch_config<T>(
         });
     desktop::initialized_user_dir()?;
     let runtime = RuntimeDirs::resolve(user_dir, Path::new(&dirs.shared))?;
-    let changed = desktop::loaded_package_changed(&runtime);
+    let changed = PROCESS_RIME.using_libjd() || desktop::loaded_package_changed(&runtime);
     PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs, changed)?;
     desktop::setup_switch_config(user_dir, &runtime)?;
     *initialized = Some(dirs);
@@ -5607,6 +5664,8 @@ struct ImeRuntimeState {
     user_data_dir: Option<PathBuf>,
     shared_data_dir: Option<String>,
     ime_host: bool,
+    #[cfg(windows)]
+    libjd_server: bool,
 }
 
 /// The data directories librime is running for.
@@ -5645,6 +5704,8 @@ struct RimeDataDirs {
 struct ProcessRimeState {
     /// The directories librime is initialized for, `None` while it is down.
     initialized: Mutex<Option<RimeDataDirs>>,
+    #[cfg(not(target_os = "ios"))]
+    libjd: Mutex<Option<jd_backend::JdBackend>>,
     /// Bumped whenever librime was torn down; a session whose generation is
     /// behind rebuilds its engine before its next call.
     generation: AtomicU64,
@@ -5672,6 +5733,8 @@ struct ProcessRimeState {
 ))]
 static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     initialized: Mutex::new(None),
+    #[cfg(not(target_os = "ios"))]
+    libjd: Mutex::new(None),
     generation: AtomicU64::new(0),
     reload_barrier: RwLock::new(()),
     sessions: Mutex::new(Vec::new()),
@@ -5708,7 +5771,7 @@ impl ProcessRimeState {
             inner.usable = None;
             if let Some(engine) = inner.engine.take() {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
-                inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
+                inner.carried_english_mode = Some(inner.english_mode.is_english(engine.as_ref()));
             }
             true
         });
@@ -5731,7 +5794,7 @@ impl ProcessRimeState {
     fn apply_switch_request(
         &self,
         root: &Path,
-        extra: Option<&Engine>,
+        extra: Option<&dyn ImeBackend>,
         request: Option<&SchemaSwitchRequest>,
     ) -> Result<(), String> {
         if request.is_none() {
@@ -5740,7 +5803,7 @@ impl ProcessRimeState {
         let schema_root = desktop::loaded_schema_root(root);
         let schema_root = schema_root.as_path();
         let sessions = lock_ignore_poison(&self.sessions);
-        let apply = |engine: &Engine| -> Result<(), String> {
+        let apply = |engine: &dyn ImeBackend| -> Result<(), String> {
             if let Some(request) = request {
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 {
@@ -5768,7 +5831,7 @@ impl ProcessRimeState {
                 continue;
             }
             ImeRuntimeSession::rebuild_engine(&mut inner, root)?;
-            if let Some(engine) = inner.engine.as_ref() {
+            if let Some(engine) = inner.engine.as_deref() {
                 apply(engine)?;
                 #[cfg(any(target_os = "android", target_os = "ios"))]
                 if let Some(id) = request.and_then(|request| request.schema_id.as_deref()) {
@@ -5803,7 +5866,7 @@ impl ProcessRimeState {
     }
 
     fn apply_pending_switch_request(&self, root: &Path) -> Result<(), String> {
-        let request = Engine::prepare_switch_request(root)?;
+        let request = RimeBackend::prepare_switch_request(root)?;
         self.apply_switch_request(root, None, request.as_ref())
     }
 
@@ -5848,7 +5911,7 @@ impl ProcessRimeState {
         }
         *initialized = None;
         self.generation.fetch_add(1, Ordering::SeqCst);
-        desktop::finalize_rime()
+        self.finalize_backend()
     }
 }
 
@@ -5880,7 +5943,7 @@ pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<()
         return Err("Rime deployment is busy".into());
     }
     let runtime = RuntimeDirs::resolve(&dirs.user, Path::new(&dirs.shared))?;
-    let changed = desktop::loaded_package_changed(&runtime);
+    let changed = PROCESS_RIME.using_libjd() || desktop::loaded_package_changed(&runtime);
     if changed {
         PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs, true)?;
     } else {
@@ -5911,7 +5974,7 @@ pub(crate) fn with_rime_finalized(
     PROCESS_RIME.drop_live_engines();
     *initialized = None;
     PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
-    desktop::finalize_rime()?;
+    PROCESS_RIME.finalize_backend()?;
     action()
 }
 
@@ -5931,9 +5994,11 @@ pub fn prepare_server_deploy() -> Result<(), String> {
 struct ImeRuntimeSessionInner {
     user_data_dir: PathBuf,
     ime_host: bool,
+    #[cfg(windows)]
+    libjd_server: bool,
     /// `None` after teardown. Pending switch requests rebuild all live engines
     /// before acknowledgment; other reloads rebuild lazily on the next access.
-    engine: Option<Engine>,
+    engine: Option<Box<dyn ImeBackend>>,
     usable: Option<Arc<()>>,
     generation: u64,
     /// ascii_mode of the engine that was dropped, restored on the rebuilt one.
@@ -5970,6 +6035,8 @@ impl ImeRuntime {
             user_data_dir,
             shared_data_dir,
             ime_host: false,
+            #[cfg(windows)]
+            libjd_server: false,
         }))
     }
 
@@ -5977,6 +6044,12 @@ impl ImeRuntime {
     /// App previews, test input and deployment runtimes must keep the default.
     pub fn with_ime_host(mut self) -> Self {
         Arc::make_mut(&mut self.0).ime_host = true;
+        self
+    }
+
+    #[cfg(windows)]
+    pub fn with_libjd_server(mut self) -> Self {
+        Arc::make_mut(&mut self.0).libjd_server = true;
         self
     }
 
@@ -6003,7 +6076,9 @@ impl ImeRuntime {
         finish_composition();
         self.reload_without_deploy_inner()?;
         let target = RuntimeDirs::isolated_user_data_dir(&dirs.user, key);
-        if target.as_deref() != Some(desktop::loaded_schema_root(&dirs.user).as_path()) {
+        if !PROCESS_RIME.using_libjd()
+            && target.as_deref() != Some(desktop::loaded_schema_root(&dirs.user).as_path())
+        {
             return Err(PACKAGE_SWITCH_PENDING.into());
         }
         *applied = signature.map(|signature| (dirs.user, signature, self.generation()));
@@ -6070,7 +6145,7 @@ impl ImeRuntime {
         PROCESS_RIME.drop_live_engines();
         *initialized = None;
         PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
-        desktop::finalize_rime()
+        PROCESS_RIME.finalize_backend()
     }
 
     /// Initialize and deploy. Idempotent per process: librime can only run for
@@ -6082,6 +6157,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.activate_libjd(&dirs, false)? {
+            return Ok(());
+        }
         if deployment_in_progress(&dirs.user)
             && !deployment_state::failed_deployment_owned_by_process(&dirs.user)
         {
@@ -6093,7 +6171,7 @@ impl ImeRuntime {
         let result = (|| {
             let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
             let runtime = RuntimeDirs::resolve(&dirs.user, Path::new(&dirs.shared))?;
-            let changed = desktop::loaded_package_changed(&runtime);
+            let changed = PROCESS_RIME.using_libjd() || desktop::loaded_package_changed(&runtime);
             if initialized.as_ref() == Some(&dirs) && !changed {
                 return Ok(());
             }
@@ -6137,12 +6215,15 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.activate_libjd(&dirs, false)? {
+            return Ok(());
+        }
         runtime_log::init_for_engine(&dirs.user);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let result = (|| {
             let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
             let runtime = RuntimeDirs::resolve(&dirs.user, Path::new(&dirs.shared))?;
-            let changed = desktop::loaded_package_changed(&runtime);
+            let changed = PROCESS_RIME.using_libjd() || desktop::loaded_package_changed(&runtime);
             if initialized.as_ref() == Some(&dirs) && !changed {
                 return Ok(());
             }
@@ -6234,6 +6315,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.activate_libjd(&dirs, true)? {
+            return Ok(());
+        }
         if deployment_in_progress(&dirs.user) {
             return Err("Rime deployment is busy".into());
         }
@@ -6245,7 +6329,7 @@ impl ImeRuntime {
                 return Err("Rime deployment is busy".into());
             }
             let runtime = RuntimeDirs::resolve(&dirs.user, Path::new(&dirs.shared))?;
-            let package_changed = desktop::loaded_package_changed(&runtime);
+            let package_changed = PROCESS_RIME.using_libjd() || desktop::loaded_package_changed(&runtime);
             if self.0.ime_host
                 && runtime.active_package_key.is_some()
                 && ReloadStamp::package_key(&ReloadStamp::path(&dirs.user))
@@ -6263,7 +6347,7 @@ impl ImeRuntime {
                     PROCESS_RIME.drop_live_engines();
                     *initialized = None;
                     PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
-                    desktop::finalize_rime()?;
+                    PROCESS_RIME.finalize_backend()?;
                 }
                 return Ok(());
             }
@@ -6399,7 +6483,7 @@ impl ImeRuntime {
                         if deployment_in_progress(&dirs.user) {
                             return Err("Rime deployment is busy".into());
                         }
-                        let rime = desktop::rime_api_lock();
+                        let rime = (!PROCESS_RIME.using_libjd()).then(desktop::rime_api_lock);
                         if self.generation() != generation {
                             return Err("Rime generation changed".into());
                         }
@@ -6439,6 +6523,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.activate_libjd(&dirs, true)? {
+            return Ok(());
+        }
         if deployment_in_progress(&dirs.user)
             && !deployment_state::failed_deployment_owned_by_process(&dirs.user)
         {
@@ -6455,6 +6542,9 @@ impl ImeRuntime {
             return Err("Rime deployment is busy".into());
         }
         PROCESS_RIME.drop_live_engines();
+        if PROCESS_RIME.clear_libjd() {
+            *initialized = None;
+        }
         // Deploying while an old session keeps librime's config and dictionary
         // caches alive would rebuild the artifacts but keep serving the stale
         // ones, so the engine is torn down first.
@@ -6526,10 +6616,15 @@ impl ImeRuntime {
             let barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)
                 .ok_or("librime initialization or reload is busy")?;
             drop(initialized);
-            let rime = desktop::try_rime_api_lock().ok_or("librime session is busy")?;
+            let libjd = PROCESS_RIME.using_libjd();
+            let rime = if libjd {
+                None
+            } else {
+                Some(desktop::try_rime_api_lock().ok_or("librime session is busy")?)
+            };
             let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
-            let schema_root = desktop::loaded_schema_root(&dirs.user);
-            let request = if self.0.ime_host {
+            let schema_root = PROCESS_RIME.schema_root(&dirs.user);
+            let request = if self.0.ime_host && !libjd {
                 // Schema requests need the registered session's Lua reload barrier first.
                 let pending = schema_switch_request::pending_for_process(&schema_root)?;
                 if pending
@@ -6538,12 +6633,12 @@ impl ImeRuntime {
                 {
                     None
                 } else {
-                    Engine::prepare_switch_request(&dirs.user)?
+                    RimeBackend::prepare_switch_request(&dirs.user)?
                 }
             } else {
                 None
             };
-            let engine = Engine::new_with_user_data_dir(&dirs.user)?;
+            let engine = PROCESS_RIME.create_backend(&dirs.user)?;
             let mut english_mode = english_mode::EnglishModeController::default();
             english_mode.configure(
                 english_mode::read_english_mode(&dirs.user),
@@ -6555,20 +6650,22 @@ impl ImeRuntime {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             if self.0.ime_host {
                 let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
-                let global = global_input::GlobalInput::get(&mut global, &engine, &schema_root);
+                let global = global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
                 global.english_mode.configure(
                     english_mode::read_english_mode(&dirs.user),
                     engine.list_schemas(),
                 );
-                global.apply(&engine, &schema_root)?;
+                global.apply(engine.as_ref(), &schema_root)?;
             }
             if request.is_some() {
-                PROCESS_RIME.apply_switch_request(&dirs.user, Some(&engine), request.as_ref())?;
+                PROCESS_RIME.apply_switch_request(&dirs.user, Some(engine.as_ref()), request.as_ref())?;
             }
             let usable = deployment_state::engine_loaded(&dirs.user);
             let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
                 user_data_dir: dirs.user.clone(),
                 ime_host: self.0.ime_host,
+                #[cfg(windows)]
+                libjd_server: self.0.libjd_server,
                 engine: Some(engine),
                 usable: Some(usable),
                 generation,
@@ -6628,7 +6725,7 @@ impl Default for ImeRuntime {
 impl ImeRuntimeSession {
     pub fn state(&self) -> ImeState {
         self.with_package_menu(|menu| menu.state())
-            .or_else(|| self.with_engine(Engine::state))
+            .or_else(|| self.with_engine(|engine| engine.state()))
             .unwrap_or_else(ImeState::empty)
     }
 
@@ -6808,6 +6905,12 @@ impl ImeRuntimeSession {
             Decision::Native => return Some(self.open_native_switcher()),
             Decision::Switch(key) => {
                 let runtime = ImeRuntime::with_dirs(&self.dirs.user, &self.dirs.shared).with_ime_host();
+                #[cfg(windows)]
+                let runtime = if lock_ignore_poison(&self.inner).libjd_server {
+                    runtime.with_libjd_server()
+                } else {
+                    runtime
+                };
                 let mut committed = None;
                 let switched = runtime.switch_package_from_ime(&key, || {
                     committed = self.with_engine_and_policy(|engine, policy| {
@@ -6945,7 +7048,7 @@ impl ImeRuntimeSession {
         .flatten()
     }
 
-    /// `Return` handling shared by every frontend, see [`Engine::process_enter`].
+    /// `Return` handling shared by every frontend, see [`RimeBackend::process_enter`].
     pub fn process_enter(&self) -> Option<KeyProcessResult> {
         self.process_runtime_key(RuntimeKey::Enter)
     }
@@ -7068,21 +7171,21 @@ impl ImeRuntimeSession {
     /// Commit whatever is being composed; the path a frontend takes when the
     /// input context ends and the composition must not be lost.
     pub fn commit_composition(&self) -> Option<ImeState> {
-        self.with_input_change(Engine::commit_composition)
+        self.with_input_change(|engine| engine.commit_composition())
     }
 
     /// Discard whatever is being composed; the path a frontend takes when the
     /// input context ends and the composition must not reach the client.
     pub fn clear_composition(&self) -> Option<ImeState> {
-        self.with_input_change(Engine::clear_composition)
+        self.with_input_change(|engine| engine.clear_composition())
     }
 
     pub fn commit_raw_input(&self) -> Option<ImeState> {
-        self.with_input_change(Engine::commit_raw_input)
+        self.with_input_change(|engine| engine.commit_raw_input())
     }
 
     pub fn raw_input(&self) -> Option<String> {
-        self.with_engine(Engine::raw_input).flatten()
+        self.with_engine(|engine| engine.raw_input()).flatten()
     }
 
     pub fn all_candidates_limited(&self, max_count: usize) -> Option<Vec<Candidate>> {
@@ -7093,15 +7196,15 @@ impl ImeRuntimeSession {
     }
 
     pub fn list_schemas(&self) -> Option<Vec<SchemaInfo>> {
-        self.with_engine(Engine::list_schemas)
+        self.with_engine(|engine| engine.list_schemas())
     }
 
     pub fn current_schema(&self) -> Option<SchemaInfo> {
-        self.with_engine(Engine::current_schema).flatten()
+        self.with_engine(|engine| engine.current_schema()).flatten()
     }
 
     pub fn schema_switches(&self) -> Option<Vec<SchemaSwitch>> {
-        self.with_engine(Engine::schema_switches)
+        self.with_engine(|engine| engine.schema_switches())
     }
 
     pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
@@ -7112,12 +7215,12 @@ impl ImeRuntimeSession {
                 Ok(state) => state,
                 Err(error) => {
                     if let Some(before) = before {
-                        before.restore(engine, &desktop::loaded_schema_root(&self.dirs.user))?;
+                        before.restore(engine, &PROCESS_RIME.schema_root(&self.dirs.user))?;
                     }
                     return Err(error);
                 }
             };
-            let schema_root = desktop::loaded_schema_root(&self.dirs.user);
+            let schema_root = PROCESS_RIME.schema_root(&self.dirs.user);
             if schema_root != self.dirs.user {
                 persist_selected_schema(&schema_root, schema_id)?;
                 write_current_schema(&schema_root, schema_id)?;
@@ -7139,11 +7242,11 @@ impl ImeRuntimeSession {
     }
 
     pub fn reset(&self) -> Option<ImeState> {
-        self.with_input_change(Engine::reset)
+        self.with_input_change(|engine| engine.reset())
     }
 
     pub fn is_ascii_mode(&self) -> bool {
-        self.with_engine(Engine::is_ascii_mode).unwrap_or(false)
+        self.with_engine(|engine| engine.is_ascii_mode()).unwrap_or(false)
     }
 
     pub fn set_ascii_mode(&self, enabled: bool) -> Option<ImeState> {
@@ -7185,7 +7288,7 @@ impl ImeRuntimeSession {
 
     fn apply_reset_switch_request(
         &self,
-        engine: &Engine,
+        engine: &dyn ImeBackend,
         ime_host: bool,
         before: Option<&global_input::InputState>,
         state: &mut ImeState,
@@ -7194,7 +7297,7 @@ impl ImeRuntimeSession {
             && state.schema_id != ".default"
             && before.is_none_or(|before| before.schema_id != state.schema_id)
         {
-            engine.apply_reset_switch_request(&desktop::loaded_schema_root(&self.dirs.user))?;
+            engine.apply_reset_switch_request(&PROCESS_RIME.schema_root(&self.dirs.user))?;
             let committed = state.committed.take();
             *state = engine.state();
             state.committed = committed;
@@ -7214,7 +7317,7 @@ impl ImeRuntimeSession {
 
     /// What the linked librime can do natively, see [`EngineCapabilities`].
     pub fn capabilities(&self) -> EngineCapabilities {
-        self.with_engine(Engine::capabilities)
+        self.with_engine(|engine| engine.capabilities())
             .unwrap_or_else(EngineCapabilities::none)
     }
 
@@ -7233,11 +7336,11 @@ impl ImeRuntimeSession {
     /// Run `action` on an engine that matches the current generation,
     /// rebuilding it first when a reload invalidated the previous one.
     /// Lock order: reload barrier → session → librime.
-    fn with_engine<T>(&self, action: impl FnOnce(&Engine) -> T) -> Option<T> {
+    fn with_engine<T>(&self, action: impl FnOnce(&dyn ImeBackend) -> T) -> Option<T> {
         self.with_engine_and_policy(|engine, _| action(engine))
     }
 
-    fn with_input_change<T>(&self, action: impl FnOnce(&Engine) -> T) -> Option<T> {
+    fn with_input_change<T>(&self, action: impl FnOnce(&dyn ImeBackend) -> T) -> Option<T> {
         self.close_package_menu();
         self.with_engine_and_mode(|engine, _, _, _, _| action(engine))
     }
@@ -7247,7 +7350,7 @@ impl ImeRuntimeSession {
     /// guard cannot be split by another thread.
     fn with_engine_and_policy<T>(
         &self,
-        action: impl FnOnce(&Engine, InputContextPolicy) -> T,
+        action: impl FnOnce(&dyn ImeBackend, InputContextPolicy) -> T,
     ) -> Option<T> {
         self.with_engine_access(false, false, |engine, policy, _, _, _| {
             action(engine, policy)
@@ -7257,7 +7360,7 @@ impl ImeRuntimeSession {
     fn with_engine_and_mode<T>(
         &self,
         action: impl FnOnce(
-            &Engine,
+            &dyn ImeBackend,
             InputContextPolicy,
             &mut english_mode::EnglishModeController,
             bool,
@@ -7272,7 +7375,7 @@ impl ImeRuntimeSession {
         publish: bool,
         invalidate_peers: bool,
         action: impl FnOnce(
-            &Engine,
+            &dyn ImeBackend,
             InputContextPolicy,
             &mut english_mode::EnglishModeController,
             bool,
@@ -7288,7 +7391,7 @@ impl ImeRuntimeSession {
         invalidate_peers: bool,
         rebuild: bool,
         action: impl FnOnce(
-            &Engine,
+            &dyn ImeBackend,
             InputContextPolicy,
             &mut english_mode::EnglishModeController,
             bool,
@@ -7314,7 +7417,7 @@ impl ImeRuntimeSession {
         } else {
             None
         };
-        let ime_host = try_lock_ignore_poison(&self.inner)?.ime_host;
+        let ime_host = try_lock_ignore_poison(&self.inner)?.ime_host && !PROCESS_RIME.using_libjd();
         let pending_lua = !rebuild && ime_host && self.lua_reload_needed();
         let lua_ready = !ime_host
             || if rebuild {
@@ -7353,6 +7456,9 @@ impl ImeRuntimeSession {
     }
 
     fn lua_reload_deferred(&self) -> bool {
+        if PROCESS_RIME.using_libjd() {
+            return false;
+        }
         lock_ignore_poison(&PROCESS_RIME.lua_retry_after)
             .as_ref()
             .is_some_and(|(root, after)| root == &self.dirs.user && Instant::now() < *after)
@@ -7371,6 +7477,9 @@ impl ImeRuntimeSession {
         };
         if initialized.as_ref() != Some(&self.dirs) {
             return false;
+        }
+        if PROCESS_RIME.using_libjd() {
+            return true;
         }
         if desktop::loaded_schema_root(&self.dirs.user) != self.dirs.user {
             return true;
@@ -7479,7 +7588,7 @@ impl ImeRuntimeSession {
         lua_ready: bool,
         rebuild: bool,
         action: impl FnOnce(
-            &Engine,
+            &dyn ImeBackend,
             InputContextPolicy,
             &mut english_mode::EnglishModeController,
             bool,
@@ -7493,8 +7602,9 @@ impl ImeRuntimeSession {
         if initialized.as_ref() != Some(&self.dirs) {
             return None;
         }
-        let schema_root = desktop::loaded_schema_root(&self.dirs.user);
-        if lua_ready
+        let libjd = PROCESS_RIME.using_libjd();
+        let schema_root = PROCESS_RIME.schema_root(&self.dirs.user);
+        if !libjd && lua_ready
             && self
                 .inner
                 .try_lock()
@@ -7533,7 +7643,7 @@ impl ImeRuntimeSession {
         let _barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)?;
         drop(initialized);
         let mut inner = try_lock_ignore_poison(&self.inner)?;
-        let _rime = desktop::try_rime_api_lock()?;
+        let _rime = if libjd { None } else { Some(desktop::try_rime_api_lock()?) };
         if !rebuild
             && (inner.engine.is_none()
                 || inner.generation != PROCESS_RIME.generation.load(Ordering::SeqCst))
@@ -7543,7 +7653,7 @@ impl ImeRuntimeSession {
         self.refresh_if_needed(&mut inner).ok()?;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(id) = inner.pending_schema_id.clone() {
-            let engine = inner.engine.as_ref()?;
+            let engine = inner.engine.as_deref()?;
             if !engine.is_composing() {
                 engine.select_schema(&id).ok()?;
                 engine.apply_reset_switch_request(&schema_root).ok()?;
@@ -7562,7 +7672,7 @@ impl ImeRuntimeSession {
             pending_schema_id,
             ..
         } = &mut *inner;
-        let engine = engine.as_ref()?;
+        let engine = engine.as_deref()?;
         if clear_composition {
             engine.discard_composition();
         }
@@ -7663,21 +7773,21 @@ impl ImeRuntimeSession {
             inner.usable = None;
             if let Some(engine) = inner.engine.take() {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
-                inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
+                inner.carried_english_mode = Some(inner.english_mode.is_english(engine.as_ref()));
             }
-            let engine = Engine::new_with_user_data_dir(root)?;
-            let schema_root = desktop::loaded_schema_root(root);
+            let engine = PROCESS_RIME.create_backend(root)?;
+            let schema_root = PROCESS_RIME.schema_root(root);
             inner
                 .english_mode
                 .configure(english_mode::read_english_mode(root), engine.list_schemas());
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             if inner.ime_host {
                 let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
-                let global = global_input::GlobalInput::get(&mut global, &engine, &schema_root);
+                let global = global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
                 global
                     .english_mode
                     .configure(english_mode::read_english_mode(root), engine.list_schemas());
-                global.apply(&engine, &schema_root)?;
+                global.apply(engine.as_ref(), &schema_root)?;
                 inner.carried_ascii_mode = None;
                 inner.carried_english_mode = None;
             }
@@ -7687,7 +7797,7 @@ impl ImeRuntimeSession {
             }
             if cfg!(not(any(target_os = "android", target_os = "ios"))) {
                 if let Some(english) = inner.carried_english_mode.take() {
-                    if let Err(error) = inner.english_mode.restore(&engine, english) {
+                    if let Err(error) = inner.english_mode.restore(engine.as_ref(), english) {
                         // A removed or broken optional dictionary must not
                         // prevent the rebuilt session from accepting input.
                         engine.apply_ascii_mode(english);
@@ -7814,6 +7924,9 @@ fn persist_selected_schema(root: &Path, id: &str) -> Result<(), String> {
 }
 
 fn publish_current_schema(root: &Path, id: &str) {
+    if PROCESS_RIME.using_libjd() {
+        return;
+    }
     if let Err(error) =
         persist_selected_schema(root, id).and_then(|()| write_current_schema(root, id))
     {

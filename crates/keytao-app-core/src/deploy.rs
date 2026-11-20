@@ -1169,6 +1169,7 @@ mod tests {
         let key = "local-switch";
         let meta = crate::packages::PackageMeta {
             scheme_key: key.into(),
+            engine: Default::default(),
             version: None,
             installed_at_unix: 1,
             source: "local".into(),

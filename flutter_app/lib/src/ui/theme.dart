@@ -294,7 +294,7 @@ class KeyTaoTheme extends StatelessWidget {
           BridgePlatform.windows => FPlatformVariant.windows,
           _ => FPlatformVariant.linux,
         },
-        child: FTooltipGroup(child: child!),
+        child: FTooltipGroup(child: FToaster(child: child!)),
       ),
       home: home,
     );

@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.Debug
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.speech.RecognitionListener
@@ -227,9 +228,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var readinessRetryDelayMs = 500L
     private var lastReloadStampSignature: String? = null
     private val readinessRetry = Runnable {
-        if (inputViewShown && !serviceDestroyed) {
-            scheduleAvailabilityRefresh(pollReloadStamp = true)
-        }
+        scheduleAvailabilityRefresh(pollReloadStamp = true)
     }
     private var editorUpdatePending = false
     @Volatile private var editorUpdateGeneration = 0L
@@ -464,6 +463,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             put("phase", "input_view")
             put("finishing_input", finishingInput)
         }
+        if (!finishingInput) scheduleReadinessRetry()
     }
 
     override fun onWindowShown() {
@@ -768,6 +768,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         keyboardView?.updateTheme(resolvePresentationTheme())
         applyKeyboardPresentation(loadPresentationConfig())
+        if (!inputViewShown) scheduleReadinessRetry()
     }
 
     private fun markPresentationLoad() {
@@ -912,6 +913,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
+        mainHandler.removeCallbacks(readinessRetry)
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
         resetDeploymentInput()
@@ -2895,7 +2897,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
             else -> false
         }
-        if (pollReloadStamp && !inputViewShown) return
+        if (pollReloadStamp && !shouldPollReloadStamp()) return
         availabilityRefreshPending = true
         val reloadPresentation = presentationLoadedWithoutRoot
         val retryReadiness = retryableReadiness &&
@@ -2918,7 +2920,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val theme = if (recovered) runCatching { KeytaoThemeResolver.resolve(this) }.getOrNull() else null
             mainHandler.post {
                 availabilityRefreshPending = false
-                if (serviceDestroyed) return@post
+                if (serviceDestroyed || (pollReloadStamp && !shouldPollReloadStamp())) return@post
                 if (stampChanged) {
                     readinessRetryCount = 0
                     readinessRetryDelayMs = 500L
@@ -2971,7 +2973,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun scheduleReadinessRetry() {
         mainHandler.removeCallbacks(readinessRetry)
-        if (inputViewShown && !serviceDestroyed) {
+        if (shouldPollReloadStamp()) {
             // Keep polling the stamp after the full readiness probe budget is exhausted.
             val delayMs = if (lastReadiness == Readiness.READY || lastReadiness == Readiness.DEPLOYING) {
                 500L
@@ -2980,6 +2982,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             readinessRetryDelayMs = (delayMs * 2).coerceAtMost(5_000L)
         }
     }
+
+    private fun shouldPollReloadStamp(): Boolean = !serviceDestroyed &&
+        (inputViewShown || (!BuildConfig.GOOGLE_PLAY_DISTRIBUTION && Process.is64Bit() &&
+            currentInputStarted && resources.configuration.keyboard > Configuration.KEYBOARD_NOKEYS))
 
     private fun configuredEnglishMode(): String {
         return baseKeyboardConfig?.englishMode ?: keyboardView?.currentConfig()?.englishMode ?: "ascii"

@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `install_result_dto`, `theme_library_host`
+// These functions are ignored because they are not marked as `pub`: `install_result_dto`, `libjd_failure`, `theme_library_host`
 
 /// Creates the process-wide Core, or returns its existing info when the resolved
 /// directories, platform and user root match. Restart the process to change them.
@@ -270,6 +270,20 @@ Future<void> setPackageEasyEnglish({
   enabled: enabled,
   androidDeploy: androidDeploy,
 );
+
+Future<LibjdStatusDto> libjdStatus() =>
+    RustLib.instance.api.crateApiCoreLibjdStatus();
+
+Future<LibjdReleaseDto> libjdRelease() =>
+    RustLib.instance.api.crateApiCoreLibjdRelease();
+
+/// Download progress uses core_events. Cancel with cancel_scheme_download.
+Future<LibjdStatusDto> installOrUpdateLibjd({
+  required LibjdReleaseDto release,
+}) => RustLib.instance.api.crateApiCoreInstallOrUpdateLibjd(release: release);
+
+Future<void> setPackageEngine({required String key, required String engine}) =>
+    RustLib.instance.api.crateApiCoreSetPackageEngine(key: key, engine: engine);
 
 Future<List<String>> removeSchemePackage({
   required String schemeKey,

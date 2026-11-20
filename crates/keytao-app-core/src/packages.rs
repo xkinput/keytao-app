@@ -6,6 +6,7 @@ pub(crate) use crate::legacy_flat::PendingPackage;
 pub use crate::legacy_flat::{record_package, sync_generated};
 use crate::package_store::PackageStore;
 use crate::{Core, CoreError};
+use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -24,6 +25,8 @@ pub(crate) mod package_logos;
 #[derive(Serialize, Deserialize)]
 pub struct PackageMeta {
     pub scheme_key: String,
+    #[serde(default, skip_serializing_if = "PackageEngine::is_rime")]
+    pub engine: PackageEngine,
     pub version: Option<String>,
     pub installed_at_unix: u64,
     pub source: String,
@@ -38,6 +41,7 @@ pub struct PackageMeta {
 #[derive(Serialize)]
 pub struct InstalledPackageInfo {
     pub scheme_key: String,
+    pub engine: String,
     pub version: Option<String>,
     pub active: bool,
     pub in_use: bool,
@@ -354,6 +358,7 @@ pub(crate) fn store_cloud_archive_reader(
     let scheme_key = key.as_str();
     let meta = PackageMeta {
         scheme_key: scheme_key.into(),
+        engine: PackageEngine::Rime,
         version: version.map(str::to_owned),
         installed_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -415,6 +420,34 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
     PackageStore::new(core).list_installed_packages()
 }
 
+fn notify_package_engine_change(root: &Path) -> Result<(), CoreError> {
+    keytao_core::ReloadStamp::write(root).map_err(CoreError::Other)?;
+    Ok(())
+}
+
+pub fn set_package_engine(core: &Core, root: &Path, key: &str, engine: &str) -> Result<(), CoreError> {
+    let engine = match engine {
+        "rime" => PackageEngine::Rime,
+        "libjd" if key == PACKAGE_KEY => PackageEngine::Libjd,
+        "libjd" => return Err(CoreError::Other("只有键道6支持 ime-jd".into())),
+        _ => return Err(CoreError::Other("未知输入引擎".into())),
+    };
+    if engine == PackageEngine::Libjd {
+        let status = crate::libjd::libjd_status(core);
+        if !status.available || status.installed_version.is_none() {
+            return Err(CoreError::Other("请先安装 ime-jd".into()));
+        }
+    }
+    keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
+        PackageStore::new(core).set_engine(root, key, engine).map_err(|error| error.to_string())
+    })
+    .map_err(CoreError::Other)?;
+    if key == PACKAGE_KEY && keytao_core::engine_choice::active_package(root).as_deref() == Some(key) {
+        notify_package_engine_change(root)?;
+    }
+    Ok(())
+}
+
 pub async fn remove_scheme_package(
     core: &Core,
     scheme_key: &str,
@@ -439,6 +472,11 @@ pub async fn remove_scheme_package(
     };
     let store = PackageStore::new(core);
     store.checked_root()?;
+    if scheme_key == PACKAGE_KEY
+        && keytao_core::engine_choice::read(&root, Some(scheme_key)) == PackageEngine::Libjd
+    {
+        set_package_engine(core, &root, scheme_key, "rime")?;
+    }
     store.remove(scheme_key)?;
     core.update_state(|state| {
         state.installed_packages.remove(scheme_key);

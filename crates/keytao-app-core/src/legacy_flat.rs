@@ -362,6 +362,7 @@ pub(crate) fn finalize_pending(
     let display_name = previous.as_ref().and_then(|meta| meta.display_name.clone());
     let meta = PackageMeta {
         scheme_key: scheme_key.into(),
+        engine: Default::default(),
         version: version.map(str::to_owned),
         installed_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -98,6 +98,7 @@ class KeytaoImeEngine(context: Context) {
     private fun warmUpIfStorageReady() {
         if (warmupComplete) return
         userDir ?: return
+        KeytaoNativeBridge.configureLibjd(appContext.dataDir.absolutePath)
         val started = System.nanoTime()
         val bundledDataOk = runCatching { ensureBundledSharedData(appContext) }.isSuccess
         warmupComplete = bundledDataOk

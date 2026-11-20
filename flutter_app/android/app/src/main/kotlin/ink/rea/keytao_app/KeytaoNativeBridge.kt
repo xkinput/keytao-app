@@ -22,6 +22,22 @@ object KeytaoNativeBridge {
         runCatching { Log.e("KeytaoNative", "{\"cat\":\"error\",\"ev\":\"native_lib_missing\"}") }
     }.getOrDefault(false)
 
+    fun configureLibjd(dataDir: String) {
+        if (loaded) nativeConfigureLibjd(dataDir, BuildConfig.GOOGLE_PLAY_DISTRIBUTION)
+    }
+
+    @JvmStatic
+    @androidx.annotation.Keep
+    fun loadLibjdLibrary(path: String): Boolean {
+        if (BuildConfig.GOOGLE_PLAY_DISTRIBUTION) return false
+        return runCatching {
+            System.load(path)
+            true
+        }.getOrDefault(false)
+    }
+
+    private external fun nativeConfigureLibjd(dataDir: String, googlePlayDistribution: Boolean)
+
     inline fun rtLog(
         level: Int,
         cat: String,

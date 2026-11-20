@@ -177,7 +177,7 @@ fn desktop_deploy_rebuilds_only_changed_schemas_and_falls_back_safely() {
         table_before
     );
     assert_eq!(prism_modified("keytao_two"), old);
-    let engine = Engine::new_with_user_data_dir(&root).unwrap();
+    let engine = RimeBackend::new_with_user_data_dir(&root).unwrap();
     engine.select_schema("keytao_one").unwrap();
     engine.process_key_result('a' as u32, 0);
     let state = engine.process_key_result('a' as u32, 0).state;

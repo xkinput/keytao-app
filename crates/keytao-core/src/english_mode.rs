@@ -95,7 +95,7 @@ pub(crate) trait EnglishBackend {
     fn set_ascii_mode(&self, enabled: bool) -> ImeState;
 }
 
-pub(crate) fn schema_options(engine: &impl EnglishBackend) -> BTreeMap<String, bool> {
+pub(crate) fn schema_options(engine: &dyn EnglishBackend) -> BTreeMap<String, bool> {
     engine
         .schema_switches()
         .into_iter()
@@ -122,7 +122,7 @@ impl EnglishModeController {
         self.schemas = schemas;
     }
 
-    pub fn is_english(&self, engine: &impl EnglishBackend) -> bool {
+    pub fn is_english(&self, engine: &dyn EnglishBackend) -> bool {
         engine.state().is_english_mode()
     }
 
@@ -144,7 +144,7 @@ impl EnglishModeController {
     /// Shift release unhandled, or a frontend fallback would switch twice.
     pub fn reconcile_ascii_toggle(
         &mut self,
-        engine: &impl EnglishBackend,
+        engine: &dyn EnglishBackend,
         before: bool,
         result: &mut KeyProcessResult,
     ) -> Result<(), String> {
@@ -173,7 +173,7 @@ impl EnglishModeController {
 
     /// A rebuilt engine starts on its configured Chinese schema. Entering
     /// English again must not replace the option snapshot saved before reload.
-    pub fn restore(&mut self, engine: &impl EnglishBackend, english: bool) -> Result<(), String> {
+    pub fn restore(&mut self, engine: &dyn EnglishBackend, english: bool) -> Result<(), String> {
         let previous_schema = self.chinese_schema.clone();
         let previous_options = self.chinese_options.clone();
         self.switch(engine, english)?;
@@ -190,7 +190,7 @@ impl EnglishModeController {
 
     pub fn switch(
         &mut self,
-        engine: &impl EnglishBackend,
+        engine: &dyn EnglishBackend,
         english: bool,
     ) -> Result<ImeState, String> {
         let current = engine
@@ -255,36 +255,6 @@ impl EnglishModeController {
             }
         }
         Ok(engine.set_ascii_mode(false))
-    }
-}
-
-impl EnglishBackend for crate::Engine {
-    fn current_schema(&self) -> Option<SchemaInfo> {
-        self.current_schema()
-    }
-    fn schema_switches(&self) -> Vec<SchemaSwitch> {
-        self.schema_switches()
-    }
-    fn get_option(&self, name: &str) -> bool {
-        self.get_option(name)
-    }
-    fn set_option(&self, name: &str, enabled: bool) -> ImeState {
-        self.set_option(name, enabled)
-    }
-    fn select_schema(&self, id: &str) -> Result<ImeState, String> {
-        self.select_schema(id)
-    }
-    fn discard_composition(&self) {
-        self.discard_composition()
-    }
-    fn state(&self) -> ImeState {
-        self.state()
-    }
-    fn apply_ascii_mode(&self, enabled: bool) {
-        self.apply_ascii_mode(enabled)
-    }
-    fn set_ascii_mode(&self, enabled: bool) -> ImeState {
-        self.set_ascii_mode(enabled)
     }
 }
 
