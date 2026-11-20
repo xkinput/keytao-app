@@ -191,6 +191,7 @@ class AppController extends ChangeNotifier {
   String? packageError;
   String? releaseError;
   String? installError;
+  String? deployWarning;
   String? addonError;
   String? wanxiangError;
   String? wanxiangGrammarError;
@@ -826,6 +827,11 @@ class AppController extends ChangeNotifier {
           cloudTransferProgress = value;
           _changed();
           return;
+        }
+        if (event.deployProgress == AppStrings.deployDone) deployWarning = null;
+        if (event.deployProgress case final value?
+            when value.contains('编译失败，已跳过：')) {
+          deployWarning = value;
         }
         if (event.deployProgress case final value?
             when isDeploying ||
@@ -2050,6 +2056,7 @@ class AppController extends ChangeNotifier {
       if (local?.deployed != true) {
         throw StateError(AppStrings.deployCheckFailed);
       }
+      deployWarning = warning?.isNotEmpty == true ? warning : null;
       _deployStep(message, DeployStepState.ok);
       if (warning != null && warning.isNotEmpty) {
         if (!deploySteps.any((step) => step.message == warning)) {
@@ -2802,8 +2809,9 @@ class AppController extends ChangeNotifier {
     try {
       final result = await android.deployImeData();
       if (result['deployed'] == true) {
-        if (result['warning'] case final String warning
-            when warning.isNotEmpty) {
+        final warning = result['warning'] as String?;
+        deployWarning = warning?.isNotEmpty == true ? warning : null;
+        if (warning != null && warning.isNotEmpty) {
           _deployStep(warning, DeployStepState.neutral);
           addOperationLogs(['[WARN] $warning']);
         }

@@ -897,6 +897,7 @@ async fn installing_into_another_directory_preserves_active_deploy_receipt() {
         &core,
         zip.to_string_lossy().into_owned(),
         dest.to_string_lossy().into_owned(),
+        Some("xmjd"),
         #[cfg(target_os = "windows")]
         |_, _, _, _| Ok(Vec::new()),
     )

@@ -87,6 +87,7 @@ impl Fixture {
             &self.core,
             archive.to_string_lossy().into_owned(),
             self.root.to_string_lossy().into_owned(),
+            Some("keytao"),
             #[cfg(target_os = "windows")]
             |_, _, _, _| Ok(Vec::new()),
         )

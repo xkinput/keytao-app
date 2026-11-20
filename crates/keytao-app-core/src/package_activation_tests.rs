@@ -73,11 +73,11 @@ async fn mobile_install_switch_and_delete_share_owned_generated_transactions() {
                     "coreInstall": true,
                     "packageZipPath": archive,
                     "packageRoot": host.root,
-                })).unwrap();
+                }), Some(key)).unwrap();
                 assert!(result.verify.iter().all(|entry| entry.ok));
             } else {
                 crate::install::smart_install_files(
-                    &host.core, entries, host.root.to_string_lossy().into_owned(), false,
+                    &host.core, entries, host.root.to_string_lossy().into_owned(), false, Some(key),
                 ).await.unwrap();
             }
             {
@@ -121,7 +121,7 @@ async fn android_core_install_failure_restores_previous_activation() {
         "coreInstall": true,
         "packageZipPath": archive,
         "packageRoot": host.root,
-    })).is_err());
+    }), Some("xmjd")).is_err());
     assert_eq!(snapshot(&host.root), before);
     assert_eq!(host.core.state().active_scheme.as_deref(), Some("keytao"));
     assert_eq!(package_activation::read(&host.core, &host.root).unwrap().unwrap().key, "keytao");
@@ -160,7 +160,7 @@ fn files(schema: &str) -> Vec<(String, Vec<u8>)> {
             format!("lua/{schema}.lua"),
             format!("return '{schema}'\n").into_bytes(),
         ),
-        ("shared.txt".into(), schema.as_bytes().to_vec()),
+        ("shared.txt".into(), b"shared".to_vec()),
         (
             "default.custom.yaml".into(),
             format!("patch:\n  menu/page_size: 6\n  schema_list:\n    - schema: {schema}\n")
@@ -196,6 +196,172 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
         .unwrap(),
         key,
     );
+}
+
+#[tokio::test]
+async fn conflicting_package_files_leave_install_and_activation_unchanged() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    for path in ["symbols.yaml", "lua/shared.lua", "collision.txt"] {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Host::new(directory.path(), Arc::new(Sink));
+        let mut first = files("alpha");
+        first.push((path.into(), b"first package\n".to_vec()));
+        store(&host, "keytao", first);
+        activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+        let mut incoming = files("beta");
+        incoming.insert(0, ("aaa-new.txt".into(), b"must not be written".to_vec()));
+        incoming.push((path.into(), b"second package\n".to_vec()));
+        store(&host, "xmjd", incoming.clone());
+        let archive = directory.path().join("incoming.zip");
+        let archive_bytes = archive_from_files(&incoming).unwrap();
+        fs::write(&archive, &archive_bytes).unwrap();
+        let before_root = snapshot(&host.root);
+        let before_store = snapshot(&PackageStore::new(&host.core).root());
+        let before_state = host.core.state();
+
+        let install_error = crate::install::smart_install(
+            &host.core,
+            archive.to_string_lossy().into_owned(),
+            host.root.to_string_lossy().into_owned(),
+            Some("xmjd"),
+        ).await.err().unwrap().to_string();
+        assert!(install_error.contains(path), "{install_error}");
+        assert!(install_error.contains("keytao"), "{install_error}");
+        assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
+        assert_eq!(snapshot(&host.root), before_root);
+        assert_eq!(snapshot(&PackageStore::new(&host.core).root()), before_store);
+        assert!(host.core.state() == before_state);
+
+        let activation_error = activate_scheme(&host.core, "xmjd", &host.root)
+            .await.err().unwrap().to_string();
+        assert!(activation_error.contains(path), "{activation_error}");
+        assert!(activation_error.contains("keytao"), "{activation_error}");
+        assert_eq!(fs::read(host.root.join(path)).unwrap(), b"first package\n");
+        assert!(!host.root.join("aaa-new.txt").exists());
+        assert_eq!(snapshot(&host.root), before_root);
+        assert_eq!(snapshot(&PackageStore::new(&host.core).root()), before_store);
+        assert!(host.core.state() == before_state);
+    }
+}
+
+#[tokio::test]
+async fn identical_package_files_allow_install_update_and_independent_removal() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
+        let mut entries = files(schema);
+        entries.push(("symbols.yaml".into(), b"punctuator: {}\n".to_vec()));
+        crate::install::smart_install_files(
+            &host.core, entries, host.root.to_string_lossy().into_owned(), false, Some(key),
+        ).await.unwrap();
+        crate::packages::record_package(&host.core, key, Some("v1"), true).unwrap();
+        assert!(package_activation::read_package(&host.core, &host.root, key).unwrap().unwrap()
+            .owned.iter().any(|file| file.path == "symbols.yaml"));
+    }
+    remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), b"punctuator: {}\n");
+    let mut update = files("beta");
+    update.push(("symbols.yaml".into(), b"punctuator: {symbols: {}}\n".to_vec()));
+    store(&host, "xmjd", update);
+    activate_scheme(&host.core, "xmjd", &host.root).await.unwrap();
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), b"punctuator: {symbols: {}}\n");
+    remove_scheme_package(&host.core, "xmjd", &host).await.unwrap();
+    assert!(!host.root.join("symbols.yaml").exists());
+}
+
+#[tokio::test]
+async fn shared_user_modified_file_survives_schema_selection_and_package_update() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let original = b"punctuator: {}\n";
+    let edited = b"punctuator: {symbols: user}\n";
+    let mut first = files("alpha");
+    first.push(("alternate.schema.yaml".into(), b"schema: {schema_id: alternate}\n".to_vec()));
+    first.push(("symbols.yaml".into(), original.to_vec()));
+    let mut second = files("beta");
+    second.push(("symbols.yaml".into(), original.to_vec()));
+    for (key, entries) in [("keytao", first.clone()), ("xmjd", second)] {
+        store(&host, key, entries);
+        activate_scheme(&host.core, key, &host.root).await.unwrap();
+        assert!(package_activation::read_package(&host.core, &host.root, key).unwrap().unwrap()
+            .owned.iter().any(|file| file.path == "symbols.yaml"
+                && file.sha256 == sha256_reader(original.as_slice()).unwrap()));
+    }
+    write(&host.root, "symbols.yaml", edited);
+    crate::package_schemas::set_package_schemas(&host.core, "keytao", &["alternate".into()]).unwrap();
+    let result = activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert!(package_activation::retained(&result.logs).contains(&"symbols.yaml".into()));
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), edited);
+
+    first.push(("updated.txt".into(), b"updated package".to_vec()));
+    store(&host, "keytao", first);
+    let result = activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    assert!(package_activation::retained(&result.logs).contains(&"symbols.yaml".into()));
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), edited);
+    assert_eq!(fs::read(host.root.join("updated.txt")).unwrap(), b"updated package");
+}
+
+#[tokio::test]
+async fn case_alias_package_files_preserve_conflicts_ownership_and_original_backup() {
+    use std::os::unix::fs::MetadataExt;
+
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let original = b"punctuator: {symbols: original}\n";
+    write(&host.root, "symbols.yaml", original);
+    let Ok(alias) = fs::metadata(host.root.join("Symbols.yaml")) else { return; };
+    let source = fs::metadata(host.root.join("symbols.yaml")).unwrap();
+    if (source.dev(), source.ino()) != (alias.dev(), alias.ino()) {
+        return;
+    }
+    let shared = b"punctuator: {symbols: shared}\n";
+    let mut first = files("alpha");
+    first.push(("symbols.yaml".into(), shared.to_vec()));
+    store(&host, "keytao", first);
+    activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
+    let mut incoming = files("beta");
+    incoming.insert(0, ("aaa-new.txt".into(), b"must not be written".to_vec()));
+    incoming.push(("Symbols.yaml".into(), b"punctuator: {symbols: conflict}\n".to_vec()));
+    store(&host, "xmjd", incoming.clone());
+    let before_root = snapshot(&host.root);
+    let before_store = snapshot(&PackageStore::new(&host.core).root());
+    let before_state = host.core.state();
+    let error = crate::install::smart_install_files(
+        &host.core, incoming.clone(), host.root.to_string_lossy().into_owned(), false, Some("xmjd"),
+    ).await.err().unwrap().to_string();
+    assert!(error.contains("Symbols.yaml"), "{error}");
+    assert!(error.contains("keytao"), "{error}");
+    assert_eq!(snapshot(&host.root), before_root);
+    assert_eq!(snapshot(&PackageStore::new(&host.core).root()), before_store);
+    assert!(host.core.state() == before_state);
+    let error = activate_scheme(&host.core, "xmjd", &host.root)
+        .await.err().unwrap().to_string();
+    assert!(error.contains("Symbols.yaml"), "{error}");
+    assert!(error.contains("keytao"), "{error}");
+    assert_eq!(snapshot(&host.root), before_root);
+    assert_eq!(snapshot(&PackageStore::new(&host.core).root()), before_store);
+    assert!(host.core.state() == before_state);
+    assert!(!host.root.join("aaa-new.txt").exists());
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), shared);
+
+    incoming.iter_mut().find(|(path, _)| path == "Symbols.yaml").unwrap().1 = shared.to_vec();
+    store(&host, "xmjd", incoming);
+    activate_scheme(&host.core, "xmjd", &host.root).await.unwrap();
+    remove_scheme_package(&host.core, "keytao", &host).await.unwrap();
+    assert_eq!(fs::read(host.root.join("Symbols.yaml")).unwrap(), shared);
+    let mut update = files("beta");
+    let updated = b"punctuator: {symbols: updated}\n";
+    update.push(("symbols.yaml".into(), updated.to_vec()));
+    store(&host, "xmjd", update);
+    activate_scheme(&host.core, "xmjd", &host.root).await.unwrap();
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), updated);
+    assert!(package_activation::read_package(&host.core, &host.root, "xmjd").unwrap().unwrap()
+        .owned.iter().any(|file| file.path == "symbols.yaml"));
+    remove_scheme_package(&host.core, "xmjd", &host).await.unwrap();
+    assert_eq!(fs::read(host.root.join("symbols.yaml")).unwrap(), original);
 }
 
 #[tokio::test]
@@ -414,7 +580,7 @@ async fn installed_packages_coexist_with_lua_snapshots_and_independent_removal()
     let host = Host::new(directory.path(), Arc::new(Sink));
     for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
         let mut entries = files(schema);
-        entries.push(("lua/shared.lua".into(), format!("return '{schema}'\n").into_bytes()));
+        entries.push(("lua/shared.lua".into(), b"return 'shared'\n".to_vec()));
         store(&host, key, entries);
         activate_scheme(&host.core, key, &host.root).await.unwrap();
     }
@@ -431,7 +597,7 @@ async fn installed_packages_coexist_with_lua_snapshots_and_independent_removal()
     for (key, schema) in [("keytao", "alpha"), ("xmjd", "beta")] {
         assert_eq!(marker["packages"][key]["schemas"], serde_json::json!([schema]));
         let snapshot = marker["packages"][key]["lua_files"]["lua/shared.lua"].as_str().unwrap();
-        assert_eq!(fs::read_to_string(host.root.join(snapshot)).unwrap(), format!("return '{schema}'\n"));
+        assert_eq!(fs::read_to_string(host.root.join(snapshot)).unwrap(), "return 'shared'\n");
     }
     for _ in 0..2 {
         let result = activate_scheme(&host.core, "keytao", &host.root).await.unwrap();
@@ -1078,7 +1244,7 @@ async fn switching_preserves_modified_owned_paths_also_shipped_by_the_next_packa
         .unwrap();
     let retained = package_activation::retained(&result.logs);
     for path in ["alpha.custom.yaml", "lua/alpha.lua"] {
-        assert!(retained.contains(&path.into()), "{path}");
+        assert!(retained.contains(&path.into()));
     }
     assert_eq!(
         fs::read(host.root.join("alpha.custom.yaml")).unwrap(),
@@ -1106,7 +1272,7 @@ async fn activating_identical_unowned_file_preserves_it_after_deactivation() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let host = Host::new(directory.path(), Arc::new(Sink));
-    write(&host.root, "shared.txt", b"alpha");
+    write(&host.root, "shared.txt", b"shared");
     let before = package_state(&host.root);
     store(&host, "keytao", files("alpha"));
     activate_scheme(&host.core, "keytao", &host.root)
@@ -1117,7 +1283,7 @@ async fn activating_identical_unowned_file_preserves_it_after_deactivation() {
         .unwrap();
     assert!(retained.is_empty());
     assert_eq!(package_state(&host.root), before);
-    assert_eq!(fs::read(host.root.join("shared.txt")).unwrap(), b"alpha");
+    assert_eq!(fs::read(host.root.join("shared.txt")).unwrap(), b"shared");
 }
 
 #[tokio::test]

@@ -451,6 +451,7 @@ pub async fn smart_install(
     core: &Core,
     zip_path: String,
     dest_path: String,
+    scheme_key: Option<&str>,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
     smart_install_preserving_settings(
@@ -458,6 +459,7 @@ pub async fn smart_install(
         zip_path,
         dest_path,
         false,
+        scheme_key,
         #[cfg(target_os = "windows")]
         finish_windows,
     )
@@ -468,6 +470,7 @@ fn smart_install_preserving_settings(
     zip_path: String,
     dest_path: String,
     preserve_default_settings: bool,
+    scheme_key: Option<&str>,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
     use std::io::Read;
@@ -494,6 +497,7 @@ fn smart_install_preserving_settings(
         zip_bytes,
         dest_path,
         preserve_default_settings,
+        scheme_key,
         #[cfg(target_os = "windows")]
         finish_windows,
     );
@@ -508,6 +512,7 @@ pub(crate) async fn smart_install_files(
     files: Vec<(String, Vec<u8>)>,
     dest_path: String,
     preserve_default_settings: bool,
+    scheme_key: Option<&str>,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
     // Existing receipts and platform verification use a transient archive.
@@ -518,9 +523,70 @@ pub(crate) async fn smart_install_files(
         zip_bytes,
         dest_path,
         preserve_default_settings,
+        scheme_key,
         #[cfg(target_os = "windows")]
         finish_windows,
     )
+}
+
+fn check_package_file_conflicts(
+    root: &std::path::Path,
+    files: &[(String, Vec<u8>)],
+    records: &std::collections::BTreeMap<String, crate::package_activation::Activation>,
+    scheme_key: Option<&str>,
+) -> Result<(), String> {
+    let mut conflicts = Vec::new();
+    for (relative, content) in files {
+        if crate::packages::excluded_from_manifest(relative) {
+            continue;
+        }
+        let path = crate::packages::safe_path(root, relative)?;
+        let mut owners: Vec<_> = records
+            .iter()
+            .filter(|(key, record)| {
+                Some(key.as_str()) != scheme_key
+                    && record.owned.iter().any(|file| {
+                        crate::package_activation::same_file_path(root, &file.path, relative)
+                    })
+            })
+            .map(|(key, _)| key.as_str())
+            .collect();
+        if owners.is_empty() {
+            continue;
+        }
+        let current = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(crate::package_fs::context("读取文件", &path, error).to_string());
+            }
+        };
+        let digest = |bytes: &[u8]| -> Result<String, String> {
+            if relative.ends_with(".custom.yaml") {
+                let content = crate::managed_custom::strip(
+                    std::str::from_utf8(bytes).map_err(|e| e.to_string())?,
+                )?;
+                crate::packages::sha256_reader(content.as_bytes()).map_err(|e| e.to_string())
+            } else {
+                crate::packages::sha256_reader(bytes).map_err(|e| e.to_string())
+            }
+        };
+        let current_sha256 = digest(&current)?;
+        if current_sha256 != digest(content)? {
+            owners.retain(|key| records[*key].owned.iter().any(|file| {
+                crate::package_activation::same_file_path(root, &file.path, relative)
+                    && file.sha256 == current_sha256
+            }));
+            if !owners.is_empty() {
+                conflicts.push(format!("{relative}（{}）", owners.join("、")));
+            }
+        }
+    }
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("文件冲突：{}", conflicts.join("、")))
+    }
 }
 
 fn smart_install_entries(
@@ -529,8 +595,17 @@ fn smart_install_entries(
     zip_bytes: Vec<u8>,
     dest_path: String,
     preserve_default_settings: bool,
+    scheme_key: Option<&str>,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
+    let dest = PathBuf::from(&dest_path);
+    let installed_records = if dest.try_exists()? {
+        crate::package_activation::read_all(core, &dest)?
+    } else {
+        Default::default()
+    };
+    check_package_file_conflicts(&dest, &files, &installed_records, scheme_key)
+        .map_err(CoreError::Other)?;
     let result: Result<_, String> = (|| {
         let emit = |stage: &str, percent: u32, message: &str| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
@@ -634,7 +709,6 @@ fn smart_install_entries(
         let package_rime_lua = crate::packages::rime_lua_from_archive(&zip_bytes)?;
         let addons =
             crate::package_activation::addon_ownership(core, &dest).map_err(|e| e.to_string())?;
-        let installed_records = crate::package_activation::read_all(core, &dest).map_err(|e| e.to_string())?;
         let mut installed_ownership = std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
         for file in installed_records.values().flat_map(|record| &record.owned) {
             installed_ownership.entry(file.path.clone()).or_default().insert(file.sha256.clone());
@@ -751,7 +825,10 @@ fn smart_install_entries(
                 logs.push(format!("[KEPT] Add-on file: {relative}"));
             } else {
                 let existing = crate::packages::safe_path(&dest, relative)?;
-                if let Some(expected) = installed_ownership.get(relative) {
+                let ownership = installed_ownership.iter().find(|(path, _)| {
+                    crate::package_activation::same_file_path(&dest, path, relative)
+                });
+                if let Some((_, expected)) = ownership {
                     let current = if relative.ends_with(".custom.yaml") && existing.is_file() {
                         let content = std::fs::read_to_string(&existing).map_err(|e| e.to_string())?;
                         Some(crate::packages::sha256_reader(crate::managed_custom::strip(&content)?.as_bytes()).map_err(|e| e.to_string())?)
@@ -764,7 +841,7 @@ fn smart_install_entries(
                     }
                 }
                 if !crate::packages::excluded_from_manifest(relative) && existing.is_file() {
-                    if !installed_ownership.contains_key(relative) {
+                    if ownership.is_none() {
                     if let Some(backup) = crate::package_activation::backup(core, &dest, relative)
                         .map_err(|e| e.to_string())?
                     {
@@ -936,6 +1013,7 @@ pub async fn prepare_android_install(
 pub fn finish_android_install(
     core: &Core,
     result: &serde_json::Value,
+    scheme_key: Option<&str>,
 ) -> Result<InstallResult, CoreError> {
     if result["coreInstall"].as_bool() == Some(true) {
         let archive = result["packageZipPath"]
@@ -948,7 +1026,7 @@ pub fn finish_android_install(
             return Err(CoreError::Other("Android installation requires an absolute root".into()));
         }
         return smart_install_preserving_settings(
-            core, archive.into(), root.into(), false,
+            core, archive.into(), root.into(), false, scheme_key,
             #[cfg(target_os = "windows")]
             finish_windows_scheme_install,
         );

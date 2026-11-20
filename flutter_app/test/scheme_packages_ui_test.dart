@@ -960,37 +960,79 @@ void main() {
         schemas: ['xmjd6'],
         installedScheme: 'xmjd',
       )
-      ..activeSchemaLogoPath = 'assets/logo.png'
-      ..installedPackages = [
+      ..activeSchemaLogoPath = 'assets/logo.png';
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 800));
+    for (final logoPath in [File('assets/logo.png').absolute.path, null]) {
+      c.installedPackages = [
         InstalledPackageDto(
           schemeKey: 'xmjd',
           active: true,
           hasPackageZip: true,
-          logoPath: File('assets/logo.png').absolute.path,
+          logoPath: logoPath,
+        ),
+      ];
+      for (final operation in [null, OperationKind.deploy, null]) {
+        c.operation = operation;
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: c.info.platform,
+            home: FScaffold(
+              child: SchemePackageRow(controller: c, schemeKey: 'xmjd'),
+            ),
+          ),
+        );
+        final logo = find.byType(SchemaLogo);
+        expect(logo, logoPath == null ? findsNothing : findsOneWidget);
+        if (logoPath != null) {
+          final image = tester.widget<Image>(
+            find.descendant(of: logo, matching: find.byType(Image)),
+          );
+          expect((image.image as FileImage).file.path, logoPath);
+        }
+      }
+    }
+  });
+
+  testWidgets('schema logos use the global logo only without a package key', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..local = const LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        installedScheme: 'local-moran',
+        schemas: ['moran'],
+      )
+      ..activeSchemaLogoPath = 'assets/logo.png'
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: 'local-moran',
+          active: true,
+          hasPackageZip: true,
         ),
       ];
     addTearDown(c.dispose);
-    _size(tester, const Size(1200, 800));
-    for (final operation in [null, OperationKind.deploy, null]) {
-      c.operation = operation;
+    for (final schemeKey in ['local-moran', 'missing', null]) {
       await tester.pumpWidget(
         KeyTaoTheme(
           platform: c.info.platform,
-          home: FScaffold(
-            child: SchemePackageRow(controller: c, schemeKey: 'xmjd'),
+          home: SchemaLogo(
+            controller: c,
+            size: 32,
+            schemeKey: schemeKey,
+            appLogoFallback: false,
           ),
         ),
       );
-      final image = tester.widget<Image>(
-        find.descendant(
-          of: find.byType(SchemaLogo),
-          matching: find.byType(Image),
-        ),
-      );
       expect(
-        (image.image as FileImage).file.path,
-        c.installedPackages.single.logoPath,
+        find.byType(Image),
+        schemeKey == null ? findsOneWidget : findsNothing,
       );
+      if (schemeKey == null) {
+        final image = tester.widget<Image>(find.byType(Image));
+        expect((image.image as FileImage).file.path, c.activeSchemaLogoPath);
+      }
     }
   });
 

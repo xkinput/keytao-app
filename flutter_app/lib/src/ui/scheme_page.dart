@@ -184,6 +184,14 @@ class _SchemePageState extends State<SchemePage> {
       fullWidth: true,
       spacing: 0,
       children: [
+        if (c.deployWarning case final warning?)
+          HairlineGridCell(
+            child: StatusMessage(
+              warning,
+              icon: FLucideIcons.triangleAlert,
+              color: warningColor(context),
+            ),
+          ),
         if (c.userWordsReport != null || c.userWordsReportError != null)
           UserWordsNotice(controller: c),
         Padding(
@@ -491,8 +499,7 @@ class SchemePackageRow extends StatelessWidget {
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
     final inUse = active && package!.inUse;
-    final hasLogo =
-        (active && c.activeSchemaLogoPath != null) || package?.logoPath != null;
+    final hasLogo = package?.logoPath != null;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
     final deploying = activating || (inUse && c.isDeploying);
     final installing = c.installingSchemeKey == schemeKey;

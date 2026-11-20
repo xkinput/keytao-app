@@ -358,6 +358,7 @@ async fn smart_install_keeps_user_dictionary_and_verifies_it() {
         &core,
         zip_path.to_string_lossy().into_owned(),
         dest.to_string_lossy().into_owned(),
+        Some("keytao"),
         #[cfg(target_os = "windows")]
         |_, _, _, _| Ok(Vec::new()),
     )
@@ -532,6 +533,7 @@ async fn switching_packages_keeps_all_installed_package_schemas() {
                 &core,
                 archive.to_string_lossy().into_owned(),
                 root.to_string_lossy().into_owned(),
+                Some(key),
                 #[cfg(target_os = "windows")]
                 |_, _, _, _| Ok(Vec::new()),
             )
@@ -600,6 +602,7 @@ async fn installing_switching_and_deploy_regeneration_use_only_the_active_packag
             &core,
             archive.to_string_lossy().into_owned(),
             root.to_string_lossy().into_owned(),
+            Some(key),
             #[cfg(target_os = "windows")]
             |_, _, _, _| Ok(Vec::new()),
         )
@@ -701,6 +704,7 @@ async fn custom_install_preserves_default_package_and_state() {
             &core,
             archive.to_string_lossy().into_owned(),
             default_root.to_string_lossy().into_owned(),
+            Some("keytao"),
             #[cfg(target_os = "windows")]
             |_, _, _, _| Ok(Vec::new()),
         )
@@ -718,6 +722,7 @@ async fn custom_install_preserves_default_package_and_state() {
             &core,
             archive.to_string_lossy().into_owned(),
             custom_root.to_string_lossy().into_owned(),
+            Some(custom_scheme),
             #[cfg(target_os = "windows")]
             |_, _, _, _| Ok(Vec::new()),
         )
@@ -828,6 +833,7 @@ async fn archive_install_replaces_rime_lua_invalidates_build_and_emits_progress(
         &core,
         zip_path.to_string_lossy().into_owned(),
         dest.to_string_lossy().into_owned(),
+        Some("keydo"),
         #[cfg(target_os = "windows")]
         |root, schemas, dictionaries, _| {
             keytao_core::invalidate_rime_build_artifacts(root, schemas, dictionaries).map(|paths| {
@@ -922,6 +928,7 @@ async fn package_without_rime_lua_removes_all_previous_content() {
             &core,
             zip_path.to_string_lossy().into_owned(),
             dest.to_string_lossy().into_owned(),
+            Some("xmjd"),
             #[cfg(target_os = "windows")]
             |_, _, _, _| Ok(Vec::new()),
         )

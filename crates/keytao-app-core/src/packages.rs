@@ -797,14 +797,14 @@ pub(crate) fn finalize_pending(
             let root = Path::new(&receipt.root);
             for record in crate::package_activation::read_all(core, root)?.values() {
                 for backup in &mut activation.backups {
-                    if let Some(original) = record.backups.iter().find(|original| original.path == backup.path) {
+                    if let Some(original) = record.backups.iter().find(|original| crate::package_activation::same_file_path(root, &original.path, &backup.path)) {
                         *backup = original.clone();
                     }
                 }
                 for backup in &record.backups {
-                    if (activation.owned.iter().any(|file| file.path == backup.path)
+                    if (activation.owned.iter().any(|file| crate::package_activation::same_file_path(root, &file.path, &backup.path))
                         || matches!(backup.path.as_str(), "default.custom.yaml" | "default-custom.yaml" | "rime.lua"))
-                        && !activation.backups.iter().any(|current| current.path == backup.path)
+                        && !activation.backups.iter().any(|current| crate::package_activation::same_file_path(root, &current.path, &backup.path))
                     {
                         activation.backups.push(backup.clone());
                     }
@@ -815,16 +815,16 @@ pub(crate) fn finalize_pending(
                     .filter(|(key, _)| key != scheme_key)
                     .flat_map(|(_, record)| record.owned.into_iter().map(|file| file.path))
                     .collect();
-                for file in previous.owned.iter().filter(|file| !activation.manifest.contains_key(&file.path)) {
+                for file in previous.owned.iter().filter(|file| !activation.manifest.keys().any(|path| crate::package_activation::same_file_path(root, path, &file.path))) {
                     if !crate::package_activation::user_file(&file.path)
-                        && !others.contains(&file.path)
+                        && !others.iter().any(|path| crate::package_activation::same_file_path(root, path, &file.path))
                         && crate::package_activation::fingerprint(root, &file.path)?.is_some_and(|current| current.sha256 == file.sha256)
                     {
                         crate::package_fs::remove_file(&safe_path(root, &file.path).map_err(CoreError::Other)?)?;
                     }
                 }
-                activation.backups.retain(|backup| !previous.owned.iter().any(|file| file.path == backup.path)
-                    && !previous.backups.iter().any(|old| old.path == backup.path));
+                activation.backups.retain(|backup| !previous.owned.iter().any(|file| crate::package_activation::same_file_path(root, &file.path, &backup.path))
+                    && !previous.backups.iter().any(|old| crate::package_activation::same_file_path(root, &old.path, &backup.path)));
                 activation.backups.extend(previous.backups);
                 activation.kept_backups.extend(previous.kept_backups);
             }
@@ -1241,11 +1241,11 @@ async fn remove_owned_package(
     for record in crate::package_activation::read_all(core, root)?.values().filter(|record| record.key != scheme_key) {
         let (remaining_files, _) = PackageStore::new(core).read_files(&record.key)?;
         for removed in &activation.owned {
-            if record.owned.iter().any(|file| file.path == removed.path)
+            if record.owned.iter().any(|file| crate::package_activation::same_file_path(root, &file.path, &removed.path))
                 && !crate::package_activation::user_file(&removed.path)
                 && crate::package_activation::fingerprint(root, &removed.path)?.is_some_and(|current| current.sha256 == removed.sha256)
             {
-                if let Some((_, bytes)) = remaining_files.iter().find(|(path, _)| path == &removed.path) {
+                if let Some((_, bytes)) = remaining_files.iter().find(|(path, _)| crate::package_activation::same_file_path(root, path, &removed.path)) {
                     crate::scheme_files::write_file_atomic(&safe_path(root, &removed.path).map_err(CoreError::Other)?, bytes)?;
                 }
             }
@@ -1401,6 +1401,7 @@ pub async fn activate_scheme(
         files,
         root.to_string_lossy().into_owned(),
         meta.source == "local",
+        Some(scheme_key),
         #[cfg(target_os = "windows")]
         finish_windows,
     )
@@ -1748,6 +1749,7 @@ mod tests {
                 &core,
                 archive.to_string_lossy().into_owned(),
                 root.to_string_lossy().into_owned(),
+                Some("txjx"),
                 #[cfg(target_os = "windows")]
                 |_, _, _, _| Ok(Vec::new()),
             )

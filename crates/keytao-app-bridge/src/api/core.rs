@@ -748,6 +748,7 @@ pub async fn install_scheme_to_dir(
         &state.core,
         archive.clone(),
         dir,
+        Some(&scheme_key),
         #[cfg(target_os = "windows")]
         keytao_app_core::install::finish_windows_scheme_install,
     )
@@ -843,6 +844,7 @@ pub async fn install_scheme_from_url(
             &state.core,
             archive.clone(),
             root.to_string_lossy().into_owned(),
+            Some(&scheme_key),
             #[cfg(target_os = "windows")]
             keytao_app_core::install::finish_windows_scheme_install,
         )
@@ -920,8 +922,10 @@ pub fn finish_android_install(
         if result["coreInstall"].as_bool() == Some(true) && !active {
             return Err("Android private installation must target the IME root".into());
         }
-        let result = keytao_app_core::install::finish_android_install(&state.core, &result)
-            .map_err(|error| error.to_string())?;
+        let result = keytao_app_core::install::finish_android_install(
+            &state.core, &result, Some(&scheme_key),
+        )
+        .map_err(|error| error.to_string())?;
         keytao_app_core::packages::record_package(
             &state.core,
             &scheme_key,

@@ -2053,18 +2053,106 @@ mod desktop {
         };
         if let Err(error) = result {
             remove_rime_build_artifact(&compiled)?;
-            let detail = log.first_error().unwrap_or(error);
-            let mut skipped = skipped_schemas(user_dir);
-            skipped.insert(
-                schema_id.to_owned(),
-                format!("方案 {schema_id} 编译失败，已跳过：{detail}"),
-            );
-            let content = serde_json::to_vec(&skipped).map_err(|error| error.to_string())?;
-            write_file_atomic(&user_dir.join("build").join(SKIPPED_SCHEMAS_FILE), &content)
-                .map_err(|error| format!("save skipped schemas: {error}"))?;
+            record_skipped_schema(user_dir, schema_id, &log, error)?;
             return Ok(false);
         }
         Ok(true)
+    }
+
+    fn record_skipped_schema(
+        user_dir: &Path,
+        schema_id: &str,
+        log: &deployment_log::DeploymentLog,
+        error: String,
+    ) -> Result<(), String> {
+        let detail = log.first_error().unwrap_or(error);
+        let mut skipped = skipped_schemas(user_dir);
+        skipped.insert(
+            schema_id.to_owned(),
+            format!("方案 {schema_id} 编译失败，已跳过：{detail}\n已从切换列表移除"),
+        );
+        let content = serde_json::to_vec(&skipped).map_err(|error| error.to_string())?;
+        write_file_atomic(&user_dir.join("build").join(SKIPPED_SCHEMAS_FILE), &content)
+            .map_err(|error| format!("save skipped schemas: {error}"))
+    }
+
+    #[test]
+    fn skipped_schema_reports_first_error_and_clears_after_successful_deploy() {
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join(format!(
+            "keytao-skipped-warning-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(
+            root.join("default.custom.yaml"),
+            "patch: {schema_list: [{schema: keytao_broken}, {schema: keytao_good}]}",
+        )
+        .unwrap();
+        for id in ["keytao_broken", "keytao_good"] {
+            std::fs::write(
+                root.join(format!("{id}.schema.yaml")),
+                format!("schema: {{schema_id: {id}}}"),
+            )
+            .unwrap();
+        }
+        begin_deployment_with_invalidation(&root, false).unwrap();
+        let log_path = root.join("rime.keytao.log.ERROR.20261120-020000.42.log");
+        std::fs::write(
+            &log_path,
+            "E20261120 02:00:00.000001 123 config.cc:1] old error\n",
+        )
+        .unwrap();
+        let log = deployment_log::DeploymentLog::capture(root.clone());
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap(),
+            "E20261120 02:01:00.000001 123 config.cc:1] copy on write failed; incompatible node type: commit\nE20261120 02:01:01.000001 123 config.cc:2] error building config: keytao_broken.schema"
+        )
+        .unwrap();
+        record_skipped_schema(&root, "keytao_broken", &log, "generic failure".into()).unwrap();
+        assert_eq!(
+            deployment_warning(&root).as_deref(),
+            Some("方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit\n已从切换列表移除")
+        );
+        std::fs::copy(
+            root.join("keytao_good.schema.yaml"),
+            root.join("build/keytao_good.schema.yaml"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build/default.yaml"),
+            "schema_list: [{schema: keytao_broken}, {schema: keytao_good}]",
+        )
+        .unwrap();
+        complete_deployment(&root).unwrap();
+        let state = schema_install_state(&root);
+        assert!(state.deployed);
+        assert_eq!(state.schemas, ["keytao_good"]);
+        assert_eq!(
+            parse_schema_list(&std::fs::read_to_string(root.join("build/default.yaml")).unwrap()),
+            ["keytao_good"]
+        );
+        begin_deployment_with_invalidation(&root, false).unwrap();
+        std::fs::copy(
+            root.join("keytao_broken.schema.yaml"),
+            root.join("build/keytao_broken.schema.yaml"),
+        )
+        .unwrap();
+        complete_deployment(&root).unwrap();
+        assert_eq!(deployment_warning(&root), None);
+        assert_eq!(
+            schema_install_state(&root).schemas,
+            ["keytao_broken", "keytao_good"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn require_any_compiled_schema(user_dir: &Path, schemas: &[String]) -> Result<(), String> {

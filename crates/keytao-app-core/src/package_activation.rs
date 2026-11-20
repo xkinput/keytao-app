@@ -162,6 +162,24 @@ pub(crate) fn fingerprint(root: &Path, relative: &str) -> Result<Option<OwnedFil
     }
 }
 
+pub(crate) fn same_file_path(root: &Path, left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(left), Ok(right)) = (fs::metadata(root.join(left)), fs::metadata(root.join(right))) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+    }
+    #[cfg(windows)]
+    if let (Ok(left), Ok(right)) = (root.join(left).canonicalize(), root.join(right).canonicalize()) {
+        return left == right;
+    }
+    false
+}
+
 pub(crate) fn retained(logs: &[String]) -> Vec<String> {
     logs.iter()
         .filter_map(|line| {
@@ -202,7 +220,7 @@ pub(crate) fn deactivate(
         if !checked.insert(&file.path)
             || user_file(&file.path)
             || addons.contains_key(&file.path)
-            || others.contains(&file.path)
+            || others.iter().any(|path| same_file_path(root, path, &file.path))
             || matches!(
                 file.path.as_str(),
                 "default.custom.yaml" | "default-custom.yaml" | "rime.lua"

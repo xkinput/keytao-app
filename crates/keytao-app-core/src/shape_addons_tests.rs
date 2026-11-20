@@ -440,6 +440,7 @@ async fn snow_builtin_migration_activation_update_and_uninstall_preserve_other_p
         &host.core,
         incoming.to_string_lossy().into_owned(),
         root.path().to_string_lossy().into_owned(),
+        Some(SNOW.id),
     )
     .await
     .unwrap();
@@ -775,6 +776,7 @@ async fn snow_builtin_real_install_deploy_and_type() {
         &host.core,
         archive.to_string_lossy().into_owned(),
         root.to_string_lossy().into_owned(),
+        Some(SNOW.id),
     )
     .await
     .unwrap();

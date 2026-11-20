@@ -137,7 +137,7 @@ fn deployment_skips_a_broken_listed_schema_and_selects_the_first_compiled_schema
         .expect("one compiled listed schema is enough");
     assert_eq!(
         keytao_core::deployment_warning(&dir).as_deref(),
-        Some("方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit")
+        Some("方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit\n已从切换列表移除")
     );
     assert!(keytao_core::schema_install_state(&dir).deployed);
     assert_eq!(
@@ -199,7 +199,7 @@ fn deployment_skips_a_broken_listed_schema_and_selects_the_first_compiled_schema
     assert!(!dir.join("build/keytao_broken.schema.yaml").is_file());
     assert_eq!(
         keytao_core::deployment_warning(&dir).as_deref(),
-        Some("方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit")
+        Some("方案 keytao_broken 编译失败，已跳过：copy on write failed; incompatible node type: commit\n已从切换列表移除")
     );
     let session = runtime.create_session().unwrap();
     assert_eq!(session.current_schema().unwrap().id, "keytao_good");
