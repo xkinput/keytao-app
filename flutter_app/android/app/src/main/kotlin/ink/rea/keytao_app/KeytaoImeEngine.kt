@@ -732,6 +732,7 @@ class KeytaoImeEngine(context: Context) {
 
         @Synchronized
         internal fun claimUpgradeDeployment(root: File, version: String, schemas: List<String>): Boolean {
+            if (KeytaoNativeBridge.runtimeIsolationEnabled(root.absolutePath)) return false
             val build = File(root, "build")
             if (KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
             val previouslyDeployed = File(build, ".keytao-deployed").isFile ||

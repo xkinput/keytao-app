@@ -730,7 +730,8 @@ pub extern "C" fn keytao_deployment_hint() -> *mut c_char {
         let Some(root) = deployment_root() else {
             return std::ptr::null_mut();
         };
-        update_deployment_status(&root, |_| {})
+        DeploymentState::display_hint(&root, update_deployment_status(&root, |_| {}))
+            .as_deref()
             .map(to_cstring)
             .unwrap_or(std::ptr::null_mut())
     })

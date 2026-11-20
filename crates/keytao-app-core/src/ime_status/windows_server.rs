@@ -603,7 +603,10 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
 }
 
 /// False permits a standalone deploy child only in InProc mode with no server pipe.
-pub(super) fn deploy_if_available() -> Result<bool, String> {
+pub(super) fn deploy_if_available(
+    plan: Option<&str>,
+    progress: impl FnMut(&keytao_core::DeployProgress),
+) -> Result<bool, String> {
     if !server_enabled() {
         super::server_recovery::require_absent_server(open_pipe(&pipe_name()?).map(|_| ()))?;
         return Ok(false);
@@ -611,7 +614,7 @@ pub(super) fn deploy_if_available() -> Result<bool, String> {
     start_watchdog();
     // Serialize recovery/deploy with this App's watchdog, including the full deployment RPC.
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
-    deploy_via_server(&mut last_start)
+    deploy_via_server(&mut last_start, plan, progress)
 }
 
 fn open_pipe(name: &str) -> io::Result<File> {
@@ -767,7 +770,11 @@ fn replace_before_deploy(
     }
 }
 
-fn deploy_via_server(last_start: &mut Option<(PathBuf, Instant)>) -> Result<bool, String> {
+fn deploy_via_server(
+    last_start: &mut Option<(PathBuf, Instant)>,
+    plan: Option<&str>,
+    mut progress: impl FnMut(&keytao_core::DeployProgress),
+) -> Result<bool, String> {
     let name = pipe_name()?;
     // Prepare the launch token before allowing recovery to stop the existing writer.
     let launcher = ServerLauncher::prepare();
@@ -786,21 +793,23 @@ fn deploy_via_server(last_start: &mut Option<(PathBuf, Instant)>) -> Result<bool
             let pipe = &mut connection.pipe;
             // No retry or in-process fallback from this point: a failed write may have sent Deploy.
             pipe.deadline = Instant::now() + DEPLOY_TIMEOUT;
-            write_frame(
-                pipe,
-                &RequestEnvelope {
-                    seq: 2,
-                    message: Request::Deploy,
-                },
-            )
-            .map_err(|error| format!("send IME server deploy: {error}"))?;
-            match read_response(pipe, 2)
-                .map_err(|error| format!("read IME server deploy: {error}"))?
-            {
-                Response::Deployed(result) => result,
-                response => Err(format!(
-                    "unexpected IME server deploy response: {response:?}"
-                )),
+            let message = plan.map_or(Request::Deploy, |plan| Request::DeployPackages {
+                plan: plan.to_owned(),
+            });
+            write_frame(pipe, &RequestEnvelope { seq: 2, message })
+                .map_err(|error| format!("send IME server deploy: {error}"))?;
+            loop {
+                match read_response(pipe, 2)
+                    .map_err(|error| format!("read IME server deploy: {error}"))?
+                {
+                    Response::DeployProgress(event) if plan.is_some() => progress(&event),
+                    Response::Deployed(result) => return result,
+                    response => {
+                        return Err(format!(
+                            "unexpected IME server deploy response: {response:?}"
+                        ));
+                    }
+                }
             }
         },
     )

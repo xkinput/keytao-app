@@ -494,7 +494,14 @@ class SchemePackageRow extends StatelessWidget {
     final hasLogo = package?.logoPath != null;
     final legacyDownload =
         active && !isLocal && !package!.hasPackageZip && update == null;
-    final deploying = c.isDeploying && c.deployingSchemeKey == schemeKey;
+    final deployLabel = c.hasPackageDeployProgress
+        ? c.packageDeployLabel(schemeKey)
+        : c.isDeploying && c.deployingSchemeKey == schemeKey
+        ? AppStrings.deploying
+        : null;
+    final deploying =
+        deployLabel == AppStrings.packageDeploying ||
+        deployLabel == AppStrings.deploying;
     final installing = c.installingSchemeKey == schemeKey;
     final changelogBody = schemeKey == 'keytao' ? c.changelogBody : null;
     final failedDeploySteps = c.deploySteps.where(
@@ -502,7 +509,10 @@ class SchemePackageRow extends StatelessWidget {
     );
     final deployFailed = failedDeploySteps.isNotEmpty;
     final needsDeploy =
-        active && !c.isDeploying && (deployFailed || c.local?.deployed != true);
+        !c.hasPackageDeployProgress &&
+        active &&
+        !c.isDeploying &&
+        (deployFailed || c.local?.deployed != true);
     final actions = ActionRow(
       children: [
         if (schemeKey == 'keytao' && showSource) _SchemeSource(controller: c),
@@ -513,8 +523,8 @@ class SchemePackageRow extends StatelessWidget {
             icon: FLucideIcons.arrowUpCircle,
             onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
           ),
-        if (deploying)
-          const ActionButton(AppStrings.deploying, primary: true)
+        if (deployLabel != null)
+          ActionButton(deployLabel, primary: true)
         else if (!isLocal && package == null)
           ActionButton(
             '下载',
@@ -729,7 +739,7 @@ class SchemePackageRow extends StatelessWidget {
                 : null,
             foreground: deployFailed ? palette.error : null,
           )
-        : inUse || deploying
+        : inUse || deployLabel != null
         ? null
         : StatusPill(
             update != null
@@ -854,7 +864,11 @@ class SchemePackageRow extends StatelessWidget {
           const SizedBox(height: 10),
         ],
         heading,
-        if (active && !deploying)
+        if (c.packageDeployError(schemeKey) case final error?) ...[
+          const SizedBox(height: 8),
+          ErrorMessage(error),
+        ],
+        if (!c.hasPackageDeployProgress && active && !deploying)
           for (final step in failedDeploySteps) ...[
             const SizedBox(height: 8),
             ErrorMessage(step.message),
@@ -889,7 +903,9 @@ class SchemePackageRow extends StatelessWidget {
           const SizedBox(height: 8),
           InstallProgressView(
             active: true,
-            progress: c.installProgress,
+            progress: deploying && c.hasPackageDeployProgress
+                ? null
+                : c.installProgress,
             fraction: c.installFraction,
             message: c.progress,
           ),
@@ -1157,8 +1173,15 @@ Map<String, Widget> _addonCells(
         : c.rimeIceHasUpdate;
     final inUse =
         installed && info?.deployed == true && c.currentAddonKey == packageKey;
+    final deployLabel = c.hasPackageDeployProgress
+        ? c.packageDeployLabel(packageKey)
+        : c.deployingSchemeKey == packageKey && (c.isDeploying || active)
+        ? AppStrings.deploying
+        : null;
     final deploying =
-        c.deployingSchemeKey == packageKey && (c.isDeploying || active);
+        deployLabel == AppStrings.packageDeploying ||
+        deployLabel == AppStrings.deploying;
+    final cardError = c.packageDeployError(packageKey) ?? error;
     final palette = AppPalette.of(context);
     final titleStyle = context.theme.typography.body.sm.copyWith(
       fontSize: compact
@@ -1243,7 +1266,7 @@ Map<String, Widget> _addonCells(
               name,
               const SizedBox(height: 4),
               Text(
-                status,
+                c.hasPackageDeployProgress ? deployLabel ?? status : status,
                 style: context.theme.typography.body.xs.copyWith(
                   color: context.theme.colors.mutedForeground,
                 ),
@@ -1261,17 +1284,13 @@ Map<String, Widget> _addonCells(
                     tooltip: tooltip,
                     onPress: install,
                   ),
-                if (cloudCard && (installed || deploying))
+                if (cloudCard && (installed || deployLabel != null))
                   ActionButton(
-                    deploying
-                        ? AppStrings.deploying
-                        : inUse
-                        ? '使用中'
-                        : '使用',
+                    deployLabel ?? (inUse ? '使用中' : '使用'),
                     primary: !inUse,
-                    success: inUse && !deploying,
+                    success: inUse && deployLabel == null,
                     icon: inUse ? FLucideIcons.check : FLucideIcons.play,
-                    onPress: c.busy || inUse || deploying
+                    onPress: c.busy || inUse || deployLabel != null
                         ? null
                         : () => c.activateSchemePackage(packageKey),
                   ),
@@ -1329,7 +1348,7 @@ Map<String, Widget> _addonCells(
             ),
             if (active || deploying) ...[
               const SizedBox(height: 12),
-              if (deploying && c.isDeploying)
+              if (deploying && (c.isDeploying || c.hasPackageDeployProgress))
                 InstallProgressView(
                   active: true,
                   fraction: c.installFraction,
@@ -1338,9 +1357,9 @@ Map<String, Widget> _addonCells(
               else
                 progress,
             ],
-            if (error != null) ...[
+            if (cardError != null) ...[
               const SizedBox(height: 8),
-              ErrorMessage(error),
+              ErrorMessage(cardError),
             ],
             if (extra != null) ...[const SizedBox(height: 16), extra],
           ],

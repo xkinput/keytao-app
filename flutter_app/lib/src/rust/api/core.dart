@@ -114,9 +114,12 @@ Future<String> uploadCloudPackage({
   expectedSha256: expectedSha256,
 );
 
-/// Records only the result returned by Android's deployImeData channel.
-Future<void> recordAndroidDeploy({required bool success}) =>
-    RustLib.instance.api.crateApiCoreRecordAndroidDeploy(success: success);
+/// Runs Android's deployImeData callback under the same lock as install and rollback.
+Future<void> deployAndroid({
+  required FutureOr<String> Function(bool) androidDeploy,
+}) => RustLib.instance.api.crateApiCoreDeployAndroid(
+  androidDeploy: androidDeploy,
+);
 
 Future<void> downloadCloudPackage({required String id}) =>
     RustLib.instance.api.crateApiCoreDownloadCloudPackage(id: id);
@@ -240,7 +243,7 @@ Future<InstallResultDto> activateScheme({
 
 Future<List<String>> removeSchemePackage({
   required String schemeKey,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreRemoveSchemePackage(
   schemeKey: schemeKey,
   androidDeploy: androidDeploy,
@@ -541,13 +544,13 @@ Future<EnglishModeDto> setDesktopEnglishMode({required EnglishModeDto mode}) =>
 Future<AddonStatusDto> addonSchemaStatus({required String id}) =>
     RustLib.instance.api.crateApiCoreAddonSchemaStatus(id: id);
 
-/// android_deploy must await deployImeData and return "" on success or error text on failure,
+/// android_deploy passes the isolation flag to deployImeData and returns "" on success or error text on failure,
 /// catching Dart exceptions. Do not re-enter bridge install/deploy calls from
 /// the callback: the install lock is held. macOS ignores the callback and uses
 /// the existing bridge deploy. InstallProgress continues through core_events.
 Future<AddonStatusDto> addonSchemaInstall({
   required String id,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreAddonSchemaInstall(
   id: id,
   androidDeploy: androidDeploy,
@@ -557,7 +560,7 @@ Future<AddonStatusDto> addonSchemaInstall({
 /// Core owns schema removal, English-mode reset and progress events.
 Future<AddonStatusDto> addonSchemaUninstall({
   required String id,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreAddonSchemaUninstall(
   id: id,
   androidDeploy: androidDeploy,
@@ -575,7 +578,7 @@ Future<void> cancelWanxiangGrammarDownload() =>
 /// Uses the add-on deploy contract and holds the install lock through rollback.
 Future<WanxiangGrammarStatusDto> manageWanxiangGrammar({
   required bool installed,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageWanxiangGrammar(
   installed: installed,
   androidDeploy: androidDeploy,
@@ -603,7 +606,7 @@ Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
 Future<AddonStatusDto> manageWanxiang({
   required bool installed,
   required String variant,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageWanxiang(
   installed: installed,
   variant: variant,
@@ -613,7 +616,7 @@ Future<AddonStatusDto> manageWanxiang({
 /// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
 Future<AddonStatusDto> manageRimeIce({
   required bool installed,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeIce(
   installed: installed,
   androidDeploy: androidDeploy,
@@ -622,7 +625,7 @@ Future<AddonStatusDto> manageRimeIce({
 /// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
 Future<AddonStatusDto> manageRimeMint({
   required bool installed,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeMint(
   installed: installed,
   androidDeploy: androidDeploy,
@@ -631,7 +634,7 @@ Future<AddonStatusDto> manageRimeMint({
 /// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
 Future<AddonStatusDto> manageRimeFrost({
   required bool installed,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeFrost(
   installed: installed,
   androidDeploy: androidDeploy,
@@ -640,7 +643,7 @@ Future<AddonStatusDto> manageRimeFrost({
 /// Holds the install lock through deployment and rollback.
 Future<AddonStatusDto> manageRimeLssp({
   required bool installed,
-  required FutureOr<String> Function() androidDeploy,
+  required FutureOr<String> Function(bool) androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageRimeLssp(
   installed: installed,
   androidDeploy: androidDeploy,

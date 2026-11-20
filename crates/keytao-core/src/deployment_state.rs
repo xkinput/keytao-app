@@ -1,4 +1,5 @@
 use crate::{RuntimeDirs, DEPLOYED_FILE, DEPLOYING_FILE};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
@@ -6,10 +7,104 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HINT_DURATION: Duration = Duration::from_millis(1500);
 const HINT_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const PROGRESS_FILE: &str = ".keytao-deploy-progress.json";
 static LOADED_BUILD: Mutex<Option<(PathBuf, Option<String>, u64)>> = Mutex::new(None);
 static USABLE_SESSIONS: Mutex<Vec<(PathBuf, Option<u64>, Weak<()>)>> = Mutex::new(Vec::new());
 static DEPLOYING: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployStep {
+    Materialize,
+    Compile,
+    Validate,
+    Prune,
+    Skip,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeployProgress {
+    pub package_key: String,
+    pub package_name: String,
+    pub index: u32,
+    pub total: u32,
+    pub step: DeployStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_package_keys: Vec<String>,
+}
+
+impl DeployProgress {
+    pub fn flat(
+        package_key: &str,
+        package_name: &str,
+        step: DeployStep,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            package_key: package_key.into(),
+            package_name: package_name.into(),
+            index: 1,
+            total: 1,
+            step,
+            error: None,
+            legacy_message: Some(message.into()),
+            queued_package_keys: Vec::new(),
+        }
+    }
+
+    pub fn message(&self) -> String {
+        self.legacy_message.clone().unwrap_or_else(|| {
+            format!(
+                "正在部署 {}（{}/{}）",
+                self.package_name, self.index, self.total
+            )
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct PublishedProgress {
+    owner: String,
+    progress: DeployProgress,
+}
+
+pub(crate) fn write_deploy_progress(root: &Path, progress: &DeployProgress) -> Result<(), String> {
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let content = serde_json::to_vec(&PublishedProgress {
+        owner: format!("{started}/{}", std::process::id()),
+        progress: progress.clone(),
+    })
+    .map_err(|error| error.to_string())?;
+    crate::write_file_atomic(&root.join(PROGRESS_FILE), &content).map_err(|error| error.to_string())
+}
+
+pub(crate) fn clear_deploy_progress(root: &Path) {
+    let _ = std::fs::remove_file(root.join(PROGRESS_FILE));
+}
+
+pub fn current_deploy_progress(root: &Path) -> Option<DeployProgress> {
+    let path = root.join(PROGRESS_FILE);
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    let published: PublishedProgress = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    sentinel_in_progress(Some(&published.owner)).then_some(published.progress)
+}
+
+pub fn deployment_progress_message(root: &Path) -> Option<String> {
+    current_deploy_progress(root).map(|progress| progress.message())
+}
 
 pub fn cached_deployment_in_progress(root: &Path) -> bool {
     crate::lock_ignore_poison(&DEPLOYING)
@@ -232,8 +327,16 @@ pub struct DeploymentState {
 }
 
 impl DeploymentState {
+    pub fn display_hint(root: &Path, hint: Option<&str>) -> Option<String> {
+        if hint == Some("正在部署中") {
+            deployment_progress_message(root).or_else(|| hint.map(str::to_owned))
+        } else {
+            hint.map(str::to_owned)
+        }
+    }
+
     pub fn visible_hint(hint: Option<&str>, has_candidates: bool) -> Option<&str> {
-        hint.filter(|hint| *hint == "正在部署中" || !has_candidates)
+        hint.filter(|hint| hint.starts_with("正在部署") || !has_candidates)
     }
 
     /// Call before a key can wait for deployment or the following engine rebuild.
@@ -253,6 +356,9 @@ impl DeploymentState {
         } else if self.failed_sentinel.is_some() {
             self.transient = Some(("部署失败", Instant::now() + HINT_DURATION));
             self.hint = Some("部署失败");
+        } else if current_deploy_progress(root).is_some() {
+            self.hint_requested = true;
+            self.hint = Some("正在部署中");
         }
     }
 
@@ -325,6 +431,10 @@ impl DeploymentState {
     ) -> Option<&'static str> {
         self.hint = self
             .refresh_hint_at(root, &staging_dir(root), now, rebuilding)
+            .or_else(|| {
+                (self.hint_requested && !usable && current_deploy_progress(root).is_some())
+                    .then_some("正在部署中")
+            })
             .filter(|hint| {
                 (*hint != "正在部署中" || self.hint_requested) && (*hint == "部署成功" || !usable)
             });

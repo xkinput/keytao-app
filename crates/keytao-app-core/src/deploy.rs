@@ -1,9 +1,3 @@
-#[cfg(any(
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "ios"
-))]
 use crate::CoreEvent;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 use crate::ime_paths::*;
@@ -12,9 +6,43 @@ use crate::ime_status::linux::launch_keytao_ime;
 #[cfg(target_os = "windows")]
 use crate::ime_status::windows::windows_deploy_rime_blocking;
 use crate::{Core, CoreError, ime_host::ImeHost};
+use keytao_core::{DeployProgress, DeployStep, RuntimeDirs, isolated_deploy::PackageDeployTarget};
 use serde::Serialize;
-#[cfg(target_os = "ios")]
 use std::path::Path;
+
+pub fn emit_legacy_progress(core: &Core, step: DeployStep, message: impl Into<String>) {
+    emit_flat_progress(core, &flat_target(core, None), step, message);
+}
+
+fn flat_target(core: &Core, root: Option<&Path>) -> PackageDeployTarget {
+    let package_key = root
+        .and_then(|root| {
+            let activations = crate::package_activation::read_all(core, root).ok()?;
+            crate::runtime_materialize::in_use_package(root, &activations)
+        })
+        .or_else(|| core.lock_state().active_scheme.clone())
+        .unwrap_or_else(|| "keytao".into());
+    let package_name = crate::runtime_materialize::package_name(core, &package_key);
+    PackageDeployTarget {
+        package_key,
+        package_name,
+        materialize_error: None,
+    }
+}
+
+fn emit_flat_progress(
+    core: &Core,
+    target: &PackageDeployTarget,
+    step: DeployStep,
+    message: impl Into<String>,
+) {
+    core.emit(CoreEvent::DeployProgress(DeployProgress::flat(
+        &target.package_key,
+        &target.package_name,
+        step,
+        message,
+    )));
+}
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeployRecord {
@@ -33,6 +61,22 @@ fn record_result_inner(
     success: bool,
     prepare_lua: bool,
 ) -> Result<(), CoreError> {
+    let root = persist_result(core, root, success)?;
+    // Hosts also use this preparation before deploying through a native IME process.
+    if prepare_lua && !success && root.is_dir() {
+        crate::packages::prepare_active_rime_lua(core, &root)?;
+    }
+    if root.is_dir() {
+        crate::packages::sync_generated(core, &root)?;
+    }
+    Ok(())
+}
+
+fn persist_result(
+    core: &Core,
+    root: &Path,
+    success: bool,
+) -> Result<std::path::PathBuf, CoreError> {
     let root = match root.canonicalize() {
         Ok(root) => root,
         Err(error)
@@ -49,14 +93,7 @@ fn record_result_inner(
             success,
         });
     })?;
-    // Hosts also use this preparation before deploying through a native IME process.
-    if prepare_lua && !success && root.is_dir() {
-        crate::packages::prepare_active_rime_lua(core, &root)?;
-    }
-    if root.is_dir() {
-        crate::packages::sync_generated(core, &root)?;
-    }
-    Ok(())
+    Ok(root)
 }
 
 pub fn record_android_result(
@@ -70,6 +107,112 @@ pub fn record_android_result(
     }
     verify_android_deployment(root)?;
     record_result(core, root, true)
+}
+
+#[cfg(target_os = "android")]
+pub(crate) const ANDROID_DEPLOY_PLAN_FILE: &str = ".keytao-android-deploy-plan.json";
+#[cfg(target_os = "android")]
+pub(crate) const ANDROID_DEPLOY_PROGRESS_FILE: &str = ".keytao-android-deploy-progress.jsonl";
+
+pub async fn deploy_with_android_host<F: std::future::Future<Output = String>>(
+    core: &Core,
+    root: &Path,
+    prepare_lua: bool,
+    deploy: impl FnOnce(bool) -> F,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    if RuntimeDirs::isolation_enabled(root) {
+        return deploy_isolated_android(core, root, deploy).await;
+    }
+    record_result_inner(core, root, false, prepare_lua).map_err(|error| error.to_string())?;
+    let target = flat_target(core, Some(root));
+    emit_flat_progress(core, &target, DeployStep::Compile, "");
+    let error = deploy(false).await;
+    record_android_result(core, root, error.is_empty()).map_err(|error| error.to_string())?;
+    if error.is_empty() {
+        emit_flat_progress(core, &target, DeployStep::Done, "");
+        Ok(())
+    } else {
+        emit_flat_progress(core, &target, DeployStep::Failed, "");
+        Err(error)
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
+    core: &Core,
+    root: &Path,
+    deploy: impl FnOnce(bool) -> F,
+) -> Result<(), String> {
+    use std::{
+        fs,
+        io::{BufRead, BufReader},
+        time::Duration,
+    };
+
+    let _plan_lock = isolated_plan_lock(root)?;
+    let targets =
+        crate::runtime_materialize::prepare_deploy_targets(core, root, &root.join("rime-data"))
+            .map_err(|error| error.to_string())?;
+    if targets.is_empty() {
+        return Err("没有可部署的方案包".into());
+    }
+    let journal = crate::packages::safe_path(root, ANDROID_DEPLOY_PROGRESS_FILE)?;
+    keytao_core::write_file_atomic(&journal, b"").map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(fs::File::open(journal).map_err(|error| error.to_string())?);
+    let plan = crate::packages::safe_path(root, ANDROID_DEPLOY_PLAN_FILE)?;
+    let content = serde_json::to_vec(&targets).map_err(|error| error.to_string())?;
+    keytao_core::write_file_atomic(&plan, &content).map_err(|error| error.to_string())?;
+
+    let mut active_step = None;
+    let mut completed = 0;
+    let mut line = Vec::new();
+    let mut drain_progress = || -> Result<(), String> {
+        while reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| error.to_string())?
+            > 0
+            && line.ends_with(b"\n")
+        {
+            let progress: DeployProgress =
+                serde_json::from_slice(&line).map_err(|error| error.to_string())?;
+            line.clear();
+            if matches!(
+                progress.step,
+                DeployStep::Done | DeployStep::Skip | DeployStep::Failed
+            ) {
+                completed += 1;
+                if progress.index == 1 {
+                    active_step = Some(progress.step);
+                }
+            }
+            core.emit(CoreEvent::DeployProgress(progress));
+        }
+        Ok(())
+    };
+    let result = deploy(true);
+    tokio::pin!(result);
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    let error = loop {
+        tokio::select! {
+            result = &mut result => break result,
+            _ = tick.tick() => drain_progress()?,
+        }
+    };
+    drain_progress()?;
+    let _ = fs::remove_file(plan);
+    if matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
+        persist_result(core, root, true).map_err(|error| error.to_string())?;
+    }
+    if !error.is_empty() {
+        return Err(error);
+    }
+    if completed != targets.len()
+        || !matches!(active_step, Some(DeployStep::Done | DeployStep::Skip))
+    {
+        return Err("Android package deployment did not report all results".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), CoreError> {
@@ -347,6 +490,169 @@ pub async fn preview_candidates(
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+async fn deploy_isolated_desktop(core: &Core, root: &Path) -> Result<DeployResult, String> {
+    #[cfg(not(target_os = "windows"))]
+    use keytao_core::deploy_child;
+    #[cfg(target_os = "macos")]
+    use std::process::Command;
+    #[cfg(not(target_os = "windows"))]
+    use std::time::Duration;
+
+    let _plan_lock = isolated_plan_lock(root)?;
+    #[cfg(target_os = "linux")]
+    let linux_lock = {
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            keytao_core::linux_deploy_lock(&root, Duration::from_secs(300))?.ok_or_else(|| {
+                "Timed out waiting 5 minutes for the librime deployment lock".to_owned()
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    };
+    let shared = crate::ime_status::app_shared_data_dir(core);
+    let targets =
+        crate::runtime_materialize::prepare_deploy_targets(core, root, Path::new(&shared))
+            .map_err(|error| error.to_string())?;
+    if targets.is_empty() {
+        return Err("没有可部署的方案包".into());
+    }
+    let expected = targets.len();
+    let plan = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let (mut command, _executable) = crate::ime_status::linux::resolve_keytao_ime_command(core);
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new(verified_macos_deploy_executable(
+        &std::env::current_exe().map_err(|error| error.to_string())?,
+    )?);
+
+    let (sender, events) = tokio::sync::mpsc::unbounded_channel::<DeployProgress>();
+    #[cfg(target_os = "windows")]
+    let worker = {
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::ime_status::windows::windows_deploy_packages_blocking(&root, &plan, |progress| {
+                let _ = sender.send(progress.clone());
+            })
+        })
+    };
+    #[cfg(not(target_os = "windows"))]
+    let worker = tokio::task::spawn_blocking(move || {
+        command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
+        if !shared.is_empty() {
+            command.env("KEYTAO_RIME_SHARED_DATA_DIR", shared);
+        }
+        #[cfg(target_os = "linux")]
+        deploy_child::inherit_linux_deploy_lock(&mut command, &linux_lock);
+        let result = deploy_child::run_deploy_child_command_with_progress(
+            &mut command,
+            Duration::from_secs(600),
+            |progress| {
+                let _ = sender.send(progress.clone());
+            },
+        );
+        #[cfg(target_os = "linux")]
+        drop(linux_lock);
+        result.map(|()| None)
+    });
+    finish_isolated_deploy(core, root, expected, events, worker).await
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+pub async fn deploy_isolated_in_process(
+    core: &Core,
+    root: &Path,
+    shared: std::path::PathBuf,
+) -> Result<DeployResult, String> {
+    let _plan_lock = isolated_plan_lock(root)?;
+    let targets = crate::runtime_materialize::prepare_deploy_targets(core, root, &shared)
+        .map_err(|error| error.to_string())?;
+    let expected = targets.len();
+    let (sender, events) = tokio::sync::mpsc::unbounded_channel();
+    let worker_root = root.to_owned();
+    let data_root = core.env().data_dir.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        keytao_core::isolated_deploy::deploy_packages(
+            &worker_root,
+            &shared,
+            Some(&data_root),
+            &targets,
+            |progress| {
+                let _ = sender.send(progress);
+            },
+        )
+        .map(|()| None)
+    });
+    finish_isolated_deploy(core, root, expected, events, worker).await
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios"
+))]
+async fn finish_isolated_deploy(
+    core: &Core,
+    root: &Path,
+    expected: usize,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<DeployProgress>,
+    worker: tokio::task::JoinHandle<Result<Option<String>, String>>,
+) -> Result<DeployResult, String> {
+    let mut active_step = None;
+    let mut completed = 0;
+    let mut reload_warning = None;
+    while let Some(progress) = events.recv().await {
+        if progress.legacy_message.is_none()
+            && matches!(
+                progress.step,
+                DeployStep::Done | DeployStep::Skip | DeployStep::Failed
+            )
+        {
+            completed += 1;
+            if progress.index == 1 {
+                active_step = Some(progress.step);
+                if !cfg!(target_os = "windows") && progress.step == DeployStep::Done {
+                    reload_warning = keytao_core::ReloadStamp::write(root)
+                        .err()
+                        .map(|error| format!("系统输入法重载通知失败：{error}"));
+                }
+            }
+        }
+        core.emit(CoreEvent::DeployProgress(progress));
+    }
+    let result = worker.await.map_err(|error| error.to_string())?;
+    if matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
+        persist_result(core, root, true).map_err(|error| error.to_string())?;
+        if active_step == Some(DeployStep::Done) {
+            render_user_schema_logos(root);
+        }
+    }
+    let worker_warning = result.map_err(|error| format!("部署失败: {error}"))?;
+    if completed != expected || !matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
+        return Err("方案包部署未返回完整结果".into());
+    }
+    Ok(DeployResult {
+        success: true,
+        message: "部署成功".into(),
+        warning: reload_warning.or(worker_warning),
+    })
+}
+
+fn isolated_plan_lock(root: &Path) -> Result<std::fs::File, String> {
+    let lock = crate::packages::safe_path(root, ".keytao-deploy-plan.lock")?;
+    let lock = std::fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock)
+        .map_err(|error| error.to_string())?;
+    lock.try_lock()
+        .map_err(|error| format!("Cannot acquire the package deployment plan lock: {error}"))?;
+    Ok(lock)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub async fn rime_deploy_default(
     core: &Core,
     host: impl ImeHost,
@@ -369,6 +675,9 @@ pub(crate) async fn rime_deploy_default_inner(
 ) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    if RuntimeDirs::isolation_enabled(&dest) {
+        return deploy_isolated_desktop(core, &dest).await;
+    }
     crate::remove_filter::ensure_remove_filter(&dest)?;
     crate::ime_settings::prepare_candidate_page_size(&dest)?;
     record_result(core, &dest, false).map_err(|e| e.to_string())?;
@@ -379,7 +688,10 @@ pub(crate) async fn rime_deploy_default_inner(
     #[cfg(not(target_os = "windows"))]
     let logo_root = dest.clone();
 
-    core.emit(CoreEvent::DeployProgress("正在部署 librime...".into()));
+    let target = flat_target(core, Some(&dest));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let target_json = serde_json::to_string(&target).map_err(|error| error.to_string())?;
+    emit_flat_progress(core, &target, DeployStep::Compile, "正在部署 librime...");
 
     #[cfg(target_os = "linux")]
     let _deploy_lock = tokio::task::spawn_blocking(move || {
@@ -407,9 +719,11 @@ pub(crate) async fn rime_deploy_default_inner(
         let app = std::env::current_exe()
             .map_err(|error| format!("Cannot determine the App executable: {error}"))?;
         let executable = verified_macos_deploy_executable(&app)?;
-        keytao_core::deploy_child::run_deploy_child(
-            &executable,
+        keytao_core::deploy_child::run_deploy_child_command_with_progress(
+            std::process::Command::new(&executable)
+                .env(keytao_core::deploy_child::FLAT_TARGET_ENV, target_json),
             std::time::Duration::from_secs(600),
+            |_| {},
         )?;
         render_user_schema_logos(&logo_root);
         Ok::<(), String>(())
@@ -417,6 +731,7 @@ pub(crate) async fn rime_deploy_default_inner(
     .await;
     #[cfg(target_os = "linux")]
     let (deploy_result, _deploy_lock) = match tokio::task::spawn_blocking(move || {
+        deploy_command.env(keytao_core::deploy_child::FLAT_TARGET_ENV, target_json);
         keytao_core::deploy_child::inherit_linux_deploy_lock(&mut deploy_command, &_deploy_lock);
         let result = keytao_core::deploy_child::run_deploy_child_command_with_progress(
             &mut deploy_command,
@@ -464,36 +779,42 @@ pub(crate) async fn rime_deploy_default_inner(
                 .join("\n");
             let warning = (!warning.is_empty()).then_some(warning);
             record_result(core, &root, true).map_err(|e| e.to_string())?;
-            core.emit(CoreEvent::DeployProgress("部署完成".into()));
+            emit_flat_progress(core, &target, DeployStep::Done, "部署完成");
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let reload_stamp_result = write_keytao_ime_reload_stamp();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             match &reload_stamp_result {
                 Ok(()) => {
-                    core.emit(CoreEvent::DeployProgress("已通知系统输入法重载".into()));
+                    emit_flat_progress(core, &target, DeployStep::Done, "已通知系统输入法重载");
                     tracing::info!("IME reload stamp written after deploy");
                 }
                 Err(e) => {
-                    core.emit(CoreEvent::DeployProgress(format!(
-                        "系统输入法重载通知失败：{e}"
-                    )));
+                    emit_flat_progress(
+                        core,
+                        &target,
+                        DeployStep::Done,
+                        format!("系统输入法重载通知失败：{e}"),
+                    );
                     tracing::warn!("IME reload stamp failed after deploy: {e}");
                 }
             }
             #[cfg(target_os = "windows")]
-            core.emit(CoreEvent::DeployProgress("已通知系统输入法重载".into()));
+            emit_flat_progress(core, &target, DeployStep::Done, "已通知系统输入法重载");
             if let Some(warning) = &warning {
-                core.emit(CoreEvent::DeployProgress(warning.clone()));
+                emit_flat_progress(core, &target, DeployStep::Done, warning.clone());
             }
             #[cfg(target_os = "linux")]
             match launch_keytao_ime(core, &host, reload_stamp_result.is_err()) {
                 Ok(status) => {
-                    core.emit(CoreEvent::DeployProgress(status.message));
+                    emit_flat_progress(core, &target, DeployStep::Done, status.message);
                 }
                 Err(error) => {
-                    core.emit(CoreEvent::DeployProgress(format!(
-                        "Linux 输入法启动失败：{error}"
-                    )));
+                    emit_flat_progress(
+                        core,
+                        &target,
+                        DeployStep::Done,
+                        format!("Linux 输入法启动失败：{error}"),
+                    );
                 }
             }
             Ok(DeployResult {
@@ -678,14 +999,16 @@ pub async fn rime_deploy_default(
 ) -> Result<DeployResult, CoreError> {
     let result: Result<_, String> = async {
         let dest = host.user_root()?;
+        let shared = ios_app_shared_data_dir(core, &dest)
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        if RuntimeDirs::isolation_enabled(&dest) {
+            return deploy_isolated_in_process(core, &dest, shared.into()).await;
+        }
         crate::remove_filter::ensure_remove_filter(&dest)?;
         crate::ime_settings::prepare_candidate_page_size(&dest)?;
         record_result(core, &dest, false).map_err(|e| e.to_string())?;
         let user = dest.to_string_lossy().into_owned();
-        let shared = ios_app_shared_data_dir(core, &dest)
-            .unwrap_or_else(keytao_core::default_shared_data_dir);
-
-        core.emit(CoreEvent::DeployProgress("正在部署 librime...".into()));
+        emit_legacy_progress(core, DeployStep::Compile, "正在部署 librime...");
 
         let logo_root = dest.clone();
         match tokio::task::spawn_blocking(move || {
@@ -697,15 +1020,15 @@ pub async fn rime_deploy_default(
         {
             Ok(Ok(())) => {
                 record_result(core, &dest, true).map_err(|e| e.to_string())?;
-                core.emit(CoreEvent::DeployProgress("部署完成".into()));
+                emit_legacy_progress(core, DeployStep::Done, "部署完成");
                 let warning = keytao_core::deployment_warning(&dest);
                 if let Some(warning) = &warning {
-                    core.emit(CoreEvent::DeployProgress(warning.clone()));
+                    emit_legacy_progress(core, DeployStep::Done, warning.clone());
                 }
                 match write_ios_reload_stamp(&dest) {
                     Ok(stamp) => {
                         let message = format!("已通知 iOS 输入法重载：{}", stamp.display());
-                        core.emit(CoreEvent::DeployProgress(message.clone()));
+                        emit_legacy_progress(core, DeployStep::Done, message.clone());
                         Ok(DeployResult {
                             success: true,
                             message,
@@ -714,7 +1037,7 @@ pub async fn rime_deploy_default(
                     }
                     Err(e) => {
                         let message = format!("部署完成，但 iOS 输入法重载通知失败：{e}");
-                        core.emit(CoreEvent::DeployProgress(message.clone()));
+                        emit_legacy_progress(core, DeployStep::Done, message.clone());
                         Ok(DeployResult {
                             success: true,
                             message,

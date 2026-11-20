@@ -272,10 +272,7 @@ pub fn read_local_schemas(_core: &Core, path: String) -> Result<Vec<String>, Cor
     Ok(parse_schema_list(&content))
 }
 
-pub fn check_local_schema(
-    _core: &Core,
-    dir: Option<PathBuf>,
-) -> Result<LocalSchemaInfo, CoreError> {
+pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSchemaInfo, CoreError> {
     let Some(dir) = dir else {
         return Ok(LocalSchemaInfo {
             installed: false,
@@ -286,6 +283,14 @@ pub fn check_local_schema(
     };
 
     let state = keytao_core::schema_install_state(&dir);
+    let installed = state.installed
+        || (keytao_core::RuntimeDirs::isolation_enabled(&dir)
+            && (!core.lock_state().installed_packages.is_empty()
+                || crate::addon_store::IDS.iter().any(|id| {
+                    crate::package_store::PackageStore::new(core)
+                        .checked_addon_path(id)
+                        .is_ok_and(|path| path.is_dir())
+                })));
     let version = state
         .installed
         .then(|| {
@@ -297,7 +302,7 @@ pub fn check_local_schema(
         .flatten();
 
     Ok(LocalSchemaInfo {
-        installed: state.installed,
+        installed,
         deployed: state.deployed,
         version,
         schemas: state.schemas,

@@ -2,6 +2,8 @@
 use crate::{Core, CoreError, deploy::DeployResult, ime_host::ImeHost};
 use std::sync::{Arc, Mutex};
 
+const DEPLOY_IN_PROGRESS: &str = "正在重新部署，请等待完成";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Open,
@@ -58,7 +60,7 @@ impl AppActions {
     pub fn begin_deploy(&self, action_id: Option<u32>) -> Result<DeployGuard, String> {
         let mut queue = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if queue.deploying {
-            return Err("正在重新部署，请等待完成".into());
+            return Err(DEPLOY_IN_PROGRESS.into());
         }
         if action_id.is_some() && action_id != queue.pending {
             return Err("此重新部署请求已处理".into());
@@ -88,7 +90,13 @@ pub async fn windows_redeploy_ime_action(
     actions: &AppActions,
     id: u32,
 ) -> Result<DeployResult, CoreError> {
-    let _guard = actions.begin_deploy(Some(id)).map_err(CoreError::Other)?;
+    let _guard = actions.begin_deploy(Some(id)).map_err(|error| {
+        let progress = (error == DEPLOY_IN_PROGRESS)
+            .then(|| host.user_root().ok())
+            .flatten()
+            .and_then(|root| keytao_core::deployment_progress_message(&root));
+        CoreError::Other(progress.unwrap_or(error))
+    })?;
     crate::deploy::rime_deploy_default_inner(core, host)
         .await
         .map_err(CoreError::Other)

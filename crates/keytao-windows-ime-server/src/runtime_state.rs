@@ -26,6 +26,10 @@ impl<E> Default for Runtime<E> {
 }
 
 impl<E> Runtime<E> {
+    pub(crate) fn should_stage_deploy(&self, isolated: bool) -> bool {
+        self.ready && !isolated
+    }
+
     pub(crate) fn key_error(&self, session_generation: Option<u64>) -> Option<EngineError> {
         if self.refreshing {
             Some(EngineError::Busy)
@@ -67,6 +71,17 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn isolated_deploy_with_a_ready_engine_requires_release_before_the_child() {
+        let runtime = Runtime {
+            engine: Some(Arc::new(())),
+            ready: true,
+            ..Runtime::default()
+        };
+        assert!(runtime.should_stage_deploy(false));
+        assert!(!runtime.should_stage_deploy(true));
+    }
 
     #[test]
     fn slow_refresh_checks_do_not_starve_key_processing() {

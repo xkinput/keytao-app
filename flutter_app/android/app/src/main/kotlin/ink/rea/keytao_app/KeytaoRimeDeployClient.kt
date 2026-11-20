@@ -21,12 +21,16 @@ object KeytaoRimeDeployClient {
         val warning: String = "",
     )
 
-    internal fun timeoutMsForSchemas(schemas: List<String>) =
-        if (schemas.any(::isAddonSchema)) addonTimeoutMs else defaultTimeoutMs
+    internal fun timeoutMsForSchemas(schemas: List<String>, isolated: Boolean = false) = when {
+        isolated -> isolatedTimeoutMs
+        schemas.any(::isAddonSchema) -> addonTimeoutMs
+        else -> defaultTimeoutMs
+    }
 
     fun deploy(
         context: Context,
         timeoutMs: Long = defaultTimeoutMs,
+        isolated: Boolean = false,
         callback: (Result) -> Unit,
     ) {
         val handler = Handler(Looper.getMainLooper())
@@ -66,6 +70,7 @@ object KeytaoRimeDeployClient {
                 val intent = Intent(context, KeytaoRimeDeployService::class.java).apply {
                     putExtra(KeytaoRimeDeployContract.extraReceiver, receiver)
                     putExtra(KeytaoRimeDeployContract.keyTimeoutMs, budget)
+                    putExtra(KeytaoRimeDeployContract.extraIsolated, isolated)
                     KeytaoAndroidPaths.testRootOverride?.let {
                         putExtra(KeytaoRimeDeployContract.extraTestRoot, it.absolutePath)
                     }
@@ -82,7 +87,12 @@ object KeytaoRimeDeployClient {
         }
     }
 
-    internal fun runDeployment(context: Context, timeoutMs: Long, callback: (Result) -> Unit) {
+    internal fun runDeployment(
+        context: Context,
+        timeoutMs: Long,
+        isolated: Boolean,
+        callback: (Result) -> Unit,
+    ) {
         val handler = Handler(Looper.getMainLooper())
         val root = runCatching { KeytaoAndroidPaths.userRoot(context) }.getOrElse { error ->
             handler.post { callback(Result(success = false, error = error.message ?: "存储尚未就绪")) }
@@ -93,6 +103,7 @@ object KeytaoRimeDeployClient {
             userRoot = root,
             handler = handler,
             timeoutMs = timeoutMs.coerceAtLeast(minimumTimeoutMs),
+            isolated = isolated,
             callback = callback,
         ).start()
     }
@@ -102,6 +113,7 @@ object KeytaoRimeDeployClient {
         private val userRoot: File,
         private val handler: Handler,
         private val timeoutMs: Long,
+        private val isolated: Boolean,
         private val callback: (Result) -> Unit,
     ) {
         private val finished = AtomicBoolean(false)
@@ -125,7 +137,7 @@ object KeytaoRimeDeployClient {
         fun start() {
             startedNs = System.nanoTime()
             try {
-                KeytaoAndroidPaths.beginDeployment(userRoot)
+                if (!isolated) KeytaoAndroidPaths.beginDeployment(userRoot)
             } catch (error: Throwable) {
                 finish(Result(success = false, error = error.message ?: "Android RIME 部署失败"))
                 return
@@ -164,6 +176,7 @@ object KeytaoRimeDeployClient {
                     putExtra(KeytaoRimeDeployContract.extraReceiver, receiver)
                     schema?.let { putExtra(KeytaoRimeDeployContract.extraSchemaId, it.id) }
                     putExtra(KeytaoRimeDeployContract.extraRenderLogos, renderLogos)
+                    putExtra(KeytaoRimeDeployContract.extraIsolated, isolated)
                     KeytaoAndroidPaths.testRootOverride?.let {
                         putExtra(KeytaoRimeDeployContract.extraTestRoot, it.absolutePath)
                     }
@@ -183,6 +196,15 @@ object KeytaoRimeDeployClient {
         private fun handleStepResult(success: Boolean, schemas: List<String>, error: String) {
             if (finished.get() || timingOut) return
             logStepResult(success, schemas.size)
+            if (isolated) {
+                finish(Result(
+                    success = success,
+                    path = KeytaoAndroidPaths.reloadStampFile(context).absolutePath,
+                    deployed = success,
+                    error = error,
+                ))
+                return
+            }
             if (renderingLogos) {
                 completeDeployment()
                 return
@@ -263,7 +285,9 @@ object KeytaoRimeDeployClient {
         private fun finish(result: Result) {
             if (!finished.compareAndSet(false, true)) return
             handler.removeCallbacks(timeout)
-            if (!result.success) KeytaoNativeBridge.markDeploymentFailed(userRoot.absolutePath)
+            if (!result.success && !isolated) {
+                KeytaoNativeBridge.markDeploymentFailed(userRoot.absolutePath)
+            }
             runCatching {
                 logStepResult(result.success, 0)
                 val success = result.success
@@ -295,6 +319,7 @@ object KeytaoRimeDeployClient {
 
     private const val defaultTimeoutMs = 180_000L
     private const val addonTimeoutMs = 300_000L
+    private const val isolatedTimeoutMs = 600_000L
     private const val minimumTimeoutMs = 1_000L
     private const val processExitGraceMs = 350L
 }
@@ -305,6 +330,7 @@ internal object KeytaoRimeDeployContract {
     const val extraReceiver = "ink.rea.keytao_app.extra.RIME_DEPLOY_RECEIVER"
     const val extraSchemaId = "ink.rea.keytao_app.extra.RIME_DEPLOY_SCHEMA_ID"
     const val extraRenderLogos = "ink.rea.keytao_app.extra.RIME_RENDER_LOGOS"
+    const val extraIsolated = "ink.rea.keytao_app.extra.RIME_DEPLOY_ISOLATED"
     const val keySuccess = "success"
     const val keySchemas = "schemas"
     const val keyError = "error"

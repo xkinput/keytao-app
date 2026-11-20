@@ -1,6 +1,7 @@
 use crate::{api::types::*, frb_generated::StreamSink, host::BridgeHost};
 use keytao_app_core::scheme_host::SchemeHost;
 use keytao_app_core::{AppEnv, Core, CoreEvent, EventSink, Platform};
+use keytao_core::DeployStep;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
@@ -152,9 +153,26 @@ impl From<CoreEvent> for BridgeEvent {
                     total_bytes: progress.total_bytes,
                 });
             }
-            CoreEvent::DeployProgress(message) => {
+            CoreEvent::DeployProgress(progress) => {
                 dto.kind = BridgeEventKind::DeployProgress;
-                dto.deploy_progress = Some(message);
+                dto.deploy_progress = Some(DeployProgressDto {
+                    package_key: progress.package_key,
+                    package_name: progress.package_name,
+                    index: progress.index,
+                    total: progress.total,
+                    step: match progress.step {
+                        DeployStep::Materialize => DeployStepDto::Materialize,
+                        DeployStep::Compile => DeployStepDto::Compile,
+                        DeployStep::Validate => DeployStepDto::Validate,
+                        DeployStep::Prune => DeployStepDto::Prune,
+                        DeployStep::Skip => DeployStepDto::Skip,
+                        DeployStep::Done => DeployStepDto::Done,
+                        DeployStep::Failed => DeployStepDto::Failed,
+                    },
+                    error: progress.error,
+                    legacy_message: progress.legacy_message,
+                    queued_package_keys: progress.queued_package_keys,
+                });
             }
             CoreEvent::WindowsImeStatus(status) => {
                 dto.kind = BridgeEventKind::WindowsImeStatus;

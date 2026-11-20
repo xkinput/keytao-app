@@ -71,6 +71,9 @@ pub struct UpgradeDeploy {
 /// Hold the lock through startup so concurrent backend processes launch one child.
 pub fn prepare() -> Result<Option<UpgradeDeploy>, String> {
     let (user_dir, version) = upgrade_context()?;
+    if keytao_core::RuntimeDirs::isolation_enabled(&user_dir) {
+        return Ok(None);
+    }
     let Some(lock) = keytao_core::linux_deploy_lock(&user_dir, std::time::Duration::ZERO)? else {
         return Ok(None);
     };
@@ -124,6 +127,9 @@ impl UpgradeDeploy {
 pub fn run_child() -> Result<(), String> {
     let _lock = keytao_core::deploy_child::inherited_linux_deploy_lock()?;
     let (user_dir, version) = upgrade_context()?;
+    if keytao_core::RuntimeDirs::isolation_enabled(&user_dir) {
+        return Ok(());
+    }
     if decision_for(&user_dir, &version)? == UpgradeDecision::Deploy {
         keytao_core::deploy_for_upgrade(
             user_dir.to_string_lossy().into_owned(),

@@ -259,22 +259,26 @@ pub async fn upload_cloud_package(
     serde_json::to_string(&package).map_err(|error| error.to_string())
 }
 
-/// Records only the result returned by Android's deployImeData channel.
-pub fn record_android_deploy(success: bool) -> Result<(), String> {
+/// Runs Android's deployImeData callback under the same lock as install and rollback.
+pub async fn deploy_android(
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = runtime::state()?;
-        keytao_app_core::deploy::record_android_result(
+        let _guard = state.install_lock.lock().await;
+        keytao_app_core::deploy::deploy_with_android_host(
             &state.core,
             &state.host.user_root()?,
-            success,
+            false,
+            android_deploy,
         )
-        .map_err(|error| error.to_string())
+        .await
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = success;
-        Err("Android deployment result is only available on Android".into())
+        let _ = android_deploy;
+        Err("Android deployment is only available on Android".into())
     }
 }
 
@@ -512,7 +516,7 @@ pub async fn activate_scheme(
 
 pub async fn remove_scheme_package(
     scheme_key: String,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<Vec<String>, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1380,13 +1384,13 @@ pub fn addon_schema_status(id: String) -> Result<AddonStatusDto, String> {
     )
 }
 
-/// android_deploy must await deployImeData and return "" on success or error text on failure,
+/// android_deploy passes the isolation flag to deployImeData and returns "" on success or error text on failure,
 /// catching Dart exceptions. Do not re-enter bridge install/deploy calls from
 /// the callback: the install lock is held. macOS ignores the callback and uses
 /// the existing bridge deploy. InstallProgress continues through core_events.
 pub async fn addon_schema_install(
     id: String,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1402,7 +1406,7 @@ pub async fn addon_schema_install(
 /// Core owns schema removal, English-mode reset and progress events.
 pub async fn addon_schema_uninstall(
     id: String,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1446,7 +1450,7 @@ pub fn cancel_wanxiang_grammar_download() -> Result<(), String> {
 /// Uses the add-on deploy contract and holds the install lock through rollback.
 pub async fn manage_wanxiang_grammar(
     installed: bool,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<WanxiangGrammarStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1518,7 +1522,7 @@ pub async fn check_addon_update(id: String) -> Result<AddonStatusDto, String> {
 pub async fn manage_wanxiang(
     installed: bool,
     variant: String,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1533,7 +1537,7 @@ pub async fn manage_wanxiang(
 /// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
 pub async fn manage_rime_ice(
     installed: bool,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1548,7 +1552,7 @@ pub async fn manage_rime_ice(
 /// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
 pub async fn manage_rime_mint(
     installed: bool,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1563,7 +1567,7 @@ pub async fn manage_rime_mint(
 /// Uses addon_schema_install's deploy contract and holds the install lock through rollback.
 pub async fn manage_rime_frost(
     installed: bool,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1578,7 +1582,7 @@ pub async fn manage_rime_frost(
 /// Holds the install lock through deployment and rollback.
 pub async fn manage_rime_lssp(
     installed: bool,
-    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;

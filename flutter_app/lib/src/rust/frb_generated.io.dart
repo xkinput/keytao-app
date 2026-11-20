@@ -30,8 +30,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_DartFn_Inputs_String_Output_String_AnyhowException(dynamic raw);
 
   @protected
-  FutureOr<String> Function()
-  dco_decode_DartFn_Inputs__Output_String_AnyhowException(dynamic raw);
+  FutureOr<String> Function(bool)
+  dco_decode_DartFn_Inputs_bool_Output_String_AnyhowException(dynamic raw);
 
   @protected
   Object dco_decode_DartOpaque(dynamic raw);
@@ -84,6 +84,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DebugLogFileDto dco_decode_box_autoadd_debug_log_file_dto(dynamic raw);
+
+  @protected
+  DeployProgressDto dco_decode_box_autoadd_deploy_progress_dto(dynamic raw);
 
   @protected
   double dco_decode_box_autoadd_f_32(dynamic raw);
@@ -140,7 +143,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogsDto dco_decode_debug_logs_dto(dynamic raw);
 
   @protected
+  DeployProgressDto dco_decode_deploy_progress_dto(dynamic raw);
+
+  @protected
   DeployResultDto dco_decode_deploy_result_dto(dynamic raw);
+
+  @protected
+  DeployStepDto dco_decode_deploy_step_dto(dynamic raw);
 
   @protected
   DownloadUrlsDto dco_decode_download_urls_dto(dynamic raw);
@@ -272,6 +281,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
+
+  @protected
+  DeployProgressDto? dco_decode_opt_box_autoadd_deploy_progress_dto(
+    dynamic raw,
+  );
 
   @protected
   double? dco_decode_opt_box_autoadd_f_32(dynamic raw);
@@ -495,6 +509,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DeployProgressDto sse_decode_box_autoadd_deploy_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   double sse_decode_box_autoadd_f_32(SseDeserializer deserializer);
 
   @protected
@@ -561,7 +580,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogsDto sse_decode_debug_logs_dto(SseDeserializer deserializer);
 
   @protected
+  DeployProgressDto sse_decode_deploy_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DeployResultDto sse_decode_deploy_result_dto(SseDeserializer deserializer);
+
+  @protected
+  DeployStepDto sse_decode_deploy_step_dto(SseDeserializer deserializer);
 
   @protected
   DownloadUrlsDto sse_decode_download_urls_dto(SseDeserializer deserializer);
@@ -723,6 +750,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DeployProgressDto? sse_decode_opt_box_autoadd_deploy_progress_dto(
     SseDeserializer deserializer,
   );
 
@@ -939,8 +971,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_DartFn_Inputs__Output_String_AnyhowException(
-    FutureOr<String> Function() self,
+  void sse_encode_DartFn_Inputs_bool_Output_String_AnyhowException(
+    FutureOr<String> Function(bool) self,
     SseSerializer serializer,
   );
 
@@ -1016,6 +1048,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_debug_log_file_dto(
     DebugLogFileDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_deploy_progress_dto(
+    DeployProgressDto self,
     SseSerializer serializer,
   );
 
@@ -1101,10 +1139,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_debug_logs_dto(DebugLogsDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_deploy_progress_dto(
+    DeployProgressDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_deploy_result_dto(
     DeployResultDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_deploy_step_dto(DeployStepDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_download_urls_dto(
@@ -1316,6 +1363,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_debug_log_file_dto(
     DebugLogFileDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_deploy_progress_dto(
+    DeployProgressDto? self,
     SseSerializer serializer,
   );
 

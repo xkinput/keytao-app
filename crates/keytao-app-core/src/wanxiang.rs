@@ -1604,9 +1604,11 @@ pub async fn manage_grammar(
             host.deploy().await?;
             #[cfg(windows)]
             if let Some(warning) = public_source_warning {
-                core.emit(CoreEvent::DeployProgress(format!(
-                    "系统搜索框方案未更新：{warning}"
-                )));
+                crate::deploy::emit_legacy_progress(
+                    core,
+                    keytao_core::DeployStep::Done,
+                    format!("系统搜索框方案未更新：{warning}"),
+                );
             }
             if !status_from_manifest(&root, receipt_manifest(&receipt)?).deployed {
                 return Err("万象拼音部署产物缺失".to_string());
@@ -1739,9 +1741,11 @@ where
             }
             #[cfg(target_os = "windows")]
             if let Some(warning) = public_source_warning {
-                core.emit(CoreEvent::DeployProgress(format!(
-                    "系统搜索框方案未更新：{warning}"
-                )));
+                crate::deploy::emit_legacy_progress(
+                    core,
+                    keytao_core::DeployStep::Done,
+                    format!("系统搜索框方案未更新：{warning}"),
+                );
             }
             if installed && !status_from_manifest(&root, receipt_manifest(&receipt)?).deployed {
                 return Err("万象拼音部署产物缺失".to_string());

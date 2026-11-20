@@ -2227,7 +2227,7 @@ pub(crate) fn reposition_ime_windows(
             st.client_id,
             st.ime_state
                 .clone()
-                .or_else(|| st.deployment_hint.map(|_| ImeState::empty())),
+                .or_else(|| st.deployment_hint.as_ref().map(|_| ImeState::empty())),
             st.composition.clone().or_else(|| {
                 st.panel_anchor
                     .as_ref()

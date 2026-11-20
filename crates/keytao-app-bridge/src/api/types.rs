@@ -196,6 +196,27 @@ pub struct CloudTransferProgressDto {
     pub total_bytes: u64,
 }
 
+pub enum DeployStepDto {
+    Materialize,
+    Compile,
+    Validate,
+    Prune,
+    Skip,
+    Done,
+    Failed,
+}
+
+pub struct DeployProgressDto {
+    pub package_key: String,
+    pub package_name: String,
+    pub index: u32,
+    pub total: u32,
+    pub step: DeployStepDto,
+    pub error: Option<String>,
+    pub legacy_message: Option<String>,
+    pub queued_package_keys: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 pub struct WindowsImeStatusDto {
     pub packaged: bool,
@@ -217,7 +238,7 @@ pub struct BridgeEvent {
     pub kind: BridgeEventKind,
     pub install_progress: Option<InstallProgressDto>,
     pub cloud_transfer_progress: Option<CloudTransferProgressDto>,
-    pub deploy_progress: Option<String>,
+    pub deploy_progress: Option<DeployProgressDto>,
     pub windows_ime_status: Option<WindowsImeStatusDto>,
 }
 
