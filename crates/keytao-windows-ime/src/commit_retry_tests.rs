@@ -44,6 +44,7 @@ struct Host {
     range_hook: Rc<RefCell<Option<Box<dyn FnOnce()>>>>,
     writes: RefCell<Vec<String>>,
     fail_text: Cell<bool>,
+    refuse_sync_once: Cell<bool>,
     fail_async_request: Cell<bool>,
     end_count: Rc<Cell<usize>>,
     fail_end: Rc<Cell<bool>>,
@@ -95,6 +96,9 @@ impl ITfContext_Impl for Context_Impl {
         let session = session.unwrap();
         self.host.session_flags.borrow_mut().push(flags);
         if flags.0 & TF_ES_SYNC.0 != 0 {
+            if self.host.refuse_sync_once.replace(false) {
+                return Err(E_FAIL.into());
+            }
             unsafe { session.DoEditSession(1) }.map(|()| S_OK)
         } else {
             if self.host.fail_async_request.get() {
@@ -343,7 +347,10 @@ fn queue(context: &ITfContext, state: &SharedState) {
         context,
         1,
         state,
-        "retry",
+        &ImeState {
+            committed: Some("retry".into()),
+            ..ImeState::empty()
+        },
         &Cell::new(false),
         generation,
         &Cell::new(false),
@@ -397,7 +404,7 @@ fn a_current_retry_still_commits_once() {
 }
 
 #[test]
-fn multiline_commits_keep_the_full_utf16_text_and_end_in_a_separate_session() {
+fn multiline_commits_keep_the_full_utf16_text_and_end_in_the_same_session() {
     for (text, expected) in [
         ("甲😀尾\n乙末\n丙终", "甲😀尾\r\n乙末\r\n丙终"),
         ("甲😀尾\r\n乙末\r\n丙终", "甲😀尾\r\n乙末\r\n丙终"),
@@ -412,38 +419,34 @@ fn multiline_commits_keep_the_full_utf16_text_and_end_in_a_separate_session() {
         assert_eq!(&*host.writes.borrow(), &[expected]);
         assert_eq!(&*host.collapses.borrow(), &[TF_ANCHOR_END]);
         assert_eq!(&*host.selection_anchors.borrow(), &[TF_AE_NONE]);
-        assert_eq!(host.end_count.get(), 0);
-        assert_eq!(host.queued.borrow().len(), 1);
+        assert_eq!(host.end_count.get(), 1);
+        assert!(host.queued.borrow().is_empty());
         assert_eq!(
             &*host.session_flags.borrow(),
-            &[
-                TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0),
-                TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_ASYNCDONTCARE.0 | TF_ES_READWRITE.0),
-            ]
+            &[TF_CONTEXT_EDIT_CONTEXT_FLAGS(
+                TF_ES_SYNC.0 | TF_ES_READWRITE.0
+            )]
         );
         assert_eq!(host.terminate_count.get(), 0);
-        host.run_queued();
-        assert_eq!(host.end_count.get(), 1);
         assert!(state.borrow().pending_composition_ends.is_empty());
         assert_eq!(&*host.text.borrow(), expected);
     }
 }
 
 #[test]
-fn a_committed_composition_ending_later_does_not_clear_new_input() {
+fn a_committed_composition_ends_before_new_input_is_cached() {
     let (host, context, state) = fixture();
     let frame = ImeState {
         committed: Some("甲\n乙😀".into()),
         ..ImeState::empty()
     };
     apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
+    assert_eq!(host.end_count.get(), 1);
+    assert!(host.queued.borrow().is_empty());
     state.borrow_mut().ime_state = Some(ImeState {
         preedit: "new input".into(),
         ..ImeState::empty()
     });
-    let sink = host.last_sink.borrow().clone().unwrap();
-    let composition = host.last_composition.borrow().clone().unwrap();
-    unsafe { sink.OnCompositionTerminated(1, &composition).unwrap() };
     host.run_queued();
     assert_eq!(
         state.borrow().ime_state.as_ref().unwrap().preedit,
@@ -454,7 +457,7 @@ fn a_committed_composition_ending_later_does_not_clear_new_input() {
 }
 
 #[test]
-fn losing_thread_focus_terminates_queued_ends_without_erasing_the_commit() {
+fn losing_thread_focus_preserves_the_synchronously_ended_commit() {
     let (host, context, state) = fixture();
     let frame = ImeState {
         committed: Some("甲\n乙😀".into()),
@@ -462,11 +465,11 @@ fn losing_thread_focus_terminates_queued_ends_without_erasing_the_commit() {
     };
     apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
     terminate_input_now(&state);
-    assert_eq!(host.terminate_count.get(), 1);
+    assert_eq!(host.terminate_count.get(), 0);
     assert!(state.borrow().pending_composition_ends.is_empty());
     assert_eq!(&*host.text.borrow(), "甲\r\n乙😀");
     host.run_queued();
-    assert_eq!(host.end_count.get(), 0);
+    assert_eq!(host.end_count.get(), 1);
     assert_eq!(host.writes.borrow().len(), 1);
 }
 
@@ -494,15 +497,12 @@ fn a_committed_frame_is_not_replayed_when_its_following_preedit_cannot_start() {
         preedit: "a".into(),
         ..ImeState::empty()
     };
-    apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
-    let end = host.queued.borrow_mut().pop().unwrap();
-    unsafe { end.DoEditSession(1).unwrap() };
-    let preedit = host.queued.borrow_mut().pop().unwrap();
-    assert!(unsafe { preedit.DoEditSession(1) }.is_err());
+    assert!(apply_ime_state(&context, 1, &state, frame, false, false, None).is_err());
     assert_eq!(&*host.text.borrow(), "甲");
     assert_eq!(host.writes.borrow().len(), 1);
     assert!(host.queued.borrow().is_empty());
     assert!(state.borrow().pending_composition_ends.is_empty());
+    assert!(state.borrow().pending_commit_retry.is_none());
 }
 
 #[test]
@@ -520,55 +520,66 @@ fn a_following_preedit_starts_after_the_old_composition_ends() {
         ..ImeState::empty()
     };
     apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
-    assert_eq!(host.starts.get(), 1);
-    assert_eq!(&*host.writes.borrow(), &["甲\r\n乙😀"]);
-    host.run_queued();
     assert_eq!(host.starts.get(), 2);
+    assert_eq!(&*host.writes.borrow(), &["甲\r\n乙😀", "a"]);
     assert_eq!(host.end_count.get(), 1);
+    assert_eq!(host.active_compositions.get(), 1);
+    assert!(host.queued.borrow().is_empty());
     assert!(state.borrow().composition.is_some());
     assert_eq!(state.borrow().ime_state.as_ref().unwrap().preedit, "a");
 }
 
 #[test]
 fn a_deferred_preedit_never_overwrites_a_newer_input_frame() {
-    for end_first in [false, true] {
+    for run_pending_first in [false, true] {
         let (host, context, state) = fixture();
         state.borrow_mut().thread_mgr_flags = TF_TMF_UIELEMENTENABLEDONLY;
+        host.refuse_sync_once.set(true);
+        host.reject_overlapping_compositions.set(true);
         let frame = ImeState {
             committed: Some("甲".into()),
             preedit: "a".into(),
             ..ImeState::empty()
         };
         apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
-        if end_first {
-            let end = host.queued.borrow_mut().pop().unwrap();
-            unsafe { end.DoEditSession(1).unwrap() };
+        assert!(host.writes.borrow().is_empty());
+        if run_pending_first {
+            host.run_queued();
         }
         let newer = ImeState {
             preedit: "ab".into(),
             ..ImeState::empty()
         };
+        if !run_pending_first {
+            assert!(
+                apply_ime_state(&context, 1, &state, newer.clone(), false, false, None).is_err()
+            );
+            assert!(host.writes.borrow().is_empty());
+            host.run_queued();
+        }
         apply_ime_state(&context, 1, &state, newer, false, false, None).unwrap();
         host.run_queued();
         assert_eq!(state.borrow().ime_state.as_ref().unwrap().preedit, "ab");
-        assert_eq!(&*host.writes.borrow(), &["甲", "ab"]);
+        assert_eq!(&*host.writes.borrow(), &["甲", "a", "ab"]);
+        assert_eq!(host.active_compositions.get(), 1);
     }
 }
 
 #[test]
-fn a_rejected_async_end_falls_back_without_retaining_or_replaying_the_commit() {
+fn a_commit_does_not_need_an_async_end_request() {
     let (host, context, state) = fixture();
     host.fail_async_request.set(true);
     let frame = ImeState {
         committed: Some("甲\n乙😀".into()),
         ..ImeState::empty()
     };
-    assert!(apply_ime_state(&context, 1, &state, frame, false, false, None).is_err());
+    apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
     assert_eq!(host.end_count.get(), 1);
     assert!(state.borrow().pending_composition_ends.is_empty());
     assert!(state.borrow().pending_commit_retry.is_none());
     assert_eq!(&*host.text.borrow(), "甲\r\n乙😀");
     assert_eq!(host.writes.borrow().len(), 1);
+    assert!(host.queued.borrow().is_empty());
 }
 
 #[test]
@@ -722,10 +733,9 @@ fn failed_end_and_terminate_keep_the_handle_until_lock_free_cleanup_succeeds() {
         committed: Some("甲".into()),
         ..ImeState::empty()
     };
-    apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
+    assert!(apply_ime_state(&context, 1, &state, frame, false, false, None).is_err());
     let session = host.queued.borrow_mut().pop().unwrap();
     assert!(unsafe { session.DoEditSession(1) }.is_err());
-    flush_pending_ime_ui(&state);
     assert_eq!(&*host.text.borrow(), "甲");
     assert_eq!(state.borrow().pending_composition_ends.len(), 1);
     assert!(host.terminate_count.get() >= 1);
@@ -753,9 +763,7 @@ fn a_late_termination_from_a_failed_old_end_does_not_clear_new_input() {
         committed: Some("甲".into()),
         ..ImeState::empty()
     };
-    apply_ime_state(&context, 1, &state, frame, false, false, None).unwrap();
-    let session = host.queued.borrow_mut().pop().unwrap();
-    assert!(unsafe { session.DoEditSession(1) }.is_err());
+    assert!(apply_ime_state(&context, 1, &state, frame, false, false, None).is_err());
     state.borrow_mut().ime_state = Some(ImeState {
         preedit: "new input".into(),
         ..ImeState::empty()
@@ -777,8 +785,6 @@ fn a_retry_that_cannot_end_retains_its_composition_without_reinserting_text() {
     host.fail_terminate.set(true);
     queue(&context, &state);
     flush_pending_commit_retry(&state);
-    let session = host.queued.borrow_mut().pop().unwrap();
-    unsafe { session.DoEditSession(1).unwrap() };
     let session = host.queued.borrow_mut().pop().unwrap();
     assert!(unsafe { session.DoEditSession(1) }.is_err());
     assert_eq!(state.borrow().pending_composition_ends.len(), 1);
