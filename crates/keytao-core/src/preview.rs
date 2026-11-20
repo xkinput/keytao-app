@@ -99,8 +99,8 @@ impl PreviewDirectory {
             Err(std::env::VarError::NotPresent) => Self::create()?,
             Err(error) => return Err(format!("invalid candidate preview workspace: {error}")),
         };
-        let source_dirs = crate::RuntimeDirs::resolve(source, source);
-        let preview_dirs = crate::RuntimeDirs::resolve(&directory.0, &directory.0);
+        let source_dirs = crate::RuntimeDirs::resolve(source, source)?;
+        let preview_dirs = crate::RuntimeDirs::resolve(&directory.0, &directory.0)?;
         fs::create_dir(&preview_dirs.staging_dir).map_err(|e| e.to_string())?;
         fs::create_dir(directory.0.join("log")).map_err(|e| e.to_string())?;
         // Only Rime inputs are copied: never inspect the App state or credentials.

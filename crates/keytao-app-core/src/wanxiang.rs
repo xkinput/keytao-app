@@ -200,8 +200,10 @@ fn status_from_manifest(root: &Path, manifest: Option<Manifest>) -> Status {
     Status {
         installed,
         deployed: installed
-            && dirs.staging_dir.join("wanxiang.schema.yaml").is_file()
-            && dirs.staging_dir.join("wanxiang.table.bin").is_file(),
+            && dirs.is_ok_and(|dirs| {
+                dirs.staging_dir.join("wanxiang.schema.yaml").is_file()
+                    && dirs.staging_dir.join("wanxiang.table.bin").is_file()
+            }),
         version: manifest
             .as_ref()
             .map_or_else(String::new, |m| m.version.clone()),

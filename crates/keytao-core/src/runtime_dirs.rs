@@ -4,6 +4,8 @@ use std::{
 };
 
 pub(crate) const PREVIOUS_BUILD: &str = "previous-build";
+pub(crate) const BUILD_GENERATION_MARKER: &str = ".keytao-build-current";
+pub(crate) const BUILD_GENERATION_PREFIX: &str = ".keytao-build-";
 
 fn read_regular_file(path: &Path) -> Option<Vec<u8>> {
     fs::symlink_metadata(path).ok()?.is_file().then_some(())?;
@@ -23,6 +25,7 @@ pub struct RuntimeDirs {
 impl RuntimeDirs {
     pub const SETTINGS_FILE: &str = "keytao-runtime-settings.json";
     pub const MANIFEST_FILE: &str = ".keytao-runtime.json";
+    pub const PUBLIC_PACKAGE_FILE: &str = ".keytao-public-package";
 
     pub fn isolation_enabled(control_root: &Path) -> bool {
         match std::env::var("KEYTAO_RUNTIME_ISOLATION").as_deref() {
@@ -35,17 +38,20 @@ impl RuntimeDirs {
         }
     }
 
-    pub fn resolve(control_root: &Path, shared: &Path) -> Self {
+    pub fn resolve(control_root: &Path, shared: &Path) -> Result<Self, String> {
         if Self::isolation_enabled(control_root) {
-            for store in Self::package_stores(control_root) {
-                if let Some(dirs) = manifest_package_key(&store)
-                    .and_then(|key| Self::isolated(control_root, shared, Some(&store), &key))
-                {
-                    return dirs;
-                }
+            if let Some(key) = Self::active_package_key(control_root) {
+                return Self::resolve_package(control_root, shared, &key).map_err(|reason| {
+                    let error = format!(
+                        "cannot resolve isolated runtime for active package {key:?}: {reason}"
+                    );
+                    crate::rt_log!(crate::Level::Info, "error", "runtime_resolve_failed", error = &error);
+                    eprintln!("KeyTao: {error}");
+                    error
+                });
             }
         }
-        Self::flat(control_root, shared)
+        Ok(Self::flat(control_root, shared))
     }
 
     pub fn active_package_key(control_root: &Path) -> Option<String> {
@@ -73,11 +79,26 @@ impl RuntimeDirs {
         if !Self::isolation_enabled(control_root) {
             return None;
         }
+        Self::resolve_package(control_root, shared, key).ok()
+    }
+
+    fn resolve_package(control_root: &Path, shared: &Path, key: &str) -> Result<Self, String> {
         if key.starts_with("builtin/") {
             return Self::isolated(control_root, shared, None, key);
         }
-        Self::package_stores(control_root)
-            .find_map(|store| Self::isolated(control_root, shared, Some(&store), key))
+        Self::isolated_user_data_dir(control_root, key)
+            .ok_or("invalid package key or runtime directory")?;
+        let mut stores = Self::package_stores(control_root);
+        let first = stores.next().ok_or("missing package store")?;
+        let result = Self::isolated(control_root, shared, Some(&first), key);
+        if result.is_err() && !package_exists(&first, key) {
+            for store in stores {
+                if package_exists(&store, key) {
+                    return Self::isolated(control_root, shared, Some(&store), key);
+                }
+            }
+        }
+        result
     }
 
     pub fn for_package_in_store(
@@ -91,7 +112,7 @@ impl RuntimeDirs {
         }
         let store = crate::package_store::root(data_root);
         fs::symlink_metadata(&store).ok()?.is_dir().then_some(())?;
-        Self::isolated(control_root, shared, Some(&store), key)
+        Self::isolated(control_root, shared, Some(&store), key).ok()
     }
 
     fn package_stores(control_root: &Path) -> impl Iterator<Item = PathBuf> {
@@ -133,21 +154,20 @@ impl RuntimeDirs {
         shared: &Path,
         store: Option<&Path>,
         key: &str,
-    ) -> Option<Self> {
-        let user_data_dir = Self::isolated_user_data_dir(control_root, key)?;
-        let staging_dir = runtime_build_dir(&user_data_dir);
+    ) -> Result<Self, String> {
+        let user_data_dir = Self::isolated_user_data_dir(control_root, key)
+            .ok_or("invalid package key or runtime directory")?;
+        let staging_dir = runtime_build_dir(&user_data_dir)?;
         let runtime_prebuilt = user_data_dir.join("prebuilt");
         if [&staging_dir, &runtime_prebuilt]
             .into_iter()
             .any(|path| fs::symlink_metadata(path).is_ok_and(|entry| !entry.is_dir()))
         {
-            return None;
+            return Err("runtime build or prebuilt directory is invalid".into());
         }
         let shared_data_dir = if key.starts_with("builtin/") {
-            // Preserve the caller's bundled search order, including macOS Squirrel SharedSupport.
-            if (shared == control_root || shared.as_os_str().is_empty())
-                && !shared.join("default.yaml").is_file()
-            {
+            // The control root can still contain the legacy layout kept for rollback.
+            if shared == control_root || shared.as_os_str().is_empty() {
                 let bundled = control_root.join("rime-data");
                 if bundled.join("default.yaml").is_file() {
                     bundled
@@ -158,22 +178,7 @@ impl RuntimeDirs {
                 shared.to_path_buf()
             }
         } else {
-            let store = store?;
-            let namespace = if key.starts_with("local-") {
-                "local"
-            } else {
-                "cloud"
-            };
-            [namespace, "addons"].into_iter().find_map(|namespace| {
-                let mut path = store.to_path_buf();
-                for part in [namespace, key, "files"] {
-                    path.push(part);
-                    if !fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_dir()) {
-                        return None;
-                    }
-                }
-                Some(path)
-            })?
+            package_files_dir(store.ok_or("missing package store")?, key)?
         };
         let package_build = shared_data_dir.join("build");
         let prebuilt_data_dir = if package_build.is_dir() {
@@ -181,7 +186,7 @@ impl RuntimeDirs {
         } else {
             runtime_prebuilt
         };
-        Some(Self {
+        Ok(Self {
             staging_dir,
             user_data_dir,
             shared_data_dir,
@@ -234,6 +239,39 @@ impl RuntimeDirs {
     }
 }
 
+fn package_files_dir(store: &Path, key: &str) -> Result<PathBuf, String> {
+    let primary = if key.starts_with("local-") {
+        "local"
+    } else {
+        "cloud"
+    };
+    let invalid = |path: &Path| {
+        format!(
+            "package files directory is missing, inaccessible or symlinked: {}",
+            path.display()
+        )
+    };
+    'namespace: for namespace in [primary, "addons"] {
+        let mut package = store.to_path_buf();
+        for part in [namespace, key] {
+            package.push(part);
+            match fs::symlink_metadata(&package) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue 'namespace,
+                _ => return Err(invalid(&package)),
+            }
+        }
+        // Match materialization's preference for the primary package if it exists.
+        let files = package.join("files");
+        return if fs::symlink_metadata(&files).is_ok_and(|metadata| metadata.is_dir()) {
+            Ok(files)
+        } else {
+            Err(invalid(&files))
+        };
+    }
+    Err(invalid(&store.join(primary).join(key).join("files")))
+}
+
 fn manifest_package_key(store: &Path) -> Option<String> {
     let bytes = read_regular_file(&store.join("active-manifest.json"))?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -241,16 +279,48 @@ fn manifest_package_key(store: &Path) -> Option<String> {
     Some(key.to_owned())
 }
 
-fn runtime_build_dir(user_dir: &Path) -> PathBuf {
+fn package_exists(store: &Path, key: &str) -> bool {
+    [if key.starts_with("local-") { "local" } else { "cloud" }, "addons"]
+        .into_iter()
+        .any(|namespace| {
+            let path = store.join(namespace);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => fs::symlink_metadata(path.join(key))
+                    .err()
+                    .is_none_or(|error| error.kind() != std::io::ErrorKind::NotFound),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                _ => true,
+            }
+        })
+}
+
+pub(crate) fn runtime_build_dir(user_dir: &Path) -> Result<PathBuf, String> {
+    let marker = user_dir.join(BUILD_GENERATION_MARKER);
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() => {
+            let name = fs::read_to_string(&marker).map_err(|error| error.to_string())?;
+            let valid = name.strip_prefix(BUILD_GENERATION_PREFIX).is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-')
+            });
+            let path = user_dir.join(&name);
+            if !valid || !fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_dir()) {
+                return Err("invalid package build generation".into());
+            }
+            return Ok(path);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err("invalid package build pointer".into()),
+    }
     let build = user_dir.join("build");
     let previous = user_dir.join(PREVIOUS_BUILD);
     // Two renames may leave only the preserved build if the deployer exits between them.
     if fs::symlink_metadata(&build).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
         && fs::symlink_metadata(&previous).is_ok_and(|entry| entry.is_dir())
     {
-        return previous;
+        return Ok(previous);
     }
-    build
+    Ok(build)
 }
 
 #[cfg(test)]
@@ -283,7 +353,7 @@ mod tests {
         let root = Path::new(root);
         for shared in [Path::new(shared), root] {
             assert_eq!(
-                RuntimeDirs::resolve(root, shared),
+                RuntimeDirs::resolve(root, shared).unwrap(),
                 RuntimeDirs {
                     user_data_dir: root.into(),
                     shared_data_dir: shared.into(),
@@ -302,11 +372,70 @@ mod tests {
     #[test]
     fn shared_control_root_keeps_separate_prebuilt_directory() {
         let root = Path::new("sample/keytao");
-        let dirs = RuntimeDirs::resolve(root, root);
+        let dirs = RuntimeDirs::resolve(root, root).unwrap();
         assert_eq!(dirs.user_data_dir, root);
         assert_eq!(dirs.shared_data_dir, root);
         assert_eq!(dirs.staging_dir, Path::new("sample/keytao/build"));
         assert_eq!(dirs.prebuilt_data_dir, Path::new("sample/keytao/prebuilt"));
         assert_eq!(dirs.active_package_key, None);
+    }
+
+    fn active_package_fixture(label: &str) -> (PathBuf, PathBuf) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keytao-runtime-{label}-{}-{now}",
+            std::process::id()
+        ));
+        let store = crate::package_store::root(&root);
+        let package = store.join("cloud/package");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            root.join(RuntimeDirs::SETTINGS_FILE),
+            br#"{"runtime_isolation":true}"#,
+        )
+        .unwrap();
+        fs::write(
+            store.join("active-manifest.json"),
+            br#"{"active_package":"package"}"#,
+        )
+        .unwrap();
+        (root, package.join("files"))
+    }
+
+    #[test]
+    fn isolated_active_package_rejects_missing_files_directory() {
+        let (root, files) = active_package_fixture("missing-files");
+        let addon_files = crate::package_store::root(&root).join("addons/package/files");
+        fs::create_dir_all(&addon_files).unwrap();
+        let missing = RuntimeDirs::resolve(&root, &root);
+        fs::create_dir(&files).unwrap();
+        let present = RuntimeDirs::resolve(&root, &root);
+        fs::remove_dir_all(files.parent().unwrap()).unwrap();
+        let addon = RuntimeDirs::resolve(&root, &root);
+        fs::remove_dir_all(root).unwrap();
+
+        let error = missing.unwrap_err();
+        assert!(error.contains("active package \"package\""));
+        assert!(error.contains("package files directory"));
+        assert_eq!(present.unwrap().shared_data_dir, files);
+        assert_eq!(addon.unwrap().shared_data_dir, addon_files);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_active_package_rejects_symlinked_files_directory() {
+        let (root, files) = active_package_fixture("symlink-files");
+        let target = root.join("external-files");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(target, files).unwrap();
+        let resolved = RuntimeDirs::resolve(&root, &root);
+        fs::remove_dir_all(root).unwrap();
+
+        let error = resolved.unwrap_err();
+        assert!(error.contains("active package \"package\""));
+        assert!(error.contains("symlinked"));
     }
 }

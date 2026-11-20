@@ -188,7 +188,7 @@ class KeytaoRimeDeployWorkerService : Service() {
         try {
             check(KeytaoNativeBridge.loaded) { "KeyTao native bridge is unavailable" }
             val error = checkNotNull(
-                KeytaoNativeBridge.nativeDeployPackages(root, applicationContext.dataDir.absolutePath),
+                KeytaoNativeBridge.nativeDeployPackages(root),
             ) {
                 "Android RIME 部署失败"
             }

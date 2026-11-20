@@ -163,6 +163,16 @@ object KeytaoNativeBridge {
         return runCatching { nativeHasDeployedSchema(userDir) }.getOrDefault(false)
     }
 
+    fun isolatedSchemaState(userDir: String): Readiness? {
+        if (!loaded) return null
+        return when (runCatching { nativeIsolatedSchemaState(userDir) }.getOrNull()) {
+            0 -> Readiness.NOT_INSTALLED
+            1 -> Readiness.NOT_DEPLOYED
+            2 -> Readiness.READY
+            else -> null
+        }
+    }
+
     fun deploymentInProgress(userDir: String): Boolean =
         loaded && runCatching { nativeDeploymentInProgress(userDir) }.getOrDefault(false)
 
@@ -461,9 +471,11 @@ object KeytaoNativeBridge {
 
     external fun nativeDeployStep(userDir: String, sharedDir: String?, schemaId: String?): String
 
-    external fun nativeDeployPackages(userDir: String, dataDir: String): String?
+    external fun nativeDeployPackages(userDir: String): String?
 
     external fun nativeHasDeployedSchema(userDir: String): Boolean
+
+    external fun nativeIsolatedSchemaState(userDir: String): Int
 
     external fun nativeDeploymentInProgress(userDir: String): Boolean
 

@@ -867,7 +867,7 @@ fn validate_metadata(key: &str, stored: &StoredPackage) -> Result<(), CoreError>
     Ok(())
 }
 
-fn collect_files(
+pub(crate) fn collect_files(
     root: &Path,
     directory: &Path,
     files: &mut BTreeSet<String>,
@@ -907,7 +907,7 @@ fn collect_files(
     Ok(())
 }
 
-fn publish_directory(
+pub(crate) fn publish_directory(
     destination: &Path,
     stage: &Path,
     rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,

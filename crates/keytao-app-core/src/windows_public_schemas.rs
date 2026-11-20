@@ -25,6 +25,10 @@ const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
 const PUBLIC_BUILD_KEY_FILE: &str = "public-build-key.txt";
 const LUA_SNAPSHOTS: &str = ".keytao-package-lua";
 const CURRENT_SCHEMA: &str = ".keytao-current-schema";
+#[cfg(target_os = "windows")]
+const PACKAGE_ENV: &str = "KEYTAO_WINDOWS_PUBLIC_PACKAGE";
+#[cfg(target_os = "windows")]
+const ACTIVATE_PACKAGE_ENV: &str = "KEYTAO_WINDOWS_PUBLIC_ACTIVATE";
 
 // LSSP contains repeated patch keys outside this metadata; preserve them verbatim.
 #[derive(serde::Deserialize, Default)]
@@ -317,20 +321,134 @@ pub fn deploy_and_publish() -> Result<(), String> {
     let version =
         keytao_core::librime_runtime_version().ok_or("无法读取 librime 版本，需要重新部署")?;
     let shared = keytao_core::default_shared_data_dir();
-    deploy_and_publish_at(
-        &public_root()?,
-        &version,
-        Path::new(&shared),
-        true,
-        |stage| {
-            let user = stage.to_string_lossy().into_owned();
-            keytao_core::deploy_for_process(
-                user,
-                shared.clone(),
-                keytao_core::DeployProcess::PublicDeploy,
-            )
-        },
+    let deploy = |stage: &Path| {
+        keytao_core::deploy_for_process(
+            stage.to_string_lossy().into_owned(),
+            shared.clone(),
+            keytao_core::DeployProcess::PublicDeploy,
+        )
+    };
+    let root = public_root()?;
+    #[cfg(target_os = "windows")]
+    if let Ok(key) = std::env::var(PACKAGE_ENV) {
+        let activate = std::env::var(ACTIVATE_PACKAGE_ENV).as_deref() == Ok("1");
+        return deploy_isolated_public_package(
+            &root, &key, &version, Path::new(&shared), activate, deploy,
+        );
+    }
+    deploy_and_publish_at(&root, &version, Path::new(&shared), true, deploy)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn publish_isolated_package(key: &str, activate: bool) -> Result<(), String> {
+    let exe = crate::ime_status::windows::windows_server_executable()?;
+    let mut command = std::process::Command::new(exe);
+    command.env(PACKAGE_ENV, key);
+    command.env(ACTIVATE_PACKAGE_ENV, if activate { "1" } else { "0" });
+    keytao_core::deploy_child::run_deploy_child_command_with_subcommand(
+        &mut command,
+        "--deploy-public",
+        std::time::Duration::from_secs(600),
+        |_| {},
     )
+}
+
+#[cfg(target_os = "windows")]
+fn deploy_isolated_public_package(
+    root: &Path,
+    key: &str,
+    version: &str,
+    shared: &Path,
+    activate: bool,
+    deploy: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    use keytao_core::RuntimeDirs;
+
+    let control_root =
+        keytao_core::default_user_data_dir().ok_or("cannot determine Rime directory")?;
+    let dirs = RuntimeDirs::for_package(&control_root, shared, key).ok_or("unknown public package")?;
+    let cache = isolated_public_cache(root, key);
+    // Generate from package source only. The desktop build may contain private custom dictionaries.
+    let mut sources = public_activation_files(
+        BTreeMap::new(),
+        Some(&dirs.shared_data_dir),
+        None,
+        &BTreeMap::new(),
+        None,
+    )?;
+    sources.insert(RuntimeDirs::PUBLIC_PACKAGE_FILE.into(), key.as_bytes().to_vec());
+    let cached = read_snapshot(&cache)?;
+    if !cached
+        .iter()
+        .filter(|(path, _)| compilation_inputs(path))
+        .eq(sources.iter().filter(|(path, _)| compilation_inputs(path)))
+    {
+        store_snapshot(&cache, &sources, false)?;
+    }
+    deploy_and_publish_at(&cache, version, shared, false, deploy)?;
+    if activate {
+        activate_isolated_snapshot(root, &control_root, key)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn isolated_public_cache(root: &Path, key: &str) -> PathBuf {
+    root.join(".package-cache")
+        .join(format!("{:x}", Sha256::digest(key)))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn activate_cached_isolated_package(key: &str) -> Result<(), String> {
+    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let _guard = PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let control_root =
+        keytao_core::default_user_data_dir().ok_or("cannot determine Rime directory")?;
+    activate_isolated_snapshot(&public_root()?, &control_root, key)
+}
+
+#[cfg(target_os = "windows")]
+fn activate_isolated_snapshot(root: &Path, control_root: &Path, key: &str) -> Result<(), String> {
+    use keytao_core::RuntimeDirs;
+
+    if !RuntimeDirs::isolation_enabled(control_root)
+        || RuntimeDirs::active_package_key(control_root).as_deref() != Some(key)
+    {
+        return Ok(());
+    }
+    let cache = isolated_public_cache(root, key);
+    let generation = read_generation_pointer(&cache, "current.txt")?
+        .ok_or("public package build is missing")?;
+    if !compiled_generation(&cache, &generation)? {
+        return Err("public package build is missing".into());
+    }
+    grant_appcontainer_read(root, false)?;
+    let target = root.join(&generation);
+    if !compiled_generation(root, &generation)? {
+        let stage = tempfile::tempdir_in(root).map_err(|error| error.to_string())?;
+        let linked = stage.path().join(&generation);
+        link_snapshot(&cache.join(&generation), &linked)?;
+        grant_appcontainer_read(&linked, true)?;
+        std::fs::rename(linked, target).map_err(|error| error.to_string())?;
+    }
+    let previous = GenerationPointers::read(root)?;
+    let next = GenerationPointers {
+        current: Some(generation),
+        pending: None,
+    };
+    if RuntimeDirs::active_package_key(control_root).as_deref() != Some(key) {
+        return Ok(());
+    }
+    if let Err(error) = next.write(root) {
+        previous
+            .write(root)
+            .map_err(|rollback| format!("{error}; restore public schema pointers: {rollback}"))?;
+        return Err(error);
+    }
+    prune_snapshots(root);
+    Ok(())
 }
 
 fn shared_data_hash(root: &Path) -> Result<String, String> {
@@ -446,7 +564,7 @@ fn deploy_and_publish_at(
         .map_err(|error| format!("prepare-dependencies: {error}"))?;
     deploy(stage.path()).map_err(|error| format!("compile: {error}"))?;
     let complete = keytao_core::deployment_warning(stage.path()).is_none();
-    let build = keytao_core::RuntimeDirs::resolve(stage.path(), shared).staging_dir;
+    let build = keytao_core::RuntimeDirs::resolve(stage.path(), shared)?.staging_dir;
     let mut compiled = BTreeMap::new();
     let snapshot_build = public_staging_dir();
     read_snapshot_files(&build, &build, &snapshot_build, &mut compiled)
@@ -672,6 +790,7 @@ fn public_staging_dir() -> PathBuf {
 
 fn is_public_asset(path: &Path) -> bool {
     if is_public_lua_metadata(path)
+        || path == Path::new(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE)
         || path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
         || (path
             .file_name()
@@ -731,7 +850,10 @@ pub fn publish_package(zip_bytes: &[u8]) -> Result<(), String> {
             continue;
         }
         let relative = checked_relative(Path::new(entry.name()))?;
-        if !is_public_asset(&relative) || is_public_lua_metadata(&relative) {
+        if !is_public_asset(&relative)
+            || is_public_lua_metadata(&relative)
+            || relative == Path::new(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE)
+        {
             continue;
         }
         if entry
@@ -870,6 +992,7 @@ fn package_directory_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>
             } else if kind.is_file()
                 && is_public_asset(&relative)
                 && !is_public_lua_metadata(&relative)
+                && relative != Path::new(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE)
                 && !relative.starts_with("build")
             {
                 *total = total
@@ -1027,7 +1150,23 @@ fn publish_activation_with_selection_at(
     grant_access: bool,
     selected_schema: Option<&str>,
 ) -> Result<(), String> {
-    let mut files = read_snapshot(root)?;
+    let files = public_activation_files(
+        read_snapshot(root)?,
+        incoming,
+        previous,
+        addons,
+        selected_schema,
+    )?;
+    store_snapshot(root, &files, grant_access)
+}
+
+fn public_activation_files(
+    mut files: BTreeMap<PathBuf, Vec<u8>>,
+    incoming: Option<&Path>,
+    previous: Option<&Path>,
+    addons: &BTreeMap<String, String>,
+    selected_schema: Option<&str>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
     let before = snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path)));
     if let Some(previous) = previous {
         let previous_files = package_directory_files(previous)?;
@@ -1164,7 +1303,7 @@ fn publish_activation_with_selection_at(
     if before != snapshot_hash(files.iter().filter(|(path, _)| compilation_inputs(path))) {
         files.retain(|path, _| !path.starts_with("build"));
     }
-    store_snapshot(root, &files, grant_access)
+    Ok(files)
 }
 
 pub fn has_schemas() -> bool {
@@ -1378,7 +1517,10 @@ fn merge_public_files(
     let mut addon_schemas = Vec::new();
     for (path, content) in incoming {
         let relative = checked_relative(path)?;
-        if !is_public_asset(&relative) || relative.starts_with("build") {
+        if !is_public_asset(&relative)
+            || relative.starts_with("build")
+            || relative == Path::new(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE)
+        {
             continue;
         }
         if relative == Path::new("default.custom.yaml")

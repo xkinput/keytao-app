@@ -118,37 +118,32 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
             }
         }
     }
-    let mut artifacts = BTreeSet::new();
-    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
-    let build = staging_relative(root, &dirs);
-    artifacts.insert(format!("{build}/default.yaml"));
-    let schemas = crate::managed_custom::active_schema_ids(root).map_err(CoreError::Other)?;
-    artifacts.extend(crate::package_artifacts::owned_artifact_paths(
-        root, &schemas,
-    )?);
-    for path in &owned {
-        if let Some(id) = path.strip_suffix(".schema.yaml") {
-            artifacts.insert(format!("{build}/{id}.schema.yaml"));
-        }
-        if let Some(id) = path.strip_suffix(".dict.yaml") {
-            for extension in ["table", "prism", "reverse"] {
-                artifacts.insert(format!("{build}/{id}.{extension}.bin"));
-                artifacts.insert(format!(
-                    "{build}/{}.{extension}.bin",
-                    id.rsplit('/').next().unwrap()
-                ));
+    let isolated = keytao_core::RuntimeDirs::isolation_enabled(root);
+    // The entire legacy build is retained for rollback when isolation is enabled.
+    if !isolated {
+        let dirs = keytao_core::RuntimeDirs::flat(root, root);
+        let build = staging_relative(root, &dirs);
+        let mut artifacts = BTreeSet::from([format!("{build}/default.yaml")]);
+        let schemas = crate::managed_custom::active_schema_ids(root).map_err(CoreError::Other)?;
+        artifacts.extend(crate::package_artifacts::owned_artifact_paths(root, &schemas)?);
+        for path in &owned {
+            if let Some(id) = path.strip_suffix(".schema.yaml") {
+                artifacts.insert(format!("{build}/{id}.schema.yaml"));
+            }
+            if let Some(id) = path.strip_suffix(".dict.yaml") {
+                for extension in ["table", "prism", "reverse"] {
+                    artifacts.insert(format!("{build}/{id}.{extension}.bin"));
+                    artifacts.insert(format!(
+                        "{build}/{}.{extension}.bin",
+                        id.rsplit('/').next().unwrap()
+                    ));
+                }
             }
         }
+        owned.extend(artifacts);
     }
-    owned.extend(artifacts);
     let mut files = Vec::new();
-    collect(
-        root,
-        root,
-        keytao_core::RuntimeDirs::isolation_enabled(root),
-        &owned,
-        &mut files,
-    )?;
+    collect(root, root, isolated, &owned, &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(OrphanReport {
         files,
@@ -179,7 +174,7 @@ fn collect(
         if (isolated
             && matches!(
                 relative.as_str(),
-                "runtime" | keytao_core::RuntimeDirs::SETTINGS_FILE
+                "build" | "runtime" | "scheme-packages" | keytao_core::RuntimeDirs::SETTINGS_FILE
             ))
             || package_activation::user_file(&relative)
             || matches!(
@@ -468,6 +463,47 @@ mod tests {
         collect(root, root, true, &BTreeSet::new(), &mut files).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "orphan.yaml");
+    }
+
+    #[test]
+    fn isolated_orphan_cleanup_preserves_the_legacy_build() {
+        let (temp, core, root) = setup();
+        let store = keytao_core::package_store::root(&root);
+        fs::create_dir_all(store.join("cloud/package/files")).unwrap();
+        fs::write(
+            store.join("active-manifest.json"),
+            br#"{"active_package":"package"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(keytao_core::RuntimeDirs::SETTINGS_FILE),
+            br#"{"runtime_isolation":true}"#,
+        )
+        .unwrap();
+        fs::create_dir(root.join("build")).unwrap();
+        let artifacts = [
+            "build/default.yaml",
+            "build/legacy.schema.yaml",
+            "build/legacy.table.bin",
+            "build/.keytao-deployed",
+        ];
+        for path in artifacts.into_iter().chain(["orphan.yaml"]) {
+            fs::write(root.join(path), b"legacy contents").unwrap();
+        }
+
+        let orphans = report(&core, &root).unwrap().files;
+        assert!(orphans.iter().any(|file| file.path == "orphan.yaml"));
+        assert!(orphans
+            .iter()
+            .all(|file| !artifacts.contains(&file.path.as_str())));
+        let path = artifacts[2];
+        let selected = OrphanFile {
+            path: path.into(),
+            sha256: sha256_reader(b"legacy contents".as_slice()).unwrap(),
+            size: b"legacy contents".len() as u64,
+        };
+        assert!(trash_with(&core, &root, &[selected], Some(&temp.path().join("trash"))).is_err());
+        assert_eq!(fs::read(root.join(path)).unwrap(), b"legacy contents");
     }
 
     #[test]

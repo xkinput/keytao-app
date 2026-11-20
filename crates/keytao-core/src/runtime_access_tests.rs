@@ -63,6 +63,122 @@ fn native_fixture(name: &str) -> Option<(ImeRuntime, PathBuf)> {
 }
 
 #[test]
+fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
+    let Some((runtime, root)) =
+        native_fixture("package_stamp_reloads_live_sessions_and_preserves_each_schema")
+    else {
+        return;
+    };
+    runtime.shutdown().unwrap();
+    std::fs::write(
+        root.join(RuntimeDirs::SETTINGS_FILE),
+        br#"{"runtime_isolation":true}"#,
+    )
+    .unwrap();
+    let first = crate::package_store::root(&root).join("cloud/first/files");
+    let second = crate::package_store::root(&root).join("cloud/second/files");
+    for (shared, ids) in [
+        (&first, &["keytao_a", "keytao_b"][..]),
+        (&second, &["keytao_c"][..]),
+    ] {
+        smoke_fixture::write(shared).unwrap();
+        let list = ids
+            .iter()
+            .map(|id| format!("  - schema: {id}\n"))
+            .collect::<String>();
+        std::fs::write(
+            shared.join("default.yaml"),
+            format!("config_version: '1'\nschema_list:\n{list}"),
+        )
+        .unwrap();
+        std::fs::remove_file(shared.join("default.custom.yaml")).unwrap();
+        for extension in ["schema.yaml", "dict.yaml"] {
+            let source = shared.join(format!("{}.{extension}", smoke_fixture::SCHEMA_ID));
+            let content = std::fs::read_to_string(&source).unwrap();
+            for id in ids {
+                std::fs::write(
+                    shared.join(format!("{id}.{extension}")),
+                    content.replace(smoke_fixture::SCHEMA_ID, id),
+                )
+                .unwrap();
+            }
+            std::fs::remove_file(source).unwrap();
+        }
+        let key = shared.parent().unwrap().file_name().unwrap();
+        let user = root.join("runtime").join(key);
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("default.custom.yaml"),
+            format!("patch:\n  schema_list:\n{list}"),
+        )
+        .unwrap();
+    }
+    let target = |key: &str| isolated_deploy::PackageDeployTarget {
+        package_key: key.into(),
+        package_name: key.into(),
+        materialize_error: None,
+        staged_inputs: None,
+    };
+    isolated_deploy::deploy_packages(
+        &root,
+        &root,
+        None,
+        &[target("first"), target("second")],
+        |_| {},
+    )
+    .unwrap();
+    runtime.switch_package("first").unwrap();
+    runtime.init_without_deploy().unwrap();
+    let session = runtime.create_session().unwrap();
+    session.select_schema("keytao_b").unwrap();
+    let second_dirs = RuntimeDirs::for_package(&root, &root, "second").unwrap();
+    let receipt_path = second_dirs.staging_dir.join(".keytao-desktop-inputs.json");
+    let receipt = std::fs::read(&receipt_path).unwrap();
+    std::fs::remove_file(&receipt_path).unwrap();
+    let first_signature = ReloadStamp::current_signature(&root);
+    assert_eq!(
+        runtime.switch_package("second"),
+        Err("请在键道 App 部署此方案包".into())
+    );
+    assert_eq!(
+        RuntimeDirs::active_package_key(&root).as_deref(),
+        Some("first")
+    );
+    assert_eq!(ReloadStamp::current_signature(&root), first_signature);
+
+    std::fs::write(receipt_path, receipt).unwrap();
+    let mut gate = ReloadStampGate::new(&root);
+    let generation = runtime.generation();
+    session.process_key_result(u32::from(b'a'), 0).unwrap();
+    runtime.switch_package("second").unwrap();
+    assert_eq!(
+        ReloadStamp::package_key(gate.path()).as_deref(),
+        Some("second")
+    );
+    assert_eq!(RuntimeDirs::resolve(&root, &root).unwrap(), second_dirs);
+    assert_eq!(session.current_schema().unwrap().id, "keytao_b");
+    assert_eq!(generation, runtime.generation());
+    let pending = gate.pending().unwrap();
+    runtime.reload_without_deploy().unwrap();
+    gate.commit(pending);
+    assert!(gate.pending().is_none());
+    assert!(runtime.generation() > generation);
+    assert_eq!(
+        desktop::initialized_user_dir().unwrap().unwrap(),
+        second_dirs.user_data_dir
+    );
+    assert_eq!(session.current_schema().unwrap().id, "keytao_c");
+    assert!(session.state().preedit.is_empty());
+    runtime.switch_package("first").unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(session.current_schema().unwrap().id, "keytao_b");
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn key_batch_uses_one_access_and_preserves_an_earlier_commit() {
     let Some((runtime, dir)) =
         native_fixture("key_batch_uses_one_access_and_preserves_an_earlier_commit")

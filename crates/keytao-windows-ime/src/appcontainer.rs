@@ -21,6 +21,7 @@ use windows::{
 
 const SEED_MARKER: &str = ".keytao-public-seed.version";
 const SEED_FILES: &str = ".keytao-public-seed.files";
+const PACKAGE_CACHE_POINTER: &str = "current.txt";
 #[cfg(test)]
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
 
@@ -73,11 +74,21 @@ pub(crate) struct SandboxData {
 
 impl SandboxData {
     pub(crate) fn mark_loaded(&self) -> std::result::Result<(), String> {
-        std::fs::write(
-            self.user_dir.join(SEED_MARKER),
-            seed_generation(&self.generation, self.active_package_key.as_deref()),
-        )
-        .map_err(|error| format!("record sandbox schema deployment: {error}"))
+        if self.active_package_key.is_some() {
+            let path = self.user_dir.with_file_name(PACKAGE_CACHE_POINTER);
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(self.generation.as_str()) {
+                keytao_core::write_file_atomic(&path, self.generation.as_bytes())
+                    .map_err(|error| format!("record package schema cache: {error}"))?;
+            }
+        }
+        if self.changed {
+            std::fs::write(
+                self.user_dir.join(SEED_MARKER),
+                seed_generation(&self.generation, self.active_package_key.as_deref()),
+            )
+            .map_err(|error| format!("record sandbox schema deployment: {error}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -93,15 +104,21 @@ pub(crate) fn prepare_data(
         return Err("AppContainer data directory was not redirected".into());
     }
     let private = private.join("KeyTao");
-    // Release every process-local session's mapped build files before replacing them.
-    keytao_core::reinitialize(
-        private.to_string_lossy().into_owned(),
-        shared_data_dir.to_owned(),
-    )?;
-    prepare_at(
+    prepare_at_with(
         &desktop.join("KeyTao/appcontainer-schemas"),
         &private,
         librime_version,
+        |user_dir, isolated| {
+            if isolated {
+                keytao_core::ImeRuntime::with_dirs(user_dir, shared_data_dir).shutdown()
+            } else {
+                // Release every process-local session's mapped build files before replacing them.
+                keytao_core::reinitialize(
+                    user_dir.to_string_lossy().into_owned(),
+                    shared_data_dir.to_owned(),
+                )
+            }
+        },
     )
 }
 
@@ -188,7 +205,7 @@ pub(crate) fn validate_prebuilt(
     root: &Path,
     librime_version: &str,
 ) -> std::result::Result<(), String> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root)?;
     let version_file = dirs.staging_dir.join("keytao-librime-version.txt");
     for path in [
         dirs.user_data_dir.clone(),
@@ -217,6 +234,20 @@ pub(crate) fn validate_prebuilt(
         return Err("需要重新部署".into());
     }
     Ok(())
+}
+
+pub(crate) fn public_package_key(root: &Path) -> std::result::Result<Option<String>, String> {
+    let path = root.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return Err("invalid public package metadata".into()),
+    }
+    let key = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    if keytao_core::RuntimeDirs::isolated_user_data_dir(root, &key).is_none() {
+        return Err("invalid public package key".into());
+    }
+    Ok(Some(key))
 }
 
 #[cfg(test)]
@@ -283,8 +314,9 @@ pub(crate) fn prune_cache(root: &Path, active: Option<&Path>) {
 }
 
 fn prune_legacy_cache(root: &Path) {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
-    prune_legacy_cache_at(root, &dirs.staging_dir);
+    if let Ok(dirs) = keytao_core::RuntimeDirs::resolve(root, root) {
+        prune_legacy_cache_at(root, &dirs.staging_dir);
+    }
 }
 
 fn prune_legacy_cache_at(root: &Path, staging_dir: &Path) {
@@ -382,10 +414,20 @@ fn prune_legacy_caches(private: &Path) {
     }
 }
 
+#[cfg(test)]
 fn prepare_at(
     public_root: &Path,
     private: &Path,
     librime_version: &str,
+) -> std::result::Result<SandboxData, String> {
+    prepare_at_with(public_root, private, librime_version, |_, _| Ok(()))
+}
+
+fn prepare_at_with(
+    public_root: &Path,
+    private: &Path,
+    librime_version: &str,
+    before_copy: impl FnOnce(&Path, bool) -> std::result::Result<(), String>,
 ) -> std::result::Result<SandboxData, String> {
     let reload_stamp_path = public_root.join("current.txt");
     // Capture before reading the generation we deploy. Publishing a newer
@@ -400,23 +442,36 @@ fn prepare_at(
         return Err("invalid public schema generation".into());
     }
     let source_root = public_root.join(&generation);
-    let source_dirs = keytao_core::RuntimeDirs::resolve(&source_root, &source_root);
-    let dirs = keytao_core::RuntimeDirs::resolve(private, private);
+    let source_dirs = keytao_core::RuntimeDirs::resolve(&source_root, &source_root)?;
+    let active_package_key = public_package_key(&source_root)?;
+    let cache = active_package_key.as_ref().map(|key| {
+        cache_directory_for_package(
+            &private.join("tsf-cache"),
+            &generation,
+            librime_version,
+            Some(key),
+        )
+    });
+    let private = cache.as_deref().unwrap_or(private);
+    let dirs = keytao_core::RuntimeDirs::resolve(private, private)?;
     validate_prebuilt(&source_root, librime_version)?;
-    let seed_generation = seed_generation(&generation, source_dirs.active_package_key.as_deref());
+    let seed_generation = seed_generation(&generation, active_package_key.as_deref());
     let changed = std::fs::read_to_string(private.join(SEED_MARKER))
         .ok()
         .as_deref()
         != Some(seed_generation.as_str())
         || validate_prebuilt(private, librime_version).is_err()
-        || !keytao_core::schema_install_state(private).deployed
+        || !keytao_core::schema_build_is_available(private)
         || keytao_core::windows_rime_build_repair_required(private);
+    if active_package_key.is_none() || changed {
+        before_copy(private, active_package_key.is_some())?;
+    }
     let result = SandboxData {
         user_dir: private.to_owned(),
         reload_stamp_path,
         reload_stamp_signature,
         generation,
-        active_package_key: source_dirs.active_package_key,
+        active_package_key,
         changed,
     };
     if !changed {
@@ -426,6 +481,9 @@ fn prepare_at(
     // First deployments write only into the package's own private directory.
     std::fs::create_dir_all(&dirs.user_data_dir)
         .map_err(|error| format!("create sandbox schema cache: {error}"))?;
+    if result.active_package_key.is_some() && !private.join("user.yaml").exists() {
+        restore_cached_schema_selection(private)?;
+    }
     let mut copied = Vec::new();
     fn copy_assets(
         base: &Path,
@@ -500,11 +558,76 @@ fn prepare_at(
     Ok(result)
 }
 
+fn restore_cached_schema_selection(cache: &Path) -> std::result::Result<(), String> {
+    let previous = cache.with_file_name(PACKAGE_CACHE_POINTER);
+    let Ok(previous) = std::fs::read_to_string(previous) else {
+        return Ok(());
+    };
+    if previous.len() != 64 || !previous.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid package schema cache generation".into());
+    }
+    let previous = cache.with_file_name(previous).join("user.yaml");
+    match std::fs::read(previous) {
+        Ok(selection) => keytao_core::write_file_atomic(&cache.join("user.yaml"), &selection)
+            .map_err(|error| format!("preserve sandbox schema selection: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const VERSION: &str = "1.0.0";
+
+    #[test]
+    fn switching_back_reuses_the_package_cache_and_its_schema_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let public = root.path().join("public");
+        let private = root.path().join("private");
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let updated_first = "c".repeat(64);
+        for (generation, key) in [
+            (&first, "first"),
+            (&second, "second"),
+            (&updated_first, "first"),
+        ] {
+            let source = public.join(generation);
+            seed(&source);
+            std::fs::write(source.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE), key)
+                .unwrap();
+        }
+        let pointer = public.join("current.txt");
+        std::fs::write(&pointer, &first).unwrap();
+        let first_cache = prepare_at(&public, &private, VERSION).unwrap();
+        first_cache.mark_loaded().unwrap();
+        let selection = first_cache.user_dir.join("user.yaml");
+        std::fs::write(&selection, "var: {previously_selected_schema: first}").unwrap();
+
+        std::fs::write(&pointer, &second).unwrap();
+        let second_cache = prepare_at(&public, &private, VERSION).unwrap();
+        assert_ne!(first_cache.user_dir, second_cache.user_dir);
+        assert!(!second_cache.user_dir.join("user.yaml").exists());
+
+        std::fs::write(&pointer, &first).unwrap();
+        let cached = prepare_at(&public, &private, VERSION).unwrap();
+        assert!(!cached.changed);
+        assert_eq!(cached.user_dir, first_cache.user_dir);
+        assert_eq!(
+            std::fs::read_to_string(selection).unwrap(),
+            "var: {previously_selected_schema: first}"
+        );
+
+        std::fs::write(&pointer, &updated_first).unwrap();
+        let rebuilt = prepare_at(&public, &private, VERSION).unwrap();
+        assert!(rebuilt.changed);
+        assert_eq!(
+            std::fs::read_to_string(rebuilt.user_dir.join("user.yaml")).unwrap(),
+            "var: {previously_selected_schema: first}"
+        );
+    }
 
     #[test]
     fn sandbox_lua_snapshots_rebase_and_exclude_private_paths() {

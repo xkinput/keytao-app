@@ -5,7 +5,12 @@ use crate::{
     package_store::{PackageStore, StoredPackage},
     packages::{safe_path, sha256_reader},
 };
-use keytao_core::{RuntimeDirs, isolated_deploy::PackageDeployTarget};
+use keytao_core::{
+    RuntimeDirs,
+    isolated_deploy::{
+        PackageDeployTarget, STAGED_INPUTS_MANIFEST, STAGED_INPUTS_PREFIX, StagedInput,
+    },
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -86,7 +91,7 @@ pub fn materialize_all_installed_packages(
     bundled: &Path,
 ) -> Result<(), CoreError> {
     if RuntimeDirs::isolation_enabled(control_root) {
-        for target in prepare_deploy_targets(core, control_root, bundled)? {
+        for target in prepare_targets(core, control_root, bundled, false, None)?.0 {
             if let Some(error) = target.materialize_error {
                 return Err(CoreError::Other(error));
             }
@@ -101,7 +106,18 @@ pub(crate) fn prepare_deploy_targets(
     core: &Core,
     control_root: &Path,
     bundled: &Path,
-) -> Result<Vec<PackageDeployTarget>, CoreError> {
+    package_key: Option<&str>,
+) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
+    prepare_targets(core, control_root, bundled, true, package_key)
+}
+
+fn prepare_targets(
+    core: &Core,
+    control_root: &Path,
+    bundled: &Path,
+    stage: bool,
+    package_key: Option<&str>,
+) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
     let settings: Settings = read_optional(&safe(control_root, RuntimeDirs::SETTINGS_FILE)?)?
         .map(|bytes| serde_json::from_slice(&bytes))
         .transpose()?
@@ -210,11 +226,18 @@ pub(crate) fn prepare_deploy_targets(
     if keys.is_empty() && bundled.join("default.yaml").is_file() {
         keys.push("builtin/keytao".into());
     }
-    Ok(keys
+    if let Some(key) = package_key {
+        keys.retain(|candidate| candidate == key);
+        if key == "builtin/keytao" && keys.is_empty() && bundled.join("default.yaml").is_file() {
+            keys.push(key.into());
+        }
+    }
+    let mut stages = Vec::new();
+    let targets = keys
         .into_iter()
         .map(|key| {
             let mut name = package_name(core, &key);
-            let result: Result<(), CoreError> = (|| {
+            let result: Result<Option<String>, CoreError> = (|| {
                 let (files, selection) = if key.starts_with("builtin/") {
                     let mut files = Files::new();
                     walk_files(bundled, "", private_path, &mut |source, name| {
@@ -239,7 +262,26 @@ pub(crate) fn prepare_deploy_targets(
                         "Missing package source for {key}"
                     )));
                 };
-                materialize(
+                #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", target_os = "linux"))]
+                if core.env().data_dir != control_root && !key.starts_with("builtin/") {
+                    let (namespace, package) = if installed.contains(&key) {
+                        let namespace = if crate::scheme::is_local_scheme_key(&key) {
+                            "local"
+                        } else {
+                            "cloud"
+                        };
+                        (namespace, store.checked_package_path(&key)?)
+                    } else {
+                        ("addons", store.checked_addon_path(&key)?)
+                    };
+                    let source = package.join("files");
+                    if RuntimeDirs::for_package(control_root, bundled, &key)
+                        .is_none_or(|dirs| dirs.shared_data_dir != source)
+                    {
+                        publish_package_sources(control_root, namespace, &key, &files)?;
+                    }
+                }
+                let prepared = prepare_runtime(
                     control_root,
                     bundled,
                     &key,
@@ -247,15 +289,77 @@ pub(crate) fn prepare_deploy_targets(
                     selection.as_deref(),
                     overlay_for(&key)?,
                     &legacy,
-                )
+                    stage,
+                )?;
+                Ok(prepared.map(|prepared| {
+                    let name = prepared
+                        .path()
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    stages.push(prepared);
+                    name
+                }))
             })();
+            let (staged_inputs, materialize_error) = match result {
+                Ok(name) => (name, None),
+                Err(error) => (None, Some(error.to_string())),
+            };
             PackageDeployTarget {
                 package_key: key,
                 package_name: name,
-                materialize_error: result.err().map(|error| error.to_string()),
+                materialize_error,
+                staged_inputs,
             }
         })
-        .collect())
+        .collect();
+    Ok((targets, stages))
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", target_os = "linux"))]
+fn publish_package_sources(
+    root: &Path,
+    namespace: &str,
+    key: &str,
+    files: &Files,
+) -> Result<(), CoreError> {
+    let destination = safe(root, &format!("scheme-packages/{namespace}/{key}/files"))?;
+    let parent = destination.parent().unwrap();
+    let previous = safe(root, &format!("scheme-packages/{namespace}/{key}/.old-files"))?;
+    let owner = safe(root, &format!("scheme-packages/{namespace}/{key}/.keytao-source-projection"))?;
+    if (destination.try_exists()? || previous.try_exists()?)
+        && read_optional(&owner)?.as_deref() != Some(b"1\n")
+    {
+        return Err(CoreError::Other(format!("方案包来源目录已存在：{key}")));
+    }
+    write_file(&owner, b"1\n")?;
+    if previous.try_exists()? {
+        if destination.try_exists()? {
+            fs::remove_dir_all(&previous)?;
+        } else {
+            fs::rename(&previous, &destination)?;
+        }
+    }
+    if destination.is_dir() {
+        let mut actual = BTreeSet::new();
+        if crate::package_store::collect_files(&destination, &destination, &mut actual, false).is_ok()
+            && actual.iter().eq(files.keys())
+            && files.iter().all(|(name, expected)| {
+                safe(&destination, name)
+                    .ok()
+                    .and_then(|path| fs::read(path).ok())
+                    .is_some_and(|bytes| bytes == *expected)
+            })
+        {
+            return Ok(());
+        }
+    }
+    let stage = tempfile::Builder::new().prefix(".sources-").tempdir_in(parent)?;
+    for (relative, bytes) in files {
+        write_file(&safe(stage.path(), relative)?, bytes)?;
+    }
+    crate::package_store::publish_directory(&destination, stage.path(), crate::package_fs::rename)
 }
 
 pub(crate) fn in_use_package(
@@ -504,7 +608,7 @@ fn materialized_path(path: &str) -> bool {
             || crate::addon::is_package_file(path))
 }
 
-fn materialize(
+fn prepare_runtime(
     control_root: &Path,
     bundled: &Path,
     key: &str,
@@ -512,7 +616,8 @@ fn materialize(
     selection: Option<&[String]>,
     overlay: Option<&Files>,
     legacy: &Files,
-) -> Result<(), CoreError> {
+    stage: bool,
+) -> Result<Option<tempfile::TempDir>, CoreError> {
     let runtime = RuntimeDirs::isolated_user_data_dir(control_root, key)
         .ok_or_else(|| CoreError::Other("Invalid runtime package key".into()))?;
     safe(control_root, &format!("runtime/{key}"))?;
@@ -626,6 +731,7 @@ fn materialize(
         generated,
         user,
         runtime_overrides,
+        stage,
     )
 }
 
@@ -776,6 +882,7 @@ fn regenerate_custom(
             serde_json::to_vec(&serde_json::json!({ "candidatePageSize": page_size }))?,
         )?;
     }
+    // Use the package's selected schemas for both the remove filter and candidate page size.
     managed_custom::regenerate(stage, &schemas.iter().cloned().collect())
         .map_err(CoreError::Other)?;
     for path in managed_custom::generated_paths(stage).map_err(CoreError::Other)? {
@@ -796,7 +903,8 @@ fn write_runtime(
     generated: Files,
     user: Files,
     runtime_overrides: BTreeSet<String>,
-) -> Result<(), CoreError> {
+    stage: bool,
+) -> Result<Option<tempfile::TempDir>, CoreError> {
     let fingerprint = |files: &Files| -> Result<BTreeMap<_, _>, CoreError> {
         files
             .iter()
@@ -819,7 +927,7 @@ fn write_runtime(
         if let Some(digest) = manifest.user_owned.get_mut(&relative) {
             *digest = sha256_reader(bytes.as_slice())?;
         }
-        if let Some(existing) = read_optional(&path)? {
+        let previous_sha256 = if let Some(existing) = read_optional(&path)? {
             if existing == bytes {
                 continue;
             }
@@ -831,8 +939,11 @@ fn write_runtime(
                     "Modified runtime file: {relative}"
                 )));
             }
-        }
-        writes.push((path, bytes));
+            Some(digest)
+        } else {
+            None
+        };
+        writes.push((path, bytes, previous_sha256));
     }
     let mut removals = Vec::new();
     for (relative, hash) in previous.owned.iter().chain(&previous.generated) {
@@ -840,7 +951,7 @@ fn write_runtime(
             let path = safe(runtime, relative)?;
             if let Some(bytes) = read_optional(&path)? {
                 if sha256_reader(bytes.as_slice())? == *hash {
-                    removals.push(path);
+                    removals.push((path, hash.clone()));
                 }
             }
         }
@@ -850,20 +961,67 @@ fn write_runtime(
         previous,
         next: manifest,
     };
+    let manifest_path = safe(runtime, MANIFEST)?;
+    let manifest_bytes = serde_json::to_vec(&patch.next)?;
+    if stage {
+        if let Some(bytes) = read_optional(&pending_path)? {
+            removals.push((pending_path, sha256_reader(bytes.as_slice())?));
+        }
+        let existing = read_optional(&manifest_path)?;
+        if existing.as_deref() != Some(manifest_bytes.as_slice()) {
+            let digest = existing
+                .map(|bytes| sha256_reader(bytes.as_slice()))
+                .transpose()?;
+            writes.push((manifest_path, manifest_bytes, digest));
+        }
+        if writes.is_empty() && removals.is_empty() {
+            return Ok(None);
+        }
+        let stage = tempfile::Builder::new()
+            .prefix(STAGED_INPUTS_PREFIX)
+            .tempdir_in(runtime)?;
+        let mut edits = BTreeMap::new();
+        for (path, bytes, previous_sha256) in writes {
+            let relative = path.strip_prefix(runtime).unwrap();
+            write_file(&stage.path().join(relative), &bytes)?;
+            edits.insert(
+                relative.to_owned(),
+                StagedInput {
+                    previous_sha256,
+                    replace: true,
+                },
+            );
+        }
+        for (path, digest) in removals {
+            let relative = path.strip_prefix(runtime).unwrap();
+            edits.insert(
+                relative.to_owned(),
+                StagedInput {
+                    previous_sha256: Some(digest),
+                    replace: false,
+                },
+            );
+        }
+        write_file(
+            &stage.path().join(STAGED_INPUTS_MANIFEST),
+            &serde_json::to_vec(&edits)?,
+        )?;
+        return Ok(Some(stage));
+    }
     if !writes.is_empty() || !removals.is_empty() {
         write_file(&pending_path, &serde_json::to_vec(&patch)?)?;
     }
-    for (path, bytes) in writes {
+    for (path, bytes, _) in writes {
         write_file(&path, &bytes)?;
     }
-    for path in removals {
+    for (path, _) in removals {
         fs::remove_file(path)?;
     }
-    write_file(&safe(runtime, MANIFEST)?, &serde_json::to_vec(&patch.next)?)?;
+    write_file(&manifest_path, &manifest_bytes)?;
     if pending_path.try_exists()? {
         fs::remove_file(pending_path)?;
     }
-    Ok(())
+    Ok(None)
 }
 
 fn current_manifest(runtime: &Path, key: &str) -> Result<Manifest, CoreError> {
@@ -924,6 +1082,28 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn materialize(
+        control_root: &Path,
+        bundled: &Path,
+        key: &str,
+        sources: Files,
+        selection: Option<&[String]>,
+        overlay: Option<&Files>,
+        legacy: &Files,
+    ) -> Result<(), CoreError> {
+        prepare_runtime(
+            control_root,
+            bundled,
+            key,
+            sources,
+            selection,
+            overlay,
+            legacy,
+            false,
+        )
+        .map(|_| ())
+    }
 
     fn put(root: &Path, path: &str, content: &str) {
         let dest = root.join(path);

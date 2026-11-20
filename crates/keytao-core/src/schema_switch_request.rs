@@ -17,6 +17,11 @@ pub struct SchemaSwitchRequest {
 }
 
 pub fn read_schema_switch_request(root: &Path) -> Result<SchemaSwitchRequest, String> {
+    let dirs = crate::RuntimeDirs::resolve(root, root)?;
+    read_at(&dirs.user_data_dir)
+}
+
+pub(crate) fn read_at(root: &Path) -> Result<SchemaSwitchRequest, String> {
     match std::fs::read(root.join(SCHEMA_SWITCH_REQUEST_FILE)) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|error| format!("read schema switch request: {error}")),
@@ -57,7 +62,7 @@ pub(crate) fn acknowledge(root: &Path, generation: u64) -> Result<(), String> {
 
 impl ProcessSwitchState {
     fn pending(&mut self, root: &Path) -> Result<Option<SchemaSwitchRequest>, String> {
-        let request = read_schema_switch_request(root)?;
+        let request = read_at(root)?;
         let applied = match self.generations.entry(root.to_path_buf()) {
             std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -84,7 +89,7 @@ pub(crate) fn merge(
     root: &Path,
     values: impl IntoIterator<Item = (String, bool)>,
 ) -> Result<(), String> {
-    let mut request = read_schema_switch_request(root)?;
+    let mut request = read_at(root)?;
     if request.generation <= schema_switch_applied_generation(root)? {
         request.schema_id = None;
     }
@@ -93,13 +98,15 @@ pub(crate) fn merge(
 }
 
 pub fn request_schema(root: &Path, id: &str) -> Result<(), String> {
-    if !crate::deployed_schemas(root)
+    let dirs = crate::RuntimeDirs::resolve(root, root)?;
+    if !crate::resolved_deployed_schemas(&dirs)
         .iter()
         .any(|schema| schema.id == id)
     {
         return Err(format!("schema {id} is not deployed"));
     }
-    let mut request = read_schema_switch_request(root)?;
+    let root = &dirs.user_data_dir;
+    let mut request = read_at(root)?;
     request.schema_id = Some(id.to_owned());
     save_request(root, &mut request)
 }

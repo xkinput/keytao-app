@@ -43,6 +43,7 @@ pub struct LocalSchemaDto {
     pub schemas: Vec<String>,
     pub installed_scheme: Option<String>,
     pub installed_scheme_version: Option<String>,
+    pub runtime_isolation: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]

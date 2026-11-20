@@ -281,12 +281,11 @@ impl InProcEngine {
             || ReloadStamp::path(&control_root),
             |data| data.reload_stamp_path.clone(),
         );
-        let dirs = keytao_core::RuntimeDirs::resolve(&control_root, Path::new(&shared));
-        let runtime = ImeRuntime::with_dirs(
-            &control_root,
-            dirs.shared_data_dir.to_string_lossy().into_owned(),
-        )
-        .with_ime_host();
+        let reload_stamp_signature = sandbox.as_ref().map_or_else(
+            || ReloadStamp::signature_at(&reload_stamp_path),
+            |data| data.reload_stamp_signature.clone(),
+        );
+        let runtime = ImeRuntime::with_dirs(&control_root, shared).with_ime_host();
         // Reload after copying prebuilt files into the reinitialized sandbox runtime.
         if sandbox.is_some() && runtime.is_initialized() {
             runtime.reload_without_deploy()?;
@@ -294,13 +293,9 @@ impl InProcEngine {
             runtime.init_without_deploy()?;
         }
         let session = runtime.create_session()?;
-        if let Some(data) = sandbox.as_ref().filter(|data| data.changed) {
+        if let Some(data) = sandbox.as_ref() {
             data.mark_loaded()?;
         }
-        let reload_stamp_signature = sandbox.as_ref().map_or_else(
-            || ReloadStamp::signature_at(&reload_stamp_path),
-            |data| data.reload_stamp_signature.clone(),
-        );
         Ok(InProcState {
             runtime: Some(runtime),
             session: Some(session),
@@ -323,17 +318,17 @@ impl InProcEngine {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("invalid public schema generation")?;
-        let dirs = keytao_core::RuntimeDirs::resolve(&deployed, Path::new(&bundled));
+        let key = crate::appcontainer::public_package_key(&deployed)?;
         let user_dir = crate::appcontainer::cache_directory_for_package(
             &temporary_root.join("keytao-no-learning"),
             generation,
             &version,
-            dirs.active_package_key.as_deref(),
+            key.as_deref(),
         );
         let stamp = format!("{}\n{version}\n{generation}", env!("CARGO_PKG_VERSION"));
         let marker = user_dir.join(".keytao-no-learning.version");
         let stale = std::fs::read_to_string(&marker).ok().as_deref() != Some(stamp.as_str())
-            || !keytao_core::schema_install_state(&user_dir).deployed
+            || !keytao_core::schema_build_is_available(&user_dir)
             || crate::appcontainer::validate_prebuilt(&user_dir, &version).is_err()
             || keytao_core::windows_rime_build_repair_required(&user_dir);
         let runtime = ImeRuntime::with_dirs(&user_dir, bundled).with_ime_host();
@@ -344,10 +339,12 @@ impl InProcEngine {
             keytao_core::complete_deployment(&user_dir)?;
             keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
         }
-        crate::appcontainer::prune_cache(
-            &temporary_root.join("keytao-no-learning"),
-            Some(&user_dir),
-        );
+        if key.is_none() {
+            crate::appcontainer::prune_cache(
+                &temporary_root.join("keytao-no-learning"),
+                Some(&user_dir),
+            );
+        }
         if let Ok(entries) = std::fs::read_dir(&temporary_root) {
             for entry in entries.flatten() {
                 if entry
@@ -387,8 +384,8 @@ impl InProcEngine {
 }
 
 fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
-    let source = keytao_core::RuntimeDirs::resolve(source, source).user_data_dir;
-    let target = keytao_core::RuntimeDirs::resolve(target, target).user_data_dir;
+    let source = keytao_core::RuntimeDirs::resolve(source, source)?.user_data_dir;
+    let target = keytao_core::RuntimeDirs::resolve(target, target)?.user_data_dir;
     copy_fallback_assets(&source, &source, &target)
 }
 

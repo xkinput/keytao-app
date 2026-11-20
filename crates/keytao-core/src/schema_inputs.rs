@@ -19,11 +19,10 @@ pub(crate) fn record_resolved_schema_input_fingerprints(
     deployed: &[String],
     package_shared: Option<&Path>,
 ) -> Result<(), String> {
-    let path = crate::RuntimeDirs::resolve(root, root)
-        .staging_dir
-        .join(RECEIPT_FILE);
+    let staging_dir = crate::RuntimeDirs::resolve(root, root)?.staging_dir;
+    let path = staging_dir.join(RECEIPT_FILE);
     if let Some(shared) = package_shared {
-        let fingerprints: BTreeMap<_, _> = schema_closure(root, deployed)
+        let fingerprints: BTreeMap<_, _> = schema_closure(&staging_dir, deployed)
             .into_iter()
             .filter_map(|id| {
                 let hash = fingerprint(root, &id, &mut BTreeSet::new(), Some(shared))?;
@@ -43,7 +42,7 @@ pub(crate) fn record_resolved_schema_input_fingerprints(
             raw.get(id) == Some(&Some(*saved))
         }
     });
-    for id in schema_closure(root, deployed) {
+    for id in schema_closure(&staging_dir, deployed) {
         if let Some(Some(value)) = raw.get(&id) {
             fingerprints.insert(id.clone(), *value);
         }
@@ -82,15 +81,14 @@ pub(crate) fn invalidate_changed_deploy_schemas(
     Ok(())
 }
 
-fn schema_closure(root: &Path, selected: &[String]) -> BTreeSet<String> {
-    let dirs = crate::RuntimeDirs::resolve(root, root);
+fn schema_closure(staging_dir: &Path, selected: &[String]) -> BTreeSet<String> {
     let mut pending: BTreeSet<_> = selected.iter().cloned().collect();
     let mut visited = BTreeSet::new();
     while let Some(id) = pending.pop_first() {
         if !valid_rime_build_id(&id) || !visited.insert(id.clone()) {
             continue;
         }
-        let compiled = fs::read(dirs.staging_dir.join(format!("{id}.schema.yaml")))
+        let compiled = fs::read(staging_dir.join(format!("{id}.schema.yaml")))
             .ok()
             .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok());
         if let Some(dependencies) = compiled
@@ -124,14 +122,13 @@ pub fn schema_input_fingerprints(
 }
 
 fn read_receipt(root: &Path) -> BTreeMap<String, [u8; 32]> {
-    fs::read(
-        crate::RuntimeDirs::resolve(root, root)
-            .staging_dir
-            .join(RECEIPT_FILE),
-    )
-    .ok()
-    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    .unwrap_or_default()
+    let Ok(dirs) = crate::RuntimeDirs::resolve(root, root) else {
+        return BTreeMap::new();
+    };
+    fs::read(dirs.staging_dir.join(RECEIPT_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 pub(crate) fn schema_input_is_current(root: &Path, id: &str, shared: &Path) -> bool {
@@ -144,7 +141,7 @@ fn raw_fingerprints(
     schema_ids: &[String],
 ) -> Result<BTreeMap<String, Option<[u8; 32]>>, String> {
     let mut ids: BTreeSet<_> = schema_ids.iter().cloned().collect();
-    match fs::read_dir(crate::RuntimeDirs::resolve(root, root).staging_dir) {
+    match fs::read_dir(crate::RuntimeDirs::resolve(root, root)?.staging_dir) {
         Ok(entries) => {
             for entry in entries {
                 let entry = entry.map_err(|error| error.to_string())?;
@@ -179,6 +176,7 @@ fn fingerprint(
         return None;
     }
     let compiled_path = crate::RuntimeDirs::resolve(root, shared.unwrap_or(root))
+        .ok()?
         .staging_dir
         .join(format!("{id}.schema.yaml"));
     let compiled_metadata = fs::symlink_metadata(&compiled_path).ok()?;

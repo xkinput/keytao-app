@@ -27,6 +27,7 @@ fn flat_target(core: &Core, root: Option<&Path>) -> PackageDeployTarget {
         package_key,
         package_name,
         materialize_error: None,
+        staged_inputs: None,
     }
 }
 
@@ -42,6 +43,20 @@ fn emit_flat_progress(
         step,
         message,
     )));
+}
+
+#[cfg(target_os = "linux")]
+fn report_linux_ime_launch(
+    core: &Core,
+    host: &impl ImeHost,
+    target: &PackageDeployTarget,
+    restart: bool,
+) {
+    let message = match launch_keytao_ime(core, host, restart) {
+        Ok(status) => status.message,
+        Err(error) => format!("Linux 输入法启动失败：{error}"),
+    };
+    emit_flat_progress(core, target, DeployStep::Done, message);
 }
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -122,7 +137,7 @@ pub async fn deploy_with_android_host<F: std::future::Future<Output = String>>(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     if RuntimeDirs::isolation_enabled(root) {
-        return deploy_isolated_android(core, root, deploy).await;
+        return deploy_isolated_android(core, root, None, deploy).await;
     }
     record_result_inner(core, root, false, prepare_lua).map_err(|error| error.to_string())?;
     let target = flat_target(core, Some(root));
@@ -142,6 +157,7 @@ pub async fn deploy_with_android_host<F: std::future::Future<Output = String>>(
 async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     core: &Core,
     root: &Path,
+    switch: Option<&str>,
     deploy: impl FnOnce(bool) -> F,
 ) -> Result<(), String> {
     use std::{
@@ -151,11 +167,15 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     };
 
     let _plan_lock = isolated_plan_lock(root)?;
-    let targets =
-        crate::runtime_materialize::prepare_deploy_targets(core, root, &root.join("rime-data"))
+    let shared = root.join("rime-data");
+    let (targets, _staged_inputs) =
+        crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, switch)
             .map_err(|error| error.to_string())?;
     if targets.is_empty() {
         return Err("没有可部署的方案包".into());
+    }
+    if switch.is_some() && switch_cached_package(root, &shared, &targets[0]).await? {
+        return Ok(());
     }
     let journal = crate::packages::safe_path(root, ANDROID_DEPLOY_PROGRESS_FILE)?;
     keytao_core::write_file_atomic(&journal, b"").map_err(|error| error.to_string())?;
@@ -201,7 +221,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     };
     drain_progress()?;
     let _ = fs::remove_file(plan);
-    if matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
+    if switch.is_none() && matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
         persist_result(core, root, true).map_err(|error| error.to_string())?;
     }
     if !error.is_empty() {
@@ -212,11 +232,15 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     {
         return Err("Android package deployment did not report all results".into());
     }
+    if let Some(key) = switch {
+        switch_prepared_package(root, &shared, key).await?;
+    }
     Ok(())
 }
 
 pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), CoreError> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, &root.join("rime-data"));
+    let dirs = keytao_core::RuntimeDirs::resolve(root, &root.join("rime-data"))
+        .map_err(CoreError::Other)?;
     let config = [
         dirs.staging_dir.join("default.yaml"),
         dirs.user_data_dir.join("default.custom.yaml"),
@@ -230,7 +254,9 @@ pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), Co
 }
 
 pub fn render_user_schema_logos(user_dir: &std::path::Path) {
-    let dirs = keytao_core::RuntimeDirs::resolve(user_dir, user_dir);
+    let Ok(dirs) = keytao_core::RuntimeDirs::resolve(user_dir, user_dir) else {
+        return;
+    };
     let mut schemas = std::collections::BTreeMap::new();
     for dir in [dirs.staging_dir, dirs.user_data_dir] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -276,6 +302,7 @@ pub fn active_schema_logo_path(user_dir: &std::path::Path) -> Option<std::path::
 
 #[cfg(target_os = "ios")]
 pub(crate) fn ios_app_shared_data_dir(core: &Core, user_root: &Path) -> Option<String> {
+    let isolated = RuntimeDirs::isolation_enabled(user_root);
     let mut candidates = vec![
         user_root.to_path_buf(),
         user_root.join("rime-data"),
@@ -303,7 +330,7 @@ pub(crate) fn ios_app_shared_data_dir(core: &Core, user_root: &Path) -> Option<S
 
     candidates
         .into_iter()
-        .find(|dir| dir.join("default.yaml").is_file())
+        .find(|dir| (!isolated || dir != user_root) && dir.join("default.yaml").is_file())
         .map(|dir| dir.to_string_lossy().into_owned())
 }
 #[derive(Serialize, Clone)]
@@ -311,6 +338,87 @@ pub struct DeployResult {
     pub success: bool,
     pub message: String,
     pub warning: Option<String>,
+}
+
+pub async fn switch_package(
+    core: &Core,
+    root: &Path,
+    key: &str,
+    #[cfg(target_os = "android")] deploy: impl FnOnce(
+        bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>,
+) -> Result<(), String> {
+    if !RuntimeDirs::isolation_enabled(root) {
+        return Err("方案包隔离未启用".into());
+    }
+    #[cfg(target_os = "android")]
+    return deploy_isolated_android(core, root, Some(key), deploy).await;
+    #[cfg(target_os = "ios")]
+    {
+        let shared = ios_app_shared_data_dir(core, root)
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        return deploy_isolated_in_process_target(core, root, shared.into(), Some(key))
+            .await
+            .map(|_| ());
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if keytao_core::default_user_data_dir().as_deref() != Some(root) {
+            let shared = crate::ime_status::app_shared_data_dir(core);
+            return deploy_isolated_in_process_target(core, root, shared.into(), Some(key))
+                .await
+                .map(|_| ());
+        }
+        deploy_isolated_desktop(core, root, Some(key)).await?;
+        Ok(())
+    }
+}
+
+async fn switch_cached_package(
+    root: &Path,
+    shared: &Path,
+    target: &PackageDeployTarget,
+) -> Result<bool, String> {
+    if let Some(error) = &target.materialize_error {
+        return Err(error.clone());
+    }
+    if target.staged_inputs.is_some() {
+        return Ok(false);
+    }
+    let key = &target.package_key;
+    let dirs = RuntimeDirs::for_package(root, shared, key)
+        .ok_or_else(|| format!("无法读取方案包：{key}"))?;
+    if !keytao_core::package_build_ready(root, &dirs) {
+        return Ok(false);
+    }
+    switch_prepared_package(root, shared, key).await?;
+    Ok(true)
+}
+
+async fn switch_prepared_package(root: &Path, shared: &Path, key: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::windows_public_schemas::publish_isolated_package(&key, false)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    }
+    keytao_core::switch_ready_package(root, shared, key)?;
+    #[cfg(target_os = "windows")]
+    crate::windows_public_schemas::activate_cached_isolated_package(key)
+        .map_err(|error| format!("方案包已切换，系统搜索框方案未更新：{error}"))?;
+    Ok(())
+}
+
+fn package_switch_result() -> DeployResult {
+    DeployResult {
+        success: true,
+        message: "已切换方案包".into(),
+        warning: None,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -490,7 +598,11 @@ pub async fn preview_candidates(
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-async fn deploy_isolated_desktop(core: &Core, root: &Path) -> Result<DeployResult, String> {
+async fn deploy_isolated_desktop(
+    core: &Core,
+    root: &Path,
+    switch: Option<&str>,
+) -> Result<DeployResult, String> {
     #[cfg(not(target_os = "windows"))]
     use keytao_core::deploy_child;
     #[cfg(target_os = "macos")]
@@ -498,7 +610,18 @@ async fn deploy_isolated_desktop(core: &Core, root: &Path) -> Result<DeployResul
     #[cfg(not(target_os = "windows"))]
     use std::time::Duration;
 
-    let _plan_lock = isolated_plan_lock(root)?;
+    let plan_lock = isolated_plan_lock(root)?;
+    let shared = crate::ime_status::app_shared_data_dir(core);
+    let shared_dir = Path::new(&shared);
+    let (targets, staged_inputs) =
+        crate::runtime_materialize::prepare_deploy_targets(core, root, shared_dir, switch)
+            .map_err(|error| error.to_string())?;
+    if targets.is_empty() {
+        return Err("没有可部署的方案包".into());
+    }
+    if switch.is_some() && switch_cached_package(root, shared_dir, &targets[0]).await? {
+        return Ok(package_switch_result());
+    }
     #[cfg(target_os = "linux")]
     let linux_lock = {
         let root = root.to_owned();
@@ -510,14 +633,10 @@ async fn deploy_isolated_desktop(core: &Core, root: &Path) -> Result<DeployResul
         .await
         .map_err(|error| error.to_string())??
     };
-    let shared = crate::ime_status::app_shared_data_dir(core);
-    let targets =
-        crate::runtime_materialize::prepare_deploy_targets(core, root, Path::new(&shared))
-            .map_err(|error| error.to_string())?;
-    if targets.is_empty() {
-        return Err("没有可部署的方案包".into());
-    }
     let expected = targets.len();
+    let publish_deploy = switch.is_none();
+    #[cfg(not(target_os = "windows"))]
+    let child_shared = shared.clone();
     let plan = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
     #[cfg(target_os = "linux")]
     let (mut command, _executable) = crate::ime_status::linux::resolve_keytao_ime_command(core);
@@ -531,16 +650,24 @@ async fn deploy_isolated_desktop(core: &Core, root: &Path) -> Result<DeployResul
     let worker = {
         let root = root.to_owned();
         tokio::task::spawn_blocking(move || {
-            crate::ime_status::windows::windows_deploy_packages_blocking(&root, &plan, |progress| {
-                let _ = sender.send(progress.clone());
-            })
+            let _staged_inputs = staged_inputs;
+            let result = crate::ime_status::windows::windows_deploy_packages_blocking(
+                &root,
+                &plan,
+                publish_deploy,
+                |progress| {
+                    let _ = sender.send(progress.clone());
+                },
+            );
+            (result, plan_lock)
         })
     };
     #[cfg(not(target_os = "windows"))]
     let worker = tokio::task::spawn_blocking(move || {
+        let _staged_inputs = staged_inputs;
         command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
-        if !shared.is_empty() {
-            command.env("KEYTAO_RIME_SHARED_DATA_DIR", shared);
+        if !child_shared.is_empty() {
+            command.env("KEYTAO_RIME_SHARED_DATA_DIR", child_shared);
         }
         #[cfg(target_os = "linux")]
         deploy_child::inherit_linux_deploy_lock(&mut command, &linux_lock);
@@ -553,9 +680,14 @@ async fn deploy_isolated_desktop(core: &Core, root: &Path) -> Result<DeployResul
         );
         #[cfg(target_os = "linux")]
         drop(linux_lock);
-        result.map(|()| None)
+        (result.map(|()| None), plan_lock)
     });
-    finish_isolated_deploy(core, root, expected, events, worker).await
+    let (result, _plan_lock) =
+        finish_isolated_deploy(core, root, expected, events, worker, publish_deploy).await?;
+    if let Some(key) = switch {
+        switch_prepared_package(root, shared_dir, key).await?;
+    }
+    Ok(result)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
@@ -564,26 +696,49 @@ pub async fn deploy_isolated_in_process(
     root: &Path,
     shared: std::path::PathBuf,
 ) -> Result<DeployResult, String> {
-    let _plan_lock = isolated_plan_lock(root)?;
-    let targets = crate::runtime_materialize::prepare_deploy_targets(core, root, &shared)
-        .map_err(|error| error.to_string())?;
+    deploy_isolated_in_process_target(core, root, shared, None).await
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+async fn deploy_isolated_in_process_target(
+    core: &Core,
+    root: &Path,
+    shared: std::path::PathBuf,
+    switch: Option<&str>,
+) -> Result<DeployResult, String> {
+    let plan_lock = isolated_plan_lock(root)?;
+    let (targets, staged_inputs) =
+        crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, switch)
+            .map_err(|error| error.to_string())?;
+    if targets.is_empty() {
+        return Err("没有可部署的方案包".into());
+    }
+    if switch.is_some() && switch_cached_package(root, &shared, &targets[0]).await? {
+        return Ok(package_switch_result());
+    }
     let expected = targets.len();
     let (sender, events) = tokio::sync::mpsc::unbounded_channel();
     let worker_root = root.to_owned();
-    let data_root = core.env().data_dir.clone();
+    let worker_shared = shared.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        keytao_core::isolated_deploy::deploy_packages(
+        let _staged_inputs = staged_inputs;
+        let result = keytao_core::isolated_deploy::deploy_packages(
             &worker_root,
-            &shared,
-            Some(&data_root),
+            &worker_shared,
+            None,
             &targets,
             |progress| {
                 let _ = sender.send(progress);
             },
-        )
-        .map(|()| None)
+        );
+        (result.map(|()| None), plan_lock)
     });
-    finish_isolated_deploy(core, root, expected, events, worker).await
+    let (result, _plan_lock) =
+        finish_isolated_deploy(core, root, expected, events, worker, switch.is_none()).await?;
+    if let Some(key) = switch {
+        switch_prepared_package(root, &shared, key).await?;
+    }
+    Ok(result)
 }
 
 #[cfg(any(
@@ -597,8 +752,9 @@ async fn finish_isolated_deploy(
     root: &Path,
     expected: usize,
     mut events: tokio::sync::mpsc::UnboundedReceiver<DeployProgress>,
-    worker: tokio::task::JoinHandle<Result<Option<String>, String>>,
-) -> Result<DeployResult, String> {
+    worker: tokio::task::JoinHandle<(Result<Option<String>, String>, std::fs::File)>,
+    publish_deploy: bool,
+) -> Result<(DeployResult, std::fs::File), String> {
     let mut active_step = None;
     let mut completed = 0;
     let mut reload_warning = None;
@@ -612,7 +768,10 @@ async fn finish_isolated_deploy(
             completed += 1;
             if progress.index == 1 {
                 active_step = Some(progress.step);
-                if !cfg!(target_os = "windows") && progress.step == DeployStep::Done {
+                if publish_deploy
+                    && !cfg!(target_os = "windows")
+                    && progress.step == DeployStep::Done
+                {
                     reload_warning = keytao_core::ReloadStamp::write(root)
                         .err()
                         .map(|error| format!("系统输入法重载通知失败：{error}"));
@@ -621,8 +780,8 @@ async fn finish_isolated_deploy(
         }
         core.emit(CoreEvent::DeployProgress(progress));
     }
-    let result = worker.await.map_err(|error| error.to_string())?;
-    if matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
+    let (result, plan_lock) = worker.await.map_err(|error| error.to_string())?;
+    if publish_deploy && matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
         persist_result(core, root, true).map_err(|error| error.to_string())?;
         if active_step == Some(DeployStep::Done) {
             render_user_schema_logos(root);
@@ -632,11 +791,14 @@ async fn finish_isolated_deploy(
     if completed != expected || !matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
         return Err("方案包部署未返回完整结果".into());
     }
-    Ok(DeployResult {
-        success: true,
-        message: "部署成功".into(),
-        warning: reload_warning.or(worker_warning),
-    })
+    Ok((
+        DeployResult {
+            success: true,
+            message: "部署成功".into(),
+            warning: reload_warning.or(worker_warning),
+        },
+        plan_lock,
+    ))
 }
 
 fn isolated_plan_lock(root: &Path) -> Result<std::fs::File, String> {
@@ -676,7 +838,15 @@ pub(crate) async fn rime_deploy_default_inner(
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     if RuntimeDirs::isolation_enabled(&dest) {
-        return deploy_isolated_desktop(core, &dest).await;
+        let result = deploy_isolated_desktop(core, &dest, None).await?;
+        #[cfg(target_os = "linux")]
+        report_linux_ime_launch(
+            core,
+            &host,
+            &flat_target(core, None),
+            result.warning.is_some(),
+        );
+        return Ok(result);
     }
     crate::remove_filter::ensure_remove_filter(&dest)?;
     crate::ime_settings::prepare_candidate_page_size(&dest)?;
@@ -804,19 +974,7 @@ pub(crate) async fn rime_deploy_default_inner(
                 emit_flat_progress(core, &target, DeployStep::Done, warning.clone());
             }
             #[cfg(target_os = "linux")]
-            match launch_keytao_ime(core, &host, reload_stamp_result.is_err()) {
-                Ok(status) => {
-                    emit_flat_progress(core, &target, DeployStep::Done, status.message);
-                }
-                Err(error) => {
-                    emit_flat_progress(
-                        core,
-                        &target,
-                        DeployStep::Done,
-                        format!("Linux 输入法启动失败：{error}"),
-                    );
-                }
-            }
+            report_linux_ime_launch(core, &host, &target, reload_stamp_result.is_err());
             Ok(DeployResult {
                 success: true,
                 message: "部署成功".into(),
@@ -863,6 +1021,88 @@ pub async fn rime_deploy_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn switching_to_cached_package_does_not_start_deployment() {
+        use std::{
+            fs,
+            io::{Cursor, Write},
+            sync::{Arc, Mutex},
+        };
+
+        #[derive(Default)]
+        struct Steps(Mutex<Vec<DeployStep>>);
+        impl crate::EventSink for Steps {
+            fn emit(&self, event: CoreEvent) {
+                if let CoreEvent::DeployProgress(progress) = event {
+                    self.0.lock().unwrap().push(progress.step);
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let shared = root.join("rime-data");
+        fs::create_dir(&shared).unwrap();
+        fs::write(root.join(RuntimeDirs::SETTINGS_FILE), br#"{"runtime_isolation":true}"#).unwrap();
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (file, content) in [
+            ("default.yaml", "config_version: '1'\nschema_list: [{schema: keytao}]\n"),
+            ("keytao.schema.yaml", "schema: {schema_id: keytao, name: Fixture, version: '1'}\nengine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\nspeller: {alphabet: abcde}\ntranslator: {dictionary: keytao, enable_user_dict: false}\n"),
+            ("keytao.dict.yaml", "---\nname: keytao\nversion: '1'\nsort: by_weight\nuse_preset_vocabulary: false\n...\n甲\ta\t100\n"),
+        ] {
+            archive.start_file(file, zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        let archive = archive.finish().unwrap().into_inner();
+        let steps = Arc::new(Steps::default());
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                resource_dir: root.to_path_buf(),
+                platform: crate::Platform::MacOs,
+                app_version: "fixture".into(),
+            },
+            steps.clone(),
+        ).unwrap();
+        let key = "local-switch";
+        let meta = crate::packages::PackageMeta {
+            scheme_key: key.into(),
+            version: None,
+            installed_at_unix: 1,
+            source: "local".into(),
+            display_name: None,
+            selection_base_version: None,
+            manifest: Default::default(),
+            zip_sha256: crate::packages::sha256_reader(archive.as_slice()).unwrap(),
+        };
+        crate::package_store::PackageStore::new(&core)
+            .write_archive(Cursor::new(archive), &meta, None)
+            .unwrap();
+        core.lock_state().installed_packages.insert(
+            key.into(),
+            crate::state::InstalledPackage { version: None },
+        );
+        deploy_isolated_in_process_target(&core, root, shared.clone(), Some(key))
+            .await
+            .unwrap();
+        let resolved = RuntimeDirs::for_package(root, &shared, key).unwrap();
+        assert_eq!(resolved.shared_data_dir, root.join("scheme-packages/local/local-switch/files"));
+        assert!(steps.0.lock().unwrap().contains(&DeployStep::Compile));
+        steps.0.lock().unwrap().clear();
+        fs::write(
+            keytao_core::package_store::active_manifest(root),
+            br#"{"active_package":"builtin/other"}"#,
+        ).unwrap();
+
+        deploy_isolated_in_process_target(&core, root, shared, Some(key))
+            .await
+            .unwrap();
+        assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(key));
+        assert!(steps.0.lock().unwrap().is_empty());
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

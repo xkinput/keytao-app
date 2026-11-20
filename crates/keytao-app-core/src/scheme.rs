@@ -282,9 +282,23 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
         });
     };
 
-    let state = keytao_core::schema_install_state(&dir);
+    let isolated = keytao_core::RuntimeDirs::isolation_enabled(&dir);
+    let state = if isolated {
+        #[cfg(target_os = "android")]
+        let shared = dir.join("rime-data");
+        #[cfg(target_os = "ios")]
+        let shared = PathBuf::from(
+            crate::deploy::ios_app_shared_data_dir(core, &dir)
+                .unwrap_or_else(keytao_core::default_shared_data_dir),
+        );
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let shared = PathBuf::from(crate::ime_status::app_shared_data_dir(core));
+        keytao_core::schema_install_state_with_shared(&dir, &shared)
+    } else {
+        keytao_core::schema_install_state(&dir)
+    };
     let installed = state.installed
-        || (keytao_core::RuntimeDirs::isolation_enabled(&dir)
+        || (isolated
             && (!core.lock_state().installed_packages.is_empty()
                 || crate::addon_store::IDS.iter().any(|id| {
                     crate::package_store::PackageStore::new(core)

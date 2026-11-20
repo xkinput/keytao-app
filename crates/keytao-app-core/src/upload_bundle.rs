@@ -737,7 +737,7 @@ pub fn build(
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
     }
-    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
+    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?;
     let build = staging_relative(root, &dirs);
     let lua = LuaSnapshot::for_schemas(root, schema_ids)?;
     let mut collector = Collector {
@@ -880,7 +880,7 @@ pub(crate) fn verify_deploy_artifacts(
     shared: Option<&Path>,
     schema_ids: &[String],
 ) -> Result<(), CoreError> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
+    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?;
     let build = staging_relative(root, &dirs);
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
@@ -1008,7 +1008,7 @@ fn checked(
     mut smoke: Option<&mut dyn FnMut(&Path, &str, u32) -> Result<(), String>>,
     require_freshness: bool,
 ) -> Result<UploadBundle, CoreError> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
+    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?;
     let staging = staging_relative(root, &dirs);
     let bundle = build(root, shared, schema_ids)?;
     let smoke_root = if smoke.is_some() {
@@ -1082,7 +1082,7 @@ impl UploadBundle {
     fn prepare_smoke_source<'a>(&'a self, root: &'a Path, ids: &[String]) -> Result<&'a Path, CoreError> {
         let Some(directory) = self.runtime_source.as_ref() else { return Ok(root) };
         let output = directory.path();
-        let source_dirs = keytao_core::RuntimeDirs::resolve(root, root);
+        let source_dirs = keytao_core::RuntimeDirs::resolve(root, root).map_err(failure)?;
         let build = staging_relative(root, &source_dirs);
         let output_dirs = keytao_core::RuntimeDirs::flat(output, output);
         let mut archive = zip::ZipArchive::new(Cursor::new(&self.bytes))

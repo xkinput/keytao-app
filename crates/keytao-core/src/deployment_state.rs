@@ -194,11 +194,12 @@ fn track_input_session(root: &Path, generation: Option<u64>) -> Arc<()> {
 
 pub(crate) fn engine_loaded(root: &Path) -> Arc<()> {
     let session = track_input_session(root, Some(engine_generation()));
-    let staging_dir = staging_dir(root);
-    let marker = sentinel(&staging_dir)
-        .is_none()
-        .then(|| marker(&staging_dir))
-        .flatten();
+    let marker = staging_dir(root).ok().and_then(|staging_dir| {
+        sentinel(&staging_dir)
+            .is_none()
+            .then(|| marker(&staging_dir))
+            .flatten()
+    });
     *crate::lock_ignore_poison(&LOADED_BUILD) =
         Some((root.to_path_buf(), marker, engine_generation()));
     session
@@ -207,7 +208,13 @@ pub(crate) fn engine_loaded(root: &Path) -> Arc<()> {
 /// Both native deployers (nanoseconds) and older Android deployers (milliseconds)
 /// publish a timestamp and the process that owns the build directory.
 pub fn deployment_in_progress(root: &Path) -> bool {
-    deployment_in_progress_at(root, &staging_dir(root))
+    match staging_dir(root) {
+        Ok(staging_dir) => deployment_in_progress_at(root, &staging_dir),
+        Err(_) => {
+            cache_deployment(root, false);
+            false
+        }
+    }
 }
 
 fn deployment_in_progress_at(root: &Path, staging_dir: &Path) -> bool {
@@ -240,8 +247,8 @@ fn sentinel_in_progress(content: Option<&str>) -> bool {
         && process_alive(pid)
 }
 
-fn staging_dir(root: &Path) -> PathBuf {
-    RuntimeDirs::resolve(root, root).staging_dir
+fn staging_dir(root: &Path) -> Result<PathBuf, String> {
+    RuntimeDirs::resolve(root, root).map(|dirs| dirs.staging_dir)
 }
 
 fn sentinel(staging_dir: &Path) -> Option<String> {
@@ -251,7 +258,7 @@ fn sentinel(staging_dir: &Path) -> Option<String> {
 /// Keep the owner sentinel intact: a failed/timed-out deploy worker may still
 /// be writing artifacts, so failure must not permit runtime teardown.
 pub fn mark_deployment_failed(root: &Path) -> Result<(), String> {
-    let staging_dir = staging_dir(root);
+    let staging_dir = staging_dir(root)?;
     let Some(token) = sentinel(&staging_dir) else {
         return Ok(());
     };
@@ -264,7 +271,9 @@ pub(crate) fn failed_deployment_owned_by_process(root: &Path) -> bool {
     if cfg!(target_os = "android") {
         return false;
     }
-    let staging_dir = staging_dir(root);
+    let Ok(staging_dir) = staging_dir(root) else {
+        return false;
+    };
     let Some(token) = sentinel(&staging_dir) else {
         return false;
     };
@@ -429,8 +438,9 @@ impl DeploymentState {
         rebuilding: bool,
         usable: bool,
     ) -> Option<&'static str> {
-        self.hint = self
-            .refresh_hint_at(root, &staging_dir(root), now, rebuilding)
+        self.hint = staging_dir(root)
+            .ok()
+            .and_then(|staging_dir| self.refresh_hint_at(root, &staging_dir, now, rebuilding))
             .or_else(|| {
                 (self.hint_requested && !usable && current_deploy_progress(root).is_some())
                     .then_some("正在部署中")
@@ -528,7 +538,9 @@ impl DeploymentState {
     }
 
     pub fn loaded(&mut self, root: &Path) {
-        self.loaded_at(root, &staging_dir(root));
+        if let Ok(staging_dir) = staging_dir(root) {
+            self.loaded_at(root, &staging_dir);
+        }
     }
 
     fn loaded_at(&mut self, root: &Path, staging_dir: &Path) {

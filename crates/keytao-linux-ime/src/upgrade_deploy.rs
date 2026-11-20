@@ -35,7 +35,7 @@ fn upgrade_context() -> Result<(PathBuf, String), String> {
 }
 
 fn decision_for(user_dir: &Path, version: &str) -> Result<UpgradeDecision, String> {
-    let dirs = keytao_core::RuntimeDirs::resolve(user_dir, user_dir);
+    let dirs = keytao_core::RuntimeDirs::resolve(user_dir, user_dir)?;
     let recorded_version = match std::fs::read_to_string(user_dir.join(VERSION_STAMP)) {
         Ok(version) => Some(version),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

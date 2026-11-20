@@ -18,6 +18,8 @@ pub const DEPLOY_SUBCOMMAND: &str = "--deploy";
 pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
 pub const FLAT_TARGET_ENV: &str = "KEYTAO_DEPLOY_FLAT_TARGET";
 const PACKAGE_DEPLOY_ARG: &str = "--packages";
+const PROGRESS_VERSION_ENV: &str = "KEYTAO_DEPLOY_PROGRESS_VERSION";
+const STRUCTURED_PROGRESS_VERSION: &str = "2";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
 #[cfg(any(target_os = "windows", test))]
@@ -25,7 +27,7 @@ const WINDOWS_BUILD_SIGNATURE_FILE: &str = ".keytao-windows-build-signature.json
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec<u8>, String> {
-    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir);
+    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir)?;
     let user_dir = dirs.user_data_dir.as_path();
     let mut schemas = crate::configured_schema_list_from_dir(user_dir);
     schemas.sort();
@@ -40,7 +42,7 @@ fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String>> {
-    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir);
+    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir).ok()?;
     // None retains the old full repair path; Some lists only proven obsolete outputs.
     if std::fs::read_to_string(user_dir.join(crate::WINDOWS_RIME_BUILD_REPAIR_MARKER)).ok()?
         != crate::WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT
@@ -114,6 +116,7 @@ fn windows_schema_build_outputs(
 #[cfg(any(target_os = "windows", test))]
 fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), String> {
     // Decide before closing the runtime gate; failures must leave the next deploy in repair mode.
+    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir)?;
     let cleanup = windows_build_cleanup(user_dir, signature);
     crate::clear_windows_rime_build_repair_marker(user_dir)?;
     crate::ReloadStamp::write(user_dir)?;
@@ -121,7 +124,6 @@ fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), Strin
         // Obsolete outputs are pruned only after the deployment succeeds.
         Some(_) => {}
         None => {
-            let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir);
             crate::remove_rime_build_artifact(
                 &dirs.staging_dir.join(".keytao-desktop-inputs.json"),
             )?;
@@ -236,6 +238,7 @@ pub fn run_deploy_child_main() -> i32 {
                         package_name: package_key.clone(),
                         package_key,
                         materialize_error: None,
+                        staged_inputs: None,
                     }]
                 };
                 crate::isolated_deploy::deploy_packages(
@@ -290,7 +293,7 @@ pub fn deploy_directory(user_dir: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         crate::write_file_atomic(
-            &crate::RuntimeDirs::resolve(user_dir, user_dir)
+            &crate::RuntimeDirs::resolve(user_dir, user_dir)?
                 .staging_dir
                 .join(WINDOWS_BUILD_SIGNATURE_FILE),
             &signature,
@@ -428,10 +431,20 @@ fn child_main_with_progress(
 ) -> i32 {
     let valid_args = args.eq([OsString::from(subcommand)]);
     let result = if valid_args {
+        // Unversioned parents only understand string progress lines.
+        let structured_progress =
+            std::env::var(PROGRESS_VERSION_ENV).as_deref() == Ok(STRUCTURED_PROGRESS_VERSION);
         let mut protocol_result = Ok(());
         let result = action(&mut |progress| {
             if protocol_result.is_ok() {
-                protocol_result = write_message(output, &Message::Progress { progress });
+                let message = if structured_progress {
+                    Message::Progress { progress }
+                } else {
+                    Message::LegacyProgress {
+                        progress: progress.message(),
+                    }
+                };
+                protocol_result = write_message(output, &message);
             }
         });
         protocol_result.and(result)
@@ -621,6 +634,7 @@ pub fn run_deploy_child_command_with_subcommand(
         command.arg(PACKAGE_DEPLOY_ARG);
     }
     let mut child = command
+        .env(PROGRESS_VERSION_ENV, STRUCTURED_PROGRESS_VERSION)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1339,7 +1353,7 @@ mod tests {
         const SCHEMA: &str = "keytao_isolated_fixture";
         if let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) {
             let shared = root.join("bundled");
-            let dirs = crate::RuntimeDirs::resolve(&root, &shared);
+            let dirs = crate::RuntimeDirs::resolve(&root, &shared).unwrap();
             assert_eq!(dirs.active_package_key.as_deref(), Some("local-fixture"));
             assert_eq!(dirs.user_data_dir, root.join("runtime/local-fixture"));
             assert_eq!(dirs.staging_dir, dirs.user_data_dir.join("build"));
@@ -1353,11 +1367,13 @@ mod tests {
                     package_key: "local-other".into(),
                     package_name: "Other".into(),
                     materialize_error: None,
+                    staged_inputs: None,
                 },
                 PackageDeployTarget {
                     package_key: "local-fixture".into(),
                     package_name: "Active".into(),
                     materialize_error: None,
+                    staged_inputs: None,
                 },
             ];
             let code = child_main_with_progress(
@@ -1503,6 +1519,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(FIXTURE, &root)
+                .env(PROGRESS_VERSION_ENV, STRUCTURED_PROGRESS_VERSION)
                 .env("KEYTAO_RIME_SHARED_DATA_DIR", &bundled)
                 .env_remove("KEYTAO_RUNTIME_ISOLATION")
                 .output()
@@ -1588,7 +1605,7 @@ mod tests {
             RuntimeDirs::active_package_key(&root).as_deref(),
             Some("local-fixture")
         );
-        assert!(crate::schema_install_state(&root).deployed);
+        assert!(!crate::schema_install_state(&root).deployed);
         for (original, build) in originals.iter().zip([&build, &other_build]) {
             let after = tree(build);
             #[cfg(target_os = "macos")]
@@ -1647,6 +1664,48 @@ mod tests {
             assert_eq!(progress[0].message(), "Deploying librime...");
             assert_eq!(code, if result.is_ok() { 0 } else { 1 });
             assert_eq!(protocol.final_result, Some(result));
+        }
+    }
+
+    #[test]
+    fn child_progress_defaults_to_text_and_supports_version_two() {
+        const CHILD: &str = "KEYTAO_DEPLOY_PROGRESS_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            let code = child_main(
+                [OsString::from(DEPLOY_SUBCOMMAND)].into_iter(),
+                &mut io::stdout().lock(),
+                DEPLOY_SUBCOMMAND,
+                || Ok(()),
+            );
+            exit_deploy_child(code);
+        }
+
+        for version in [None, Some("99"), Some("2")] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "deploy_child::tests::child_progress_defaults_to_text_and_supports_version_two",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove(FLAT_TARGET_ENV);
+            match version {
+                Some(version) => command.env(PROGRESS_VERSION_ENV, version),
+                None => command.env_remove(PROGRESS_VERSION_ENV),
+            };
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stdout = std::str::from_utf8(&output.stdout).unwrap();
+            let line = stdout.lines().find(|line| line.starts_with('{')).unwrap();
+            if version == Some("2") {
+                assert!(matches!(
+                    serde_json::from_str::<Message>(line).unwrap(),
+                    Message::Progress { progress } if progress.step == DeployStep::Compile
+                ));
+            } else {
+                assert_eq!(line, r#"{"progress":"Deploying librime..."}"#);
+            }
         }
     }
 
@@ -1757,7 +1816,10 @@ mod tests {
             r#"
 case "$#:$1" in 1:--deploy) ;; *) exit 2 ;; esac
 if read ignored; then exit 3; fi
-printf '%s\n' '{"progress":"Compiling..."}' '{"ok":true}'
+case "$KEYTAO_DEPLOY_PROGRESS_VERSION" in 2) ;; *) exit 4 ;; esac
+printf '%s\n' '{"progress":"Compiling..."}' \
+    '{"progress":{"package_key":"local-fixture","package_name":"Fixture","index":1,"total":2,"step":"validate"}}' \
+    '{"ok":true}'
 "#,
         );
         let mut progress = Vec::new();
@@ -1766,15 +1828,14 @@ printf '%s\n' '{"progress":"Compiling..."}' '{"ok":true}'
         });
         std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
         assert_eq!(result, Ok(()));
+        assert_eq!(progress.len(), 2);
         assert_eq!(
-            progress,
-            [DeployProgress::flat(
-                "librime",
-                "librime",
-                DeployStep::Compile,
-                "Compiling..."
-            )]
+            progress[0],
+            DeployProgress::flat("librime", "librime", DeployStep::Compile, "Compiling...")
         );
+        assert_eq!(progress[1].package_key, "local-fixture");
+        assert_eq!(progress[1].step, DeployStep::Validate);
+        assert_eq!((progress[1].index, progress[1].total), (1, 2));
     }
 
     #[cfg(unix)]

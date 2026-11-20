@@ -289,7 +289,7 @@ pub(crate) fn record(
             files: snapshot.clone(),
         })
     };
-    let path = crate::RuntimeDirs::resolve(root, root)
+    let path = crate::RuntimeDirs::resolve(root, root)?
         .staging_dir
         .join(RECEIPT_FILE);
     let Some(receipt) = collect() else {
@@ -333,7 +333,7 @@ fn discard_unverified_legacy_inputs(
         // complete_deployment may have paired post-compile edits with older build outputs.
         trusted.retain(|id, _| !untrusted.contains(id));
         let bytes = serde_json::to_vec(&trusted).map_err(|error| error.to_string())?;
-        let path = crate::RuntimeDirs::resolve(root, root)
+        let path = crate::RuntimeDirs::resolve(root, root)?
             .staging_dir
             .join(LEGACY_RECEIPT_FILE);
         write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
@@ -654,7 +654,7 @@ fn safe_relative(name: &str) -> bool {
 }
 
 fn read_staging_file(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
-    let staging = crate::RuntimeDirs::resolve(root, root).staging_dir;
+    let staging = crate::RuntimeDirs::resolve(root, root)?.staging_dir;
     match fs::symlink_metadata(&staging) {
         Ok(metadata) if metadata.is_dir() => read_regular(&staging, name),
         Ok(_) => Err("non-regular input".into()),
@@ -791,7 +791,7 @@ fn resolve(
 }
 
 fn outputs_present(root: &Path, outputs: &BTreeSet<String>) -> Option<bool> {
-    let dirs = crate::RuntimeDirs::resolve(root, root);
+    let dirs = crate::RuntimeDirs::resolve(root, root).ok()?;
     let mut present = true;
     for output in outputs {
         let path = dirs.staging_dir.join(output);

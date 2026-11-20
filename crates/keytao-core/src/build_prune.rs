@@ -31,8 +31,8 @@ pub fn prune_rime_build_artifacts(
     user_dir: &Path,
     shared_dir: Option<&Path>,
 ) -> Result<usize, String> {
+    let dirs = RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir))?;
     let planned = (|| {
-        let dirs = RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir));
         let shared_build = shared_build_dir(&dirs, shared_dir.is_some());
         let bytes = fs::read(checked_compiled_file(&dirs.staging_dir, "default.yaml")?).ok()?;
         let default: Value = serde_yaml::from_slice(&bytes).ok()?;
@@ -121,7 +121,7 @@ pub(crate) fn reachable_rime_build_outputs(
     require_current_inputs: bool,
     resolve_references: bool,
 ) -> Option<BTreeSet<String>> {
-    let dirs = RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir));
+    let dirs = RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir)).ok()?;
     let fingerprints = require_current_inputs
         .then(|| crate::schema_input_fingerprints(user_dir, schemas).ok())
         .flatten();
