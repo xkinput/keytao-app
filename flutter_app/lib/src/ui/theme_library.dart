@@ -249,51 +249,69 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   }
 
   @override
-  Widget build(BuildContext context) => Section(
-    title: '主题库',
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    spacing: 4,
     children: [
-      ActionRow(
+      Row(
         children: [
-          ActionButton('粘贴导入', onPress: _enabled ? _paste : null),
-          ActionButton(
+          const Expanded(child: EyebrowLabel('主题库')),
+          _action(
+            '粘贴导入',
+            FLucideIcons.clipboardPaste,
+            _enabled ? _paste : null,
+          ),
+          _action(
             '复制分享串',
-            onPress: _enabled && _current != null
+            FLucideIcons.copy,
+            _enabled && _current != null
                 ? () => _export(_current!.id, copy: true)
                 : null,
           ),
-          ActionButton(
+          _action(
             '导出文件',
-            onPress: _enabled && _current != null
-                ? () => _export(_current!.id)
-                : null,
+            FLucideIcons.download,
+            _enabled && _current != null ? () => _export(_current!.id) : null,
           ),
-          ActionButton('导入文件', onPress: _enabled ? _openFile : null),
+          _action('导入文件', FLucideIcons.upload, _enabled ? _openFile : null),
         ],
       ),
       if (_loading || _working) const FProgress(),
       if (_themes.isNotEmpty)
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = ((constraints.maxWidth + 8) / 168).floor().clamp(
-              1,
-              _themes.length,
-            );
-            final width = (constraints.maxWidth - (columns - 1) * 8) / columns;
-            return Wrap(
+        SizedBox(
+          height: 64,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
               spacing: 8,
-              runSpacing: 8,
               children: [
                 for (final theme in _themes)
-                  SizedBox(width: width, child: _card(context, theme)),
+                  SizedBox(width: 144, child: _card(context, theme)),
               ],
-            );
-          },
+            ),
+          ),
         ),
       if (_message case final message?)
         Semantics(liveRegion: true, child: Text(message)),
       if (_error case final error?) ErrorMessage(error),
     ],
   );
+
+  Widget _action(String label, IconData icon, VoidCallback? onPress) =>
+      FTooltip(
+        tipBuilder: (_, _) => Text(label),
+        child: FButton.icon(
+          variant: FButtonVariant.ghost,
+          onPress: onPress,
+          style: const FButtonStyleDelta.delta(
+            contentStyle: FButtonContentStyleDelta.delta(
+              constraints: BoxConstraints.tightFor(width: 44, height: 44),
+              padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
+            ),
+          ),
+          child: Icon(icon, size: 16, semanticLabel: label),
+        ),
+      );
 
   Widget _card(BuildContext context, ThemeSummaryDto theme) {
     final palette = AppPalette.of(context);
@@ -316,7 +334,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.only(left: 6, right: 6, top: 2),
                 child: Row(
                   spacing: 6,
                   children: [
@@ -326,7 +344,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.only(left: 10, right: 2),
+                padding: const EdgeInsets.only(left: 6),
                 child: Row(
                   spacing: 4,
                   children: [
@@ -378,14 +396,10 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                           ],
                         ),
                       ],
-                      builder: (_, popover, _) => FButton.icon(
-                        variant: FButtonVariant.ghost,
-                        onPress: _enabled ? popover.toggle : null,
-                        child: Icon(
-                          FLucideIcons.ellipsis,
-                          size: 18,
-                          semanticLabel: '${theme.name} 主题操作',
-                        ),
+                      builder: (_, popover, _) => _action(
+                        '${theme.name} 主题操作',
+                        FLucideIcons.ellipsis,
+                        _enabled ? popover.toggle : null,
                       ),
                     ),
                   ],
@@ -401,7 +415,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   Widget _colors(ThemePreviewColorsDto colors, String label) => Semantics(
     label: '$label预览',
     child: Container(
-      height: 44,
+      height: 16,
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: _color(colors.background),
@@ -412,14 +426,17 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
         spacing: 4,
         children: [
           Container(
-            width: 10,
-            height: 10,
+            width: 6,
+            height: 6,
             decoration: BoxDecoration(
               color: _color(colors.accent),
               shape: BoxShape.circle,
             ),
           ),
-          Text('字', style: TextStyle(color: _color(colors.foreground))),
+          Text(
+            '字',
+            style: TextStyle(color: _color(colors.foreground), fontSize: 10),
+          ),
         ],
       ),
     ),

@@ -225,7 +225,7 @@ void main() {
     for (final key in 'qwertyuiopasdfghjkl'.split('')) {
       expect(find.byKey(ValueKey('keyboard-preview-key-$key')), findsOneWidget);
     }
-    // The preview keeps two letter rows and the edited key types visible.
+    // The home preview keeps the alpha.1 toolbar and two letter rows.
     for (final key in 'zxcvbnm'.split('')) {
       expect(find.text(key), findsNothing);
     }
@@ -233,10 +233,7 @@ void main() {
       expect(find.byKey(ValueKey('keyboard-preview-key-$label')), findsNothing);
     }
     for (final label in ['123', '符', '空格', '↵']) {
-      expect(
-        find.byKey(ValueKey('keyboard-preview-key-$label')),
-        findsOneWidget,
-      );
+      expect(find.byKey(ValueKey('keyboard-preview-key-$label')), findsNothing);
     }
     final keyboard = find.byKey(const ValueKey('mobile-keyboard-preview'));
     expect(
@@ -249,7 +246,7 @@ void main() {
     );
     expect(
       find.byKey(const ValueKey('mobile-candidate-bar-preview')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(find.bySemanticsLabel('KeyTao 键盘预览，键道6，静态展示'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -476,11 +473,7 @@ void main() {
       await tester.pumpWidget(
         KeyTaoTheme(
           platform: controller.info.platform,
-          home: FScaffold(
-            child: SingleChildScrollView(
-              child: ThemeEditorSection(controller: controller),
-            ),
-          ),
+          home: FScaffold(child: ThemeEditorSection(controller: controller)),
         ),
       );
       await tester.pumpAndSettle();
@@ -488,23 +481,84 @@ void main() {
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
       await tester.pumpAndSettle();
       expect(_panelColor(tester), light);
-      ChoiceSetting<String> editTarget() =>
-          tester.widget<ChoiceSetting<String>>(
-            find.byWidgetPredicate(
-              (widget) =>
-                  widget is ChoiceSetting<String> && widget.label == '编辑目标',
-            ),
-          );
-      editTarget().onChanged!('dark');
+      final editTarget = find.descendant(
+        of: find.bySemanticsLabel('编辑目标'),
+        matching: find.byWidgetPredicate((widget) => widget is FSelect<String>),
+      );
+      await tester.tap(editTarget);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('深色').last);
       await tester.pumpAndSettle();
       final dark = _panelColor(tester);
       expect(dark, isNot(light));
       controller.updateSettings(colorScheme: UiColorSchemeDto.light);
       await tester.pumpAndSettle();
       expect(_panelColor(tester), dark);
-      editTarget().onChanged!('light');
+      await tester.tap(editTarget);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('浅色').last);
       await tester.pumpAndSettle();
       expect(_panelColor(tester), light);
+
+      final radius = find.descendant(
+        of: find.byKey(
+          const ValueKey(('theme-control', 'common.cornerRadius')),
+        ),
+        matching: find.byType(FSlider),
+      );
+      await tester.ensureVisible(radius);
+      final bounds = tester.getRect(radius);
+      final drag = await tester.startGesture(
+        Offset(bounds.left + bounds.width * 16 / 28, bounds.center.dy),
+      );
+      await drag.moveBy(const Offset(20, 0));
+      await drag.moveTo(Offset(bounds.right - 1, bounds.center.dy));
+      await tester.pump();
+      Map<String, dynamic> preview() => tester
+          .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
+          .theme;
+      expect(preview()['panel']['cornerRadius'], 28);
+      expect(controller.uiSettings!.cornerRadius, isNull);
+      controller.saveGate = Completer<bool>();
+      await drag.up();
+      await tester.pump();
+      expect(preview()['panel']['cornerRadius'], 28);
+      expect(controller.uiSettings!.cornerRadius, isNull);
+      controller.saveGate!.complete(true);
+      await tester.pumpAndSettle();
+      controller.saveGate = null;
+      expect(controller.uiSettings!.cornerRadius, 28);
+      expect(tester.takeException(), isNull, reason: 'Slider commit');
+
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) => widget is Semantics && widget.properties.label == '选择背景色',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(AppDialog),
+          matching: find.byType(EditableText),
+        ),
+        '#102030',
+      );
+      await tester.pump();
+      expect(_panelColor(tester), isNot(light));
+      expect(controller.uiSettings!.backgroundColor, isEmpty);
+      await tester.tap(find.text(AppStrings.cancel));
+      await tester.pumpAndSettle();
+      expect(_panelColor(tester), light);
+      expect(tester.takeException(), isNull, reason: 'Color cancel');
+
+      controller.saveGate = Completer<bool>();
+      await tester.tap(find.bySemanticsLabel('圆角：恢复默认'));
+      await tester.pump();
+      expect(preview()['panel']['cornerRadius'], 16);
+      expect(controller.uiSettings!.cornerRadius, 28);
+      controller.saveGate!.complete(true);
+      await tester.pumpAndSettle();
+      expect(controller.uiSettings!.cornerRadius, isNull);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
@@ -585,7 +639,7 @@ void main() {
         expect(
           decoration(find.byKey(const ValueKey('keyboard-preview-key-q')))
               .color,
-          const Color(0xD2FFFFFF),
+          const Color(0xAA2A303A),
         );
       }
       await tester.tap(find.text(AppStrings.cancel));

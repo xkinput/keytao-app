@@ -3,7 +3,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/candidate_panel_preview.dart';
-import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/ui/mobile_keyboard_preview.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/theme_editor.dart';
@@ -37,17 +36,24 @@ void main() {
       await tester.pumpWidget(
         KeyTaoTheme(
           platform: BridgePlatform.macOs,
-          home: FScaffold(
-            child: SingleChildScrollView(
-              child: ThemeEditorSection(controller: controller),
-            ),
-          ),
+          home: FScaffold(child: ThemeEditorSection(controller: controller)),
         ),
       );
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
-      expect(tester.widget<AccentPicker>(find.byType(AccentPicker)).value, '');
+      expect(
+        tester
+            .widget<Semantics>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is Semantics && widget.properties.label == '选择强调色',
+              ),
+            )
+            .properties
+            .value,
+        '',
+      );
       expect(find.byType(CandidatePanelPreview), findsOneWidget);
       expect(find.byType(MobileKeyboardPreview), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());

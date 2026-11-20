@@ -16,6 +16,7 @@ class CandidatePanelPreview extends StatelessWidget {
     this.keyboard = false,
     this.keyboardSchemeName = 'KeyTao',
     this.keyboardLogo,
+    this.editorPreview = false,
   }) : assert(candidateCount >= 1 && candidateCount <= 255);
 
   final Map<String, dynamic> theme;
@@ -25,6 +26,7 @@ class CandidatePanelPreview extends StatelessWidget {
   final bool keyboard;
   final String keyboardSchemeName;
   final Widget? keyboardLogo;
+  final bool editorPreview;
   // The IME shows the preedit in the panel only when it is not embedded.
   final bool showPreedit;
 
@@ -74,6 +76,7 @@ class CandidatePanelPreview extends StatelessWidget {
         schemeName: keyboardSchemeName,
         logo: keyboardLogo,
         candidates: this.candidates,
+        editorPreview: editorPreview,
       );
     }
     final font = theme['font'] as Map<String, dynamic>;
@@ -84,7 +87,8 @@ class CandidatePanelPreview extends StatelessWidget {
         ? panel['orientation'] == 'vertical'
         : orientation == PanelOrientationDto.vertical;
     final fontSize = _metric(font, 'size');
-    final families = (font['family'] as String?)
+    final family = font['family'] as String?;
+    final families = family
         ?.split(',')
         .map((family) => family.trim())
         .where((family) => family.isNotEmpty)
@@ -102,8 +106,12 @@ class CandidatePanelPreview extends StatelessWidget {
     };
     TextStyle style(double size, Color color, FontWeight weight) => TextStyle(
       inherit: false,
-      fontFamily: families?.firstOrNull,
-      fontFamilyFallback: families,
+      fontFamily: editorPreview
+          ? families?.firstOrNull
+          : family == null || family.isEmpty
+          ? null
+          : family,
+      fontFamilyFallback: editorPreview ? families : null,
       fontSize: size,
       fontWeight: weight,
       color: color,
@@ -165,7 +173,11 @@ class CandidatePanelPreview extends StatelessWidget {
           : index < this.candidates.length
           ? this.candidates[index]
           : (text: '', comment: '');
-      final comment = candidate.comment;
+      final comment =
+          editorPreview &&
+              (candidate.comment.isEmpty || candidate.comment == '🚫')
+          ? '注释'
+          : candidate.comment;
       final labelStyle = style(
         _metric(font, 'labelSize'),
         _color(option, selected ? 'selectedLabelColor' : 'labelColor'),
@@ -204,7 +216,11 @@ class CandidatePanelPreview extends StatelessWidget {
               decoration: BoxDecoration(
                 color: _color(
                   option,
-                  selected ? 'selectedBackground' : 'background',
+                  selected
+                      ? 'selectedBackground'
+                      : editorPreview && index == 1
+                      ? 'hoverBackground'
+                      : 'background',
                 ),
                 borderRadius: BorderRadius.circular(
                   _metric(option, 'cornerRadius'),
@@ -214,13 +230,17 @@ class CandidatePanelPreview extends StatelessWidget {
                 borderRadius: BorderRadius.circular(
                   _metric(option, 'cornerRadius'),
                 ),
-                border: _metric(option, 'borderWidth') > 0
+                border: !editorPreview || _metric(option, 'borderWidth') > 0
                     ? Border.all(
                         color: _color(
                           option,
                           selected ? 'selectedBorderColor' : 'borderColor',
                         ),
-                        width: _metric(option, 'borderWidth'),
+                        width: !editorPreview && selected
+                            ? math
+                                  .max(1, _metric(option, 'borderWidth'))
+                                  .toDouble()
+                            : _metric(option, 'borderWidth'),
                       )
                     : null,
               ),
@@ -317,7 +337,7 @@ class CandidatePanelPreview extends StatelessWidget {
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
                     color: _color(panel, 'background'),
-                    boxShadow: panel['shadowStyle'] != null
+                    boxShadow: editorPreview && panel['shadowStyle'] != null
                         ? [
                             BoxShadow(
                               color: _color(panel['shadowStyle'], 'color'),
@@ -340,7 +360,7 @@ class CandidatePanelPreview extends StatelessWidget {
                     borderRadius: BorderRadius.circular(
                       _metric(panel, 'cornerRadius'),
                     ),
-                    border: _metric(panel, 'borderWidth') > 0
+                    border: !editorPreview || _metric(panel, 'borderWidth') > 0
                         ? Border.all(
                             color: _color(panel, 'borderColor'),
                             width: _metric(panel, 'borderWidth'),
