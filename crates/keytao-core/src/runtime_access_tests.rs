@@ -87,7 +87,7 @@ fn key_batch_uses_one_access_and_preserves_an_earlier_commit() {
     drop(session);
     drop(runtime);
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn lua_file_regeneration_does_not_wait_for_librime() {
         "file_only = true\n"
     );
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn schema_lua_switches_reinitialize_before_the_next_key() {
     assert!(!other.is_initialized());
     drop(stale);
     std::fs::remove_dir_all(other_dir).unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn lua_regeneration_errors_do_not_block_startup_or_reload() {
         "last_good = true\n"
     );
     drop(session);
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -537,7 +537,7 @@ fn plain_reload_prewarm_rebuilds_focused_then_other_sessions() {
     drop(sessions);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -561,7 +561,7 @@ fn a_switch_reload_rebuilds_every_session_before_acknowledging() {
             .is_ascii_mode());
     }
     drop(sessions);
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -650,7 +650,7 @@ fn f4_schema_calls_and_creation_wait_for_another_sessions_rebuild() {
     drop((first, second));
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -713,7 +713,7 @@ fn key_on_another_session_waits_for_prewarm_and_gets_candidates() {
     drop((focused, session));
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -747,7 +747,7 @@ fn failed_prewarm_key_rebuilds_engine_and_gets_candidates() {
     drop(session);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -800,7 +800,7 @@ fn key_during_prewarm_never_commits_raw_text() {
     drop(session);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -839,7 +839,7 @@ fn busy_policy_change_cannot_restore_sensitive_composition() {
     drop(session);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -867,7 +867,7 @@ fn prewarm_reports_only_actual_rebuilds() {
     drop(session);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 #[test]
@@ -917,7 +917,7 @@ fn deployment_keeps_new_and_rebuilt_sessions_composing() {
     drop((session, created, dropped));
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));
-    std::fs::remove_dir_all(dir).unwrap();
+    let _ = std::fs::remove_dir_all(dir); // best effort: librime may still flush files
 }
 
 static SERIAL: Mutex<()> = Mutex::new(());
