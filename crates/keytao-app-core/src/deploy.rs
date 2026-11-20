@@ -73,21 +73,23 @@ pub fn record_android_result(
 }
 
 pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), CoreError> {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, &root.join("rime-data"));
     let config = [
-        "build/default.yaml",
-        "default.custom.yaml",
-        "default-custom.yaml",
+        dirs.staging_dir.join("default.yaml"),
+        dirs.user_data_dir.join("default.custom.yaml"),
+        dirs.user_data_dir.join("default-custom.yaml"),
     ]
     .into_iter()
-    .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+    .find_map(|path| std::fs::read_to_string(path).ok())
     .ok_or_else(|| CoreError::Other("Android RIME 部署缺少方案配置".into()))?;
     let schemas = crate::scheme_files::parse_schema_list(&config);
-    crate::upload_bundle::verify_deploy_artifacts(root, Some(&root.join("rime-data")), &schemas)
+    crate::upload_bundle::verify_deploy_artifacts(root, Some(&dirs.shared_data_dir), &schemas)
 }
 
 pub fn render_user_schema_logos(user_dir: &std::path::Path) {
+    let dirs = keytao_core::RuntimeDirs::resolve(user_dir, user_dir);
     let mut schemas = std::collections::BTreeMap::new();
-    for dir in [user_dir.join("build"), user_dir.to_path_buf()] {
+    for dir in [dirs.staging_dir, dirs.user_data_dir] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

@@ -1,3 +1,4 @@
+use crate::{RuntimeDirs, DEPLOYED_FILE, DEPLOYING_FILE};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
@@ -98,7 +99,11 @@ fn track_input_session(root: &Path, generation: Option<u64>) -> Arc<()> {
 
 pub(crate) fn engine_loaded(root: &Path) -> Arc<()> {
     let session = track_input_session(root, Some(engine_generation()));
-    let marker = sentinel(root).is_none().then(|| marker(root)).flatten();
+    let staging_dir = staging_dir(root);
+    let marker = sentinel(&staging_dir)
+        .is_none()
+        .then(|| marker(&staging_dir))
+        .flatten();
     *crate::lock_ignore_poison(&LOADED_BUILD) =
         Some((root.to_path_buf(), marker, engine_generation()));
     session
@@ -107,7 +112,11 @@ pub(crate) fn engine_loaded(root: &Path) -> Arc<()> {
 /// Both native deployers (nanoseconds) and older Android deployers (milliseconds)
 /// publish a timestamp and the process that owns the build directory.
 pub fn deployment_in_progress(root: &Path) -> bool {
-    let active = sentinel_in_progress(sentinel(root).as_deref());
+    deployment_in_progress_at(root, &staging_dir(root))
+}
+
+fn deployment_in_progress_at(root: &Path, staging_dir: &Path) -> bool {
+    let active = sentinel_in_progress(sentinel(staging_dir).as_deref());
     cache_deployment(root, active);
     active
 }
@@ -136,17 +145,22 @@ fn sentinel_in_progress(content: Option<&str>) -> bool {
         && process_alive(pid)
 }
 
-fn sentinel(root: &Path) -> Option<String> {
-    std::fs::read_to_string(root.join("build/.keytao-deploying")).ok()
+fn staging_dir(root: &Path) -> PathBuf {
+    RuntimeDirs::resolve(root, root).staging_dir
+}
+
+fn sentinel(staging_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(staging_dir.join(DEPLOYING_FILE)).ok()
 }
 
 /// Keep the owner sentinel intact: a failed/timed-out deploy worker may still
 /// be writing artifacts, so failure must not permit runtime teardown.
 pub fn mark_deployment_failed(root: &Path) -> Result<(), String> {
-    let Some(token) = sentinel(root) else {
+    let staging_dir = staging_dir(root);
+    let Some(token) = sentinel(&staging_dir) else {
         return Ok(());
     };
-    crate::write_file_atomic(&root.join("build/.keytao-deploy-failed"), token.as_bytes())
+    crate::write_file_atomic(&staging_dir.join(".keytao-deploy-failed"), token.as_bytes())
         .map_err(|error| format!("publish deployment failure: {error}"))
 }
 
@@ -155,7 +169,8 @@ pub(crate) fn failed_deployment_owned_by_process(root: &Path) -> bool {
     if cfg!(target_os = "android") {
         return false;
     }
-    let Some(token) = sentinel(root) else {
+    let staging_dir = staging_dir(root);
+    let Some(token) = sentinel(&staging_dir) else {
         return false;
     };
     token
@@ -163,7 +178,7 @@ pub(crate) fn failed_deployment_owned_by_process(root: &Path) -> bool {
         .split_once('/')
         .and_then(|(_, pid)| pid.parse::<u32>().ok())
         == Some(std::process::id())
-        && std::fs::read_to_string(root.join("build/.keytao-deploy-failed")).ok() == Some(token)
+        && std::fs::read_to_string(staging_dir.join(".keytao-deploy-failed")).ok() == Some(token)
 }
 
 #[cfg(unix)]
@@ -308,9 +323,11 @@ impl DeploymentState {
         rebuilding: bool,
         usable: bool,
     ) -> Option<&'static str> {
-        self.hint = self.refresh_hint_at(root, now, rebuilding).filter(|hint| {
-            (*hint != "正在部署中" || self.hint_requested) && (*hint == "部署成功" || !usable)
-        });
+        self.hint = self
+            .refresh_hint_at(root, &staging_dir(root), now, rebuilding)
+            .filter(|hint| {
+                (*hint != "正在部署中" || self.hint_requested) && (*hint == "部署成功" || !usable)
+            });
         self.refreshed_at = Some(now);
         self.hint
     }
@@ -318,14 +335,15 @@ impl DeploymentState {
     fn refresh_hint_at(
         &mut self,
         root: &Path,
+        staging_dir: &Path,
         now: Instant,
         rebuilding: bool,
     ) -> Option<&'static str> {
         if !self.observed {
-            self.loaded_marker = marker(root);
+            self.loaded_marker = marker(staging_dir);
             self.observed = true;
         }
-        let current = sentinel(root);
+        let current = sentinel(staging_dir);
         let active = sentinel_in_progress(current.as_deref());
         cache_deployment(root, active);
         let previously_loaded = current.is_none()
@@ -339,11 +357,11 @@ impl DeploymentState {
                     loaded_root == root
                         && loaded_marker
                             .as_ref()
-                            .is_some_and(|loaded| marker(root).as_ref() == Some(loaded))
+                            .is_some_and(|loaded| marker(staging_dir).as_ref() == Some(loaded))
                         && *generation == engine_generation()
                 });
             if loaded && !rebuilding {
-                self.loaded(root);
+                self.loaded_at(root, staging_dir);
             }
             // A loaded runtime handles reloads through its existing engine-build wait.
             if previously_loaded {
@@ -352,7 +370,7 @@ impl DeploymentState {
         }
         if current.is_some()
             && current != self.failed_sentinel
-            && std::fs::read_to_string(root.join("build/.keytao-deploy-failed")).ok() == current
+            && std::fs::read_to_string(staging_dir.join(".keytao-deploy-failed")).ok() == current
         {
             self.pending = current.clone();
             self.failed();
@@ -372,7 +390,7 @@ impl DeploymentState {
             self.failed();
             self.failed_sentinel = current;
         } else if current.is_none() {
-            let marker = marker(root);
+            let marker = marker(staging_dir);
             if !previously_loaded
                 && self.pending.is_none()
                 && marker.is_some()
@@ -400,10 +418,14 @@ impl DeploymentState {
     }
 
     pub fn loaded(&mut self, root: &Path) {
-        if deployment_in_progress(root) {
+        self.loaded_at(root, &staging_dir(root));
+    }
+
+    fn loaded_at(&mut self, root: &Path, staging_dir: &Path) {
+        if deployment_in_progress_at(root, staging_dir) {
             return;
         }
-        let marker = marker(root);
+        let marker = marker(staging_dir);
         if marker.is_none() && self.pending.is_some() {
             self.failed();
             return;
@@ -433,6 +455,47 @@ impl DeploymentState {
     }
 }
 
-fn marker(root: &Path) -> Option<String> {
-    crate::ReloadStamp::signature_at(&root.join("build/.keytao-deployed"))
+fn marker(staging_dir: &Path) -> Option<String> {
+    crate::ReloadStamp::signature_at(&staging_dir.join(DEPLOYED_FILE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deployment_state_uses_resolved_staging_markers() {
+        let started = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "keytao-deployment-markers-{}-{}",
+            std::process::id(),
+            started.as_nanos()
+        ));
+        let staging_dir = root.join("runtime/package/build");
+        let legacy_build = root.join("build");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::create_dir_all(&legacy_build).unwrap();
+        std::fs::write(legacy_build.join(DEPLOYED_FILE), "stale").unwrap();
+
+        let now = Instant::now();
+        let mut state = DeploymentState::default();
+        assert_eq!(state.refresh_hint_at(&root, &staging_dir, now, false), None);
+        assert_eq!(state.loaded_marker, None);
+
+        let token = format!("{}/{}", started.as_nanos(), std::process::id());
+        std::fs::write(staging_dir.join(DEPLOYING_FILE), &token).unwrap();
+        std::fs::write(legacy_build.join(".keytao-deploy-failed"), &token).unwrap();
+        assert_eq!(
+            state.refresh_hint_at(&root, &staging_dir, now, false),
+            Some("正在部署中")
+        );
+
+        state.hint_requested = true;
+        std::fs::write(staging_dir.join(".keytao-deploy-failed"), token).unwrap();
+        assert_eq!(
+            state.refresh_hint_at(&root, &staging_dir, now, false),
+            Some("部署失败")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -36,6 +36,8 @@ mod global_input;
 #[cfg(test)]
 mod grammar_tests;
 mod reload_stamp_cache;
+mod runtime_dirs;
+pub use runtime_dirs::RuntimeDirs;
 mod schema_inputs;
 pub use schema_inputs::{record_schema_input_fingerprints, schema_input_fingerprints};
 mod rime_lua;
@@ -540,22 +542,10 @@ pub fn utf16_offset_from_chars(text: &str, char_offset: usize) -> usize {
         .sum::<usize>()
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "android",
-    target_os = "ios",
-    test
-))]
+#[cfg(test)]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
-    let staging_dir = user_data_dir.join("build");
-    let prebuilt_dir = if user_data_dir == shared_data_dir {
-        shared_data_dir.join("prebuilt")
-    } else {
-        shared_data_dir.join("build")
-    };
-    (staging_dir, prebuilt_dir)
+    let dirs = RuntimeDirs::resolve(user_data_dir, shared_data_dir);
+    (dirs.staging_dir, dirs.prebuilt_data_dir)
 }
 
 #[cfg(any(
@@ -686,14 +676,18 @@ const NEUTRAL_GRAMMAR_PENALTY: f64 = -13.815510557964274;
 fn wanxiang_grammar_enabled(user_dir: &Path) -> bool {
     !cfg!(target_os = "ios")
         && user_dir.join(WANXIANG_GRAMMAR_FILE).is_file()
-        && std::fs::read(user_dir.join("build/wanxiang.schema.yaml"))
-            .ok()
-            .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|schema| {
-                schema["grammar"]["language"]
-                    .as_str()
-                    .is_some_and(|language| !language.is_empty())
-            })
+        && std::fs::read(
+            RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join("wanxiang.schema.yaml"),
+        )
+        .ok()
+        .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|schema| {
+            schema["grammar"]["language"]
+                .as_str()
+                .is_some_and(|language| !language.is_empty())
+        })
 }
 
 /// Patch generated configs only; package sources and user overrides stay intact.
@@ -707,7 +701,7 @@ fn update_neutral_grammar(user_dir: &Path, enabled: bool) {
     if !wanxiang_grammar_enabled(user_dir) {
         return;
     }
-    let build = user_dir.join("build");
+    let build = RuntimeDirs::resolve(user_dir, user_dir).staging_dir;
     match std::fs::symlink_metadata(&build) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             eprintln!("KeyTao: warning: refuse symbolic link: {}", build.display());
@@ -812,7 +806,7 @@ mod desktop {
     use super::*;
     use librime_sys::{
         rime_get_api, RimeApi, RimeCandidateListIterator, RimeConfig, RimeConfigIterator,
-        RimeContext, RimeLeversApi, RimeTraits, RimeUserDictIterator,
+        RimeContext, RimeLeversApi, RimeUserDictIterator,
     };
     use rime_api::{create_session, KeyEvent, KeyStatus};
     use std::cell::{Cell, RefCell};
@@ -1203,11 +1197,9 @@ mod desktop {
         }
         // Rime's user config and user dictionaries are writable only in this snapshot.
         // Compiled dictionaries/models remain in the original, read-only data search path.
+        let dirs = RuntimeDirs::resolve(directory.path(), user_dir);
         setup_rime(
-            &directory.path().to_string_lossy(),
-            &user_dir.to_string_lossy(),
-            &directory.path().join("build").to_string_lossy(),
-            &user_dir.join("build").to_string_lossy(),
+            &dirs,
             &directory.path().join("log").to_string_lossy(),
             false,
             user_dir,
@@ -1555,9 +1547,7 @@ mod desktop {
         let _dictionary_override =
             prepare_android_auxiliary_dictionary(Path::new(&user_data_dir), &schema_id)?;
         deploy_schema_file(&source).map_err(|error| deploy_log.failure_message(Some(&error)))?;
-        let compiled = Path::new(&user_data_dir)
-            .join("build")
-            .join(format!("{schema_id}.schema.yaml"));
+        let compiled = compiled_schema_path(Path::new(&user_data_dir), &schema_id);
         Ok(schema_dependencies_from_file(&compiled))
     }
 
@@ -1621,37 +1611,33 @@ mod desktop {
     }
 
     fn initialize_rime(user_data_dir: &str, shared_data_dir: &str, deployer_only: bool) {
-        let user_dir = Path::new(user_data_dir);
+        let control_root = Path::new(user_data_dir);
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(shared_data_dir));
+        let user_dir = dirs.user_data_dir.as_path();
         let lua_prepared = !lock_ignore_poison(&PROCESS_RIME.lua_retry_after)
             .as_ref()
-            .is_some_and(|(root, _)| root == user_dir);
+            .is_some_and(|(root, _)| root == control_root);
         *lock_ignore_poison(&RIME_LUA_SIGNATURE) = lua_prepared
-            .then(|| rime_lua::signature(user_dir).ok().flatten())
+            .then(|| rime_lua::signature(control_root).ok().flatten())
             .flatten();
         *lock_ignore_poison(&RIME_DEPLOYMENT_SIGNATURE) =
-            ReloadStamp::signature_at(&user_dir.join("build").join(DEPLOYED_FILE));
+            ReloadStamp::signature_at(&dirs.staging_dir.join(DEPLOYED_FILE));
         patch_neutral_grammar(user_dir);
-        let shared_dir = Path::new(shared_data_dir);
-        let (staging_dir, prebuilt_dir) = rime_build_dirs(user_dir, shared_dir);
-        let log_dir = rime_log_dir(user_dir);
+        let log_dir = rime_log_dir(control_root);
 
-        let _ = std::fs::create_dir_all(&staging_dir);
-        let _ = std::fs::create_dir_all(&prebuilt_dir);
+        let _ = std::fs::create_dir_all(&dirs.staging_dir);
+        let _ = std::fs::create_dir_all(&dirs.prebuilt_data_dir);
         let _ = std::fs::create_dir_all(&log_dir);
 
-        setup_rime(
-            user_data_dir,
-            shared_data_dir,
-            &staging_dir.to_string_lossy(),
-            &prebuilt_dir.to_string_lossy(),
-            &log_dir.to_string_lossy(),
-            deployer_only,
-            user_dir,
-        );
+        setup_rime(&dirs, &log_dir.to_string_lossy(), deployer_only, user_dir);
     }
 
     pub(super) fn loaded_deployment_is_current(user_dir: &Path) -> bool {
-        let current = ReloadStamp::signature_at(&user_dir.join("build").join(DEPLOYED_FILE));
+        let current = ReloadStamp::signature_at(
+            &RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join(DEPLOYED_FILE),
+        );
         current.is_some() && *lock_ignore_poison(&RIME_DEPLOYMENT_SIGNATURE) == current
     }
 
@@ -1719,20 +1705,30 @@ mod desktop {
 
     #[cfg(not(target_os = "android"))]
     fn desktop_deploy_signature(user_dir: &Path, shared_dir: &Path) -> Result<String, String> {
+        let dirs = RuntimeDirs::resolve(user_dir, shared_dir);
         Ok(format!(
             "{};librime/{};shared/{}",
             deployment_fingerprint(user_dir)?,
             librime_runtime_version().ok_or("librime version is unavailable")?,
-            shared_dir.display()
+            dirs.shared_data_dir.display()
         ))
     }
 
     #[cfg(not(target_os = "android"))]
     fn desktop_deploy_plan(user_dir: &Path, shared_dir: &Path) -> Option<Vec<String>> {
         if cfg!(target_os = "ios")
-            || user_dir.join("build").join(DEPLOYING_FILE).exists()
-            || user_dir.join("build/.keytao-deploy-failed").exists()
-            || !user_dir.join("build").join(DEPLOYED_FILE).is_file()
+            || RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join(DEPLOYING_FILE)
+                .exists()
+            || RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join(".keytao-deploy-failed")
+                .exists()
+            || !RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join(DEPLOYED_FILE)
+                .is_file()
         {
             return None;
         }
@@ -1789,7 +1785,11 @@ mod desktop {
         invalidate_rime_build_artifacts(user_dir, &schemas, &[])?;
         // ConfigFileUpdate only checks timestamps; content receipts also catch same-mtime edits.
         if !config_current {
-            remove_rime_build_artifact(&user_dir.join("build/default.yaml"))?;
+            remove_rime_build_artifact(
+                &RuntimeDirs::resolve(user_dir, user_dir)
+                    .staging_dir
+                    .join("default.yaml"),
+            )?;
         }
         Ok(())
     }
@@ -1988,8 +1988,8 @@ mod desktop {
                 deploy_schema_file(&source)?;
             }
 
-            let compiled = user_dir
-                .join("build")
+            let compiled = RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
                 .join(format!("{schema_id}.schema.yaml"));
             for dependency in schema_dependencies_from_file(&compiled) {
                 if !deployed.contains(&dependency) {
@@ -2075,8 +2075,13 @@ mod desktop {
             format!("方案 {schema_id} 编译失败，已跳过：{detail}\n已从切换列表移除"),
         );
         let content = serde_json::to_vec(&skipped).map_err(|error| error.to_string())?;
-        write_file_atomic(&user_dir.join("build").join(SKIPPED_SCHEMAS_FILE), &content)
-            .map_err(|error| format!("save skipped schemas: {error}"))
+        write_file_atomic(
+            &RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join(SKIPPED_SCHEMAS_FILE),
+            &content,
+        )
+        .map_err(|error| format!("save skipped schemas: {error}"))
     }
 
     #[test]
@@ -2206,13 +2211,15 @@ mod desktop {
 
     fn parse_schema_list_from_dir(user_dir: &Path) -> Vec<String> {
         [
-            "default.custom.yaml",
-            "default-custom.yaml",
-            "default.yaml",
-            "build/default.yaml",
+            user_dir.join("default.custom.yaml"),
+            user_dir.join("default-custom.yaml"),
+            user_dir.join("default.yaml"),
+            RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join("default.yaml"),
         ]
         .iter()
-        .filter_map(|name| std::fs::read_to_string(user_dir.join(name)).ok())
+        .filter_map(|path| std::fs::read_to_string(path).ok())
         .map(|content| parse_schema_list(&content))
         .find(|schemas| !schemas.is_empty())
         .unwrap_or_default()
@@ -2226,8 +2233,8 @@ mod desktop {
     }
 
     fn compiled_schema_path(user_dir: &Path, schema_id: &str) -> PathBuf {
-        user_dir
-            .join("build")
+        RuntimeDirs::resolve(user_dir, user_dir)
+            .staging_dir
             .join(format!("{schema_id}.schema.yaml"))
     }
 
@@ -2242,21 +2249,9 @@ mod desktop {
         }
     }
 
-    fn setup_rime(
-        user_data_dir: &str,
-        shared_data_dir: &str,
-        staging_dir: &str,
-        prebuilt_data_dir: &str,
-        log_dir: &str,
-        deployer_only: bool,
-        grammar_user_dir: &Path,
-    ) {
+    fn setup_rime(dirs: &RuntimeDirs, log_dir: &str, deployer_only: bool, grammar_user_dir: &Path) {
         let configured_log_dir = PathBuf::from(log_dir);
         let use_octagram = !deployer_only && wanxiang_grammar_enabled(grammar_user_dir);
-        let user_data_dir = CString::new(user_data_dir).expect("valid user data dir");
-        let shared_data_dir = CString::new(shared_data_dir).expect("valid shared data dir");
-        let staging_dir = CString::new(staging_dir).expect("valid staging dir");
-        let prebuilt_data_dir = CString::new(prebuilt_data_dir).expect("valid prebuilt data dir");
         let log_dir = CString::new(log_dir).expect("valid log dir");
         let distribution_name = CString::new("KeyTao").unwrap();
         let distribution_code_name = CString::new("keytao").unwrap();
@@ -2270,73 +2265,70 @@ mod desktop {
         }
         modules.push(std::ptr::null::<c_char>());
 
-        librime_sys::rime_struct!(traits: RimeTraits);
-        traits.user_data_dir = user_data_dir.as_ptr();
-        traits.shared_data_dir = shared_data_dir.as_ptr();
-        traits.staging_dir = staging_dir.as_ptr();
-        traits.prebuilt_data_dir = prebuilt_data_dir.as_ptr();
-        traits.log_dir = log_dir.as_ptr();
-        traits.distribution_name = distribution_name.as_ptr();
-        traits.distribution_code_name = distribution_code_name.as_ptr();
-        traits.distribution_version = distribution_version.as_ptr();
-        // glog retains this pointer after setup returns.
-        traits.app_name = c"rime.keytao".as_ptr();
-        traits.min_log_level = 1;
-        traits.modules = if deployer_only {
-            std::ptr::null_mut()
-        } else {
-            modules.as_mut_ptr()
-        };
+        dirs.with_rime_traits(|mut traits| {
+            traits.log_dir = log_dir.as_ptr();
+            traits.distribution_name = distribution_name.as_ptr();
+            traits.distribution_code_name = distribution_code_name.as_ptr();
+            traits.distribution_version = distribution_version.as_ptr();
+            // glog retains this pointer after setup returns.
+            traits.app_name = c"rime.keytao".as_ptr();
+            traits.min_log_level = 1;
+            traits.modules = if deployer_only {
+                std::ptr::null_mut()
+            } else {
+                modules.as_mut_ptr()
+            };
 
-        unsafe {
-            if !deployer_only {
-                require_levers_module();
-                require_lua_module();
-                #[cfg(not(target_os = "ios"))]
-                if use_octagram {
-                    require_octagram_module();
-                }
-            }
-
-            let api = rime_get_api();
-            {
-                let mut setup_complete = lock_ignore_poison(&RIME_SETUP_COMPLETE);
-                if !*setup_complete {
-                    if let Some(setup) = (*api).setup {
-                        prune_rime_logs(&configured_log_dir);
-                        setup(&mut traits);
-                        *lock_ignore_poison(&RIME_SETUP_LOG_DIR) = Some(configured_log_dir);
+            unsafe {
+                if !deployer_only {
+                    require_levers_module();
+                    require_lua_module();
+                    #[cfg(not(target_os = "ios"))]
+                    if use_octagram {
+                        require_octagram_module();
                     }
-                    *setup_complete = true;
                 }
-            }
-            if deployer_only {
-                if let Some(initialize) = (*api).deployer_initialize {
+
+                let api = rime_get_api();
+                {
+                    let mut setup_complete = lock_ignore_poison(&RIME_SETUP_COMPLETE);
+                    if !*setup_complete {
+                        if let Some(setup) = (*api).setup {
+                            prune_rime_logs(&configured_log_dir);
+                            setup(&mut traits);
+                            *lock_ignore_poison(&RIME_SETUP_LOG_DIR) = Some(configured_log_dir);
+                        }
+                        *setup_complete = true;
+                    }
+                }
+                if deployer_only {
+                    if let Some(initialize) = (*api).deployer_initialize {
+                        initialize(&mut traits);
+                    }
+                } else if let Some(initialize) = (*api).initialize {
                     initialize(&mut traits);
                 }
-            } else if let Some(initialize) = (*api).initialize {
-                initialize(&mut traits);
+                #[cfg(target_os = "android")]
+                if let Some(deployer_initialize) = (*api).deployer_initialize {
+                    traits.modules = std::ptr::null_mut();
+                    deployer_initialize(&mut traits);
+                }
+                if let Some(set_notification_handler) = (*api).set_notification_handler {
+                    set_notification_handler(Some(notification_handler), std::ptr::null_mut());
+                }
+                // Windows librime returns ANSI bytes here, even when the input path was UTF-8.
+                *lock_ignore_poison(&RIME_USER_DATA_DIR) = rime_api_member!(api, get_user_data_dir)
+                    .and_then(|get| {
+                        let current = get();
+                        (!current.is_null()).then(|| {
+                            (
+                                PathBuf::from(dirs.user_data_dir.to_string_lossy().as_ref()),
+                                CStr::from_ptr(current).to_bytes().to_vec(),
+                            )
+                        })
+                    });
             }
-            #[cfg(target_os = "android")]
-            if let Some(deployer_initialize) = (*api).deployer_initialize {
-                traits.modules = std::ptr::null_mut();
-                deployer_initialize(&mut traits);
-            }
-            if let Some(set_notification_handler) = (*api).set_notification_handler {
-                set_notification_handler(Some(notification_handler), std::ptr::null_mut());
-            }
-            // Windows librime returns ANSI bytes here, even when the input path was UTF-8.
-            *lock_ignore_poison(&RIME_USER_DATA_DIR) = rime_api_member!(api, get_user_data_dir)
-                .and_then(|get| {
-                    let current = get();
-                    (!current.is_null()).then(|| {
-                        (
-                            PathBuf::from(user_data_dir.to_str().expect("valid user data dir")),
-                            CStr::from_ptr(current).to_bytes().to_vec(),
-                        )
-                    })
-                });
-        }
+        });
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -4448,8 +4440,8 @@ pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>,
     let Some(schema_id) = deployed_schema_id_from_dir(user_dir) else {
         return Ok(Vec::new());
     };
-    if !user_dir
-        .join("build")
+    if !RuntimeDirs::resolve(user_dir, user_dir)
+        .staging_dir
         .join(format!("{schema_id}.schema.yaml"))
         .is_file()
     {
@@ -4475,8 +4467,8 @@ pub fn set_schema_switch(
     value: usize,
 ) -> Result<Vec<SchemaSwitchSetting>, String> {
     if deployed_schema_id_from_dir(user_dir).as_deref() != Some(schema_id)
-        || !user_dir
-            .join("build")
+        || !RuntimeDirs::resolve(user_dir, user_dir)
+            .staging_dir
             .join(format!("{schema_id}.schema.yaml"))
             .is_file()
     {
@@ -7194,7 +7186,8 @@ fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> 
 }
 
 pub fn deployed_schemas(root: &Path) -> Vec<SchemaInfo> {
-    let schemas = std::fs::read_to_string(root.join("build/default.yaml"))
+    let dirs = RuntimeDirs::resolve(root, root);
+    let schemas = std::fs::read_to_string(dirs.staging_dir.join("default.yaml"))
         .ok()
         .map(|content| parse_schema_list(&content))
         .filter(|schemas| !schemas.is_empty())
@@ -7311,7 +7304,8 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
     if configured.is_empty() {
         return None;
     }
-    let deployed = std::fs::read_to_string(dir.join("build/default.yaml"))
+    let dirs = RuntimeDirs::resolve(dir, dir);
+    let deployed = std::fs::read_to_string(dirs.staging_dir.join("default.yaml"))
         .ok()
         .map(|content| parse_schema_list(&content))
         .filter(|schemas| !schemas.is_empty());
@@ -7339,8 +7333,8 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
     if let Some(schema) = selected.filter(|schema| {
         valid_rime_build_id(schema)
             && schemas.contains(schema)
-            && dir
-                .join("build")
+            && dirs
+                .staging_dir
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
     }) {
@@ -7460,8 +7454,8 @@ pub fn parse_schema_name(content: &str) -> Option<String> {
 
 fn schema_name_from_dir(user_data_dir: &Path, schema_id: &str) -> Option<String> {
     [
-        user_data_dir
-            .join("build")
+        RuntimeDirs::resolve(user_data_dir, user_data_dir)
+            .staging_dir
             .join(format!("{schema_id}.schema.yaml")),
         user_data_dir.join(format!("{schema_id}.schema.yaml")),
     ]
@@ -7535,13 +7529,15 @@ fn valid_rime_build_id(id: &str) -> bool {
 
 fn configured_schema_list_from_dir(user_data_dir: &Path) -> Vec<String> {
     [
-        "default.custom.yaml",
-        "default-custom.yaml",
-        "build/default.yaml",
-        "default.yaml",
+        user_data_dir.join("default.custom.yaml"),
+        user_data_dir.join("default-custom.yaml"),
+        RuntimeDirs::resolve(user_data_dir, user_data_dir)
+            .staging_dir
+            .join("default.yaml"),
+        user_data_dir.join("default.yaml"),
     ]
     .into_iter()
-    .filter_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
+    .filter_map(|path| std::fs::read_to_string(path).ok())
     .find_map(|content| {
         let schemas = parse_schema_list(&content);
         let has_empty_schema_list = serde_yaml::from_str::<Value>(&content).is_ok_and(|value| {
@@ -7640,10 +7636,14 @@ const DEPLOYED_FILE: &str = ".keytao-deployed";
 const SKIPPED_SCHEMAS_FILE: &str = ".keytao-skipped-schemas.json";
 
 fn skipped_schemas(user_data_dir: &Path) -> std::collections::BTreeMap<String, String> {
-    std::fs::read(user_data_dir.join("build").join(SKIPPED_SCHEMAS_FILE))
-        .ok()
-        .and_then(|content| serde_json::from_slice(&content).ok())
-        .unwrap_or_default()
+    std::fs::read(
+        RuntimeDirs::resolve(user_data_dir, user_data_dir)
+            .staging_dir
+            .join(SKIPPED_SCHEMAS_FILE),
+    )
+    .ok()
+    .and_then(|content| serde_json::from_slice(&content).ok())
+    .unwrap_or_default()
 }
 
 /// Non-blocking warnings from the latest deployment, including deploy children.
@@ -7720,7 +7720,7 @@ fn begin_deployment_with_invalidation(
     user_data_dir: &Path,
     invalidate: bool,
 ) -> Result<(), String> {
-    let build = user_data_dir.join("build");
+    let build = RuntimeDirs::resolve(user_data_dir, user_data_dir).staging_dir;
     std::fs::create_dir_all(&build)
         .map_err(|error| format!("create {}: {error}", build.display()))?;
     let sentinel = build.join(DEPLOYING_FILE);
@@ -7748,7 +7748,7 @@ fn begin_deployment_with_invalidation(
 }
 
 fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(), String> {
-    let build = user_data_dir.join("build");
+    let build = RuntimeDirs::resolve(user_data_dir, user_data_dir).staging_dir;
     let marker = DeploymentMarker {
         fingerprint: deployment_fingerprint(user_data_dir)?,
         schemas: schemas.to_vec(),
@@ -7827,8 +7827,8 @@ pub fn complete_deployment_with_cleanup(
             user_data_dir
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
-                && user_data_dir
-                    .join("build")
+                && RuntimeDirs::resolve(user_data_dir, user_data_dir)
+                    .staging_dir
                     .join(format!("{schema}.schema.yaml"))
                     .is_file()
         })
@@ -7852,7 +7852,9 @@ pub fn complete_deployment_with_cleanup(
     }
     cleanup()?;
     write_deployed_marker(user_data_dir, &schemas)?;
-    let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
+    let sentinel = RuntimeDirs::resolve(user_data_dir, user_data_dir)
+        .staging_dir
+        .join(DEPLOYING_FILE);
     match std::fs::remove_file(&sentinel) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -7864,7 +7866,9 @@ fn write_effective_default_schema_list(
     user_data_dir: &Path,
     effective: &[String],
 ) -> Result<(), String> {
-    let default_path = user_data_dir.join("build/default.yaml");
+    let default_path = RuntimeDirs::resolve(user_data_dir, user_data_dir)
+        .staging_dir
+        .join("default.yaml");
     if default_path.is_file() {
         let content = std::fs::read(&default_path).map_err(|error| error.to_string())?;
         let mut default: Value =
@@ -7897,12 +7901,12 @@ pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
                 .is_file()
                 || skipped.contains_key(schema)
         });
-    let build = user_data_dir.join("build");
+    let build = RuntimeDirs::resolve(user_data_dir, user_data_dir).staging_dir;
     let deployed = installed
         && !schemas.is_empty()
         && schemas.iter().all(|schema| {
-            user_data_dir
-                .join("build")
+            RuntimeDirs::resolve(user_data_dir, user_data_dir)
+                .staging_dir
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
         })
@@ -7960,7 +7964,7 @@ pub fn invalidate_rime_build_artifacts(
     schema_ids: &[String],
     dictionary_ids: &[String],
 ) -> Result<Vec<String>, String> {
-    let build_dir = user_data_dir.join("build");
+    let build_dir = RuntimeDirs::resolve(user_data_dir, user_data_dir).staging_dir;
     if !build_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -8482,7 +8486,9 @@ fn patch_keydo_helpers(content: &str) -> Option<String> {
 /// Replacing `rime.lua` on disk does not update the Lua VM in those processes,
 /// so a newly installed scheme must not depend on new global variables there.
 pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<String>, String> {
-    let rime_lua_path = user_data_dir.join("rime.lua");
+    let rime_lua_path = RuntimeDirs::resolve(user_data_dir, user_data_dir)
+        .user_data_dir
+        .join("rime.lua");
     let rime_lua = match std::fs::read_to_string(&rime_lua_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -8513,7 +8519,9 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
             .map_err(|error| format!("write {}: {error}", path.display()))?;
         changed.push(file_name.to_string());
 
-        let compiled_path = user_data_dir.join("build").join(file_name);
+        let compiled_path = RuntimeDirs::resolve(user_data_dir, user_data_dir)
+            .staging_dir
+            .join(file_name);
         match std::fs::read_to_string(&compiled_path) {
             Ok(compiled) => {
                 if let Some(patched) = rewrite_lua_component_autoloads(&compiled, &bindings) {
@@ -8594,7 +8602,9 @@ fn regenerate_rime_lua_for_ime(root: &Path) -> bool {
 
 fn regenerate_legacy_rime_lua(user_data_dir: &Path) -> Result<(), String> {
     let manifest_path = user_data_dir.join(ACTIVE_SCHEME_MANIFEST);
-    let rime_lua_path = user_data_dir.join("rime.lua");
+    let rime_lua_path = RuntimeDirs::resolve(user_data_dir, user_data_dir)
+        .user_data_dir
+        .join("rime.lua");
     for path in [&manifest_path, &rime_lua_path] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -8650,7 +8660,9 @@ pub fn preserve_rime_lua_user_edits(
     user_data_dir: &Path,
     expected: Option<&str>,
 ) -> Result<Option<std::path::PathBuf>, String> {
-    let source = user_data_dir.join("rime.lua");
+    let source = RuntimeDirs::resolve(user_data_dir, user_data_dir)
+        .user_data_dir
+        .join("rime.lua");
     match std::fs::symlink_metadata(&source) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(format!("refuse symbolic link: {}", source.display()));

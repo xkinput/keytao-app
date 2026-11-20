@@ -188,6 +188,7 @@ pub fn status_at(root: &Path) -> Status {
 }
 
 fn status_from_manifest(root: &Path, manifest: Option<Manifest>) -> Status {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
     let installed = manifest.as_ref().is_some_and(|manifest| {
         manifest
             .files
@@ -199,8 +200,8 @@ fn status_from_manifest(root: &Path, manifest: Option<Manifest>) -> Status {
     Status {
         installed,
         deployed: installed
-            && root.join("build/wanxiang.schema.yaml").is_file()
-            && root.join("build/wanxiang.table.bin").is_file(),
+            && dirs.staging_dir.join("wanxiang.schema.yaml").is_file()
+            && dirs.staging_dir.join("wanxiang.table.bin").is_file(),
         version: manifest
             .as_ref()
             .map_or_else(String::new, |m| m.version.clone()),

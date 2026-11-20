@@ -253,14 +253,15 @@ pub fn addon_schema_source_files(id: &str) -> [(&'static str, String); 4] {
 }
 
 pub fn deployed_english_schema_available(root: &Path) -> bool {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
     let schemas = [
-        "default.custom.yaml",
-        "default-custom.yaml",
-        "default.yaml",
-        "build/default.yaml",
+        dirs.user_data_dir.join("default.custom.yaml"),
+        dirs.user_data_dir.join("default-custom.yaml"),
+        dirs.user_data_dir.join("default.yaml"),
+        dirs.staging_dir.join("default.yaml"),
     ]
     .into_iter()
-    .filter_map(|name| std::fs::read_to_string(root.join(name)).ok())
+    .filter_map(|path| std::fs::read_to_string(path).ok())
     .map(|text| parse_schema_list(&text))
     .find(|schemas| !schemas.is_empty())
     .unwrap_or_default();
@@ -273,7 +274,7 @@ pub fn deployed_english_schema_available(root: &Path) -> bool {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
         })
         .any(|id| {
-            let path = root.join("build").join(format!("{id}.schema.yaml"));
+            let path = dirs.staging_dir.join(format!("{id}.schema.yaml"));
             let Some(schema) = std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
@@ -290,6 +291,7 @@ pub fn deployed_english_schema_available(root: &Path) -> bool {
 }
 
 pub fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
     let configured = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
@@ -303,8 +305,8 @@ pub fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
             .iter()
             .all(|(_, relative)| root.join(relative).is_file());
     let deployed = installed
-        && root
-            .join("build")
+        && dirs
+            .staging_dir
             .join(format!("{id}.schema.yaml"))
             .is_file();
     AddonSchemaStatus {

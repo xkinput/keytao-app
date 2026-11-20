@@ -97,6 +97,7 @@ impl Addon {
     }
 
     fn status_with_manifest(&self, root: &Path, manifest: Option<Manifest>) -> Status {
+        let dirs = keytao_core::RuntimeDirs::resolve(root, root);
         let configured = crate::addon::addon_default_custom(root).ok().map(|(_, content)| keytao_core::parse_schema_list(&content)).unwrap_or_default();
         let selected: Vec<_> = manifest.as_ref().into_iter().flat_map(|manifest| &manifest.files)
             .filter_map(|file| file.path.strip_suffix(".schema.yaml"))
@@ -113,8 +114,8 @@ impl Addon {
             installed,
             deployed: installed
                 && !selected.is_empty()
-                && selected.iter().all(|id| root.join(format!("build/{id}.schema.yaml")).is_file())
-                && (!selected.contains(&self.id) || root.join(format!("build/{}.table.bin", self.dictionary)).is_file()),
+                && selected.iter().all(|id| dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file())
+                && (!selected.contains(&self.id) || dirs.staging_dir.join(format!("{}.table.bin", self.dictionary)).is_file()),
             version: manifest.map_or_else(String::new, |manifest| manifest.version),
             variant: String::new(),
         }

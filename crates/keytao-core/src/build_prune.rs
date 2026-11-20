@@ -60,8 +60,12 @@ pub fn prune_rime_build_artifacts(
                 .filter(|id| {
                     !checked.contains(*id)
                         && std::iter::once(user_dir).chain(shared_dir).any(|root| {
-                            fs::symlink_metadata(root.join(format!("build/{id}.schema.yaml")))
-                                .is_ok()
+                            fs::symlink_metadata(
+                                crate::RuntimeDirs::resolve(root, root)
+                                    .staging_dir
+                                    .join(format!("{id}.schema.yaml")),
+                            )
+                            .is_ok()
                         })
                 })
                 .cloned()
@@ -76,7 +80,8 @@ pub fn prune_rime_build_artifacts(
             );
             checked.extend(kept_schemas);
         }
-        let build = user_dir.join("build");
+        let build =
+            crate::RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir)).staging_dir;
         if fs::symlink_metadata(&build).ok()?.file_type().is_symlink() {
             return None;
         }
@@ -164,11 +169,15 @@ fn read_inside(root: &Path, relative: &str) -> Option<Vec<u8>> {
 
 fn checked_file(root: &Path, relative: &str) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
-    for component in Path::new(relative).components() {
+    for (index, component) in Path::new(relative).components().enumerate() {
         let Component::Normal(component) = component else {
             return None;
         };
-        path.push(component);
+        if index == 0 && component == "build" {
+            path = crate::RuntimeDirs::resolve(root, root).staging_dir;
+        } else {
+            path.push(component);
+        }
         if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
             return None;
         }
@@ -221,7 +230,13 @@ fn patch_keys_resolved(value: &Value) -> Option<()> {
 }
 
 fn present(root: &Path, relative: &str) -> bool {
-    !matches!(fs::symlink_metadata(root.join(relative)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    let path = match Path::new(relative).strip_prefix("build") {
+        Ok(relative) => crate::RuntimeDirs::resolve(root, root)
+            .staging_dir
+            .join(relative),
+        Err(_) => root.join(relative),
+    };
+    !matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 struct Graph<'a> {

@@ -12,6 +12,8 @@ pub struct Stage(PathBuf);
 
 impl Stage {
     pub fn create(source: &Path) -> Result<Self, String> {
+        let dirs = keytao_core::RuntimeDirs::resolve(source, source);
+        let source = dirs.user_data_dir.as_path();
         let parent = source.parent().ok_or("invalid Rime directory")?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -37,8 +39,8 @@ impl Stage {
         root: &Path,
         mut reload: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
-        let current = root.join("build");
-        let incoming = self.0.join("build");
+        let current = keytao_core::RuntimeDirs::resolve(root, root).staging_dir;
+        let incoming = keytao_core::RuntimeDirs::resolve(&self.0, &self.0).staging_dir;
         let previous = self.0.join("previous-build");
         fs::rename(&current, &previous)
             .map_err(|error| format!("preserve previous deployment: {error}"))?;
@@ -114,7 +116,11 @@ fn checked_directory(source: &Path, name: &str) -> Result<PathBuf, String> {
     {
         return Err("invalid deployment stage".into());
     }
-    let parent = source.parent().ok_or("invalid Rime directory")?;
+    let dirs = keytao_core::RuntimeDirs::resolve(source, source);
+    let parent = dirs
+        .user_data_dir
+        .parent()
+        .ok_or("invalid Rime directory")?;
     let path = parent.join(name);
     if !fs::symlink_metadata(&path)
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())

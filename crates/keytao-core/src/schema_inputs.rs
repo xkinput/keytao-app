@@ -31,7 +31,9 @@ pub fn record_schema_input_fingerprints(root: &Path, deployed: &[String]) -> Res
         }
     }
     let bytes = serde_json::to_vec(&fingerprints).map_err(|error| error.to_string())?;
-    let path = root.join(RECEIPT);
+    let path = crate::RuntimeDirs::resolve(root, root)
+        .staging_dir
+        .join(RECEIPT.trim_start_matches("build/"));
     if fs::read(&path).ok().as_deref() != Some(&bytes) {
         write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     }
@@ -59,13 +61,14 @@ pub(crate) fn invalidate_changed_deploy_schemas(
 }
 
 fn schema_closure(root: &Path, selected: &[String]) -> BTreeSet<String> {
+    let dirs = crate::RuntimeDirs::resolve(root, root);
     let mut pending: BTreeSet<_> = selected.iter().cloned().collect();
     let mut visited = BTreeSet::new();
     while let Some(id) = pending.pop_first() {
         if !valid_rime_build_id(&id) || !visited.insert(id.clone()) {
             continue;
         }
-        let compiled = fs::read(root.join(format!("build/{id}.schema.yaml")))
+        let compiled = fs::read(dirs.staging_dir.join(format!("{id}.schema.yaml")))
             .ok()
             .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok());
         if let Some(dependencies) = compiled
@@ -99,10 +102,14 @@ pub fn schema_input_fingerprints(
 }
 
 fn read_receipt(root: &Path) -> BTreeMap<String, [u8; 32]> {
-    fs::read(root.join(RECEIPT))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    fs::read(
+        crate::RuntimeDirs::resolve(root, root)
+            .staging_dir
+            .join(RECEIPT.trim_start_matches("build/")),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    .unwrap_or_default()
 }
 
 pub(crate) fn schema_input_is_current(root: &Path, id: &str, shared: &Path) -> bool {
@@ -115,7 +122,7 @@ fn raw_fingerprints(
     schema_ids: &[String],
 ) -> Result<BTreeMap<String, Option<[u8; 32]>>, String> {
     let mut ids: BTreeSet<_> = schema_ids.iter().cloned().collect();
-    match fs::read_dir(root.join("build")) {
+    match fs::read_dir(crate::RuntimeDirs::resolve(root, root).staging_dir) {
         Ok(entries) => {
             for entry in entries {
                 let entry = entry.map_err(|error| error.to_string())?;
@@ -149,7 +156,9 @@ fn fingerprint(
     if !valid_rime_build_id(id) || !visited.insert(id.into()) {
         return None;
     }
-    let compiled_path = root.join(format!("build/{id}.schema.yaml"));
+    let compiled_path = crate::RuntimeDirs::resolve(root, shared.unwrap_or(root))
+        .staging_dir
+        .join(format!("{id}.schema.yaml"));
     let compiled_metadata = fs::symlink_metadata(&compiled_path).ok()?;
     if !compiled_metadata.is_file() {
         return None;

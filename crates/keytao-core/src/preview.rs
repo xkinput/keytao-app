@@ -99,10 +99,14 @@ impl PreviewDirectory {
             Err(std::env::VarError::NotPresent) => Self::create()?,
             Err(error) => return Err(format!("invalid candidate preview workspace: {error}")),
         };
-        fs::create_dir(directory.0.join("build")).map_err(|e| e.to_string())?;
+        let source_dirs = crate::RuntimeDirs::resolve(source, source);
+        let preview_dirs = crate::RuntimeDirs::resolve(&directory.0, &directory.0);
+        fs::create_dir(&preview_dirs.staging_dir).map_err(|e| e.to_string())?;
         fs::create_dir(directory.0.join("log")).map_err(|e| e.to_string())?;
         // Only Rime inputs are copied: never inspect the App state or credentials.
-        for entry in fs::read_dir(source).map_err(|e| format!("read preview inputs: {e}"))? {
+        for entry in fs::read_dir(&source_dirs.user_data_dir)
+            .map_err(|e| format!("read preview inputs: {e}"))?
+        {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
             let name = entry.file_name();
@@ -119,14 +123,14 @@ impl PreviewDirectory {
                 copy_tree(&path, &directory.0.join(name.as_ref()))?;
             }
         }
-        for entry in fs::read_dir(source.join("build"))
+        for entry in fs::read_dir(&source_dirs.staging_dir)
             .map_err(|e| format!("read deployed preview config: {e}"))?
         {
             let entry = entry.map_err(|e| e.to_string())?;
             if entry.path().extension().and_then(|e| e.to_str()) == Some("yaml") {
                 fs::copy(
                     entry.path(),
-                    directory.0.join("build").join(entry.file_name()),
+                    preview_dirs.staging_dir.join(entry.file_name()),
                 )
                 .map_err(|e| format!("copy deployed preview config: {e}"))?;
             }
