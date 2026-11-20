@@ -110,9 +110,9 @@
 - **B3 切换**（持有 lib.rs）
   - 内容：resolver 读 active_package；stamp 带 key；Windows 按包分阶段交换；Android 部署器接收目标包。
   - 测试：stamp 变化后目录随之变化；对已缓存的包调切换，不触发编译。
-- **B4 迁移**：flag 默认打开，legacy 保留，列出孤儿，用 sync 快照迁移 userdb。测试：迁移可重复执行（幂等）；回退后 legacy 文件 md5 不变。需要人工确认。
+- **B4 迁移**：在主动启用隔离时迁移，保留旧布局，列出孤儿，通过快照迁移 userdb。测试：迁移可重复执行（幂等）；回退后 legacy 文件 md5 不变。实机迁移需要人工确认。
 - **B5 UI（展示层）**：switcher_model.rs，Flutter 首页两级选择，F4 第一级（D2）。每个平台的菜单单独一个批次，只做重新渲染检查。
-- **B6 删除**：去掉 package_activation.rs 里复制进共享目录的路径和 `.keytao-package-lua` 的跨包快照。验收：全量测试通过，`grep` 不再有引用。
+- **B6 模块边界**：旗标关闭时，已存储方案包的激活走 `legacy_flat`，由它负责共享目录复制、跨包 Lua 快照及共享 `default.custom.yaml` 合并。隔离切包、物化和分包部署走各自的 runtime。旗标仍默认关闭。
 
 ---
 # Critique
@@ -153,3 +153,10 @@
 - B0 merged. B1 must address: relative 'build/...' literals (staged_deploy.rs:76-77,194-198; desktop_inputs.rs:11-12; schema_inputs.rs:10; deploy_child.rs:20; build_prune.rs; package_artifacts.rs; upload_bundle.rs; package_orphans.rs:128-134,203; windows_public_schemas.rs:23,669; appcontainer.rs:125) once staging leaves root/build; golden test per-cfg.
 
 - B1 merged. MUST FIX before the flag can be on (B4): package_orphans.rs:122 with flag on lists legacy flat build/* as orphans (cleanup would delete them); runtime_dirs.rs:37 falls back silently to flat root when package files dir missing (fail closed + log).
+
+## B6 交接与默认开启
+
+- B4 已保护旧版 `build/` 免于孤儿清理，并在已选隔离包缺少源文件目录时报错。
+- 保留平铺事务恢复和迁移所需的激活记录、备份读取。旧版首装、显式目录导出、包移除继续使用现有流程。Windows 隔离公共缓存仍按单包生成 Lua 快照。
+- 默认开启前需把应用内首装接到方案包仓库及分包部署，明确隔离包移除和回退的处理方式，并验证迁移、旧布局回退和各平台运行时切包。迁移实机用户数据仍需负责人确认。
+- 负责人决定何时默认启用隔离，以及旧版平铺激活和回退入口保留多久。移除旧版实现前，先确认支持期内的旧布局能迁移及回退。

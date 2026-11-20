@@ -3184,8 +3184,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (!composing && !currentState.hasComposition) return
         if (currentInputConnection == null) return
         if (currentState.isPackageSwitcher) {
-            applyState(engine.clearComposition())
-            return
+            applyState(engine.processKey(AndroidKeyMapper.XK_ESCAPE, 0))
+            if (currentState.isPackageSwitcher || !currentState.hasComposition) return
         }
         var fallbackState = currentState
         if (!editorUpdatePending && engine.nativeReady) {

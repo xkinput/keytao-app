@@ -261,6 +261,16 @@ Future<void> switchPackage({
   androidDeploy: androidDeploy,
 );
 
+Future<void> setPackageEasyEnglish({
+  required String packageKey,
+  required bool enabled,
+  required FutureOr<String> Function(bool) androidDeploy,
+}) => RustLib.instance.api.crateApiCoreSetPackageEasyEnglish(
+  packageKey: packageKey,
+  enabled: enabled,
+  androidDeploy: androidDeploy,
+);
+
 Future<List<String>> removeSchemePackage({
   required String schemeKey,
   required FutureOr<String> Function(bool) androidDeploy,

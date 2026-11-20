@@ -86,14 +86,40 @@ impl Addon {
     }
 
     pub(crate) fn status(&self, core: &Core, root: &Path) -> Result<Status, CoreError> {
+        let isolated = keytao_core::RuntimeDirs::isolation_enabled(root);
+        let source = if isolated {
+            crate::addon_store::isolated_files(core, self.id).map_err(CoreError::Other)?
+        } else {
+            root.to_path_buf()
+        };
         let manifest = crate::addon_store::manifest(core, root, self.id)
             .and_then(|bytes| {
                 bytes
-                    .map(|bytes| self.parse_manifest(root, &bytes))
+                    .map(|bytes| self.parse_manifest(&source, &bytes))
                     .transpose()
             })
             .map_err(CoreError::Other)?;
+        if isolated {
+            let installed = self.files_installed(&source, manifest.as_ref());
+            return Ok(Status {
+                installed,
+                deployed: installed && crate::addon_store::isolated_ready(core, root, self.id),
+                version: manifest.map_or_else(String::new, |manifest| manifest.version),
+                variant: String::new(),
+            });
+        }
         Ok(self.status_with_manifest(root, manifest))
+    }
+
+    fn files_installed(&self, root: &Path, manifest: Option<&Manifest>) -> bool {
+        manifest.is_some_and(|manifest| {
+            manifest
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .chain(self.required.iter().copied())
+                .all(|name| wanxiang::safe_target(root, name).is_ok_and(|path| path.is_file()))
+        })
     }
 
     fn status_with_manifest(&self, root: &Path, manifest: Option<Manifest>) -> Status {
@@ -102,14 +128,7 @@ impl Addon {
         let selected: Vec<_> = manifest.as_ref().into_iter().flat_map(|manifest| &manifest.files)
             .filter_map(|file| file.path.strip_suffix(".schema.yaml"))
             .filter(|id| configured.iter().any(|selected| selected == id)).collect();
-        let installed = manifest.as_ref().is_some_and(|manifest| {
-            manifest
-                .files
-                .iter()
-                .map(|file| file.path.as_str())
-                .chain(self.required.iter().copied())
-                .all(|name| wanxiang::safe_target(root, name).is_ok_and(|path| path.is_file()))
-        });
+        let installed = self.files_installed(root, manifest.as_ref());
         Status {
             installed,
             deployed: installed
@@ -132,6 +151,9 @@ impl Addon {
         package: &RemotePackage,
         archive_sha256: String,
     ) -> Result<(), String> {
+        if receipt.is_isolated() {
+            return self.record_manifest(receipt, files, package, archive_sha256);
+        }
         #[cfg(windows)]
         {
             receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
@@ -189,12 +211,22 @@ impl Addon {
             };
             receipt.replace(&file.path, &source, file.sha256)?;
         }
+        self.record_manifest(receipt, owned, package, archive_sha256)
+    }
+
+    fn record_manifest(
+        &self,
+        receipt: &mut InstallReceipt,
+        files: Vec<InstalledFile>,
+        package: &RemotePackage,
+        archive_sha256: String,
+    ) -> Result<(), String> {
         let manifest = Manifest {
             format: 1,
             version: package.version.clone(),
             source: package.source.clone(),
             archive_sha256,
-            files: owned,
+            files,
         };
         let source = receipt.work.join("manifest.json");
         fs::write(
@@ -222,7 +254,7 @@ impl Addon {
         progress: impl Fn(u8, &str) + Send + Sync + 'static,
     ) -> Result<InstallReceipt, String> {
         if let Some(bytes) = receipt.manifest_bytes(self.manifest)? {
-            self.parse_manifest(&receipt.root, &bytes)?;
+            self.parse_manifest(&receipt.source_dir()?, &bytes)?;
         }
         let package = package.await?;
         progress(5, &format!("正在下载{}…", self.name));
@@ -296,6 +328,17 @@ impl Addon {
             let root = host.user_root()?;
             let mut receipt = InstallReceipt::new(&root)?;
             receipt.attach_store(core, self.id)?;
+            if receipt.is_isolated() {
+                if installed {
+                    let receipt = install_package(receipt).await?;
+                    receipt.deploy_isolated(core, self.id, host).await?;
+                } else {
+                    receipt.uninstall_isolated(core, self.id, host).await?;
+                    receipt.finish()?;
+                }
+                self.emit_completed(core, installed);
+                return self.status(core, &root).map_err(|error| error.to_string());
+            }
             let previous = receipt
                 .manifest_bytes(self.manifest)?
                 .map(|bytes| self.parse_manifest(&root, &bytes))
@@ -396,19 +439,23 @@ impl Addon {
             public_update.0.take();
             receipt.finish()?;
             crate::packages::sync_generated(core, &root).map_err(|error| error.to_string())?;
-            core.emit(CoreEvent::InstallProgress(InstallProgress {
-                stage: "done".into(),
-                percent: 100,
-                message: if installed {
-                    format!("{}已安装并部署", self.name)
-                } else {
-                    format!("{}已卸载，保留用户自定义和学习记录", self.name)
-                },
-            }));
+            self.emit_completed(core, installed);
             self.status(core, &root).map_err(|error| error.to_string())
         }
         .await;
         result.map_err(CoreError::Other)
+    }
+
+    fn emit_completed(&self, core: &Core, installed: bool) {
+        core.emit(CoreEvent::InstallProgress(InstallProgress {
+            stage: "done".into(),
+            percent: 100,
+            message: if installed {
+                format!("{}已安装并部署", self.name)
+            } else {
+                format!("{}已卸载，保留用户自定义和学习记录", self.name)
+            },
+        }));
     }
 }
 

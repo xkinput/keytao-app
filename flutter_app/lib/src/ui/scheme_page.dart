@@ -1269,16 +1269,31 @@ Map<String, Widget> _addonCells(
     Widget? variant,
     Widget? extra,
   }) {
+    final isolated = c.local?.runtimeIsolation == true;
+    final overlay = isolated && packageKey == 'easy_en';
+    final currentPackage = c.local?.installedScheme;
+    final englishEnabled = c.local?.easyEnglishEnabled;
+    final isolatedPackage = isolated
+        ? c.isolatedPackages
+              .where((package) => package.packageKey == packageKey)
+              .firstOrNull
+        : null;
     final cloudCard = !compact && _homeAddonKeys.contains(packageKey);
     final info = packageKey == 'easy_en' ? c.addon : c.rimeIce;
     final hasUpdate = packageKey == 'easy_en'
         ? c.addonHasUpdate
         : c.rimeIceHasUpdate;
-    final inUse =
-        installed && info?.deployed == true && c.currentAddonKey == packageKey;
+    final inUse = isolated
+        ? isolatedPackage?.active == true && isolatedPackage?.ready == true
+        : installed &&
+              info?.deployed == true &&
+              c.currentAddonKey == packageKey;
+    final deployKey = overlay && active
+        ? currentPackage ?? packageKey
+        : packageKey;
     final deployLabel = c.hasPackageDeployProgress
-        ? c.packageDeployLabel(packageKey)
-        : c.deployingSchemeKey == packageKey && (c.isDeploying || active)
+        ? c.packageDeployLabel(deployKey)
+        : c.deployingSchemeKey == deployKey && (c.isDeploying || active)
         ? AppStrings.deploying
         : null;
     final deploying =
@@ -1379,7 +1394,23 @@ Map<String, Widget> _addonCells(
             ],
             ActionRow(
               children: [
-                if (showInstall && (!cloudCard || !installed || hasUpdate))
+                if (overlay)
+                  ActionButton(
+                    englishEnabled == true ? '从当前方案移除' : '加入当前方案',
+                    primary: englishEnabled != true,
+                    onPress:
+                        c.busy ||
+                            currentPackage == null ||
+                            englishEnabled == null
+                        ? null
+                        : () => c.setPackageEasyEnglish(
+                            currentPackage,
+                            !englishEnabled,
+                          ),
+                  ),
+                if (!overlay &&
+                    showInstall &&
+                    (!cloudCard || !installed || hasUpdate))
                   ActionButton(
                     cloudCard ? (installed ? '更新' : '下载') : label,
                     primary: installed,
@@ -1387,7 +1418,9 @@ Map<String, Widget> _addonCells(
                     tooltip: tooltip,
                     onPress: install,
                   ),
-                if (cloudCard && (installed || deployLabel != null))
+                if (!overlay &&
+                    (cloudCard || isolated) &&
+                    (installed || deployLabel != null))
                   ActionButton(
                     deployLabel ?? (inUse ? '使用中' : '使用'),
                     primary: !inUse,
@@ -1395,9 +1428,11 @@ Map<String, Widget> _addonCells(
                     icon: inUse ? FLucideIcons.check : FLucideIcons.play,
                     onPress: c.busy || inUse || deployLabel != null
                         ? null
+                        : isolated
+                        ? () => c.switchPackage(packageKey)
                         : () => c.activateSchemePackage(packageKey),
                   ),
-                if (installed)
+                if (!overlay && installed)
                   ActionButton(AppStrings.uninstall, onPress: uninstall),
                 FPopoverMenu(
                   control: FPopoverControl.managed(controller: menu),
@@ -1406,7 +1441,7 @@ Map<String, Widget> _addonCells(
                   menuBuilder: (_, popover, _) => [
                     FItemGroup(
                       children: [
-                        if (cloudCard && installed)
+                        if (!overlay && cloudCard && installed)
                           FItem(
                             title: const Text('重新部署'),
                             prefix: const Icon(FLucideIcons.refreshCw),
@@ -1417,7 +1452,7 @@ Map<String, Widget> _addonCells(
                                   }
                                 : null,
                           ),
-                        if (installed)
+                        if (!overlay && installed)
                           FItem(
                             title: const Text(AppStrings.selectSchemas),
                             prefix: const Icon(FLucideIcons.listChecks),

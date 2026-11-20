@@ -7,6 +7,7 @@ import os
 
 private let rimeKeySpace: UInt32 = 0x0020
 private let rimeKeyBackspace: UInt32 = 0xff08
+private let rimeKeyEscape: UInt32 = 0xff1b
 private let openPackageMenuKey: UInt32 = 0x02000004
 private let keyTaoKeyboardLog = Logger(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 private let keyTaoKeyboardTraitsLog = OSLog(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
@@ -1999,12 +2000,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard !runtimeStarting || queuedCommands.isEmpty else { return false }
         guard currentState.hasComposition else { return true }
         guard engine.nativeReady else { return false }
-        if currentState.isPackageSwitcher {
-            apply(engine.clearComposition())
-            return !currentState.hasComposition
-        }
         let generation = inputContextGeneration
         let documentIdentifier = currentDocumentIdentifier()
+        if currentState.isPackageSwitcher {
+            apply(engine.processKey(rimeKeyEscape))
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier),
+                  !currentState.isPackageSwitcher else { return false }
+        }
         if !currentState.candidates.isEmpty || !currentState.candidatePanel.candidates.isEmpty {
             if engineCapabilities.candidateSelection {
                 apply(engine.selectCandidate(0))

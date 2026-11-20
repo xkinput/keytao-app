@@ -54,6 +54,32 @@ where
         }
     }
 
+    async fn deploy_package(&self, key: &str) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        self.host.require_default_windows_root()?;
+        keytao_app_core::deploy::deploy_package(
+            &self.host.core,
+            &self.host.root,
+            key,
+            #[cfg(target_os = "android")]
+            self.android_deploy.as_ref().ok_or("Android deploy callback missing")?,
+        )
+        .await
+    }
+
+    async fn switch_package(&self, key: &str) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        self.host.require_default_windows_root()?;
+        keytao_app_core::deploy::switch_package(
+            &self.host.core,
+            &self.host.root,
+            key,
+            #[cfg(target_os = "android")]
+            self.android_deploy.as_ref().ok_or("Android deploy callback missing")?,
+        )
+        .await
+    }
+
     fn write_reload_stamp(&self, root: &Path) -> Result<Option<PathBuf>, String> {
         SchemeHost::write_reload_stamp(&self.host, root)
     }

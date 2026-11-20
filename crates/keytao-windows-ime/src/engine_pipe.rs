@@ -79,7 +79,7 @@ struct Shared {
 impl Shared {
     fn track_schema(&self, schema_id: &str) {
         let mut usable = self.usable_session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if schema_id.is_empty() || schema_id == ".default" {
+        if matches!(schema_id, "" | ".default" | keytao_core::switcher_model::SCHEMA_ID) {
             *usable = None;
         } else if usable.is_none() {
             *usable = keytao_core::default_user_data_dir()

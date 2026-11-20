@@ -16,6 +16,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
+use keytao_core::RuntimeDirs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -25,6 +26,7 @@ use tokio::{
 
 pub const SCHEMA_ID: &str = "wanxiang";
 const GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
+const ISOLATED_GRAMMAR_FILE: &str = "runtime/wanxiang/wanxiang-lts-zh-hans.gram";
 const GRAMMAR_LANGUAGE: &str = "wanxiang-lts-zh-hans";
 const GRAMMAR_RELEASE: &str = "https://api.github.com/repos/amzxyz/RIME-LMDG/releases/tags/LTS";
 const GRAMMAR_DOWNLOAD: &str =
@@ -189,14 +191,7 @@ pub fn status_at(root: &Path) -> Status {
 
 fn status_from_manifest(root: &Path, manifest: Option<Manifest>) -> Status {
     let dirs = keytao_core::RuntimeDirs::resolve(root, root);
-    let installed = manifest.as_ref().is_some_and(|manifest| {
-        manifest
-            .files
-            .iter()
-            .map(|file| file.path.as_str())
-            .chain(REQUIRED.iter().copied())
-            .all(|name| safe_target(root, name).is_ok_and(|p| p.is_file()))
-    });
+    let installed = files_installed(root, manifest.as_ref());
     Status {
         installed,
         deployed: installed
@@ -209,6 +204,17 @@ fn status_from_manifest(root: &Path, manifest: Option<Manifest>) -> Status {
             .map_or_else(String::new, |m| m.version.clone()),
         variant: manifest.map_or_else(default_variant, |m| m.variant),
     }
+}
+
+fn files_installed(root: &Path, manifest: Option<&Manifest>) -> bool {
+    manifest.is_some_and(|manifest| {
+        manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(REQUIRED.iter().copied())
+            .all(|name| safe_target(root, name).is_ok_and(|path| path.is_file()))
+    })
 }
 
 fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
@@ -281,19 +287,33 @@ fn grammar_supported() -> bool {
 }
 
 pub fn grammar_status(root: &Path) -> Result<GrammarStatus, CoreError> {
-    grammar_status_from_manifest(root, read_manifest(root).map_err(CoreError::Other)?)
+    grammar_status_from_manifest(
+        root,
+        read_manifest(root).map_err(CoreError::Other)?,
+        GRAMMAR_FILE,
+    )
 }
 
 pub fn grammar_status_for(core: &Core, root: &Path) -> Result<GrammarStatus, CoreError> {
-    grammar_status_from_manifest(root, stored_manifest(core, root).map_err(CoreError::Other)?)
+    let relative = if RuntimeDirs::isolation_enabled(root) {
+        ISOLATED_GRAMMAR_FILE
+    } else {
+        GRAMMAR_FILE
+    };
+    grammar_status_from_manifest(
+        root,
+        stored_manifest(core, root).map_err(CoreError::Other)?,
+        relative,
+    )
 }
 
 fn grammar_status_from_manifest(
     root: &Path,
     manifest: Option<Manifest>,
+    relative: &str,
 ) -> Result<GrammarStatus, CoreError> {
     let result = || -> Result<_, String> {
-        let path = safe_target(root, GRAMMAR_FILE)?;
+        let path = safe_target(root, relative)?;
         let size = match fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => metadata.len(),
             Ok(_) => return Err("万象语法模型路径不是文件".into()),
@@ -301,17 +321,18 @@ fn grammar_status_from_manifest(
             Err(error) => return Err(format!("读取万象语法模型失败：{error}")),
         };
         let model = manifest.and_then(|manifest| manifest.grammar);
+        let installed = size > 0 && (relative == GRAMMAR_FILE || model.is_some());
         Ok(GrammarStatus {
             available: grammar_supported(),
-            installed: size > 0,
+            installed,
             version: model.map_or_else(String::new, |model| model.version),
-            size: if size > 0 { size } else { GRAMMAR_SIZE },
+            size: if installed { size } else { GRAMMAR_SIZE },
         })
     };
     result().map_err(CoreError::Other)
 }
 
-fn grammar_schema(schema: &str, enabled: bool) -> String {
+pub(crate) fn grammar_schema(schema: &str, enabled: bool) -> String {
     if enabled {
         schema.replace("language: \"\"", &format!("language: {GRAMMAR_LANGUAGE}"))
     } else {
@@ -511,17 +532,27 @@ fn commit_grammar(
     supported: bool,
 ) -> Result<(), String> {
     receipt.preflight_owner("wanxiang.schema.yaml")?;
-    receipt.preflight_owner(GRAMMAR_FILE)?;
+    let grammar_file = if receipt.is_isolated() {
+        ISOLATED_GRAMMAR_FILE
+    } else {
+        GRAMMAR_FILE
+    };
+    receipt.preflight_owner(grammar_file)?;
     let mut manifest = receipt_manifest(receipt)?.ok_or("请先安装万象拼音")?;
     let schema = manifest
         .files
         .iter_mut()
         .find(|file| file.path == "wanxiang.schema.yaml")
         .ok_or("万象安装记录缺少方案文件")?;
-    if fingerprint(&safe_target(&receipt.root, &schema.path)?)?.0 != schema.sha256 {
+    let stage = receipt.work.join("files");
+    let schema_root = if receipt.is_isolated() {
+        &stage
+    } else {
+        &receipt.root
+    };
+    if fingerprint(&safe_target(schema_root, &schema.path)?)?.0 != schema.sha256 {
         return Err("万象方案文件已修改，请先更新万象拼音".into());
     }
-    let stage = receipt.work.join("files");
     fs::create_dir_all(&stage).map_err(|error| error.to_string())?;
     let schema_path = stage.join(&schema.path);
     fs::write(&schema_path, BASIC_SCHEMA).map_err(|error| error.to_string())?;
@@ -542,28 +573,28 @@ fn commit_grammar(
     if let Some((path, package)) = download {
         let (sha256, size) = fingerprint(path)?;
         verify_download_with_limit(size, package.download_bytes, MAX_GRAMMAR_BYTES)?;
-        receipt.replace(GRAMMAR_FILE, path, sha256.clone())?;
+        receipt.replace(grammar_file, path, sha256.clone())?;
         manifest.grammar = Some(GrammarModel {
             version: package.version.clone(),
             size,
             sha256,
         });
     } else if !installed {
-        if safe_target(&receipt.root, GRAMMAR_FILE)?.is_file() {
+        if safe_target(&receipt.root, grammar_file)?.is_file() {
             let model = manifest
                 .grammar
                 .as_ref()
                 .ok_or("语法模型没有所有权记录，已保留")?;
-            if fingerprint(&safe_target(&receipt.root, GRAMMAR_FILE)?)?
+            if fingerprint(&safe_target(&receipt.root, grammar_file)?)?
                 != (model.sha256.clone(), model.size)
             {
                 return Err("语法模型已修改，已保留原文件".into());
             }
-            receipt.move_original(GRAMMAR_FILE)?;
+            receipt.move_original(grammar_file)?;
         }
         manifest.grammar = None;
     } else if manifest.grammar.is_none() {
-        let (sha256, size) = fingerprint(&safe_target(&receipt.root, GRAMMAR_FILE)?)?;
+        let (sha256, size) = fingerprint(&safe_target(&receipt.root, grammar_file)?)?;
         verify_download_with_limit(size, Some(size), MAX_GRAMMAR_BYTES)?;
         manifest.grammar = Some(GrammarModel {
             version: "local".into(),
@@ -572,14 +603,12 @@ fn commit_grammar(
         });
     }
     manifest.includes_grammar = installed;
-    receipt.replace(&schema.path, &private_schema, schema.sha256.clone())?;
-    let path = receipt.work.join("manifest.json");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    receipt.replace_manifest(MANIFEST, &path)
+    if receipt.is_isolated() {
+        fs::copy(private_schema, schema_path).map_err(|error| error.to_string())?;
+    } else {
+        receipt.replace(&schema.path, &private_schema, schema.sha256.clone())?;
+    }
+    record_manifest(receipt, &manifest)
 }
 
 // Reject Windows aliases/ADS and traversal on every OS so an archive accepted
@@ -705,6 +734,8 @@ pub struct InstallReceipt {
     changes: Vec<Change>,
     pending: bool,
     store: Option<crate::addon_store::AddonStore>,
+    store_rollback: Option<tempfile::TempDir>,
+    isolated: bool,
     manifest: Option<Vec<u8>>,
     other_owners: BTreeMap<String, String>,
     #[cfg(windows)]
@@ -744,6 +775,8 @@ impl InstallReceipt {
             changes: Vec::new(),
             pending: true,
             store: None,
+            store_rollback: None,
+            isolated: false,
             manifest: None,
             other_owners: BTreeMap::new(),
             #[cfg(windows)]
@@ -753,6 +786,11 @@ impl InstallReceipt {
     }
 
     pub(crate) fn attach_store(&mut self, core: &Core, id: &str) -> Result<(), String> {
+        if RuntimeDirs::isolation_enabled(&self.root) {
+            self.store = Some(crate::addon_store::AddonStore::new(core, &self.root, id)?);
+            self.isolated = true;
+            return Ok(());
+        }
         crate::addon_store::migrate(core, &self.root).map_err(|e| e.to_string())?;
         let addons = crate::package_activation::addon_ownership(core, &self.root)
             .map_err(|e| e.to_string())?;
@@ -781,6 +819,19 @@ impl InstallReceipt {
         }
         self.store = Some(crate::addon_store::AddonStore::new(core, &self.root, id)?);
         Ok(())
+    }
+
+    pub(crate) fn is_isolated(&self) -> bool {
+        self.isolated
+    }
+
+    pub(crate) fn source_dir(&self) -> Result<PathBuf, String> {
+        if self.isolated
+            && let Some(store) = &self.store
+        {
+            return store.source_dir();
+        }
+        Ok(self.root.clone())
     }
 
     pub(crate) fn preflight_owner(&self, relative: &str) -> Result<(), String> {
@@ -831,15 +882,102 @@ impl InstallReceipt {
     }
 
     pub(crate) fn commit_store(&mut self, installed: bool) -> Result<(), String> {
+        let isolated = self.is_isolated();
         if let Some(store) = &mut self.store {
             if installed {
                 let bytes = self.manifest.as_ref().ok_or("附加方案缺少安装记录")?;
-                store.commit(&self.work.join("files"), bytes)?;
+                if isolated {
+                    self.store_rollback =
+                        Some(store.commit_isolated(&self.work.join("files"), bytes)?);
+                } else {
+                    store.commit(&self.work.join("files"), bytes)?;
+                }
             } else {
                 store.remove()?;
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn uninstall_isolated(
+        &mut self,
+        core: &Core,
+        id: &str,
+        host: &impl SchemeHost,
+    ) -> Result<(), String> {
+        let root = self.root.clone();
+        let active = || RuntimeDirs::active_package_key(&root).as_deref() == Some(id);
+        if active() {
+            let packages = crate::runtime_materialize::isolated_packages(core, &root)
+                .map_err(|error| error.to_string())?;
+            let fallback = packages
+                .iter()
+                .find(|package| package.package_key != id && package.ready)
+                .map_or("builtin/keytao", |package| package.package_key.as_str());
+            host.switch_package(fallback).await?;
+        }
+        keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
+            if active() {
+                return Err("请先切换到其他方案包".into());
+            }
+            let relative = format!("scheme-packages/addons/{id}");
+            let projection = crate::packages::safe_path(&root, &relative)?;
+            let marker = crate::packages::safe_path(&projection, ".keytao-source-projection")?;
+            let moved = fs::read(marker).ok().as_deref() == Some(b"1\n");
+            let backup = self.work.join("source-projection");
+            if moved {
+                fs::rename(&projection, &backup).map_err(|error| error.to_string())?;
+            }
+            if let Err(error) = self.commit_store(false) {
+                if moved {
+                    if let Err(restore) = fs::rename(&backup, &projection) {
+                        self.pending = false;
+                        return Err(format!(
+                            "{error}；恢复方案包失败：{restore}；备份保留在 {}",
+                            backup.display()
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+            Ok(())
+        })?;
+        crate::runtime_materialize::isolated_packages(core, &root)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) async fn deploy_isolated(
+        mut self,
+        core: &Core,
+        id: &str,
+        host: &impl SchemeHost,
+    ) -> Result<(), String> {
+        let existed = crate::addon_store::isolated_files(core, id)?.is_dir();
+        self.commit_store(true)?;
+        let deployed = host.deploy_package(id).await.and_then(|()| {
+            if crate::addon_store::isolated_ready(core, &self.root, id) {
+                Ok(())
+            } else {
+                Err("方案包部署产物缺失".into())
+            }
+        });
+        if let Err(error) = deployed {
+            let root = self.root.clone();
+            self.rollback()
+                .map_err(|restore| format!("{error}；恢复方案包失败：{restore}"))?;
+            let restored = if existed {
+                host.deploy_package(id).await
+            } else {
+                let mut receipt = Self::new(&root)?;
+                receipt.attach_store(core, id)?;
+                receipt.uninstall_isolated(core, id, host).await?;
+                receipt.finish()
+            };
+            restored.map_err(|restore| format!("{error}；恢复方案包失败：{restore}"))?;
+            return Err(error);
+        }
+        self.finish()
     }
 
     pub(crate) fn move_original(&mut self, relative: &str) -> Result<(), String> {
@@ -907,6 +1045,9 @@ impl InstallReceipt {
     }
 
     fn rollback_inner(&mut self) -> Result<(), String> {
+        if let Some(rollback) = self.store_rollback.take() {
+            self.store.as_ref().unwrap().rollback_isolated(rollback)?;
+        }
         while let Some(change) = self.changes.last() {
             let destination = safe_target(&self.root, &change.path)?;
             if let Some(expected) = &change.replacement_hash {
@@ -1364,23 +1505,41 @@ fn commit_files(
     variant: &str,
 ) -> Result<(), String> {
     variant_source(variant)?;
+    if receipt.is_isolated() {
+        let grammar = receipt_manifest(receipt)?.and_then(|manifest| manifest.grammar);
+        let grammar = match grammar {
+            Some(model) if safe_target(&receipt.root, ISOLATED_GRAMMAR_FILE)?.is_file() => {
+                if fingerprint(&safe_target(&receipt.root, ISOLATED_GRAMMAR_FILE)?)?
+                    != (model.sha256.clone(), model.size)
+                {
+                    return Err("语法模型已修改，已保留原文件".into());
+                }
+                Some(model)
+            }
+            _ => None,
+        };
+        if grammar.is_some() && grammar_supported() {
+            update_staged_grammar(receipt, &mut files, true)?;
+        }
+        return record_manifest(
+            receipt,
+            &Manifest {
+                format: 1,
+                version: package.version.clone(),
+                variant: variant.into(),
+                source: package.source.clone(),
+                archive_sha256,
+                includes_grammar: grammar.is_some(),
+                grammar,
+                files,
+            },
+        );
+    }
     let grammar_present = safe_target(&receipt.root, GRAMMAR_FILE)?.is_file();
     if grammar_present {
         receipt.preflight_owner(GRAMMAR_FILE)?;
     }
-    if let Some(schema) = files
-        .iter_mut()
-        .find(|file| file.path == "wanxiang.schema.yaml")
-    {
-        let path = receipt.work.join("files").join(&schema.path);
-        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        fs::write(
-            &path,
-            grammar_schema(&content, grammar_present && grammar_supported()),
-        )
-        .map_err(|error| error.to_string())?;
-        (schema.sha256, schema.size) = fingerprint(&path)?;
-    }
+    update_staged_grammar(receipt, &mut files, grammar_present && grammar_supported())?;
     #[cfg(windows)]
     {
         receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
@@ -1440,20 +1599,43 @@ fn commit_files(
         let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
         fs::write(&path, grammar_schema(&content, false)).map_err(|error| error.to_string())?;
     }
-    let manifest = Manifest {
-        format: 1,
-        version: package.version.clone(),
-        variant: variant.into(),
-        source: package.source.clone(),
-        archive_sha256,
-        includes_grammar: grammar_present,
-        grammar,
-        files: owned,
-    };
+    record_manifest(
+        receipt,
+        &Manifest {
+            format: 1,
+            version: package.version.clone(),
+            variant: variant.into(),
+            source: package.source.clone(),
+            archive_sha256,
+            includes_grammar: grammar_present,
+            grammar,
+            files: owned,
+        },
+    )
+}
+
+fn update_staged_grammar(
+    receipt: &InstallReceipt,
+    files: &mut [InstalledFile],
+    enabled: bool,
+) -> Result<(), String> {
+    if let Some(schema) = files
+        .iter_mut()
+        .find(|file| file.path == "wanxiang.schema.yaml")
+    {
+        let path = receipt.work.join("files").join(&schema.path);
+        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        fs::write(&path, grammar_schema(&content, enabled)).map_err(|error| error.to_string())?;
+        (schema.sha256, schema.size) = fingerprint(&path)?;
+    }
+    Ok(())
+}
+
+fn record_manifest(receipt: &mut InstallReceipt, manifest: &Manifest) -> Result<(), String> {
     let path = receipt.work.join("manifest.json");
     fs::write(
         &path,
-        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+        serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     receipt.replace_manifest(MANIFEST, &path)
@@ -1564,7 +1746,12 @@ pub async fn manage_grammar(
             }
             .into(),
         }));
-        let download = if installed && !safe_target(&root, GRAMMAR_FILE)?.is_file() {
+        let grammar_file = if receipt.is_isolated() {
+            ISOLATED_GRAMMAR_FILE
+        } else {
+            GRAMMAR_FILE
+        };
+        let download = if installed && !safe_target(&root, grammar_file)?.is_file() {
             Some(download_grammar(core, &root, &mut cancel).await?)
         } else {
             None
@@ -1585,6 +1772,10 @@ pub async fn manage_grammar(
             installed,
             grammar_supported(),
         )?;
+        if receipt.is_isolated() {
+            receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
+            return finish_grammar(core, &root, installed);
+        }
         #[cfg(windows)]
         let mut public_update = None;
         let deployment = async {
@@ -1632,20 +1823,24 @@ pub async fn manage_grammar(
             return Err(error);
         }
         receipt.finish()?;
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: if installed {
-                "语法模型已安装"
-            } else {
-                "语法模型已删除"
-            }
-            .into(),
-        }));
-        grammar_status_for(core, &root).map_err(|error| error.to_string())
+        finish_grammar(core, &root, installed)
     }
     .await;
     result.map_err(CoreError::Other)
+}
+
+fn finish_grammar(core: &Core, root: &Path, installed: bool) -> Result<GrammarStatus, String> {
+    core.emit(CoreEvent::InstallProgress(InstallProgress {
+        stage: "done".into(),
+        percent: 100,
+        message: if installed {
+            "语法模型已安装"
+        } else {
+            "语法模型已删除"
+        }
+        .into(),
+    }));
+    grammar_status_for(core, root).map_err(|error| error.to_string())
 }
 
 pub async fn manage_wanxiang(
@@ -1690,6 +1885,16 @@ where
         let root = host.user_root()?;
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, SCHEMA_ID)?;
+        if receipt.is_isolated() {
+            if installed {
+                let receipt = install_package(receipt, variant).await?;
+                receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
+            } else {
+                receipt.uninstall_isolated(core, SCHEMA_ID, host).await?;
+                receipt.finish()?;
+            }
+            return finish_wanxiang(core, &root, installed);
+        }
         let removed_sources = if installed {
             Vec::new()
         } else {
@@ -1781,25 +1986,40 @@ where
             return Err(error);
         }
         receipt.finish()?;
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: if installed {
-                "万象拼音已安装并部署"
-            } else {
-                "万象拼音已卸载，保留用户自定义和学习记录"
-            }
-            .into(),
-        }));
-        wanxiang_status(core, &root).map_err(|e| e.to_string())
+        finish_wanxiang(core, &root, installed)
     }
     .await;
     result.map_err(CoreError::Other)
 }
 
+fn finish_wanxiang(core: &Core, root: &Path, installed: bool) -> Result<Status, String> {
+    core.emit(CoreEvent::InstallProgress(InstallProgress {
+        stage: "done".into(),
+        percent: 100,
+        message: if installed {
+            "万象拼音已安装并部署"
+        } else {
+            "万象拼音已卸载，保留用户自定义和学习记录"
+        }
+        .into(),
+    }));
+    wanxiang_status(core, root).map_err(|error| error.to_string())
+}
+
 pub fn wanxiang_status(core: &Core, root: &Path) -> Result<Status, CoreError> {
-    Ok(status_from_manifest(
-        root,
-        stored_manifest(core, root).map_err(CoreError::Other)?,
-    ))
+    let manifest = stored_manifest(core, root).map_err(CoreError::Other)?;
+    if RuntimeDirs::isolation_enabled(root) {
+        let source =
+            crate::addon_store::isolated_files(core, SCHEMA_ID).map_err(CoreError::Other)?;
+        let installed = files_installed(&source, manifest.as_ref());
+        return Ok(Status {
+            installed,
+            deployed: installed && crate::addon_store::isolated_ready(core, root, SCHEMA_ID),
+            version: manifest
+                .as_ref()
+                .map_or_else(String::new, |manifest| manifest.version.clone()),
+            variant: manifest.map_or_else(default_variant, |manifest| manifest.variant),
+        });
+    }
+    Ok(status_from_manifest(root, manifest))
 }

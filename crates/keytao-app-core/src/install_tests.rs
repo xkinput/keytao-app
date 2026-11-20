@@ -414,8 +414,8 @@ async fn activation_without_stored_directory_requires_redownload() {
     assert_eq!(core.state().active_scheme.as_deref(), Some("keytao"));
 }
 
-#[test]
-fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
+#[tokio::test]
+async fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
     let dir = tempfile::tempdir().unwrap();
     let core = Core::new(
         AppEnv {
@@ -456,7 +456,18 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
     .unwrap();
     let cursor = std::io::Cursor::new(Vec::new());
     let zip = zip::ZipWriter::new(cursor).finish().unwrap().into_inner();
-    crate::packages::cleanup_previous(&core, &custom_root, &zip).unwrap();
+    let archive = dir.path().join("package.zip");
+    fs::write(&archive, zip).unwrap();
+    smart_install(
+        &core,
+        archive.to_string_lossy().into_owned(),
+        custom_root.to_string_lossy().into_owned(),
+        None,
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         fs::read_to_string(custom_root.join("obsolete.lua")).unwrap(),
         "abc"

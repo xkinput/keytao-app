@@ -38,6 +38,7 @@ pub fn packages(
     let active = RuntimeDirs::active_package_key(root);
     installed
         .into_iter()
+        .filter(|(key, _)| key != "easy_en")
         .map(|(package_key, display_name)| {
             let ready = RuntimeDirs::for_package(root, shared, &package_key)
                 .is_some_and(|dirs| package_build_ready(root, &dirs));
@@ -245,7 +246,10 @@ impl Menu {
         if is_hotkey(key, mask) {
             return Decision::Native;
         }
-        if matches!(key, 0xffe1 | 0xffe2 | 0xffe5) {
+        if matches!(key, 0xffe1..=0xffe4 | 0xffe9..=0xffec) {
+            return Decision::Stay;
+        }
+        if key == 0xffe5 {
             return Decision::Pass;
         }
         if mask & RIME_RELEASE_MASK != 0 {
@@ -328,5 +332,38 @@ mod tests {
         assert!(is_hotkey(0x60, RIME_MOD_CONTROL));
         assert!(!is_hotkey(XK_F4, RIME_RELEASE_MASK));
         assert!(Menu::open(false, || panic!("loaded while disabled")).is_none());
+    }
+
+    #[test]
+    fn modifier_keys_keep_the_package_menu_open() {
+        use crate::{RIME_MOD_ALT, RIME_MOD_SHIFT, RIME_MOD_SUPER};
+
+        let mut menu = Menu::open(true, || {
+            vec![Package {
+                package_key: "package".into(),
+                display_name: "Package".into(),
+                active: true,
+                ready: true,
+            }]
+        })
+        .unwrap();
+        for (key, mask) in [
+            (0xffe1, RIME_MOD_SHIFT),
+            (0xffe2, RIME_MOD_SHIFT),
+            (0xffe3, RIME_MOD_CONTROL),
+            (0xffe4, RIME_MOD_CONTROL),
+            (0xffe9, RIME_MOD_ALT),
+            (0xffea, RIME_MOD_ALT),
+            (0xffeb, RIME_MOD_SUPER),
+            (0xffec, RIME_MOD_SUPER),
+        ] {
+            assert_eq!(menu.key(key, 0), Decision::Stay, "{key:#x} press");
+            assert_eq!(menu.key(key, mask), Decision::Stay, "{key:#x} with mask");
+            assert_eq!(
+                menu.key(key, mask | RIME_RELEASE_MASK),
+                Decision::Stay,
+                "{key:#x} release"
+            );
+        }
     }
 }

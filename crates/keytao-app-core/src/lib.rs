@@ -27,6 +27,7 @@ mod downloaded_addon;
 mod pinyin_addons;
 mod shape_addons;
 mod package_activation;
+mod legacy_flat;
 mod package_artifacts;
 pub mod package_orphans;
 pub mod package_migration;
