@@ -368,7 +368,7 @@ fn registry_path(key: PCWSTR, name: PCWSTR) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn server_enabled() -> bool {
+pub(super) fn server_enabled() -> bool {
     let mut value = 0u32;
     let mut size = std::mem::size_of_val(&value) as u32;
     let result = unsafe {

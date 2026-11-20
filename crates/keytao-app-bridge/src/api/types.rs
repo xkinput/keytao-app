@@ -62,6 +62,33 @@ pub struct InstalledPackageDto {
     pub source: Option<String>,
     pub display_name: Option<String>,
     pub logo_path: Option<String>,
+    #[frb(default = "rime")]
+    pub engine: String,
+}
+
+pub struct LibjdStatusDto {
+    pub available: bool,
+    pub installed_version: Option<String>,
+}
+
+#[flutter_rust_bridge::frb(opaque)]
+pub struct LibjdReleaseDto(pub(crate) keytao_app_core::libjd::LibjdRelease);
+
+impl LibjdReleaseDto {
+    #[flutter_rust_bridge::frb(sync, getter)]
+    pub fn version(&self) -> String {
+        self.0.version().to_owned()
+    }
+
+    #[flutter_rust_bridge::frb(sync, getter)]
+    pub fn size(&self) -> u32 {
+        self.0.size()
+    }
+
+    #[flutter_rust_bridge::frb(sync, getter)]
+    pub fn source_url(&self) -> String {
+        self.0.source_url().to_owned()
+    }
 }
 
 #[derive(serde::Deserialize)]

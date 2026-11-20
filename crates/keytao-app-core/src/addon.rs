@@ -823,9 +823,29 @@ where
         }));
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, id)?;
+        let packages = if receipt.is_isolated() && receipt.manifest_bytes(MANIFEST)?.is_some() {
+            crate::runtime_materialize::installed_easy_english_packages(core, &root)
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
         let mut receipt = install(receipt).await?;
         if receipt.is_isolated() {
             receipt.commit_store(true)?;
+            for (index, key) in packages.iter().enumerate() {
+                if let Err(error) = host.deploy_package(key).await {
+                    receipt.rollback().map_err(|restore| {
+                        format!("{error}；恢复 English 失败：{restore}")
+                    })?;
+                    let mut message = error;
+                    for key in &packages[..=index] {
+                        if let Err(restore) = host.deploy_package(key).await {
+                            message.push_str(&format!("；恢复 {key} 部署失败：{restore}"));
+                        }
+                    }
+                    return Err(message);
+                }
+            }
             receipt.finish()?;
             return addon_schema_status(core, || Ok(root), id.into())
                 .map_err(|error| error.to_string());
@@ -1130,7 +1150,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn easy_english_toggle_redeploys_only_the_active_package() {
+    async fn isolated_easy_english_toggle_and_update_refresh_only_enabled_packages() {
         use crate::scheme_host::tests::AddonHost;
         use keytao_core::RuntimeDirs;
         use std::fs;
@@ -1145,35 +1165,56 @@ mod tests {
         fs::create_dir_all(active.parent().unwrap()).unwrap();
         let first = "builtin/keytao";
         let second = "builtin/second";
-        host.core.lock_state().installed_packages.insert(
-            second.into(),
-            crate::state::InstalledPackage { version: None },
-        );
+        let disabled = "builtin/disabled";
+        {
+            let mut installed = host.core.lock_state();
+            for key in [second, disabled] {
+                installed.installed_packages.insert(
+                    key.into(),
+                    crate::state::InstalledPackage { version: None },
+                );
+            }
+        }
         for key in [second, first] {
             fs::write(&active, serde_json::json!({"active_package": key}).to_string()).unwrap();
             host.deploy_package(key).await.unwrap();
         }
-        let mut receipt = InstallReceipt::new(root).unwrap();
-        receipt.attach_store(&host.core, EASY_EN_ADDON_ID).unwrap();
-        let archive = receipt.work.join("fixture.zip");
-        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-        for (suffix, content) in [
-            ("schema.yaml", fs::read_to_string(bundled.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID))).unwrap()
-                .replace(smoke_fixture::SCHEMA_ID, EASY_EN_ADDON_ID)),
-            ("dict.yaml", fs::read_to_string(bundled.join(format!("{}.dict.yaml", smoke_fixture::SCHEMA_ID))).unwrap()
-                .replace(smoke_fixture::SCHEMA_ID, EASY_EN_ADDON_ID)),
-        ] {
-            zip.start_file(format!("rime-easy-en-commit/easy_en.{suffix}"), zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(content.as_bytes()).unwrap();
-        }
-        for (path, content) in [("lua/easy_en.lua", "return {}"), ("LICENSE", "fixture")] {
-            zip.start_file(format!("rime-easy-en-commit/{path}"), zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(content.as_bytes()).unwrap();
-        }
-        zip.finish().unwrap();
-        commit_package(&mut receipt, &archive, &package_from_commit(&"a".repeat(40)).unwrap()).unwrap();
-        receipt.commit_store(true).unwrap();
-        receipt.finish().unwrap();
+        let install = |version: char| {
+            let bundled = &bundled;
+            move |mut receipt: InstallReceipt| async move {
+                let fixture = |suffix| {
+                    fs::read_to_string(bundled.join(format!("{}.{suffix}", smoke_fixture::SCHEMA_ID)))
+                        .unwrap()
+                        .replace(smoke_fixture::SCHEMA_ID, EASY_EN_ADDON_ID)
+                };
+                let schema = fixture("schema.yaml")
+                    .replace("KeyTao Smoke", &format!("Easy English {version}"));
+                let dictionary = fixture("dict.yaml");
+                let archive = receipt.work.join("fixture.zip");
+                let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+                for (path, content) in [
+                    ("easy_en.schema.yaml", schema.as_str()),
+                    ("easy_en.dict.yaml", dictionary.as_str()),
+                    ("lua/easy_en.lua", "return {}"),
+                    ("LICENSE", "fixture"),
+                ] {
+                    zip.start_file(
+                        format!("rime-easy-en-commit/{path}"),
+                        zip::write::SimpleFileOptions::default(),
+                    )
+                    .unwrap();
+                    zip.write_all(content.as_bytes()).unwrap();
+                }
+                zip.finish().unwrap();
+                let package = package_from_commit(&version.to_string().repeat(40)).unwrap();
+                commit_package(&mut receipt, &archive, &package).unwrap();
+                Ok(receipt)
+            }
+        };
+        let update = |version| {
+            addon_schema_install_with(&host.core, EASY_EN_ADDON_ID.into(), &host, install(version))
+        };
+        update('a').await.unwrap();
 
         let first_dirs = RuntimeDirs::for_package(root, &bundled, first).unwrap();
         let second_dirs = RuntimeDirs::for_package(root, &bundled, second).unwrap();
@@ -1191,6 +1232,39 @@ mod tests {
         }
         assert!(!root.join("easy_en.schema.yaml").exists());
         assert!(set_package_easy_english(&host.core, second, true, &host).await.is_err());
+
+        for key in [first, second, "removed"] {
+            crate::runtime_materialize::update_easy_english(root, key, true).unwrap();
+        }
+        fs::write(&active, serde_json::json!({"active_package": second}).to_string()).unwrap();
+        let assert_overlays = || {
+            for key in [first, second] {
+                let dirs = RuntimeDirs::for_package(root, &bundled, key).unwrap();
+                let built = fs::read_to_string(dirs.staging_dir.join("easy_en.schema.yaml")).unwrap();
+                assert!(built.contains("Easy English b"));
+            }
+            assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(second));
+        };
+        assert_eq!(update('b').await.unwrap().version, "bbbbbbbbbbbb");
+        assert_overlays();
+        let disabled_dirs = RuntimeDirs::for_package(root, &bundled, disabled).unwrap();
+        assert!(!disabled_dirs.staging_dir.exists());
+
+        let broken = "z-missing-source";
+        host.core.lock_state().installed_packages.insert(
+            broken.into(),
+            crate::state::InstalledPackage { version: None },
+        );
+        crate::runtime_materialize::update_easy_english(root, broken, true).unwrap();
+        assert!(update('c').await.is_err());
+        let stored = addon_schema_status(
+            &host.core,
+            || Ok(root.to_path_buf()),
+            EASY_EN_ADDON_ID.into(),
+        )
+        .unwrap();
+        assert_eq!(stored.version, "bbbbbbbbbbbb");
+        assert_overlays();
     }
 
     #[tokio::test]

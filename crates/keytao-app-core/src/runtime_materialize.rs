@@ -98,6 +98,28 @@ pub fn easy_english_enabled(root: &Path, key: &str) -> Result<bool, CoreError> {
     Ok(read_settings(root)?.easy_english_packages.contains(key))
 }
 
+pub(crate) fn installed_easy_english_packages(
+    core: &Core,
+    root: &Path,
+) -> Result<Vec<String>, CoreError> {
+    let enabled = read_settings(root)?.easy_english_packages;
+    if enabled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    let installed = isolated_package_keys(core, root, &shared)?;
+    Ok(enabled
+        .into_iter()
+        .filter(|key| {
+            installed.contains(key)
+                || (key == "builtin/keytao"
+                    && shared.join("default.yaml").is_file()
+                    && RuntimeDirs::isolated_user_data_dir(root, key)
+                        .is_some_and(|path| path.is_dir()))
+        })
+        .collect())
+}
+
 pub(crate) fn update_easy_english(root: &Path, key: &str, enabled: bool) -> Result<bool, CoreError> {
     let path = safe(root, RuntimeDirs::SETTINGS_FILE)?;
     let mut settings: serde_json::Map<String, serde_json::Value> = read_optional(&path)?
@@ -130,6 +152,24 @@ pub fn isolated_packages(
     if !RuntimeDirs::isolation_enabled(root) {
         return Ok(Vec::new());
     }
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    let installed: BTreeMap<_, _> = isolated_package_keys(core, root, &shared)?
+        .into_iter()
+        .map(|key| {
+            let name = package_name(core, &key);
+            (key, name)
+        })
+        .collect();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    publish_ime_package_catalog(root, &installed)?;
+    Ok(keytao_core::switcher_model::packages(root, &shared, installed))
+}
+
+fn isolated_package_keys(
+    core: &Core,
+    root: &Path,
+    shared: &Path,
+) -> Result<BTreeSet<String>, CoreError> {
     let store = PackageStore::new(core);
     let activations = crate::package_activation::read_all(core, root)?;
     let mut keys = installed_main_packages(core, &activations);
@@ -139,7 +179,6 @@ pub fn isolated_packages(
             .filter(|id| *id != EASY_EN_ADDON_ID)
             .map(str::to_owned),
     );
-    let shared = crate::deploy::deploy_shared_data_dir(core, root);
     if let Some(active) =
         RuntimeDirs::active_package_key(root).filter(|key| key.starts_with("builtin/"))
     {
@@ -147,13 +186,7 @@ pub fn isolated_packages(
     } else if keys.is_empty() && shared.join("default.yaml").is_file() {
         keys.insert("builtin/keytao".into());
     }
-    let installed: BTreeMap<_, _> = keys.into_iter().map(|key| {
-        let name = package_name(core, &key);
-        (key, name)
-    }).collect();
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    publish_ime_package_catalog(root, &installed)?;
-    Ok(keytao_core::switcher_model::packages(root, &shared, installed))
+    Ok(keys)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

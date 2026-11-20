@@ -9,6 +9,15 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LibjdReleaseDto>>
+abstract class LibjdReleaseDto implements RustOpaqueInterface {
+  int get size;
+
+  String get sourceUrl;
+
+  String get version;
+}
+
 class AccountUserDto {
   final PlatformInt64 id;
   final String? name;
@@ -710,6 +719,7 @@ class InstalledPackageDto {
   final String? source;
   final String? displayName;
   final String? logoPath;
+  final String engine;
 
   const InstalledPackageDto({
     required this.schemeKey,
@@ -721,6 +731,7 @@ class InstalledPackageDto {
     this.source,
     this.displayName,
     this.logoPath,
+    this.engine = r"rime",
   });
 
   @override
@@ -733,7 +744,8 @@ class InstalledPackageDto {
       supportsUserWords.hashCode ^
       source.hashCode ^
       displayName.hashCode ^
-      logoPath.hashCode;
+      logoPath.hashCode ^
+      engine.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -748,7 +760,8 @@ class InstalledPackageDto {
           supportsUserWords == other.supportsUserWords &&
           source == other.source &&
           displayName == other.displayName &&
-          logoPath == other.logoPath;
+          logoPath == other.logoPath &&
+          engine == other.engine;
 }
 
 class IsolatedPackageDto {
@@ -780,6 +793,24 @@ class IsolatedPackageDto {
           displayName == other.displayName &&
           active == other.active &&
           ready == other.ready;
+}
+
+class LibjdStatusDto {
+  final bool available;
+  final String? installedVersion;
+
+  const LibjdStatusDto({required this.available, this.installedVersion});
+
+  @override
+  int get hashCode => available.hashCode ^ installedVersion.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LibjdStatusDto &&
+          runtimeType == other.runtimeType &&
+          available == other.available &&
+          installedVersion == other.installedVersion;
 }
 
 class LinuxImeStatusDto {

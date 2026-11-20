@@ -4,6 +4,7 @@ use crate::{
     packages::{InstalledPackageInfo, PackageMeta, safe_path, sha256_reader},
 };
 use serde::{Deserialize, Serialize};
+use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine};
 use std::{
     collections::BTreeSet,
     fs,
@@ -298,6 +299,56 @@ impl<'a> PackageStore<'a> {
         Ok(Some(stored.meta))
     }
 
+    pub(crate) fn set_engine(
+        &self,
+        root: &Path,
+        key: &str,
+        engine: PackageEngine,
+    ) -> Result<(), CoreError> {
+        use crate::scheme_files::write_file_atomic;
+
+        let _pending = self.core.pending_package.lock().unwrap_or_else(|error| error.into_inner());
+        let path = self.checked_metadata_path(key)?;
+        let before = fs::read(&path)?;
+        validate_metadata(key, &serde_json::from_slice(&before)?)?;
+        if key != PACKAGE_KEY {
+            return Ok(());
+        }
+        let mut metadata: serde_json::Value = serde_json::from_slice(&before)?;
+        if engine.is_rime() {
+            metadata.as_object_mut().unwrap().remove("engine");
+        } else {
+            metadata["engine"] = serde_json::to_value(engine)?;
+        }
+        let settings_path = safe_path(root, keytao_core::english_mode::SETTINGS_FILE)
+            .map_err(CoreError::Other)?;
+        let mut settings: serde_json::Map<String, serde_json::Value> = match fs::read(&settings_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(error) => return Err(error.into()),
+        };
+        let engines = settings
+            .entry("engines")
+            .or_insert_with(|| serde_json::json!({}));
+        let engines = engines
+            .as_object_mut()
+            .ok_or_else(|| CoreError::Other("输入引擎设置格式无效".into()))?;
+        if engine.is_rime() {
+            engines.remove(key);
+        } else {
+            engines.insert(key.into(), serde_json::to_value(engine)?);
+        }
+        let settings = serde_json::to_vec_pretty(&settings)?;
+        let metadata = serde_json::to_vec_pretty(&metadata)?;
+        write_file_atomic(&path, &metadata)?;
+        if let Err(error) = write_file_atomic(&settings_path, &settings) {
+            write_file_atomic(&path, &before)
+                .map_err(|restore| CoreError::Other(format!("{error}; {restore}")))?;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn read_files_at(
         path: &Path,
         key: &str,
@@ -473,6 +524,10 @@ impl<'a> PackageStore<'a> {
                     &previous.as_ref().unwrap().files.iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
                 )
             }).transpose()?;
+        let mut meta: PackageMeta = serde_json::from_value(serde_json::to_value(meta)?)?;
+        if let Some(previous) = previous.as_ref() {
+            meta.engine = previous.meta.engine;
+        }
         let stored = StoredPackage {
             key: meta.scheme_key.clone(),
             origin: origin.map(str::to_owned).or_else(|| previous.and_then(|stored| stored.origin)),
@@ -482,8 +537,9 @@ impl<'a> PackageStore<'a> {
             grammar: None,
             addon_manifest: None,
             selected_schemas,
-            meta: serde_json::from_value(serde_json::to_value(meta)?)?,
+            meta,
         };
+        let meta = &stored.meta;
         validate_metadata(&meta.scheme_key, &stored)?;
         let metadata_path = stage.0.join("package.json");
         let mut metadata = fs::File::create(&metadata_path)
@@ -829,17 +885,19 @@ impl<'a> PackageStore<'a> {
                 }
             } else { None };
             let active = activated.contains_key(&scheme_key) || state.active_scheme.as_deref() == Some(&scheme_key);
+            let engine = meta.as_ref().map_or(PackageEngine::Rime, |meta| meta.engine);
             Some(InstalledPackageInfo {
                 logo_path: if has_package_zip {
                     crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
                 } else { None },
                 active,
                 in_use: active && current_package == Some(&scheme_key),
-                supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
+                supports_user_words: engine.is_rime() && crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false
                 }),
                 scheme_key,
+                engine: engine.as_str().into(),
                 version: package.version,
                 has_package_zip,
                 source: meta.as_ref().map(|meta| meta.source.clone()).unwrap_or_else(|| "official".into()),
@@ -853,6 +911,7 @@ fn validate_metadata(key: &str, stored: &StoredPackage) -> Result<(), CoreError>
     crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
     if stored.key != key
         || stored.meta.scheme_key != key
+        || (key != PACKAGE_KEY && !stored.meta.engine.is_rime())
         || stored.files.len() > 10_000
         || stored.meta.zip_sha256.len() != 64
         || !stored
@@ -1018,6 +1077,7 @@ mod tests {
     fn metadata(key: &str, zip: &[u8]) -> PackageMeta {
         PackageMeta {
             scheme_key: key.into(),
+            engine: PackageEngine::Rime,
             version: Some("v1".into()),
             installed_at_unix: 7,
             source: if key.starts_with("local-") {
@@ -1030,6 +1090,37 @@ mod tests {
             selection_base_version: None,
             manifest: BTreeMap::new(),
             zip_sha256: sha256_reader(zip).unwrap(),
+        }
+    }
+
+    #[test]
+    fn package_engine_mirror_preserves_settings_and_rolls_back_on_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let package = store.package_path(PACKAGE_KEY);
+        fs::create_dir_all(&package).unwrap();
+        let meta = metadata(PACKAGE_KEY, b"fixture");
+        let mut record = serde_json::to_value(&meta).unwrap();
+        record["key"] = PACKAGE_KEY.into();
+        record["files"] = serde_json::json!([]);
+        record["installed_at"] = meta.installed_at_unix.into();
+        let path = package.join("package.json");
+        let original = serde_json::to_vec(&record).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let ime = directory.path().join("ime");
+        assert!(store.set_engine(&ime, PACKAGE_KEY, PackageEngine::Libjd).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        fs::create_dir(&ime).unwrap();
+        let settings = ime.join(keytao_core::english_mode::SETTINGS_FILE);
+        fs::write(&settings, br#"{"candidatePageSize":7}"#).unwrap();
+        for engine in [PackageEngine::Libjd, PackageEngine::Rime] {
+            store.set_engine(&ime, PACKAGE_KEY, engine).unwrap();
+            assert_eq!(store.read_meta(PACKAGE_KEY).unwrap().unwrap().engine, engine);
+            assert_eq!(keytao_core::engine_choice::read(&ime, Some(PACKAGE_KEY)), engine);
+            assert_eq!(crate::ime_settings::read_candidate_page_size(&ime), Some(7));
         }
     }
 

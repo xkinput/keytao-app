@@ -309,6 +309,7 @@ pub fn import_local_scheme(
     };
     let metadata = PackageMeta {
         scheme_key: scheme_key.clone(),
+        engine: Default::default(),
         version: Some(version.clone()),
         installed_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

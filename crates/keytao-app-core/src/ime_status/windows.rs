@@ -1508,6 +1508,41 @@ pub(crate) fn windows_server_executable() -> Result<PathBuf, String> {
     server::installed_server_exe()
 }
 
+#[cfg(windows)]
+pub fn libjd_server_platform() -> Option<keytao_core::libjd::LibjdPlatform> {
+    if !server::server_enabled() {
+        return None;
+    }
+    let architecture = match windows_pe_machine(&windows_server_executable().ok()?)? {
+        WINDOWS_PE_MACHINE_X64 => "x86_64",
+        WINDOWS_PE_MACHINE_ARM64 => "aarch64",
+        _ => return None,
+    };
+    keytao_core::libjd::platform_for("windows", architecture)
+}
+
+#[cfg(windows)]
+pub const LIBJD_CHECK_SUBCOMMAND: &str = "--check-libjd";
+
+#[cfg(windows)]
+pub(crate) fn validate_libjd_library(path: &Path) -> Result<serde_json::Value, String> {
+    use keytao_core::deploy_child::{DEPLOY_SUBCOMMAND, run_deploy_child_command_with_subcommand};
+
+    let executable = windows_server_executable()?;
+    let mut command = std::process::Command::new(executable);
+    command.arg(LIBJD_CHECK_SUBCOMMAND).arg(path);
+    // Older servers reject the extra arguments instead of starting a second pipe listener.
+    run_deploy_child_command_with_subcommand(
+        &mut command,
+        DEPLOY_SUBCOMMAND,
+        std::time::Duration::from_secs(10),
+        |_| {},
+    )
+    .map_err(|error| format!("ime-jd 引擎服务器校验失败：{error}"))?;
+    serde_json::to_value(keytao_core::jd_backend::JdAbiLayout::EXPECTED)
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn windows_deploy_packages_blocking(
     user_dir: &Path,

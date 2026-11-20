@@ -16,6 +16,10 @@ val keystoreProperties = Properties().apply {
 val repoRoot = rootProject.projectDir.resolve("../..").canonicalFile
 val androidRuntimeScript = repoRoot.resolve("scripts/android-librime-runtime.sh")
 val runtimeAssetsDir = layout.buildDirectory.dir("generated/keytao/assets")
+val googlePlayDistribution = providers.gradleProperty("keytaoGooglePlayDistribution")
+    .orElse("false")
+    .get()
+    .toBooleanStrict()
 
 android {
     namespace = "ink.rea.keytao_app"
@@ -38,6 +42,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("boolean", "GOOGLE_PLAY_DISTRIBUTION", googlePlayDistribution.toString())
     }
 
     signingConfigs {

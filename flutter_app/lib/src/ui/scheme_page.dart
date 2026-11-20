@@ -368,7 +368,7 @@ class _SchemePageState extends State<SchemePage> {
                     ),
                   ActionRow(
                     children: [
-                      if (c.canCancelDownload)
+                      if (c.canCancelDownload && !c.isManagingLibjd)
                         ActionButton(
                           AppStrings.cancel,
                           onPress: c.cancelDownload,
@@ -582,8 +582,103 @@ class SchemePackageRow extends StatelessWidget {
   final bool showSource;
 
   @override
-  Widget build(BuildContext context) =>
-      _SchemeCardMenu(key: ValueKey(schemeKey), builder: _build);
+  Widget build(BuildContext context) => controller.usesLibjd(schemeKey)
+      ? _buildLibjd(context)
+      : _SchemeCardMenu(key: ValueKey(schemeKey), builder: _build);
+
+  Future<void> _downloadLibjd(BuildContext context, String title) {
+    Future<bool> confirm(LibjdReleaseDto release) async {
+      if (!context.mounted) return false;
+      final confirmed = await showFDialog<bool>(
+        context: context,
+        builder: (context, _, animation) => AppDialog(
+          title: title,
+          animation: animation,
+          actions: [
+            ActionButton(
+              AppStrings.cancel,
+              onPress: () => Navigator.pop(context),
+            ),
+            ActionButton(
+              AppStrings.download,
+              primary: true,
+              onPress: () => Navigator.pop(context, true),
+            ),
+          ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            spacing: 8,
+            children: [
+              ValueRow('版本', release.version),
+              ValueRow('大小', formatLogBytes(BigInt.from(release.size))),
+              ValueRow('来源', release.sourceUrl),
+              const ValueRow('许可证', 'GPL-3.0'),
+              const Text('会加载第三方原生代码。'),
+            ],
+          ),
+        ),
+      );
+      return confirmed == true;
+    }
+
+    return _showLibjdNotice(context, () => controller.downloadLibjd(confirm));
+  }
+
+  Future<void> _showLibjdNotice(
+    BuildContext context,
+    Future<String?> Function() action,
+  ) async {
+    final toaster = FToaster.of(context);
+    final notice = await action();
+    if (toaster.mounted && notice != null) {
+      toaster.show(builder: (_, _) => FToast(title: Text(notice)));
+    }
+  }
+
+  Widget _buildLibjd(BuildContext context) {
+    final c = controller;
+    final version = c.libjd?.installedVersion ?? AppStrings.unknownVersion;
+    return Column(
+      key: const ValueKey('scheme-package-keytao'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 10,
+      children: [
+        Text('键道6', style: context.theme.typography.display.md),
+        Text('libjd $version'),
+        ActionRow(
+          children: [
+            ActionButton(
+              '更新 ime-jd',
+              onPress: c.busy
+                  ? null
+                  : () => _downloadLibjd(context, '更新 ime-jd'),
+            ),
+            ActionButton(
+              '切回 Rime',
+              onPress: c.busy
+                  ? null
+                  : () => _showLibjdNotice(context, c.revertLibjd),
+            ),
+          ],
+        ),
+        if (c.isManagingLibjd) _libjdProgress(),
+      ],
+    );
+  }
+
+  Widget _libjdProgress() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    spacing: 8,
+    children: [
+      InstallProgressView(
+        active: true,
+        progress: controller.installProgress,
+        message: controller.progress,
+      ),
+      if (controller.canCancelDownload)
+        ActionButton(AppStrings.cancel, onPress: controller.cancelDownload),
+    ],
+  );
 
   Widget _build(BuildContext context, FPopoverController menu) {
     final c = controller;
@@ -1002,6 +1097,25 @@ class SchemePackageRow extends StatelessWidget {
           )
         else
           actions,
+        if (schemeKey == 'keytao' &&
+            package?.hasPackageZip == true &&
+            c.libjd?.available == true) ...[
+          const SizedBox(height: 8),
+          ActionRow(
+            children: [
+              ActionButton(
+                '切换到 ime-jd 引擎',
+                onPress: c.busy
+                    ? null
+                    : () => _downloadLibjd(context, '切换到 ime-jd 引擎'),
+              ),
+            ],
+          ),
+          if (c.isManagingLibjd) ...[
+            const SizedBox(height: 8),
+            _libjdProgress(),
+          ],
+        ],
         if (installing || deploying) ...[
           const SizedBox(height: 8),
           InstallProgressView(
@@ -1408,14 +1522,14 @@ Map<String, Widget> _addonCells(
                             !englishEnabled,
                           ),
                   ),
-                if (!overlay &&
+                if ((!overlay || hasUpdate) &&
                     showInstall &&
                     (!cloudCard || !installed || hasUpdate))
                   ActionButton(
                     cloudCard ? (installed ? '更新' : '下载') : label,
                     primary: installed,
                     icon: FLucideIcons.download,
-                    tooltip: tooltip,
+                    tooltip: overlay ? null : tooltip,
                     onPress: install,
                   ),
                 if (!overlay &&
@@ -1486,10 +1600,11 @@ Map<String, Widget> _addonCells(
             ),
             if (active || deploying) ...[
               const SizedBox(height: 12),
-              if (deploying && (c.isDeploying || c.hasPackageDeployProgress))
+              if ((deploying && c.isDeploying) ||
+                  ((deploying || overlay) && c.hasPackageDeployProgress))
                 InstallProgressView(
                   active: true,
-                  fraction: c.installFraction,
+                  fraction: overlay ? null : c.installFraction,
                   message: c.progress,
                 )
               else

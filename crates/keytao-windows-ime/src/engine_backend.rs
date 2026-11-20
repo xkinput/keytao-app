@@ -177,7 +177,7 @@ impl InProcEngine {
 
     /// The server always initializes the desktop directories, including for AC clients.
     pub fn build_server(&self) -> Result<EngineHandle, String> {
-        self.install(Self::try_build_engine(false)?)
+        self.install(Self::try_build_engine(false, true)?)
     }
 
     /// Load externally deployed artifacts without running deployment in this process.
@@ -263,7 +263,7 @@ impl InProcEngine {
         Ok(EngineHandle { schema_id })
     }
 
-    fn try_build_engine(sandboxed: bool) -> Result<InProcState, String> {
+    fn try_build_engine(sandboxed: bool, server: bool) -> Result<InProcState, String> {
         let _init_guard = EngineInitGuard::acquire(sandboxed)?;
         let shared = server_shared_data_dir();
         let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
@@ -286,6 +286,11 @@ impl InProcEngine {
             |data| data.reload_stamp_signature.clone(),
         );
         let runtime = ImeRuntime::with_dirs(&control_root, shared).with_ime_host();
+        let runtime = if server && read_engine_mode() == crate::engine_config::EngineMode::Pipe {
+            runtime.with_libjd_server()
+        } else {
+            runtime
+        };
         // Reload after copying prebuilt files into the reinitialized sandbox runtime.
         if sandbox.is_some() && runtime.is_initialized() {
             runtime.reload_without_deploy()?;
@@ -539,7 +544,7 @@ impl ImeEngineBackend for InProcEngine {
         self.install(if self.no_learning {
             Self::try_build_no_learning(sandboxed)?
         } else {
-            Self::try_build_engine(sandboxed)?
+            Self::try_build_engine(sandboxed, false)?
         })
     }
 

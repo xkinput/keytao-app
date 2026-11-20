@@ -1,6 +1,6 @@
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::english_mode::EnglishModeController;
-use crate::{Engine, SchemaSwitchRequest};
+use crate::{ImeBackend, SchemaSwitchRequest};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use std::path::PathBuf;
 use std::{collections::BTreeMap, path::Path};
@@ -13,7 +13,7 @@ pub(crate) struct InputState {
 }
 
 impl InputState {
-    pub fn read(engine: &Engine) -> Self {
+    pub fn read(engine: &dyn ImeBackend) -> Self {
         let state = engine.state();
         Self {
             schema_id: state.schema_id,
@@ -26,7 +26,7 @@ impl InputState {
         self.schema_id == ".default"
     }
 
-    pub fn restore(&self, engine: &Engine, root: &Path) -> Result<(), String> {
+    pub fn restore(&self, engine: &dyn ImeBackend, root: &Path) -> Result<(), String> {
         engine.select_schema(&self.schema_id)?;
         engine.apply_reset_switch_request(root)?;
         engine.apply_switch_request(
@@ -52,14 +52,14 @@ pub(crate) struct GlobalInput {
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl GlobalInput {
-    pub fn get<'a>(slot: &'a mut Option<Self>, engine: &Engine, root: &Path) -> &'a mut Self {
+    pub fn get<'a>(slot: &'a mut Option<Self>, engine: &dyn ImeBackend, root: &Path) -> &'a mut Self {
         if slot.as_ref().is_some_and(|global| global.root != root) {
             *slot = None;
         }
         slot.get_or_insert_with(|| Self::new(engine, root))
     }
 
-    pub fn new(engine: &Engine, root: &Path) -> Self {
+    pub fn new(engine: &dyn ImeBackend, root: &Path) -> Self {
         let mut english_mode = EnglishModeController::default();
         english_mode.configure(
             crate::english_mode::read_english_mode(root),
@@ -88,7 +88,7 @@ impl GlobalInput {
         }
     }
 
-    pub fn apply(&mut self, engine: &Engine, root: &Path) -> Result<(), String> {
+    pub fn apply(&mut self, engine: &dyn ImeBackend, root: &Path) -> Result<(), String> {
         let current = engine
             .current_schema()
             .ok_or("Rime current schema is unavailable")?;

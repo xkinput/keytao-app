@@ -24,8 +24,60 @@ mod handshake;
 #[cfg(any(windows, test))]
 mod pipe_io;
 
+#[cfg(any(windows, test))]
+fn is_staged_libjd(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts = relative.iter();
+    let valid_tag = parts
+        .next()
+        .and_then(|tag| tag.to_str())
+        .is_some_and(keytao_core::libjd::valid_tag);
+    let valid_stage = parts
+        .next()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".libjd-"))
+        .is_some_and(|suffix| !suffix.is_empty());
+    valid_tag && valid_stage && parts.eq([std::ffi::OsStr::new("libjd.dll")])
+}
+
 #[cfg(windows)]
 fn main() {
+    use keytao_app_core::ime_status::windows::LIBJD_CHECK_SUBCOMMAND;
+    use keytao_core::deploy_child::DEPLOY_SUBCOMMAND;
+
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|arg| arg == LIBJD_CHECK_SUBCOMMAND) {
+        let result = (|| -> Result<(), String> {
+            let path = std::path::PathBuf::from(args.next().ok_or("missing ime-jd path")?);
+            if !args.eq([std::ffi::OsString::from(DEPLOY_SUBCOMMAND)])
+                || !path.is_absolute()
+                || !std::fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file())
+            {
+                return Err("invalid ime-jd validation arguments".into());
+            }
+            let data = std::env::var_os("LOCALAPPDATA")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or("missing LOCALAPPDATA")?;
+            let root = keytao_core::libjd::engine_root(&data.join("ink.rea.keytao-app"))
+                .and_then(|root| root.canonicalize().ok())
+                .ok_or("invalid ime-jd installation root")?;
+            let path = path
+                .canonicalize()
+                .map_err(|error| format!("resolve ime-jd library: {error}"))?;
+            if !is_staged_libjd(&root, &path) {
+                return Err("invalid ime-jd staging library".into());
+            }
+            // The app passes a staging library only after checking the release digest.
+            unsafe { keytao_core::jd_backend::JdBackend::load(&path) }?;
+            Ok(())
+        })();
+        let ok = result.is_ok();
+        println!("{}", serde_json::json!({"ok": ok, "error": result.err()}));
+        keytao_core::deploy_child::exit_deploy_child(i32::from(!ok));
+    }
     if let Some(subcommand) = std::env::args_os().skip(1).find(|arg| {
         arg == "--deploy"
             || arg == "--deploy-public"
@@ -78,6 +130,25 @@ mod engine_status;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn libjd_validation_accepts_only_a_versioned_staging_library() {
+        use std::path::Path;
+
+        let root = Path::new("engines/libjd");
+        let staged = "v0.13.0/.libjd-123456/libjd.dll";
+        assert!(super::is_staged_libjd(root, &root.join(staged)));
+        assert!(!super::is_staged_libjd(root, Path::new(staged)));
+        for invalid in [
+            "latest/.libjd-123456/libjd.dll",
+            "v0.13.0/windows-x86_64/libjd.dll",
+            "v0.13.0/.libjd-/libjd.dll",
+            "v0.13.0/.libjd-123456/other.dll",
+            "v0.13.0/.libjd-123456/nested/libjd.dll",
+        ] {
+            assert!(!super::is_staged_libjd(root, &root.join(invalid)));
+        }
+    }
+
     #[test]
     fn process_keys_keeps_press_and_release_commits() {
         struct FakeEngine {

@@ -19,6 +19,7 @@ pub mod system_fonts;
 pub mod rime_sync;
 pub mod ime_status;
 pub mod download;
+pub mod libjd;
 pub mod install;
 mod package_store;
 mod package_fs;
@@ -65,6 +66,22 @@ pub use env::{AppEnv, Platform};
 pub use error::CoreError;
 pub use events::{CoreEvent, EventSink};
 pub use state::AppState;
+
+fn validate_libjd_library(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    return ime_status::windows::validate_libjd_library(path);
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+    {
+        // The installer passes only a library extracted from the digest-verified release asset.
+        let backend = unsafe { keytao_core::jd_backend::JdBackend::load(path)? };
+        serde_json::to_value(backend.abi_layout()).map_err(|error| error.to_string())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
+    {
+        let _ = path;
+        Err("此平台不支持 ime-jd".into())
+    }
+}
 
 use std::{
     fs,
