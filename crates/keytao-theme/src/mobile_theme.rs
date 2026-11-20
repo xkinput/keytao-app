@@ -8,7 +8,9 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Map, Value};
 
-use crate::{mix_color, parse_color, with_alpha, ResolvedImeTheme, RgbaColor, DEFAULT_THEME_YAML};
+use crate::{
+    mix_color, parse_color, with_alpha, FontWeight, ResolvedImeTheme, RgbaColor, DEFAULT_THEME_YAML,
+};
 
 /// Resolve validated, variant-merged source `mobile` overrides into appearance.
 ///
@@ -16,6 +18,15 @@ use crate::{mix_color, parse_color, with_alpha, ResolvedImeTheme, RgbaColor, DEF
 /// guess. `keyStates.selected.softBackground` is a resolved-only color for
 /// function/accent keys; an explicit selected background overrides both forms.
 pub fn resolve_mobile_theme(pc: &ResolvedImeTheme, overrides: &Value, is_dark: bool) -> Value {
+    resolve_mobile_theme_for_platform(pc, overrides, is_dark, cfg!(target_os = "ios"))
+}
+
+fn resolve_mobile_theme_for_platform(
+    pc: &ResolvedImeTheme,
+    overrides: &Value,
+    is_dark: bool,
+    ios: bool,
+) -> Value {
     static DEFAULTS: OnceLock<Value> = OnceLock::new();
     let defaults = DEFAULTS.get_or_init(|| {
         serde_yaml::from_str(DEFAULT_THEME_YAML).expect("the bundled theme must be valid YAML")
@@ -26,64 +37,127 @@ pub fn resolve_mobile_theme(pc: &ResolvedImeTheme, overrides: &Value, is_dark: b
     }
     normalize_colors(&mut mobile);
 
-    let accent = pc.ui.accent_color.unwrap_or_else(|| {
-        parse_color(
-            defaults["candidate"]["selectedLabelColor"]
-                .as_str()
-                .unwrap(),
-        )
-        .expect("the bundled accent must be a color")
-    });
+    let accent = pc
+        .ui
+        .accent_color
+        .unwrap_or(pc.candidate.selected_label_color);
     let keyboard_background = with_alpha(
         mix_color(pc.panel.background, accent, 0.07),
         pc.panel.background.alpha,
     );
-    let soft_background = color(mix_color(pc.panel.background, accent, 0.22));
-    let soft_selected = color(mix_color(pc.panel.background, accent, 0.24));
-    let selected = with_alpha(
-        pc.candidate.selected_background,
-        (f32::from(pc.candidate.selected_background.alpha) * if is_dark { 0.48 } else { 0.62 })
+    let soft_background = if ios {
+        // UIKit kept both blends unrounded until the final resolved color.
+        with_alpha(
+            mix_color(pc.panel.background, accent, 0.07 + 0.93 * 0.22),
+            (255.0_f32
+                * if is_dark {
+                    0.66 + 0.36 * 0.22
+                } else {
+                    0.44 + 0.72 * 0.22
+                })
             .round() as u8,
-    );
+        )
+    } else {
+        with_alpha(
+            mix_color(keyboard_background, accent, 0.22),
+            pc.panel.background.alpha,
+        )
+    };
+    let mut soft_key = json!({
+        "background": color(soft_background),
+        "pressedBackground": color(with_alpha(
+            mix_color(soft_background, pc.candidate.pressed_background, 0.72),
+            soft_background.alpha,
+        )),
+        "borderColor": color(with_alpha(accent, if is_dark { 107 } else { 153 })),
+        "borderWidth": 1,
+    });
+    for field in ["pressedBackground", "borderColor", "borderWidth"] {
+        if overrides["keyboard"]["key"].get(field).is_some() {
+            soft_key.as_object_mut().unwrap().remove(field);
+        }
+    }
 
     mobile["isDark"] = json!(is_dark);
     mobile["keyboard"]["background"] = color(keyboard_background);
+    if ios {
+        mobile["keyboard"]["key"]["background"] =
+            color(parse_color(if is_dark { "#1C222A61" } else { "#FFFFFF94" }).unwrap());
+        if is_dark {
+            mobile["keyboard"]["key"]["borderColor"] = color(parse_color("#FFFFFF17").unwrap());
+        }
+    }
     if pc.candidate.background.alpha > 0 {
-        mobile["keyboard"]["key"]["background"] = color(pc.candidate.background);
+        mobile["keyboard"]["key"]["background"] = color(if ios {
+            with_alpha(pc.candidate.background, if is_dark { 87 } else { 133 })
+        } else {
+            pc.candidate.background
+        });
     }
     for (field, value) in [
         ("foreground", color(pc.candidate.foreground)),
         ("hintForeground", color(pc.candidate.comment_color)),
-        ("pressedBackground", color(pc.candidate.selected_background)),
+        ("pressedBackground", color(pc.candidate.pressed_background)),
         ("pressedForeground", color(pc.candidate.pressed_foreground)),
         (
             "cornerRadius",
             json!(pc.candidate.corner_radius * 10.0 / 11.0),
         ),
-        ("fontWeight", json!(pc.font.weight)),
+        (
+            "fontWeight",
+            json!(match pc.font.weight {
+                FontWeight::SemiBold => FontWeight::Regular,
+                weight => weight,
+            }),
+        ),
     ] {
         mobile["keyboard"]["key"][field] = value;
     }
     mobile["keyboard"]["keyTypes"] = json!({
-        "character": {}, "function": {"background": soft_background},
+        "character": {}, "function": soft_key,
         "space": {}, "enter": {}, "backspace": {}, "shift": {}
     });
     mobile["keyboard"]["keyClasses"] = json!({
-        "accent": {"background": soft_background},
-        "accentPunctuation": {"background": soft_background}
+        "accent": soft_key,
+        "accentPunctuation": soft_key,
     });
+    if overrides.pointer("/keyboard/key/foreground").is_none() {
+        mobile["keyboard"]["keyClasses"]["accent"]["foreground"] =
+            color(pc.candidate.selected_foreground);
+    }
     mobile["keyboard"]["keyStates"] = json!({
-        "selected": {"background": color(selected), "softBackground": soft_selected,
+        "selected": {"background": color(pc.candidate.selected_background),
+            "softBackground": color(pc.candidate.selected_background),
+            "pressedBackground": color(with_alpha(
+                mix_color(pc.candidate.selected_background, pc.candidate.pressed_background, 0.52),
+                pc.candidate.selected_background.alpha,
+            )),
             "foreground": color(pc.candidate.selected_foreground)}
     });
-    mobile["keyboard"]["toolbar"]["foreground"] = color(pc.navigation.foreground);
+    if overrides
+        .pointer("/keyboard/key/pressedBackground")
+        .is_some()
+    {
+        mobile["keyboard"]["keyStates"]["selected"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pressedBackground");
+    }
+    mobile["keyboard"]["toolbar"]["foreground"] = color(pc.candidate.foreground);
     mobile["keyboard"]["toolbar"]["selectedForeground"] = color(accent);
     for (field, value) in [
         ("foreground", pc.candidate.foreground),
         ("selectedForeground", pc.candidate.selected_foreground),
         ("selectedBackground", pc.candidate.selected_background),
         ("commentColor", pc.candidate.comment_color),
-        ("preeditForeground", pc.candidate.foreground),
+        (
+            "preeditForeground",
+            if ios {
+                pc.candidate.label_color
+            } else {
+                pc.candidate.foreground
+            },
+        ),
     ] {
         mobile["candidateBar"][field] = color(value);
     }
@@ -114,6 +188,11 @@ pub fn resolve_mobile_theme(pc: &ResolvedImeTheme, overrides: &Value, is_dark: b
     }
     let mut shift_on = Map::new();
     overlay_colors(&mut shift_on, &mobile["keyboard"]["keyClasses"]["accent"]);
+    shift_on.insert(
+        "background".into(),
+        mobile["keyboard"]["key"]["background"].clone(),
+    );
+    shift_on.insert("borderColor".into(), color(pc.candidate.selected_border_color));
     overlay_colors(
         &mut shift_on,
         &overrides["keyboard"]["keyStates"]["shiftOn"],
@@ -345,7 +424,7 @@ mod tests {
             let mut pc = resolve_theme_with_pending_settings(None, None, scheme, None);
             pc.panel.background = parse_color("#10203040").unwrap();
             pc.ui.accent_color = parse_color("#A0B0C080");
-            let mobile = resolve_mobile_theme(&pc, &json!({}), dark);
+            let mobile = resolve_mobile_theme_for_platform(&pc, &json!({}), dark, false);
             assert_eq!(mobile["isDark"], dark);
             assert_eq!(
                 mobile["keyboard"]["background"],
@@ -353,11 +432,11 @@ mod tests {
             );
             assert_eq!(
                 mobile["keyboard"]["keyTypes"]["function"]["background"],
-                color(parse_color("#304050FF").unwrap())
+                color(parse_color("#37475740").unwrap())
             );
             assert_eq!(
                 mobile["keyboard"]["keyStates"]["selected"]["softBackground"],
-                color(parse_color("#334353FF").unwrap())
+                color(pc.candidate.selected_background)
             );
             assert_eq!(mobile["keyboard"]["key"]["cornerRadius"], 10.0);
             assert_eq!(
@@ -374,14 +453,102 @@ mod tests {
             );
             pc.candidate.background = parse_color("#12345601").unwrap();
             assert_eq!(
-                resolve_mobile_theme(&pc, &json!({}), dark)["keyboard"]["key"]["background"],
+                resolve_mobile_theme_for_platform(&pc, &json!({}), dark, false)["keyboard"]["key"]
+                    ["background"],
                 color(pc.candidate.background)
             );
             pc.candidate.selected_background.alpha = 128;
             assert_eq!(
-                resolve_mobile_theme(&pc, &json!({}), dark)["keyboard"]["keyStates"]["selected"]
-                    ["background"]["alpha"],
-                if dark { 61 } else { 79 }
+                resolve_mobile_theme_for_platform(&pc, &json!({}), dark, false)["keyboard"]
+                    ["keyStates"]["selected"]["background"]["alpha"],
+                128
+            );
+            assert_eq!(
+                resolve_mobile_theme_for_platform(&pc, &json!({}), dark, false)["keyboard"]
+                    ["keyStates"]["selected"]["pressedBackground"],
+                color(with_alpha(
+                    mix_color(
+                        pc.candidate.selected_background,
+                        pc.candidate.pressed_background,
+                        0.52
+                    ),
+                    128,
+                ))
+            );
+
+            let ios = resolve_mobile_theme_for_platform(&pc, &json!({}), dark, true);
+            assert_eq!(
+                ios["keyboard"]["keyTypes"]["function"]["background"],
+                color(parse_color(if dark { "#384858BC" } else { "#38485899" }).unwrap())
+            );
+            assert_eq!(
+                ios["keyboard"]["key"]["background"],
+                color(with_alpha(
+                    pc.candidate.background,
+                    if dark { 87 } else { 133 }
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn shift_on_uses_key_background_and_selected_border_unless_overridden() {
+        for (scheme, dark) in [
+            (EffectiveColorScheme::Light, false),
+            (EffectiveColorScheme::Dark, true),
+        ] {
+            let pc = resolve_theme_with_pending_settings(None, None, scheme, None);
+            for ios in [false, true] {
+                for overrides in [
+                    json!({}),
+                    json!({"keyboard":{"key":{"background":"#10203040"},
+                        "keyClasses":{"accent":{"background":"#50607080","borderColor":"#90A0B0C0"}}}}),
+                    json!({"keyboard":{"keyStates":{"shiftOn":{
+                        "background":"#11223344","borderColor":"#55667788"}}}}),
+                ] {
+                    let mobile = resolve_mobile_theme_for_platform(&pc, &overrides, dark, ios);
+                    let shifted = resolve_mobile_key_style(
+                        &mobile,
+                        &key(json!({"label":"shift","action":{"type":"shift"}})),
+                        false,
+                        false,
+                        true,
+                    );
+                    let explicit = &overrides["keyboard"]["keyStates"]["shiftOn"];
+                    let background = explicit["background"]
+                        .as_str()
+                        .map(|value| color(parse_color(value).unwrap()))
+                        .unwrap_or_else(|| mobile["keyboard"]["key"]["background"].clone());
+                    let border = explicit["borderColor"]
+                        .as_str()
+                        .map(|value| color(parse_color(value).unwrap()))
+                        .unwrap_or_else(|| color(pc.candidate.selected_border_color));
+                    assert_eq!(shifted["background"], background, "{scheme:?}, ios={ios}");
+                    assert_eq!(shifted["borderColor"], border, "{scheme:?}, ios={ios}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ios_defaults_match_resolved_theme_contract() {
+        for (scheme, dark, fixture) in [
+            (
+                EffectiveColorScheme::Light,
+                false,
+                include_str!("../tests/fixtures/default-ios-light.json"),
+            ),
+            (
+                EffectiveColorScheme::Dark,
+                true,
+                include_str!("../tests/fixtures/default-ios-dark.json"),
+            ),
+        ] {
+            let pc = resolve_theme_with_pending_settings(None, None, scheme, None);
+            let expected: Value = serde_json::from_str(fixture).unwrap();
+            assert_eq!(
+                resolve_mobile_theme_for_platform(&pc, &json!({}), dark, true),
+                expected["mobile"]
             );
         }
     }
@@ -391,7 +558,7 @@ mod tests {
         let mobile = theme(
             false,
             json!({"keyboard": {
-                "background":"#01020304", "key":{"background":"#10203000", "hintForeground":"#40506070", "borderColor":"#708090A0", "fontWeight":"black"},
+                "background":"#01020304", "key":{"background":"#10203000", "hintForeground":"#40506070", "borderColor":"#708090A0", "borderWidth":0.5, "pressedBackground":"#22334455", "foreground":"#66778899", "fontWeight":"black"},
                 "keyStates":{"selected":{"background":"#AABBCC09"}},
                 "keyClasses":{"accent":{"background":"#11223344", "cornerRadius":3}}
             }}),
@@ -415,11 +582,27 @@ mod tests {
         assert_eq!(mobile["keyboard"]["floating"]["borderColor"]["alpha"], 160);
         assert_eq!(
             mobile["keyboard"]["keyStates"]["shiftOn"]["background"]["alpha"],
-            68
+            0
         );
         assert!(mobile["keyboard"]["keyStates"]["shiftOn"]
             .get("cornerRadius")
             .is_none());
+        for spec in [
+            json!({"label":"a"}),
+            json!({"label":"a","style":"accent"}),
+            json!({"label":"."}),
+            json!({"label":"space","action":{"type":"space"}}),
+        ] {
+            let style = resolve_mobile_key_style(&mobile, &key(spec), false, false, false);
+            for field in [
+                "pressedBackground",
+                "borderColor",
+                "borderWidth",
+                "foreground",
+            ] {
+                assert_eq!(style[field], mobile["keyboard"]["key"][field]);
+            }
+        }
         for command in ["input", "space"] {
             let selected = resolve_mobile_key_style(
                 &mobile,
@@ -429,7 +612,46 @@ mod tests {
                 false,
             );
             assert_eq!(selected["background"]["alpha"], 9);
+            assert_eq!(
+                selected["pressedBackground"],
+                mobile["keyboard"]["key"]["pressedBackground"]
+            );
         }
+        let mobile = theme(
+            false,
+            json!({"keyboard": {
+                "key":{"pressedBackground":"#112233", "borderColor":"#445566", "borderWidth":0.5, "foreground":"#778899"},
+                "keyTypes":{"function":{"pressedBackground":"#223344", "borderColor":"#556677", "borderWidth":1.5, "foreground":"#8899AA"}},
+                "keyClasses":{"accent":{"pressedBackground":"#334455", "borderColor":"#667788", "borderWidth":2, "foreground":"#99AABB"}},
+                "keyStates":{"selected":{"pressedBackground":"#445566"}}
+            }}),
+        );
+        for (spec, expected) in [
+            (
+                json!({"label":"space","action":{"type":"space"}}),
+                &mobile["keyboard"]["keyTypes"]["function"],
+            ),
+            (
+                json!({"label":"space","action":{"type":"space"},"style":"accent"}),
+                &mobile["keyboard"]["keyClasses"]["accent"],
+            ),
+        ] {
+            let style = resolve_mobile_key_style(&mobile, &key(spec), false, false, false);
+            for field in [
+                "pressedBackground",
+                "borderColor",
+                "borderWidth",
+                "foreground",
+            ] {
+                assert_eq!(style[field], expected[field]);
+            }
+        }
+        let selected =
+            resolve_mobile_key_style(&mobile, &key(json!({"label":"a"})), false, true, false);
+        assert_eq!(
+            selected["pressedBackground"],
+            color(parse_color("#445566").unwrap())
+        );
     }
 
     #[test]
@@ -563,10 +785,7 @@ mod tests {
                         [if soft { "softBackground" } else { "background" }]
                 );
                 if !soft {
-                    assert_eq!(
-                        selected["background"]["alpha"],
-                        if dark { 122 } else { 158 }
-                    );
+                    assert_eq!(selected["background"]["alpha"], 255);
                 }
             }
         }

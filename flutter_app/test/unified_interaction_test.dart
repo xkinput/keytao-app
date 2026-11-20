@@ -16,13 +16,18 @@ class _EditingController extends ViewController {
   String? savedAccent;
   final keyboardPatches = <Map<String, Object>>[];
   @override
-  Future<Map<String, dynamic>> updateThemeEditor({
-    required String target,
-    required String path,
-    Object? value,
+  Future<bool> saveUi({
+    UiColorSchemeDto? colorScheme,
+    PanelOrientationDto? orientation,
+    bool? hideCandidatePanel,
+    String? accentColor,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+    String? backgroundColor,
+    double? fontSize,
   }) async {
-    if (path == 'common.accentColor') savedAccent = value as String?;
-    return getThemeEditor();
+    savedAccent = accentColor;
+    return true;
   }
 
   @override

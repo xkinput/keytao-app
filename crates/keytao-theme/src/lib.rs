@@ -2264,11 +2264,11 @@ mod tests {
         let theme = resolve_theme_from_paths(None, None);
         assert_eq!(theme.version, THEME_SCHEMA_VERSION);
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
-        assert!(!theme.ui.embedded_composition);
+        assert!(theme.ui.embedded_composition);
         assert!(!theme.ui.hide_candidate_panel);
         assert!(theme.ui.show_tray_mode_indicator);
-        assert!(!theme.ui.effective_embedded_composition());
-        assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
+        assert!(theme.ui.effective_embedded_composition());
+        assert_eq!(theme.panel.orientation, PanelOrientation::Horizontal);
         assert_eq!(theme.panel.min_width, 128.0);
         assert_eq!(theme.font.size, 20.0);
         assert_eq!(theme.candidate.label_suffix, ".");
@@ -2344,7 +2344,7 @@ mod tests {
     #[test]
     fn resolved_default_uses_builtin_theme_yaml() {
         let theme = ResolvedImeTheme::default();
-        assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
+        assert_eq!(theme.panel.orientation, PanelOrientation::Horizontal);
         assert_eq!(theme.candidate.min_height, 34.0);
         assert_eq!(theme.mode_hint.background, rgba(0x2d, 0x4b, 0x63, 0xff));
         assert_eq!(theme.mode_hint.foreground, rgba(0xff, 0xff, 0xff, 0xff));
