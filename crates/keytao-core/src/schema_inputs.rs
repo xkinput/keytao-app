@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-const RECEIPT: &str = "build/.keytao-schema-inputs.json";
+const RECEIPT_FILE: &str = ".keytao-schema-inputs.json";
 
 /// Save source/output hashes only after the deployment has fully succeeded.
 pub fn record_schema_input_fingerprints(root: &Path, deployed: &[String]) -> Result<(), String> {
@@ -33,7 +33,7 @@ pub fn record_schema_input_fingerprints(root: &Path, deployed: &[String]) -> Res
     let bytes = serde_json::to_vec(&fingerprints).map_err(|error| error.to_string())?;
     let path = crate::RuntimeDirs::resolve(root, root)
         .staging_dir
-        .join(RECEIPT.trim_start_matches("build/"));
+        .join(RECEIPT_FILE);
     if fs::read(&path).ok().as_deref() != Some(&bytes) {
         write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     }
@@ -105,7 +105,7 @@ fn read_receipt(root: &Path) -> BTreeMap<String, [u8; 32]> {
     fs::read(
         crate::RuntimeDirs::resolve(root, root)
             .staging_dir
-            .join(RECEIPT.trim_start_matches("build/")),
+            .join(RECEIPT_FILE),
     )
     .ok()
     .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -243,6 +243,7 @@ fn fingerprint(
 
 #[cfg(test)]
 mod tests {
+    const RECEIPT: &str = "build/.keytao-schema-inputs.json";
     use super::*;
     use crate::{invalidate_rime_build_artifacts, DeployProcess};
     use std::sync::atomic::{AtomicU64, Ordering};

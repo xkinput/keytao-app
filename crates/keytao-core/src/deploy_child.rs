@@ -17,10 +17,12 @@ pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
 #[cfg(any(target_os = "windows", test))]
-const WINDOWS_BUILD_SIGNATURE: &str = "build/.keytao-windows-build-signature.json";
+const WINDOWS_BUILD_SIGNATURE_FILE: &str = ".keytao-windows-build-signature.json";
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec<u8>, String> {
+    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir);
+    let user_dir = dirs.user_data_dir.as_path();
     let mut schemas = crate::configured_schema_list_from_dir(user_dir);
     schemas.sort();
     schemas.dedup();
@@ -42,11 +44,7 @@ fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String
     {
         return None;
     }
-    let previous = std::fs::read(
-        dirs.staging_dir
-            .join(WINDOWS_BUILD_SIGNATURE.trim_start_matches("build/")),
-    )
-    .ok()?;
+    let previous = std::fs::read(dirs.staging_dir.join(WINDOWS_BUILD_SIGNATURE_FILE)).ok()?;
     let previous: (String, String, Vec<String>) = serde_json::from_slice(&previous).ok()?;
     let current: (String, String, Vec<String>) = serde_json::from_slice(signature).ok()?;
     if previous.0 != current.0
@@ -119,12 +117,11 @@ fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), Strin
         // Obsolete outputs are pruned only after the deployment succeeds.
         Some(_) => {}
         None => {
+            let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir);
             crate::remove_rime_build_artifact(
-                &crate::RuntimeDirs::resolve(user_dir, user_dir)
-                    .staging_dir
-                    .join(".keytao-desktop-inputs.json"),
+                &dirs.staging_dir.join(".keytao-desktop-inputs.json"),
             )?;
-            crate::invalidate_active_windows_rime_build(user_dir)?;
+            crate::invalidate_active_windows_rime_build(&dirs.user_data_dir)?;
         }
     }
     Ok(())
@@ -233,7 +230,7 @@ pub fn deploy_directory(user_dir: &Path) -> Result<(), String> {
         crate::write_file_atomic(
             &crate::RuntimeDirs::resolve(user_dir, user_dir)
                 .staging_dir
-                .join(WINDOWS_BUILD_SIGNATURE.trim_start_matches("build/")),
+                .join(WINDOWS_BUILD_SIGNATURE_FILE),
             &signature,
         )
         .map_err(|error| format!("write Windows build signature: {error}"))?;
@@ -626,6 +623,8 @@ fn wait_for_child_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WINDOWS_BUILD_SIGNATURE: &str = "build/.keytao-windows-build-signature.json";
 
     #[test]
     fn windows_deploy_reuses_only_trusted_builds() {
@@ -1229,6 +1228,175 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn isolated_deploy_child_compiles_only_the_active_package() {
+        use std::{collections::BTreeMap, fs, path::PathBuf};
+
+        const FIXTURE: &str = "KEYTAO_ISOLATED_DEPLOY_FIXTURE";
+        const SCHEMA: &str = "keytao_isolated_fixture";
+        if let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) {
+            let shared = root.join("bundled");
+            let dirs = crate::RuntimeDirs::resolve(&root, &shared);
+            assert_eq!(dirs.active_package_key.as_deref(), Some("local-fixture"));
+            assert_eq!(dirs.user_data_dir, root.join("runtime/local-fixture"));
+            assert_eq!(dirs.staging_dir, dirs.user_data_dir.join("build"));
+            assert_eq!(
+                dirs.shared_data_dir,
+                root.join("scheme-packages/local/local-fixture/files")
+            );
+            assert_eq!(dirs.prebuilt_data_dir, dirs.shared_data_dir.join("build"));
+            let code = child_main(
+                [OsString::from(DEPLOY_SUBCOMMAND)].into_iter(),
+                &mut io::stdout().lock(),
+                DEPLOY_SUBCOMMAND,
+                || {
+                    deploy_directory(&root)?;
+                    assert!(crate::schema_install_state(&root).deployed);
+                    Ok(())
+                },
+            );
+            exit_deploy_child(code);
+        }
+
+        fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+            let mut entries = BTreeMap::new();
+            let mut pending = vec![root.to_path_buf()];
+            while let Some(dir) = pending.pop() {
+                for entry in fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                    if entry.file_type().unwrap().is_dir() {
+                        entries.insert(relative, None);
+                        pending.push(path);
+                    } else {
+                        entries.insert(relative, Some(fs::read(path).unwrap()));
+                    }
+                }
+            }
+            entries
+        }
+
+        #[cfg(target_os = "macos")]
+        fn md5(entries: &BTreeMap<PathBuf, Option<Vec<u8>>>) -> Vec<u8> {
+            let mut child = Command::new("md5")
+                .arg("-q")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&serde_json::to_vec(entries).unwrap())
+                .unwrap();
+            let result = child.wait_with_output().unwrap();
+            assert!(result.status.success());
+            result.stdout
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("keytao-isolated-deploy-{}", std::process::id()));
+        let package = root.join("scheme-packages/local/local-fixture/files");
+        let runtime = root.join("runtime/local-fixture");
+        let other = root.join("runtime/local-other");
+        let bundled = root.join("bundled");
+        for dir in [
+            package.join("build"),
+            runtime.clone(),
+            other.join("build"),
+            bundled.clone(),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            root.join(crate::RuntimeDirs::SETTINGS_FILE),
+            r#"{"runtime_isolation":true}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("scheme-packages/active-manifest.json"),
+            r#"{"active_package":"local-fixture"}"#,
+        )
+        .unwrap();
+        fs::write(
+            bundled.join("default.yaml"),
+            "config_version: '1'\nschema_list: []\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("default.yaml"),
+            "config_version: '1'\nschema_list: []\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join(format!("{SCHEMA}.schema.yaml")),
+            format!(
+                "schema: {{schema_id: {SCHEMA}, name: Isolation Fixture, version: '1'}}\n\
+                 menu: {{page_size: 2}}\n\
+                 engine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor]\n  translators: [table_translator]\n\
+                 translator: {{dictionary: {SCHEMA}, enable_user_dict: false}}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            package.join(format!("{SCHEMA}.dict.yaml")),
+            format!("---\nname: {SCHEMA}\nversion: '1'\nuse_preset_vocabulary: false\n...\n甲\ta\t100\n"),
+        )
+        .unwrap();
+        fs::write(
+            runtime.join("default.custom.yaml"),
+            format!("patch:\n  schema_list: [{{schema: {SCHEMA}}}]\n"),
+        )
+        .unwrap();
+        fs::write(
+            runtime.join(format!("{SCHEMA}.custom.yaml")),
+            "patch: {menu/page_size: 7}\n",
+        )
+        .unwrap();
+        fs::write(other.join("symbols.yaml"), "symbols: {other: keep}\n").unwrap();
+        fs::write(other.join("build/other.table.bin"), b"keep build").unwrap();
+        let before = tree(&other);
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "deploy_child::tests::isolated_deploy_child_compiles_only_the_active_package",
+                "--nocapture",
+            ])
+            .env(FIXTURE, &root)
+            .env("KEYTAO_RIME_SHARED_DATA_DIR", &bundled)
+            .env_remove("KEYTAO_RUNTIME_ISOLATION")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.lines().any(|line| matches!(
+            serde_json::from_str::<Message>(line),
+            Ok(Message::Final {
+                ok: true,
+                error: None
+            })
+        )));
+        let build = runtime.join("build");
+        let compiled: serde_yaml::Value =
+            serde_yaml::from_slice(&fs::read(build.join(format!("{SCHEMA}.schema.yaml"))).unwrap())
+                .unwrap();
+        assert_eq!(compiled["menu"]["page_size"].as_u64(), Some(7));
+        assert!(build.join(format!("{SCHEMA}.table.bin")).is_file());
+        assert!(!root.join("build").exists());
+        let after = tree(&other);
+        #[cfg(target_os = "macos")]
+        assert_eq!(md5(&before), md5(&after));
+        assert_eq!(before, after);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

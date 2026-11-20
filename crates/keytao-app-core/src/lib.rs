@@ -42,6 +42,7 @@ pub mod user_words;
 mod remove_filter;
 mod candidate_page_size;
 mod managed_custom;
+pub mod runtime_materialize;
 pub mod wanxiang;
 pub mod rime_ice;
 pub mod rime_mint;

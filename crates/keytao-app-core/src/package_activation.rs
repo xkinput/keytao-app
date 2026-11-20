@@ -360,7 +360,7 @@ pub(crate) fn remove(core: &Core, root: &Path, key: &str, inactive: &Activation)
     Ok(())
 }
 
-fn backup_bytes(core: &Core, backup: &Backup) -> Result<Vec<u8>, CoreError> {
+pub(crate) fn backup_bytes(core: &Core, backup: &Backup) -> Result<Vec<u8>, CoreError> {
     let path = safe_path(&PackageStore::new(core).checked_root()?, &backup.backup)
         .map_err(CoreError::Other)?;
     let bytes = fs::read(&path)

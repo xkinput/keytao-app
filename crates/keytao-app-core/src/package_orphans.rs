@@ -1,7 +1,7 @@
 use crate::{
     Core, CoreError, Platform, package_activation,
     package_store::PackageStore,
-    packages::{safe_path, sha256_reader},
+    packages::{safe_path, sha256_reader, staging_relative},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -119,19 +119,22 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         }
     }
     let mut artifacts = BTreeSet::new();
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    let build = staging_relative(root, &dirs);
+    artifacts.insert(format!("{build}/default.yaml"));
     let schemas = crate::managed_custom::active_schema_ids(root).map_err(CoreError::Other)?;
     artifacts.extend(crate::package_artifacts::owned_artifact_paths(
         root, &schemas,
     )?);
     for path in &owned {
         if let Some(id) = path.strip_suffix(".schema.yaml") {
-            artifacts.insert(format!("build/{id}.schema.yaml"));
+            artifacts.insert(format!("{build}/{id}.schema.yaml"));
         }
         if let Some(id) = path.strip_suffix(".dict.yaml") {
             for extension in ["table", "prism", "reverse"] {
-                artifacts.insert(format!("build/{id}.{extension}.bin"));
+                artifacts.insert(format!("{build}/{id}.{extension}.bin"));
                 artifacts.insert(format!(
-                    "build/{}.{extension}.bin",
+                    "{build}/{}.{extension}.bin",
                     id.rsplit('/').next().unwrap()
                 ));
             }
@@ -139,7 +142,13 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
     }
     owned.extend(artifacts);
     let mut files = Vec::new();
-    collect(root, root, &owned, &mut files)?;
+    collect(
+        root,
+        root,
+        keytao_core::RuntimeDirs::isolation_enabled(root),
+        &owned,
+        &mut files,
+    )?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(OrphanReport {
         files,
@@ -150,6 +159,7 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
 fn collect(
     root: &Path,
     directory: &Path,
+    isolated: bool,
     owned: &BTreeSet<String>,
     files: &mut Vec<OrphanFile>,
 ) -> Result<(), CoreError> {
@@ -166,7 +176,12 @@ fn collect(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if package_activation::user_file(&relative)
+        if (isolated
+            && matches!(
+                relative.as_str(),
+                "runtime" | keytao_core::RuntimeDirs::SETTINGS_FILE
+            ))
+            || package_activation::user_file(&relative)
             || matches!(
                 relative.as_str(),
                 "installation.yaml"
@@ -182,7 +197,7 @@ fn collect(
             continue;
         }
         if metadata.is_dir() {
-            collect(root, &path, owned, files)?;
+            collect(root, &path, isolated, owned, files)?;
         } else if metadata.is_file()
             && !owned.contains(&relative)
             && !generated(&relative, &path)?
@@ -198,10 +213,7 @@ fn collect(
 }
 
 fn generated(relative: &str, path: &Path) -> Result<bool, CoreError> {
-    if matches!(
-        relative,
-        "default.custom.yaml" | "default-custom.yaml" | "build/default.yaml"
-    ) {
+    if matches!(relative, "default.custom.yaml" | "default-custom.yaml") {
         return Ok(true);
     }
     if !relative.ends_with(".yaml") && !relative.ends_with(".lua") {
@@ -438,6 +450,26 @@ mod tests {
         .unwrap();
         (temp, core, root)
     }
+
+    #[test]
+    fn isolated_runtime_files_are_not_eligible_for_legacy_orphan_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("runtime/package")).unwrap();
+        fs::write(root.join("runtime/package/symbols.yaml"), "package").unwrap();
+        fs::write(
+            root.join(keytao_core::RuntimeDirs::SETTINGS_FILE),
+            r#"{"runtime_isolation":true}"#,
+        )
+        .unwrap();
+        fs::write(root.join("orphan.yaml"), "legacy").unwrap();
+
+        let mut files = Vec::new();
+        collect(root, root, true, &BTreeSet::new(), &mut files).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "orphan.yaml");
+    }
+
     #[test]
     fn excludes_owned_generated_addon_and_user_files() {
         let (_temp, core, root) = setup();

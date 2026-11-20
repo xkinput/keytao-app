@@ -20,6 +20,7 @@ use std::{
 
 static PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
+#[cfg(test)]
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
 const PUBLIC_BUILD_KEY_FILE: &str = "public-build-key.txt";
 const LUA_SNAPSHOTS: &str = ".keytao-package-lua";
@@ -447,7 +448,8 @@ fn deploy_and_publish_at(
     let complete = keytao_core::deployment_warning(stage.path()).is_none();
     let build = keytao_core::RuntimeDirs::resolve(stage.path(), shared).staging_dir;
     let mut compiled = BTreeMap::new();
-    read_snapshot_files(stage.path(), &build, &mut compiled)
+    let snapshot_build = public_staging_dir();
+    read_snapshot_files(&build, &build, &snapshot_build, &mut compiled)
         .map_err(|error| format!("collect-artifacts: {error}"))?;
     if !compiled
         .keys()
@@ -457,7 +459,7 @@ fn deploy_and_publish_at(
     }
     files.extend(compiled);
     files.insert(
-        LIBRIME_VERSION_FILE.into(),
+        snapshot_build.join("keytao-librime-version.txt"),
         version.trim().as_bytes().to_vec(),
     );
     store_snapshot(root, &files, grant_access).map_err(|error| format!("publish: {error}"))?;
@@ -663,10 +665,18 @@ fn checked_relative(path: &Path) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+fn public_staging_dir() -> PathBuf {
+    let root = Path::new("");
+    keytao_core::RuntimeDirs::flat(root, root).staging_dir
+}
+
 fn is_public_asset(path: &Path) -> bool {
     if is_public_lua_metadata(path)
         || path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
-        || path == Path::new("build/.keytao-skipped-schemas.json")
+        || (path
+            .file_name()
+            .is_some_and(|name| name == ".keytao-skipped-schemas.json")
+            && path.parent() == Some(public_staging_dir().as_path()))
         || path == Path::new("lua/rime_ice/lunar.db")
         || path == Path::new("zh-moqi.gram")
     {
@@ -1142,7 +1152,7 @@ fn publish_activation_with_selection_at(
         None => keytao_core::regenerate_active_rime_lua(stage.path())?,
     }
     let mut generated = BTreeMap::new();
-    read_snapshot_files(stage.path(), stage.path(), &mut generated)?;
+    read_snapshot_files(stage.path(), stage.path(), Path::new(""), &mut generated)?;
     if let Some(bytes) = generated.get_mut(Path::new(keytao_core::ACTIVE_SCHEME_MANIFEST)) {
         let mut marker: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
@@ -1294,13 +1304,14 @@ fn read_snapshot(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
     {
         return Err("symbolic link at public schema snapshot root".into());
     }
-    read_snapshot_files(&snapshot, &snapshot, &mut files)?;
+    read_snapshot_files(&snapshot, &snapshot, Path::new(""), &mut files)?;
     Ok(files)
 }
 
 fn read_snapshot_files(
     base: &Path,
     dir: &Path,
+    prefix: &Path,
     files: &mut BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
@@ -1310,9 +1321,9 @@ fn read_snapshot_files(
             return Err("symbolic link in public schema snapshot".into());
         }
         if kind.is_dir() {
-            read_snapshot_files(base, &entry.path(), files)?;
+            read_snapshot_files(base, &entry.path(), prefix, files)?;
         } else if kind.is_file() {
-            let relative = entry.path().strip_prefix(base).unwrap().to_path_buf();
+            let relative = prefix.join(entry.path().strip_prefix(base).unwrap());
             if is_public_asset(&relative) {
                 files.insert(
                     relative,
@@ -1497,7 +1508,7 @@ fn store_snapshot(
         })
         .unwrap_or(false);
     let preserve_current = !empty_schema_list
-        && !files.contains_key(Path::new(LIBRIME_VERSION_FILE))
+        && !files.contains_key(&public_staging_dir().join("keytao-librime-version.txt"))
         && previous
             .current
             .as_ref()
@@ -1515,7 +1526,7 @@ fn store_snapshot(
         {
             return Err("symbolic link at public schema snapshot root".into());
         }
-        read_snapshot_files(&snapshot, &snapshot, &mut existing)?;
+        read_snapshot_files(&snapshot, &snapshot, Path::new(""), &mut existing)?;
     }
     let changed = !snapshot.exists() || existing != *files;
     if grant_access {
@@ -1557,7 +1568,7 @@ fn store_snapshot(
 
 fn compiled_generation(root: &Path, generation: &str) -> Result<bool, String> {
     let snapshot = root.join(generation);
-    let dirs = keytao_core::RuntimeDirs::resolve(&snapshot, &snapshot);
+    let dirs = keytao_core::RuntimeDirs::flat(&snapshot, &snapshot);
     for path in [
         snapshot.clone(),
         dirs.staging_dir.clone(),
