@@ -168,19 +168,16 @@ fn prepare_with_smoke(
     scheme_key: &str,
     root: &Path,
     shared: Option<&Path>,
-    smoke: impl FnMut(&Path, &str, u32) -> Result<(), String>,
+    mut smoke: impl FnMut(&Path, &str, u32) -> Result<(), String>,
 ) -> Result<PreparedUpload, CoreError> {
     eligible(core, scheme_key, root)?;
     let (mut stored, meta) = crate::package_store::PackageStore::new(core).read_files(scheme_key)?;
     crate::package_schemas::filter_files(scheme_key, &mut stored,
         crate::package_schemas::read_selection(&crate::package_schemas::metadata_path(core, scheme_key)?)?.as_deref())?;
     let ids = package_schema_ids(&stored, &meta)?;
-    let bundle = if cfg!(target_os = "android") {
-        // Android validates Kotlin's deploy result and artifacts, without in-process Rime.
-        crate::upload_bundle::verified_artifacts(root, shared, &ids)?
-    } else {
-        crate::upload_bundle::verified(root, shared, &ids, smoke)?
-    };
+    // Android validates Kotlin's deploy result and artifacts, without in-process Rime.
+    let smoke = if cfg!(target_os = "android") { None } else { Some(&mut smoke as _) };
+    let bundle = crate::upload_bundle::verified_package(root, shared, scheme_key, &ids, smoke)?;
     if bundle.bytes.len() as u64 > MAX_PACKAGE_SIZE {
         return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
     }
@@ -359,7 +356,9 @@ async fn upload_prepared_at(
     core.emit(CoreEvent::CloudTransferProgress(progress.clone()));
     let current = || -> Result<(), CoreError> {
         eligible(core, scheme_key, root)?;
-        if crate::upload_bundle::verified_artifacts(root, shared.as_deref(), &ids)?.sha256 != sha256 {
+        if crate::upload_bundle::verified_package(root, shared.as_deref(), scheme_key, &ids, None)?
+            .sha256 != sha256
+        {
             return Err(CoreError::Other(format!(
                 "方案 {scheme_key} 的依赖文件已更改，请重新确认上传清单"
             )));

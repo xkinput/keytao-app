@@ -920,6 +920,53 @@ class PackageKeptBackupDto {
           backup == other.backup;
 }
 
+class PackageMigrationReportDto {
+  final int version;
+  final bool completed;
+  final String activePackage;
+  final String runtimePackage;
+  final List<String> packages;
+  final List<String> userFiles;
+  final List<String> legacyUserDatabases;
+  final PackageOrphanReportDto orphans;
+
+  const PackageMigrationReportDto({
+    required this.version,
+    required this.completed,
+    required this.activePackage,
+    required this.runtimePackage,
+    required this.packages,
+    required this.userFiles,
+    required this.legacyUserDatabases,
+    required this.orphans,
+  });
+
+  @override
+  int get hashCode =>
+      version.hashCode ^
+      completed.hashCode ^
+      activePackage.hashCode ^
+      runtimePackage.hashCode ^
+      packages.hashCode ^
+      userFiles.hashCode ^
+      legacyUserDatabases.hashCode ^
+      orphans.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PackageMigrationReportDto &&
+          runtimeType == other.runtimeType &&
+          version == other.version &&
+          completed == other.completed &&
+          activePackage == other.activePackage &&
+          runtimePackage == other.runtimePackage &&
+          packages == other.packages &&
+          userFiles == other.userFiles &&
+          legacyUserDatabases == other.legacyUserDatabases &&
+          orphans == other.orphans;
+}
+
 class PackageOrphanFileDto {
   final String path;
   final String sha256;

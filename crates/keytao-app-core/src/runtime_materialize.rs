@@ -39,6 +39,8 @@ struct Manifest {
     owned: BTreeMap<String, String>,
     generated: BTreeMap<String, String>,
     user_owned: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_default: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     runtime_overrides: BTreeSet<String>,
 }
@@ -67,7 +69,7 @@ impl Manifest {
             || self
                 .user_owned
                 .keys()
-                .any(|path| !materialized_path(path) || !user_path(path))
+                .any(|path| !materialized_path(path) || (!user_path(path) && path != crate::account::USER_DICTIONARY))
             || self
                 .runtime_overrides
                 .iter()
@@ -91,7 +93,7 @@ pub fn materialize_all_installed_packages(
     bundled: &Path,
 ) -> Result<(), CoreError> {
     if RuntimeDirs::isolation_enabled(control_root) {
-        for target in prepare_targets(core, control_root, bundled, false, None)?.0 {
+        for target in prepare_targets(core, control_root, bundled, false, None, None)?.0 {
             if let Some(error) = target.materialize_error {
                 return Err(CoreError::Other(error));
             }
@@ -108,7 +110,27 @@ pub(crate) fn prepare_deploy_targets(
     bundled: &Path,
     package_key: Option<&str>,
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
-    prepare_targets(core, control_root, bundled, true, package_key)
+    prepare_targets(core, control_root, bundled, true, package_key, None)
+}
+
+pub(crate) fn materialize_migration(
+    core: &Core,
+    root: &Path,
+    bundled: &Path,
+    active: &str,
+    legacy: &Files,
+) -> Result<Vec<RuntimeDirs>, CoreError> {
+    prepare_targets(core, root, bundled, false, None, Some((active, legacy)))?
+        .0
+        .into_iter()
+        .map(|target| {
+            if let Some(error) = target.materialize_error {
+                return Err(CoreError::Other(error));
+            }
+            RuntimeDirs::for_package(root, bundled, &target.package_key)
+                .ok_or_else(|| CoreError::Other(format!("Missing runtime for {}", target.package_key)))
+        })
+        .collect()
 }
 
 fn prepare_targets(
@@ -117,45 +139,24 @@ fn prepare_targets(
     bundled: &Path,
     stage: bool,
     package_key: Option<&str>,
+    migration: Option<(&str, &Files)>,
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
     let settings: Settings = read_optional(&safe(control_root, RuntimeDirs::SETTINGS_FILE)?)?
         .map(|bytes| serde_json::from_slice(&bytes))
         .transpose()?
         .unwrap_or_default();
     let store = PackageStore::new(core);
-    let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
     let activations = crate::package_activation::read_all(core, control_root)?;
-    for record in activations.values() {
-        for file in record.owned.iter().chain(&record.generated) {
-            owners
-                .entry(file.path.clone())
-                .or_default()
-                .insert(file.sha256.clone());
-        }
-        for (path, sha256) in &record.manifest {
-            owners
-                .entry(path.clone())
-                .or_default()
-                .insert(sha256.clone());
-        }
-    }
     let mut addons = BTreeMap::new();
-    for &id in crate::addon_store::IDS {
+    for id in installed_addons(&store)? {
         let package = store.checked_addon_path(id)?;
-        if package.try_exists()? {
-            let source: Result<_, CoreError> = (|| {
-                let activation: crate::package_activation::Activation =
-                    serde_json::from_slice(&fs::read(safe(&package, "activation.json")?)?)?;
-                for file in activation.owned.into_iter().chain(activation.generated) {
-                    owners.entry(file.path).or_default().insert(file.sha256);
-                }
-                crate::addon_store::validate_directory(&package, id)?;
-                let metadata: StoredPackage =
-                    serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
-                Ok((package, metadata))
-            })();
-            addons.insert(id.to_owned(), source);
-        }
+        let source: Result<_, CoreError> = (|| {
+            crate::addon_store::validate_directory(&package, id)?;
+            let metadata: StoredPackage =
+                serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
+            Ok((package, metadata))
+        })();
+        addons.insert(id.to_owned(), source);
     }
     let english = (!settings.easy_english_packages.is_empty()).then(|| {
         addons
@@ -177,42 +178,24 @@ fn prepare_targets(
             })
             .transpose()
     };
-    let mut legacy = user_files(control_root, &owners)?;
-    if let Some(active) = crate::package_activation::read(core, control_root)? {
-        for path in DEFAULT_CUSTOM {
-            if let (Some(applied), Some(current)) =
-                (active.default_applied.get(path), legacy.get(path))
-            {
-                let original = active
-                    .backups
-                    .iter()
-                    .find(|backup| backup.path == path)
-                    .map(|backup| crate::package_activation::backup_bytes(core, backup))
-                    .transpose()?;
-                let user = restore_user_default(current, applied, original.as_deref())?;
-                if user.is_empty() {
-                    legacy.remove(path);
-                } else {
-                    legacy.insert(path.into(), user);
-                }
-            }
-        }
-    }
-    let (installed, selected) = {
-        let state = core.lock_state();
-        (
-            state
-                .installed_packages
-                .keys()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            state.active_scheme.clone(),
-        )
+    let legacy;
+    let inputs = if let Some((_, legacy)) = migration {
+        legacy
+    } else {
+        legacy = if safe(control_root, RuntimeDirs::MIGRATION_MARKER)?.try_exists()? {
+            Files::new()
+        } else {
+            legacy_user_files(core, control_root)?
+        };
+        &legacy
     };
-    let active = RuntimeDirs::active_package_key(control_root)
-        .or_else(|| RuntimeDirs::active_package_key(&core.env().data_dir))
-        .or_else(|| in_use_package(control_root, &activations))
-        .or(selected);
+    let installed = installed_main_packages(core, &activations);
+    let active = migration.map(|(active, _)| active.to_owned()).or_else(|| {
+        RuntimeDirs::active_package_key(control_root)
+            .or_else(|| RuntimeDirs::active_package_key(&core.env().data_dir))
+            .or_else(|| in_use_package(control_root, &activations))
+            .or_else(|| core.lock_state().active_scheme.clone())
+    });
     let mut keys = installed
         .union(&addons.keys().cloned().collect())
         .cloned()
@@ -288,7 +271,7 @@ fn prepare_targets(
                     files,
                     selection.as_deref(),
                     overlay_for(&key)?,
-                    &legacy,
+                    inputs,
                     stage,
                 )?;
                 Ok(prepared.map(|prepared| {
@@ -315,6 +298,28 @@ fn prepare_targets(
         })
         .collect();
     Ok((targets, stages))
+}
+
+pub(crate) fn installed_main_packages(
+    core: &Core,
+    activations: &BTreeMap<String, crate::package_activation::Activation>,
+) -> BTreeSet<String> {
+    core.lock_state()
+        .installed_packages
+        .keys()
+        .chain(activations.keys())
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn installed_addons(store: &PackageStore<'_>) -> Result<Vec<&'static str>, CoreError> {
+    let mut addons = Vec::new();
+    for &id in crate::addon_store::IDS {
+        if store.checked_addon_path(id)?.try_exists()? {
+            addons.push(id);
+        }
+    }
+    Ok(addons)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", target_os = "linux"))]
@@ -430,10 +435,87 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
 }
 
 fn user_path(path: &str) -> bool {
-    path.ends_with(".custom.yaml")
+    path != crate::account::USER_DICTIONARY
+        && (path.ends_with(".custom.yaml")
         || path.ends_with(".dict.yaml")
         || path.rsplit('/').next() == Some("custom_phrase.txt")
-        || path == DEFAULT_CUSTOM[1]
+        || path == DEFAULT_CUSTOM[1])
+}
+
+pub(crate) fn legacy_sync_dir(root: &Path) -> Result<PathBuf, CoreError> {
+    let settings = crate::rime_sync::read_settings(root).map_err(CoreError::Other)?;
+    let path = if settings.sync_dir.is_empty() {
+        root.join("sync")
+    } else {
+        root.join(settings.sync_dir)
+    };
+    match path.canonicalize() {
+        Ok(sync) => {
+            let canonical_root = root.canonicalize()?;
+            Ok(sync.strip_prefix(canonical_root).map_or_else(|_| sync.clone(), |suffix| root.join(suffix)))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let mut normalized = PathBuf::new();
+            for part in path.components() {
+                if part == std::path::Component::ParentDir {
+                    normalized.pop();
+                } else {
+                    normalized.push(part);
+                }
+            }
+            Ok(normalized)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn legacy_user_files(core: &Core, root: &Path) -> Result<Files, CoreError> {
+    let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
+    let store = PackageStore::new(core);
+    for record in crate::package_activation::read_all(core, root)?.into_values() {
+        for file in record.owned.into_iter().chain(record.generated) {
+            owners.entry(file.path).or_default().insert(file.sha256);
+        }
+        for (path, sha256) in record.manifest {
+            owners.entry(path).or_default().insert(sha256);
+        }
+    }
+    for id in installed_addons(&store)? {
+        let path = safe(&store.checked_addon_path(id)?, "activation.json")?;
+        let record: crate::package_activation::Activation = serde_json::from_slice(&fs::read(path)?)?;
+        for file in record.owned.into_iter().chain(record.generated) {
+            owners.entry(file.path).or_default().insert(file.sha256);
+        }
+    }
+    for files in crate::addon_store::unprojected_legacy_addons(core, root)?.into_values() {
+        for file in files {
+            owners.entry(file.path).or_default().insert(file.sha256);
+        }
+    }
+    let sync_dir = legacy_sync_dir(root)?;
+    let mut legacy = user_files(root, &owners, &sync_dir)?;
+    if let Some(active) = crate::package_activation::read(core, root)? {
+        for path in DEFAULT_CUSTOM {
+            if let (Some(applied), Some(current)) =
+                (active.default_applied.get(path), read_optional(&safe(root, path)?)?)
+            {
+                let original = active
+                    .backups
+                    .iter()
+                    .find(|backup| backup.path == path)
+                    .map(|backup| crate::package_activation::backup_bytes(core, backup))
+                    .transpose()?;
+                let current = strip_generated(path, current)?;
+                let user = restore_user_default(&current, applied, original.as_deref())?;
+                if user.is_empty() {
+                    legacy.remove(path);
+                } else {
+                    legacy.insert(path.into(), user);
+                }
+            }
+        }
+    }
+    Ok(legacy)
 }
 
 fn private_path(path: &str) -> bool {
@@ -458,9 +540,11 @@ fn private_path(path: &str) -> bool {
 fn user_files(
     root: &Path,
     owners: &BTreeMap<String, BTreeSet<String>>,
+    sync_dir: &Path,
 ) -> Result<Files, CoreError> {
     let mut result = Files::new();
-    walk_files(root, "", private_path, &mut |path, relative| {
+    let skip = |path: &str| private_path(path) || root.join(path).starts_with(sync_dir);
+    walk_files(root, "", skip, &mut |path, relative| {
         if user_path(relative) {
             let bytes = strip_generated(relative, fs::read(path)?)?;
             let digest = sha256_reader(bytes.as_slice())?;
@@ -485,8 +569,11 @@ fn restore_user_default(
     use serde_yaml::{Mapping, Value};
 
     let parse = |bytes| {
-        serde_yaml::from_slice::<Mapping>(bytes)
-            .map_err(|error| CoreError::Other(error.to_string()))
+        match serde_yaml::from_slice(bytes).map_err(|error| CoreError::Other(error.to_string()))? {
+            Value::Mapping(mapping) => Ok(mapping),
+            Value::Null => Ok(Mapping::new()),
+            _ => Err(CoreError::Other("Default custom must be a mapping".into())),
+        }
     };
     let empty = Mapping::new();
     let patch_key = Value::String("patch".into());
@@ -603,6 +690,7 @@ fn materialized_path(path: &str) -> bool {
     !private_path(path)
         && (user_path(path)
             || lua_path(path)
+            || matches!(path, crate::account::USER_DICTIONARY | crate::account::USER_WORD_REMOVALS)
             || COMMON.contains(&path)
             || path.starts_with("opencc/")
             || crate::addon::is_package_file(path))
@@ -635,6 +723,7 @@ fn prepare_runtime(
     let mut generated = Files::new();
     let mut owned = Files::new();
     let mut schema_sources = Files::new();
+    let mut dictionaries = Files::new();
     if let Some(overlay) = overlay {
         for (path, bytes) in overlay
             .iter()
@@ -647,7 +736,12 @@ fn prepare_runtime(
                         "Easy English file conflict: {path}"
                     )));
                 }
-                None => owned.insert(path.clone(), bytes.clone()),
+                None => {
+                    if path.ends_with(".dict.yaml") {
+                        dictionaries.insert(path.clone(), bytes.clone());
+                    }
+                    owned.insert(path.clone(), bytes.clone())
+                }
             };
         }
         if let Some(bytes) = owned.get("easy_en.schema.yaml") {
@@ -657,6 +751,8 @@ fn prepare_runtime(
     for (path, bytes) in sources {
         if path.ends_with(".schema.yaml") && !path.contains('/') {
             schema_sources.insert(path, bytes);
+        } else if path.ends_with(".dict.yaml") {
+            dictionaries.insert(path, bytes);
         } else if materialized_path(&path)
             && (lua_path(&path) || path.ends_with(".custom.yaml") || path == DEFAULT_CUSTOM[1])
         {
@@ -687,6 +783,13 @@ fn prepare_runtime(
             if changed {
                 runtime_overrides.insert(relative.to_owned());
             }
+            if relative == DEFAULT_CUSTOM[0]
+                && !runtime_overrides.contains(relative)
+                && let Some(default) = &previous.user_default
+            {
+                user.entry(relative.to_owned()).or_insert_with(|| default.as_bytes().to_vec());
+                return Ok(());
+            }
             if runtime_overrides.contains(relative)
                 || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
             {
@@ -702,11 +805,11 @@ fn prepare_runtime(
     let incoming = take_default_custom(&mut owned);
     let existing = take_default_custom(&mut user);
     let default = default_custom(incoming.as_deref(), existing.as_deref(), &selected)?;
-    if existing.is_some() {
+    if let Some(existing) = existing {
         if runtime_overrides.remove(DEFAULT_CUSTOM[1]) {
             runtime_overrides.insert(DEFAULT_CUSTOM[0].into());
         }
-        user.insert(DEFAULT_CUSTOM[0].into(), default.clone());
+        user.insert(DEFAULT_CUSTOM[0].into(), existing);
     }
     generated.insert(DEFAULT_CUSTOM[0].into(), default);
     for path in user.keys() {
@@ -722,6 +825,20 @@ fn prepare_runtime(
         &mut generated,
         &user,
     )?;
+    for (path, bytes) in &user {
+        if path.ends_with(".dict.yaml") {
+            dictionaries.insert(path.clone(), bytes.clone());
+        }
+    }
+    let schema_configs = schema_sources.values().chain(
+        owned.iter().chain(&user).chain(&generated)
+            .filter(|(path, _)| path.strip_suffix(".custom.yaml").is_some_and(|schema| {
+                schema_sources.contains_key(&format!("{schema}.schema.yaml"))
+            }))
+            .map(|(_, bytes)| bytes),
+    );
+    let used = crate::account::runtime_dictionary_usage(schema_configs.map(Vec::as_slice), &dictionaries)?;
+    crate::account::add_runtime_user_dictionary(control_root, &dictionaries, &used, &mut generated)?;
     runtime_overrides.retain(|path| user.contains_key(path));
     write_runtime(
         &runtime,
@@ -916,6 +1033,7 @@ fn write_runtime(
         owned: fingerprint(&owned)?,
         generated: fingerprint(&generated)?,
         user_owned: fingerprint(&user)?,
+        user_default: user.get(DEFAULT_CUSTOM[0]).map(|bytes| utf8(bytes).map(str::to_owned)).transpose()?,
         runtime_overrides,
     };
     let mut files = owned;
@@ -946,8 +1064,12 @@ fn write_runtime(
         writes.push((path, bytes, previous_sha256));
     }
     let mut removals = Vec::new();
-    for (relative, hash) in previous.owned.iter().chain(&previous.generated) {
-        if manifest.fingerprint(relative).is_none() && !previous.user_owned.contains_key(relative) {
+    for (relative, hash) in previous.owned.iter().chain(&previous.generated).chain(
+        previous.user_owned.get_key_value(crate::account::USER_DICTIONARY),
+    ) {
+        if manifest.fingerprint(relative).is_none()
+            && (relative == crate::account::USER_DICTIONARY || !previous.user_owned.contains_key(relative))
+        {
             let path = safe(runtime, relative)?;
             if let Some(bytes) = read_optional(&path)? {
                 if sha256_reader(bytes.as_slice())? == *hash {
@@ -1080,6 +1202,9 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::hashes as test_hashes;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1131,7 +1256,7 @@ mod tests {
         files
     }
 
-    fn hashes(root: &Path) -> BTreeMap<String, String> {
+    pub(crate) fn hashes(root: &Path) -> BTreeMap<String, String> {
         let mut digests = BTreeMap::new();
         walk_files(root, "", |_| false, &mut |path, relative| {
             #[cfg(target_os = "macos")]
@@ -1190,7 +1315,7 @@ mod tests {
             "owned.dict.yaml".into(),
             BTreeSet::from([sha256_reader("package dictionary".as_bytes()).unwrap()]),
         )]);
-        let legacy = user_files(root, &owners).unwrap();
+        let legacy = user_files(root, &owners, &root.join("sync")).unwrap();
         assert_eq!(legacy.len(), 4);
         let overlay = Files::from([
             (

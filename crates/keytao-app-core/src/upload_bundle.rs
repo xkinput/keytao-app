@@ -1,4 +1,5 @@
 use crate::{CoreError, packages::staging_relative};
+use keytao_core::RuntimeDirs;
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -31,6 +32,7 @@ struct SchemaFiles {
 struct Collector<'a> {
     root: &'a Path,
     shared: Option<&'a Path>,
+    package: Option<&'a Path>,
     lua: Option<&'a LuaSnapshot>,
     files: BTreeMap<String, BundleFile>,
     schemas: BTreeMap<String, SchemaFiles>,
@@ -154,7 +156,7 @@ fn allowed(name: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn yaml(bytes: &[u8], name: &str) -> Result<Value, CoreError> {
+pub(crate) fn yaml(bytes: &[u8], name: &str) -> Result<Value, CoreError> {
     let text = std::str::from_utf8(bytes).map_err(|e| failure(format!("{name}: {e}")))?;
     // Dictionary rows after the YAML header are tab-separated text, not YAML.
     // Some symbol presets contain literal C0 characters in their symbol strings.
@@ -234,11 +236,21 @@ fn yaml(bytes: &[u8], name: &str) -> Result<Value, CoreError> {
         .map_err(|e| failure(format!("{name}: {e}")))
 }
 
+fn source_path(root: &Path, package: Option<&Path>, name: &str) -> Result<std::path::PathBuf, CoreError> {
+    let path = crate::packages::safe_path(root, name).map_err(failure)?;
+    if let Some(package) = package {
+        if !path.try_exists()? {
+            return crate::packages::safe_path(package, name).map_err(failure);
+        }
+    }
+    Ok(path)
+}
+
 impl Collector<'_> {
     fn source(&self, name: &str) -> Result<std::path::PathBuf, CoreError> {
         let root = self.lua.filter(|lua| name == "rime.lua" || lua.managed.contains(name))
             .map_or(self.root, |lua| lua.directory.path());
-        crate::packages::safe_path(root, name).map_err(failure)
+        source_path(root, self.package, name)
     }
     fn shared_file(&self, name: &str) -> bool {
         self.shared.is_some_and(|root| root.join(name).is_file())
@@ -322,13 +334,13 @@ impl Collector<'_> {
                 } else {
                     format!("{id}.yaml")
                 };
-                if preset
-                    && !self.root.join(&name).is_file()
-                    && (self.root.join(format!("{id}.symbols.yaml")).is_file()
-                        || (!self.shared_file(&name)
-                            && self.shared_file(&format!("{id}.symbols.yaml"))))
-                {
-                    name = format!("{id}.symbols.yaml");
+                if preset && !self.source(&name)?.is_file() {
+                    let symbols = format!("{id}.symbols.yaml");
+                    if self.source(&symbols)?.is_file()
+                        || (!self.shared_file(&name) && self.shared_file(&symbols))
+                    {
+                        name = symbols;
+                    }
                 }
                 self.add(schema, &name)?;
                 let Some(bytes) = self.files.get(&name) else {
@@ -575,15 +587,15 @@ impl Collector<'_> {
                     .to_string_lossy()
                     .into_owned();
                 let root_relative = format!("opencc/{dependency}");
-                let file = [&relative, &root_relative]
-                    .into_iter()
-                    .find(|name| self.root.join(name).is_file())
-                    .or_else(|| {
-                        [&relative, &root_relative]
-                            .into_iter()
-                            .find(|name| self.shared_file(name))
-                    })
-                    .unwrap_or(&relative);
+                let file = if self.source(&relative)?.is_file() {
+                    &relative
+                } else if self.source(&root_relative)?.is_file()
+                    || (!self.shared_file(&relative) && self.shared_file(&root_relative))
+                {
+                    &root_relative
+                } else {
+                    &relative
+                };
                 self.add_file(schema, file, true)?;
             }
         }
@@ -734,15 +746,27 @@ pub fn build(
     shared: Option<&Path>,
     schema_ids: &[String],
 ) -> Result<UploadBundle, CoreError> {
+    let dirs = RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?;
+    build_from(root, shared, &dirs, schema_ids)
+}
+
+fn build_from(
+    root: &Path,
+    shared: Option<&Path>,
+    dirs: &RuntimeDirs,
+    schema_ids: &[String],
+) -> Result<UploadBundle, CoreError> {
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
     }
-    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?;
-    let build = staging_relative(root, &dirs);
-    let lua = LuaSnapshot::for_schemas(root, schema_ids)?;
+    let user = &dirs.user_data_dir;
+    let build = staging_relative(user, dirs);
+    let package = dirs.active_package_key.as_ref().map(|_| dirs.shared_data_dir.as_path());
+    let lua = if package.is_some() { None } else { LuaSnapshot::for_schemas(root, schema_ids)? };
     let mut collector = Collector {
-        root,
-        shared,
+        root: user,
+        shared: if package.is_some() { None } else { shared },
+        package,
         lua: lua.as_ref(),
         files: BTreeMap::new(),
         schemas: BTreeMap::new(),
@@ -762,13 +786,13 @@ pub fn build(
         }
         let source = yaml(&collector.files[&source].contents()?, &source)?;
         let compiled = format!("{build}/{id}.schema.yaml");
-        let compiled_path = crate::packages::safe_path(root, &compiled).map_err(failure)?;
+        let compiled_path = crate::packages::safe_path(user, &compiled).map_err(failure)?;
         let deployed = compiled_path.is_file();
         // The deployed schema contains Rime's resolved includes and custom patches.
         // Source references still supply the files needed to rebuild that schema.
         collector.scan(&id, &source, !deployed)?;
         let custom = format!("{id}.custom.yaml");
-        if root.join(&custom).try_exists()? {
+        if collector.source(&custom)?.try_exists()? {
             collector.add(&id, &custom)?;
             let value = yaml(&collector.files[&custom].contents()?, &custom)?;
             collector.scan(&id, &value, !deployed)?;
@@ -864,7 +888,7 @@ pub fn verified(
     schema_ids: &[String],
     mut smoke: impl FnMut(&Path, &str, u32) -> Result<(), String>,
 ) -> Result<UploadBundle, CoreError> {
-    checked(root, shared, schema_ids, Some(&mut smoke), true)
+    checked(root, shared, None, schema_ids, Some(&mut smoke))
 }
 
 pub fn verified_artifacts(
@@ -872,7 +896,17 @@ pub fn verified_artifacts(
     shared: Option<&Path>,
     schema_ids: &[String],
 ) -> Result<UploadBundle, CoreError> {
-    checked(root, shared, schema_ids, None, true)
+    checked(root, shared, None, schema_ids, None)
+}
+
+pub(crate) fn verified_package(
+    root: &Path,
+    shared: Option<&Path>,
+    package: &str,
+    schema_ids: &[String],
+    smoke: Option<&mut dyn FnMut(&Path, &str, u32) -> Result<(), String>>,
+) -> Result<UploadBundle, CoreError> {
+    checked(root, shared, Some(package), schema_ids, smoke)
 }
 
 pub(crate) fn verify_deploy_artifacts(
@@ -900,7 +934,7 @@ pub(crate) fn verify_deploy_artifacts(
             }
         }
         let compiled = format!("{build}/{id}.schema.yaml");
-        let compiled_path = verify_artifact(root, &id, &compiled, &sources, false)?;
+        let compiled_path = verify_artifact(root, &id, &compiled, &sources, None, false)?;
         let value = yaml(&fs::read(compiled_path)?, &compiled)?;
         if value["schema"]["schema_id"].as_str() != Some(&id) {
             return Err(failure(format!(
@@ -947,6 +981,7 @@ pub(crate) fn verify_deploy_artifacts(
                     &id,
                     &format!("{build}/{dictionary}.table.bin"),
                     &sources,
+                    None,
                     false,
                 )?;
             }
@@ -955,6 +990,7 @@ pub(crate) fn verify_deploy_artifacts(
                 &id,
                 &format!("{build}/{dictionary}.reverse.bin"),
                 &sources,
+                None,
                 false,
             )?;
         }
@@ -964,6 +1000,7 @@ pub(crate) fn verify_deploy_artifacts(
                 &id,
                 &format!("{build}/{prism}.prism.bin"),
                 &sources,
+                None,
                 false,
             )?;
         }
@@ -1004,15 +1041,25 @@ fn collect_deploy_dictionaries(value: &Value, reverse_only: bool, schema: &mut S
 fn checked(
     root: &Path,
     shared: Option<&Path>,
+    target: Option<&str>,
     schema_ids: &[String],
     mut smoke: Option<&mut dyn FnMut(&Path, &str, u32) -> Result<(), String>>,
-    require_freshness: bool,
 ) -> Result<UploadBundle, CoreError> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?;
-    let staging = staging_relative(root, &dirs);
-    let bundle = build(root, shared, schema_ids)?;
+    let dirs = if let Some(key) = target.filter(|_| RuntimeDirs::isolation_enabled(root)) {
+        RuntimeDirs::for_package(root, shared.unwrap_or(root), key)
+            .ok_or_else(|| failure(format!("无法读取方案包：{key}")))?
+    } else {
+        RuntimeDirs::resolve(root, shared.unwrap_or(root)).map_err(failure)?
+    };
+    let user = &dirs.user_data_dir;
+    let staging = staging_relative(user, &dirs);
+    let package = dirs.active_package_key.as_ref().map(|_| dirs.shared_data_dir.as_path());
+    let mut bundle = build_from(root, shared, &dirs, schema_ids)?;
+    if smoke.is_some() && package.is_some() {
+        bundle.runtime_source = Some(tempfile::tempdir()?);
+    }
     let smoke_root = if smoke.is_some() {
-        bundle.prepare_smoke_source(root, schema_ids)?
+        bundle.prepare_smoke_source(&dirs, schema_ids)?
     } else { root };
     for (id, schema) in &bundle.schemas {
         let configs: BTreeSet<_> = schema
@@ -1022,7 +1069,7 @@ fn checked(
             .cloned()
             .collect();
         let compiled = format!("{staging}/{id}.schema.yaml");
-        let compiled_path = verify_artifact(root, id, &compiled, &configs, require_freshness)?;
+        let compiled_path = verify_artifact(user, id, &compiled, &configs, package, true)?;
         for (dictionary, table) in &schema.dictionaries {
             let inputs = &schema.dictionary_sources[dictionary];
             if inputs.is_empty() {
@@ -1031,19 +1078,21 @@ fn checked(
             }
             if *table {
                 verify_artifact(
-                    root,
+                    user,
                     id,
                     &format!("{staging}/{dictionary}.table.bin"),
                     inputs,
-                    require_freshness,
+                    package,
+                    true,
                 )?;
             }
             verify_artifact(
-                root,
+                user,
                 id,
                 &format!("{staging}/{dictionary}.reverse.bin"),
                 inputs,
-                require_freshness,
+                package,
+                true,
             )?;
         }
         for (prism, dictionary) in &schema.prisms {
@@ -1053,11 +1102,12 @@ fn checked(
             let mut sources = configs.clone();
             sources.extend(schema.dictionary_sources[dictionary].iter().cloned());
             verify_artifact(
-                root,
+                user,
                 id,
                 &format!("{staging}/{prism}.prism.bin"),
                 &sources,
-                require_freshness,
+                package,
+                true,
             )?;
         }
         let value = yaml(&fs::read(compiled_path)?, &compiled)?;
@@ -1079,11 +1129,11 @@ fn checked(
 }
 
 impl UploadBundle {
-    fn prepare_smoke_source<'a>(&'a self, root: &'a Path, ids: &[String]) -> Result<&'a Path, CoreError> {
+    fn prepare_smoke_source<'a>(&'a self, dirs: &'a RuntimeDirs, ids: &[String]) -> Result<&'a Path, CoreError> {
+        let root = &dirs.user_data_dir;
         let Some(directory) = self.runtime_source.as_ref() else { return Ok(root) };
         let output = directory.path();
-        let source_dirs = keytao_core::RuntimeDirs::resolve(root, root).map_err(failure)?;
-        let build = staging_relative(root, &source_dirs);
+        let build = staging_relative(root, dirs);
         let output_dirs = keytao_core::RuntimeDirs::flat(output, output);
         let mut archive = zip::ZipArchive::new(Cursor::new(&self.bytes))
             .map_err(|error| failure(error.to_string()))?;
@@ -1118,6 +1168,7 @@ fn verify_artifact(
     id: &str,
     artifact: &str,
     sources: &BTreeSet<String>,
+    package: Option<&Path>,
     require_freshness: bool,
 ) -> Result<std::path::PathBuf, CoreError> {
     let path = crate::packages::safe_path(root, artifact).map_err(failure)?;
@@ -1135,7 +1186,7 @@ fn verify_artifact(
         .map_err(|e| failure(format!("方案 {id}：{artifact}: {e}")))?;
     // Runtime-only Lua/OpenCC/text resources do not produce dictionary binaries.
     for source in sources {
-        let source_path = crate::packages::safe_path(root, source).map_err(failure)?;
+        let source_path = source_path(root, package, source)?;
         let modified = fs::metadata(source_path)
             .and_then(|m| m.modified())
             .map_err(|e| failure(format!("方案 {id}：{source}: {e}")))?;
@@ -1151,6 +1202,34 @@ fn verify_artifact(
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
+
+    #[test]
+    fn isolated_upload_uses_the_requested_package_sources_and_build() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let store = root.join("scheme-packages");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(root.join(RuntimeDirs::SETTINGS_FILE), r#"{"runtime_isolation":true}"#).unwrap();
+        fs::write(store.join("active-manifest.json"), r#"{"active_package":"one"}"#).unwrap();
+        fs::write(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST), "not the isolated manifest").unwrap();
+        let id = "main".to_owned();
+        for key in ["one", "two"] {
+            let files = store.join("cloud").join(key).join("files");
+            fs::create_dir_all(&files).unwrap();
+            let source = files.join("main.schema.yaml");
+            fs::write(&source, format!("schema: {{ schema_id: main, name: {key} }}\n")).unwrap();
+            let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+            fs::File::options().write(true).open(source).unwrap().set_times(fs::FileTimes::new().set_modified(past)).unwrap();
+        }
+        let build = root.join("runtime/two/build");
+        fs::create_dir_all(&build).unwrap();
+        fs::write(build.join("main.schema.yaml"), "schema: { schema_id: main, name: two }\n").unwrap();
+        let bundle = verified_package(root, None, "two", &[id], None).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bundle.bytes)).unwrap();
+        let mut schema = String::new();
+        archive.by_name("main.schema.yaml").unwrap().read_to_string(&mut schema).unwrap();
+        assert!(schema.contains("name: two"));
+    }
 
     #[test]
     fn inactive_lua_owner_upload_uses_its_snapshot_without_changing_runtime_files() {

@@ -969,7 +969,6 @@ class AppController extends ChangeNotifier {
       return;
     }
 
-    if (operation == null) return;
     if (value.index == 1 && value.step == DeployStepDto.materialize) {
       _packageDeployProgress
         ..clear()
@@ -2106,6 +2105,13 @@ class AppController extends ChangeNotifier {
       scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
     } catch (failure) {
       packageError = errorText(failure);
+      try {
+        await Future.wait([_readInstalledPackages(), _readLocal()]);
+      } catch (refreshFailure) {
+        debugPrint(
+          'Package switch state refresh failed: ${errorText(refreshFailure)}',
+        );
+      }
       rethrow;
     } finally {
       deployingSchemeKey = null;

@@ -128,7 +128,7 @@ impl BridgeHost {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn deploy_paths(&self) -> (PathBuf, PathBuf) {
-        let shared = PathBuf::from(keytao_app_core::ime_status::app_shared_data_dir(&self.core));
+        let shared = keytao_app_core::deploy::deploy_shared_data_dir(&self.core, &self.root);
         (self.root.clone(), shared)
     }
     pub(crate) async fn deploy_default(

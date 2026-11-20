@@ -31,6 +31,24 @@ pub struct OrphanReport {
 }
 
 pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
+    report_with_exclusions(core, root, None, BTreeSet::new())
+}
+
+pub(crate) fn report_migration(
+    core: &Core,
+    root: &Path,
+    sync_dir: &Path,
+    migrated: BTreeSet<String>,
+) -> Result<OrphanReport, CoreError> {
+    report_with_exclusions(core, root, Some(sync_dir), migrated)
+}
+
+fn report_with_exclusions(
+    core: &Core,
+    root: &Path,
+    sync_dir: Option<&Path>,
+    mut owned: BTreeSet<String>,
+) -> Result<OrphanReport, CoreError> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
@@ -46,9 +64,11 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         }
         Err(error) => return Err(error.into()),
     }
-    let mut owned = BTreeSet::new();
-    owned.extend(crate::addon_store::report_paths(core, root)?);
-    owned.extend(crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?);
+    owned.extend(if sync_dir.is_some() {
+        crate::addon_store::read_report_paths(core, root)?
+    } else {
+        crate::addon_store::report_paths(core, root)?
+    });
     let store = PackageStore::new(core);
     for key in core.state().installed_packages.keys() {
         if let Some(meta) = store.read_meta(key)? {
@@ -118,7 +138,7 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
             }
         }
     }
-    let isolated = keytao_core::RuntimeDirs::isolation_enabled(root);
+    let isolated = sync_dir.is_some() || keytao_core::RuntimeDirs::isolation_enabled(root);
     // The entire legacy build is retained for rollback when isolation is enabled.
     if !isolated {
         let dirs = keytao_core::RuntimeDirs::flat(root, root);
@@ -143,7 +163,7 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         owned.extend(artifacts);
     }
     let mut files = Vec::new();
-    collect(root, root, isolated, &owned, &mut files)?;
+    collect(root, root, isolated, sync_dir, &owned, &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(OrphanReport {
         files,
@@ -155,12 +175,22 @@ fn collect(
     root: &Path,
     directory: &Path,
     isolated: bool,
+    sync_dir: Option<&Path>,
     owned: &BTreeSet<String>,
     files: &mut Vec<OrphanFile>,
 ) -> Result<(), CoreError> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(name.as_ref(), "app-state.json" | "sync")
+            || name.contains(".userdb")
+            || name.ends_with(".leveldb")
+            || sync_dir.is_some_and(|dir| path.starts_with(dir))
+        {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&path)?;
         // Never traverse links, including links to user dictionaries outside this root.
         if metadata.file_type().is_symlink() {
@@ -183,6 +213,7 @@ fn collect(
                     | "rime.lua"
                     | "keytao-ime.reload"
                     | "keytao-librime-upgrade.lock"
+                    | ".keytao-package-deploy.lock"
                     | keytao_core::english_mode::SETTINGS_FILE
                     | "theme.yaml"
                     | "keyboard.yaml"
@@ -192,7 +223,7 @@ fn collect(
             continue;
         }
         if metadata.is_dir() {
-            collect(root, &path, isolated, owned, files)?;
+            collect(root, &path, isolated, sync_dir, owned, files)?;
         } else if metadata.is_file()
             && !owned.contains(&relative)
             && !generated(&relative, &path)?
@@ -460,7 +491,7 @@ mod tests {
         fs::write(root.join("orphan.yaml"), "legacy").unwrap();
 
         let mut files = Vec::new();
-        collect(root, root, true, &BTreeSet::new(), &mut files).unwrap();
+        collect(root, root, true, None, &BTreeSet::new(), &mut files).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "orphan.yaml");
     }

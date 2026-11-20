@@ -194,16 +194,17 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
         return Err("installation_id must be trimmed".into());
     }
     validate_sync_dir(&settings.sync_dir)?;
-    let generation = keytao_core::request_user_data_sync(&root)?;
+    let request_root = prepare_sync_root(&root, &settings)?;
+    let generation = keytao_core::request_user_data_sync(&request_root)?;
     if let Err(error) = host.write_reload_stamp(&root) {
-        if keytao_core::cancel_user_data_sync(&root, generation).unwrap_or(true) {
+        if keytao_core::cancel_user_data_sync(&request_root, generation).unwrap_or(true) {
             return Err(error);
         }
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut process_id = None;
     loop {
-        match keytao_core::read_user_data_sync_result(&root) {
+        match keytao_core::read_user_data_sync_result(&request_root) {
             Ok(Some(result)) if result.generation == generation => {
                 if result.finished_at != 0 {
                     return if result.ok {
@@ -217,7 +218,7 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
                 process_id = Some(result.process_id);
             }
             Err(error) if process_id.is_none() => {
-                if keytao_core::cancel_user_data_sync(&root, generation).unwrap_or(true) {
+                if keytao_core::cancel_user_data_sync(&request_root, generation).unwrap_or(true) {
                     return Err(error);
                 }
             }
@@ -228,7 +229,7 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
                 return Err("IME exited before completing user data sync".into());
             }
         } else if tokio::time::Instant::now() >= deadline
-            && keytao_core::cancel_user_data_sync(&root, generation)?
+            && keytao_core::cancel_user_data_sync(&request_root, generation)?
         {
             return Err(
                 "IME did not start syncing within 20 seconds; make sure it is running".into(),
@@ -236,6 +237,24 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+fn prepare_sync_root(root: &Path, settings: &RimeSyncSettings) -> Result<PathBuf, String> {
+    let runtime = keytao_core::RuntimeDirs::resolve(root, root)?;
+    let Some(key) = runtime.active_package_key else {
+        return Ok(runtime.user_data_dir);
+    };
+    if !runtime.user_data_dir.is_dir() {
+        return Err(format!("Rime runtime is not available for {key}"));
+    }
+    // Librime backs up configs beside userdb snapshots, so packages need separate sync folders.
+    let sync_dir = Path::new(&settings.effective_sync_dir).join("keytao-packages").join(key);
+    save_settings(
+        &runtime.user_data_dir,
+        &settings.installation_id,
+        sync_dir.to_str().ok_or("Rime sync path is not valid UTF-8")?,
+    )?;
+    Ok(runtime.user_data_dir)
 }
 
 #[cfg(unix)]
@@ -361,6 +380,30 @@ mod tests {
             std::fs::write(&path, invalid).unwrap();
             assert!(read_settings(root.path()).is_err());
         }
+    }
+
+    #[test]
+    fn isolated_sync_prepares_settings_only_for_the_selected_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let settings = save_settings(root, "device", "").unwrap();
+        let legacy = std::fs::read(root.join("installation.yaml")).unwrap();
+        let store = root.join("scheme-packages");
+        std::fs::write(root.join(keytao_core::RuntimeDirs::SETTINGS_FILE), r#"{"runtime_isolation":true}"#).unwrap();
+        for key in ["one", "two"] {
+            std::fs::create_dir_all(store.join("cloud").join(key).join("files")).unwrap();
+            std::fs::create_dir_all(root.join("runtime").join(key)).unwrap();
+        }
+        for key in ["one", "two"] {
+            std::fs::write(store.join("active-manifest.json"), format!(r#"{{"active_package":"{key}"}}"#)).unwrap();
+            let runtime = prepare_sync_root(root, &settings).unwrap();
+            assert_eq!(runtime, root.join("runtime").join(key));
+            let prepared = read_settings(&runtime).unwrap();
+            assert_eq!(prepared.installation_id, "device");
+            assert_eq!(Path::new(&prepared.effective_sync_dir), root.join("sync/keytao-packages").join(key));
+        }
+        assert_eq!(std::fs::read(root.join("installation.yaml")).unwrap(), legacy);
+        assert!(!root.join("sync").exists());
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

@@ -1,11 +1,15 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
 };
 
 pub(crate) const PREVIOUS_BUILD: &str = "previous-build";
 pub(crate) const BUILD_GENERATION_MARKER: &str = ".keytao-build-current";
 pub(crate) const BUILD_GENERATION_PREFIX: &str = ".keytao-build-";
+static LOGGED_RESOLVE_FAILURES: LazyLock<Mutex<HashSet<(PathBuf, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn read_regular_file(path: &Path) -> Option<Vec<u8>> {
     fs::symlink_metadata(path).ok()?.is_file().then_some(())?;
@@ -25,6 +29,7 @@ pub struct RuntimeDirs {
 impl RuntimeDirs {
     pub const SETTINGS_FILE: &str = "keytao-runtime-settings.json";
     pub const MANIFEST_FILE: &str = ".keytao-runtime.json";
+    pub const MIGRATION_MARKER: &str = "runtime/.keytao-migration.json";
     pub const PUBLIC_PACKAGE_FILE: &str = ".keytao-public-package";
 
     pub fn isolation_enabled(control_root: &Path) -> bool {
@@ -45,8 +50,18 @@ impl RuntimeDirs {
                     let error = format!(
                         "cannot resolve isolated runtime for active package {key:?}: {reason}"
                     );
-                    crate::rt_log!(crate::Level::Info, "error", "runtime_resolve_failed", error = &error);
-                    eprintln!("KeyTao: {error}");
+                    if crate::lock_ignore_poison(&LOGGED_RESOLVE_FAILURES)
+                        .insert((control_root.to_path_buf(), key.clone()))
+                    {
+                        crate::rt_log!(
+                            crate::Level::Info,
+                            "error",
+                            "runtime_resolve_failed",
+                            root = control_root.to_string_lossy(),
+                            error = &error
+                        );
+                        eprintln!("KeyTao {}: {error}", control_root.display());
+                    }
                     error
                 });
             }
@@ -55,7 +70,25 @@ impl RuntimeDirs {
     }
 
     pub fn active_package_key(control_root: &Path) -> Option<String> {
-        Self::package_stores(control_root).find_map(|store| manifest_package_key(&store))
+        let migration = Self::migration_marker(control_root);
+        let version = migration.as_ref().and_then(|marker| marker["version"].as_u64());
+        Self::package_stores(control_root)
+            .find_map(|store| manifest_package_key(&store, version))
+            .or_else(|| {
+                let marker = migration?;
+                marker["runtime_package"].as_str().map(str::to_owned)
+            })
+    }
+
+    pub(crate) fn migration_version(control_root: &Path) -> Option<u64> {
+        Self::migration_marker(control_root)?["version"].as_u64()
+    }
+
+    fn migration_marker(control_root: &Path) -> Option<serde_json::Value> {
+        let path = control_root.join(Self::MIGRATION_MARKER);
+        fs::symlink_metadata(path.parent()?).ok()?.is_dir().then_some(())?;
+        let marker: serde_json::Value = serde_json::from_slice(&read_regular_file(&path)?).ok()?;
+        (marker["version"].as_u64()? == 1).then_some(marker)
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -272,9 +305,12 @@ fn package_files_dir(store: &Path, key: &str) -> Result<PathBuf, String> {
     Err(invalid(&store.join(primary).join(key).join("files")))
 }
 
-fn manifest_package_key(store: &Path) -> Option<String> {
+fn manifest_package_key(store: &Path, migration_version: Option<u64>) -> Option<String> {
     let bytes = read_regular_file(&store.join("active-manifest.json"))?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if migration_version.is_some() && manifest["runtime_migration_version"].as_u64() != migration_version {
+        return None;
+    }
     let key = manifest["active_package"].as_str()?;
     Some(key.to_owned())
 }

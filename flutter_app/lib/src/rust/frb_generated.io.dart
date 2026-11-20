@@ -324,6 +324,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PackageKeptBackupDto dco_decode_package_kept_backup_dto(dynamic raw);
 
   @protected
+  PackageMigrationReportDto dco_decode_package_migration_report_dto(
+    dynamic raw,
+  );
+
+  @protected
   PackageOrphanFileDto dco_decode_package_orphan_file_dto(dynamic raw);
 
   @protected
@@ -795,6 +800,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PackageKeptBackupDto sse_decode_package_kept_backup_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PackageMigrationReportDto sse_decode_package_migration_report_dto(
     SseDeserializer deserializer,
   );
 
@@ -1414,6 +1424,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_package_kept_backup_dto(
     PackageKeptBackupDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_package_migration_report_dto(
+    PackageMigrationReportDto self,
     SseSerializer serializer,
   );
 
