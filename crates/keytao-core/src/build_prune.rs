@@ -1,5 +1,6 @@
 //! Reachability of compiled Rime outputs; uncertainty always retains the build.
 
+use crate::RuntimeDirs;
 use serde_yaml::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -31,7 +32,9 @@ pub fn prune_rime_build_artifacts(
     shared_dir: Option<&Path>,
 ) -> Result<usize, String> {
     let planned = (|| {
-        let bytes = read_inside(user_dir, "build/default.yaml")?;
+        let dirs = RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir));
+        let shared_build = shared_build_dir(&dirs, shared_dir.is_some());
+        let bytes = fs::read(checked_compiled_file(&dirs.staging_dir, "default.yaml")?).ok()?;
         let default: Value = serde_yaml::from_slice(&bytes).ok()?;
         let schemas = default.get("schema_list")?.as_sequence()?;
         if schemas.is_empty() {
@@ -59,14 +62,12 @@ pub fn prune_rime_build_artifacts(
                 .iter()
                 .filter(|id| {
                     !checked.contains(*id)
-                        && std::iter::once(user_dir).chain(shared_dir).any(|root| {
-                            fs::symlink_metadata(
-                                crate::RuntimeDirs::resolve(root, root)
-                                    .staging_dir
-                                    .join(format!("{id}.schema.yaml")),
-                            )
-                            .is_ok()
-                        })
+                        && std::iter::once(dirs.staging_dir.as_path())
+                            .chain(shared_build)
+                            .any(|build| {
+                                fs::symlink_metadata(build.join(format!("{id}.schema.yaml")))
+                                    .is_ok()
+                            })
                 })
                 .cloned()
                 .collect();
@@ -80,12 +81,10 @@ pub fn prune_rime_build_artifacts(
             );
             checked.extend(kept_schemas);
         }
-        let build =
-            crate::RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir)).staging_dir;
-        if fs::symlink_metadata(&build).ok()?.file_type().is_symlink() {
+        if !fs::symlink_metadata(&dirs.staging_dir).ok()?.is_dir() {
             return None;
         }
-        fs::read_dir(build)
+        fs::read_dir(&dirs.staging_dir)
             .ok()?
             .map(|entry| {
                 let entry = entry.ok()?;
@@ -122,6 +121,7 @@ pub(crate) fn reachable_rime_build_outputs(
     require_current_inputs: bool,
     resolve_references: bool,
 ) -> Option<BTreeSet<String>> {
+    let dirs = RuntimeDirs::resolve(user_dir, shared_dir.unwrap_or(user_dir));
     let fingerprints = require_current_inputs
         .then(|| crate::schema_input_fingerprints(user_dir, schemas).ok())
         .flatten();
@@ -129,8 +129,11 @@ pub(crate) fn reachable_rime_build_outputs(
         return None;
     }
     let mut graph = Graph {
-        user: user_dir,
-        shared: shared_dir,
+        user: &dirs.user_data_dir,
+        shared: (shared_dir.is_some() || dirs.active_package_key.is_some())
+            .then_some(dirs.shared_data_dir.as_path()),
+        build: &dirs.staging_dir,
+        shared_build: shared_build_dir(&dirs, shared_dir.is_some()),
         strict: resolve_references,
         protect_references: require_current_inputs || resolve_references,
         outputs: BTreeSet::new(),
@@ -162,6 +165,16 @@ pub(crate) fn reachable_rime_build_outputs(
     Some(graph.outputs)
 }
 
+fn shared_build_dir(dirs: &RuntimeDirs, has_shared: bool) -> Option<&Path> {
+    (has_shared || dirs.active_package_key.is_some()).then_some(
+        if dirs.user_data_dir == dirs.shared_data_dir {
+            dirs.staging_dir.as_path()
+        } else {
+            dirs.prebuilt_data_dir.as_path()
+        },
+    )
+}
+
 // Reject links at every component instead of following package-controlled paths.
 fn read_inside(root: &Path, relative: &str) -> Option<Vec<u8>> {
     fs::read(checked_file(root, relative)?).ok()
@@ -169,20 +182,21 @@ fn read_inside(root: &Path, relative: &str) -> Option<Vec<u8>> {
 
 fn checked_file(root: &Path, relative: &str) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
-    for (index, component) in Path::new(relative).components().enumerate() {
+    for component in Path::new(relative).components() {
         let Component::Normal(component) = component else {
             return None;
         };
-        if index == 0 && component == "build" {
-            path = crate::RuntimeDirs::resolve(root, root).staging_dir;
-        } else {
-            path.push(component);
-        }
+        path.push(component);
         if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
             return None;
         }
     }
     fs::metadata(&path).ok()?.is_file().then_some(path)
+}
+
+fn checked_compiled_file(build: &Path, name: &str) -> Option<PathBuf> {
+    fs::symlink_metadata(build).ok()?.is_dir().then_some(())?;
+    checked_file(build, name)
 }
 
 fn dictionary_header(path: &Path) -> Option<Value> {
@@ -230,18 +244,14 @@ fn patch_keys_resolved(value: &Value) -> Option<()> {
 }
 
 fn present(root: &Path, relative: &str) -> bool {
-    let path = match Path::new(relative).strip_prefix("build") {
-        Ok(relative) => crate::RuntimeDirs::resolve(root, root)
-            .staging_dir
-            .join(relative),
-        Err(_) => root.join(relative),
-    };
-    !matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    !matches!(fs::symlink_metadata(root.join(relative)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 struct Graph<'a> {
     user: &'a Path,
     shared: Option<&'a Path>,
+    build: &'a Path,
+    shared_build: Option<&'a Path>,
     strict: bool,
     protect_references: bool,
     outputs: BTreeSet<String>,
@@ -275,13 +285,24 @@ impl Graph<'_> {
         self.shared.and_then(|root| checked_file(root, name))
     }
 
+    fn compiled_present(&self, name: &str) -> bool {
+        present(self.build, name) || self.shared_build.is_some_and(|build| present(build, name))
+    }
+
+    fn compiled_path(&self, name: &str) -> Option<PathBuf> {
+        if present(self.build, name) {
+            return checked_compiled_file(self.build, name);
+        }
+        self.shared_build
+            .and_then(|build| checked_compiled_file(build, name))
+    }
+
     fn config(&mut self, name: &str, schema: bool) -> Option<()> {
         if !self.configs.insert(name.into()) {
             return Some(());
         }
-        let compiled = format!("build/{name}");
-        let bytes = if self.present(&compiled) {
-            self.resolve(&compiled)?
+        let bytes = if self.compiled_present(name) {
+            fs::read(self.compiled_path(name)?).ok()?
         } else if !schema {
             self.resolve(name)?
         } else {
@@ -371,7 +392,7 @@ impl Graph<'_> {
         if !self.present(&name) {
             return [".table.bin", ".reverse.bin", ".correction.bin"]
                 .iter()
-                .any(|suffix| self.resolve_path(&format!("build/{id}{suffix}")).is_some())
+                .any(|suffix| self.compiled_path(&format!("{id}{suffix}")).is_some())
                 .then_some(());
         }
         let value = dictionary_header(&self.resolve_path(&name)?)?;
@@ -420,11 +441,7 @@ impl Graph<'_> {
                 if let Some(prism) = value.get("prism") {
                     let id = prism.as_str().filter(|id| crate::valid_rime_build_id(id))?;
                     self.outputs.insert(format!("{id}.prism.bin"));
-                    if self.strict
-                        && self
-                            .resolve_path(&format!("build/{id}.prism.bin"))
-                            .is_none()
-                    {
+                    if self.strict && self.compiled_path(&format!("{id}.prism.bin")).is_none() {
                         return None;
                     }
                 }
@@ -472,7 +489,7 @@ impl Graph<'_> {
                             .and_then(Value::as_str)
                             .filter(|id| !id.is_empty())
                         {
-                            self.resolve_path(&format!("build/{id}.prism.bin"))?;
+                            self.compiled_path(&format!("{id}.prism.bin"))?;
                         }
                     }
                     match key.as_str().unwrap_or_default() {
@@ -530,9 +547,8 @@ impl Graph<'_> {
             }
             let name = format!("{file}.yaml");
             self.config(&name, file.ends_with(".schema"))?;
-            let compiled = format!("build/{name}");
-            let bytes = if self.present(&compiled) {
-                self.resolve(&compiled)?
+            let bytes = if self.compiled_present(&name) {
+                fs::read(self.compiled_path(&name)?).ok()?
             } else {
                 self.resolve(&name)?
             };

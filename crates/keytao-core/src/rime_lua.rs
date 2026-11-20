@@ -229,6 +229,12 @@ fn read_manifest(root: &Path) -> Result<Option<Value>, String> {
 }
 
 pub(crate) fn signature(root: &Path) -> Result<Option<String>, String> {
+    let dirs = crate::RuntimeDirs::resolve(root, root);
+    if let Some(key) = dirs.active_package_key {
+        let manifest = dirs.user_data_dir.join(crate::RuntimeDirs::MANIFEST_FILE);
+        let signature = crate::ReloadStamp::signature_at(&manifest).unwrap_or_default();
+        return Ok(Some(format!("{key}:{signature}")));
+    }
     Ok(read_manifest(root)?.and_then(|manifest| {
         let owner = manifest.get("lua_owner")?;
         Some(format!(
@@ -257,6 +263,9 @@ pub(crate) fn rebase_manifest(root: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn regenerate(root: &Path) -> Result<(), String> {
+    if crate::RuntimeDirs::resolve(root, root).active_package_key.is_some() {
+        return Ok(());
+    }
     let Some(_) = read_manifest(root)? else {
         return Ok(());
     };
@@ -284,6 +293,10 @@ pub(crate) fn regenerate(root: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
+    let dirs = crate::RuntimeDirs::resolve(root, root);
+    if dirs.active_package_key.is_some() {
+        return Ok(false);
+    }
     // File transactions must not contend with native key handling.
     let _files = crate::lock_ignore_poison(&FILE_LOCK);
     let Some(mut manifest) = read_manifest(root)? else {
@@ -302,7 +315,7 @@ pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
     if packages.is_empty() {
         return crate::regenerate_legacy_rime_lua(root).map(|_| false);
     }
-    let user_dir = crate::RuntimeDirs::resolve(root, root).user_data_dir;
+    let user_dir = dirs.user_data_dir;
     let selected = packages.iter().find(|(_, package)| {
         package["schemas"]
             .as_array()

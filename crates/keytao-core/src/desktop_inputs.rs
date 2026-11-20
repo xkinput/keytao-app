@@ -5,11 +5,11 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
-const RECEIPT: &str = "build/.keytao-desktop-inputs.json";
-const LEGACY_RECEIPT: &str = "build/.keytao-schema-inputs.json";
+const RECEIPT_FILE: &str = ".keytao-desktop-inputs.json";
+const LEGACY_RECEIPT_FILE: &str = ".keytao-schema-inputs.json";
 
 pub(crate) type SourceSnapshot = BTreeMap<String, InputFile>;
 
@@ -87,7 +87,7 @@ pub(crate) fn snapshot(root: &Path, shared: &Path) -> Option<SourceSnapshot> {
         }
         Some(())
     }
-    let cache = read_regular(root, RECEIPT)
+    let cache = read_staging_file(root, RECEIPT_FILE)
         .ok()
         .flatten()
         .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok())
@@ -123,14 +123,16 @@ struct SchemaInputs {
 }
 
 pub(crate) fn recorded_schema_ids(root: &Path) -> Option<BTreeSet<String>> {
-    let saved: Receipt = serde_json::from_slice(&read_regular(root, RECEIPT).ok()??).ok()?;
+    let saved: Receipt =
+        serde_json::from_slice(&read_staging_file(root, RECEIPT_FILE).ok()??).ok()?;
     Some(saved.schemas.into_keys().collect())
 }
 
 pub(crate) fn default_config_is_current(root: &Path, shared: &Path) -> bool {
     let current = || -> Option<bool> {
-        read_regular(root, "build/default.yaml").ok()??;
-        let saved: Receipt = serde_json::from_slice(&read_regular(root, RECEIPT).ok()??).ok()?;
+        read_staging_file(root, "default.yaml").ok()??;
+        let saved: Receipt =
+            serde_json::from_slice(&read_staging_file(root, RECEIPT_FILE).ok()??).ok()?;
         Some(
             saved.shared == shared.to_str()?
                 && saved.default_inputs == default_inputs(root, shared, None)?,
@@ -166,14 +168,15 @@ pub(crate) fn changed_schemas(
     signature: &str,
 ) -> Option<Vec<String>> {
     let legacy: BTreeMap<String, [u8; 32]> =
-        serde_json::from_slice(&read_regular(root, LEGACY_RECEIPT).ok()??).ok()?;
+        serde_json::from_slice(&read_staging_file(root, LEGACY_RECEIPT_FILE).ok()??).ok()?;
     // A newly imported legacy database still needs full maintenance's upgrade task.
     for entry in fs::read_dir(root).ok()? {
         if entry.ok()?.file_name().to_str()?.ends_with(".userdb.kct") {
             return None;
         }
     }
-    let saved: Receipt = serde_json::from_slice(&read_regular(root, RECEIPT).ok()??).ok()?;
+    let saved: Receipt =
+        serde_json::from_slice(&read_staging_file(root, RECEIPT_FILE).ok()??).ok()?;
     let selected: BTreeSet<_> = selected.iter().cloned().collect();
     if saved.version != 1
         || saved.selected.is_empty()
@@ -193,7 +196,7 @@ pub(crate) fn changed_schemas(
     for (id, previous) in &saved.schemas {
         // Removed dependency sources require the old full-maintenance semantics.
         resolve(root, shared, &format!("{id}.schema.yaml"), None).ok()??;
-        if read_regular(root, &format!("build/{id}.schema.yaml"))
+        if read_staging_file(root, &format!("{id}.schema.yaml"))
             .ok()?
             .is_none()
         {
@@ -237,7 +240,8 @@ fn include_dependency_consumers(
 }
 
 pub(crate) fn changed_schema_inputs(root: &Path, shared: &Path) -> Option<BTreeSet<String>> {
-    let saved: Receipt = serde_json::from_slice(&read_regular(root, RECEIPT).ok()??).ok()?;
+    let saved: Receipt =
+        serde_json::from_slice(&read_staging_file(root, RECEIPT_FILE).ok()??).ok()?;
     if saved.shared != shared.to_str()? {
         return None;
     }
@@ -285,7 +289,9 @@ pub(crate) fn record(
             files: snapshot.clone(),
         })
     };
-    let path = runtime_path(root, RECEIPT);
+    let path = crate::RuntimeDirs::resolve(root, root)
+        .staging_dir
+        .join(RECEIPT_FILE);
     let Some(receipt) = collect() else {
         discard_unverified_legacy_inputs(root, shared, snapshot)?;
         return match fs::remove_file(path) {
@@ -295,7 +301,7 @@ pub(crate) fn record(
         };
     };
     let bytes = serde_json::to_vec(&receipt).map_err(|error| error.to_string())?;
-    if read_regular(root, RECEIPT)?.as_deref() != Some(&bytes) {
+    if read_staging_file(root, RECEIPT_FILE)?.as_deref() != Some(&bytes) {
         write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -306,7 +312,7 @@ fn discard_unverified_legacy_inputs(
     shared: &Path,
     snapshot: Option<&SourceSnapshot>,
 ) -> Result<(), String> {
-    let Some(bytes) = read_regular(root, LEGACY_RECEIPT)? else {
+    let Some(bytes) = read_staging_file(root, LEGACY_RECEIPT_FILE)? else {
         return Ok(());
     };
     let mut trusted: BTreeMap<String, [u8; 32]> =
@@ -327,8 +333,10 @@ fn discard_unverified_legacy_inputs(
         // complete_deployment may have paired post-compile edits with older build outputs.
         trusted.retain(|id, _| !untrusted.contains(id));
         let bytes = serde_json::to_vec(&trusted).map_err(|error| error.to_string())?;
-        write_file_atomic(&runtime_path(root, LEGACY_RECEIPT), &bytes)
-            .map_err(|error| error.to_string())?;
+        let path = crate::RuntimeDirs::resolve(root, root)
+            .staging_dir
+            .join(LEGACY_RECEIPT_FILE);
+        write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -343,7 +351,7 @@ fn schema_inputs(
     if !valid_rime_build_id(id) {
         return None;
     }
-    let bytes = read_regular(root, &format!("build/{id}.schema.yaml")).ok()??;
+    let bytes = read_staging_file(root, &format!("{id}.schema.yaml")).ok()??;
     let compiled: Value = serde_yaml::from_slice(&bytes).ok()?;
     if compiled["schema"]["schema_id"].as_str()? != id {
         return None;
@@ -645,12 +653,13 @@ fn safe_relative(name: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn runtime_path(root: &Path, name: &str) -> PathBuf {
-    match Path::new(name).strip_prefix("build") {
-        Ok(name) => crate::RuntimeDirs::resolve(root, root)
-            .staging_dir
-            .join(name),
-        Err(_) => root.join(name),
+fn read_staging_file(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    let staging = crate::RuntimeDirs::resolve(root, root).staging_dir;
+    match fs::symlink_metadata(&staging) {
+        Ok(metadata) if metadata.is_dir() => read_regular(&staging, name),
+        Ok(_) => Err("non-regular input".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -661,11 +670,7 @@ fn regular_metadata(root: &Path, name: &str) -> Result<Option<fs::Metadata>, Str
     let mut path = root.to_path_buf();
     let components: Vec<_> = Path::new(name).components().collect();
     for (index, component) in components.iter().enumerate() {
-        if index == 0 && component.as_os_str() == "build" {
-            path = crate::RuntimeDirs::resolve(root, root).staging_dir;
-        } else {
-            path.push(component.as_os_str());
-        }
+        path.push(component.as_os_str());
         match fs::symlink_metadata(&path) {
             Ok(metadata)
                 if if index + 1 == components.len() {
@@ -692,7 +697,7 @@ fn read_regular(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
     }
     #[cfg(test)]
     INPUT_READS.with(|reads| *reads.borrow_mut().entry(root.join(name)).or_default() += 1);
-    fs::read(runtime_path(root, name))
+    fs::read(root.join(name))
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -807,6 +812,9 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
+
+    const RECEIPT: &str = "build/.keytao-desktop-inputs.json";
+    const LEGACY_RECEIPT: &str = "build/.keytao-schema-inputs.json";
 
     struct Fixture(PathBuf);
 

@@ -119,10 +119,23 @@ fn checked_relative(text: &str) -> std::result::Result<PathBuf, String> {
 }
 
 pub(crate) fn public_asset(path: &Path) -> bool {
+    public_asset_at(path, None)
+}
+
+fn public_asset_at(path: &Path, staging: Option<&Path>) -> bool {
     if path == Path::new(keytao_core::ACTIVE_SCHEME_MANIFEST)
         || path == Path::new(".keytao-current-schema")
         || path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
-        || path == Path::new("build/.keytao-skipped-schemas.json")
+        || (path
+            .file_name()
+            .is_some_and(|name| name == ".keytao-skipped-schemas.json")
+            && path.parent().is_some_and(|parent| {
+                let root = Path::new("");
+                staging.map_or_else(
+                    || parent == keytao_core::RuntimeDirs::flat(root, root).staging_dir,
+                    |staging| parent == staging,
+                )
+            }))
     {
         return true;
     }
@@ -322,7 +335,7 @@ fn prune_legacy_cache_at(root: &Path, staging_dir: &Path) {
         let Ok(relative) = checked_relative(&name) else {
             continue;
         };
-        if !public_asset(&relative) {
+        if !public_asset_at(&relative, build) {
             continue;
         }
         if let Some(path) = safe_path(&relative).filter(|path| path.is_file()) {

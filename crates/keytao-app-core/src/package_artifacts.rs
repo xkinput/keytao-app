@@ -1,4 +1,7 @@
-use crate::{CoreError, packages::safe_path};
+use crate::{
+    CoreError,
+    packages::{safe_path, staging_relative},
+};
 use serde_yaml::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,13 +20,15 @@ pub(crate) fn owned_artifact_paths(
     root: &Path,
     schema_ids: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, CoreError> {
-    let references = references(root, schema_ids.clone(), &BTreeMap::new())?;
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    let build = staging_relative(root, &dirs);
+    let references = references(root, &build, schema_ids.clone(), &BTreeMap::new())?;
     let mut paths = references.binaries;
     paths.extend(
         references
             .schemas
             .into_iter()
-            .map(|id| format!("build/{id}.schema.yaml")),
+            .map(|id| format!("{build}/{id}.schema.yaml")),
     );
     if references.incomplete {
         fn collect_binaries(
@@ -57,7 +62,7 @@ pub(crate) fn owned_artifact_paths(
             }
             Ok(())
         }
-        let build = safe_path(root, "build").map_err(CoreError::Other)?;
+        let build = safe_path(root, &build).map_err(CoreError::Other)?;
         collect_binaries(root, &build, &mut paths)?;
     }
     Ok(paths)
@@ -148,6 +153,9 @@ pub(crate) fn cleanup(
     removed_files: &[(String, Vec<u8>)],
     remaining_schema_ids: &BTreeSet<String>,
 ) -> Result<Vec<String>, CoreError> {
+    // Legacy activation removes files from its flat layout independently of the active runtime.
+    let dirs = keytao_core::RuntimeDirs::flat(root, root);
+    let build = staging_relative(root, &dirs);
     let removed_sources: BTreeMap<_, _> = removed_files
         .iter()
         .filter_map(|(name, bytes)| {
@@ -157,14 +165,15 @@ pub(crate) fn cleanup(
         .collect();
     let removed = references(
         root,
+        &build,
         removed_sources.keys().cloned().collect(),
         &removed_sources,
     )?;
-    let remaining = references(root, remaining_schema_ids.clone(), &BTreeMap::new())?;
+    let remaining = references(root, &build, remaining_schema_ids.clone(), &BTreeMap::new())?;
     let mut candidates: BTreeSet<_> = removed
         .schemas
         .difference(&remaining.schemas)
-        .map(|id| format!("build/{id}.schema.yaml"))
+        .map(|id| format!("{build}/{id}.schema.yaml"))
         .collect();
     // Missing or invalid active sources cannot prove that a dictionary is unused.
     if !remaining.incomplete {
@@ -192,6 +201,7 @@ pub(crate) fn cleanup(
 
 fn references(
     root: &Path,
+    build: &str,
     mut pending: BTreeSet<String>,
     sources: &BTreeMap<String, &[u8]>,
 ) -> Result<References, CoreError> {
@@ -201,13 +211,14 @@ fn references(
         if !visited.insert(id.clone()) {
             continue;
         }
-        safe_path(root, &format!("build/{id}.schema.yaml")).map_err(CoreError::Other)?;
+        let compiled_name = format!("{build}/{id}.schema.yaml");
+        safe_path(root, &compiled_name).map_err(CoreError::Other)?;
         result.schemas.insert(id.clone());
         let source = match sources.get(&id) {
             Some(bytes) => Some(bytes.to_vec()),
             None => read_optional(root, &format!("{id}.schema.yaml"))?,
         };
-        let compiled = read_optional(root, &format!("build/{id}.schema.yaml"))?;
+        let compiled = read_optional(root, &compiled_name)?;
         let mut resolved = false;
         for (bytes, compiled) in [(source, false), (compiled, true)] {
             let Some(bytes) = bytes else {
@@ -222,11 +233,11 @@ fn references(
                 continue;
             }
             if let Some(schema_id) = value["schema"]["schema_id"].as_str() {
-                safe_path(root, &format!("build/{schema_id}.schema.yaml"))
+                safe_path(root, &format!("{build}/{schema_id}.schema.yaml"))
                     .map_err(CoreError::Other)?;
                 result.schemas.insert(schema_id.into());
             }
-            let complete = collect_value(root, &value, &mut pending, &mut result.binaries)?;
+            let complete = collect_value(root, build, &value, &mut pending, &mut result.binaries)?;
             resolved |= compiled && complete;
         }
         // Only a compiled schema includes custom patches and resolved includes.
@@ -246,6 +257,7 @@ fn read_optional(root: &Path, name: &str) -> Result<Option<Vec<u8>>, CoreError> 
 
 fn collect_value(
     root: &Path,
+    build: &str,
     value: &Value,
     pending: &mut BTreeSet<String>,
     binaries: &mut BTreeSet<String>,
@@ -265,7 +277,7 @@ fn collect_value(
                                 &["prism"]
                             };
                             for extension in extensions {
-                                let name = format!("build/{id}.{extension}.bin");
+                                let name = format!("{build}/{id}.{extension}.bin");
                                 safe_path(root, &name).map_err(CoreError::Other)?;
                                 binaries.insert(name);
                             }
@@ -290,12 +302,12 @@ fn collect_value(
                     }
                     _ => {}
                 }
-                complete &= collect_value(root, value, pending, binaries)?;
+                complete &= collect_value(root, build, value, pending, binaries)?;
             }
         }
         Value::Sequence(items) => {
             for value in items {
-                complete &= collect_value(root, value, pending, binaries)?;
+                complete &= collect_value(root, build, value, pending, binaries)?;
             }
         }
         _ => {}

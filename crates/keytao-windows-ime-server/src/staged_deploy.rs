@@ -14,6 +14,10 @@ impl Stage {
     pub fn create(source: &Path) -> Result<Self, String> {
         let dirs = keytao_core::RuntimeDirs::resolve(source, source);
         let source = dirs.user_data_dir.as_path();
+        let staging = dirs
+            .staging_dir
+            .strip_prefix(source)
+            .map_err(|error| error.to_string())?;
         let parent = source.parent().ok_or("invalid Rime directory")?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -22,7 +26,7 @@ impl Stage {
         let path = parent.join(format!("{PREFIX}{}-{nonce}", std::process::id()));
         fs::create_dir(&path).map_err(|error| format!("create deployment stage: {error}"))?;
         let stage = Self(path);
-        copy_inputs(source, source, &stage.0)?;
+        copy_inputs(source, source, &stage.0, staging)?;
         Ok(stage)
     }
 
@@ -39,20 +43,24 @@ impl Stage {
         root: &Path,
         mut reload: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
-        let current = keytao_core::RuntimeDirs::resolve(root, root).staging_dir;
-        let incoming = keytao_core::RuntimeDirs::resolve(&self.0, &self.0).staging_dir;
+        let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+        let current = dirs.staging_dir;
+        let staging = current
+            .strip_prefix(&dirs.user_data_dir)
+            .map_err(|error| error.to_string())?;
+        let incoming = keytao_core::RuntimeDirs::flat(&self.0, &self.0).staging_dir;
         let previous = self.0.join("previous-build");
         fs::rename(&current, &previous)
             .map_err(|error| format!("preserve previous deployment: {error}"))?;
         let installed = fs::rename(&incoming, &current)
             .map_err(|error| format!("install deployment: {error}"))
-            .and_then(|()| move_preserved_files(&previous, &previous, &current))
+            .and_then(|()| move_preserved_files(&previous, &previous, &current, staging))
             .and_then(|()| reload());
         if let Err(error) = installed {
             if current.exists() {
                 fs::rename(&current, &incoming)
                     .map_err(|rollback| format!("{error}; preserve rejected build: {rollback}"))?;
-                move_preserved_files(&incoming, &incoming, &previous)
+                move_preserved_files(&incoming, &incoming, &previous, staging)
                     .map_err(|rollback| format!("{error}; restore build files: {rollback}"))?;
             }
             fs::rename(&previous, &current)
@@ -67,23 +75,28 @@ impl Stage {
     }
 }
 
-fn move_preserved_files(base: &Path, source: &Path, target: &Path) -> Result<(), String> {
+fn move_preserved_files(
+    base: &Path,
+    source: &Path,
+    target: &Path,
+    staging: &Path,
+) -> Result<(), String> {
     for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let path = entry.path();
-        let relative =
-            Path::new("build").join(path.strip_prefix(base).map_err(|error| error.to_string())?);
-        if relative == Path::new("build/.keytao-deploying")
-            || relative == Path::new("build/.keytao-deploy-failed")
+        let relative = path.strip_prefix(base).map_err(|error| error.to_string())?;
+        if relative == Path::new(".keytao-deploying")
+            || relative == Path::new(".keytao-deploy-failed")
         {
             continue;
         }
+        let relative = staging.join(relative);
         let kind = entry.file_type().map_err(|error| error.to_string())?;
         let destination = target.join(entry.file_name());
-        if kind.is_dir() && deployment_input(&relative, true) {
+        if kind.is_dir() && deployment_input(&relative, true, staging) {
             fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
-            move_preserved_files(base, &path, &destination)?;
-        } else if !deployment_input(&relative, kind.is_dir()) {
+            move_preserved_files(base, &path, &destination, staging)?;
+        } else if !deployment_input(&relative, kind.is_dir(), staging) {
             fs::rename(&path, &destination)
                 .map_err(|error| format!("preserve build file: {error}"))?;
         }
@@ -140,14 +153,14 @@ fn checked_directory(source: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn copy_inputs(base: &Path, source: &Path, target: &Path) -> Result<(), String> {
+fn copy_inputs(base: &Path, source: &Path, target: &Path, staging: &Path) -> Result<(), String> {
     fs::create_dir_all(target).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let path = entry.path();
         let relative = path.strip_prefix(base).map_err(|error| error.to_string())?;
         let kind = entry.file_type().map_err(|error| error.to_string())?;
-        if !deployment_input(relative, kind.is_dir()) {
+        if !deployment_input(relative, kind.is_dir(), staging) {
             continue;
         }
         if kind.is_symlink() {
@@ -158,7 +171,7 @@ fn copy_inputs(base: &Path, source: &Path, target: &Path) -> Result<(), String> 
         }
         let destination = target.join(entry.file_name());
         if kind.is_dir() {
-            copy_inputs(base, &path, &destination)?;
+            copy_inputs(base, &path, &destination, staging)?;
         } else if kind.is_file() {
             fs::copy(&path, &destination).map_err(|error| error.to_string())?;
             fs::OpenOptions::new()
@@ -171,7 +184,7 @@ fn copy_inputs(base: &Path, source: &Path, target: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn deployment_input(path: &Path, directory: bool) -> bool {
+fn deployment_input(path: &Path, directory: bool, staging: &Path) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     if path.components().any(|part| {
         let Component::Normal(name) = part else {
@@ -186,16 +199,22 @@ fn deployment_input(path: &Path, directory: bool) -> bool {
         return !name.starts_with('.') || name == ".keytao-package-lua";
     }
     if name.starts_with('.') {
+        if let Ok(relative) = path.strip_prefix(staging) {
+            return [
+                ".keytao-deployed",
+                ".keytao-desktop-inputs.json",
+                ".keytao-schema-inputs.json",
+                ".keytao-windows-build-signature.json",
+                ".keytao-skipped-schemas.json",
+            ]
+            .iter()
+            .any(|name| relative == Path::new(name));
+        }
         return [
             ".keytao-active-scheme.json",
             ".keytao-current-schema",
             ".keytao-schema-switches.json",
             ".keytao-windows-build-repair-v1",
-            "build/.keytao-deployed",
-            "build/.keytao-desktop-inputs.json",
-            "build/.keytao-schema-inputs.json",
-            "build/.keytao-windows-build-signature.json",
-            "build/.keytao-skipped-schemas.json",
             "rime-data/.bundled-version",
         ]
         .iter()

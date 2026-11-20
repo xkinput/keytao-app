@@ -1348,12 +1348,8 @@ pub(crate) fn validate_relative(relative: &str) -> Result<(), String> {
 pub(crate) fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     validate_relative(relative)?;
     let mut path = root.to_owned();
-    for (index, part) in relative.split('/').enumerate() {
-        if index == 0 && part == "build" {
-            path = keytao_core::RuntimeDirs::resolve(root, root).staging_dir;
-        } else {
-            path.push(part);
-        }
+    for part in relative.split('/') {
+        path.push(part);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(format!("Package path contains a symlink: {relative}"));
@@ -1366,6 +1362,14 @@ pub(crate) fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> 
         }
     }
     Ok(path)
+}
+
+pub(crate) fn staging_relative(root: &Path, dirs: &keytao_core::RuntimeDirs) -> String {
+    dirs.staging_dir
+        .strip_prefix(root)
+        .expect("staging directory is inside the control root")
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 pub async fn activate_scheme(

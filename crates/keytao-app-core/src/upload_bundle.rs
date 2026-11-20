@@ -1,4 +1,4 @@
-use crate::CoreError;
+use crate::{CoreError, packages::staging_relative};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -88,12 +88,18 @@ impl LuaSnapshot {
         if let Some(files) = manifest["lua_owner"]["files"].as_object() {
             managed.extend(files.keys().cloned());
         }
-        let dirs = keytao_core::RuntimeDirs::resolve(directory.path(), directory.path());
+        let dirs = keytao_core::RuntimeDirs::flat(directory.path(), directory.path());
+        let build = staging_relative(directory.path(), &dirs);
         fs::create_dir_all(&dirs.staging_dir)?;
         let defaults = serde_yaml::to_string(&serde_json::json!({"schema_list": [{"schema": selected}]}))
             .map_err(|error| failure(error.to_string()))?;
         fs::write(directory.path().join("default.yaml"), defaults)?;
-        fs::write(crate::packages::safe_path(directory.path(), &format!("build/{selected}.schema.yaml")).map_err(failure)?, "")?;
+        let compiled = crate::packages::safe_path(
+            directory.path(),
+            &format!("{build}/{selected}.schema.yaml"),
+        )
+        .map_err(failure)?;
+        fs::write(compiled, "")?;
         manifest["root"] = directory.path().canonicalize()?.to_string_lossy().as_ref().into();
         fs::write(directory.path().join(keytao_core::ACTIVE_SCHEME_MANIFEST), serde_json::to_vec(&manifest)?)?;
         keytao_core::regenerate_active_rime_lua(directory.path()).map_err(failure)?;
@@ -731,6 +737,8 @@ pub fn build(
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
     }
+    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
+    let build = staging_relative(root, &dirs);
     let lua = LuaSnapshot::for_schemas(root, schema_ids)?;
     let mut collector = Collector {
         root,
@@ -753,7 +761,7 @@ pub fn build(
             continue;
         }
         let source = yaml(&collector.files[&source].contents()?, &source)?;
-        let compiled = format!("build/{id}.schema.yaml");
+        let compiled = format!("{build}/{id}.schema.yaml");
         let compiled_path = crate::packages::safe_path(root, &compiled).map_err(failure)?;
         let deployed = compiled_path.is_file();
         // The deployed schema contains Rime's resolved includes and custom patches.
@@ -873,6 +881,7 @@ pub(crate) fn verify_deploy_artifacts(
     schema_ids: &[String],
 ) -> Result<(), CoreError> {
     let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
+    let build = staging_relative(root, &dirs);
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
     }
@@ -883,14 +892,16 @@ pub(crate) fn verify_deploy_artifacts(
         if !visited.insert(id.clone()) {
             continue;
         }
-        let source = format!("{id}.schema.yaml");
-        let source_path = crate::packages::safe_path(root, &source).map_err(failure)?;
-        if !source_path.is_file() && shared.is_some_and(|dir| dir.join(&source).is_file()) {
-            continue;
+        if dirs.active_package_key.is_none() {
+            let source = format!("{id}.schema.yaml");
+            let source_path = crate::packages::safe_path(root, &source).map_err(failure)?;
+            if !source_path.is_file() && shared.is_some_and(|dir| dir.join(&source).is_file()) {
+                continue;
+            }
         }
-        let compiled = format!("build/{id}.schema.yaml");
-        verify_artifact(root, &id, &compiled, &sources, false)?;
-        let value = yaml(&fs::read(dirs.staging_dir.join(format!("{id}.schema.yaml")))?, &compiled)?;
+        let compiled = format!("{build}/{id}.schema.yaml");
+        let compiled_path = verify_artifact(root, &id, &compiled, &sources, false)?;
+        let value = yaml(&fs::read(compiled_path)?, &compiled)?;
         if value["schema"]["schema_id"].as_str() != Some(&id) {
             return Err(failure(format!(
                 "方案 {id}：{compiled} 的 schema/schema_id 不匹配"
@@ -919,12 +930,14 @@ pub(crate) fn verify_deploy_artifacts(
             }
         }
         collect_deploy_dictionaries(&value, false, &mut schema);
-        for dictionary in schema.dictionaries.keys().cloned().collect::<Vec<_>>() {
-            let name = format!("{dictionary}.dict.yaml");
-            let local = crate::packages::safe_path(root, &name).map_err(failure)?;
-            if !local.is_file() && shared.is_some_and(|dir| dir.join(&name).is_file()) {
-                schema.dictionaries.remove(&dictionary);
-                schema.prisms.retain(|(_, id)| id != &dictionary);
+        if dirs.active_package_key.is_none() {
+            for dictionary in schema.dictionaries.keys().cloned().collect::<Vec<_>>() {
+                let name = format!("{dictionary}.dict.yaml");
+                let local = crate::packages::safe_path(root, &name).map_err(failure)?;
+                if !local.is_file() && shared.is_some_and(|dir| dir.join(&name).is_file()) {
+                    schema.dictionaries.remove(&dictionary);
+                    schema.prisms.retain(|(_, id)| id != &dictionary);
+                }
             }
         }
         for (dictionary, table) in schema.dictionaries {
@@ -932,7 +945,7 @@ pub(crate) fn verify_deploy_artifacts(
                 verify_artifact(
                     root,
                     &id,
-                    &format!("build/{dictionary}.table.bin"),
+                    &format!("{build}/{dictionary}.table.bin"),
                     &sources,
                     false,
                 )?;
@@ -940,7 +953,7 @@ pub(crate) fn verify_deploy_artifacts(
             verify_artifact(
                 root,
                 &id,
-                &format!("build/{dictionary}.reverse.bin"),
+                &format!("{build}/{dictionary}.reverse.bin"),
                 &sources,
                 false,
             )?;
@@ -949,7 +962,7 @@ pub(crate) fn verify_deploy_artifacts(
             verify_artifact(
                 root,
                 &id,
-                &format!("build/{prism}.prism.bin"),
+                &format!("{build}/{prism}.prism.bin"),
                 &sources,
                 false,
             )?;
@@ -996,6 +1009,7 @@ fn checked(
     require_freshness: bool,
 ) -> Result<UploadBundle, CoreError> {
     let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
+    let staging = staging_relative(root, &dirs);
     let bundle = build(root, shared, schema_ids)?;
     let smoke_root = if smoke.is_some() {
         bundle.prepare_smoke_source(root, schema_ids)?
@@ -1007,8 +1021,8 @@ fn checked(
             .filter(|name| name.ends_with(".yaml") && !name.ends_with(".dict.yaml"))
             .cloned()
             .collect();
-        let compiled = format!("build/{id}.schema.yaml");
-        verify_artifact(root, id, &compiled, &configs, require_freshness)?;
+        let compiled = format!("{staging}/{id}.schema.yaml");
+        let compiled_path = verify_artifact(root, id, &compiled, &configs, require_freshness)?;
         for (dictionary, table) in &schema.dictionaries {
             let inputs = &schema.dictionary_sources[dictionary];
             if inputs.is_empty() {
@@ -1019,7 +1033,7 @@ fn checked(
                 verify_artifact(
                     root,
                     id,
-                    &format!("build/{dictionary}.table.bin"),
+                    &format!("{staging}/{dictionary}.table.bin"),
                     inputs,
                     require_freshness,
                 )?;
@@ -1027,7 +1041,7 @@ fn checked(
             verify_artifact(
                 root,
                 id,
-                &format!("build/{dictionary}.reverse.bin"),
+                &format!("{staging}/{dictionary}.reverse.bin"),
                 inputs,
                 require_freshness,
             )?;
@@ -1041,12 +1055,12 @@ fn checked(
             verify_artifact(
                 root,
                 id,
-                &format!("build/{prism}.prism.bin"),
+                &format!("{staging}/{prism}.prism.bin"),
                 &sources,
                 require_freshness,
             )?;
         }
-        let value = yaml(&fs::read(dirs.staging_dir.join(format!("{id}.schema.yaml")))?, &compiled)?;
+        let value = yaml(&fs::read(compiled_path)?, &compiled)?;
         if value["schema"]["schema_id"].as_str() != Some(id) {
             return Err(failure(format!(
                 "方案 {id}：{compiled} 的 schema/schema_id 不匹配"
@@ -1069,7 +1083,8 @@ impl UploadBundle {
         let Some(directory) = self.runtime_source.as_ref() else { return Ok(root) };
         let output = directory.path();
         let source_dirs = keytao_core::RuntimeDirs::resolve(root, root);
-        let output_dirs = keytao_core::RuntimeDirs::resolve(output, output);
+        let build = staging_relative(root, &source_dirs);
+        let output_dirs = keytao_core::RuntimeDirs::flat(output, output);
         let mut archive = zip::ZipArchive::new(Cursor::new(&self.bytes))
             .map_err(|error| failure(error.to_string()))?;
         for index in 0..archive.len() {
@@ -1079,12 +1094,13 @@ impl UploadBundle {
             let mut file = fs::File::create(destination)?;
             std::io::copy(&mut entry, &mut file)?;
         }
-        for entry in fs::read_dir(&source_dirs.staging_dir)? {
+        for entry in fs::read_dir(crate::packages::safe_path(root, &build).map_err(failure)?)? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_str().ok_or_else(|| failure("invalid build artifact path"))?;
             if name.starts_with(".keytao-") || !entry.file_type()?.is_file() { continue; }
-            let source = crate::packages::safe_path(root, &format!("build/{name}")).map_err(failure)?;
+            let source = crate::packages::safe_path(root, &format!("{build}/{name}"))
+                .map_err(failure)?;
             fs::copy(source, output_dirs.staging_dir.join(name))?;
         }
         fs::write(output_dirs.staging_dir.join("default.yaml"), serde_yaml::to_string(&serde_json::json!({
@@ -1103,24 +1119,24 @@ fn verify_artifact(
     artifact: &str,
     sources: &BTreeSet<String>,
     require_freshness: bool,
-) -> Result<(), CoreError> {
+) -> Result<std::path::PathBuf, CoreError> {
     let path = crate::packages::safe_path(root, artifact).map_err(failure)?;
-    let metadata = fs::metadata(path)
+    let metadata = fs::metadata(&path)
         .map_err(|e| failure(format!("方案 {id}：缺少构建产物 {artifact}: {e}")))?;
     if !metadata.is_file() {
         return Err(failure(format!("方案 {id}：构建产物不是文件 {artifact}")));
     }
     if !require_freshness {
         // librime reuses checksum-identical artifacts even when source mtimes change.
-        return Ok(());
+        return Ok(path);
     }
     let built = metadata
         .modified()
         .map_err(|e| failure(format!("方案 {id}：{artifact}: {e}")))?;
     // Runtime-only Lua/OpenCC/text resources do not produce dictionary binaries.
     for source in sources {
-        let path = crate::packages::safe_path(root, source).map_err(failure)?;
-        let modified = fs::metadata(path)
+        let source_path = crate::packages::safe_path(root, source).map_err(failure)?;
+        let modified = fs::metadata(source_path)
             .and_then(|m| m.modified())
             .map_err(|e| failure(format!("方案 {id}：{source}: {e}")))?;
         if built <= modified {
@@ -1129,7 +1145,7 @@ fn verify_artifact(
             )));
         }
     }
-    Ok(())
+    Ok(path)
 }
 
 #[cfg(test)]

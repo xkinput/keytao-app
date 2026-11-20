@@ -1153,23 +1153,33 @@ mod desktop {
         shared_data_dir: String,
         process: DeployProcess,
     ) -> Result<(), String> {
-        runtime_log::init_for_engine(Path::new(&user_data_dir));
+        let control_root = Path::new(&user_data_dir);
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir));
+        setup_resolved_runtime(control_root, &dirs, process)
+    }
+
+    fn setup_resolved_runtime(
+        control_root: &Path,
+        dirs: &RuntimeDirs,
+        process: DeployProcess,
+    ) -> Result<(), String> {
+        runtime_log::init_for_engine(control_root);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         crate::rt_log!(Level::Info, "rime", "setup_start");
         let initialized_now = {
             let _rime = rime_api_lock();
-            regenerate_rime_lua_for_ime(Path::new(&user_data_dir));
+            regenerate_rime_lua_for_ime(control_root);
             let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
             if *initialized {
                 false
             } else {
-                initialize_rime(&user_data_dir, &shared_data_dir, false);
+                initialize_rime(control_root, dirs, false);
                 *initialized = true;
                 true
             }
         };
         if initialized_now && process.needs_user_dictionary_cache() {
-            initialize_user_dictionary_cache(Path::new(&user_data_dir));
+            initialize_user_dictionary_cache(&dirs.user_data_dir);
         }
         if let Some(started) = started {
             crate::rt_log!(
@@ -1191,18 +1201,19 @@ mod desktop {
         request.validate()?;
         let schema = deployed_schema_id_from_dir(user_dir).ok_or("no active deployed schema")?;
         let directory = preview::PreviewDirectory::snapshot(user_dir)?;
+        let runtime = RuntimeDirs::resolve(user_dir, user_dir);
         let _rime = rime_api_lock();
         if *lock_ignore_poison(&RIME_INITIALIZED) {
             return Err("candidate preview requires a fresh child process".into());
         }
         // Rime's user config and user dictionaries are writable only in this snapshot.
         // Compiled dictionaries/models remain in the original, read-only data search path.
-        let dirs = RuntimeDirs::resolve(directory.path(), user_dir);
+        let dirs = RuntimeDirs::flat(directory.path(), &runtime.user_data_dir);
         setup_rime(
             &dirs,
             &directory.path().join("log").to_string_lossy(),
             false,
-            user_dir,
+            &runtime.user_data_dir,
         );
         *lock_ignore_poison(&RIME_INITIALIZED) = true;
         let result = preview_session(&schema, request, true);
@@ -1299,15 +1310,17 @@ mod desktop {
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<(), String> {
+        let control_root = Path::new(&user_data_dir);
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir));
         {
             let _rime = rime_api_lock();
-            regenerate_rime_lua_for_ime(Path::new(&user_data_dir));
+            regenerate_rime_lua_for_ime(control_root);
             finalize_rime()?;
             let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
-            initialize_rime(&user_data_dir, &shared_data_dir, false);
+            initialize_rime(control_root, &dirs, false);
             *initialized = true;
         }
-        initialize_user_dictionary_cache(Path::new(&user_data_dir));
+        initialize_user_dictionary_cache(&dirs.user_data_dir);
         Ok(())
     }
 
@@ -1334,10 +1347,15 @@ mod desktop {
         shared_data_dir: String,
         process: DeployProcess,
     ) -> Result<(), String> {
-        runtime_log::init_for_engine(Path::new(&user_data_dir));
+        let control_root = Path::new(&user_data_dir);
+        runtime_log::init_for_engine(control_root);
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir));
+        let user_dir = dirs.user_data_dir.as_path();
+        let shared_dir = dirs.shared_data_dir.as_path();
+        let package_shared = dirs.package_shared();
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let schema_count = started
-            .map(|_| parse_schema_list_from_dir(Path::new(&user_data_dir)).len())
+            .map(|_| parse_schema_list_from_dir(user_dir).len())
             .unwrap_or_default();
         crate::rt_log!(
             Level::Info,
@@ -1347,42 +1365,36 @@ mod desktop {
         );
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let result = (|| {
-            let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
+            let deploy_log = capture_deployment_log(control_root);
             #[cfg(not(target_os = "android"))]
             let input_snapshot = if cfg!(target_os = "ios") {
                 None
             } else {
-                desktop_inputs::snapshot(Path::new(&user_data_dir), Path::new(&shared_data_dir))
+                desktop_inputs::snapshot(user_dir, shared_dir)
             };
             #[cfg(not(target_os = "android"))]
-            let selective =
-                desktop_deploy_plan(Path::new(&user_data_dir), Path::new(&shared_data_dir));
+            let selective = desktop_deploy_plan(user_dir, shared_dir);
             #[cfg(not(target_os = "android"))]
-            begin_desktop_deployment(
-                Path::new(&user_data_dir),
-                Path::new(&shared_data_dir),
-                selective.as_deref(),
-            )?;
+            begin_desktop_deployment(user_dir, shared_dir, selective.as_deref())?;
             #[cfg(target_os = "android")]
-            begin_deployment(Path::new(&user_data_dir))?;
+            begin_deployment(user_dir)?;
 
             #[cfg(target_os = "windows")]
-            patch_windows_lua_compatibility(Path::new(&user_data_dir))?;
+            patch_windows_lua_compatibility(user_dir)?;
+
+            setup_resolved_runtime(control_root, &dirs, process)?;
 
             #[cfg(target_os = "android")]
             {
-                setup_only_for_process(user_data_dir.clone(), shared_data_dir.clone(), process)?;
-                deploy_android_staged(&user_data_dir)
+                deploy_android_staged(user_dir, package_shared)
                     .map_err(|error| deploy_log.failure_message(Some(&error)))?;
             }
 
             #[cfg(not(target_os = "android"))]
             {
-                let user_dir = Path::new(&user_data_dir);
-                setup_only_for_process(user_data_dir.clone(), shared_data_dir.clone(), process)?;
                 let selective_requested = selective.is_some();
                 let deployed = if let Some(changed) = selective {
-                    deploy_desktop_selective(user_dir, &changed)
+                    deploy_desktop_selective(user_dir, &changed, package_shared)
                 } else {
                     Ok(None)
                 }
@@ -1393,15 +1405,15 @@ mod desktop {
                     deployed
                 } else {
                     if selective_requested {
-                        begin_desktop_deployment(user_dir, Path::new(&shared_data_dir), None)?;
+                        begin_desktop_deployment(user_dir, shared_dir, None)?;
                     }
-                    prepare_missing_desktop_schemas(user_dir, Path::new(&shared_data_dir))?;
+                    prepare_missing_desktop_schemas(user_dir, shared_dir)?;
                     if !full_deploy_and_wait(user_dir)
                         .map_err(|error| deploy_log.failure_message(Some(&error)))?
                     {
                         return Err(deploy_log.failure_message(None));
                     }
-                    deploy_desktop_schema_dependencies(user_dir, None)
+                    deploy_desktop_schema_dependencies(user_dir, None, package_shared)
                         .map_err(|error| {
                             deploy_log.failure_message(Some(&format!("依赖部署失败：{error}")))
                         })?
@@ -1412,23 +1424,15 @@ mod desktop {
                     deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
                 })?;
             }
-            complete_deployment_with_cleanup(Path::new(&user_data_dir), || {
+            complete_resolved_deployment(user_dir, package_shared, || {
                 #[cfg(not(target_os = "android"))]
-                record_desktop_deployment(
-                    Path::new(&user_data_dir),
-                    Path::new(&shared_data_dir),
-                    input_snapshot.as_ref(),
-                )?;
-                prune_rime_build_artifacts(
-                    Path::new(&user_data_dir),
-                    Some(Path::new(&shared_data_dir)),
-                )
-                .map(|_| ())
+                record_desktop_deployment(user_dir, shared_dir, input_snapshot.as_ref())?;
+                prune_rime_build_artifacts(user_dir, Some(shared_dir)).map(|_| ())
             })?;
             Ok(())
         })();
         if result.is_err() {
-            let _ = mark_deployment_failed(Path::new(&user_data_dir));
+            let _ = mark_deployment_failed(user_dir);
         }
         if let Some(started) = started {
             crate::rt_log!(
@@ -1449,11 +1453,15 @@ mod desktop {
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<(), String> {
-        let user_dir = Path::new(&user_data_dir);
-        runtime_log::init_for_engine(user_dir);
+        let control_root = Path::new(&user_data_dir);
+        runtime_log::init_for_engine(control_root);
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let deploy_log = capture_deployment_log(user_dir);
-        begin_desktop_deployment(user_dir, Path::new(&shared_data_dir), None)?;
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir));
+        let user_dir = dirs.user_data_dir.as_path();
+        let shared_dir = dirs.shared_data_dir.as_path();
+        let package_shared = dirs.package_shared();
+        let deploy_log = capture_deployment_log(control_root);
+        begin_desktop_deployment(user_dir, shared_dir, None)?;
         {
             let _rime = rime_api_lock();
             if *lock_ignore_poison(&RIME_SETUP_COMPLETE) || *lock_ignore_poison(&RIME_INITIALIZED) {
@@ -1472,20 +1480,20 @@ mod desktop {
                 }
             }
             // setup_only exports user dictionaries; Lua initialization can run user code.
-            initialize_rime(&user_data_dir, &shared_data_dir, true);
+            initialize_rime(control_root, &dirs, true);
         }
-        prepare_missing_desktop_schemas(user_dir, Path::new(&shared_data_dir))?;
+        prepare_missing_desktop_schemas(user_dir, shared_dir)?;
         if !full_deploy_and_wait(user_dir)
             .map_err(|error| deploy_log.failure_message(Some(&error)))?
         {
             return Err(deploy_log.failure_message(None));
         }
-        deploy_desktop_schema_dependencies(user_dir, None)
+        deploy_desktop_schema_dependencies(user_dir, None, package_shared)
             .map_err(|error| deploy_log.failure_message(Some(&format!("依赖部署失败：{error}"))))?;
         validate_deployed_schema_files(user_dir)
             .map_err(|error| deploy_log.failure_message(Some(&format!("部署验证失败：{error}"))))?;
-        complete_deployment_with_cleanup(user_dir, || {
-            prune_rime_build_artifacts(user_dir, Some(Path::new(&shared_data_dir))).map(|_| ())
+        complete_resolved_deployment(user_dir, package_shared, || {
+            prune_rime_build_artifacts(user_dir, Some(shared_dir)).map(|_| ())
         })
         .inspect_err(|_| {
             let _ = mark_deployment_failed(user_dir);
@@ -1497,18 +1505,17 @@ mod desktop {
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<Vec<String>, String> {
-        runtime_log::init(Path::new(&user_data_dir), "android-deploy");
+        let control_root = Path::new(&user_data_dir);
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir));
+        let user_dir = dirs.user_data_dir.as_path();
+        runtime_log::init(control_root, "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
-        begin_deployment(Path::new(&user_data_dir))?;
-        setup_only_for_process(
-            user_data_dir.clone(),
-            shared_data_dir,
-            DeployProcess::AndroidDeployer,
-        )?;
+        let deploy_log = capture_deployment_log(control_root);
+        begin_deployment(user_dir)?;
+        setup_resolved_runtime(control_root, &dirs, DeployProcess::AndroidDeployer)?;
         deploy_config_file("default.yaml", "config_version")
             .map_err(|error| deploy_log.failure_message(Some(&error)))?;
-        let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
+        let schemas = parse_schema_list_from_dir(user_dir);
         if schemas.is_empty() {
             Err("no schema selected in default.custom.yaml".into())
         } else {
@@ -1522,32 +1529,35 @@ mod desktop {
         shared_data_dir: String,
         schema_id: String,
     ) -> Result<Vec<String>, String> {
-        runtime_log::init(Path::new(&user_data_dir), "android-deploy");
+        let control_root = Path::new(&user_data_dir);
+        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir));
+        let user_dir = dirs.user_data_dir.as_path();
+        let package_shared = dirs.package_shared();
+        runtime_log::init(control_root, "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
-        regenerate_active_rime_lua(Path::new(&user_data_dir))?;
-        setup_only_for_process(
-            user_data_dir.clone(),
-            shared_data_dir,
-            DeployProcess::AndroidDeployer,
-        )?;
-        let user_dir = Path::new(&user_data_dir);
+        let deploy_log = capture_deployment_log(control_root);
+        regenerate_active_rime_lua(user_dir)?;
+        setup_resolved_runtime(control_root, &dirs, DeployProcess::AndroidDeployer)?;
         if parse_schema_list_from_dir(user_dir).contains(&schema_id) {
-            if !deploy_listed_schema(user_dir, &schema_id)? {
+            if !deploy_listed_schema_from(user_dir, &schema_id, package_shared)? {
                 return Ok(Vec::new());
             }
             return Ok(schema_dependencies_from_file(&compiled_schema_path(
                 user_dir, &schema_id,
             )));
         }
-        let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
+        let source = schema_source_path(user_dir, package_shared, &schema_id);
         if !source.is_file() {
             return Err(format!("missing schema source: {}", source.display()));
         }
         let _dictionary_override =
-            prepare_android_auxiliary_dictionary(Path::new(&user_data_dir), &schema_id)?;
+            if package_shared.is_none() || user_dir.join("liangfen.dict.yaml").is_file() {
+                prepare_android_auxiliary_dictionary(user_dir, &schema_id)?
+            } else {
+                None
+            };
         deploy_schema_file(&source).map_err(|error| deploy_log.failure_message(Some(&error)))?;
-        let compiled = compiled_schema_path(Path::new(&user_data_dir), &schema_id);
+        let compiled = compiled_schema_path(user_dir, &schema_id);
         Ok(schema_dependencies_from_file(&compiled))
     }
 
@@ -1610,9 +1620,7 @@ mod desktop {
         Ok(Some(AndroidDictionaryOverride { source, backup }))
     }
 
-    fn initialize_rime(user_data_dir: &str, shared_data_dir: &str, deployer_only: bool) {
-        let control_root = Path::new(user_data_dir);
-        let dirs = RuntimeDirs::resolve(control_root, Path::new(shared_data_dir));
+    fn initialize_rime(control_root: &Path, dirs: &RuntimeDirs, deployer_only: bool) {
         let user_dir = dirs.user_data_dir.as_path();
         let lua_prepared = !lock_ignore_poison(&PROCESS_RIME.lua_retry_after)
             .as_ref()
@@ -1626,10 +1634,12 @@ mod desktop {
         let log_dir = rime_log_dir(control_root);
 
         let _ = std::fs::create_dir_all(&dirs.staging_dir);
-        let _ = std::fs::create_dir_all(&dirs.prebuilt_data_dir);
+        if dirs.active_package_key.is_none() {
+            let _ = std::fs::create_dir_all(&dirs.prebuilt_data_dir);
+        }
         let _ = std::fs::create_dir_all(&log_dir);
 
-        setup_rime(&dirs, &log_dir.to_string_lossy(), deployer_only, user_dir);
+        setup_rime(dirs, &log_dir.to_string_lossy(), deployer_only, user_dir);
     }
 
     pub(super) fn loaded_deployment_is_current(user_dir: &Path) -> bool {
@@ -1650,6 +1660,7 @@ mod desktop {
     fn deploy_desktop_schema_dependencies(
         user_dir: &Path,
         changed: Option<&[String]>,
+        package_shared: Option<&Path>,
     ) -> Result<Option<Vec<String>>, String> {
         let initial_schemas = parse_schema_list_from_dir(user_dir);
         if initial_schemas.is_empty() {
@@ -1665,7 +1676,7 @@ mod desktop {
             let needs_deploy = changed.is_some_and(|ids| ids.contains(schema_id))
                 || !compiled.is_file()
                 || cfg!(target_os = "ios");
-            if needs_deploy && !deploy_listed_schema(user_dir, schema_id)? {
+            if needs_deploy && !deploy_listed_schema_from(user_dir, schema_id, package_shared)? {
                 continue;
             }
             require_compiled_schema(&compiled, schema_id)?;
@@ -1686,7 +1697,7 @@ mod desktop {
                 return Ok(None);
             }
 
-            let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+            let source = schema_source_path(user_dir, package_shared, &schema_id);
             if !source.is_file() {
                 continue;
             }
@@ -1846,6 +1857,7 @@ mod desktop {
     fn deploy_desktop_selective(
         user_dir: &Path,
         changed: &[String],
+        package_shared: Option<&Path>,
     ) -> Result<Option<Vec<String>>, String> {
         {
             let _rime = rime_api_lock();
@@ -1868,7 +1880,8 @@ mod desktop {
         update_neutral_grammar(user_dir, false);
         let result = (|| {
             deploy_config_file("default.yaml", "config_version")?;
-            let deployed = deploy_desktop_schema_dependencies(user_dir, Some(changed))?;
+            let deployed =
+                deploy_desktop_schema_dependencies(user_dir, Some(changed), package_shared)?;
             let _rime = rime_api_lock();
             unsafe {
                 let api = rime_get_api();
@@ -1954,10 +1967,9 @@ mod desktop {
     }
 
     #[cfg(target_os = "android")]
-    fn deploy_android_staged(user_data_dir: &str) -> Result<(), String> {
+    fn deploy_android_staged(user_dir: &Path, package_shared: Option<&Path>) -> Result<(), String> {
         deploy_config_file("default.yaml", "config_version")?;
 
-        let user_dir = Path::new(user_data_dir);
         let initial_schemas = parse_schema_list_from_dir(user_dir);
         if initial_schemas.is_empty() {
             return Err("no schema selected in default.custom.yaml".into());
@@ -1975,16 +1987,20 @@ mod desktop {
             }
 
             if required {
-                if !deploy_listed_schema(user_dir, &schema_id)? {
+                if !deploy_listed_schema_from(user_dir, &schema_id, package_shared)? {
                     continue;
                 }
             } else {
-                let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+                let source = schema_source_path(user_dir, package_shared, &schema_id);
                 if !source.is_file() {
                     continue;
                 }
                 let _dictionary_override =
-                    prepare_android_auxiliary_dictionary(user_dir, &schema_id)?;
+                    if package_shared.is_none() || user_dir.join("liangfen.dict.yaml").is_file() {
+                        prepare_android_auxiliary_dictionary(user_dir, &schema_id)?
+                    } else {
+                        None
+                    };
                 deploy_schema_file(&source)?;
             }
 
@@ -2014,7 +2030,16 @@ mod desktop {
         include!("desktop_deploy_tests.rs");
     }
 
+    #[cfg(any(not(target_os = "android"), test))]
     fn deploy_listed_schema(user_dir: &Path, schema_id: &str) -> Result<bool, String> {
+        deploy_listed_schema_from(user_dir, schema_id, None)
+    }
+
+    fn deploy_listed_schema_from(
+        user_dir: &Path,
+        schema_id: &str,
+        package_shared: Option<&Path>,
+    ) -> Result<bool, String> {
         let shared_dir = if cfg!(target_os = "android") {
             let _rime = rime_api_lock();
             unsafe {
@@ -2025,16 +2050,27 @@ mod desktop {
         } else {
             None
         };
-        deploy_listed_schema_with_reuse(user_dir, schema_id, shared_dir.as_deref())
+        let source = schema_source_path(user_dir, package_shared, schema_id);
+        deploy_listed_schema_at(user_dir, schema_id, shared_dir.as_deref(), source)
     }
 
+    #[cfg(test)]
     fn deploy_listed_schema_with_reuse(
         user_dir: &Path,
         schema_id: &str,
         shared_dir: Option<&Path>,
     ) -> Result<bool, String> {
+        let source = schema_source_path(user_dir, None, schema_id);
+        deploy_listed_schema_at(user_dir, schema_id, shared_dir, source)
+    }
+
+    fn deploy_listed_schema_at(
+        user_dir: &Path,
+        schema_id: &str,
+        shared_dir: Option<&Path>,
+        source: PathBuf,
+    ) -> Result<bool, String> {
         let log = capture_deployment_log(user_dir);
-        let source = user_dir.join(format!("{schema_id}.schema.yaml"));
         let compiled = compiled_schema_path(user_dir, schema_id);
         // librime can leave a previous build behind when a new config fails to compile.
         if !shared_dir.is_some_and(|shared| {
@@ -2947,7 +2983,8 @@ mod desktop {
             }
             join();
         }
-        initialize_user_dictionary_cache(user_dir);
+        let dirs = RuntimeDirs::resolve(user_dir, user_dir);
+        initialize_user_dictionary_cache(&dirs.user_data_dir);
         // Deployer::Run aggregates task failures into the deploy notification.
         if *lock_ignore_poison(&DEPLOY_RESULT) != Some(true) {
             return Err("Rime user data sync failed".into());
@@ -3106,8 +3143,9 @@ mod desktop {
             if let Some((dir, schema_id)) = &preferred {
                 require_compiled_schema(&compiled_schema_path(dir, schema_id), schema_id)?;
             }
+            let dirs = RuntimeDirs::resolve(user_data_dir, user_data_dir);
             let user_dictionary_source_available =
-                user_dictionary_cache_available_for(Some(user_data_dir));
+                user_dictionary_cache_available_for(Some(&dirs.user_data_dir));
             let _rime = rime_api_lock();
             #[cfg(all(
                 test,
@@ -3125,7 +3163,7 @@ mod desktop {
             Ok(Self {
                 session: ManuallyDrop::new(session),
                 chord_schema: RefCell::new((String::new(), false)),
-                user_data_dir: Some(user_data_dir.to_path_buf()),
+                user_data_dir: Some(dirs.user_data_dir),
                 user_dictionary_source_available,
             })
         }
@@ -5838,7 +5876,8 @@ impl ImeRuntime {
             }
 
             let user_dir = dirs.user.clone();
-            let schema_state = schema_install_state(&user_dir);
+            let runtime = RuntimeDirs::resolve(&user_dir, Path::new(&dirs.shared));
+            let schema_state = resolved_schema_install_state(&runtime);
             if !schema_state.installed {
                 return Err(
                     "no KeyTao scheme is installed; install one in the KeyTao app first".into(),
@@ -5919,7 +5958,8 @@ impl ImeRuntime {
             if deployment_in_progress(&dirs.user) {
                 return Err("Rime deployment is busy".into());
             }
-            let schema_state = schema_install_state(&dirs.user);
+            let runtime = RuntimeDirs::resolve(&dirs.user, Path::new(&dirs.shared));
+            let schema_state = resolved_schema_install_state(&runtime);
             if schema_state.schemas.is_empty() {
                 if initialized.as_ref() == Some(&dirs) {
                     let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
@@ -7218,7 +7258,9 @@ pub fn write_current_schema(root: &Path, id: &str) -> Result<(), String> {
 }
 
 fn persist_selected_schema(root: &Path, id: &str) -> Result<(), String> {
-    let path = root.join("user.yaml");
+    let path = RuntimeDirs::resolve(root, root)
+        .user_data_dir
+        .join("user.yaml");
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(format!("refuse symbolic link: {}", path.display()));
@@ -7316,7 +7358,7 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
         .filter(|(root, _)| root == dir)
         .map(|(_, id)| id.clone())
         .or_else(|| {
-            std::fs::read_to_string(dir.join("user.yaml"))
+            std::fs::read_to_string(dirs.user_data_dir.join("user.yaml"))
                 .ok()
                 .and_then(|content| serde_yaml::from_str::<Value>(&content).ok())
                 .and_then(|value| {
@@ -7325,6 +7367,9 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
                         .map(str::to_owned)
                 })
                 .or_else(|| {
+                    if dirs.active_package_key.is_some() {
+                        return None;
+                    }
                     std::fs::read_to_string(dir.join(".keytao-current-schema"))
                         .ok()
                         .map(|id| id.trim().to_owned())
@@ -7453,11 +7498,10 @@ pub fn parse_schema_name(content: &str) -> Option<String> {
 }
 
 fn schema_name_from_dir(user_data_dir: &Path, schema_id: &str) -> Option<String> {
+    let dirs = RuntimeDirs::resolve(user_data_dir, user_data_dir);
     [
-        RuntimeDirs::resolve(user_data_dir, user_data_dir)
-            .staging_dir
-            .join(format!("{schema_id}.schema.yaml")),
-        user_data_dir.join(format!("{schema_id}.schema.yaml")),
+        dirs.staging_dir.join(format!("{schema_id}.schema.yaml")),
+        schema_source_path(&dirs.user_data_dir, dirs.package_shared(), schema_id),
     ]
     .into_iter()
     .filter_map(|path| std::fs::read_to_string(path).ok())
@@ -7528,13 +7572,12 @@ fn valid_rime_build_id(id: &str) -> bool {
 }
 
 fn configured_schema_list_from_dir(user_data_dir: &Path) -> Vec<String> {
+    let dirs = RuntimeDirs::resolve(user_data_dir, user_data_dir);
     [
-        user_data_dir.join("default.custom.yaml"),
-        user_data_dir.join("default-custom.yaml"),
-        RuntimeDirs::resolve(user_data_dir, user_data_dir)
-            .staging_dir
-            .join("default.yaml"),
-        user_data_dir.join("default.yaml"),
+        dirs.user_data_dir.join("default.custom.yaml"),
+        dirs.user_data_dir.join("default-custom.yaml"),
+        dirs.staging_dir.join("default.yaml"),
+        dirs.user_data_dir.join("default.yaml"),
     ]
     .into_iter()
     .filter_map(|path| std::fs::read_to_string(path).ok())
@@ -7680,7 +7723,16 @@ fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
     ))
 }
 
-fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<String> {
+fn schema_source_path(user_data_dir: &Path, package_shared: Option<&Path>, id: &str) -> PathBuf {
+    let name = format!("{id}.schema.yaml");
+    let path = user_data_dir.join(&name);
+    match package_shared {
+        Some(shared) if !path.is_file() => shared.join(name),
+        _ => path,
+    }
+}
+
+fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool, isolated: bool) -> Vec<String> {
     let schemas: Vec<_> = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
@@ -7694,7 +7746,11 @@ fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<Strin
     } else {
         schemas
     };
-    managed_primary_schemas_from_list(user_data_dir, schemas)
+    if isolated {
+        schemas
+    } else {
+        managed_primary_schemas_from_list(user_data_dir, schemas)
+    }
 }
 
 fn managed_primary_schemas_from_list(user_data_dir: &Path, schemas: Vec<String>) -> Vec<String> {
@@ -7821,12 +7877,19 @@ pub fn complete_deployment_with_cleanup(
     user_data_dir: &Path,
     cleanup: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    let schemas = managed_primary_schemas(user_data_dir, true);
+    let dirs = RuntimeDirs::resolve(user_data_dir, user_data_dir);
+    complete_resolved_deployment(&dirs.user_data_dir, dirs.package_shared(), cleanup)
+}
+
+fn complete_resolved_deployment(
+    user_data_dir: &Path,
+    package_shared: Option<&Path>,
+    cleanup: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let schemas = managed_primary_schemas(user_data_dir, true, package_shared.is_some());
     if schemas.is_empty()
         || !schemas.iter().all(|schema| {
-            user_data_dir
-                .join(format!("{schema}.schema.yaml"))
-                .is_file()
+            schema_source_path(user_data_dir, package_shared, schema).is_file()
                 && RuntimeDirs::resolve(user_data_dir, user_data_dir)
                     .staging_dir
                     .join(format!("{schema}.schema.yaml"))
@@ -7890,26 +7953,28 @@ fn write_effective_default_schema_list(
 }
 
 pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
-    let installed_schemas = managed_primary_schemas(user_data_dir, false);
-    let schemas = managed_primary_schemas(user_data_dir, true);
+    let dirs = RuntimeDirs::resolve(user_data_dir, user_data_dir);
+    resolved_schema_install_state(&dirs)
+}
+
+fn resolved_schema_install_state(dirs: &RuntimeDirs) -> SchemaInstallState {
+    let package_shared = dirs.package_shared();
+    let user_data_dir = dirs.user_data_dir.as_path();
+    let installed_schemas = managed_primary_schemas(user_data_dir, false, package_shared.is_some());
+    let schemas = managed_primary_schemas(user_data_dir, true, package_shared.is_some());
     let skipped = skipped_schemas(user_data_dir);
 
     let installed = !installed_schemas.is_empty()
         && installed_schemas.iter().all(|schema| {
-            user_data_dir
-                .join(format!("{schema}.schema.yaml"))
-                .is_file()
+            schema_source_path(user_data_dir, package_shared, schema).is_file()
                 || skipped.contains_key(schema)
         });
-    let build = RuntimeDirs::resolve(user_data_dir, user_data_dir).staging_dir;
+    let build = &dirs.staging_dir;
     let deployed = installed
         && !schemas.is_empty()
-        && schemas.iter().all(|schema| {
-            RuntimeDirs::resolve(user_data_dir, user_data_dir)
-                .staging_dir
-                .join(format!("{schema}.schema.yaml"))
-                .is_file()
-        })
+        && schemas
+            .iter()
+            .all(|schema| build.join(format!("{schema}.schema.yaml")).is_file())
         && !build.join(DEPLOYING_FILE).exists()
         && match std::fs::read(build.join(DEPLOYED_FILE)) {
             Ok(content) => {

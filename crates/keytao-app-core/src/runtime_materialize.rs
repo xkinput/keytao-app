@@ -1,0 +1,1129 @@
+use crate::{
+    Core, CoreError,
+    addon::EASY_EN_ADDON_ID,
+    managed_custom,
+    package_store::{PackageStore, StoredPackage},
+    packages::{safe_path, sha256_reader},
+};
+use keytao_core::RuntimeDirs;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+};
+
+const MANIFEST: &str = RuntimeDirs::MANIFEST_FILE;
+const PENDING: &str = ".keytao-runtime.pending.json";
+const DEFAULT_CUSTOM: [&str; 2] = ["default.custom.yaml", "default-custom.yaml"];
+const COMMON: [&str; 6] = [
+    "default.yaml",
+    "key_bindings.yaml",
+    "punctuation.yaml",
+    "symbols.yaml",
+    "essay.txt",
+    "opencc",
+];
+
+type Files = BTreeMap<String, Vec<u8>>;
+
+#[derive(Default, Deserialize, Serialize)]
+struct Manifest {
+    package: String,
+    owned: BTreeMap<String, String>,
+    generated: BTreeMap<String, String>,
+    user_owned: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    runtime_overrides: BTreeSet<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Pending {
+    previous: Manifest,
+    next: Manifest,
+}
+
+impl Manifest {
+    fn fingerprint(&self, path: &str) -> Option<&String> {
+        self.generated
+            .get(path)
+            .or_else(|| self.owned.get(path))
+            .or_else(|| self.user_owned.get(path))
+    }
+
+    fn validate(&self, key: &str) -> Result<(), CoreError> {
+        if (!self.package.is_empty() && self.package != key)
+            || self
+                .owned
+                .keys()
+                .chain(self.generated.keys())
+                .any(|path| !materialized_path(path))
+            || self
+                .user_owned
+                .keys()
+                .any(|path| !materialized_path(path) || !user_path(path))
+            || self
+                .runtime_overrides
+                .iter()
+                .any(|path| !self.user_owned.contains_key(path))
+        {
+            return Err(CoreError::Other("Invalid runtime manifest".into()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct Settings {
+    #[serde(default)]
+    easy_english_packages: BTreeSet<String>,
+}
+
+/// Prepare isolated librime inputs for the installed packages when isolation is enabled.
+/// `bundled` is the platform's resolved bundled rime-data directory.
+pub fn materialize_all_installed_packages(
+    core: &Core,
+    control_root: &Path,
+    bundled: &Path,
+) -> Result<(), CoreError> {
+    if !RuntimeDirs::isolation_enabled(control_root) {
+        return Ok(());
+    }
+    let settings: Settings = read_optional(&safe(control_root, RuntimeDirs::SETTINGS_FILE)?)?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()?
+        .unwrap_or_default();
+    let store = PackageStore::new(core);
+    let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
+    for record in crate::package_activation::read_all(core, control_root)?.into_values() {
+        for file in record.owned.into_iter().chain(record.generated) {
+            owners.entry(file.path).or_default().insert(file.sha256);
+        }
+        for (path, sha256) in record.manifest {
+            owners.entry(path).or_default().insert(sha256);
+        }
+    }
+    let mut addons = BTreeMap::new();
+    for &id in crate::addon_store::IDS {
+        let package = store.checked_addon_path(id)?;
+        if package.try_exists()? {
+            crate::addon_store::validate_directory(&package, id)?;
+            let metadata: StoredPackage =
+                serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
+            let activation: crate::package_activation::Activation =
+                serde_json::from_slice(&fs::read(safe(&package, "activation.json")?)?)?;
+            for file in activation.owned.into_iter().chain(activation.generated) {
+                owners.entry(file.path).or_default().insert(file.sha256);
+            }
+            addons.insert(id, (package, metadata));
+        }
+    }
+    let english = if settings.easy_english_packages.is_empty() {
+        None
+    } else {
+        addons
+            .get(EASY_EN_ADDON_ID)
+            .map(|(path, metadata)| addon_files(path, metadata))
+            .transpose()?
+    };
+    let overlay_for = |key: &str| {
+        if key != EASY_EN_ADDON_ID && settings.easy_english_packages.contains(key) {
+            english.as_ref().map(Some).ok_or_else(|| {
+                CoreError::Other(
+                    "Easy English must be installed before enabling its overlay".into(),
+                )
+            })
+        } else {
+            Ok(None)
+        }
+    };
+    let mut legacy = user_files(control_root, &owners)?;
+    if let Some(active) = crate::package_activation::read(core, control_root)? {
+        for path in DEFAULT_CUSTOM {
+            if let (Some(applied), Some(current)) =
+                (active.default_applied.get(path), legacy.get(path))
+            {
+                let original = active
+                    .backups
+                    .iter()
+                    .find(|backup| backup.path == path)
+                    .map(|backup| crate::package_activation::backup_bytes(core, backup))
+                    .transpose()?;
+                let user = restore_user_default(current, applied, original.as_deref())?;
+                if user.is_empty() {
+                    legacy.remove(path);
+                } else {
+                    legacy.insert(path.into(), user);
+                }
+            }
+        }
+    }
+    let installed: Vec<_> = core
+        .lock_state()
+        .installed_packages
+        .keys()
+        .cloned()
+        .collect();
+    for key in installed {
+        let (files, _) = store.read_files(&key)?;
+        let selection =
+            crate::package_schemas::read_selection(&store.checked_metadata_path(&key)?)?;
+        materialize(
+            control_root,
+            bundled,
+            &key,
+            files.into_iter().collect(),
+            selection.as_deref(),
+            overlay_for(&key)?,
+            &legacy,
+        )?;
+        // Snow can also have a standalone add-on record during store migration.
+        addons.remove(key.as_str());
+    }
+    for (key, (package, metadata)) in addons {
+        let owned_files = addon_files(&package, &metadata)?;
+        materialize(
+            control_root,
+            bundled,
+            key,
+            owned_files,
+            metadata.selected_schemas.as_deref(),
+            overlay_for(key)?,
+            &legacy,
+        )?;
+    }
+    Ok(())
+}
+
+fn addon_files(package: &Path, metadata: &StoredPackage) -> Result<Files, CoreError> {
+    let source = safe(package, "files")?;
+    metadata
+        .files
+        .iter()
+        .map(|file| {
+            let bytes = fs::read(safe(&source, &file.path)?)?;
+            if sha256_reader(bytes.as_slice())? != file.sha256 {
+                return Err(CoreError::Other(
+                    "Add-on source fingerprint mismatch".into(),
+                ));
+            }
+            Ok((file.path.clone(), bytes))
+        })
+        .collect()
+}
+
+fn safe(root: &Path, path: &str) -> Result<PathBuf, CoreError> {
+    safe_path(root, path).map_err(CoreError::Other)
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn user_path(path: &str) -> bool {
+    path.ends_with(".custom.yaml")
+        || path.ends_with(".dict.yaml")
+        || path.rsplit('/').next() == Some("custom_phrase.txt")
+        || path == DEFAULT_CUSTOM[1]
+}
+
+fn private_path(path: &str) -> bool {
+    path.split('/').any(|part| {
+        part.starts_with('.')
+            || part.contains(".userdb")
+            || part.ends_with(".leveldb")
+            || matches!(
+                part,
+                "build"
+                    | "sync"
+                    | "log"
+                    | "runtime"
+                    | "prebuilt"
+                    | "scheme-packages"
+                    | "rime-data"
+                    | "shared"
+            )
+    })
+}
+
+fn user_files(
+    root: &Path,
+    owners: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<Files, CoreError> {
+    let mut result = Files::new();
+    walk_files(root, "", private_path, &mut |path, relative| {
+        if user_path(relative) {
+            let bytes = strip_generated(relative, fs::read(path)?)?;
+            let digest = sha256_reader(bytes.as_slice())?;
+            if !bytes.is_empty()
+                && !owners
+                    .get(relative)
+                    .is_some_and(|hashes| hashes.contains(&digest))
+            {
+                result.insert(relative.to_owned(), bytes);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(result)
+}
+
+fn restore_user_default(
+    current: &[u8],
+    applied: &serde_yaml::Value,
+    original: Option<&[u8]>,
+) -> Result<Vec<u8>, CoreError> {
+    use serde_yaml::{Mapping, Value};
+
+    let parse = |bytes| {
+        serde_yaml::from_slice::<Mapping>(bytes)
+            .map_err(|error| CoreError::Other(error.to_string()))
+    };
+    let empty = Mapping::new();
+    let patch_key = Value::String("patch".into());
+    let current = parse(current)?;
+    let applied = applied.as_mapping().unwrap_or(&empty);
+    let mut original = original.map(parse).transpose()?.unwrap_or_default();
+    for key in current
+        .keys()
+        .chain(applied.keys())
+        .filter(|key| *key != &patch_key)
+    {
+        restore_user_key(&mut original, &current, applied, key);
+    }
+
+    let current_patch = current
+        .get(&patch_key)
+        .and_then(Value::as_mapping)
+        .unwrap_or(&empty);
+    let applied_patch = applied
+        .get(&patch_key)
+        .and_then(Value::as_mapping)
+        .unwrap_or(&empty);
+    let mut patch = original
+        .remove(&patch_key)
+        .and_then(|value| value.as_mapping().cloned())
+        .unwrap_or_default();
+    for key in current_patch.keys().chain(applied_patch.keys()) {
+        restore_user_key(&mut patch, current_patch, applied_patch, key);
+    }
+    patch.retain(|key, _| !is_schema_list_key(key));
+    if !patch.is_empty() {
+        original.insert(patch_key, Value::Mapping(patch));
+    }
+    if original.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_yaml::to_string(&original)
+        .map(String::into_bytes)
+        .map_err(|error| CoreError::Other(error.to_string()))
+}
+
+fn restore_user_key(
+    original: &mut serde_yaml::Mapping,
+    current: &serde_yaml::Mapping,
+    applied: &serde_yaml::Mapping,
+    key: &serde_yaml::Value,
+) {
+    let value = current.get(key);
+    if value != applied.get(key) {
+        if let Some(value) = value {
+            original.insert(key.clone(), value.clone());
+        } else {
+            original.remove(key);
+        }
+    }
+}
+
+fn is_schema_list_key(key: &serde_yaml::Value) -> bool {
+    key.as_str()
+        .is_some_and(|key| key == "schema_list" || key.starts_with("schema_list/"))
+}
+
+fn walk_files(
+    root: &Path,
+    prefix: &str,
+    skip: impl Fn(&str) -> bool + Copy,
+    visit: &mut impl FnMut(&Path, &str) -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let relative = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if skip(&relative) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            walk_files(&entry.path(), &relative, skip, visit)?;
+        } else if kind.is_file() {
+            visit(&entry.path(), &relative)?;
+        }
+    }
+    Ok(())
+}
+
+fn strip_generated(path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, CoreError> {
+    if path.ends_with(".custom.yaml") || path == DEFAULT_CUSTOM[1] {
+        return managed_custom::strip(utf8(&bytes)?)
+            .map(String::into_bytes)
+            .map_err(CoreError::Other);
+    }
+    Ok(bytes)
+}
+
+fn utf8(bytes: &[u8]) -> Result<&str, CoreError> {
+    std::str::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string()))
+}
+
+fn lua_path(path: &str) -> bool {
+    path == "rime.lua" || path.starts_with("lua/")
+}
+
+fn materialized_path(path: &str) -> bool {
+    !private_path(path)
+        && (user_path(path)
+            || lua_path(path)
+            || COMMON.contains(&path)
+            || path.starts_with("opencc/")
+            || crate::addon::is_package_file(path))
+}
+
+fn materialize(
+    control_root: &Path,
+    bundled: &Path,
+    key: &str,
+    sources: Files,
+    selection: Option<&[String]>,
+    overlay: Option<&Files>,
+    legacy: &Files,
+) -> Result<(), CoreError> {
+    let runtime = RuntimeDirs::isolated_user_data_dir(control_root, key)
+        .ok_or_else(|| CoreError::Other("Invalid runtime package key".into()))?;
+    safe(control_root, &format!("runtime/{key}"))?;
+    fs::create_dir_all(&runtime)?;
+    let lock = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(safe(&runtime, ".keytao-materialize.lock")?)?;
+    lock.lock()?;
+    let previous = current_manifest(&runtime, key)?;
+
+    let available: BTreeSet<_> = sources.keys().cloned().collect();
+    let mut selected = selected_schemas(key, &sources, selection)?;
+    let mut generated = Files::new();
+    let mut owned = Files::new();
+    let mut schema_sources = Files::new();
+    if let Some(overlay) = overlay {
+        for (path, bytes) in overlay
+            .iter()
+            .filter(|(path, _)| crate::addon::is_package_file(path))
+        {
+            match sources.get(path) {
+                Some(own) if own == bytes => continue,
+                Some(_) => {
+                    return Err(CoreError::Other(format!(
+                        "Easy English file conflict: {path}"
+                    )));
+                }
+                None => owned.insert(path.clone(), bytes.clone()),
+            };
+        }
+        if let Some(bytes) = owned.get("easy_en.schema.yaml") {
+            schema_sources.insert("easy_en.schema.yaml".into(), bytes.clone());
+        }
+    }
+    for (path, bytes) in sources {
+        if path.ends_with(".schema.yaml") && !path.contains('/') {
+            schema_sources.insert(path, bytes);
+        } else if materialized_path(&path)
+            && (lua_path(&path) || path.ends_with(".custom.yaml") || path == DEFAULT_CUSTOM[1])
+        {
+            owned.insert(path, bytes);
+        }
+    }
+    if overlay.is_some() {
+        if !schema_sources.contains_key("easy_en.schema.yaml") {
+            return Err(CoreError::Other("Easy English has no schema source".into()));
+        }
+        if !selected.iter().any(|id| id == EASY_EN_ADDON_ID) {
+            selected.push(EASY_EN_ADDON_ID.into());
+        }
+    }
+    if let Some(entry) = owned.remove("rime.lua") {
+        if let Some(lua) = crate::install::prepare_rime_lua_install(Some(utf8(&entry)?), &[]) {
+            generated.insert("rime.lua".into(), lua.into_bytes());
+        }
+    }
+    add_common_files(bundled, &available, &mut generated)?;
+
+    let mut user = legacy.clone();
+    let mut runtime_overrides = previous.runtime_overrides.clone();
+    walk_files(&runtime, "", private_path, &mut |path, relative| {
+        if user_path(relative) {
+            let bytes = fs::read(path)?;
+            let changed = previous.fingerprint(relative) != Some(&sha256_reader(bytes.as_slice())?);
+            if changed {
+                runtime_overrides.insert(relative.to_owned());
+            }
+            if runtime_overrides.contains(relative)
+                || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
+            {
+                let bytes = strip_generated(relative, bytes)?;
+                if !bytes.is_empty() {
+                    user.insert(relative.to_owned(), bytes);
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    let incoming = take_default_custom(&mut owned);
+    let existing = take_default_custom(&mut user);
+    let default = default_custom(incoming.as_deref(), existing.as_deref(), &selected)?;
+    if existing.is_some() {
+        if runtime_overrides.remove(DEFAULT_CUSTOM[1]) {
+            runtime_overrides.insert(DEFAULT_CUSTOM[0].into());
+        }
+        user.insert(DEFAULT_CUSTOM[0].into(), default.clone());
+    }
+    generated.insert(DEFAULT_CUSTOM[0].into(), default);
+    for path in user.keys() {
+        owned.remove(path);
+    }
+
+    regenerate_custom(
+        &runtime,
+        &schema_sources,
+        &selected,
+        crate::ime_settings::read_candidate_page_size(control_root),
+        &mut owned,
+        &mut generated,
+        &user,
+    )?;
+    runtime_overrides.retain(|path| user.contains_key(path));
+    write_runtime(
+        &runtime,
+        key,
+        previous,
+        owned,
+        generated,
+        user,
+        runtime_overrides,
+    )
+}
+
+fn selected_schemas(
+    key: &str,
+    sources: &Files,
+    selection: Option<&[String]>,
+) -> Result<Vec<String>, CoreError> {
+    let configs: Vec<_> = sources
+        .iter()
+        .filter(|(path, _)| {
+            DEFAULT_CUSTOM.contains(&path.as_str())
+                || *path == "default.yaml"
+                || (!path.contains('/') && path.ends_with(".schema.yaml"))
+        })
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect();
+    let available = |id: &str| sources.contains_key(&format!("{id}.schema.yaml"));
+    let mut schemas: Vec<_> = crate::package_schemas::enumerate(key, &configs, selection)?
+        .into_iter()
+        .filter(|schema| schema.selected && available(&schema.id))
+        .map(|schema| schema.id)
+        .collect();
+    if schemas.is_empty() {
+        schemas.extend(sources.keys().filter_map(|path| {
+            (!path.contains('/'))
+                .then(|| path.strip_suffix(".schema.yaml"))
+                .flatten()
+                .map(str::to_owned)
+        }));
+    }
+    if schemas.is_empty() {
+        return Err(CoreError::Other(format!(
+            "Package {key} has no schema sources"
+        )));
+    }
+    Ok(schemas)
+}
+
+fn add_common_files(
+    bundled: &Path,
+    available: &BTreeSet<String>,
+    generated: &mut Files,
+) -> Result<(), CoreError> {
+    if bundled.as_os_str().is_empty() {
+        return Ok(());
+    }
+    for path in COMMON {
+        if path == "opencc" {
+            walk_files(
+                &bundled.join(path),
+                path,
+                private_path,
+                &mut |source, relative| {
+                    if !available.contains(relative) {
+                        generated.insert(relative.to_owned(), fs::read(source)?);
+                    }
+                    Ok(())
+                },
+            )?;
+        } else if !available.contains(path) {
+            if let Some(bytes) = read_optional(&bundled.join(path))? {
+                generated.insert(path.to_owned(), bytes);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn take_default_custom(files: &mut Files) -> Option<Vec<u8>> {
+    let current = files.remove(DEFAULT_CUSTOM[0]);
+    let legacy = files.remove(DEFAULT_CUSTOM[1]);
+    current.or(legacy)
+}
+
+fn default_custom(
+    package: Option<&[u8]>,
+    user: Option<&[u8]>,
+    schemas: &[String],
+) -> Result<Vec<u8>, CoreError> {
+    let mut package: serde_yaml::Value = serde_yaml::from_slice(package.unwrap_or(b"{}"))
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    if package.is_null() {
+        package = serde_yaml::Mapping::new().into();
+    }
+    let mapping = package
+        .as_mapping_mut()
+        .ok_or_else(|| CoreError::Other("Package default custom must be a mapping".into()))?;
+    let patch = crate::scheme_files::yaml_child_mapping(mapping, "patch", "Invalid default patch")
+        .map_err(CoreError::Other)?;
+    patch.insert(
+        "schema_list".into(),
+        serde_yaml::Value::Sequence(Vec::new()),
+    );
+    let package = serde_yaml::to_string(&package).map_err(|e| CoreError::Other(e.to_string()))?;
+    let (merged, _) =
+        crate::install::merge_local_default_custom(user.map(utf8).transpose()?, &package)
+            .map_err(CoreError::Other)?;
+    let mut merged: serde_yaml::Mapping =
+        serde_yaml::from_str(&merged).map_err(|error| CoreError::Other(error.to_string()))?;
+    let patch =
+        crate::scheme_files::yaml_child_mapping(&mut merged, "patch", "Invalid default patch")
+            .map_err(CoreError::Other)?;
+    patch.retain(|key, _| !is_schema_list_key(key));
+    let entries: Vec<_> = schemas
+        .iter()
+        .map(|id| BTreeMap::from([("schema", id)]))
+        .collect();
+    patch.insert(
+        "schema_list".into(),
+        serde_yaml::to_value(entries).map_err(|error| CoreError::Other(error.to_string()))?,
+    );
+    serde_yaml::to_string(&merged)
+        .map(String::into_bytes)
+        .map_err(|error| CoreError::Other(error.to_string()))
+}
+
+fn regenerate_custom(
+    runtime: &Path,
+    sources: &Files,
+    schemas: &[String],
+    page_size: Option<u8>,
+    owned: &mut Files,
+    generated: &mut Files,
+    user: &Files,
+) -> Result<(), CoreError> {
+    let staging = tempfile::Builder::new()
+        .prefix(".keytao-materialize-")
+        .tempdir_in(runtime)?;
+    let stage = staging.path();
+    for (path, bytes) in sources
+        .iter()
+        .chain(owned.iter().filter(|(path, _)| {
+            path.ends_with(".custom.yaml") || *path == crate::remove_filter::SCRIPT_PATH
+        }))
+        .chain(
+            user.iter()
+                .filter(|(path, _)| path.ends_with(".custom.yaml")),
+        )
+    {
+        let destination = safe(stage, path)?;
+        fs::create_dir_all(destination.parent().unwrap())?;
+        fs::write(destination, bytes)?;
+    }
+    if let Some(page_size) = page_size {
+        fs::write(
+            stage.join(keytao_core::english_mode::SETTINGS_FILE),
+            serde_json::to_vec(&serde_json::json!({ "candidatePageSize": page_size }))?,
+        )?;
+    }
+    managed_custom::regenerate(stage, &schemas.iter().cloned().collect())
+        .map_err(CoreError::Other)?;
+    for path in managed_custom::generated_paths(stage).map_err(CoreError::Other)? {
+        let bytes = fs::read(safe(stage, &path)?)?;
+        if owned.get(&path) != Some(&bytes) {
+            owned.remove(&path);
+            generated.insert(path, bytes);
+        }
+    }
+    Ok(())
+}
+
+fn write_runtime(
+    runtime: &Path,
+    key: &str,
+    previous: Manifest,
+    owned: Files,
+    generated: Files,
+    user: Files,
+    runtime_overrides: BTreeSet<String>,
+) -> Result<(), CoreError> {
+    let fingerprint = |files: &Files| -> Result<BTreeMap<_, _>, CoreError> {
+        files
+            .iter()
+            .map(|(name, bytes)| Ok((name.clone(), sha256_reader(bytes.as_slice())?)))
+            .collect()
+    };
+    let mut manifest = Manifest {
+        package: key.into(),
+        owned: fingerprint(&owned)?,
+        generated: fingerprint(&generated)?,
+        user_owned: fingerprint(&user)?,
+        runtime_overrides,
+    };
+    let mut files = owned;
+    files.extend(user);
+    files.extend(generated);
+    let mut writes = Vec::new();
+    for (relative, bytes) in files {
+        let path = safe(runtime, &relative)?;
+        if let Some(digest) = manifest.user_owned.get_mut(&relative) {
+            *digest = sha256_reader(bytes.as_slice())?;
+        }
+        if let Some(existing) = read_optional(&path)? {
+            if existing == bytes {
+                continue;
+            }
+            let digest = sha256_reader(existing.as_slice())?;
+            if !manifest.user_owned.contains_key(&relative)
+                && previous.fingerprint(&relative) != Some(&digest)
+            {
+                return Err(CoreError::Other(format!(
+                    "Modified runtime file: {relative}"
+                )));
+            }
+        }
+        writes.push((path, bytes));
+    }
+    let mut removals = Vec::new();
+    for (relative, hash) in previous.owned.iter().chain(&previous.generated) {
+        if manifest.fingerprint(relative).is_none() && !previous.user_owned.contains_key(relative) {
+            let path = safe(runtime, relative)?;
+            if let Some(bytes) = read_optional(&path)? {
+                if sha256_reader(bytes.as_slice())? == *hash {
+                    removals.push(path);
+                }
+            }
+        }
+    }
+    let pending_path = safe(runtime, PENDING)?;
+    let patch = Pending {
+        previous,
+        next: manifest,
+    };
+    if !writes.is_empty() || !removals.is_empty() {
+        write_file(&pending_path, &serde_json::to_vec(&patch)?)?;
+    }
+    for (path, bytes) in writes {
+        write_file(&path, &bytes)?;
+    }
+    for path in removals {
+        fs::remove_file(path)?;
+    }
+    write_file(&safe(runtime, MANIFEST)?, &serde_json::to_vec(&patch.next)?)?;
+    if pending_path.try_exists()? {
+        fs::remove_file(pending_path)?;
+    }
+    Ok(())
+}
+
+fn current_manifest(runtime: &Path, key: &str) -> Result<Manifest, CoreError> {
+    let read = |path| read_optional(&safe(runtime, path)?);
+    if let Some(bytes) = read(PENDING)? {
+        let Pending { mut previous, next } = serde_json::from_slice(&bytes)?;
+        previous.validate(key)?;
+        next.validate(key)?;
+        for path in next
+            .owned
+            .keys()
+            .chain(next.generated.keys())
+            .chain(next.user_owned.keys())
+        {
+            let current = read(path)?
+                .map(|bytes| sha256_reader(bytes.as_slice()))
+                .transpose()?;
+            if current.as_ref() != next.fingerprint(path) {
+                continue;
+            }
+            for (previous, next) in [
+                (&mut previous.owned, &next.owned),
+                (&mut previous.generated, &next.generated),
+                (&mut previous.user_owned, &next.user_owned),
+            ] {
+                previous.remove(path);
+                if let Some(digest) = next.get(path) {
+                    previous.insert(path.clone(), digest.clone());
+                }
+            }
+            previous.runtime_overrides.remove(path);
+            if next.runtime_overrides.contains(path) {
+                previous.runtime_overrides.insert(path.clone());
+            }
+        }
+        return Ok(previous);
+    }
+    let previous: Manifest = read(MANIFEST)?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()?
+        .unwrap_or_default();
+    previous.validate(key)?;
+    Ok(previous)
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
+    if read_optional(path)?.as_deref() != Some(bytes) {
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(path).map_err(|error| error.error)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(root: &Path, path: &str, content: &str) {
+        let dest = root.join(path);
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(dest, content).unwrap();
+    }
+
+    fn fixture(root: &Path, key: &str) -> Files {
+        let package = root.join(format!("scheme-packages/cloud/{key}/files"));
+        put(&package, "symbols.yaml", key);
+        put(
+            &package,
+            &format!("{key}.schema.yaml"),
+            &format!("schema: {{schema_id: {key}, name: {key}}}\n"),
+        );
+        put(&package, "rime.lua", &format!("require('{key}')\n"));
+        put(&package, &format!("lua/{key}.lua"), key);
+        put(&package, "opencc/owned.json", key);
+        let mut files = Files::new();
+        walk_files(&package, "", |_| false, &mut |path, relative| {
+            files.insert(relative.into(), fs::read(path)?);
+            Ok(())
+        })
+        .unwrap();
+        files
+    }
+
+    fn hashes(root: &Path) -> BTreeMap<String, String> {
+        let mut digests = BTreeMap::new();
+        walk_files(root, "", |_| false, &mut |path, relative| {
+            #[cfg(target_os = "macos")]
+            let digest = {
+                let md5 = std::process::Command::new("md5")
+                    .arg("-q")
+                    .arg(path)
+                    .output()?;
+                assert!(
+                    md5.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&md5.stderr)
+                );
+                utf8(&md5.stdout)?.trim().to_owned()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let digest = sha256_reader(fs::File::open(path)?)?;
+            digests.insert(relative.into(), digest);
+            Ok(())
+        })
+        .unwrap();
+        digests
+    }
+
+    #[test]
+    fn package_assets_and_overlays_stay_isolated_on_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        put(
+            root,
+            RuntimeDirs::SETTINGS_FILE,
+            r#"{"runtime_isolation":true}"#,
+        );
+        put(&bundled, "default.yaml", "schema_list: []\n");
+        put(&bundled, "symbols.yaml", "not used");
+        put(&bundled, "opencc/owned.json", "not used");
+        put(&bundled, "opencc/missing.json", "common");
+        put(
+            root,
+            "default.custom.yaml",
+            "patch: {schema_list: [{schema: old}], schema_list/@next: {schema: foreign}, schema_list/@0/schema: foreign, menu/page_size: 8}\n",
+        );
+        put(
+            root,
+            keytao_core::english_mode::SETTINGS_FILE,
+            r#"{"candidatePageSize": 7}"#,
+        );
+        put(root, "squirrel.custom.yaml", "patch: {user: true}\n");
+        put(root, "custom_phrase.txt", "user phrases");
+        put(root, "private.dict.yaml", "user dictionary");
+        put(root, "owned.dict.yaml", "package dictionary");
+        put(root, "dictionary.userdb/no-copy.dict.yaml", "leveldb");
+        put(root, "sync/no-copy.dict.yaml", "sync");
+        let owners = BTreeMap::from([(
+            "owned.dict.yaml".into(),
+            BTreeSet::from([sha256_reader("package dictionary".as_bytes()).unwrap()]),
+        )]);
+        let legacy = user_files(root, &owners).unwrap();
+        assert_eq!(legacy.len(), 4);
+        let overlay = Files::from([
+            (
+                "easy_en.schema.yaml".into(),
+                b"schema: {schema_id: easy_en, name: Easy English}\n".to_vec(),
+            ),
+            ("easy_en.dict.yaml".into(), b"english".to_vec()),
+            ("lua/easy_en.lua".into(), b"module".to_vec()),
+        ]);
+        for (key, english) in [("keytao", Some(&overlay)), ("keydo", None)] {
+            materialize(
+                root,
+                &bundled,
+                key,
+                fixture(root, key),
+                None,
+                english,
+                &legacy,
+            )
+            .unwrap();
+        }
+        let ta = RuntimeDirs::for_package(root, &bundled, "keytao").unwrap();
+        let kd = RuntimeDirs::for_package(root, &bundled, "keydo").unwrap();
+        assert_ne!(ta.user_data_dir, kd.user_data_dir);
+        for dirs in [&ta, &kd] {
+            let key = dirs.active_package_key.as_deref().unwrap();
+            let run = &dirs.user_data_dir;
+            assert_eq!(
+                fs::read_to_string(dirs.shared_data_dir.join("symbols.yaml")).unwrap(),
+                key
+            );
+            assert!(!run.join("symbols.yaml").exists());
+            assert!(!run.join("opencc/owned.json").exists());
+            assert_eq!(
+                fs::read_to_string(run.join("opencc/missing.json")).unwrap(),
+                "common"
+            );
+            assert_eq!(
+                fs::read_to_string(run.join("private.dict.yaml")).unwrap(),
+                "user dictionary"
+            );
+            assert_eq!(
+                fs::read_to_string(run.join("custom_phrase.txt")).unwrap(),
+                "user phrases"
+            );
+            assert_eq!(
+                fs::read_to_string(run.join("squirrel.custom.yaml")).unwrap(),
+                "patch: {user: true}\n"
+            );
+            assert!(!run.join("owned.dict.yaml").exists());
+            assert!(!run.join("dictionary.userdb").exists());
+            assert!(!run.join("sync").exists());
+            let default = fs::read_to_string(run.join("default.custom.yaml")).unwrap();
+            assert!(default.contains("menu/page_size: 8"));
+            assert!(!default.contains("schema_list/"));
+            assert!(
+                fs::read_to_string(run.join(format!("{key}.custom.yaml")))
+                    .unwrap()
+                    .contains("menu/page_size: 7")
+            );
+            let manifest: Manifest =
+                serde_json::from_slice(&fs::read(run.join(MANIFEST)).unwrap()).unwrap();
+            assert!(manifest.user_owned.contains_key("squirrel.custom.yaml"));
+            assert!(manifest.generated.contains_key("opencc/missing.json"));
+            assert_eq!(
+                manifest.owned.contains_key("easy_en.schema.yaml"),
+                key == "keytao"
+            );
+            if key == "keytao" {
+                assert_eq!(
+                    keytao_core::parse_schema_list(&default),
+                    ["keytao", "easy_en"]
+                );
+                assert!(run.join("easy_en.custom.yaml").is_file());
+                assert!(!run.join("lua/keydo.lua").exists());
+            } else {
+                assert_eq!(keytao_core::parse_schema_list(&default), ["keydo"]);
+                assert!(!run.join("easy_en.schema.yaml").exists());
+                assert!(!run.join("lua/easy_en.lua").exists());
+                assert!(!run.join("lua/keytao.lua").exists());
+            }
+        }
+        put(&ta.user_data_dir, "dictionary.userdb/LOCK", "live leveldb");
+        let before = hashes(&root.join("runtime"));
+        materialize(
+            root,
+            &bundled,
+            "keytao",
+            fixture(root, "keytao"),
+            None,
+            Some(&overlay),
+            &legacy,
+        )
+        .unwrap();
+        assert_eq!(hashes(&root.join("runtime")), before);
+
+        put(
+            &ta.user_data_dir,
+            "squirrel.custom.yaml",
+            "patch: {runtime_edit: true}\n",
+        );
+        let other_before = hashes(&kd.user_data_dir);
+        materialize(
+            root,
+            &bundled,
+            "keytao",
+            fixture(root, "keytao"),
+            None,
+            None,
+            &legacy,
+        )
+        .unwrap();
+        assert!(!ta.user_data_dir.join("easy_en.schema.yaml").exists());
+        assert!(!ta.user_data_dir.join("easy_en.custom.yaml").exists());
+        assert_eq!(
+            fs::read_to_string(ta.user_data_dir.join("squirrel.custom.yaml")).unwrap(),
+            "patch: {runtime_edit: true}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ta.user_data_dir.join("dictionary.userdb/LOCK")).unwrap(),
+            "live leveldb"
+        );
+        assert_eq!(hashes(&kd.user_data_dir), other_before);
+        let edited = hashes(&ta.user_data_dir);
+        materialize(
+            root,
+            &bundled,
+            "keytao",
+            fixture(root, "keytao"),
+            None,
+            None,
+            &legacy,
+        )
+        .unwrap();
+        assert_eq!(hashes(&ta.user_data_dir), edited);
+    }
+
+    #[test]
+    fn retries_with_new_inputs_replace_interrupted_generated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundle = root.join("rime-data");
+        let package = fixture(root, "keytao");
+        let run = root.join("runtime/keytao");
+        let interrupted = "require('previous attempt')\n";
+        put(&run, "rime.lua", interrupted);
+        let pending = Pending {
+            previous: Manifest::default(),
+            next: Manifest {
+                package: "keytao".into(),
+                generated: BTreeMap::from([(
+                    "rime.lua".into(),
+                    sha256_reader(interrupted.as_bytes()).unwrap(),
+                )]),
+                ..Default::default()
+            },
+        };
+        fs::write(run.join(PENDING), serde_json::to_vec(&pending).unwrap()).unwrap();
+        materialize(root, &bundle, "keytao", package, None, None, &Files::new()).unwrap();
+        assert_eq!(
+            fs::read_to_string(run.join("rime.lua")).unwrap(),
+            "require('keytao')\n"
+        );
+        assert!(!run.join(PENDING).exists());
+    }
+
+    #[test]
+    fn legacy_default_recovers_user_values_without_the_flat_packages_patches() {
+        let applied = serde_yaml::from_str(
+            "patch: {schema_list: [{schema: a}], menu/page_size: 6, recognizer/patterns: from_a}\n",
+        )
+        .unwrap();
+        let recovered = restore_user_default(
+            b"patch: {schema_list: [{schema: a}], menu/page_size: 9, recognizer/patterns: from_a}\n",
+            &applied,
+            Some(b"patch: {menu/page_size: 7, ascii_composer: from_user}\n"),
+        ).unwrap();
+        let default = default_custom(
+            Some(b"patch: {recognizer/patterns: from_b}\n"),
+            Some(&recovered),
+            &["b".into()],
+        )
+        .unwrap();
+        let content = utf8(&default).unwrap();
+        assert_eq!(keytao_core::parse_schema_list(content), ["b"]);
+        assert!(content.contains("menu/page_size: 9"));
+        assert!(content.contains("ascii_composer: from_user"));
+        assert!(content.contains("recognizer/patterns: from_b"));
+        assert!(!content.contains("from_a"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_runtime_is_rejected_without_writing_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let target = root.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir(root.join("runtime")).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("runtime/keytao")).unwrap();
+        let package = fixture(root, "keytao");
+        assert!(
+            materialize(
+                root,
+                &root.join("rime-data"),
+                "keytao",
+                package,
+                None,
+                None,
+                &Files::new()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(target).unwrap().count(), 0);
+    }
+}
