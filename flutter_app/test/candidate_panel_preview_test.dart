@@ -13,6 +13,7 @@ import 'package:keytao/src/ui/candidate_panel_preview.dart';
 import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/ui/settings.dart';
 import 'package:keytao/src/ui/theme.dart';
+import 'package:keytao/src/ui/theme_editor.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
@@ -425,7 +426,7 @@ void main() {
       await tester.ensureVisible(horizontal);
       await tester.tap(horizontal);
       await tester.pump();
-      expect(tester.widget<Flex>(_candidates).direction, Axis.vertical);
+      expect(tester.widget<Flex>(_candidates).direction, Axis.horizontal);
       expect(controller.uiSettings!.orientation, PanelOrientationDto.vertical);
       controller.saveGate!.complete(true);
       await tester.pumpAndSettle();
@@ -471,7 +472,18 @@ void main() {
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
       addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
       final controller = _PreviewController();
-      await _pumpSettings(tester, controller);
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: controller.info.platform,
+          home: FScaffold(
+            child: SingleChildScrollView(
+              child: ThemeEditorSection(controller: controller),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
       final light = _panelColor(tester);
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
       await tester.pumpAndSettle();

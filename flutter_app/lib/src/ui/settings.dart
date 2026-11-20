@@ -6,9 +6,10 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
+import 'candidate_panel_preview.dart';
+import 'color_picker.dart';
 import 'theme.dart';
 import 'theme_editor.dart';
-import 'theme_library.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -226,6 +227,14 @@ class SettingsCard extends StatefulWidget {
 
 class _SettingsCardState extends State<SettingsCard> {
   AppController get controller => widget.controller;
+  ImeUiSettingsDto? _previewSource;
+  UiColorSchemeDto? _previewScheme;
+  PanelOrientationDto? _previewOrientation;
+  String? _previewAccent;
+  String? _previewBackground;
+  double? _previewRadius;
+  bool _resetRadius = false;
+  double? _previewFontSize;
 
   @override
   void initState() {
@@ -233,17 +242,60 @@ class _SettingsCardState extends State<SettingsCard> {
     unawaited(controller.refreshCandidatePreview());
   }
 
+  void _resetPreview() {
+    _previewScheme = null;
+    _previewOrientation = null;
+    _previewAccent = null;
+    _previewBackground = null;
+    _previewRadius = null;
+    _resetRadius = false;
+    _previewFontSize = null;
+  }
+
+  Future<void> _savePreview({
+    UiColorSchemeDto? colorScheme,
+    PanelOrientationDto? orientation,
+    bool? hideCandidatePanel,
+    double? fontSize,
+    double? cornerRadius,
+    bool resetCornerRadius = false,
+  }) async {
+    setState(() {
+      _previewScheme = colorScheme ?? _previewScheme;
+      _previewOrientation = orientation ?? _previewOrientation;
+      _previewFontSize = fontSize ?? _previewFontSize;
+      _previewRadius = resetCornerRadius
+          ? null
+          : cornerRadius ?? _previewRadius;
+      if (cornerRadius != null || resetCornerRadius) {
+        _resetRadius = resetCornerRadius;
+      }
+    });
+    final saved = await controller.saveUi(
+      colorScheme: colorScheme,
+      orientation: orientation,
+      hideCandidatePanel: hideCandidatePanel,
+      fontSize: fontSize,
+      cornerRadius: cornerRadius,
+      resetCornerRadius: resetCornerRadius,
+    );
+    if (!saved && mounted) setState(_resetPreview);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final settings = controller.uiSettings;
+    if (!identical(settings, _previewSource)) {
+      _previewSource = settings;
+      _resetPreview();
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (controller.isMobile) ...[
           ?widget.hero,
           const SizedBox(height: 12),
-          ThemeLibrarySection(controller: controller),
-          const SizedBox(height: 18),
-          ThemeEditorSection(controller: controller),
+          _preview(context, keyboard: true),
           const SizedBox(height: 18),
           _mobile(context),
         ] else
@@ -290,9 +342,13 @@ class _SettingsCardState extends State<SettingsCard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        HairlineGridSection(minCellWidth: 440, children: [?widget.hero]),
-        HairlineGridCell(child: ThemeLibrarySection(controller: controller)),
-        HairlineGridCell(child: ThemeEditorSection(controller: controller)),
+        HairlineGridSection(
+          minCellWidth: 440,
+          children: [
+            ?widget.hero,
+            if (s != null && !s.hideCandidatePanel) _preview(context),
+          ],
+        ),
         if (s == null)
           HairlineGridCell(
             child: SettingRow(
@@ -307,10 +363,18 @@ class _SettingsCardState extends State<SettingsCard> {
           HairlineGridSection(
             children: [
               _settingsCell('候选模式', [
-                SwitchSetting(
-                  '隐藏候选面板',
-                  value: s.hideCandidatePanel,
-                  onChanged: c.busy ? null : c.saveHideCandidatePanel,
+                BigTextRadioGroup<PanelOrientationDto?>(
+                  label: '候选模式',
+                  value: s.hideCandidatePanel ? null : s.orientation,
+                  options: const {...orientations, null: '隐藏'},
+                  onChanged: c.busy
+                      ? null
+                      : (value) => value == null
+                            ? c.saveHideCandidatePanel(true)
+                            : _savePreview(
+                                orientation: value,
+                                hideCandidatePanel: false,
+                              ),
                 ),
                 if (c.showsEmbeddedComposition)
                   _separated(
@@ -347,6 +411,37 @@ class _SettingsCardState extends State<SettingsCard> {
                   Text(hint, style: context.theme.typography.body.xs),
                 _separated(_candidatePageSize()),
               ]),
+              _settingsCell('外观', [
+                BigTextRadioGroup<UiColorSchemeDto>(
+                  label: '配色方案',
+                  value: s.colorScheme,
+                  options: colorSchemes,
+                  onChanged: c.busy
+                      ? null
+                      : (value) => _savePreview(colorScheme: value),
+                ),
+                if (!s.hideCandidatePanel) ...[
+                  ..._appearanceControls(),
+                  SliderSetting(
+                    label: AppStrings.candidateFontSize,
+                    value: s.fontSize,
+                    min: candidateFontMin,
+                    max: candidateFontMax,
+                    divisions: candidateFontDivisions,
+                    onPreview: (value) =>
+                        setState(() => _previewFontSize = value),
+                    onChanged: c.busy
+                        ? null
+                        : (value) => _savePreview(fontSize: value),
+                  ),
+                ],
+                ActionButton(
+                  '编辑主题',
+                  onPress: c.busy
+                      ? null
+                      : () => showThemeEditorDialog(context, controller: c),
+                ),
+              ]),
             ],
           ),
         if (c.imeUiError case final error?)
@@ -370,6 +465,127 @@ class _SettingsCardState extends State<SettingsCard> {
     ),
     child: child,
   );
+
+  List<Widget> _appearanceControls() {
+    final c = controller;
+    final settings = c.uiSettings!;
+    return [
+      _separated(
+        AccentPicker(
+          controller: c,
+          onPreview: (value) {
+            if (mounted) setState(() => _previewAccent = value);
+          },
+        ),
+      ),
+      BackgroundPicker(
+        controller: c,
+        onPreview: (value) {
+          if (mounted) setState(() => _previewBackground = value);
+        },
+      ),
+      SliderSetting(
+        label: '圆角',
+        value: settings.cornerRadius ?? 16,
+        min: 0,
+        max: 28,
+        divisions: 28,
+        onPreview: (value) => setState(() {
+          _previewRadius = value;
+          _resetRadius = false;
+        }),
+        onChanged: c.busy ? null : (value) => _savePreview(cornerRadius: value),
+      ),
+      Align(
+        alignment: Alignment.centerRight,
+        child: ActionButton(
+          '恢复默认',
+          icon: FLucideIcons.rotateCcw,
+          onPress: c.busy || settings.cornerRadius == null
+              ? null
+              : () => _savePreview(resetCornerRadius: true),
+        ),
+      ),
+    ];
+  }
+
+  Widget _preview(BuildContext context, {bool keyboard = false}) {
+    final c = controller;
+    final s = c.uiSettings;
+    final accent =
+        _previewAccent ??
+        s?.accentColor ??
+        '#${(ChromeAccent.of(context).toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+    final orientation = keyboard
+        ? PanelOrientationDto.horizontal
+        : _previewOrientation ?? s!.orientation;
+    final fontSize = _previewFontSize ?? s?.fontSize ?? 18;
+    final cornerRadius = _resetRadius
+        ? null
+        : _previewRadius ?? s?.cornerRadius;
+    final backgroundColor = _previewBackground ?? s?.backgroundColor ?? '';
+    final preview = CandidatePanelPreview(
+      key: ValueKey((
+        _previewScheme ?? s?.colorScheme,
+        accent,
+        orientation,
+        cornerRadius,
+        backgroundColor,
+      )),
+      theme: c.resolveCandidatePanelPreview(
+        colorScheme: _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto,
+        accentColor: accent,
+        cornerRadius: cornerRadius,
+        backgroundColor: backgroundColor,
+        fontSize: fontSize,
+        systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+      ),
+      orientation: orientation,
+      showPreedit: !keyboard && !s!.effectiveEmbeddedComposition,
+      candidateCount: c.candidatePageSize ?? c.candidatePreviewPageSize ?? 6,
+      candidates: c.candidatePreviewCandidates,
+      keyboard: keyboard,
+      keyboardSchemeName:
+          c.installedPackageFor(c.activeSchemeKey)?.displayName ??
+          schemeDisplayName(c.activeSchemeKey),
+      keyboardLogo: SchemaLogo(controller: c, size: 28),
+    );
+    if (keyboard) return preview;
+    return CustomPaint(
+      painter: _PreviewDots(AppPalette.of(context).hairline),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 285),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 30, 24, 15),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              AnimatedSwitcher(
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 160),
+                layoutBuilder: (current, _) =>
+                    current ?? const SizedBox.shrink(),
+                child: preview,
+              ),
+              const SizedBox(height: 18),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
+                  textAlign: TextAlign.right,
+                  style: context.theme.typography.body.xs.copyWith(
+                    color: AppPalette.of(context).muted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _mobile(BuildContext context) {
     final c = controller;
@@ -430,6 +646,19 @@ class _SettingsCardState extends State<SettingsCard> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       spacing: 18,
       children: [
+        if (c.uiSettings != null)
+          Section(
+            title: '外观',
+            children: [
+              ..._appearanceControls(),
+              ActionButton(
+                '编辑主题',
+                onPress: c.busy
+                    ? null
+                    : () => showThemeEditorDialog(context, controller: c),
+              ),
+            ],
+          ),
         Semantics(
           label: AppStrings.mobileKeyboard,
           child: Section(
@@ -642,6 +871,24 @@ class _SettingsCardState extends State<SettingsCard> {
       ],
     );
   }
+}
+
+class _PreviewDots extends CustomPainter {
+  const _PreviewDots(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    for (var y = 7.0; y < size.height; y += 14) {
+      for (var x = 7.0; x < size.width; x += 14) {
+        canvas.drawCircle(Offset(x, y), 1, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PreviewDots oldDelegate) => color != oldDelegate.color;
 }
 
 class _PhrasesEditor extends StatefulWidget {

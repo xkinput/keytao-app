@@ -10,7 +10,6 @@ import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/onboarding.dart';
 import 'package:keytao/src/ui/shell.dart';
-import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
 
@@ -154,12 +153,7 @@ void unifiedGateCases(BridgePlatform platform) {
             if (platform == BridgePlatform.ios) {
               expect(find.text(AppStrings.iosOnboarding), findsOneWidget);
               expect(find.text('候选与键盘'), findsOneWidget);
-              final panelFont = find.widgetWithText(
-                SliderSetting,
-                AppStrings.candidateFontSize,
-              );
-              expect(panelFont, findsOneWidget);
-              expect(tester.widget<SliderSetting>(panelFont).onChanged, isNull);
+              expect(find.text(AppStrings.candidateFontSize), findsNothing);
               expect(find.text(AppStrings.openStoragePermission), findsNothing);
               expect(find.text(AppStrings.chooseKeytao), findsNothing);
             }

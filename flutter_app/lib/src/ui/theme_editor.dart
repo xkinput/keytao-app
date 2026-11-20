@@ -11,7 +11,61 @@ import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
 import 'mobile_keyboard_preview.dart';
 import 'theme.dart';
+import 'theme_library.dart';
 import 'widgets.dart';
+
+Future<void> showThemeEditorDialog(
+  BuildContext context, {
+  required AppController controller,
+}) => showFDialog<void>(
+  context: context,
+  builder: (context, _, animation) {
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: 18,
+      children: [
+        ThemeLibrarySection(controller: controller),
+        ThemeEditorSection(controller: controller),
+      ],
+    );
+    final close = ActionButton('关闭', onPress: () => Navigator.pop(context));
+    if (controller.isMobile) {
+      return Scaffold(
+        backgroundColor: AppPalette.of(context).surface,
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 12,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '编辑主题',
+                        style: context.theme.typography.display.lg,
+                      ),
+                    ),
+                    close,
+                  ],
+                ),
+                Expanded(child: SingleChildScrollView(child: content)),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    return AppDialog(
+      title: '编辑主题',
+      animation: animation,
+      constraints: const BoxConstraints(maxWidth: 1200, maxHeight: 900),
+      actions: [close],
+      child: SizedBox(width: 1120, child: content),
+    );
+  },
+);
 
 class ThemeEditorSection extends StatefulWidget {
   const ThemeEditorSection({super.key, required this.controller});
@@ -30,6 +84,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   bool _working = false;
   bool _pending = true;
   bool _advanced = false;
+  late bool _mobile;
   String _target = 'light';
   String? _error;
   final Map<String, String> _textDrafts = {};
@@ -62,6 +117,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   @override
   void initState() {
     super.initState();
+    _mobile = _controller.isMobile;
     _settings = _controller.uiSettings;
     _storageReady = _ready;
     _target = _settings?.effectiveColorScheme == EffectiveColorSchemeDto.dark
@@ -180,6 +236,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   }
 
   bool _supported(String path) =>
+      _mobile != _controller.isMobile ||
       (_snapshot!['capabilities']['supportedFields'] as List).contains(path);
 
   void _preview(String path, Object? value) {
@@ -384,7 +441,6 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         ],
       );
     }
-    final colors = {'background': '底色', 'foreground': '字色'};
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       spacing: 18,
@@ -441,23 +497,206 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   : null,
             ),
             if (_working) const FProgress(),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final previews = [
-                  CandidatePanelPreview(
-                    theme: _resolved,
-                    showPreedit:
-                        !(_controller
-                                .uiSettings
-                                ?.effectiveEmbeddedComposition ??
-                            false),
-                    candidateCount:
-                        _controller.candidatePageSize ??
-                        _controller.candidatePreviewPageSize ??
-                        6,
-                    candidates: _controller.candidatePreviewCandidates,
+          ],
+        ),
+        FTabs(
+          control: FTabControl.lifted(
+            index: _mobile ? 1 : 0,
+            onChange: (index) => setState(() {
+              _mobile = index == 1;
+              _draft = null;
+            }),
+          ),
+          children: [
+            FTabEntry(label: const Text('PC'), child: _tabContent(false)),
+            FTabEntry(label: const Text('移动端'), child: _tabContent(true)),
+          ],
+        ),
+        if (_error case final error?) ErrorMessage(error),
+      ],
+    );
+  }
+
+  Widget _tabContent(bool mobile) => LayoutBuilder(
+    builder: (context, constraints) {
+      final colors = {'background': '底色', 'foreground': '字色'};
+      final controls = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: 18,
+        children: [
+          Section(
+            title: '通用',
+            children: [
+              _field(
+                '强调色',
+                'common.accentColor',
+                AccentPicker(
+                  controller: _controller,
+                  value: _colorValue('common.accentColor'),
+                  enabled: _enabled && _supported('common.accentColor'),
+                  onPreview: (value) => _preview('common.accentColor', value),
+                  onChanged: (value) =>
+                      _save('common.accentColor', value.isEmpty ? null : value),
+                ),
+              ),
+              _field(
+                '背景色',
+                'common.backgroundColor',
+                BackgroundPicker(
+                  controller: _controller,
+                  value: _colorValue('common.backgroundColor'),
+                  enabled: _enabled && _supported('common.backgroundColor'),
+                  onPreview: (value) => _preview(
+                    'common.backgroundColor',
+                    value.isEmpty ? null : value,
                   ),
-                  MobileKeyboardPreview(
+                  onChanged: (value) => _save(
+                    'common.backgroundColor',
+                    value.isEmpty ? null : value,
+                  ),
+                ),
+              ),
+              _slider('圆角', 'common.cornerRadius', 0, 28, 28),
+              _text('字体族', 'common.font.family'),
+              _choice('字重', 'common.font.weight', const {
+                'ultralight': '极细',
+                'thin': '纤细',
+                'light': '细',
+                'regular': '常规',
+                'medium': '中等',
+                'semibold': '半粗',
+                'bold': '粗',
+                'heavy': '重',
+                'black': '特粗',
+              }, scrollable: true),
+            ],
+          ),
+          if (!mobile)
+            Section(
+              title: 'PC 面板',
+              children: [
+                _choice('方向', 'pc.panel.orientation', const {
+                  'horizontal': '横排',
+                  'vertical': '竖排',
+                }),
+                _slider(
+                  AppStrings.candidateFontSize,
+                  'pc.font.size',
+                  10,
+                  36,
+                  26,
+                ),
+                ActionButton(
+                  _advanced ? '收起高级' : '高级',
+                  icon: _advanced
+                      ? FLucideIcons.chevronUp
+                      : FLucideIcons.chevronDown,
+                  onPress: () => setState(() => _advanced = !_advanced),
+                ),
+                if (_advanced) ...[
+                  _color('面板背景', 'pc.panel.background'),
+                  _color('面板边框', 'pc.panel.borderColor'),
+                  _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
+                  _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
+                  _slider('横向内边距', 'pc.panel.paddingX', 0, 32, 32),
+                  _slider('纵向内边距', 'pc.panel.paddingY', 0, 28, 28),
+                  _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
+                  _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
+                  _toggle('面板阴影', 'pc.panel.shadow'),
+                  for (final entry in const {
+                    'labelSize': '序号字号',
+                    'commentSize': '注释字号',
+                    'preeditSize': '编码字号',
+                  }.entries)
+                    _slider(entry.value, 'pc.font.${entry.key}', 9, 28, 19),
+                  for (final entry in const {
+                    'background': '候选底色',
+                    'foreground': '候选字色',
+                    'selectedForeground': '高亮字色',
+                    'selectedBackground': '高亮底色',
+                    'labelColor': '序号字色',
+                    'selectedLabelColor': '高亮序号',
+                    'commentColor': '注释字色',
+                    'selectedCommentColor': '高亮注释',
+                    'hoverBackground': '悬停底色',
+                    'borderColor': '候选边框',
+                    'selectedBorderColor': '高亮边框',
+                  }.entries)
+                    _color(entry.value, 'pc.candidate.${entry.key}'),
+                  _slider('候选边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
+                  _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
+                  _text('序号后缀', 'pc.candidate.labelSuffix'),
+                ],
+              ],
+            ),
+          if (mobile) ...[
+            Section(
+              title: '键盘',
+              children: [
+                _color('键盘背景', 'mobile.keyboard.background'),
+                for (final entry in const {
+                  'key': '按键',
+                  'keyTypes.function': '功能键',
+                  'keyTypes.space': '空格',
+                  'keyTypes.enter': '回车',
+                  'keyClasses.accent': '强调键',
+                }.entries)
+                  for (final color in colors.entries)
+                    _color(
+                      '${entry.value}${color.value}',
+                      'mobile.keyboard.${entry.key}.${color.key}',
+                    ),
+                _color('提示字色', 'mobile.keyboard.key.hintForeground'),
+                _slider('按键圆角', 'mobile.keyboard.key.cornerRadius', 0, 24, 24),
+                _color('按键边框', 'mobile.keyboard.key.borderColor'),
+                _slider('按键边框宽度', 'mobile.keyboard.key.borderWidth', 0, 2, 4),
+                _color('按键阴影', 'mobile.keyboard.key.shadowColor'),
+                _slider('阴影偏移', 'mobile.keyboard.key.shadowOffsetY', 0, 4, 8),
+                _slider(
+                  '按键字号',
+                  'mobile.keyboard.key.fontScale',
+                  80,
+                  130,
+                  50,
+                  scale: true,
+                ),
+                _slider(
+                  '提示字号',
+                  'mobile.keyboard.key.hintFontScale',
+                  80,
+                  130,
+                  50,
+                  scale: true,
+                ),
+              ],
+            ),
+            Section(
+              title: '候选栏',
+              children: [
+                _slider(
+                  '候选字号缩放',
+                  'mobile.candidateBar.fontScale',
+                  80,
+                  130,
+                  50,
+                  scale: true,
+                ),
+                _toggle('显示注释', 'mobile.candidateBar.showComment'),
+                _color('栏背景', 'mobile.candidateBar.background'),
+              ],
+            ),
+          ],
+        ],
+      );
+      final preview = SizedBox(
+        height: 200,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.topCenter,
+          child: SizedBox(
+            width: 360,
+            child: mobile
+                ? MobileKeyboardPreview(
                     theme: _resolved,
                     schemeName:
                         _controller
@@ -466,177 +705,37 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                         schemeDisplayName(_controller.activeSchemeKey),
                     candidates: _controller.candidatePreviewCandidates,
                     logo: SchemaLogo(controller: _controller, size: 28),
+                  )
+                : CandidatePanelPreview(
+                    theme: _resolved,
+                    showPreedit:
+                        !(_controller
+                                .uiSettings
+                                ?.effectiveEmbeddedComposition ??
+                            true),
+                    candidateCount:
+                        _controller.candidatePageSize ??
+                        _controller.candidatePreviewPageSize ??
+                        6,
+                    candidates: _controller.candidatePreviewCandidates,
                   ),
-                ];
-                return constraints.maxWidth >= 760
-                    ? Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        spacing: 24,
-                        children: [
-                          for (final preview in previews)
-                            Expanded(child: preview),
-                        ],
-                      )
-                    : Column(spacing: 18, children: previews);
-              },
-            ),
-          ],
+          ),
         ),
-        Section(
-          title: '通用',
-          children: [
-            _field(
-              '强调色',
-              'common.accentColor',
-              AccentPicker(
-                controller: _controller,
-                value: _colorValue('common.accentColor'),
-                enabled: _enabled && _supported('common.accentColor'),
-                onPreview: (value) => _preview('common.accentColor', value),
-                onChanged: (value) =>
-                    _save('common.accentColor', value.isEmpty ? null : value),
-              ),
-            ),
-            _field(
-              '背景色',
-              'common.backgroundColor',
-              BackgroundPicker(
-                controller: _controller,
-                value: _colorValue('common.backgroundColor'),
-                enabled: _enabled && _supported('common.backgroundColor'),
-                onPreview: (value) => _preview(
-                  'common.backgroundColor',
-                  value.isEmpty ? null : value,
-                ),
-                onChanged: (value) => _save(
-                  'common.backgroundColor',
-                  value.isEmpty ? null : value,
-                ),
-              ),
-            ),
-            _slider('圆角', 'common.cornerRadius', 0, 28, 28),
-            _text('字体族', 'common.font.family'),
-            _choice('字重', 'common.font.weight', const {
-              'ultralight': '极细',
-              'thin': '纤细',
-              'light': '细',
-              'regular': '常规',
-              'medium': '中等',
-              'semibold': '半粗',
-              'bold': '粗',
-              'heavy': '重',
-              'black': '特粗',
-            }, scrollable: true),
-          ],
-        ),
-        Section(
-          title: 'PC 面板',
-          children: [
-            _choice('方向', 'pc.panel.orientation', const {
-              'horizontal': '横排',
-              'vertical': '竖排',
-            }),
-            _slider(AppStrings.candidateFontSize, 'pc.font.size', 10, 36, 26),
-            ActionButton(
-              _advanced ? '收起高级' : '高级',
-              icon: _advanced
-                  ? FLucideIcons.chevronUp
-                  : FLucideIcons.chevronDown,
-              onPress: () => setState(() => _advanced = !_advanced),
-            ),
-            if (_advanced) ...[
-              _color('面板背景', 'pc.panel.background'),
-              _color('面板边框', 'pc.panel.borderColor'),
-              _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
-              _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
-              _slider('横向内边距', 'pc.panel.paddingX', 0, 32, 32),
-              _slider('纵向内边距', 'pc.panel.paddingY', 0, 28, 28),
-              _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
-              _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
-              _toggle('面板阴影', 'pc.panel.shadow'),
-              for (final entry in const {
-                'labelSize': '序号字号',
-                'commentSize': '注释字号',
-                'preeditSize': '编码字号',
-              }.entries)
-                _slider(entry.value, 'pc.font.${entry.key}', 9, 28, 19),
-              for (final entry in const {
-                'background': '候选底色',
-                'foreground': '候选字色',
-                'selectedForeground': '高亮字色',
-                'selectedBackground': '高亮底色',
-                'labelColor': '序号字色',
-                'selectedLabelColor': '高亮序号',
-                'commentColor': '注释字色',
-                'selectedCommentColor': '高亮注释',
-                'hoverBackground': '悬停底色',
-                'borderColor': '候选边框',
-                'selectedBorderColor': '高亮边框',
-              }.entries)
-                _color(entry.value, 'pc.candidate.${entry.key}'),
-              _slider('候选边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
-              _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
-              _text('序号后缀', 'pc.candidate.labelSuffix'),
-            ],
-          ],
-        ),
-        Section(
-          title: '键盘',
-          children: [
-            _color('键盘背景', 'mobile.keyboard.background'),
-            for (final entry in const {
-              'key': '按键',
-              'keyTypes.function': '功能键',
-              'keyTypes.space': '空格',
-              'keyTypes.enter': '回车',
-              'keyClasses.accent': '强调键',
-            }.entries)
-              for (final color in colors.entries)
-                _color(
-                  '${entry.value}${color.value}',
-                  'mobile.keyboard.${entry.key}.${color.key}',
-                ),
-            _color('提示字色', 'mobile.keyboard.key.hintForeground'),
-            _slider('按键圆角', 'mobile.keyboard.key.cornerRadius', 0, 24, 24),
-            _color('按键边框', 'mobile.keyboard.key.borderColor'),
-            _slider('按键边框宽度', 'mobile.keyboard.key.borderWidth', 0, 2, 4),
-            _color('按键阴影', 'mobile.keyboard.key.shadowColor'),
-            _slider('阴影偏移', 'mobile.keyboard.key.shadowOffsetY', 0, 4, 8),
-            _slider(
-              '按键字号',
-              'mobile.keyboard.key.fontScale',
-              80,
-              130,
-              50,
-              scale: true,
-            ),
-            _slider(
-              '提示字号',
-              'mobile.keyboard.key.hintFontScale',
-              80,
-              130,
-              50,
-              scale: true,
-            ),
-          ],
-        ),
-        Section(
-          title: '候选栏',
-          children: [
-            _slider(
-              '候选字号缩放',
-              'mobile.candidateBar.fontScale',
-              80,
-              130,
-              50,
-              scale: true,
-            ),
-            _toggle('显示注释', 'mobile.candidateBar.showComment'),
-            _color('栏背景', 'mobile.candidateBar.background'),
-          ],
-        ),
-        if (_error case final error?) ErrorMessage(error),
-      ],
-    );
-  }
+      );
+      return constraints.maxWidth >= 960
+          ? Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: 24,
+              children: [
+                Expanded(child: controls),
+                SizedBox(width: 320, child: preview),
+              ],
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 18,
+              children: [preview, controls],
+            );
+    },
+  );
 }

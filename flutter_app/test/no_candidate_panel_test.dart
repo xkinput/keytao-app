@@ -97,7 +97,7 @@ void main() {
     BridgePlatform.linux: TargetPlatform.linux,
   }.entries) {
     testWidgets(
-      '${entry.key.name} hidden panel keeps theme controls and embedded preference',
+      '${entry.key.name} no candidate panel mode restores panel controls',
       (tester) async {
         final controller = _PanelController(entry.key)
           .._updateSettings(
@@ -105,9 +105,7 @@ void main() {
             orientation: PanelOrientationDto.vertical,
           );
         await _pumpSettings(tester, controller);
-        final mode = find.byWidgetPredicate(
-          (widget) => widget is ChoiceSetting<String> && widget.label == '方向',
-        );
+        final mode = find.byType(BigTextRadioGroup<PanelOrientationDto?>);
         final embedded = find.widgetWithText(
           SwitchSetting,
           AppStrings.embedded,
@@ -116,11 +114,8 @@ void main() {
           SliderSetting,
           AppStrings.candidateFontSize,
         );
-        final hidden = find.widgetWithText(SwitchSetting, '隐藏候选面板');
-        final hideSwitch = find.descendant(
-          of: hidden,
-          matching: find.byType(FSwitch),
-        );
+        final hidden = find.text('隐藏');
+        final editor = find.widgetWithText(ActionButton, '编辑主题');
 
         if (entry.key == BridgePlatform.linux) {
           expect(embedded, findsNothing);
@@ -131,12 +126,20 @@ void main() {
         expect(font, findsOneWidget);
         expect(find.byType(AccentPicker), findsOneWidget);
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
+        expect(editor, findsOneWidget);
+        expect(tester.widget<ActionButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
-        expect(tester.widget<ChoiceSetting<String>>(mode).value, 'vertical');
-        expect(find.byType(ChoiceSetting<UiColorSchemeDto>), findsOneWidget);
+        expect(
+          tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
+          PanelOrientationDto.vertical,
+        );
+        expect(
+          find.byType(BigTextRadioGroup<UiColorSchemeDto>),
+          findsOneWidget,
+        );
 
-        await tester.ensureVisible(hideSwitch);
-        await tester.tap(hideSwitch);
+        await tester.ensureVisible(hidden);
+        await tester.tap(hidden);
         await tester.pumpAndSettle();
 
         expect(controller.uiSettings!.hideCandidatePanel, isTrue);
@@ -152,24 +155,33 @@ void main() {
           expect(tester.widget<SwitchSetting>(embedded).value, isTrue);
           expect(tester.widget<SwitchSetting>(embedded).onChanged, isNull);
         }
-        expect(font, findsOneWidget);
-        expect(find.byType(AccentPicker), findsOneWidget);
-        expect(find.byType(CandidatePanelPreview), findsOneWidget);
+        expect(font, findsNothing);
+        expect(find.byType(AccentPicker), findsNothing);
+        expect(find.byType(CandidatePanelPreview), findsNothing);
+        expect(editor, findsOneWidget);
+        expect(tester.widget<ActionButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
-        expect(tester.widget<ChoiceSetting<String>>(mode).value, 'vertical');
-        expect(find.byType(ChoiceSetting<UiColorSchemeDto>), findsOneWidget);
+        expect(
+          tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
+          isNull,
+        );
+        expect(
+          find.byType(BigTextRadioGroup<UiColorSchemeDto>),
+          findsOneWidget,
+        );
         expect(find.text(AppStrings.englishMode), findsOneWidget);
 
-        await tester.ensureVisible(hideSwitch);
-        await tester.tap(hideSwitch);
+        final horizontal = find.text('横排');
+        await tester.ensureVisible(horizontal);
+        await tester.tap(horizontal);
         await tester.pumpAndSettle();
 
-        expect(controller.savedValues, [true, false]);
-        expect(controller.savedOrientations, isEmpty);
+        expect(controller.savedValues, [true]);
+        expect(controller.savedOrientations, [PanelOrientationDto.horizontal]);
         expect(controller.uiSettings!.hideCandidatePanel, isFalse);
         expect(
           controller.uiSettings!.orientation,
-          PanelOrientationDto.vertical,
+          PanelOrientationDto.horizontal,
         );
         expect(controller.uiSettings!.embeddedComposition, isFalse);
         if (entry.key == BridgePlatform.linux) {
@@ -181,8 +193,13 @@ void main() {
         expect(font, findsOneWidget);
         expect(find.byType(AccentPicker), findsOneWidget);
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
+        expect(editor, findsOneWidget);
+        expect(tester.widget<ActionButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
-        expect(tester.widget<ChoiceSetting<String>>(mode).value, 'vertical');
+        expect(
+          tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
+          PanelOrientationDto.horizontal,
+        );
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
       },

@@ -49,7 +49,7 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(tester.widget<AccentPicker>(find.byType(AccentPicker)).value, '');
       expect(find.byType(CandidatePanelPreview), findsOneWidget);
-      expect(find.byType(MobileKeyboardPreview), findsOneWidget);
+      expect(find.byType(MobileKeyboardPreview), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }

@@ -113,7 +113,7 @@ fn v3_preview_matches_saved_source_and_preserves_explicit_styles() {
     write_ime_ui_settings_to_path(
         &path,
         UiColorScheme::Light,
-        PanelOrientation::Vertical,
+        PanelOrientation::Horizontal,
         Some("#445566".into()),
         24.0,
         Some(20.0),

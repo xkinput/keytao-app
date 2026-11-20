@@ -10,7 +10,7 @@ version: 2
 
 ui:
   colorScheme: auto
-  embeddedComposition: false
+  embeddedComposition: true
   hideCandidatePanel: false
   showTrayModeIndicator: true
 
@@ -23,7 +23,7 @@ font:
   weight: semibold
 
 panel:
-  orientation: vertical
+  orientation: horizontal
   background: "#F8FAFFF2"
   borderColor: "#B8C3D0"
   borderWidth: 1
@@ -90,8 +90,8 @@ mobile:
       background: "#FFFFFFD2"
       borderColor: "#1A222C1C"
       borderWidth: 1
-      shadowColor: transparent
-      shadowOffsetY: 1
+      shadowColor: "#1A222C1C"
+      shadowOffsetY: 1.6
       fontScale: 1
       hintFontScale: 1
       swipeHintVisible: true

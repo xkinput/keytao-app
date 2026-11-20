@@ -501,20 +501,20 @@ pub fn migrate_v2_theme(yaml: &str, id: &str, name: &str) -> Result<ThemeSource,
         );
         source = parse_source_value(source.value)?;
     }
-    if compiled {
-        for (variant, scheme) in [
-            ("light", EffectiveColorScheme::Light),
-            ("dark", EffectiveColorScheme::Dark),
-        ] {
-            let old = crate::resolve_compiled_theme_yaml(&yaml, scheme);
-            let new = resolve_theme_source(&source, scheme);
-            let mut mobile = difference(&old.mobile, &new.mobile);
-            crate::source::encode_colors(&mut mobile);
-            source.value[variant]["mobile"] = mobile;
-        }
-        source = parse_source_value(source.value)?;
+    for (variant, scheme) in [
+        ("light", EffectiveColorScheme::Light),
+        ("dark", EffectiveColorScheme::Dark),
+    ] {
+        let old = crate::resolve_compiled_theme_yaml(&yaml, scheme);
+        let new = resolve_theme_source(&source, scheme);
+        let mut old_mobile = old.mobile;
+        let mut new_mobile = new.mobile;
+        crate::source::encode_colors(&mut old_mobile);
+        crate::source::encode_colors(&mut new_mobile);
+        let mobile = difference(&old_mobile, &new_mobile);
+        merge(&mut source.value[variant]["mobile"], &mobile);
     }
-    Ok(source)
+    parse_source_value(source.value)
 }
 
 /// Return the current source's safe path, or `None` for an unmigrated v2 file.
@@ -1517,6 +1517,7 @@ mod tests {
     fn v2_migration_golden_corpus_is_byte_identical_in_both_schemes() {
         let corpus = [
             ("default", crate::DEFAULT_THEME_YAML),
+            ("mobile-color-channel", "mobile:\n  keyboard:\n    key:\n      borderColor: '#FF222C1C'\n"),
             ("accent", "ui:\n  accentColor: '#FF3366'\n"),
             ("accent-explicit", "ui:\n  accentColor: '#30AA70'\ncandidate:\n  selectedBackground: '#F1E2D3'\n  pressedBackground: '#ABCDEF'\nmodeHint:\n  foreground: '#010203'\n"),
             ("corner-explicit", "ui:\n  cornerRadius: 25\ncandidate:\n  cornerRadius: 2\nnavigation:\n  cornerRadius: 1\n"),
@@ -2182,8 +2183,8 @@ mod tests {
     }
 
     #[test]
-    fn manual_accent_is_backed_up_before_three_source_writebacks() {
-        manual_appearance_writebacks("ui", "accentColor", json!("#FF0000"), false);
+    fn manual_accent_survives_three_source_writebacks() {
+        manual_appearance_writebacks("ui", "accentColor", json!("#FF0000"), true);
     }
 
     #[test]
@@ -2197,8 +2198,8 @@ mod tests {
     }
 
     #[test]
-    fn manual_panel_color_is_backed_up_before_three_source_writebacks() {
-        manual_appearance_writebacks("panel", "background", json!("#11223344"), false);
+    fn manual_panel_color_survives_three_source_writebacks() {
+        manual_appearance_writebacks("panel", "background", json!("#11223344"), true);
     }
 
     #[test]

@@ -9,21 +9,28 @@ fn default_resolved_json_matches_renderer_contract_in_both_appearances() {
         r#"{"version":3,"meta":{"id":"keytao.default","name":"Default","appearance":"both"}}"#,
     )
     .unwrap();
-    for (scheme, golden) in [
+    for (scheme, golden, ios_golden) in [
         (
             EffectiveColorScheme::Light,
             include_str!("fixtures/default-light.json"),
+            include_str!("fixtures/default-ios-light.json"),
         ),
         (
             EffectiveColorScheme::Dark,
             include_str!("fixtures/default-dark.json"),
+            include_str!("fixtures/default-ios-dark.json"),
         ),
     ] {
         let actual: Value = serde_json::from_str(
             &resolved_renderer_theme_json(&resolve_theme_source(&source, scheme)).unwrap(),
         )
         .unwrap();
-        let expected: Value = serde_json::from_str(golden).unwrap();
+        let expected: Value = serde_json::from_str(if cfg!(target_os = "ios") {
+            ios_golden
+        } else {
+            golden
+        })
+        .unwrap();
         assert_eq!(
             actual, expected,
             "{scheme:?} renderer fields or defaults changed"
@@ -35,14 +42,15 @@ fn default_resolved_json_matches_renderer_contract_in_both_appearances() {
 fn emergency_renderer_fallbacks_match_rust_defaults() {
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/default-light.json")).unwrap();
-    for asset in [
-        include_str!("../../../flutter_app/android/app/src/main/assets/keytao-default-theme.json"),
-        include_str!(
-            "../../keytao-ios-ime/Sources/KeyTaoIOSIME/Resources/default-theme-light.json"
-        ),
-    ] {
-        assert_eq!(serde_json::from_str::<Value>(asset).unwrap(), expected);
-    }
+    let android =
+        include_str!("../../../flutter_app/android/app/src/main/assets/keytao-default-theme.json");
+    assert_eq!(serde_json::from_str::<Value>(android).unwrap(), expected);
+    let ios = include_str!(
+        "../../keytao-ios-ime/Sources/KeyTaoIOSIME/Resources/default-theme-light.json"
+    );
+    let ios_expected: Value =
+        serde_json::from_str(include_str!("fixtures/default-ios-light.json")).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(ios).unwrap(), ios_expected);
     let swift = include_str!("../../keytao-macos-ime/Sources/KeyTaoIME/ImeTheme.swift");
     let fallback = swift
         .split_once("private static let fallbackJSON = #\"")

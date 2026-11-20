@@ -1697,8 +1697,8 @@ mod tests {
         let path = dir.path().join("nested/theme.yaml");
         let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
         assert!(!settings.hide_candidate_panel);
-        assert!(!settings.embedded_composition);
-        assert!(!settings.effective_embedded_composition);
+        assert!(settings.embedded_composition);
+        assert!(settings.effective_embedded_composition);
 
         write_ime_hide_candidate_panel_to_path(path.clone(), true).unwrap();
         let root: serde_yaml::Value =
@@ -1710,7 +1710,7 @@ mod tests {
         assert_eq!(root["ui"]["hideCandidatePanel"].as_bool(), Some(true));
         let settings = ime_ui_settings_from_paths(path, None, String::new()).unwrap();
         assert!(settings.hide_candidate_panel);
-        assert!(!settings.embedded_composition);
+        assert!(settings.embedded_composition);
         assert!(settings.effective_embedded_composition);
     }
 
