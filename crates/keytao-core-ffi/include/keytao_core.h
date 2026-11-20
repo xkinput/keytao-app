@@ -128,6 +128,11 @@ char *keytao_reload_stamp_path_at(const char *user_dir);
 bool keytao_reload_if_stamp_changed(void);
 
 /**
+ * Cached shared key gate, including failed initialization before a session exists.
+ */
+bool keytao_deployment_blocks_input(void);
+
+/**
  * Whether the deployment sentinel belongs to a live deployer. This reads the filesystem.
  */
 bool keytao_deployment_in_progress_at(const char *user_dir);

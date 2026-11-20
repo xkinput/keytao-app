@@ -820,6 +820,24 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploym
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentBlocksInput(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeDeploymentBlocksInput", 0, || {
+        let Some(root) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        ANDROID_DEPLOYMENT_STATE
+            .lock()
+            .ok()
+            .is_some_and(|state| state.blocks_input(&root)) as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentKeyPressed(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

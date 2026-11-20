@@ -8,7 +8,9 @@ pub use build_prune::prune_rime_build_artifacts;
 pub mod deploy_child;
 mod deployment_log;
 mod deployment_state;
-pub use deployment_state::{deployment_in_progress, mark_deployment_failed, DeploymentState};
+pub use deployment_state::{
+    deployment_in_progress, mark_deployment_failed, track_usable_input_session, DeploymentState,
+};
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
@@ -5364,6 +5366,7 @@ impl ProcessRimeState {
                 return false;
             };
             let mut inner = lock_ignore_poison(&session);
+            inner.usable = None;
             if let Some(engine) = inner.engine.take() {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
                 inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
@@ -5550,6 +5553,7 @@ struct ImeRuntimeSessionInner {
     /// `None` after teardown. Pending switch requests rebuild all live engines
     /// before acknowledgment; other reloads rebuild lazily on the next access.
     engine: Option<Engine>,
+    usable: Option<Arc<()>>,
     generation: u64,
     /// ascii_mode of the engine that was dropped, restored on the rebuilt one.
     carried_ascii_mode: Option<bool>,
@@ -6104,11 +6108,12 @@ impl ImeRuntime {
             if request.is_some() {
                 PROCESS_RIME.apply_switch_request(&dirs.user, Some(&engine), request.as_ref())?;
             }
-            deployment_state::engine_loaded(&dirs.user);
+            let usable = deployment_state::engine_loaded(&dirs.user);
             let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
                 user_data_dir: dirs.user.clone(),
                 ime_host: self.0.ime_host,
                 engine: Some(engine),
+                usable: Some(usable),
                 generation,
                 carried_ascii_mode: None,
                 carried_english_mode: None,
@@ -6626,7 +6631,13 @@ impl ImeRuntimeSession {
         ) -> T,
     ) -> Option<T> {
         // Wait before taking any lock needed by the builder.
-        let _build = if rebuild {
+        // Keep the loaded schema usable while another process compiles its replacement.
+        let use_loaded_schema = deployment_state::cached_deployment_in_progress(&self.dirs.user)
+            && try_lock_ignore_poison(&self.inner).is_some_and(|inner| {
+                inner.engine.is_some()
+                    && inner.generation == PROCESS_RIME.generation.load(Ordering::SeqCst)
+            });
+        let _build = if rebuild && !use_loaded_schema {
             Some(PROCESS_RIME.build.acquire()?)
         } else {
             None
@@ -6972,6 +6983,7 @@ impl ImeRuntimeSession {
             // Drop the previous engine before creating the replacement: librime
             // hands a new session the cached config and dictionaries as long as any
             // other session still references them.
+            inner.usable = None;
             if let Some(engine) = inner.engine.take() {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
                 inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
@@ -7012,7 +7024,7 @@ impl ImeRuntimeSession {
             inner.generation = current;
             inner.applied_input_version = 0;
             inner.last_input_state = None;
-            deployment_state::engine_loaded(root);
+            inner.usable = Some(deployment_state::engine_loaded(root));
             Ok(())
         })();
         if let Some(started) = started {

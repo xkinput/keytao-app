@@ -303,6 +303,7 @@ struct Runtime {
     engine: Option<InProcEngine>,
     generation: u64,
     ready: bool,
+    deploying: bool,
 }
 
 fn ensure_deploy_job() -> Result<(), String> {
@@ -359,6 +360,92 @@ fn finish_deploy(
         (Ok(()), Ok(())) => Ok(()),
     };
     (result, ready)
+}
+
+fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
+    static DEPLOY_LOCK: Mutex<()> = Mutex::new(());
+    let _deploy = DEPLOY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    {
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !runtime.ready {
+            return runtime.deploy();
+        }
+        runtime.deploying = true;
+    }
+    let result = (|| {
+        ensure_deploy_job()?;
+        let root = keytao_core::default_user_data_dir().ok_or("cannot determine Rime directory")?;
+        let stage = crate::staged_deploy::Stage::create(&root)?;
+        keytao_core::rebase_active_scheme_manifest(stage.path())?;
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let mut command = std::process::Command::new(executable);
+        command.env(crate::staged_deploy::DIRECTORY_ENV, stage.directory_name());
+        keytao_core::deploy_child::run_deploy_child_command_with_subcommand(
+            &mut command,
+            crate::staged_deploy::SUBCOMMAND,
+            Duration::from_secs(600),
+            |_| {},
+        )?;
+        if !keytao_core::schema_install_state(stage.path()).deployed {
+            return Err("staged deployment has no usable schema".into());
+        }
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let engine = runtime
+            .engine
+            .as_ref()
+            .ok_or("server runtime is not ready")?;
+        engine.prepare_server_deploy()?;
+        let mut ready = false;
+        let result = stage.install(&root, || {
+            keytao_core::ReloadStamp::write(&root)?;
+            engine.reload_server()?;
+            ready = true;
+            Ok(())
+        });
+        let result = if !ready {
+            match engine.reload_server() {
+                Ok(_) => {
+                    ready = true;
+                    result
+                }
+                Err(recovery) => Err(format!(
+                    "{}; recover server engine: {recovery}",
+                    result.unwrap_err()
+                )),
+            }
+        } else {
+            result
+        };
+        runtime.ready = ready;
+        runtime.generation = runtime.generation.wrapping_add(1);
+        if result.is_ok() {
+            keytao_core::mark_windows_rime_build_repair_complete(&root)?;
+        }
+        result
+    })();
+    let mut runtime = runtime
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    runtime.deploying = false;
+    runtime.write_status(
+        result.as_ref().err().map(String::as_str),
+        runtime
+            .ready
+            .then(|| {
+                runtime
+                    .engine
+                    .as_ref()
+                    .map(|engine| engine.state().schema_id)
+            })
+            .flatten(),
+    );
+    result
 }
 
 impl Runtime {
@@ -440,6 +527,9 @@ impl Runtime {
     }
 
     fn refresh(&mut self) -> Result<(), String> {
+        if self.deploying {
+            return Ok(());
+        }
         let changed = self
             .engine
             .as_ref()
@@ -760,7 +850,7 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
                 client.is_appcontainer,
                 installed_process(pid, &client.sid, &server.sid, &[keytao_app_root()]).is_ok(),
             ) {
-                Response::Deployed(runtime.lock().unwrap_or_else(|p| p.into_inner()).deploy())
+                Response::Deployed(deploy(runtime))
             } else {
                 Response::Deployed(Err(
                     "Deploy requires an authenticated App caller under the KeyTao app root".into(),
@@ -1080,6 +1170,7 @@ mod tests {
             engine: None,
             generation: 8,
             ready: false,
+            deploying: false,
         });
         let mut session = ClientSession {
             engine: None,
@@ -1102,6 +1193,7 @@ mod tests {
             engine: Some(InProcEngine::default()),
             generation: 8,
             ready: true,
+            deploying: false,
         });
         let mut session = ClientSession {
             engine: Some(InProcEngine::default()),

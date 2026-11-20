@@ -482,6 +482,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
             user: PathBuf::from(&user),
             shared: shared.clone(),
         };
+        update_deployment_status(&dirs.user, |_| {});
         let (previous, previous_runtime, same_ready_runtime) = {
             let g = lock_ignore_poison(&GLOBAL);
             (
@@ -691,10 +692,25 @@ pub extern "C" fn keytao_reload_if_stamp_changed() -> bool {
 }
 
 fn deployment_root() -> Option<PathBuf> {
-    lock_ignore_poison(&GLOBAL)
+    let root = lock_ignore_poison(&GLOBAL)
         .dirs
         .as_ref()
-        .map(|dirs| dirs.user.clone())
+        .map(|dirs| dirs.user.clone());
+    root.or_else(|| {
+        lock_ignore_poison(&DEPLOYMENT_STATUS)
+            .as_ref()
+            .map(|status| status.root.clone())
+    })
+}
+
+/// Cached shared key gate, including failed initialization before a session exists.
+#[no_mangle]
+pub extern "C" fn keytao_deployment_blocks_input() -> bool {
+    guard("keytao_deployment_blocks_input", false, || {
+        lock_ignore_poison(&DEPLOYMENT_STATUS)
+            .as_ref()
+            .is_some_and(|status| status.state.blocks_input(&status.root))
+    })
 }
 
 /// Whether the deployment sentinel belongs to a live deployer. This reads the filesystem.

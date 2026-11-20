@@ -146,7 +146,11 @@ class KeytaoImeEngine(context: Context) {
         refreshDeploymentHint()
         warmUpIfStorageReady()
         if (KeytaoAndroidPaths.isDeploymentInProgress(root)) {
-            return if (nativeReady && session != 0L) Readiness.READY else Readiness.DEPLOYING
+            return when {
+                deploymentBlocksInput() -> Readiness.DEPLOYING
+                nativeReady && session != 0L -> Readiness.READY
+                else -> Readiness.NATIVE_UNAVAILABLE
+            }
         }
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
         if (!hasInstalledSchema()) {
@@ -164,7 +168,7 @@ class KeytaoImeEngine(context: Context) {
                 ) { }
                 return Readiness.DEPLOYING
             }
-            return if (KeytaoAndroidPaths.isDeploymentInProgress(root)) {
+            return if (deploymentBlocksInput()) {
                 Readiness.DEPLOYING
             } else Readiness.NOT_DEPLOYED
         }
@@ -172,6 +176,9 @@ class KeytaoImeEngine(context: Context) {
         refreshDeploymentHint()
         return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
     }
+
+    fun deploymentBlocksInput(): Boolean =
+        userDir?.let { KeytaoNativeBridge.deploymentBlocksInput(it.absolutePath) } ?: false
 
     fun refreshDeploymentHint() {
         synchronized(deploymentHintLock) {

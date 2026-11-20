@@ -192,6 +192,12 @@ final class KeyTaoInputController: IMKInputController {
             // binds them on macOS.
             return false
         }
+        guard !keytao_deployment_blocks_input() else {
+            // Nothing usable yet: keep asking, so a missed reload event cannot
+            // leave every key swallowed until the next focus change.
+            KeyTaoRuntime.shared.requestInitialization()
+            return true
+        }
 
         guard let session = ensureSession() else { return false }
 
@@ -544,7 +550,7 @@ final class KeyTaoInputController: IMKInputController {
     private func showDeploymentIndicator(client: IMKTextInput?) {
         let theme = ImeThemeManager.shared.theme()
         if let hint = KeyTaoRuntime.shared.deploymentHint,
-           hint == "正在部署中" || normalCandidateModel?.candidates.isEmpty != false {
+           keytao_deployment_blocks_input() || normalCandidateModel?.candidates.isEmpty != false {
             showingDeploymentHint = true
             hideModeIndicator()
             var model = KeyTaoPanelModel.empty
@@ -553,7 +559,6 @@ final class KeyTaoInputController: IMKInputController {
             candidatePanel?.onSelect = nil
             candidatePanel?.onPageChange = nil
             candidatePanel?.displayIfNeeded()
-            // Submit layer updates before the key can block on the engine rebuild.
             CATransaction.flush()
         } else {
             showingDeploymentHint = false
@@ -749,6 +754,10 @@ final class KeyTaoInputController: IMKInputController {
         if !newFlags.subtracting(previousFlags).isEmpty || Int(event.keyCode) == kVK_CapsLock {
             deploymentKeyPressed(client: client)
             guard inputContextGeneration.isCurrent(generation) else { return false }
+        }
+        guard !keytao_deployment_blocks_input() else {
+            shiftPressedWithoutKey = false
+            return false
         }
 
         if !newFlags.isDisjoint(with: chordModifiers) {

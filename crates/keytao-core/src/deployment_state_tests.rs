@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+static ENGINE_LOAD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn installed_schema() -> PathBuf {
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
     let suffix = SystemTime::now()
@@ -483,7 +485,8 @@ fn deployment_input_reset_hides_pending_and_success_hints() {
 }
 
 #[test]
-fn deployment_hint_waits_for_the_entire_prewarm_worker() {
+fn deployment_hint_stops_when_a_session_is_usable_during_prewarm() {
+    let _engine_load = super::lock_ignore_poison(&ENGINE_LOAD_TEST);
     let dir = installed_schema();
     compiled_schema(&dir);
     complete_deployment(&dir).unwrap();
@@ -492,13 +495,11 @@ fn deployment_hint_waits_for_the_entire_prewarm_worker() {
     begin_deployment(&dir).unwrap();
     state.key_pressed(&dir);
     complete_deployment(&dir).unwrap();
-    super::deployment_state::engine_loaded(&dir);
+    let _usable = super::deployment_state::engine_loaded(&dir);
     let hint = state.hint_at_with_build(&dir, Instant::now(), true);
-    assert_eq!(hint, Some("正在部署中"));
-    assert_eq!(
-        DeploymentState::visible_hint(hint, true),
-        Some("正在部署中")
-    );
+    assert_eq!(hint, None);
+    assert_eq!(DeploymentState::visible_hint(hint, true), None);
+    assert!(!state.blocks_input(&dir));
     let hint = state.hint_at_with_build(&dir, Instant::now(), false);
     assert_eq!(hint, Some("部署成功"));
     assert_eq!(DeploymentState::visible_hint(hint, true), None);
@@ -514,6 +515,120 @@ fn deployment_live_checks_refresh_the_memory_cache() {
     assert!(cached_deployment_in_progress(&dir));
     assert!(!deployment_in_progress(&dir));
     assert!(!cached_deployment_in_progress(&dir));
+}
+
+#[test]
+fn deployment_only_blocks_and_hints_without_a_usable_session() {
+    for usable in [false, true] {
+        for failed in [false, true] {
+            let dir = installed_schema();
+            begin_deployment(&dir).unwrap();
+            let mut state = DeploymentState::default();
+            state.hint_at_with_session(&dir, Instant::now(), false, usable);
+            state.key_pressed_with_session(&dir, usable);
+            if failed {
+                super::mark_deployment_failed(&dir).unwrap();
+                state = DeploymentState::default();
+                state.key_pressed_with_session(&dir, usable);
+            }
+            let hint = state.hint_at_with_session(&dir, Instant::now(), false, usable);
+            assert_eq!(state.blocks_input_with_session(usable), !usable && !failed);
+            assert_eq!(
+                hint,
+                if usable {
+                    None
+                } else if failed {
+                    Some("部署失败")
+                } else {
+                    Some("正在部署中")
+                }
+            );
+            assert_eq!(
+                state.hint_at_with_session(&dir, Instant::now(), false, true),
+                None
+            );
+            assert_eq!(
+                state.hint_at_with_session(&dir, Instant::now(), true, true),
+                None
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
+#[test]
+fn deployment_reload_after_a_usable_session_never_blocks_or_hints() {
+    let _engine_load = super::lock_ignore_poison(&ENGINE_LOAD_TEST);
+    for (startup_pending, observe_usable) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let dir = installed_schema();
+        let mut state = DeploymentState::default();
+        assert_eq!(state.hint_at(&dir, Instant::now()), None);
+        compiled_schema(&dir);
+        complete_deployment(&dir).unwrap();
+        if !startup_pending {
+            state.loaded(&dir);
+        }
+        assert_eq!(state.hint_at(&dir, Instant::now()), None);
+        let usable = super::deployment_state::engine_loaded(&dir);
+        if observe_usable {
+            state.key_pressed(&dir);
+            assert_eq!(state.hint(&dir), None);
+        }
+        begin_deployment(&dir).unwrap();
+        complete_deployment(&dir).unwrap();
+        drop(usable);
+        state.key_pressed(&dir);
+        assert!(!state.blocks_input(&dir));
+        assert_eq!(state.hint_at_with_build(&dir, Instant::now(), true), None);
+        let _usable = super::deployment_state::engine_loaded(&dir);
+        assert_eq!(state.hint_at_with_build(&dir, Instant::now(), false), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn deployment_dead_failed_owner_shows_failure_without_blocking_keys() {
+    for waiting_key in [false, true] {
+        let dir = installed_schema();
+        let mut state = DeploymentState::default();
+        begin_deployment(&dir).unwrap();
+        if waiting_key {
+            state.key_pressed(&dir);
+            assert!(state.blocks_input(&dir));
+            assert_eq!(state.cached_hint(), Some("正在部署中"));
+        }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        fs::write(
+            dir.join("build/.keytao-deploying"),
+            format!("{}/{}", now.as_nanos(), u32::MAX),
+        )
+        .unwrap();
+        assert!(!schema_install_state(&dir).deployed);
+        for _ in 0..2 {
+            state.key_pressed(&dir);
+            assert_eq!(state.cached_hint(), Some("部署失败"));
+            assert!(!state.blocks_input(&dir));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn deployment_usability_ends_with_the_last_loaded_session() {
+    let dir = installed_schema();
+    let usable = super::track_usable_input_session(&dir);
+    let mut state = DeploymentState::default();
+    begin_deployment(&dir).unwrap();
+    state.key_pressed(&dir);
+    assert!(!state.blocks_input(&dir));
+    assert_eq!(state.hint(&dir), None);
+    drop(usable);
+    state.key_pressed(&dir);
+    assert!(state.blocks_input(&dir));
+    assert_eq!(state.hint(&dir), Some("正在部署中"));
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

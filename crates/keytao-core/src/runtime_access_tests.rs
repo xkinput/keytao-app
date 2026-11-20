@@ -857,6 +857,18 @@ fn deployment_keeps_new_and_rebuilt_sessions_composing() {
         );
         assert!(!result.state.preedit.is_empty());
     }
+    let mut deployment = DeploymentState::default();
+    deployment.key_pressed(&dir);
+    assert!(!deployment.blocks_input(&dir));
+    assert_eq!(deployment.hint(&dir), None);
+    {
+        let _build = PROCESS_RIME.build.acquire().unwrap();
+        assert!(session.process_key_result(b'a' as u32, 0).is_some());
+    }
+    mark_deployment_failed(&dir).unwrap();
+    deployment.key_pressed(&dir);
+    assert_eq!(deployment.hint(&dir), None);
+    assert!(!deployment.blocks_input(&dir));
     std::fs::remove_file(dir.join("build").join(DEPLOYING_FILE)).unwrap();
     drop((session, created, dropped));
     runtime.shutdown().unwrap();
@@ -877,6 +889,7 @@ fn empty_runtime_session() -> (ImeRuntime, ImeRuntimeSession) {
             user_data_dir: runtime.data_dirs().unwrap().user,
             ime_host: false,
             engine: None,
+            usable: None,
             generation: PROCESS_RIME.generation.load(Ordering::SeqCst),
             carried_ascii_mode: None,
             carried_english_mode: None,

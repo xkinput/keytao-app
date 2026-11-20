@@ -61,6 +61,7 @@ pub struct PipeEngine {
 #[derive(Default)]
 struct Shared {
     inner: Mutex<PipeState>,
+    usable_session: Mutex<Option<Arc<()>>>,
     control: Mutex<Option<Connection>>,
     active: AtomicBool,
     reload_required: AtomicBool,
@@ -70,6 +71,22 @@ struct Shared {
     epoch: AtomicU64,
     activity: Mutex<GenerationActivity>,
     reaper: OnceLock<Sender<ReaperMessage>>,
+}
+
+impl Shared {
+    fn track_schema(&self, schema_id: &str) {
+        let mut usable = self.usable_session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if schema_id.is_empty() || schema_id == ".default" {
+            *usable = None;
+        } else if usable.is_none() {
+            *usable = keytao_core::default_user_data_dir()
+                .map(|root| keytao_core::track_usable_input_session(&root));
+        }
+    }
+
+    fn clear_usable_session(&self) {
+        *self.usable_session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 }
 
 #[derive(Default)]
@@ -212,12 +229,14 @@ impl PipeEngine {
             let generation = match reconnect(&mut inner, deadline) {
                 Ok(generation) => generation,
                 Err(error) => {
+                    self.shared.clear_usable_session();
                     self.shared.reload_required.store(true, Ordering::Release);
                     log_disconnect(&error);
                     return None;
                 }
             };
             if self.shared.generation.load(Ordering::Acquire) != generation {
+                self.shared.clear_usable_session();
                 inner.connection = None;
                 self.shared.reload_required.store(true, Ordering::Release);
                 return None;
@@ -230,20 +249,29 @@ impl PipeEngine {
         if self.shared.epoch.load(Ordering::Acquire) != epoch
             || !self.shared.active.load(Ordering::Acquire)
         {
+            self.shared.clear_usable_session();
             inner.connection = None;
             return None;
         }
         match result {
             Ok(Response::Err(EngineError::NotReady)) => {
+                self.shared.clear_usable_session();
                 inner.connection = None;
                 self.shared.reload_required.store(true, Ordering::Release);
                 None
             }
             Ok(response) => {
+                match &response {
+                    Response::Key(Some(result)) => self.shared.track_schema(&result.state.schema_id),
+                    Response::State(Some(state)) | Response::English(Ok(state)) => self.shared.track_schema(&state.schema_id),
+                    Response::Key(None) | Response::State(None) | Response::Err(EngineError::Failed(_)) => self.shared.clear_usable_session(),
+                    _ => {}
+                }
                 inner.remember(&request, &response);
                 Some(response)
             }
             Err(error) => {
+                self.shared.clear_usable_session();
                 inner.connection = None;
                 let consume = key_request && error.consume_key();
                 self.shared
@@ -295,6 +323,9 @@ impl PipeEngine {
             return Err("could not resync engine session state".into());
         }
         inner.remember(&Request::GetState, &state);
+        if let Response::State(Some(state)) = &state {
+            self.shared.track_schema(&state.schema_id);
+        }
         let generation = connection.generation;
         *self
             .shared
@@ -308,6 +339,7 @@ impl PipeEngine {
 
 impl ImeEngineBackend for PipeEngine {
     fn build(&self) -> Result<EngineHandle, String> {
+        self.shared.clear_usable_session();
         self.shared.active.store(false, Ordering::Release);
         let epoch = self.shared.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.reload_required.store(false, Ordering::Release);
@@ -344,6 +376,7 @@ impl ImeEngineBackend for PipeEngine {
         inner.ascii_mode = None;
         inner.context_ascii_mode = None;
         self.shared.active.store(true, Ordering::Release);
+        self.shared.track_schema(&handle.schema_id);
         drop(inner);
         let _ = self
             .shared
@@ -372,6 +405,7 @@ impl ImeEngineBackend for PipeEngine {
     }
 
     fn drop_session(&self) {
+        self.shared.clear_usable_session();
         self.shared.active.store(false, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::AcqRel);
         self.shared.reload_required.store(false, Ordering::Release);
@@ -822,16 +856,19 @@ fn apply_generation_response(
     match response {
         Ok(Response::Generation(generation)) => {
             if shared.generation.load(Ordering::Acquire) != generation {
+                shared.clear_usable_session();
                 shared.reload_required.store(true, Ordering::Release);
             }
         }
         Ok(Response::Err(EngineError::Busy)) => {}
         Ok(_) => {
+            shared.clear_usable_session();
             inner.connection = None;
             shared.reload_required.store(true, Ordering::Release);
             log_disconnect("invalid engine generation response");
         }
         Err(error) => {
+            shared.clear_usable_session();
             inner.connection = None;
             shared.reload_required.store(true, Ordering::Release);
             log_disconnect(&error.message);

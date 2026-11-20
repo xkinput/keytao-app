@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HINT_DURATION: Duration = Duration::from_millis(1500);
 const HINT_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
-static LOADED_BUILD: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+static LOADED_BUILD: Mutex<Option<(PathBuf, Option<String>, u64)>> = Mutex::new(None);
+static USABLE_SESSIONS: Mutex<Vec<(PathBuf, Option<u64>, Weak<()>)>> = Mutex::new(Vec::new());
 static DEPLOYING: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -45,13 +46,62 @@ fn engine_rebuilding() -> bool {
     false
 }
 
-pub(crate) fn engine_loaded(root: &Path) {
-    if sentinel(root).is_some() {
-        return;
+fn engine_generation() -> u64 {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    ))]
+    {
+        crate::PROCESS_RIME
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
-    if let Some(marker) = marker(root) {
-        *crate::lock_ignore_poison(&LOADED_BUILD) = Some((root.to_path_buf(), marker));
-    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    )))]
+    0
+}
+
+pub(crate) fn has_usable_input_session(root: &Path) -> bool {
+    crate::lock_ignore_poison(&USABLE_SESSIONS)
+        .iter()
+        .any(|(loaded_root, generation, session)| {
+            loaded_root == root
+                && generation.is_none_or(|generation| generation == engine_generation())
+                && session.strong_count() > 0
+        })
+}
+
+/// Keep this token alive only while a validated local or remote input session is usable.
+pub fn track_usable_input_session(root: &Path) -> Arc<()> {
+    track_input_session(root, None)
+}
+
+fn track_input_session(root: &Path, generation: Option<u64>) -> Arc<()> {
+    let session = Arc::new(());
+    let mut sessions = crate::lock_ignore_poison(&USABLE_SESSIONS);
+    sessions.retain(|(_, _, session)| session.strong_count() > 0);
+    sessions.push((
+        root.to_path_buf(),
+        generation,
+        Arc::downgrade(&session),
+    ));
+    session
+}
+
+pub(crate) fn engine_loaded(root: &Path) -> Arc<()> {
+    let session = track_input_session(root, Some(engine_generation()));
+    let marker = sentinel(root).is_none().then(|| marker(root)).flatten();
+    *crate::lock_ignore_poison(&LOADED_BUILD) =
+        Some((root.to_path_buf(), marker, engine_generation()));
+    session
 }
 
 /// Both native deployers (nanoseconds) and older Android deployers (milliseconds)
@@ -173,11 +223,31 @@ impl DeploymentState {
 
     /// Call before a key can wait for deployment or the following engine rebuild.
     pub fn key_pressed(&mut self, root: &Path) {
-        self.hint_at(root, Instant::now());
+        self.key_pressed_with_session(root, has_usable_input_session(root));
+    }
+
+    pub(crate) fn key_pressed_with_session(&mut self, root: &Path, usable: bool) {
+        if usable {
+            self.hint = self.hint.filter(|hint| *hint == "部署成功");
+            return;
+        }
+        self.hint_at_with_session(root, Instant::now(), engine_rebuilding(), usable);
         if self.pending.is_some() && self.pending != self.failed_sentinel {
             self.hint_requested = true;
             self.hint = Some("正在部署中");
+        } else if self.failed_sentinel.is_some() {
+            self.transient = Some(("部署失败", Instant::now() + HINT_DURATION));
+            self.hint = Some("部署失败");
         }
+    }
+
+    /// Cached decision shared by native key gates; never reads deployment files.
+    pub fn blocks_input(&self, root: &Path) -> bool {
+        self.blocks_input_with_session(has_usable_input_session(root))
+    }
+
+    pub(crate) fn blocks_input_with_session(&self, usable: bool) -> bool {
+        !usable && self.pending.is_some()
     }
 
     pub fn reset_input(&mut self) {
@@ -188,6 +258,13 @@ impl DeploymentState {
     }
 
     pub fn hint(&mut self, root: &Path) -> Option<&'static str> {
+        if has_usable_input_session(root) {
+            if self.hint_requested {
+                self.cached_hint_at(root, Instant::now());
+            }
+            self.hint = self.hint.filter(|hint| *hint == "部署成功");
+            return self.cached_hint();
+        }
         self.cached_hint_at(root, Instant::now())
     }
 
@@ -221,9 +298,19 @@ impl DeploymentState {
         now: Instant,
         rebuilding: bool,
     ) -> Option<&'static str> {
-        self.hint = self
-            .refresh_hint_at(root, now, rebuilding)
-            .filter(|hint| *hint != "正在部署中" || self.hint_requested);
+        self.hint_at_with_session(root, now, rebuilding, has_usable_input_session(root))
+    }
+
+    pub(crate) fn hint_at_with_session(
+        &mut self,
+        root: &Path,
+        now: Instant,
+        rebuilding: bool,
+        usable: bool,
+    ) -> Option<&'static str> {
+        self.hint = self.refresh_hint_at(root, now, rebuilding).filter(|hint| {
+            (*hint != "正在部署中" || self.hint_requested) && (*hint == "部署成功" || !usable)
+        });
         self.refreshed_at = Some(now);
         self.hint
     }
@@ -241,14 +328,26 @@ impl DeploymentState {
         let current = sentinel(root);
         let active = sentinel_in_progress(current.as_deref());
         cache_deployment(root, active);
+        let previously_loaded = current.is_none()
+            && crate::lock_ignore_poison(&LOADED_BUILD)
+                .as_ref()
+                .is_some_and(|(loaded_root, _, _)| loaded_root == root);
         if current.is_none() {
             let loaded = crate::lock_ignore_poison(&LOADED_BUILD)
                 .as_ref()
-                .is_some_and(|(loaded_root, loaded_marker)| {
-                    loaded_root == root && marker(root).as_ref() == Some(loaded_marker)
+                .is_some_and(|(loaded_root, loaded_marker, generation)| {
+                    loaded_root == root
+                        && loaded_marker
+                            .as_ref()
+                            .is_some_and(|loaded| marker(root).as_ref() == Some(loaded))
+                        && *generation == engine_generation()
                 });
             if loaded && !rebuilding {
                 self.loaded(root);
+            }
+            // A loaded runtime handles reloads through its existing engine-build wait.
+            if previously_loaded {
+                self.pending = None;
             }
         }
         if current.is_some()
@@ -274,7 +373,11 @@ impl DeploymentState {
             self.failed_sentinel = current;
         } else if current.is_none() {
             let marker = marker(root);
-            if self.pending.is_none() && marker.is_some() && marker != self.loaded_marker {
+            if !previously_loaded
+                && self.pending.is_none()
+                && marker.is_some()
+                && marker != self.loaded_marker
+            {
                 self.pending = marker.clone();
                 self.hint_requested = false;
                 self.transient = None;

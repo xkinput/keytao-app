@@ -2995,7 +2995,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (runningDeferredDeploymentKey || (!markPressed && !deploymentKeyScheduled)) return false
         if (markPressed) engine.deploymentKeyPressed()
         keyboardView?.updateDeploymentHint(engine.deploymentHint)
-        if (!deploymentKeyScheduled && engine.deploymentHint != "正在部署中") return false
+        if (!deploymentKeyScheduled && !engine.deploymentBlocksInput()) return false
         val view = keyboardView?.takeIf { it.isAttachedToWindow && it.isShown } ?: return false
         deferredDeploymentKeys.addLast(action)
         if (deploymentKeyScheduled) return true

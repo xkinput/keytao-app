@@ -199,27 +199,32 @@ pub fn run_deploy_child_main() -> i32 {
         let _lock = inherited_linux_deploy_lock()?;
         let user_dir = crate::default_user_data_dir()
             .ok_or("cannot determine the librime user data directory")?;
-        let shared_dir = crate::default_shared_data_dir();
-        #[cfg(target_os = "windows")]
-        let signature = windows_build_signature(
-            &user_dir,
-            &crate::librime_runtime_version().ok_or("cannot determine the librime version")?,
-        )?;
-        #[cfg(target_os = "windows")]
-        prepare_windows_deploy(&user_dir, &signature)?;
-        crate::deploy_for_process(
-            user_dir.to_string_lossy().into_owned(),
-            shared_dir,
-            crate::DeployProcess::DeployChild,
-        )?;
-        #[cfg(target_os = "windows")]
-        {
-            crate::write_file_atomic(&user_dir.join(WINDOWS_BUILD_SIGNATURE), &signature)
-                .map_err(|error| format!("write Windows build signature: {error}"))?;
-            crate::mark_windows_rime_build_repair_complete(&user_dir)?;
-        }
-        Ok(())
+        deploy_directory(&user_dir)
     })
+}
+
+/// Compile a host-owned isolated deployment directory in a short-lived process.
+pub fn deploy_directory(user_dir: &Path) -> Result<(), String> {
+    let shared_dir = crate::default_shared_data_dir();
+    #[cfg(target_os = "windows")]
+    let signature = windows_build_signature(
+        user_dir,
+        &crate::librime_runtime_version().ok_or("cannot determine the librime version")?,
+    )?;
+    #[cfg(target_os = "windows")]
+    prepare_windows_deploy(user_dir, &signature)?;
+    crate::deploy_for_process(
+        user_dir.to_string_lossy().into_owned(),
+        shared_dir,
+        crate::DeployProcess::DeployChild,
+    )?;
+    #[cfg(target_os = "windows")]
+    {
+        crate::write_file_atomic(&user_dir.join(WINDOWS_BUILD_SIGNATURE), &signature)
+            .map_err(|error| format!("write Windows build signature: {error}"))?;
+        crate::mark_windows_rime_build_repair_complete(user_dir)?;
+    }
+    Ok(())
 }
 
 /// Inspect deployed data in an isolated user directory, never running deployment.
@@ -500,7 +505,7 @@ pub fn run_deploy_child_command_with_progress(
     run_deploy_child_command_with_subcommand(command, DEPLOY_SUBCOMMAND, timeout, progress)
 }
 
-fn run_deploy_child_command_with_subcommand(
+pub fn run_deploy_child_command_with_subcommand(
     command: &mut Command,
     subcommand: &str,
     timeout: Duration,
