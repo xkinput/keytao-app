@@ -88,7 +88,8 @@ impl LuaSnapshot {
         if let Some(files) = manifest["lua_owner"]["files"].as_object() {
             managed.extend(files.keys().cloned());
         }
-        fs::create_dir_all(directory.path().join("build"))?;
+        let dirs = keytao_core::RuntimeDirs::resolve(directory.path(), directory.path());
+        fs::create_dir_all(&dirs.staging_dir)?;
         let defaults = serde_yaml::to_string(&serde_json::json!({"schema_list": [{"schema": selected}]}))
             .map_err(|error| failure(error.to_string()))?;
         fs::write(directory.path().join("default.yaml"), defaults)?;
@@ -871,6 +872,7 @@ pub(crate) fn verify_deploy_artifacts(
     shared: Option<&Path>,
     schema_ids: &[String],
 ) -> Result<(), CoreError> {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
     if schema_ids.is_empty() {
         return Err(failure("方案包缺少 schema_list/schema manifest"));
     }
@@ -888,7 +890,7 @@ pub(crate) fn verify_deploy_artifacts(
         }
         let compiled = format!("build/{id}.schema.yaml");
         verify_artifact(root, &id, &compiled, &sources, false)?;
-        let value = yaml(&fs::read(root.join(&compiled))?, &compiled)?;
+        let value = yaml(&fs::read(dirs.staging_dir.join(format!("{id}.schema.yaml")))?, &compiled)?;
         if value["schema"]["schema_id"].as_str() != Some(&id) {
             return Err(failure(format!(
                 "方案 {id}：{compiled} 的 schema/schema_id 不匹配"
@@ -993,6 +995,7 @@ fn checked(
     mut smoke: Option<&mut dyn FnMut(&Path, &str, u32) -> Result<(), String>>,
     require_freshness: bool,
 ) -> Result<UploadBundle, CoreError> {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, shared.unwrap_or(root));
     let bundle = build(root, shared, schema_ids)?;
     let smoke_root = if smoke.is_some() {
         bundle.prepare_smoke_source(root, schema_ids)?
@@ -1043,7 +1046,7 @@ fn checked(
                 require_freshness,
             )?;
         }
-        let value = yaml(&fs::read(root.join(&compiled))?, &compiled)?;
+        let value = yaml(&fs::read(dirs.staging_dir.join(format!("{id}.schema.yaml")))?, &compiled)?;
         if value["schema"]["schema_id"].as_str() != Some(id) {
             return Err(failure(format!(
                 "方案 {id}：{compiled} 的 schema/schema_id 不匹配"
@@ -1065,6 +1068,8 @@ impl UploadBundle {
     fn prepare_smoke_source<'a>(&'a self, root: &'a Path, ids: &[String]) -> Result<&'a Path, CoreError> {
         let Some(directory) = self.runtime_source.as_ref() else { return Ok(root) };
         let output = directory.path();
+        let source_dirs = keytao_core::RuntimeDirs::resolve(root, root);
+        let output_dirs = keytao_core::RuntimeDirs::resolve(output, output);
         let mut archive = zip::ZipArchive::new(Cursor::new(&self.bytes))
             .map_err(|error| failure(error.to_string()))?;
         for index in 0..archive.len() {
@@ -1074,15 +1079,15 @@ impl UploadBundle {
             let mut file = fs::File::create(destination)?;
             std::io::copy(&mut entry, &mut file)?;
         }
-        for entry in fs::read_dir(root.join("build"))? {
+        for entry in fs::read_dir(&source_dirs.staging_dir)? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_str().ok_or_else(|| failure("invalid build artifact path"))?;
             if name.starts_with(".keytao-") || !entry.file_type()?.is_file() { continue; }
             let source = crate::packages::safe_path(root, &format!("build/{name}")).map_err(failure)?;
-            fs::copy(source, output.join("build").join(name))?;
+            fs::copy(source, output_dirs.staging_dir.join(name))?;
         }
-        fs::write(output.join("build/default.yaml"), serde_yaml::to_string(&serde_json::json!({
+        fs::write(output_dirs.staging_dir.join("default.yaml"), serde_yaml::to_string(&serde_json::json!({
             "schema_list": ids.iter().map(|id| serde_json::json!({"schema": id})).collect::<Vec<_>>()
         })).map_err(|error| failure(error.to_string()))?)?;
         keytao_core::complete_deployment(output).map_err(failure)?;

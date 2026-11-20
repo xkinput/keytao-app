@@ -270,8 +270,8 @@ pub(crate) fn regenerate(root: &Path) -> Result<(), String> {
             .and_then(|request| request.schema_id)
             .filter(|id| {
                 crate::valid_rime_build_id(id)
-                    && root
-                        .join("build")
+                    && crate::RuntimeDirs::resolve(root, root)
+                        .staging_dir
                         .join(format!("{id}.schema.yaml"))
                         .is_file()
                     && crate::deployed_schemas(root)
@@ -302,6 +302,7 @@ pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
     if packages.is_empty() {
         return crate::regenerate_legacy_rime_lua(root).map(|_| false);
     }
+    let user_dir = crate::RuntimeDirs::resolve(root, root).user_data_dir;
     let selected = packages.iter().find(|(_, package)| {
         package["schemas"]
             .as_array()
@@ -323,7 +324,7 @@ pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
                 if !relative.starts_with("lua/") {
                     return Err(format!("invalid Lua module path: {relative}"));
                 }
-                checked_path(root, relative)?;
+                checked_path(&user_dir, relative)?;
                 let source = source
                     .as_str()
                     .ok_or("Lua snapshot path must be a string")?;
@@ -344,7 +345,7 @@ pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
             if !relative.starts_with("lua/") {
                 return Err(format!("invalid Lua module path: {relative}"));
             }
-            checked_path(root, relative)?;
+            checked_path(&user_dir, relative)?;
             modules.entry(relative.clone()).or_default();
         }
     }
@@ -390,7 +391,7 @@ pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
                     .as_bytes(),
             );
         }
-        let target = checked_path(root, relative)?;
+        let target = checked_path(&user_dir, relative)?;
         let current = match fs::read(&target) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -410,7 +411,7 @@ pub(crate) fn select(root: &Path, schema: &str) -> Result<bool, String> {
     let owner = serde_json::json!({"key": key, "sha256": hash(generated.as_bytes()), "modules_sha256": format!("{:x}", module_digest.finalize()), "files": owned_files});
     let changed = manifest["lua_owner"]["sha256"] != owner["sha256"]
         || manifest["lua_owner"]["modules_sha256"] != owner["modules_sha256"];
-    let path = checked_path(root, "rime.lua")?;
+    let path = checked_path(&user_dir, "rime.lua")?;
     let current = match fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

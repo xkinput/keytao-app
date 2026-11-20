@@ -35,22 +35,23 @@ fn upgrade_context() -> Result<(PathBuf, String), String> {
 }
 
 fn decision_for(user_dir: &Path, version: &str) -> Result<UpgradeDecision, String> {
+    let dirs = keytao_core::RuntimeDirs::resolve(user_dir, user_dir);
     let recorded_version = match std::fs::read_to_string(user_dir.join(VERSION_STAMP)) {
         Ok(version) => Some(version),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("cannot read librime version stamp: {error}")),
     };
     let has_schemes = [
-        "default.custom.yaml",
-        "default-custom.yaml",
-        "build/default.yaml",
-        "default.yaml",
+        dirs.user_data_dir.join("default.custom.yaml"),
+        dirs.user_data_dir.join("default-custom.yaml"),
+        dirs.staging_dir.join("default.yaml"),
+        dirs.user_data_dir.join("default.yaml"),
     ]
     .into_iter()
-    .filter_map(|name| std::fs::read_to_string(user_dir.join(name)).ok())
+    .filter_map(|path| std::fs::read_to_string(path).ok())
     .map(|content| keytao_core::parse_schema_list(&content))
     .any(|schemas| !schemas.is_empty());
-    let has_deployed_data = has_schemes && keytao_core::has_schemas(&user_dir.join("build"));
+    let has_deployed_data = has_schemes && keytao_core::has_schemas(&dirs.staging_dir);
     Ok(upgrade_decision(
         recorded_version.as_deref(),
         version,

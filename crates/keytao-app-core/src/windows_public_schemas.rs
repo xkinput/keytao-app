@@ -445,7 +445,7 @@ fn deploy_and_publish_at(
         .map_err(|error| format!("prepare-dependencies: {error}"))?;
     deploy(stage.path()).map_err(|error| format!("compile: {error}"))?;
     let complete = keytao_core::deployment_warning(stage.path()).is_none();
-    let build = stage.path().join("build");
+    let build = keytao_core::RuntimeDirs::resolve(stage.path(), shared).staging_dir;
     let mut compiled = BTreeMap::new();
     read_snapshot_files(stage.path(), &build, &mut compiled)
         .map_err(|error| format!("collect-artifacts: {error}"))?;
@@ -1557,10 +1557,11 @@ fn store_snapshot(
 
 fn compiled_generation(root: &Path, generation: &str) -> Result<bool, String> {
     let snapshot = root.join(generation);
+    let dirs = keytao_core::RuntimeDirs::resolve(&snapshot, &snapshot);
     for path in [
         snapshot.clone(),
-        snapshot.join("build"),
-        snapshot.join(LIBRIME_VERSION_FILE),
+        dirs.staging_dir.clone(),
+        dirs.staging_dir.join("keytao-librime-version.txt"),
     ] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {

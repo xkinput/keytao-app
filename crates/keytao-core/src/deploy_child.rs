@@ -34,14 +34,19 @@ fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String>> {
+    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir);
     // None retains the old full repair path; Some lists only proven obsolete outputs.
     if std::fs::read_to_string(user_dir.join(crate::WINDOWS_RIME_BUILD_REPAIR_MARKER)).ok()?
         != crate::WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT
-        || user_dir.join("build").join(crate::DEPLOYING_FILE).exists()
+        || dirs.staging_dir.join(crate::DEPLOYING_FILE).exists()
     {
         return None;
     }
-    let previous = std::fs::read(user_dir.join(WINDOWS_BUILD_SIGNATURE)).ok()?;
+    let previous = std::fs::read(
+        dirs.staging_dir
+            .join(WINDOWS_BUILD_SIGNATURE.trim_start_matches("build/")),
+    )
+    .ok()?;
     let previous: (String, String, Vec<String>) = serde_json::from_slice(&previous).ok()?;
     let current: (String, String, Vec<String>) = serde_json::from_slice(signature).ok()?;
     if previous.0 != current.0
@@ -61,7 +66,7 @@ fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String
     }
 
     // A newly selected schema has no build yet: validate the *previous* deployment.
-    let marker = std::fs::read(user_dir.join("build").join(crate::DEPLOYED_FILE)).ok()?;
+    let marker = std::fs::read(dirs.staging_dir.join(crate::DEPLOYED_FILE)).ok()?;
     let marker: crate::DeploymentMarker = serde_json::from_slice(&marker).ok()?;
     let deployed = crate::effective_schema_list(user_dir, previous.2.clone());
     if marker.fingerprint != previous.0
@@ -72,9 +77,10 @@ fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String
             .any(|id| !marker.schemas.contains(id))
         || deployed
             .iter()
-            .any(|id| !user_dir.join(format!("build/{id}.schema.yaml")).is_file())
+            .any(|id| !dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file())
         || marker.schemas.iter().any(|id| {
-            !previous.2.contains(id) || !user_dir.join(format!("build/{id}.schema.yaml")).is_file()
+            !previous.2.contains(id)
+                || !dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file()
         })
     {
         return None;
@@ -113,7 +119,11 @@ fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), Strin
         // Obsolete outputs are pruned only after the deployment succeeds.
         Some(_) => {}
         None => {
-            crate::remove_rime_build_artifact(&user_dir.join("build/.keytao-desktop-inputs.json"))?;
+            crate::remove_rime_build_artifact(
+                &crate::RuntimeDirs::resolve(user_dir, user_dir)
+                    .staging_dir
+                    .join(".keytao-desktop-inputs.json"),
+            )?;
             crate::invalidate_active_windows_rime_build(user_dir)?;
         }
     }
@@ -220,8 +230,13 @@ pub fn deploy_directory(user_dir: &Path) -> Result<(), String> {
     )?;
     #[cfg(target_os = "windows")]
     {
-        crate::write_file_atomic(&user_dir.join(WINDOWS_BUILD_SIGNATURE), &signature)
-            .map_err(|error| format!("write Windows build signature: {error}"))?;
+        crate::write_file_atomic(
+            &crate::RuntimeDirs::resolve(user_dir, user_dir)
+                .staging_dir
+                .join(WINDOWS_BUILD_SIGNATURE.trim_start_matches("build/")),
+            &signature,
+        )
+        .map_err(|error| format!("write Windows build signature: {error}"))?;
         crate::mark_windows_rime_build_repair_complete(user_dir)?;
     }
     Ok(())

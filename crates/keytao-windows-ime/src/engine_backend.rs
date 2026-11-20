@@ -273,15 +273,20 @@ impl InProcEngine {
         } else {
             None
         };
-        let user_dir = match &sandbox {
+        let control_root = match &sandbox {
             Some(data) => data.user_dir.clone(),
             None => default_user_data_dir().ok_or("cannot determine keytao data directory")?,
         };
         let reload_stamp_path = sandbox.as_ref().map_or_else(
-            || ReloadStamp::path(&user_dir),
+            || ReloadStamp::path(&control_root),
             |data| data.reload_stamp_path.clone(),
         );
-        let runtime = ImeRuntime::with_dirs(&user_dir, shared).with_ime_host();
+        let dirs = keytao_core::RuntimeDirs::resolve(&control_root, Path::new(&shared));
+        let runtime = ImeRuntime::with_dirs(
+            &control_root,
+            dirs.shared_data_dir.to_string_lossy().into_owned(),
+        )
+        .with_ime_host();
         // Reload after copying prebuilt files into the reinitialized sandbox runtime.
         if sandbox.is_some() && runtime.is_initialized() {
             runtime.reload_without_deploy()?;
@@ -318,10 +323,12 @@ impl InProcEngine {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("invalid public schema generation")?;
-        let user_dir = crate::appcontainer::cache_directory(
+        let dirs = keytao_core::RuntimeDirs::resolve(&deployed, Path::new(&bundled));
+        let user_dir = crate::appcontainer::cache_directory_for_package(
             &temporary_root.join("keytao-no-learning"),
             generation,
             &version,
+            dirs.active_package_key.as_deref(),
         );
         let stamp = format!("{}\n{version}\n{generation}", env!("CARGO_PKG_VERSION"));
         let marker = user_dir.join(".keytao-no-learning.version");
@@ -380,7 +387,9 @@ impl InProcEngine {
 }
 
 fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
-    copy_fallback_assets(source, source, target)
+    let source = keytao_core::RuntimeDirs::resolve(source, source).user_data_dir;
+    let target = keytao_core::RuntimeDirs::resolve(target, target).user_data_dir;
+    copy_fallback_assets(&source, &source, &target)
 }
 
 fn copy_fallback_assets(base: &Path, source: &Path, target: &Path) -> Result<(), String> {

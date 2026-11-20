@@ -1348,8 +1348,12 @@ pub(crate) fn validate_relative(relative: &str) -> Result<(), String> {
 pub(crate) fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     validate_relative(relative)?;
     let mut path = root.to_owned();
-    for part in relative.split('/') {
-        path.push(part);
+    for (index, part) in relative.split('/').enumerate() {
+        if index == 0 && part == "build" {
+            path = keytao_core::RuntimeDirs::resolve(root, root).staging_dir;
+        } else {
+            path.push(part);
+        }
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(format!("Package path contains a symlink: {relative}"));

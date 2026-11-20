@@ -21,6 +21,7 @@ use windows::{
 
 const SEED_MARKER: &str = ".keytao-public-seed.version";
 const SEED_FILES: &str = ".keytao-public-seed.files";
+#[cfg(test)]
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
 
 pub(crate) fn is_appcontainer() -> Result<bool> {
@@ -66,13 +67,17 @@ pub(crate) struct SandboxData {
     pub(crate) reload_stamp_path: PathBuf,
     pub(crate) reload_stamp_signature: Option<String>,
     generation: String,
+    active_package_key: Option<String>,
     pub(crate) changed: bool,
 }
 
 impl SandboxData {
     pub(crate) fn mark_loaded(&self) -> std::result::Result<(), String> {
-        std::fs::write(self.user_dir.join(SEED_MARKER), &self.generation)
-            .map_err(|error| format!("record sandbox schema deployment: {error}"))
+        std::fs::write(
+            self.user_dir.join(SEED_MARKER),
+            seed_generation(&self.generation, self.active_package_key.as_deref()),
+        )
+        .map_err(|error| format!("record sandbox schema deployment: {error}"))
     }
 }
 
@@ -170,10 +175,12 @@ pub(crate) fn validate_prebuilt(
     root: &Path,
     librime_version: &str,
 ) -> std::result::Result<(), String> {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    let version_file = dirs.staging_dir.join("keytao-librime-version.txt");
     for path in [
-        root.to_owned(),
-        root.join("build"),
-        root.join(LIBRIME_VERSION_FILE),
+        dirs.user_data_dir.clone(),
+        dirs.staging_dir.clone(),
+        version_file.clone(),
     ] {
         let kind = std::fs::symlink_metadata(&path)
             .map_err(|_| "需要重新部署".to_string())?
@@ -182,15 +189,14 @@ pub(crate) fn validate_prebuilt(
             return Err("symbolic link in prebuilt schema data".into());
         }
     }
-    let version = std::fs::read_to_string(root.join(LIBRIME_VERSION_FILE))
-        .map_err(|_| "需要重新部署".to_string())?;
+    let version = std::fs::read_to_string(version_file).map_err(|_| "需要重新部署".to_string())?;
     if librime_version.is_empty() || version.trim() != librime_version {
         return Err("需要重新部署".into());
     }
     let state = keytao_core::schema_install_state(root);
     if !state.installed
         || !state.schemas.iter().all(|schema| {
-            root.join("build")
+            dirs.staging_dir
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
         })
@@ -200,13 +206,34 @@ pub(crate) fn validate_prebuilt(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn cache_directory(root: &Path, generation: &str, librime_version: &str) -> PathBuf {
+    cache_directory_for_package(root, generation, librime_version, None)
+}
+
+pub(crate) fn cache_directory_for_package(
+    root: &Path,
+    generation: &str,
+    librime_version: &str,
+    active_package_key: Option<&str>,
+) -> PathBuf {
     let version: String = librime_version
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    root.join(format!("{}-{version}", env!("CARGO_PKG_VERSION")))
-        .join(generation)
+    let mut path = root.join(format!("{}-{version}", env!("CARGO_PKG_VERSION")));
+    if let Some(key) = active_package_key {
+        let key: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
+        path.push(format!("package-{key}"));
+    }
+    path.join(generation)
+}
+
+fn seed_generation(generation: &str, active_package_key: Option<&str>) -> String {
+    match active_package_key {
+        Some(key) => format!("{generation}\n{key}"),
+        None => generation.to_owned(),
+    }
 }
 
 pub(crate) fn prune_cache(root: &Path, active: Option<&Path>) {
@@ -243,6 +270,11 @@ pub(crate) fn prune_cache(root: &Path, active: Option<&Path>) {
 }
 
 fn prune_legacy_cache(root: &Path) {
+    let dirs = keytao_core::RuntimeDirs::resolve(root, root);
+    prune_legacy_cache_at(root, &dirs.staging_dir);
+}
+
+fn prune_legacy_cache_at(root: &Path, staging_dir: &Path) {
     if !std::fs::symlink_metadata(root)
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
     {
@@ -253,11 +285,26 @@ fn prune_legacy_cache(root: &Path) {
         .lines()
         .map(str::to_owned)
         .collect();
-    let build = root.join("build");
-    if std::fs::symlink_metadata(&build)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-    {
-        if let Ok(entries) = std::fs::read_dir(&build) {
+    let safe_path = |relative: &Path| {
+        let mut path = root.to_owned();
+        let safe = relative.components().all(|part| {
+            let Component::Normal(name) = part else {
+                return false;
+            };
+            path.push(name);
+            std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+        });
+        safe.then_some(path)
+    };
+    let build = staging_dir.strip_prefix(root).ok().filter(|relative| {
+        relative.file_name().is_some() && relative.parent().and_then(safe_path).is_some()
+    });
+    if let Some(relative) = build.filter(|_| {
+        std::fs::symlink_metadata(staging_dir)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    }) {
+        if let Ok(entries) = std::fs::read_dir(staging_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
@@ -266,7 +313,7 @@ fn prune_legacy_cache(root: &Path) {
                     .any(|suffix| name.ends_with(suffix))
                     || name == "keytao-librime-version.txt"
                 {
-                    files.push(format!("build/{name}"));
+                    files.push(relative.join(&*name).to_string_lossy().into_owned());
                 }
             }
         }
@@ -278,17 +325,13 @@ fn prune_legacy_cache(root: &Path) {
         if !public_asset(&relative) {
             continue;
         }
-        let mut path = root.to_owned();
-        let safe = relative.components().all(|part| {
-            path.push(part.as_os_str());
-            std::fs::symlink_metadata(&path)
-                .is_ok_and(|metadata| !metadata.file_type().is_symlink())
-        });
-        if safe && path.is_file() {
+        if let Some(path) = safe_path(&relative).filter(|path| path.is_file()) {
             let _ = std::fs::remove_file(path);
         }
     }
-    let _ = std::fs::remove_dir(build);
+    if build.is_some() {
+        let _ = std::fs::remove_dir(staging_dir);
+    }
     let _ = std::fs::remove_dir(root);
 }
 
@@ -343,12 +386,15 @@ fn prepare_at(
     if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid public schema generation".into());
     }
-    let source = public_root.join(&generation);
-    validate_prebuilt(&source, librime_version)?;
+    let source_root = public_root.join(&generation);
+    let source_dirs = keytao_core::RuntimeDirs::resolve(&source_root, &source_root);
+    let dirs = keytao_core::RuntimeDirs::resolve(private, private);
+    validate_prebuilt(&source_root, librime_version)?;
+    let seed_generation = seed_generation(&generation, source_dirs.active_package_key.as_deref());
     let changed = std::fs::read_to_string(private.join(SEED_MARKER))
         .ok()
         .as_deref()
-        != Some(&generation)
+        != Some(seed_generation.as_str())
         || validate_prebuilt(private, librime_version).is_err()
         || !keytao_core::schema_install_state(private).deployed
         || keytao_core::windows_rime_build_repair_required(private);
@@ -357,6 +403,7 @@ fn prepare_at(
         reload_stamp_path,
         reload_stamp_signature,
         generation,
+        active_package_key: source_dirs.active_package_key,
         changed,
     };
     if !changed {
@@ -364,7 +411,7 @@ fn prepare_at(
         return Ok(result);
     }
     // First deployments write only into the package's own private directory.
-    std::fs::create_dir_all(private)
+    std::fs::create_dir_all(&dirs.user_data_dir)
         .map_err(|error| format!("create sandbox schema cache: {error}"))?;
     let mut copied = Vec::new();
     fn copy_assets(
@@ -402,7 +449,12 @@ fn prepare_at(
         }
         Ok(())
     }
-    copy_assets(&source, &source, private, &mut copied)?;
+    copy_assets(
+        &source_dirs.user_data_dir,
+        &source_dirs.user_data_dir,
+        &dirs.user_data_dir,
+        &mut copied,
+    )?;
     keytao_core::rebase_active_scheme_manifest(private)?;
     if let Ok(previous) = std::fs::read_to_string(private.join(SEED_FILES)) {
         for name in previous
@@ -419,7 +471,7 @@ fn prepare_at(
                 if relative.components().count() == 1
                     && relative.to_string_lossy().ends_with(".schema.yaml")
                 {
-                    let compiled = private.join("build").join(&relative);
+                    let compiled = dirs.staging_dir.join(&relative);
                     if compiled.is_file() {
                         std::fs::remove_file(compiled).map_err(|error| error.to_string())?;
                     }
@@ -714,6 +766,45 @@ mod tests {
         assert_eq!(original, cache_directory(root, &first, VERSION));
         assert!(cache_directory(root, &first, "other/version").starts_with(root));
         assert_eq!(original.file_name().unwrap(), first.as_str());
+    }
+
+    #[test]
+    fn cache_identity_includes_package_key_and_preserves_flat_paths() {
+        let root = Path::new("cache");
+        let generation = "1".repeat(64);
+        let legacy = root
+            .join(format!("{}-312e302e30", env!("CARGO_PKG_VERSION")))
+            .join(&generation);
+        assert_eq!(
+            cache_directory_for_package(root, &generation, VERSION, None),
+            legacy
+        );
+        let first = cache_directory_for_package(root, &generation, VERSION, Some("cloud/a"));
+        let second = cache_directory_for_package(root, &generation, VERSION, Some("cloud/b"));
+        assert_ne!(first, second);
+        assert_ne!(first, legacy);
+        assert!(first.starts_with(root));
+        assert_eq!(seed_generation(&generation, None), generation);
+        assert_ne!(
+            seed_generation(&generation, Some("cloud/a")),
+            seed_generation(&generation, Some("cloud/b")),
+        );
+    }
+
+    #[test]
+    fn legacy_cache_prunes_compiled_files_from_resolved_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let flat = root.path().join("build");
+        let staging = root.path().join("runtime/keytao/build");
+        for dir in [&flat, &staging] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("obsolete.table.bin"), b"compiled dictionary").unwrap();
+        }
+
+        prune_legacy_cache_at(root.path(), &staging);
+
+        assert!(!staging.exists());
+        assert!(flat.join("obsolete.table.bin").is_file());
     }
 
     #[test]

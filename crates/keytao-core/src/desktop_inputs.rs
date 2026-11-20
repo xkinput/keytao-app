@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 const RECEIPT: &str = "build/.keytao-desktop-inputs.json";
@@ -285,7 +285,7 @@ pub(crate) fn record(
             files: snapshot.clone(),
         })
     };
-    let path = root.join(RECEIPT);
+    let path = runtime_path(root, RECEIPT);
     let Some(receipt) = collect() else {
         discard_unverified_legacy_inputs(root, shared, snapshot)?;
         return match fs::remove_file(path) {
@@ -327,7 +327,8 @@ fn discard_unverified_legacy_inputs(
         // complete_deployment may have paired post-compile edits with older build outputs.
         trusted.retain(|id, _| !untrusted.contains(id));
         let bytes = serde_json::to_vec(&trusted).map_err(|error| error.to_string())?;
-        write_file_atomic(&root.join(LEGACY_RECEIPT), &bytes).map_err(|error| error.to_string())?;
+        write_file_atomic(&runtime_path(root, LEGACY_RECEIPT), &bytes)
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -644,6 +645,15 @@ fn safe_relative(name: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+fn runtime_path(root: &Path, name: &str) -> PathBuf {
+    match Path::new(name).strip_prefix("build") {
+        Ok(name) => crate::RuntimeDirs::resolve(root, root)
+            .staging_dir
+            .join(name),
+        Err(_) => root.join(name),
+    }
+}
+
 fn regular_metadata(root: &Path, name: &str) -> Result<Option<fs::Metadata>, String> {
     if !safe_relative(name) {
         return Err("unsupported input path".into());
@@ -651,7 +661,11 @@ fn regular_metadata(root: &Path, name: &str) -> Result<Option<fs::Metadata>, Str
     let mut path = root.to_path_buf();
     let components: Vec<_> = Path::new(name).components().collect();
     for (index, component) in components.iter().enumerate() {
-        path.push(component.as_os_str());
+        if index == 0 && component.as_os_str() == "build" {
+            path = crate::RuntimeDirs::resolve(root, root).staging_dir;
+        } else {
+            path.push(component.as_os_str());
+        }
         match fs::symlink_metadata(&path) {
             Ok(metadata)
                 if if index + 1 == components.len() {
@@ -678,7 +692,7 @@ fn read_regular(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
     }
     #[cfg(test)]
     INPUT_READS.with(|reads| *reads.borrow_mut().entry(root.join(name)).or_default() += 1);
-    fs::read(root.join(name))
+    fs::read(runtime_path(root, name))
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -772,9 +786,10 @@ fn resolve(
 }
 
 fn outputs_present(root: &Path, outputs: &BTreeSet<String>) -> Option<bool> {
+    let dirs = crate::RuntimeDirs::resolve(root, root);
     let mut present = true;
     for output in outputs {
-        let path = root.join("build").join(output);
+        let path = dirs.staging_dir.join(output);
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_file() => present &= metadata.len() != 0,
             Ok(_) => return None,
