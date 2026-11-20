@@ -56,6 +56,14 @@ mod grammar_tests;
 mod reload_stamp_cache;
 mod runtime_dirs;
 pub use runtime_dirs::RuntimeDirs;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub mod switcher_model;
 mod schema_inputs;
 pub use schema_inputs::{record_schema_input_fingerprints, schema_input_fingerprints};
 mod rime_lua;
@@ -3326,6 +3334,47 @@ mod desktop {
             extract_state_readonly(self)
         }
 
+        pub(super) fn open_schema_switcher(&self) -> ImeState {
+            let _rime = rime_api_lock();
+            let mut hotkeys = Vec::new();
+            // SAFETY: config and session access are serialized by the librime lock.
+            unsafe {
+                let api = rime_get_api();
+                if let (Some(open), Some(close)) = (
+                    rime_api_member!(api, config_open),
+                    rime_api_member!(api, config_close),
+                ) {
+                    let mut config: RimeConfig = std::mem::zeroed();
+                    if open(c"default".as_ptr(), &mut config) != 0 {
+                        hotkeys = config_string_list_locked(&mut config, "switcher/hotkeys");
+                        close(&mut config);
+                    }
+                }
+                if let Some(simulate) = rime_api_member!(api, simulate_key_sequence) {
+                    if hotkeys.is_empty() {
+                        hotkeys = vec!["F4".into(), "Control+grave".into()];
+                    }
+                    for hotkey in hotkeys {
+                        if hotkey.is_empty()
+                            || hotkey.chars().any(|ch| ch.is_whitespace() || matches!(ch, '{' | '}'))
+                        {
+                            continue;
+                        }
+                        if let Ok(sequence) = CString::new(format!("{{{hotkey}}}")) {
+                            simulate(self.session.session_id, sequence.as_ptr());
+                            let state = extract_state_with_commit(self);
+                            if state.schema_id == ".default" || state.committed.is_some() {
+                                return state;
+                            }
+                        }
+                    }
+                    return extract_state_readonly(self);
+                }
+            }
+            self.session.process_key(key_event(key_policy::XK_F4, 0));
+            extract_state_with_commit(self)
+        }
+
         /// Pick the `index`-th candidate of the current page through librime's
         /// own API, so that selection does not depend on `menu/select_keys`
         /// being long enough or on the schema's alphabet.
@@ -5496,6 +5545,7 @@ pub struct ImeRuntimeSession {
 #[derive(Default)]
 struct PendingRuntimeInput {
     state_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+    package_menu: Option<switcher_model::Menu>,
 }
 
 #[cfg(any(
@@ -5606,6 +5656,7 @@ struct ProcessRimeState {
     /// engines before finalizing librime; entries die with their session.
     sessions: Mutex<Vec<WeakRuntimeSession>>,
     build: EngineBuildLock,
+    package_reload: Mutex<Option<(PathBuf, String, u64)>>,
     prewarm_scheduled: AtomicBool,
     lua_retry_after: Mutex<Option<(PathBuf, Instant)>>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -5625,6 +5676,7 @@ static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     reload_barrier: RwLock::new(()),
     sessions: Mutex::new(Vec::new()),
     build: EngineBuildLock::new(),
+    package_reload: Mutex::new(None),
     prewarm_scheduled: AtomicBool::new(false),
     lua_retry_after: Mutex::new(None),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -5646,6 +5698,9 @@ impl ProcessRimeState {
     fn drop_live_engines(&self) {
         let mut sessions = lock_ignore_poison(&self.sessions);
         sessions.retain(|session| {
+            if let Some(pending) = session.pending.upgrade() {
+                lock_ignore_poison(&pending).package_menu = None;
+            }
             let Some(session) = session.inner.upgrade() else {
                 return false;
             };
@@ -5930,6 +5985,41 @@ impl ImeRuntime {
         switch_ready_package(&dirs.user, Path::new(&dirs.shared), key)
     }
 
+    fn switch_package_from_ime(
+        &self,
+        key: &str,
+        finish_composition: impl FnOnce(),
+    ) -> Result<(), String> {
+        // Keep a local stamp watcher from reloading between publishing the
+        // switch and bringing up the selected package's native switcher.
+        let mut applied = try_lock_ignore_poison(&PROCESS_RIME.package_reload)
+            .ok_or("Rime package reload is busy")?;
+        let dirs = self.data_dirs()?;
+        if deployment_in_progress(&dirs.user) {
+            return Err("Rime deployment is busy".into());
+        }
+        isolated_deploy::try_switch_ready_package(&dirs.user, Path::new(&dirs.shared), key)?;
+        let signature = ReloadStamp::current_signature(&dirs.user);
+        finish_composition();
+        self.reload_without_deploy_inner()?;
+        let target = RuntimeDirs::isolated_user_data_dir(&dirs.user, key);
+        if target.as_deref() != Some(desktop::loaded_schema_root(&dirs.user).as_path()) {
+            return Err(PACKAGE_SWITCH_PENDING.into());
+        }
+        *applied = signature.map(|signature| (dirs.user, signature, self.generation()));
+        Ok(())
+    }
+
+    pub fn has_applied_package_switch(&self, signature: &str) -> bool {
+        lock_ignore_poison(&PROCESS_RIME.package_reload)
+            .as_ref()
+            .is_some_and(|(root, applied, generation)| {
+                applied == signature
+                    && *generation == self.generation()
+                    && self.data_dirs().is_ok_and(|dirs| dirs.user == *root)
+            })
+    }
+
     fn apply_pending_switch_request(&self, root: &Path) -> Result<(), String> {
         if self.0.ime_host {
             PROCESS_RIME.apply_pending_switch_request(root)?;
@@ -6123,6 +6213,22 @@ impl ImeRuntime {
     }
 
     pub fn reload_without_deploy(&self) -> Result<(), String> {
+        self.reload_without_deploy_changed().map(|_| ())
+    }
+
+    pub fn reload_without_deploy_changed(&self) -> Result<bool, String> {
+        let applied = lock_ignore_poison(&PROCESS_RIME.package_reload);
+        if applied.as_ref().is_some_and(|(root, signature, generation)| {
+            *generation == self.generation()
+                && self.data_dirs().is_ok_and(|dirs| dirs.user == *root)
+                && ReloadStamp::current_signature(root).as_deref() == Some(signature.as_str())
+        }) {
+            return Ok(false);
+        }
+        self.reload_without_deploy_inner().map(|()| true)
+    }
+
+    fn reload_without_deploy_inner(&self) -> Result<(), String> {
         let _build = PROCESS_RIME
             .build
             .acquire()
@@ -6521,8 +6627,48 @@ impl Default for ImeRuntime {
 ))]
 impl ImeRuntimeSession {
     pub fn state(&self) -> ImeState {
-        self.with_engine(Engine::state)
+        self.with_package_menu(|menu| menu.state())
+            .or_else(|| self.with_engine(Engine::state))
             .unwrap_or_else(ImeState::empty)
+    }
+
+    fn with_package_menu<T>(&self, action: impl FnOnce(&mut switcher_model::Menu) -> T) -> Option<T> {
+        let mut pending = lock_ignore_poison(&self.pending);
+        if self.input_policy().composing {
+            pending.package_menu.as_mut().map(action)
+        } else {
+            pending.package_menu = None;
+            None
+        }
+    }
+
+    fn close_package_menu(&self) {
+        lock_ignore_poison(&self.pending).package_menu = None;
+    }
+
+    fn decide_package_menu(
+        &self,
+        decide: impl FnOnce(&mut switcher_model::Menu) -> switcher_model::Decision,
+    ) -> Option<KeyProcessResult> {
+        let decision = {
+            let mut pending = lock_ignore_poison(&self.pending);
+            if !self.input_policy().composing {
+                pending.package_menu = None;
+                return None;
+            }
+            let decision = decide(pending.package_menu.as_mut()?);
+            if decision != switcher_model::Decision::Stay {
+                pending.package_menu = None;
+            }
+            decision
+        };
+        self.apply_package_decision(decision)
+    }
+
+    pub fn should_forward_consumed_shortcut(&self, key: u32, mask: u32) -> bool {
+        key_policy::should_forward_consumed_shortcut(key, mask)
+            && !(switcher_model::is_hotkey(key, mask)
+                && RuntimeDirs::isolation_enabled(&self.dirs.user))
     }
 
     /// Called on the prewarm worker, without engine locks. Frontends can post
@@ -6533,6 +6679,9 @@ impl ImeRuntimeSession {
 
     /// Inspect candidates without waiting for or rebuilding a busy engine.
     pub fn peek_state(&self) -> ImeState {
+        if let Some(state) = self.with_package_menu(|menu| menu.state()) {
+            return state;
+        }
         let state =
             self.with_engine_access_mode(false, false, false, |engine, _, _, _, _| engine.state());
         if state.is_none() && self.runtime_can_resume() {
@@ -6605,6 +6754,105 @@ impl ImeRuntimeSession {
     }
 
     fn process_keys_now(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
+        if !keys.iter().any(|&(key, mask)| switcher_model::is_hotkey(key, mask))
+            && self.with_package_menu(|_| ()).is_none()
+        {
+            return self.process_native_keys(keys);
+        }
+        if !RuntimeDirs::isolation_enabled(&self.dirs.user) {
+            self.close_package_menu();
+            if keys.iter().all(|&(key, _)| key != switcher_model::OPEN_PACKAGE_MENU) {
+                return self.process_native_keys(keys);
+            }
+        }
+        key_batch::process_keys(keys, |key, mask| {
+            self.process_package_key(key, mask)
+                .or_else(|| self.process_native_keys(&[(key, mask)]))
+                .unwrap_or_else(|| KeyProcessResult { state: self.peek_state(), accepted: false })
+        })
+    }
+
+    fn process_package_key(&self, key: u32, mask: u32) -> Option<KeyProcessResult> {
+        if let Some(result) = self.decide_package_menu(|menu| menu.key(key, mask)) {
+            return Some(result);
+        }
+        if switcher_model::is_hotkey(key, mask)
+            && try_lock_ignore_poison(&self.inner).is_some_and(|inner| inner.ime_host)
+        {
+            if let Some(mut menu) =
+                switcher_model::Menu::load(&self.dirs.user, Path::new(&self.dirs.shared))
+            {
+                let opened = self.with_engine_and_policy(|engine, policy| {
+                    let state = engine.state();
+                    if !policy.composing || state.schema_id == ".default" {
+                        return None;
+                    }
+                    menu.keep_input_mode(state);
+                    let state = menu.state();
+                    lock_ignore_poison(&self.pending).package_menu = Some(menu);
+                    Some(KeyProcessResult { state, accepted: true })
+                });
+                if let Some(result) = opened.flatten() {
+                    return Some(result);
+                }
+            }
+        }
+        (key == switcher_model::OPEN_PACKAGE_MENU)
+            .then(|| KeyProcessResult { state: self.peek_state(), accepted: false })
+    }
+
+    fn apply_package_decision(&self, decision: switcher_model::Decision) -> Option<KeyProcessResult> {
+        use switcher_model::Decision;
+        match decision {
+            Decision::Pass => return None,
+            Decision::Native => return Some(self.open_native_switcher()),
+            Decision::Switch(key) => {
+                let runtime = ImeRuntime::with_dirs(&self.dirs.user, &self.dirs.shared).with_ime_host();
+                let mut committed = None;
+                let switched = runtime.switch_package_from_ime(&key, || {
+                    committed = self.with_engine_and_policy(|engine, policy| {
+                        if !policy.composing {
+                            return None;
+                        }
+                        let raw = engine.raw_input().filter(|raw| !raw.is_empty());
+                        engine.commit_composition().committed.or(raw)
+                    }).flatten();
+                });
+                let mut result = match switched {
+                    Ok(()) => self.open_native_switcher(),
+                    Err(error) => {
+                        crate::rt_log!(Level::Info, "error", "package_switch", msg = error);
+                        KeyProcessResult { state: self.state(), accepted: true }
+                    }
+                };
+                if let Some(mut text) = committed {
+                    if let Some(native) = result.state.committed.take() {
+                        text.push_str(&native);
+                    }
+                    result.state.committed = Some(text);
+                }
+                return Some(result);
+            }
+            Decision::Close | Decision::Stay => {}
+        }
+        Some(KeyProcessResult { state: self.state(), accepted: true })
+    }
+
+    fn open_native_switcher(&self) -> KeyProcessResult {
+        let state = self.with_engine_and_mode(|engine, policy, _, _, _| {
+            if policy.composing {
+                engine.open_schema_switcher()
+            } else {
+                engine.state()
+            }
+        });
+        KeyProcessResult {
+            state: state.unwrap_or_else(|| self.peek_state()),
+            accepted: true,
+        }
+    }
+
+    fn process_native_keys(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
@@ -6709,6 +6957,9 @@ impl ImeRuntimeSession {
                 accepted: false,
             });
         }
+        if let Some(result) = self.process_package_key(key_policy::XK_RETURN, 0) {
+            return Some(result);
+        }
         self.with_engine_access_mode(true, false, true, |engine, policy, _, ime_host, before| {
             if policy.composing {
                 let mut result = engine.process_enter();
@@ -6744,6 +6995,11 @@ impl ImeRuntimeSession {
     /// a composing one.
     pub fn set_input_policy(&self, policy: InputContextPolicy) -> Option<ImeState> {
         self.policy.set(policy);
+        if !policy.composing {
+            self.close_package_menu();
+        } else if let Some(state) = self.with_package_menu(|menu| menu.state()) {
+            return Some(state);
+        }
         self.with_engine_access_mode(false, false, false, |engine, policy, _, _, _| {
             if !policy.composing {
                 engine.clear_composition()
@@ -6754,6 +7010,11 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_candidate_on_page(&self, index: usize) -> Option<ImeState> {
+        if let Some(result) = self.decide_package_menu(|menu| {
+            menu.page_index(index).map_or(switcher_model::Decision::Stay, |index| menu.select(index))
+        }) {
+            return Some(result.state);
+        }
         self.with_engine_and_mode(|engine, _, _, ime_host, before| {
             let mut state = engine.select_candidate_on_page(index);
             if let Err(error) =
@@ -6766,18 +7027,33 @@ impl ImeRuntimeSession {
     }
 
     pub fn highlight_candidate_on_page(&self, index: usize) -> Option<ImeState> {
+        if let Some(state) = self.with_package_menu(|menu| {
+            menu.highlight(index);
+            menu.state()
+        }) {
+            return Some(state);
+        }
         self.with_engine(|engine| engine.highlight_candidate_on_page(index))
     }
 
     pub fn candidate_is_user_phrase_on_page(&self, index: usize) -> Option<bool> {
+        if self.with_package_menu(|_| ()).is_some() {
+            return Some(false);
+        }
         self.with_engine(|engine| engine.candidate_is_user_phrase_on_page(index))
     }
 
     pub fn delete_candidate_on_page_result(&self, index: usize) -> Option<(ImeState, bool)> {
+        if let Some(state) = self.with_package_menu(|menu| menu.state()) {
+            return Some((state, false));
+        }
         self.with_engine(|engine| engine.delete_candidate_on_page_result(index))
     }
 
     pub fn select_candidate_global(&self, index: usize) -> Option<ImeState> {
+        if let Some(result) = self.decide_package_menu(|menu| menu.select(index)) {
+            return Some(result.state);
+        }
         self.with_engine_and_mode(|engine, _, _, ime_host, before| {
             let mut state = engine.select_candidate_global(index);
             if let Err(error) =
@@ -6810,6 +7086,9 @@ impl ImeRuntimeSession {
     }
 
     pub fn all_candidates_limited(&self, max_count: usize) -> Option<Vec<Candidate>> {
+        if let Some(candidates) = self.with_package_menu(|menu| menu.candidates(max_count)) {
+            return Some(candidates);
+        }
         self.with_engine(|engine| engine.all_candidates_limited(max_count))
     }
 
@@ -6826,6 +7105,7 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
+        self.close_package_menu();
         self.context_ascii_mode.store(0, Ordering::Release);
         self.with_engine_and_mode(|engine, _, _, ime_host, before| {
             let mut state = match engine.select_schema(schema_id) {
@@ -6849,6 +7129,12 @@ impl ImeRuntimeSession {
     }
 
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {
+        if let Some(state) = self.with_package_menu(|menu| {
+            menu.change_page(backward);
+            menu.state()
+        }) {
+            return Some(state);
+        }
         self.with_input_change(|engine| engine.change_page(backward))
     }
 
@@ -6952,6 +7238,7 @@ impl ImeRuntimeSession {
     }
 
     fn with_input_change<T>(&self, action: impl FnOnce(&Engine) -> T) -> Option<T> {
+        self.close_package_menu();
         self.with_engine_and_mode(|engine, _, _, _, _| action(engine))
     }
 

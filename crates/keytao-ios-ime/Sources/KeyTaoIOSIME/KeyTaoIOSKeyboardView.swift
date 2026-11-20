@@ -575,6 +575,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
+    func closeRimeMenu() {
+        if functionPanelActive && functionPanelMode == .rime { closeCandidatePanel() }
+    }
+
     /// Controls that need a librime entry point the running build does not
     /// export are dropped instead of being drawn and then synthesizing a key
     /// stroke: paging keys leave the layout, candidates stop taking taps.
@@ -2056,7 +2060,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if candidateMenu != nil { return .candidateMenu }
         if message != nil { return .statusMessage }
         if functionPanelActive { return .functionPanel }
-        if usesFullHeightSymbolKeyboard() { return .fullHeightSymbolKeyboard }
+        if !state.isPackageSwitcher && usesFullHeightSymbolKeyboard() { return .fullHeightSymbolKeyboard }
         if !state.candidatePanel.candidates.isEmpty { return .candidates }
         if backspacePreviewText?.isEmpty == false { return .backspaceHint }
         if !candidatePanelExpanded, !hasActiveComposition, visibleClipboardSuggestion != nil {

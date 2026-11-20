@@ -22,7 +22,11 @@ pub(crate) fn legacy_dictionary_names(root: &Path) -> Result<BTreeSet<String>, C
         let Some(name) = filename.to_str().and_then(|s| s.strip_suffix(".userdb")) else {
             continue;
         };
-        if !valid_name(name) || !entry.file_type()?.is_dir() {
+        let is_directory = entry.file_type()?.is_dir();
+        if is_directory && name.strip_prefix('.').is_some_and(valid_name) {
+            continue;
+        }
+        if !valid_name(name) || !is_directory {
             return Err(CoreError::Other(format!(
                 "Invalid legacy user dictionary directory: {}",
                 entry.path().display()
@@ -245,6 +249,28 @@ fn verify_current_manifest(database: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn dictionary_discovery_skips_temp_directories_and_rejects_invalid_entries() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        for name in [".temp.userdb", ".backup.userdb", "learned.userdb"] {
+            fs::create_dir(root.join(name)).unwrap();
+        }
+        assert_eq!(
+            legacy_dictionary_names(root).unwrap(),
+            BTreeSet::from(["learned".into()])
+        );
+
+        for name in [".userdb", "..temp.userdb"] {
+            let invalid = root.join(name);
+            fs::create_dir(&invalid).unwrap();
+            assert!(legacy_dictionary_names(root).is_err(), "{name}");
+            fs::remove_dir(invalid).unwrap();
+        }
+        fs::write(root.join(".file.userdb"), b"invalid").unwrap();
+        assert!(legacy_dictionary_names(root).is_err());
+    }
 
     #[test]
     fn userdb_snapshots_use_private_sync_and_only_matching_runtimes() {

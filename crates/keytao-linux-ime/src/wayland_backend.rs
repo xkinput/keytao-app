@@ -708,7 +708,10 @@ impl App {
         // Forward consumed Ctrl shortcuts that the app should still
         // receive (e.g. Ctrl+` for terminal quake toggle). Match the
         // precise list from the original linux.rs implementation.
-        if key_policy::should_forward_consumed_shortcut(sym_raw, effective_mods) {
+        if self
+            .session
+            .should_forward_consumed_shortcut(sym_raw, effective_mods)
+        {
             self.forward_unhandled_key(evdev_keycode, sym_raw);
         } else {
             // The compositor stopped repeating this key when the grab took it,

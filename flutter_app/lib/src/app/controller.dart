@@ -181,6 +181,8 @@ class AppController extends ChangeNotifier {
   bool checkingAppUpdate = false;
   String? appUpdateError;
   List<InstalledPackageDto> installedPackages = [];
+  List<IsolatedPackageDto> isolatedPackages = [];
+  int _isolatedPackagesRequest = 0;
   List<SchemeUpdateDto> schemeUpdates = [];
   Map<String, String> dismissedSchemeUpdates = {};
   bool schemeUpdatesLoading = false;
@@ -1114,6 +1116,7 @@ class AppController extends ChangeNotifier {
       rimeIceError ??= errorText(failure);
     }
     await _readSchemas();
+    await refreshIsolatedPackages();
     await _readSchemaSwitches();
     activeSchemaLogoPath = await core.activeSchemaLogoPath();
     if (activeSchemaLogoPath case final path?) {
@@ -1190,6 +1193,22 @@ class AppController extends ChangeNotifier {
       _changed();
     } catch (_) {
       // Keep the last schema visible if a foreground refresh is unavailable.
+    }
+  }
+
+  Future<void> refreshIsolatedPackages() async {
+    final request = ++_isolatedPackagesRequest;
+    if (local?.runtimeIsolation != true) {
+      isolatedPackages = [];
+      return;
+    }
+    try {
+      final packages = await core.isolatedPackages();
+      if (_disposed || request != _isolatedPackagesRequest) return;
+      isolatedPackages = packages;
+      _changed();
+    } catch (failure) {
+      debugPrint('Package selector refresh failed: ${errorText(failure)}');
     }
   }
 
@@ -2118,6 +2137,40 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   }
+
+  Future<bool> switchPackage(String key) =>
+      run(() => _switchSchemePackage(key));
+
+  Future<PackageMigrationReportDto> previewPackageMigration() =>
+      core.previewPackageMigration();
+
+  Future<bool> migrateToIsolated() => run(() async {
+    packageError = null;
+    _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      final report = await core.migrateToIsolated();
+      await _switchSchemePackage(report.runtimePackage);
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<bool> useLegacyLayout() => run(() async {
+    packageError = null;
+    try {
+      await core.useLegacyLayout();
+      await _readLocal();
+      await _readInstalledPackages();
+      unawaited(refreshCandidatePreview());
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
+    }
+  });
 
   Future<bool> removeSchemePackage(String key) {
     final package = installedPackageFor(key);

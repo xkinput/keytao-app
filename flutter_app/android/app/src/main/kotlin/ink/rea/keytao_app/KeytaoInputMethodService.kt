@@ -730,7 +730,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         } else {
             -1
         }
-        if (!composing && !currentState.hasComposition) return
+        if (!composing && (currentState.isPackageSwitcher || !currentState.hasComposition)) return
         val insideComposition = candidatesStart >= 0 &&
             candidatesEnd >= candidatesStart &&
             newSelStart >= candidatesStart &&
@@ -954,6 +954,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         onUserInteraction()
         discardPendingHostBackspace()
         if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (!panelBackDownConsumed && currentState.isPackageSwitcher) {
+                applyState(engine.processKey(AndroidKeyMapper.XK_ESCAPE, 0))
+                panelBackDownConsumed = true
+            }
             if (panelBackDownConsumed || keyboardView?.closeOverlayPanel() == true) {
                 panelBackDownConsumed = true
                 return true
@@ -1027,7 +1031,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }
             hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
             if (!result.accepted) {
-                KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
+                if (key.keyCode != AndroidKeyMapper.OPEN_PACKAGE_MENU) {
+                    KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
+                }
                 pendingKeystrokeStartNs = 0L
                 return passKeyDownToHost(keyCode, event)
             }
@@ -1665,6 +1671,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleBackspace() {
+        if (currentState.isPackageSwitcher) {
+            applyState(engine.processKey(AndroidKeyMapper.XK_BACK_SPACE, 0))
+            return
+        }
         emojiSearchQuery?.let { query ->
             if (currentState.hasComposition && !bypassesComposition()) {
                 applyState(engine.processKey(AndroidKeyMapper.XK_BACK_SPACE, 0))
@@ -2159,6 +2169,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun openRimeMenu() {
+        if (!bypassesComposition()) {
+            val state = engine.processKey(AndroidKeyMapper.OPEN_PACKAGE_MENU, 0)
+            if (state.accepted) {
+                applyState(state)
+                return
+            }
+        }
         refreshRimeOptions()
     }
 
@@ -3166,6 +3183,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun commitCompositionBeforeDirectInput() {
         if (!composing && !currentState.hasComposition) return
         if (currentInputConnection == null) return
+        if (currentState.isPackageSwitcher) {
+            applyState(engine.clearComposition())
+            return
+        }
         var fallbackState = currentState
         if (!editorUpdatePending && engine.nativeReady) {
             val selected = if (currentState.candidates.isNotEmpty()) {
@@ -3248,12 +3269,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     if (regionStart >= 0) regionStart += state.committed.length
                 }
 
-                if (state.preedit.isNotEmpty()) {
+                if (state.preedit.isNotEmpty() && !state.isPackageSwitcher) {
                     connection.setComposingText(state.preedit, 1)
                     composing = true
                     composingRegionStart = regionStart
                     applyPreeditCaret(connection, state, regionStart)
-                } else if (composing) {
+                } else if (composing && !state.isPackageSwitcher) {
                     connection.commitText("", 1)
                     composing = false
                 }

@@ -190,6 +190,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 dco_decode_isize(dynamic raw);
 
   @protected
+  IsolatedPackageDto dco_decode_isolated_package_dto(dynamic raw);
+
+  @protected
   LinuxImeStatusDto dco_decode_linux_ime_status_dto(dynamic raw);
 
   @protected
@@ -200,6 +203,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<InstalledPackageDto> dco_decode_list_installed_package_dto(dynamic raw);
+
+  @protected
+  List<IsolatedPackageDto> dco_decode_list_isolated_package_dto(dynamic raw);
 
   @protected
   List<PackageKeptBackupDto> dco_decode_list_package_kept_backup_dto(
@@ -640,6 +646,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 sse_decode_isize(SseDeserializer deserializer);
 
   @protected
+  IsolatedPackageDto sse_decode_isolated_package_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LinuxImeStatusDto sse_decode_linux_ime_status_dto(
     SseDeserializer deserializer,
   );
@@ -652,6 +663,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<InstalledPackageDto> sse_decode_list_installed_package_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<IsolatedPackageDto> sse_decode_list_isolated_package_dto(
     SseDeserializer deserializer,
   );
 
@@ -1223,6 +1239,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_isize(PlatformInt64 self, SseSerializer serializer);
 
   @protected
+  void sse_encode_isolated_package_dto(
+    IsolatedPackageDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_linux_ime_status_dto(
     LinuxImeStatusDto self,
     SseSerializer serializer,
@@ -1240,6 +1262,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_installed_package_dto(
     List<InstalledPackageDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_isolated_package_dto(
+    List<IsolatedPackageDto> self,
     SseSerializer serializer,
   );
 

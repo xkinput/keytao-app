@@ -48,7 +48,7 @@ pub fn deploy_packages(
     if !RuntimeDirs::isolation_enabled(control_root) {
         return Err("package isolation is disabled".into());
     }
-    let _deploy = deploy_lock(control_root)?;
+    let _deploy = deploy_lock(control_root, true)?;
     crate::with_rime_finalized(|| {
         deploy_packages_with(
             control_root,
@@ -166,7 +166,7 @@ impl Drop for ProgressHint<'_> {
     }
 }
 
-fn lock(path: &Path) -> Result<fs::File, String> {
+fn lock(path: &Path, wait: bool) -> Result<fs::File, String> {
     if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
         return Err(format!("invalid deployment lock: {}", path.display()));
     }
@@ -176,8 +176,11 @@ fn lock(path: &Path) -> Result<fs::File, String> {
         .truncate(false)
         .open(path)
         .map_err(|error| format!("open deployment lock: {error}"))?;
-    file.lock()
-        .map_err(|error| format!("lock deployment: {error}"))?;
+    if wait {
+        file.lock().map_err(|error| format!("lock deployment: {error}"))?;
+    } else {
+        file.try_lock().map_err(|error| format!("lock deployment: {error}"))?;
+    }
     Ok(file)
 }
 
@@ -186,12 +189,12 @@ pub fn with_isolated_package_lock<T>(
     action: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let _deploy = RuntimeDirs::isolation_enabled(control_root)
-        .then(|| deploy_lock(control_root))
+        .then(|| deploy_lock(control_root, true))
         .transpose()?;
     action()
 }
 
-fn deploy_lock(control_root: &Path) -> Result<fs::File, String> {
+fn deploy_lock(control_root: &Path, wait: bool) -> Result<fs::File, String> {
     let runtime = control_root.join("runtime");
     match fs::create_dir(&runtime) {
         Ok(()) => {}
@@ -201,7 +204,7 @@ fn deploy_lock(control_root: &Path) -> Result<fs::File, String> {
     if !fs::symlink_metadata(&runtime).is_ok_and(|metadata| metadata.is_dir()) {
         return Err("invalid isolated runtime directory".into());
     }
-    lock(&runtime.join(DEPLOY_LOCK))
+    lock(&runtime.join(DEPLOY_LOCK), wait)
 }
 
 pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
@@ -212,13 +215,25 @@ pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
 
 /// The IME can select a committed build. Only the app can prepare an unready package.
 pub fn switch_ready_package(control_root: &Path, shared: &Path, key: &str) -> Result<(), String> {
+    switch_package(control_root, shared, key, true)
+}
+
+pub(crate) fn try_switch_ready_package(
+    control_root: &Path,
+    shared: &Path,
+    key: &str,
+) -> Result<(), String> {
+    switch_package(control_root, shared, key, false)
+}
+
+fn switch_package(control_root: &Path, shared: &Path, key: &str, wait: bool) -> Result<(), String> {
     let not_ready = || "请在键道 App 部署此方案包".to_owned();
     let dirs = RuntimeDirs::for_package(control_root, shared, key).ok_or_else(not_ready)?;
     if !dirs.user_data_dir.is_dir() {
         return Err(not_ready());
     }
-    let _deploy = deploy_lock(control_root)?;
-    let _materialize = lock(&dirs.user_data_dir.join(MATERIALIZE_LOCK))?;
+    let _deploy = deploy_lock(control_root, wait)?;
+    let _materialize = lock(&dirs.user_data_dir.join(MATERIALIZE_LOCK), wait)?;
     let dirs = RuntimeDirs::for_package(control_root, shared, key).ok_or_else(not_ready)?;
     if !package_build_ready(control_root, &dirs) {
         return Err(not_ready());
@@ -267,7 +282,7 @@ fn deploy_package(
     compile: impl FnOnce(&RuntimeDirs) -> Result<(), String>,
 ) -> Result<DeployStep, String> {
     let user = &dirs.user_data_dir;
-    let _lock = lock(&user.join(MATERIALIZE_LOCK))?;
+    let _lock = lock(&user.join(MATERIALIZE_LOCK), true)?;
     let versioned_build =
         use_versioned_build(cfg!(target_os = "windows"), dirs.active_package_key.as_deref());
     let build = if versioned_build {

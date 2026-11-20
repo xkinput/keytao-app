@@ -683,7 +683,10 @@ impl App {
             self.commit_state_to_context(&ime_state);
             self.update_kimpanel(&ime_state);
             self.show_panel(ime_state, qh);
-            if key_policy::should_forward_consumed_shortcut(sym_raw, effective_mods) {
+            if self
+                .session
+                .should_forward_consumed_shortcut(sym_raw, effective_mods)
+            {
                 self.forward_key_press(evdev_keycode);
             } else {
                 // The grab took this key away from KWin, so a held

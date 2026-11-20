@@ -11,7 +11,7 @@ pub(crate) const BUILD_GENERATION_PREFIX: &str = ".keytao-build-";
 static LOGGED_RESOLVE_FAILURES: LazyLock<Mutex<HashSet<(PathBuf, String)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn read_regular_file(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_regular_file(path: &Path) -> Option<Vec<u8>> {
     fs::symlink_metadata(path).ok()?.is_file().then_some(())?;
     fs::read(path).ok()
 }
@@ -33,14 +33,15 @@ impl RuntimeDirs {
     pub const PUBLIC_PACKAGE_FILE: &str = ".keytao-public-package";
 
     pub fn isolation_enabled(control_root: &Path) -> bool {
-        match std::env::var("KEYTAO_RUNTIME_ISOLATION").as_deref() {
+        let environment_enabled = match std::env::var("KEYTAO_RUNTIME_ISOLATION").as_deref() {
+            Ok("0" | "false") => return false,
             Ok("1" | "true") => true,
-            Ok("0" | "false") => false,
-            _ => read_regular_file(&control_root.join(Self::SETTINGS_FILE))
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|settings| settings["runtime_isolation"].as_bool())
-                .unwrap_or(false),
-        }
+            _ => false,
+        };
+        read_regular_file(&control_root.join(Self::SETTINGS_FILE))
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|settings| settings["runtime_isolation"].as_bool())
+            .unwrap_or(environment_enabled)
     }
 
     pub fn resolve(control_root: &Path, shared: &Path) -> Result<Self, String> {
@@ -82,6 +83,10 @@ impl RuntimeDirs {
 
     pub(crate) fn migration_version(control_root: &Path) -> Option<u64> {
         Self::migration_marker(control_root)?["version"].as_u64()
+    }
+
+    pub fn migration_complete(control_root: &Path) -> bool {
+        Self::migration_version(control_root).is_some()
     }
 
     fn migration_marker(control_root: &Path) -> Option<serde_json::Value> {
@@ -148,7 +153,7 @@ impl RuntimeDirs {
         Self::isolated(control_root, shared, Some(&store), key).ok()
     }
 
-    fn package_stores(control_root: &Path) -> impl Iterator<Item = PathBuf> {
+    pub(crate) fn package_stores(control_root: &Path) -> impl Iterator<Item = PathBuf> {
         let app_root = (crate::default_user_data_dir().as_deref() == Some(control_root))
             .then(|| dirs::data_local_dir().map(|root| root.join("ink.rea.keytao-app")))
             .flatten();

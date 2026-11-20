@@ -229,14 +229,14 @@ fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
 
                 tracing::info!("reload stamp changed: {}", gate.path().display());
                 let _activity = hot_update::activity();
-                match engine.reload_without_deploy() {
-                    Ok(()) => {
+                match engine.reload_without_deploy_changed() {
+                    Ok(reloaded) => {
                         gate.commit(requested);
-                        tracing::info!("librime reloaded after deploy stamp change");
-                        // Sessions rebuild lazily, so the backends have to be
-                        // told to drop the preedit and candidates the previous
-                        // build produced.
-                        reload_bus::notify();
+                        if reloaded {
+                            tracing::info!("librime reloaded after deploy stamp change");
+                            // Drop preedit and candidates from the previous build.
+                            reload_bus::notify();
+                        }
                     }
                     // The request stays pending: the next tick retries it.
                     Err(e) if e == keytao_core::PACKAGE_SWITCH_PENDING => {}

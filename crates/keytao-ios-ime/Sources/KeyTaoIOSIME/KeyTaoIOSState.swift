@@ -76,6 +76,10 @@ public struct KeyTaoImeState: Codable, Equatable {
         !preedit.isEmpty || !candidates.isEmpty || !candidatePanel.candidates.isEmpty
     }
 
+    var isPackageSwitcher: Bool {
+        schemaId == ".keytao_packages"
+    }
+
     public func withoutTransientCommit() -> KeyTaoImeState {
         var next = self
         next.committed = ""

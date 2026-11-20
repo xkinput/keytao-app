@@ -549,6 +549,7 @@ impl ImeEngineBackend for InProcEngine {
         }
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let InProcState {
+            runtime,
             reload_stamp_path,
             reload_stamp_signature,
             reload_stamp_cache,
@@ -560,7 +561,17 @@ impl ImeEngineBackend for InProcEngine {
         else {
             return false;
         };
-        reload_stamp_signature.as_deref() != Some(current.as_str())
+        if reload_stamp_signature.as_deref() == Some(current.as_str()) {
+            return false;
+        }
+        if runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.has_applied_package_switch(&current))
+        {
+            *reload_stamp_signature = Some(current);
+            return false;
+        }
+        true
     }
 
     fn status_error(&self) -> Option<&'static str> {

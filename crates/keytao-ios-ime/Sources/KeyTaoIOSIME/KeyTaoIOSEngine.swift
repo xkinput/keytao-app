@@ -1112,7 +1112,7 @@ final class KeyTaoIOSEngine {
         guard !name.isEmpty, !name.hasPrefix("."), !id.isEmpty, !id.hasPrefix(".") else {
             var next = state
             if !lastDisplaySchemaName.isEmpty { next.schemaName = lastDisplaySchemaName }
-            if !lastDisplaySchemaId.isEmpty { next.schemaId = lastDisplaySchemaId }
+            if !state.isPackageSwitcher, !lastDisplaySchemaId.isEmpty { next.schemaId = lastDisplaySchemaId }
             refreshSchemaLogo(next)
             return next
         }

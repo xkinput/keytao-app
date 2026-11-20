@@ -691,6 +691,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun updateState(next: KeytaoImeState) {
+        if (next.isPackageSwitcher && functionPanelActive) closeCandidatePanel()
         val started = if (candidatePanelExpanded) System.nanoTime() else 0L
         val nextSignature = candidateSignature(next)
         if (nextSignature != candidateSignature) {
@@ -1112,7 +1113,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             candidateMenu != null -> CandidateBarContent.CANDIDATE_MENU
             message != null -> CandidateBarContent.STATUS_MESSAGE
             functionPanelActive -> CandidateBarContent.FUNCTION_PANEL
-            usesFullHeightSymbolKeyboard() -> CandidateBarContent.FULL_HEIGHT_SYMBOL_KEYBOARD
+            !state.isPackageSwitcher && usesFullHeightSymbolKeyboard() -> CandidateBarContent.FULL_HEIGHT_SYMBOL_KEYBOARD
             panelModel.candidates.isNotEmpty() -> CandidateBarContent.CANDIDATES
             !backspacePreviewText.isNullOrEmpty() -> CandidateBarContent.BACKSPACE_HINT
             recentClipboardSuggestion != null -> CandidateBarContent.CLIPBOARD_SUGGESTION

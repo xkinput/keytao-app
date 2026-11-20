@@ -175,6 +175,13 @@ class _CurrentSchemeHero extends StatelessWidget {
       _ => null,
     };
     final local = c.local;
+    final isolated = local?.runtimeIsolation == true;
+    final isolatedPackage = isolated
+        ? c.isolatedPackages.where((package) => package.active).firstOrNull
+        : null;
+    final schemas = isolated && isolatedPackage == null
+        ? const <SchemaDto>[]
+        : c.schemas;
     final needsScheme = !c.isMobile && local?.installed == false;
     final version =
         package?.version ??
@@ -197,6 +204,7 @@ class _CurrentSchemeHero extends StatelessWidget {
         : AppStrings.pendingDeploy;
     final title =
         c.currentSchemaName ??
+        isolatedPackage?.displayName ??
         package?.displayName ??
         (local?.installed == true
             ? schemeDisplayName(c.activeSchemeKey)
@@ -223,6 +231,11 @@ class _CurrentSchemeHero extends StatelessWidget {
           EyebrowLabel(
             desktop ? '当前方案 · ${c.aboutValues['平台']} 系统输入法' : '当前方案',
           ),
+          if (isolated && c.isolatedPackages.isNotEmpty)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: _packageSelector(isolatedPackage),
+            ),
           Row(
             spacing: 12,
             children: [
@@ -235,7 +248,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                     FItemGroup(
                       enabled: !c.busy,
                       children: [
-                        for (final schema in c.schemas)
+                        for (final schema in schemas)
                           FItem(
                             title: Text(schema.name),
                             semanticsChecked: schema.id == c.currentSchemaId,
@@ -255,7 +268,8 @@ class _CurrentSchemeHero extends StatelessWidget {
                   builder: (_, popover, _) => FButton.raw(
                     key: const ValueKey('current-schema-selector'),
                     variant: FButtonVariant.ghost,
-                    onPress: c.busy || c.schemas.isEmpty
+                    semanticsLabel: isolated ? '方案，$title' : null,
+                    onPress: c.busy || schemas.isEmpty
                         ? null
                         : () {
                             c.refreshSchemas();
@@ -277,7 +291,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                             ),
                           ),
                         ),
-                        if (c.schemas.isNotEmpty)
+                        if (schemas.isNotEmpty)
                           Icon(
                             FLucideIcons.chevronDown,
                             size: desktop ? 20 : 18,
@@ -310,6 +324,7 @@ class _CurrentSchemeHero extends StatelessWidget {
             ],
           ),
           if (needsScheme) const Text('请先安装输入方案。'),
+          if (isolated && c.packageError != null) ErrorMessage(c.packageError),
           ActionRow(
             children: [
               if (!needsScheme)
@@ -327,6 +342,58 @@ class _CurrentSchemeHero extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _packageSelector(IsolatedPackageDto? activePackage) {
+    final c = controller;
+    final name = activePackage?.displayName;
+    return FPopoverMenu(
+      menuAnchor: Alignment.topLeft,
+      childAnchor: Alignment.bottomLeft,
+      menuBuilder: (_, popover, _) => [
+        FItemGroup(
+          enabled: !c.busy,
+          children: [
+            for (final package in c.isolatedPackages)
+              FItem(
+                title: Text(package.displayName),
+                subtitle: package.ready ? null : const Text('部署后可用'),
+                semanticsChecked: package.active,
+                semanticsInMutuallyExclusiveGroup: true,
+                suffix: package.active ? const Icon(FLucideIcons.check) : null,
+                onPress: c.busy
+                    ? null
+                    : () {
+                        popover.hide();
+                        if (!package.active || !package.ready) {
+                          c.switchPackage(package.packageKey);
+                        }
+                      },
+              ),
+          ],
+        ),
+      ],
+      builder: (_, popover, _) => FButton(
+        key: const ValueKey('current-package-selector'),
+        variant: FButtonVariant.ghost,
+        mainAxisSize: MainAxisSize.min,
+        semanticsLabel: name == null ? '选择方案包' : '方案包，$name',
+        onPress: c.busy
+            ? null
+            : () {
+                c.refreshIsolatedPackages();
+                popover.toggle();
+              },
+        suffix: const Icon(FLucideIcons.chevronDown),
+        child: Flexible(
+          child: Text(
+            name ?? '方案包',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
       ),
     );
   }

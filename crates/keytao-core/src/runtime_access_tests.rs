@@ -79,16 +79,17 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     let second = crate::package_store::root(&root).join("cloud/second/files");
     for (shared, ids) in [
         (&first, &["keytao_a", "keytao_b"][..]),
-        (&second, &["keytao_c"][..]),
+        (&second, &["keytao_c", "keytao_d"][..]),
     ] {
         smoke_fixture::write(shared).unwrap();
         let list = ids
             .iter()
             .map(|id| format!("  - schema: {id}\n"))
             .collect::<String>();
+        let hotkeys = if shared == &second { "[Control+Shift+grave]" } else { "[F4, Control+grave]" };
         std::fs::write(
             shared.join("default.yaml"),
-            format!("config_version: '1'\nschema_list:\n{list}"),
+            format!("config_version: '1'\nswitcher:\n  caption: Schemas\n  hotkeys: {hotkeys}\nschema_list:\n{list}"),
         )
         .unwrap();
         std::fs::remove_file(shared.join("default.custom.yaml")).unwrap();
@@ -113,6 +114,11 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
         )
         .unwrap();
     }
+    std::fs::write(
+        second.parent().unwrap().join("package.json"),
+        br#"{"display_name":"Second Package"}"#,
+    )
+    .unwrap();
     let target = |key: &str| isolated_deploy::PackageDeployTarget {
         package_key: key.into(),
         package_name: key.into(),
@@ -145,6 +151,10 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
         Some("first")
     );
     assert_eq!(ReloadStamp::current_signature(&root), first_signature);
+    let menu = session.process_key_result(key_policy::XK_F4, 0).unwrap();
+    assert_eq!(menu.state.candidates[1].text, "Second Package（second） 未部署");
+    assert_eq!(session.select_candidate_on_page(1).unwrap().schema_id, switcher_model::SCHEMA_ID);
+    session.process_key_result(key_policy::XK_ESCAPE, 0).unwrap();
 
     std::fs::write(receipt_path, receipt).unwrap();
     let mut gate = ReloadStampGate::new(&root);
@@ -188,6 +198,56 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     runtime.switch_package("first").unwrap();
     runtime.reload_without_deploy().unwrap();
     assert_eq!(session.current_schema().unwrap().id, "keytao_b");
+
+    use crate::key_policy::{XK_ESCAPE, XK_F4};
+    let menu = session.process_key_result(XK_F4, 0).unwrap();
+    assert!(menu.accepted);
+    assert_eq!(menu.state.schema_id, switcher_model::SCHEMA_ID);
+    assert_eq!(session.peek_state().candidates[1].text, "Second Package（second）");
+    assert_eq!(session.process_enter().unwrap().state.schema_id, ".default");
+    session.process_key_result(XK_ESCAPE, 0).unwrap();
+    assert_eq!(
+        session.process_key_result(0x60, RIME_MOD_CONTROL).unwrap().state.schema_id,
+        switcher_model::SCHEMA_ID
+    );
+    assert_eq!(session.process_key_result(XK_F4, 0).unwrap().state.schema_id, ".default");
+    session.process_key_result(XK_ESCAPE, 0).unwrap();
+    let composition = session.process_keys_result(&[(b'a'.into(), 0), (b'a'.into(), 0)]).unwrap();
+    assert!(!composition.state.preedit.is_empty());
+    let preview = composition.state.commit_preview;
+    assert!(!preview.is_empty());
+    session.process_key_result(XK_F4, 0).unwrap();
+    isolated_deploy::with_isolated_package_lock(&root, || {
+        let rejected = session.select_candidate_on_page(1).unwrap();
+        assert_eq!(rejected.preedit, composition.state.preedit);
+        assert!(rejected.committed.is_none());
+        assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("first"));
+        Ok(())
+    }).unwrap();
+    session.process_key_result(XK_F4, 0).unwrap();
+    let generation = runtime.generation();
+    let native_menu = session.select_candidate_on_page(1).unwrap();
+    assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("second"));
+    assert_eq!(native_menu.schema_id, ".default");
+    assert_eq!(native_menu.committed.as_deref(), Some(preview.as_str()));
+    assert!(runtime.generation() > generation);
+    assert!(!runtime.reload_without_deploy_changed().unwrap());
+    assert_eq!(session.state().schema_id, ".default");
+    let resumed = session.process_key_result(XK_ESCAPE, 0).unwrap();
+    assert_eq!(resumed.state.schema_id, "keytao_c");
+    ReloadStamp::write_package(&root, "second").unwrap();
+    assert!(runtime.reload_without_deploy_changed().unwrap());
+    runtime.switch_package("first").unwrap();
+    runtime.reload_without_deploy().unwrap();
+
+    std::fs::write(
+        root.join(RuntimeDirs::SETTINGS_FILE),
+        br#"{"runtime_isolation":false}"#,
+    )
+    .unwrap();
+    let baseline = session.process_key_result(XK_F4, 0).unwrap();
+    assert!(baseline.accepted);
+    assert_eq!(baseline.state.schema_id, ".default");
     drop(session);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));

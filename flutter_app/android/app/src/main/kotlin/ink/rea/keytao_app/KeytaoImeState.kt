@@ -68,6 +68,9 @@ data class KeytaoImeState(
     val hasComposition: Boolean
         get() = preedit.isNotEmpty() || candidates.isNotEmpty()
 
+    val isPackageSwitcher: Boolean
+        get() = schemaId == ".keytao_packages"
+
     fun withoutTransientCommit() = copy(committed = "", accepted = false)
 
     companion object {

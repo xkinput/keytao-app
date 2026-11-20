@@ -5,7 +5,7 @@ use crate::{
     packages::safe_path,
     runtime_materialize,
 };
-use keytao_core::RuntimeDirs;
+use keytao_core::{ReloadStamp, RuntimeDirs};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -36,7 +36,7 @@ pub struct MigrationReport {
 
 pub fn preview(core: &Core, root: &Path) -> Result<MigrationReport, CoreError> {
     let root = checked_root(root)?;
-    let sync_dir = checked_sync_dir(&root)?;
+    let sync_dir = checked_sync_dir(core, &root)?;
     let previous = read_marker(&marker_path(&root)?)?;
     let completed = previous.is_some();
     let migration = match previous {
@@ -55,7 +55,7 @@ pub fn migrate_to_isolated(core: &Core, root: &Path) -> Result<MigrationReport, 
     if !RuntimeDirs::isolation_enabled(&root) {
         return Err(CoreError::Other("方案包隔离未启用".into()));
     }
-    checked_sync_dir(&root)?;
+    checked_sync_dir(core, &root)?;
     keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
         migrate_locked(core, &root).map_err(|error| error.to_string())
     })
@@ -64,7 +64,7 @@ pub fn migrate_to_isolated(core: &Core, root: &Path) -> Result<MigrationReport, 
 
 fn migrate_locked(core: &Core, root: &Path) -> Result<MigrationReport, CoreError> {
     package_activation::recover(core)?;
-    let sync_dir = checked_sync_dir(root)?;
+    let sync_dir = checked_sync_dir(core, root)?;
     let path = marker_path(root)?;
     if let Some(migration) = read_marker(&path)? {
         return report(core, root, &sync_dir, migration, true);
@@ -83,6 +83,13 @@ fn migrate_locked(core: &Core, root: &Path) -> Result<MigrationReport, CoreError
     )?;
     migration_userdb::migrate(root, &runtimes, &sync_dir)?;
     crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec(&report.migration)?)?;
+    if let Err(error) = ReloadStamp::write_package(root, &report.migration.runtime_package) {
+        let error = match crate::package_fs::remove_file(&path) {
+            Ok(()) => error,
+            Err(rollback) => format!("{error}; remove incomplete migration marker: {rollback}"),
+        };
+        return Err(CoreError::Other(error));
+    }
     Ok(report)
 }
 
@@ -106,9 +113,24 @@ fn report(
     })
 }
 
-fn checked_sync_dir(root: &Path) -> Result<PathBuf, CoreError> {
+fn checked_sync_dir(core: &Core, root: &Path) -> Result<PathBuf, CoreError> {
     let sync_dir = runtime_materialize::legacy_sync_dir(root)?;
-    for protected in [root.join("runtime"), root.join("scheme-packages")] {
+    let store = PackageStore::new(core).root();
+    let canonical_store = core
+        .env()
+        .data_dir
+        .canonicalize()
+        .ok()
+        .map(|data| keytao_core::package_store::root(&data));
+    for protected in [
+        root.join("runtime"),
+        root.join("scheme-packages"),
+        ReloadStamp::path(root),
+        store,
+    ]
+    .into_iter()
+    .chain(canonical_store)
+    {
         if protected.starts_with(&sync_dir) || sync_dir.starts_with(&protected) {
             return Err(CoreError::Other("同步目录与方案包迁移目录重叠".into()));
         }
@@ -237,6 +259,7 @@ fn read_marker(path: &Path) -> Result<Option<Migration>, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keytao_core::RELOAD_STAMP_FILE_NAME;
     use crate::{
         AppEnv, AppState, CoreEvent, EventSink, Platform,
         package_activation::Activation,
@@ -432,11 +455,16 @@ mod tests {
             ["orphan.yaml"]
         );
 
+        let stamp = ReloadStamp::write_package(root, "local-a").unwrap();
         let result = migrate_to_isolated(&core, root).unwrap();
         assert!(result.completed);
         assert_eq!(result.migration, planned.migration);
         assert_eq!(
             RuntimeDirs::active_package_key(root).as_deref(),
+            Some("local-z")
+        );
+        assert_eq!(
+            ReloadStamp::package_key(&stamp).as_deref(),
             Some("local-z")
         );
         for key in &result.migration.packages {
@@ -469,7 +497,9 @@ mod tests {
         assert_eq!(
             migrated
                 .iter()
-                .filter(|(path, _)| !path.starts_with("runtime/"))
+                .filter(|(path, _)| {
+                    !path.starts_with("runtime/") && path.as_str() != RELOAD_STAMP_FILE_NAME
+                })
                 .map(|(path, hash)| (path.clone(), hash.clone()))
                 .collect::<BTreeMap<_, _>>(),
             legacy,
@@ -520,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_addon_can_own_the_current_schema_without_changing_its_receipt() {
+    fn legacy_addon_can_own_the_current_schema_without_changing_legacy_files() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let core = fixture(root);
@@ -536,6 +566,7 @@ mod tests {
         );
         let source = b"schema: {schema_id: rime_ice, name: Rime Ice}\n";
         put(root, "rime_ice.schema.yaml", source);
+        put(root, "legacy/nested/untouched.yaml", b"untouched\n");
         let receipt = serde_json::to_vec(&serde_json::json!({
             "format": 1, "version": "1", "source": "fixture", "archive_sha256": "0".repeat(64),
             "files": [{
@@ -546,6 +577,12 @@ mod tests {
         .unwrap();
         put(root, ".keytao-rime-ice.json", &receipt);
         let before = test_hashes(root);
+        assert_eq!(
+            crate::addon_store::manifest(&core, root, "rime_ice").unwrap(),
+            Some(receipt.clone())
+        );
+        package_orphans::report(&core, root).unwrap();
+        assert_eq!(test_hashes(root), before);
         assert_eq!(
             preview(&core, root).unwrap().migration.active_package,
             "rime_ice"
@@ -559,10 +596,75 @@ mod tests {
             "rime_ice"
         );
         assert!(root.join("runtime/rime_ice").is_dir());
-        assert_eq!(
-            fs::read(root.join(".keytao-rime-ice.json")).unwrap(),
-            receipt
+        let mut after = test_hashes(root);
+        after.retain(|path, _| {
+            !path.starts_with("runtime/")
+                && !path.starts_with("scheme-packages/")
+                && path != RELOAD_STAMP_FILE_NAME
+        });
+        assert_eq!(after, before);
+
+        put(
+            root,
+            RuntimeDirs::SETTINGS_FILE,
+            br#"{"runtime_isolation":false}"#,
         );
-        assert_eq!(fs::read(root.join("rime_ice.schema.yaml")).unwrap(), source);
+        let rolled_back = test_hashes(root);
+        assert_eq!(
+            crate::addon_store::manifest(&core, root, "rime_ice").unwrap(),
+            Some(receipt)
+        );
+        package_orphans::report(&core, root).unwrap();
+        assert_eq!(test_hashes(root), rolled_back);
+
+        put(
+            root,
+            RuntimeDirs::SETTINGS_FILE,
+            br#"{"runtime_isolation":true}"#,
+        );
+        fs::remove_dir_all(root.join("scheme-packages/addons/rime_ice")).unwrap();
+        assert!(crate::addon_store::manifest(&core, root, "rime_ice")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn migration_rejects_sync_directory_in_the_apps_separate_package_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("ime");
+        let core = fixture(&directory.path().join("app"));
+        let store = PackageStore::new(&core).root();
+        put(
+            &root,
+            "installation.yaml",
+            format!("sync_dir: {:?}\n", store.join("addons")).as_bytes(),
+        );
+
+        assert!(preview(&core, &root).is_err());
+    }
+
+    #[test]
+    fn migration_can_retry_after_a_reload_stamp_write_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let core = fixture(root);
+        let activation = package(&core, "local-a", "alpha", "alpha");
+        package_activation::write(&core, &activation).unwrap();
+        put(
+            root,
+            RuntimeDirs::SETTINGS_FILE,
+            br#"{"runtime_isolation":true}"#,
+        );
+        let stamp = ReloadStamp::path(root);
+        fs::create_dir(&stamp).unwrap();
+        assert!(migrate_to_isolated(&core, root).is_err());
+        assert!(!preview(&core, root).unwrap().completed);
+
+        fs::remove_dir(&stamp).unwrap();
+        assert!(migrate_to_isolated(&core, root).unwrap().completed);
+        assert_eq!(
+            ReloadStamp::package_key(&stamp).as_deref(),
+            Some("local-a")
+        );
     }
 }

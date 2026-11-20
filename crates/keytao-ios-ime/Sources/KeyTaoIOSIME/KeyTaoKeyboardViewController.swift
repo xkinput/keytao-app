@@ -7,6 +7,7 @@ import os
 
 private let rimeKeySpace: UInt32 = 0x0020
 private let rimeKeyBackspace: UInt32 = 0xff08
+private let openPackageMenuKey: UInt32 = 0x02000004
 private let keyTaoKeyboardLog = Logger(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 private let keyTaoKeyboardTraitsLog = OSLog(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 
@@ -618,6 +619,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.reset:
             apply(engine.reset())
         case KeyTaoCommandType.rimeMenu:
+            if !hostTraits.bypassesRime, keyboardView?.isEmojiSearching != true {
+                let state = engine.processKey(openPackageMenuKey)
+                if state.accepted {
+                    keyboardView?.closeRimeMenu()
+                    apply(state)
+                    return
+                }
+            }
             refreshRimeOptions()
         case KeyTaoCommandType.rimeSchema:
             selectRimeSchema(command.value)
@@ -1990,6 +1999,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard !runtimeStarting || queuedCommands.isEmpty else { return false }
         guard currentState.hasComposition else { return true }
         guard engine.nativeReady else { return false }
+        if currentState.isPackageSwitcher {
+            apply(engine.clearComposition())
+            return !currentState.hasComposition
+        }
         let generation = inputContextGeneration
         let documentIdentifier = currentDocumentIdentifier()
         if !currentState.candidates.isEmpty || !currentState.candidatePanel.candidates.isEmpty {
@@ -2096,6 +2109,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// suppresses autocorrect over it and groups undo around it. When host marked
     /// text is disabled, the candidate bar renders the preedit instead.
     private func updateHostMarkedText() {
+        guard !currentState.isPackageSwitcher else { return }
         let preedit = currentState.candidatePanel.preedit ?? currentState.preedit
         guard keyboardView?.isEmojiSearching != true, hostMarkedTextEnabled, !preedit.isEmpty,
               let documentIdentifier = currentDocumentIdentifier() else {

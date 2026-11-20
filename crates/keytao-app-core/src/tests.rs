@@ -162,13 +162,24 @@ fn legacy_import_is_idempotent_across_restart() {
 
 #[test]
 fn fresh_onboarding_initialization_persists_false_without_shared_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let data_dir = dir.path().join("private");
-    let core = open_core(&data_dir).unwrap();
-    core.initialize_onboarding(Some(dir.path().join("ime"))).unwrap();
-    assert!(data_dir.join("app-state.json").is_file());
-    assert!(!open_core(&data_dir).unwrap().onboarding().completed);
-    assert!(!dir.path().join("ime/app-state.json").exists());
+    for isolated in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("private");
+        let ime = dir.path().join("ime");
+        if isolated {
+            fs::create_dir(&ime).unwrap();
+            fs::write(
+                ime.join(keytao_core::RuntimeDirs::SETTINGS_FILE),
+                br#"{"runtime_isolation":true}"#,
+            )
+            .unwrap();
+        }
+        let core = open_core(&data_dir).unwrap();
+        core.initialize_onboarding(Some(ime.clone())).unwrap();
+        assert!(data_dir.join("app-state.json").is_file());
+        assert!(!open_core(&data_dir).unwrap().onboarding().completed);
+        assert!(!ime.join("app-state.json").exists());
+    }
 }
 
 fn installed_schema(dir: &Path) -> PathBuf {
