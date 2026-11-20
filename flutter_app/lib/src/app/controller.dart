@@ -263,6 +263,8 @@ class AppController extends ChangeNotifier {
   String? schemaSwitchError;
   List<SchemaDto> schemas = [];
   String? currentSchemaId;
+  String? currentAddonKey;
+  String? deployingSchemeKey;
   String? get currentSchemaName =>
       schemas.where((schema) => schema.id == currentSchemaId).firstOrNull?.name;
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
@@ -830,6 +832,11 @@ class AppController extends ChangeNotifier {
           _changed();
           return;
         }
+        if (event.deployProgress case final value?
+            when isManagingAddon || isManagingRimeIce) {
+          deployingSchemeKey = isManagingAddon ? 'easy_en' : 'rime_ice';
+          progress = value;
+        }
         if (event.deployProgress == AppStrings.deployDone) deployWarning = null;
         if (event.deployProgress case final value?
             when value.contains('编译失败，已跳过：')) {
@@ -916,6 +923,10 @@ class AppController extends ChangeNotifier {
     progress = value.message;
     installFraction = value.percent.clamp(0, 100) / 100;
     if (isManagingAddon) addonProgress = value;
+    if (value.stage.contains('deploy')) {
+      if (isManagingAddon) deployingSchemeKey = 'easy_en';
+      if (isManagingRimeIce) deployingSchemeKey = 'rime_ice';
+    }
     if (isManagingWanxiang) wanxiangProgress = value;
     if (isManagingWanxiangGrammar) wanxiangGrammarProgress = value;
     if (isManagingRimeIce) rimeIceProgress = value;
@@ -1021,6 +1032,12 @@ class AppController extends ChangeNotifier {
     } catch (failure) {
       addonError = errorText(failure);
     }
+    try {
+      rimeIce = await core.rimeIceStatus();
+      if (!isManagingRimeIce) rimeIceError = null;
+    } catch (failure) {
+      rimeIceError ??= errorText(failure);
+    }
     await _readSchemas();
     await _readSchemaSwitches();
     activeSchemaLogoPath = await core.activeSchemaLogoPath();
@@ -1062,6 +1079,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _readSchemas() async {
+    currentAddonKey = null;
     if (local?.deployed != true) {
       schemas = [];
       currentSchemaId = null;
@@ -1070,6 +1088,19 @@ class AppController extends ChangeNotifier {
     final result = await core.getSchemas();
     schemas = result.schemas;
     currentSchemaId = result.current;
+    for (final key in ['easy_en', 'rime_ice']) {
+      final status = key == 'easy_en' ? addon : rimeIce;
+      if (status?.installed != true || currentSchemaId == null) continue;
+      try {
+        final candidates = await packageSchemas(key);
+        if (candidates.any((candidate) => candidate.id == currentSchemaId)) {
+          currentAddonKey = key;
+          break;
+        }
+      } catch (_) {
+        // Legacy addons can lack stored package metadata.
+      }
+    }
   }
 
   Future<void> refreshSchemas() async {
@@ -1166,14 +1197,6 @@ class AppController extends ChangeNotifier {
           wanxiangError = null;
         } catch (failure) {
           wanxiangError = errorText(failure);
-        }
-      }),
-      read(() async {
-        try {
-          rimeIce = await core.rimeIceStatus();
-          rimeIceError = null;
-        } catch (failure) {
-          rimeIceError = errorText(failure);
         }
       }),
       read(() async {
@@ -1655,7 +1678,9 @@ class AppController extends ChangeNotifier {
     final result = await run(() async {
       await _install();
       // Deploying clears the verification list, so keep failures on screen.
-      if (verification.every((entry) => entry.ok)) await _deploy();
+      if (verification.every((entry) => entry.ok)) {
+        await _deploy(schemeKey: scheme);
+      }
     });
     return result && verification.every((entry) => entry.ok);
   }
@@ -1764,7 +1789,9 @@ class AppController extends ChangeNotifier {
           throw StateError(AppStrings.installFailed);
         }
         await _install();
-        if (verification.every((entry) => entry.ok)) await _deploy();
+        if (verification.every((entry) => entry.ok)) {
+          await _deploy(schemeKey: key);
+        }
       } finally {
         installingSchemeKey = null;
       }
@@ -1871,10 +1898,38 @@ class AppController extends ChangeNotifier {
         (!wasActive || verification.every((entry) => entry.ok));
   }
 
-  Future<bool> activateSchemePackage(String key) {
-    final package = installedPackageFor(key);
-    if (package == null || package.active || !package.hasPackageZip) {
-      return Future.value(false);
+  Future<bool> activateSchemePackage(String key) async {
+    var package = installedPackageFor(key);
+    final addonStatus = switch (key) {
+      'easy_en' => addon,
+      'rime_ice' => rimeIce,
+      _ => null,
+    };
+    if (package?.active == true && package!.inUse) return false;
+    if (addonStatus?.installed != true && package?.hasPackageZip != true) {
+      if (package?.active != true || isLocalScheme(key)) return false;
+      if (!await downloadSchemePackage(key)) return false;
+      package = installedPackageFor(key);
+      if (package?.hasPackageZip != true) return false;
+      if (package!.inUse) return true;
+    }
+    if (package?.active == true || addonStatus?.installed == true) {
+      return run(() async {
+        if (addonStatus?.deployed == false || local?.deployed == false) {
+          await _deploy(schemeKey: key);
+        }
+        await _readSchemas();
+        final candidates = await packageSchemas(key);
+        final selected = candidates
+            .where(
+              (candidate) =>
+                  candidate.selected &&
+                  schemas.any((schema) => schema.id == candidate.id),
+            )
+            .firstOrNull;
+        if (selected == null) throw StateError(AppStrings.noSchemeForDeploy);
+        await _selectSchema(selected.id);
+      });
     }
     return run(() => _activateSchemePackage(key))
         .then((result) => result && verification.every((entry) => entry.ok));
@@ -1897,7 +1952,7 @@ class AppController extends ChangeNotifier {
       await _readInstalledPackages();
       if (shouldDeploy) {
         await _readLocal();
-        await _deploy();
+        await _deploy(schemeKey: key);
       }
     } catch (failure) {
       packageError = errorText(failure);
@@ -1943,7 +1998,7 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
     if (verification.every((entry) => entry.ok)) {
-      await _deploy();
+      await _deploy(schemeKey: key);
       scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
     }
   }
@@ -2024,11 +2079,18 @@ class AppController extends ChangeNotifier {
     if (files.isNotEmpty) packageError = '已保留您修改过的文件：\n$files';
   }
 
-  Future<bool> deploy({int? imeActionId}) =>
-      run(() => _deploy(imeActionId: imeActionId));
+  Future<bool> deploy({int? imeActionId, String? schemeKey}) =>
+      run(() => _deploy(imeActionId: imeActionId, schemeKey: schemeKey));
 
-  Future<void> _deploy({int? imeActionId}) async {
+  Future<void> _deploy({int? imeActionId, String? schemeKey}) async {
     _pendingCloudPackageUploads.clear();
+    // shortcut: Global progress has no package identity; use package events when available.
+    deployingSchemeKey =
+        schemeKey ??
+        installedPackages
+            .where((package) => package.inUse)
+            .map((package) => package.schemeKey)
+            .firstOrNull;
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
@@ -2085,6 +2147,7 @@ class AppController extends ChangeNotifier {
       addOperationLogs(['[DEPLOY ERROR] ${errorText(failure)}']);
       rethrow;
     } finally {
+      deployingSchemeKey = null;
       operation = null;
     }
   }
@@ -2879,6 +2942,7 @@ class AppController extends ChangeNotifier {
       } catch (_) {}
       rethrow;
     } finally {
+      deployingSchemeKey = null;
       operation = null;
     }
   });
@@ -2991,6 +3055,7 @@ class AppController extends ChangeNotifier {
       } catch (_) {}
       rethrow;
     } finally {
+      deployingSchemeKey = null;
       operation = null;
     }
   });
@@ -3138,13 +3203,16 @@ class AppController extends ChangeNotifier {
         unawaited(refreshCandidatePreview());
       });
 
-  Future<bool> selectSchema(String schemaId) => run(() async {
+  Future<bool> selectSchema(String schemaId) =>
+      run(() => _selectSchema(schemaId));
+
+  Future<void> _selectSchema(String schemaId) async {
     if (isAndroid) await _requireStorage();
     await core.selectSchema(schemaId: schemaId);
     await _readLocal();
     await _readInstalledPackages();
     unawaited(refreshCandidatePreview());
-  });
+  }
 
   Future<bool> saveCandidatePageSize(int? size) => run(() async {
     if (isAndroid) await _requireStorage();

@@ -251,7 +251,7 @@ Future<void> _openAddons(WidgetTester tester) async {
 List<String> _actionLabels(WidgetTester tester) => tester
     .widgetList<ActionButton>(find.byType(ActionButton))
     .map((button) => button.label)
-    .where((label) => const {'下载', '重新下载', '更新', '启用', '卸载'}.contains(label))
+    .where((label) => const {'下载', '重新下载', '更新', '使用', '卸载'}.contains(label))
     .toList();
 
 void main() {
@@ -910,7 +910,7 @@ void main() {
     await tester.pumpAndSettle();
     position.jumpTo(60);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(ActionButton, '启用').first);
+    await tester.tap(find.widgetWithText(ActionButton, '使用').first);
     await tester.pumpAndSettle();
     expect(inputFocus.hasFocus, isFalse);
     expect(position.pixels, closeTo(60, 0.01));
@@ -974,6 +974,11 @@ void main() {
       ];
       for (final operation in [null, OperationKind.deploy, null]) {
         c.operation = operation;
+        c.deployingSchemeKey = operation == OperationKind.deploy
+            ? 'xmjd'
+            : null;
+        c.busy = operation != null;
+        c.progress = AppStrings.deployingLibrime;
         await tester.pumpWidget(
           KeyTaoTheme(
             platform: c.info.platform,
@@ -982,6 +987,34 @@ void main() {
             ),
           ),
         );
+        final button = tester.widget<ActionButton>(
+          find.widgetWithText(
+            ActionButton,
+            operation == OperationKind.deploy ? AppStrings.deploying : '使用中',
+          ),
+        );
+        expect(button.onPress, isNull);
+        expect(button.success, operation != OperationKind.deploy);
+        expect(find.byType(AppBadge), findsNothing);
+        expect(
+          find.text(AppStrings.deployingLibrime),
+          operation == OperationKind.deploy ? findsOneWidget : findsNothing,
+        );
+        c.deployingSchemeKey = 'keytao';
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: c.info.platform,
+            home: FScaffold(
+              child: SchemePackageRow(controller: c, schemeKey: 'xmjd'),
+            ),
+          ),
+        );
+        expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
+        expect(
+          find.widgetWithText(ActionButton, AppStrings.deploying),
+          findsNothing,
+        );
+        expect(find.text(AppStrings.deployingLibrime), findsNothing);
         final logo = find.byType(SchemaLogo);
         expect(logo, logoPath == null ? findsNothing : findsOneWidget);
         if (logoPath != null) {
@@ -1051,8 +1084,8 @@ void main() {
           hasPackageZip: true,
         ),
         update: false,
-        labels: ['卸载'],
-        calls: ['remove:keytao'],
+        labels: ['使用', '卸载'],
+        calls: ['activate:keytao', 'remove:keytao'],
       ),
       (
         package: const InstalledPackageDto(
@@ -1073,8 +1106,8 @@ void main() {
           hasPackageZip: false,
         ),
         update: false,
-        labels: ['下载', '卸载'],
-        calls: ['install:keytao', 'remove:keytao'],
+        labels: ['卸载'],
+        calls: ['remove:keytao'],
       ),
       (
         package: const InstalledPackageDto(
@@ -1084,7 +1117,7 @@ void main() {
           hasPackageZip: true,
         ),
         update: false,
-        labels: ['启用', '卸载'],
+        labels: ['使用', '卸载'],
         calls: ['activate:keytao', 'remove:keytao'],
       ),
       (
@@ -1106,7 +1139,7 @@ void main() {
           hasPackageZip: true,
         ),
         update: true,
-        labels: ['更新', '启用', '卸载'],
+        labels: ['更新', '使用', '卸载'],
         calls: ['update:keytao', 'activate:keytao', 'remove:keytao'],
       ),
       (
@@ -1166,7 +1199,10 @@ void main() {
         find.byType(ActionButton),
       )) {
         if (button.label == '下载') expect(button.primary, isFalse);
-        if (button.label == AppStrings.deploy) expect(button.primary, isTrue);
+        if (button.label == '使用中') {
+          expect(button.success, isTrue);
+          expect(button.onPress, isNull);
+        }
       }
       expect(find.text('自造词'), findsNothing);
       expect(find.text('卸载'), findsNothing);
@@ -1212,7 +1248,15 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('自造词'), findsOneWidget);
         expect(find.text('卸载'), findsOneWidget);
-        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        expect(find.widgetWithText(FItem, '重新部署'), findsOneWidget);
+        if (!entry.package!.hasPackageZip && !entry.update) {
+          expect(find.widgetWithText(FItem, '下载'), findsOneWidget);
+          await tester.tap(find.widgetWithText(FItem, '下载'));
+          await tester.pumpAndSettle();
+          expect(c.actions.last, 'download:keytao');
+        } else {
+          await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        }
         await tester.pumpAndSettle();
       }
       c.busy = true;
@@ -1464,9 +1508,9 @@ void main() {
     );
   }
 
-  for (final (key, title, action, operation) in [
-    ('rime-ice', AppStrings.rimeIce, 'ice', OperationKind.rimeIce),
-    ('easy-en', 'Easy English', 'easy', OperationKind.addon),
+  for (final (key, action, operation) in [
+    ('rime-ice', 'ice', OperationKind.rimeIce),
+    ('easy-en', 'easy', OperationKind.addon),
   ]) {
     testWidgets('home $key card uses package badges and retains operations', (
       tester,
@@ -1481,7 +1525,7 @@ void main() {
         (true, true, false, '1', '已安装'),
         (true, false, false, '1', AppStrings.pendingDeploy),
         (true, true, false, '2', '可更新'),
-        (true, false, true, '2', AppStrings.pendingDeploy),
+        (true, false, true, '2', '可更新'),
         (true, true, true, '2', '使用中'),
       ]) {
         final info = AddonStatusDto(
@@ -1497,6 +1541,7 @@ void main() {
           c.rimeIce = info;
           c.rimeIceLatestVersion = latest;
         }
+        c.currentAddonKey = active ? scheme : null;
         c.local = LocalSchemaDto(
           installed: true,
           deployed: true,
@@ -1504,22 +1549,49 @@ void main() {
         );
         await _pumpSchemePage(tester, c);
         expect(
-          find.descendant(of: card, matching: find.text(active ? '在用' : '云端')),
+          find.descendant(
+            of: card,
+            matching: find.text(active && deployed ? '在用' : '云端'),
+          ),
           findsOneWidget,
+        );
+        final inUse = active && deployed;
+        expect(
+          find.descendant(of: card, matching: find.byType(AppBadge)),
+          findsNothing,
         );
         final badge = find.descendant(
           of: card,
-          matching: find.byType(active ? AppBadge : StatusPill),
+          matching: find.byType(StatusPill),
         );
+        if (inUse) {
+          expect(badge, findsNothing);
+        } else {
+          expect(
+            find.descendant(of: badge, matching: find.text(status)),
+            findsOneWidget,
+          );
+        }
+        if (installed) {
+          final button = tester.widget<ActionButton>(
+            find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, inUse ? '使用中' : '使用'),
+            ),
+          );
+          expect(button.success, inUse);
+          expect(button.onPress == null, inUse);
+          if (!inUse) {
+            button.onPress!();
+            expect(c.actions.last, 'activate:$scheme');
+          }
+        }
         expect(
-          find.descendant(of: badge, matching: find.text(status)),
-          findsOneWidget,
-        );
-        expect(
-          tester.getCenter(badge).dy,
-          tester
-              .getCenter(find.descendant(of: card, matching: find.text(title)))
-              .dy,
+          find.descendant(
+            of: card,
+            matching: find.widgetWithText(ActionButton, '部署'),
+          ),
+          findsNothing,
         );
         expect(
           find.descendant(of: card, matching: find.text('$status · 1')),
@@ -1530,6 +1602,7 @@ void main() {
           installed ? findsOneWidget : findsNothing,
         );
       }
+      c.actions.clear();
       await tester.ensureVisible(card);
       await tester.tap(
         find.descendant(
@@ -1624,7 +1697,7 @@ void main() {
     final card = find.byKey(const ValueKey('scheme-package-future-addon'));
     expect(card, findsOneWidget);
     await tester.ensureVisible(card);
-    await tester.tap(find.descendant(of: card, matching: find.text('启用')));
+    await tester.tap(find.descendant(of: card, matching: find.text('使用')));
     await tester.pumpAndSettle();
     expect(c.actions, ['activate:future-addon']);
     expect(tester.takeException(), isNull);

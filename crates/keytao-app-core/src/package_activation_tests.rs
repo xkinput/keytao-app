@@ -539,36 +539,35 @@ async fn updating_package_keeps_removed_files_owned_by_another_activation() {
 }
 
 #[tokio::test]
-async fn installed_package_in_use_tracks_current_schema_when_lua_entry_points_conflict() {
+async fn installed_package_in_use_tracks_only_current_schema_owner() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let host = Host::new(directory.path(), Arc::new(Sink));
-    for (key, schema) in [("keytao", "alpha"), ("txjx", "gamma"), ("xmjd", "beta")] {
-        let mut entries = files(schema);
-        if key == "txjx" {
-            entries.retain(|(path, _)| path != "rime.lua");
+    for second_lua in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Host::new(directory.path(), Arc::new(Sink));
+        for (key, schema) in [("keytao", "alpha"), ("txjx", "gamma"), ("xmjd", "beta")] {
+            let mut entries = files(schema);
+            if key == "txjx" || (key == "xmjd" && !second_lua) {
+                entries.retain(|(path, _)| path != "rime.lua");
+            }
+            store(&host, key, entries);
+            activate_scheme(&host.core, key, &host.root).await.unwrap();
         }
-        store(&host, key, entries);
-        activate_scheme(&host.core, key, &host.root).await.unwrap();
-        if key == "txjx" {
-            assert!(crate::packages::list_installed_packages(&host.core).unwrap()
-                .iter().all(|package| package.active && package.in_use));
-        }
-    }
-    write(&host.root, "english.schema.yaml", b"schema: {schema_id: english}\n");
-    crate::addon::write_addon_schema_list(&host.root, "english", true).unwrap();
-    for selected in ["beta", "alpha", "gamma", "english"] {
-        keytao_core::write_current_schema(&host.root, selected).unwrap();
-        let packages = crate::packages::list_installed_packages(&host.core).unwrap();
-        for package in packages {
-            assert!(package.active, "{} remains activated", package.scheme_key);
-            let expected = match package.scheme_key.as_str() {
-                "keytao" => selected == "alpha",
-                "xmjd" => selected == "beta",
-                "txjx" => true,
-                _ => unreachable!(),
-            };
-            assert_eq!(package.in_use, expected, "{} with {selected}", package.scheme_key);
+        write(&host.root, "english.schema.yaml", b"schema: {schema_id: english}\n");
+        crate::addon::write_addon_schema_list(&host.root, "english", true).unwrap();
+        for selected in ["beta", "alpha", "gamma", "english"] {
+            keytao_core::write_current_schema(&host.root, selected).unwrap();
+            let packages = crate::packages::list_installed_packages(&host.core).unwrap();
+            for package in packages {
+                assert!(package.active, "{} remains activated", package.scheme_key);
+                let expected = match package.scheme_key.as_str() {
+                    "keytao" => selected == "alpha",
+                    "xmjd" => selected == "beta",
+                    "txjx" => selected == "gamma",
+                    _ => unreachable!(),
+                };
+                assert_eq!(package.in_use, expected,
+                    "{} with {selected}, second_lua={second_lua}", package.scheme_key);
+            }
         }
     }
 }
