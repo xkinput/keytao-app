@@ -403,10 +403,24 @@ pub fn addon_schema_status(
         let id = validate_addon_schema_id(&id)?;
         let root = root()?;
         let mut status = addon_schema_status_at(&root, id);
-        status.version = crate::addon_store::manifest(core, &root, id)?
+        let manifest = crate::addon_store::manifest(core, &root, id)?
             .map(|bytes| parse_manifest(&bytes))
-            .transpose()?
-            .map_or_else(String::new, |manifest| manifest.version);
+            .transpose()?;
+        if keytao_core::RuntimeDirs::isolation_enabled(&root) {
+            status.installed = manifest.is_some() && crate::addon_store::isolated_files(core, id)?.is_dir();
+            status.deployed = keytao_core::RuntimeDirs::resolve(
+                &root,
+                &shared_data_dir(core, &root),
+            )
+            .is_ok_and(|dirs| {
+                status.installed
+                    && dirs.active_package_key.as_deref().is_some_and(|key| {
+                        crate::runtime_materialize::easy_english_enabled(&root, key).unwrap_or(false)
+                    })
+                    && dirs.staging_dir.join("easy_en.schema.yaml").is_file()
+            });
+        }
+        status.version = manifest.map_or_else(String::new, |manifest| manifest.version);
         Ok(status)
     })();
     result.map_err(CoreError::Other)
@@ -461,8 +475,9 @@ fn commit_package(
         .transpose()?;
     let legacy =
         previous.is_none() && addon_schema_status_at(&receipt.root, EASY_EN_ADDON_ID).installed;
-    let mut owned = Vec::new();
-    for file in &files {
+    let isolated = receipt.is_isolated();
+    let mut owned = if isolated { files.clone() } else { Vec::new() };
+    for file in files.iter().filter(|_| !isolated) {
         receipt.preflight_owner(&file.path)?;
         let destination = wanxiang::safe_target(&receipt.root, &file.path)?;
         if destination.exists() {
@@ -502,7 +517,7 @@ fn commit_package(
     {
         receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
     }
-    for file in &files {
+    for file in files.iter().filter(|_| !isolated) {
         if !owned.iter().any(|owned| owned.path == file.path) {
             continue;
         }
@@ -809,6 +824,12 @@ where
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, id)?;
         let mut receipt = install(receipt).await?;
+        if receipt.is_isolated() {
+            receipt.commit_store(true)?;
+            receipt.finish()?;
+            return addon_schema_status(core, || Ok(root), id.into())
+                .map_err(|error| error.to_string());
+        }
         write_schema_list_transaction(&mut receipt, id, true, &shared_data_dir(core, &root))?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "addon-deploy".into(),
@@ -886,6 +907,13 @@ pub async fn addon_schema_uninstall(
     let result: Result<_, String> = async {
         let id = validate_addon_schema_id(&id)?;
         let root = host.user_root()?;
+        if keytao_core::RuntimeDirs::isolation_enabled(&root) {
+            let key = keytao_core::RuntimeDirs::active_package_key(&root)
+                .ok_or("没有使用中的方案包")?;
+            set_package_easy_english(core, &key, false, host).await?;
+            return addon_schema_status(core, || Ok(root), id.into())
+                .map_err(|error| error.to_string());
+        }
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "addon-uninstall".into(),
             percent: 20,
@@ -985,6 +1013,42 @@ pub async fn addon_schema_uninstall(
     result.map_err(CoreError::Other)
 }
 
+pub async fn set_package_easy_english(
+    core: &Core,
+    key: &str,
+    enabled: bool,
+    host: &impl SchemeHost,
+) -> Result<(), String> {
+    use crate::runtime_materialize::{easy_english_enabled, update_easy_english};
+    use keytao_core::RuntimeDirs;
+    let root = host.user_root()?;
+    if !RuntimeDirs::isolation_enabled(&root)
+        || key == EASY_EN_ADDON_ID
+        || RuntimeDirs::active_package_key(&root).as_deref() != Some(key)
+    {
+        return Err("使用中的方案包已变更".into());
+    }
+    if easy_english_enabled(&root, key).map_err(|error| error.to_string())? == enabled {
+        return Ok(());
+    }
+    if enabled && !crate::addon_store::isolated_files(core, EASY_EN_ADDON_ID)?.is_dir() {
+        addon_schema_install(core, EASY_EN_ADDON_ID.into(), host)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if update_easy_english(&root, key, enabled).map_err(|error| error.to_string())?
+        && let Err(error) = host.deploy_package(key).await
+    {
+        update_easy_english(&root, key, !enabled)
+            .map_err(|restore| format!("{error}；恢复 English 设置失败：{restore}"))?;
+        host.deploy_package(key)
+            .await
+            .map_err(|restore| format!("{error}；恢复方案包部署失败：{restore}"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
 mod smoke_fixture;
@@ -1062,6 +1126,71 @@ mod tests {
         let mut receipt = commit_fixture_package(root, sha, content);
         write_schema_list_transaction(&mut receipt, EASY_EN_ADDON_ID, true, root).unwrap();
         receipt
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn easy_english_toggle_redeploys_only_the_active_package() {
+        use crate::scheme_host::tests::AddonHost;
+        use keytao_core::RuntimeDirs;
+        use std::fs;
+
+        let directory = TestRoot::new();
+        let root = directory.path();
+        let host = AddonHost::new(root);
+        let bundled = host.core.env().resource_dir.join("rime-data");
+        smoke_fixture::write(&bundled).unwrap();
+        fs::write(root.join(RuntimeDirs::SETTINGS_FILE), br#"{"runtime_isolation":true}"#).unwrap();
+        let active = keytao_core::package_store::active_manifest(root);
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        let first = "builtin/keytao";
+        let second = "builtin/second";
+        host.core.lock_state().installed_packages.insert(
+            second.into(),
+            crate::state::InstalledPackage { version: None },
+        );
+        for key in [second, first] {
+            fs::write(&active, serde_json::json!({"active_package": key}).to_string()).unwrap();
+            host.deploy_package(key).await.unwrap();
+        }
+        let mut receipt = InstallReceipt::new(root).unwrap();
+        receipt.attach_store(&host.core, EASY_EN_ADDON_ID).unwrap();
+        let archive = receipt.work.join("fixture.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        for (suffix, content) in [
+            ("schema.yaml", fs::read_to_string(bundled.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID))).unwrap()
+                .replace(smoke_fixture::SCHEMA_ID, EASY_EN_ADDON_ID)),
+            ("dict.yaml", fs::read_to_string(bundled.join(format!("{}.dict.yaml", smoke_fixture::SCHEMA_ID))).unwrap()
+                .replace(smoke_fixture::SCHEMA_ID, EASY_EN_ADDON_ID)),
+        ] {
+            zip.start_file(format!("rime-easy-en-commit/easy_en.{suffix}"), zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        for (path, content) in [("lua/easy_en.lua", "return {}"), ("LICENSE", "fixture")] {
+            zip.start_file(format!("rime-easy-en-commit/{path}"), zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        commit_package(&mut receipt, &archive, &package_from_commit(&"a".repeat(40)).unwrap()).unwrap();
+        receipt.commit_store(true).unwrap();
+        receipt.finish().unwrap();
+
+        let first_dirs = RuntimeDirs::for_package(root, &bundled, first).unwrap();
+        let second_dirs = RuntimeDirs::for_package(root, &bundled, second).unwrap();
+        fs::remove_file(second_dirs.staging_dir.join("default.yaml")).unwrap();
+        let second_before = crate::runtime_materialize::test_hashes(&second_dirs.user_data_dir);
+        for enabled in [true, false] {
+            set_package_easy_english(&host.core, first, enabled, &host).await.unwrap();
+            assert_eq!(crate::runtime_materialize::easy_english_enabled(root, first).unwrap(), enabled);
+            let built = fs::read_to_string(first_dirs.staging_dir.join("default.yaml")).unwrap();
+            assert_eq!(keytao_core::parse_schema_list(&built).iter().any(|id| id == EASY_EN_ADDON_ID), enabled);
+            assert_eq!(first_dirs.user_data_dir.join("lua/easy_en.lua").is_file(), enabled);
+            assert_eq!(first_dirs.staging_dir.join("easy_en.schema.yaml").is_file(), enabled);
+            assert_eq!(crate::runtime_materialize::test_hashes(&second_dirs.user_data_dir), second_before);
+            assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(first));
+        }
+        assert!(!root.join("easy_en.schema.yaml").exists());
+        assert!(set_package_easy_english(&host.core, second, true, &host).await.is_err());
     }
 
     #[tokio::test]

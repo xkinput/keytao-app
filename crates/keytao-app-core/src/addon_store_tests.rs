@@ -39,6 +39,48 @@ fn put(root: &Path, relative: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn isolated_addon_publication_preserves_flat_sources_and_restores_failed_update() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = core(directory.path());
+    let root = directory.path().join("rime");
+    let source = directory.path().join("source");
+    let schema = "rime_ice.schema.yaml";
+    let original = b"schema: {schema_id: rime_ice, name: Original}";
+    let updated = b"schema: {schema_id: rime_ice, name: Updated}";
+    put(
+        &root,
+        RuntimeDirs::SETTINGS_FILE,
+        br#"{"runtime_isolation":true}"#,
+    );
+    put(&root, schema, b"private flat source");
+    put(&source, schema, original);
+    let store = AddonStore::new(&core, &root, "rime_ice").unwrap();
+    drop(
+        store
+            .commit_isolated(&source, &manifest_bytes(&[(schema, original)]))
+            .unwrap(),
+    );
+    let stored = isolated_files(&core, "rime_ice").unwrap().join(schema);
+    assert_eq!(fs::read(&stored).unwrap(), original);
+    assert!(store.read_manifest().unwrap().is_some());
+
+    put(&source, schema, updated);
+    assert!(
+        store
+            .commit_isolated(&source, &manifest_bytes(&[(schema, original)]))
+            .is_err()
+    );
+    assert_eq!(fs::read(&stored).unwrap(), original);
+    let rollback = store
+        .commit_isolated(&source, &manifest_bytes(&[(schema, updated)]))
+        .unwrap();
+    assert_eq!(fs::read(&stored).unwrap(), updated);
+    store.rollback_isolated(rollback).unwrap();
+    assert_eq!(fs::read(&stored).unwrap(), original);
+    assert_eq!(fs::read(root.join(schema)).unwrap(), b"private flat source");
+}
+
+#[test]
 fn addon_multi_schema_defaults_selection_update_and_migration() {
     let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();

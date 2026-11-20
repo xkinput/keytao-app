@@ -98,7 +98,7 @@ fn record_result_inner(
     let root = persist_result(core, root, success)?;
     // Hosts also use this preparation before deploying through a native IME process.
     if prepare_lua && !success && root.is_dir() {
-        crate::packages::prepare_active_rime_lua(core, &root)?;
+        crate::legacy_flat::prepare_active_rime_lua(core, &root)?;
     }
     if root.is_dir() {
         crate::packages::sync_generated(core, &root)?;
@@ -156,7 +156,7 @@ pub async fn deploy_with_android_host<F: std::future::Future<Output = String>>(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     if RuntimeDirs::isolation_enabled(root) {
-        return deploy_isolated_android(core, root, None, deploy).await;
+        return deploy_isolated_android(core, root, IsolatedDeploy::All, deploy).await;
     }
     record_result_inner(core, root, false, prepare_lua).map_err(|error| error.to_string())?;
     let target = flat_target(core, Some(root));
@@ -176,7 +176,7 @@ pub async fn deploy_with_android_host<F: std::future::Future<Output = String>>(
 async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     core: &Core,
     root: &Path,
-    switch: Option<&str>,
+    mode: IsolatedDeploy<'_>,
     deploy: impl FnOnce(bool) -> F,
 ) -> Result<(), String> {
     use std::{
@@ -188,12 +188,14 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     let _plan_lock = isolated_plan_lock(root)?;
     let shared = deploy_shared_data_dir(core, root);
     let (targets, _staged_inputs) =
-        crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, switch)
+        crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, mode.target())
             .map_err(|error| error.to_string())?;
     if targets.is_empty() {
         return Err("没有可部署的方案包".into());
     }
-    if switch.is_some() && switch_cached_package(root, &shared, &targets[0]).await? {
+    if matches!(mode, IsolatedDeploy::Switch(_))
+        && switch_cached_package(root, &shared, &targets[0]).await?
+    {
         return Ok(());
     }
     let journal = crate::packages::safe_path(root, ANDROID_DEPLOY_PROGRESS_FILE)?;
@@ -240,7 +242,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     };
     drain_progress()?;
     let _ = fs::remove_file(plan);
-    if switch.is_none() && matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
+    if mode.publishes_all() && matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
         persist_result(core, root, true).map_err(|error| error.to_string())?;
     }
     if !error.is_empty() {
@@ -251,7 +253,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     {
         return Err("Android package deployment did not report all results".into());
     }
-    if let Some(key) = switch {
+    if let IsolatedDeploy::Switch(key) = mode {
         switch_prepared_package(root, &shared, key).await?;
     }
     Ok(())
@@ -359,23 +361,73 @@ pub struct DeployResult {
     pub warning: Option<String>,
 }
 
-pub async fn switch_package(
+#[derive(Clone, Copy)]
+enum IsolatedDeploy<'a> {
+    All,
+    Switch(&'a str),
+    Refresh(&'a str),
+}
+
+impl<'a> IsolatedDeploy<'a> {
+    fn target(self) -> Option<&'a str> {
+        match self {
+            Self::All => None,
+            Self::Switch(key) | Self::Refresh(key) => Some(key),
+        }
+    }
+
+    fn publishes_all(self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
+pub async fn switch_package<#[cfg(target_os = "android")] F: std::future::Future<Output = String> + Send>(
     core: &Core,
     root: &Path,
     key: &str,
-    #[cfg(target_os = "android")] deploy: impl FnOnce(
-        bool,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>,
+    #[cfg(target_os = "android")] deploy: impl FnOnce(bool) -> F,
+) -> Result<(), String> {
+    deploy_package_mode(
+        core,
+        root,
+        IsolatedDeploy::Switch(key),
+        #[cfg(target_os = "android")]
+        deploy,
+    )
+    .await
+}
+
+pub async fn deploy_package<#[cfg(target_os = "android")] F: std::future::Future<Output = String> + Send>(
+    core: &Core,
+    root: &Path,
+    key: &str,
+    #[cfg(target_os = "android")] deploy: impl FnOnce(bool) -> F,
+) -> Result<(), String> {
+    deploy_package_mode(
+        core,
+        root,
+        IsolatedDeploy::Refresh(key),
+        #[cfg(target_os = "android")]
+        deploy,
+    )
+    .await
+}
+
+async fn deploy_package_mode<#[cfg(target_os = "android")] F: std::future::Future<Output = String> + Send>(
+    core: &Core,
+    root: &Path,
+    mode: IsolatedDeploy<'_>,
+    #[cfg(target_os = "android")] deploy: impl FnOnce(bool) -> F,
 ) -> Result<(), String> {
     if !RuntimeDirs::isolation_enabled(root) {
         return Err("方案包隔离未启用".into());
     }
     #[cfg(target_os = "android")]
-    return deploy_isolated_android(core, root, Some(key), deploy).await;
+    return deploy_isolated_android(core, root, mode, deploy).await;
     #[cfg(target_os = "ios")]
     {
         let shared = deploy_shared_data_dir(core, root);
-        return deploy_isolated_in_process_target(core, root, shared, Some(key))
+        return deploy_isolated_in_process_target(core, root, shared, mode)
             .await
             .map(|_| ());
     }
@@ -384,11 +436,11 @@ pub async fn switch_package(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if keytao_core::default_user_data_dir().as_deref() != Some(root) {
             let shared = deploy_shared_data_dir(core, root);
-            return deploy_isolated_in_process_target(core, root, shared, Some(key))
+            return deploy_isolated_in_process_target(core, root, shared, mode)
                 .await
                 .map(|_| ());
         }
-        deploy_isolated_desktop(core, root, Some(key)).await?;
+        deploy_isolated_desktop(core, root, mode).await?;
         Ok(())
     }
 }
@@ -428,6 +480,26 @@ async fn switch_prepared_package(root: &Path, shared: &Path, key: &str) -> Resul
     #[cfg(target_os = "windows")]
     crate::windows_public_schemas::activate_cached_isolated_package(key)
         .map_err(|error| format!("方案包已切换，系统搜索框方案未更新：{error}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn finish_package_refresh(root: &Path, key: &str) -> Result<(), String> {
+    keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
+        if RuntimeDirs::active_package_key(root).as_deref() == Some(key) {
+            keytao_core::ReloadStamp::write_package(root, key)?;
+        }
+        Ok(())
+    })?;
+    #[cfg(target_os = "windows")]
+    if RuntimeDirs::active_package_key(root).as_deref() == Some(key) {
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::windows_public_schemas::publish_isolated_package(&key, true)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    }
     Ok(())
 }
 
@@ -619,7 +691,7 @@ pub async fn preview_candidates(
 async fn deploy_isolated_desktop(
     core: &Core,
     root: &Path,
-    switch: Option<&str>,
+    mode: IsolatedDeploy<'_>,
 ) -> Result<DeployResult, String> {
     #[cfg(not(target_os = "windows"))]
     use keytao_core::deploy_child;
@@ -632,12 +704,14 @@ async fn deploy_isolated_desktop(
     let shared = deploy_shared_data_dir(core, root);
     let shared_dir = shared.as_path();
     let (targets, staged_inputs) =
-        crate::runtime_materialize::prepare_deploy_targets(core, root, shared_dir, switch)
+        crate::runtime_materialize::prepare_deploy_targets(core, root, shared_dir, mode.target())
             .map_err(|error| error.to_string())?;
     if targets.is_empty() {
         return Err("没有可部署的方案包".into());
     }
-    if switch.is_some() && switch_cached_package(root, shared_dir, &targets[0]).await? {
+    if matches!(mode, IsolatedDeploy::Switch(_))
+        && switch_cached_package(root, shared_dir, &targets[0]).await?
+    {
         return Ok(package_switch_result());
     }
     #[cfg(target_os = "linux")]
@@ -652,7 +726,7 @@ async fn deploy_isolated_desktop(
         .map_err(|error| error.to_string())??
     };
     let expected = targets.len();
-    let publish_deploy = switch.is_none();
+    let publish_deploy = mode.publishes_all();
     #[cfg(not(target_os = "windows"))]
     let child_shared = shared.clone();
     let plan = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
@@ -702,8 +776,10 @@ async fn deploy_isolated_desktop(
     });
     let (result, _plan_lock) =
         finish_isolated_deploy(core, root, expected, events, worker, publish_deploy).await?;
-    if let Some(key) = switch {
+    if let IsolatedDeploy::Switch(key) = mode {
         switch_prepared_package(root, shared_dir, key).await?;
+    } else if let IsolatedDeploy::Refresh(key) = mode {
+        finish_package_refresh(root, key).await?;
     }
     Ok(result)
 }
@@ -714,7 +790,7 @@ pub async fn deploy_isolated_in_process(
     root: &Path,
     shared: std::path::PathBuf,
 ) -> Result<DeployResult, String> {
-    deploy_isolated_in_process_target(core, root, shared, None).await
+    deploy_isolated_in_process_target(core, root, shared, IsolatedDeploy::All).await
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
@@ -722,16 +798,18 @@ async fn deploy_isolated_in_process_target(
     core: &Core,
     root: &Path,
     shared: std::path::PathBuf,
-    switch: Option<&str>,
+    mode: IsolatedDeploy<'_>,
 ) -> Result<DeployResult, String> {
     let plan_lock = isolated_plan_lock(root)?;
     let (targets, staged_inputs) =
-        crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, switch)
+        crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, mode.target())
             .map_err(|error| error.to_string())?;
     if targets.is_empty() {
         return Err("没有可部署的方案包".into());
     }
-    if switch.is_some() && switch_cached_package(root, &shared, &targets[0]).await? {
+    if matches!(mode, IsolatedDeploy::Switch(_))
+        && switch_cached_package(root, &shared, &targets[0]).await?
+    {
         return Ok(package_switch_result());
     }
     let expected = targets.len();
@@ -752,9 +830,12 @@ async fn deploy_isolated_in_process_target(
         (result.map(|()| None), plan_lock)
     });
     let (result, _plan_lock) =
-        finish_isolated_deploy(core, root, expected, events, worker, switch.is_none()).await?;
-    if let Some(key) = switch {
+        finish_isolated_deploy(core, root, expected, events, worker, mode.publishes_all())
+            .await?;
+    if let IsolatedDeploy::Switch(key) = mode {
         switch_prepared_package(root, &shared, key).await?;
+    } else if let IsolatedDeploy::Refresh(key) = mode {
+        finish_package_refresh(root, key).await?;
     }
     Ok(result)
 }
@@ -856,7 +937,7 @@ pub(crate) async fn rime_deploy_default_inner(
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     if RuntimeDirs::isolation_enabled(&dest) {
-        let result = deploy_isolated_desktop(core, &dest, None).await?;
+        let result = deploy_isolated_desktop(core, &dest, IsolatedDeploy::All).await?;
         #[cfg(target_os = "linux")]
         report_linux_ime_launch(
             core,
@@ -1103,7 +1184,7 @@ mod tests {
             key.into(),
             crate::state::InstalledPackage { version: None },
         );
-        deploy_isolated_in_process_target(&core, root, shared.clone(), Some(key))
+        deploy_isolated_in_process_target(&core, root, shared.clone(), IsolatedDeploy::Switch(key))
             .await
             .unwrap();
         let resolved = RuntimeDirs::for_package(root, &shared, key).unwrap();
@@ -1115,7 +1196,7 @@ mod tests {
             br#"{"active_package":"builtin/other"}"#,
         ).unwrap();
 
-        deploy_isolated_in_process_target(&core, root, shared, Some(key))
+        deploy_isolated_in_process_target(&core, root, shared, IsolatedDeploy::Switch(key))
             .await
             .unwrap();
         assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(key));

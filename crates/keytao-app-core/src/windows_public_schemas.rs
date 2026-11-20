@@ -478,6 +478,33 @@ fn deploy_isolated_public_package(
         &BTreeMap::new(),
         None,
     )?;
+    if key == crate::wanxiang::SCHEMA_ID
+        && let Some(schema) = sources.get_mut(Path::new("wanxiang.schema.yaml"))
+    {
+        *schema = crate::wanxiang::grammar_schema(
+            std::str::from_utf8(schema).map_err(|error| error.to_string())?,
+            false,
+        )
+        .into_bytes();
+    }
+    if crate::runtime_materialize::easy_english_enabled(&control_root, key)
+        .map_err(|error| error.to_string())?
+    {
+        let english = RuntimeDirs::for_package(&control_root, shared, EASY_EN_ADDON_ID)
+            .ok_or("Missing Easy English package sources")?;
+        crate::addon_store::validate_directory(
+            english
+                .shared_data_dir
+                .parent()
+                .ok_or("Invalid Easy English package directory")?,
+            EASY_EN_ADDON_ID,
+        )
+        .map_err(|error| error.to_string())?;
+        let overlay = package_directory_files(&english.shared_data_dir)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        merge_public_files(&mut sources, &overlay)?;
+    }
     sources.insert(RuntimeDirs::PUBLIC_PACKAGE_FILE.into(), key.as_bytes().to_vec());
     let cached = read_snapshot(&cache)?;
     if !cached

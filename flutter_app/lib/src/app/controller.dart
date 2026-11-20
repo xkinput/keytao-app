@@ -355,6 +355,11 @@ class AppController extends ChangeNotifier {
 
   String get activeSchemeKey {
     final installed = local?.installedScheme;
+    if (local?.runtimeIsolation == true && installed != null) {
+      return installed.startsWith('builtin/')
+          ? installed.substring('builtin/'.length)
+          : installed;
+    }
     if (installed != null && installedPackageFor(installed)?.active == true) {
       return installed;
     }
@@ -795,10 +800,18 @@ class AppController extends ChangeNotifier {
 
   bool get storageReady =>
       storage?['granted'] == true && storage?['writable'] == true;
-  bool get englishReady =>
-      addon?.englishAvailable == true ||
-      (addon?.installed == true && addon?.deployed == true) ||
-      (local?.schemas.contains('english') ?? false);
+  bool get englishReady => local?.runtimeIsolation == true
+      ? schemas.any(
+          (schema) =>
+              const {'easy_en', 'english'}.contains(schema.id) ||
+              const {
+                'easy english',
+                'english',
+              }.contains(schema.name.toLowerCase()),
+        )
+      : addon?.englishAvailable == true ||
+            (addon?.installed == true && addon?.deployed == true) ||
+            (local?.schemas.contains('english') ?? false);
   bool get setupReady {
     if (local?.installed != true || local?.deployed != true) return false;
     if (isAndroid) {
@@ -933,7 +946,9 @@ class AppController extends ChangeNotifier {
     installFraction = value.percent.clamp(0, 100) / 100;
     if (isManagingAddon) addonProgress = value;
     if (value.stage.contains('deploy')) {
-      if (isManagingAddon) deployingSchemeKey = 'easy_en';
+      if (isManagingAddon && local?.runtimeIsolation != true) {
+        deployingSchemeKey = 'easy_en';
+      }
       if (isManagingRimeIce) deployingSchemeKey = 'rime_ice';
     }
     if (isManagingWanxiang) wanxiangProgress = value;
@@ -949,7 +964,9 @@ class AppController extends ChangeNotifier {
     if (value.legacyMessage case final message?) {
       if (message.isEmpty) return;
       if (isManagingAddon || isManagingRimeIce) {
-        deployingSchemeKey = isManagingAddon ? 'easy_en' : 'rime_ice';
+        if (!isManagingAddon || local?.runtimeIsolation != true) {
+          deployingSchemeKey = isManagingAddon ? 'easy_en' : 'rime_ice';
+        }
         progress = message;
       }
       if (message == AppStrings.deployDone) deployWarning = null;
@@ -1138,11 +1155,15 @@ class AppController extends ChangeNotifier {
           )
           .listen(
             (event) {
-              final suffix = '${Platform.pathSeparator}.keytao-current-schema';
+              final separator = Platform.pathSeparator;
+              bool schemaChanged(String? path) =>
+                  path?.endsWith('$separator.keytao-current-schema') == true ||
+                  (local?.runtimeIsolation == true &&
+                      path?.endsWith('${separator}keytao-ime.reload') == true);
               if (_foreground &&
-                  (event.path.endsWith(suffix) ||
+                  (schemaChanged(event.path) ||
                       (event is FileSystemMoveEvent &&
-                          event.destination?.endsWith(suffix) == true))) {
+                          schemaChanged(event.destination)))) {
                 unawaited(refreshSchemas());
               }
             },
@@ -1166,6 +1187,7 @@ class AppController extends ChangeNotifier {
     final result = await core.getSchemas();
     schemas = result.schemas;
     currentSchemaId = result.current;
+    if (local?.runtimeIsolation == true) return;
     for (final key in ['easy_en', 'rime_ice']) {
       final status = key == 'easy_en' ? addon : rimeIce;
       if (status?.installed != true || currentSchemaId == null) continue;
@@ -1188,8 +1210,11 @@ class AppController extends ChangeNotifier {
       return;
     }
     try {
+      final isolated = local?.runtimeIsolation == true;
+      if (isolated) local = await core.checkLocalSchema();
       await _readSchemas();
       await _readInstalledPackages();
+      if (isolated) await refreshIsolatedPackages();
       _changed();
     } catch (_) {
       // Keep the last schema visible if a foreground refresh is unavailable.
@@ -3087,6 +3112,32 @@ class AppController extends ChangeNotifier {
 
   Future<bool> installAddon() => _manageAddon(true);
   Future<bool> uninstallAddon() => _manageAddon(false);
+
+  Future<bool> setPackageEasyEnglish(String key, bool enabled) => run(() async {
+    deployingSchemeKey = key;
+    addonError = null;
+    addonProgress = null;
+    _startOperation(OperationKind.addon, AppStrings.deployingLibrime);
+    try {
+      if (isAndroid) await _requireStorage();
+      await core.setPackageEasyEnglish(
+        packageKey: key,
+        enabled: enabled,
+        androidDeploy: _androidDeploy,
+      );
+      await _readLocal();
+    } catch (failure) {
+      try {
+        await _readLocal();
+      } catch (_) {}
+      addonError = errorText(failure);
+      rethrow;
+    } finally {
+      deployingSchemeKey = null;
+      operation = null;
+    }
+  });
+
   Future<bool> _manageAddon(bool installed) => run(() async {
     _addonUpdateChecks['easy_en'] = Object();
     _startOperation(

@@ -151,6 +151,7 @@ fn plan(
     let mut packages = installed.clone();
     packages.extend(addons.iter().map(|key| (*key).to_owned()));
     packages.extend(legacy_addons.keys().cloned());
+    packages.remove(crate::addon::EASY_EN_ADDON_ID);
     let schema = legacy_schema(root)?;
     let source = schema
         .as_deref()

@@ -29,9 +29,14 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
             .map_err(|error| error.to_string())?;
     let app_state = state.core.state();
     let runtime_isolation = keytao_core::RuntimeDirs::isolation_enabled(&root).then_some(true);
-    let installed_scheme = runtime_isolation
-        .and_then(|_| keytao_core::RuntimeDirs::active_package_key(&root))
-        .or(app_state.active_scheme);
+    let active_package = runtime_isolation
+        .and_then(|_| keytao_core::RuntimeDirs::active_package_key(&root));
+    let easy_english_enabled = active_package.as_deref()
+        .filter(|key| *key != keytao_app_core::addon::EASY_EN_ADDON_ID)
+        .map(|key| keytao_app_core::runtime_materialize::easy_english_enabled(&root, key))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let installed_scheme = active_package.or(app_state.active_scheme);
     let installed_scheme_version = installed_scheme
         .as_ref()
         .and_then(|scheme| app_state.installed_packages.get(scheme))
@@ -46,6 +51,7 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         runtime_isolation,
         runtime_migration_complete: runtime_isolation
             .map(|_| keytao_core::RuntimeDirs::migration_complete(&root)),
+        easy_english_enabled,
     })
 }
 
@@ -104,8 +110,6 @@ pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result
             &state.core,
             &scheme_key,
             &root,
-            #[cfg(target_os = "android")]
-            |_| Box::pin(async { Err("Unused extraction callback".into()) }),
             #[cfg(target_os = "windows")]
             keytao_app_core::install::finish_windows_scheme_install,
         )
@@ -566,21 +570,11 @@ pub async fn activate_scheme(
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let root = state.host.user_root()?;
-    #[cfg(not(target_os = "android"))]
     let _ = android_extract;
     let result = keytao_app_core::packages::activate_scheme(
         &state.core,
         &scheme_key,
         &root,
-        #[cfg(target_os = "android")]
-        move |archive| -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>,
-        > {
-            let extraction = android_extract(archive);
-            Box::pin(async move {
-                serde_json::from_str(&extraction.await).map_err(|error| error.to_string())
-            })
-        },
         #[cfg(target_os = "windows")]
         keytao_app_core::install::finish_windows_scheme_install,
     )
@@ -607,6 +601,18 @@ pub async fn switch_package(
         android_deploy,
     )
     .await
+}
+
+pub async fn set_package_easy_english(
+    package_key: String,
+    enabled: bool,
+    android_deploy: impl Fn(bool) -> DartFnFuture<String> + Send + Sync,
+) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    keytao_app_core::addon::set_package_easy_english(&state.core, &package_key, enabled, &host)
+        .await
 }
 
 pub async fn remove_scheme_package(

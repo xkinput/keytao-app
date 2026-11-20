@@ -8,6 +8,12 @@ use std::{
 pub trait SchemeHost: Sync {
     fn user_root(&self) -> Result<PathBuf, String>;
     fn deploy(&self) -> impl Future<Output = Result<(), String>> + Send;
+    fn deploy_package(&self, _key: &str) -> impl Future<Output = Result<(), String>> + Send {
+        async { Err("Package deployment is unavailable".into()) }
+    }
+    fn switch_package(&self, _key: &str) -> impl Future<Output = Result<(), String>> + Send {
+        async { Err("Package switching is unavailable".into()) }
+    }
     fn write_reload_stamp(&self, root: &Path) -> Result<Option<PathBuf>, String>;
     #[cfg(target_os = "android")]
     fn copy_addon_assets(&self, id: &str) -> Result<(), String>;
@@ -76,7 +82,7 @@ pub(crate) mod tests {
             {
                 return Err("fixture deploy failure".into());
             }
-            crate::packages::prepare_active_rime_lua(&self.core, &self.root)
+            crate::legacy_flat::prepare_active_rime_lua(&self.core, &self.root)
                 .map_err(|e| e.to_string())?;
             let config =
                 std::fs::read(self.root.join("default.custom.yaml")).map_err(|e| e.to_string())?;
@@ -103,6 +109,10 @@ pub(crate) mod tests {
                 .map_err(|e| e.to_string())?;
             }
             Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        async fn deploy_package(&self, key: &str) -> Result<(), String> {
+            crate::deploy::deploy_package(&self.core, &self.root, key).await
         }
         fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
             self.reloads.fetch_add(1, Ordering::SeqCst);

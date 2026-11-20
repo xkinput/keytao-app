@@ -87,6 +87,42 @@ struct Settings {
     easy_english_packages: BTreeSet<String>,
 }
 
+fn read_settings(root: &Path) -> Result<Settings, CoreError> {
+    Ok(read_optional(&safe(root, RuntimeDirs::SETTINGS_FILE)?)?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()?
+        .unwrap_or_default())
+}
+
+pub fn easy_english_enabled(root: &Path, key: &str) -> Result<bool, CoreError> {
+    Ok(read_settings(root)?.easy_english_packages.contains(key))
+}
+
+pub(crate) fn update_easy_english(root: &Path, key: &str, enabled: bool) -> Result<bool, CoreError> {
+    let path = safe(root, RuntimeDirs::SETTINGS_FILE)?;
+    let mut settings: serde_json::Map<String, serde_json::Value> = read_optional(&path)?
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?
+        .unwrap_or_default();
+    let mut packages: BTreeSet<String> = settings
+        .get("easy_english_packages")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let changed = if enabled {
+        packages.insert(key.into())
+    } else {
+        packages.remove(key)
+    };
+    if changed {
+        settings.insert("easy_english_packages".into(), serde_json::to_value(packages)?);
+        write_file(&path, &serde_json::to_vec(&settings)?)?;
+    }
+    Ok(changed)
+}
+
 pub fn isolated_packages(
     core: &Core,
     root: &Path,
@@ -97,7 +133,12 @@ pub fn isolated_packages(
     let store = PackageStore::new(core);
     let activations = crate::package_activation::read_all(core, root)?;
     let mut keys = installed_main_packages(core, &activations);
-    keys.extend(installed_addons(&store)?.into_iter().map(str::to_owned));
+    keys.extend(
+        installed_addons(&store)?
+            .into_iter()
+            .filter(|id| *id != EASY_EN_ADDON_ID)
+            .map(str::to_owned),
+    );
     let shared = crate::deploy::deploy_shared_data_dir(core, root);
     if let Some(active) =
         RuntimeDirs::active_package_key(root).filter(|key| key.starts_with("builtin/"))
@@ -221,42 +262,31 @@ fn prepare_targets(
     package_key: Option<&str>,
     migration: Option<(&str, &Files)>,
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
-    let settings: Settings = read_optional(&safe(control_root, RuntimeDirs::SETTINGS_FILE)?)?
-        .map(|bytes| serde_json::from_slice(&bytes))
-        .transpose()?
-        .unwrap_or_default();
+    let settings = read_settings(control_root)?;
     let store = PackageStore::new(core);
     let activations = crate::package_activation::read_all(core, control_root)?;
-    let mut addons = BTreeMap::new();
-    for id in installed_addons(&store)? {
+    let addons: BTreeSet<_> = installed_addons(&store)?
+        .into_iter()
+        .filter(|id| *id != EASY_EN_ADDON_ID)
+        .map(str::to_owned)
+        .collect();
+    let load_addon = |id: &str| -> Result<_, CoreError> {
         let package = store.checked_addon_path(id)?;
-        let source: Result<_, CoreError> = (|| {
-            crate::addon_store::validate_directory(&package, id)?;
-            let metadata: StoredPackage =
-                serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
-            Ok((package, metadata))
-        })();
-        addons.insert(id.to_owned(), source);
-    }
-    let english = (!settings.easy_english_packages.is_empty()).then(|| {
-        addons
-            .get(EASY_EN_ADDON_ID)
-            .ok_or_else(|| "Easy English must be installed before enabling its overlay".to_owned())
-            .and_then(|entry| {
-                let (path, metadata) = entry.as_ref().map_err(ToString::to_string)?;
-                addon_files(path, metadata).map_err(|error| error.to_string())
-            })
-    });
+        crate::addon_store::validate_directory(&package, id)?;
+        let metadata: StoredPackage =
+            serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
+        Ok((addon_files(&package, &metadata)?, metadata.selected_schemas))
+    };
+    let english = std::cell::OnceCell::new();
     let overlay_for = |key: &str| {
+        if !settings.easy_english_packages.contains(key) {
+            return Ok(None);
+        }
         english
+            .get_or_init(|| load_addon(EASY_EN_ADDON_ID).map(|(files, _)| files))
             .as_ref()
-            .filter(|_| key != EASY_EN_ADDON_ID && settings.easy_english_packages.contains(key))
-            .map(|files| {
-                files
-                    .as_ref()
-                    .map_err(|error| CoreError::Other(error.clone()))
-            })
-            .transpose()
+            .map(Some)
+            .map_err(|error| CoreError::Other(error.to_string()))
     };
     let legacy;
     let inputs = if let Some((_, legacy)) = migration {
@@ -275,9 +305,10 @@ fn prepare_targets(
             .or_else(|| RuntimeDirs::active_package_key(&core.env().data_dir))
             .or_else(|| in_use_package(control_root, &activations))
             .or_else(|| core.lock_state().active_scheme.clone())
-    });
+    }).filter(|key| key != EASY_EN_ADDON_ID);
     let mut keys = installed
-        .union(&addons.keys().cloned().collect())
+        .union(&addons)
+        .filter(|key| key.as_str() != EASY_EN_ADDON_ID)
         .cloned()
         .collect::<Vec<_>>();
     if let Some(active) = &active {
@@ -304,7 +335,7 @@ fn prepare_targets(
     let targets = keys
         .into_iter()
         .map(|key| {
-            let mut name = package_name(core, &key);
+            let name = package_name(core, &key);
             let result: Result<Option<String>, CoreError> = (|| {
                 let (files, selection) = if key.starts_with("builtin/") {
                     let mut files = Files::new();
@@ -319,12 +350,8 @@ fn prepare_targets(
                         &store.checked_metadata_path(&key)?,
                     )?;
                     (files.into_iter().collect(), selection)
-                } else if let Some(entry) = addons.remove(&key) {
-                    let (package, metadata) = entry?;
-                    if let Some(display_name) = metadata.meta.display_name.as_ref() {
-                        name.clone_from(display_name);
-                    }
-                    (addon_files(&package, &metadata)?, metadata.selected_schemas)
+                } else if addons.contains(&key) {
+                    load_addon(&key)?
                 } else {
                     return Err(CoreError::Other(format!(
                         "Missing package source for {key}"
@@ -934,7 +961,7 @@ fn selected_schemas(
         })
         .map(|(path, bytes)| (path.clone(), bytes.clone()))
         .collect();
-    let available = |id: &str| sources.contains_key(&format!("{id}.schema.yaml"));
+    let available = |id: &str| id != EASY_EN_ADDON_ID && sources.contains_key(&format!("{id}.schema.yaml"));
     let mut schemas: Vec<_> = crate::package_schemas::enumerate(key, &configs, selection)?
         .into_iter()
         .filter(|schema| schema.selected && available(&schema.id))
@@ -945,6 +972,7 @@ fn selected_schemas(
             (!path.contains('/'))
                 .then(|| path.strip_suffix(".schema.yaml"))
                 .flatten()
+                .filter(|id| *id != EASY_EN_ADDON_ID)
                 .map(str::to_owned)
         }));
     }

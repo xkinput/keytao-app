@@ -109,6 +109,47 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn stored_activation_keeps_the_isolated_control_root_untouched() {
+    let fixture = Fixture::new();
+    let key = packages::import_local_scheme(
+        &fixture.core,
+        &fixture.dir.path().join("source"),
+        "Local",
+        None,
+    )
+    .unwrap();
+    let settings = fixture.root.join(keytao_core::RuntimeDirs::SETTINGS_FILE);
+    fs::write(&settings, br#"{"runtime_isolation":true}"#).unwrap();
+
+    let result = packages::activate_scheme(
+        &fixture.core,
+        &key,
+        &fixture.root,
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await;
+    assert!(result.is_err());
+    let entries: Vec<_> = fs::read_dir(&fixture.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries, [settings.clone()]);
+
+    fs::write(settings, br#"{"runtime_isolation":false}"#).unwrap();
+    packages::activate_scheme(
+        &fixture.core,
+        &key,
+        &fixture.root,
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await
+    .unwrap();
+    assert!(fixture.root.join("keytao.schema.yaml").is_file());
+}
+
+#[tokio::test]
 async fn selected_local_schemas_survive_reimport_and_deploy_with_librime() {
     let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();

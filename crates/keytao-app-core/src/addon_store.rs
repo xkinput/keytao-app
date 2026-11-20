@@ -117,7 +117,41 @@ impl AddonStore {
 
     pub(crate) fn read_manifest(&self) -> Result<Option<Vec<u8>>, String> {
         let _guard = operation();
+        if RuntimeDirs::isolation_enabled(&self.root) {
+            return self.read_isolated_manifest();
+        }
         self.read_manifest_inner()
+    }
+
+    pub(crate) fn source_dir(&self) -> Result<PathBuf, String> {
+        safe_path(&self.destination, "files")
+    }
+
+    fn read_isolated_manifest(&self) -> Result<Option<Vec<u8>>, String> {
+        if !self
+            .destination
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(None);
+        }
+        let stored = read_stored(&self.destination, &self.id).map_err(|error| error.to_string())?;
+        let mut manifest = stored.addon_manifest.ok_or("Add-on manifest is missing")?;
+        let names: BTreeSet<_> = parse_manifest(&manifest, &self.id)?
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        manifest["files"] = serde_json::to_value(
+            stored
+                .files
+                .iter()
+                .filter(|file| names.contains(&file.path))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        serde_json::to_vec(&manifest)
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
 
     fn read_manifest_inner(&self) -> Result<Option<Vec<u8>>, String> {
@@ -125,7 +159,14 @@ impl AddonStore {
             return Ok(None);
         };
         let stored = read_stored(&self.destination, &self.id).map_err(|e| e.to_string())?;
-        let mut manifest = stored.addon_manifest.ok_or("Add-on manifest is missing")?;
+        let path = safe_path(&self.destination, "flat-manifest.json")?;
+        let mut manifest = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                stored.addon_manifest.ok_or("Add-on manifest is missing")?
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if self.id == "wanxiang" && !active.owned.iter().any(|f| f.path == GRAMMAR) {
             manifest["grammar"] = serde_json::Value::Null;
             manifest["includes_grammar"] = false.into();
@@ -164,8 +205,51 @@ impl AddonStore {
 
     pub(crate) fn commit(&self, official_files: &Path, manifest: &[u8]) -> Result<(), String> {
         let _guard = operation();
-        self.commit_inner(official_files, manifest, &[])
+        self.commit_inner(official_files, manifest, &[], false)
             .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn commit_isolated(
+        &self,
+        official_files: &Path,
+        manifest: &[u8],
+    ) -> Result<tempfile::TempDir, String> {
+        let _guard = operation();
+        fs::create_dir_all(&self.staging).map_err(|error| error.to_string())?;
+        let rollback = tempfile::tempdir_in(&self.staging).map_err(|error| error.to_string())?;
+        if self
+            .destination
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            let previous = rollback.path().join("previous");
+            let mut names = BTreeSet::new();
+            collect_official(&self.destination, &self.destination, &mut names)?;
+            for name in names {
+                let from = safe_path(&self.destination, &name)?;
+                let to = safe_path(&previous, &name)?;
+                fs::create_dir_all(to.parent().unwrap()).map_err(|error| error.to_string())?;
+                if fs::hard_link(&from, &to).is_err() {
+                    fs::copy(from, to).map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        self.commit_inner(official_files, manifest, &[], true)
+            .map_err(|error| error.to_string())?;
+        Ok(rollback)
+    }
+
+    pub(crate) fn rollback_isolated(&self, rollback: tempfile::TempDir) -> Result<(), String> {
+        let _guard = operation();
+        let previous = rollback.path().join("previous");
+        let result = if previous.is_dir() {
+            PackageStore::publish_addon_at(&self.destination, &self.id, &previous)
+                .map_err(|error| error.to_string())
+        } else {
+            fs::rename(&self.destination, rollback.path().join("removed"))
+                .map_err(|error| error.to_string())
+        };
+        result.map_err(|error| format!("{error}；备份保留在 {}", rollback.keep().display()))
     }
 
     fn commit_inner(
@@ -173,6 +257,7 @@ impl AddonStore {
         official_files: &Path,
         manifest: &[u8],
         modified: &[String],
+        isolated: bool,
     ) -> Result<(), CoreError> {
         let value: serde_json::Value = serde_json::from_slice(manifest)?;
         let manifest_files = parse_manifest(&value, &self.id).map_err(CoreError::Other)?;
@@ -189,7 +274,7 @@ impl AddonStore {
             }
             let source = safe_path(official_files, &relative).map_err(CoreError::Other)?;
             let mut bytes = fs::read(&source)?;
-            if self.id == "wanxiang" && relative == "wanxiang.schema.yaml" {
+            if !isolated && self.id == "wanxiang" && relative == "wanxiang.schema.yaml" {
                 bytes = String::from_utf8(bytes)
                     .map_err(|e| CoreError::Other(e.to_string()))?
                     .replace("language: wanxiang-lts-zh-hans", "language: \"\"")
@@ -206,27 +291,35 @@ impl AddonStore {
         }
         let mut active = Activation {
             key: self.id.clone(),
-            root: self.root.to_string_lossy().into_owned(),
+            root: if isolated {
+                String::new()
+            } else {
+                self.root.to_string_lossy().into_owned()
+            },
             scheme_key: self.id.clone(),
             ..Default::default()
         };
+        let verification_root = if isolated { &files_root } else { &self.root };
         for file in manifest_files {
             if modified.contains(&file.path) {
                 continue;
             }
-            let path = safe_path(&self.root, &file.path).map_err(CoreError::Other)?;
+            let path = safe_path(verification_root, &file.path).map_err(CoreError::Other)?;
             let metadata = fs::symlink_metadata(&path)?;
             if !metadata.is_file() {
                 return Err(CoreError::Other("Add-on path is not a file".into()));
             }
             let digest = sha256_reader(fs::File::open(path)?)?;
-            if !(self.id == "easy_en" && file.path == "easy_en.custom.yaml")
-                && (metadata.len() != file.size || digest != file.sha256)
-            {
+            let legacy_custom =
+                !isolated && self.id == "easy_en" && file.path == "easy_en.custom.yaml";
+            if (metadata.len() != file.size || digest != file.sha256) && !legacy_custom {
                 return Err(CoreError::Other(format!(
                     "Add-on source changed before commit: {}",
                     file.path
                 )));
+            }
+            if isolated {
+                continue;
             }
             let owned = OwnedFile {
                 path: file.path.clone(),
@@ -239,7 +332,8 @@ impl AddonStore {
                 active.owned.push(owned);
             }
         }
-        if self.id == "easy_en"
+        if !isolated
+            && self.id == "easy_en"
             && !modified.iter().any(|p| p == "easy_en.custom.yaml")
             && !active
                 .generated
@@ -252,7 +346,8 @@ impl AddonStore {
                 active.generated.push(file);
             }
         }
-        if self.id == "wanxiang"
+        if !isolated
+            && self.id == "wanxiang"
             && !modified.iter().any(|p| p == GRAMMAR)
             && value["includes_grammar"].as_bool() == Some(true)
             && value["grammar"].is_object()
@@ -276,6 +371,12 @@ impl AddonStore {
                 sha256: expected.into(),
                 move_file: true,
             });
+        }
+        if isolated && let Some(legacy) = self.activation().map_err(CoreError::Other)? {
+            if let Some(manifest) = self.read_manifest_inner().map_err(CoreError::Other)? {
+                write_synced(&stage.path().join("flat-manifest.json"), &manifest)?;
+            }
+            active = legacy;
         }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -503,7 +604,11 @@ pub(crate) fn manifest(core: &Core, root: &Path, id: &str) -> Result<Option<Vec<
         if !isolated && let Some(receipt) = legacy()? {
             return Ok(Some(receipt));
         }
-        let stored = addon.read_manifest_inner()?;
+        let stored = if isolated {
+            addon.read_isolated_manifest()?
+        } else {
+            addon.read_manifest_inner()?
+        };
         if stored.is_none() && !migrated {
             return legacy();
         }
@@ -593,6 +698,19 @@ fn files_path(core: &Core, id: &str) -> Result<PathBuf, String> {
     let path = store.checked_addon_path(id).map_err(|e| e.to_string())?;
     validate_directory(&path, id).map_err(|e| e.to_string())?;
     safe_path(&path, "files")
+}
+
+pub(crate) fn isolated_files(core: &Core, id: &str) -> Result<PathBuf, String> {
+    let package = PackageStore::new(core)
+        .checked_addon_path(id)
+        .map_err(|error| error.to_string())?;
+    safe_path(&package, "files")
+}
+
+pub(crate) fn isolated_ready(core: &Core, root: &Path, id: &str) -> bool {
+    RuntimeDirs::for_package(root, root, id)
+        .or_else(|| RuntimeDirs::for_package_in_store(root, root, &core.env().data_dir, id))
+        .is_some_and(|dirs| keytao_core::package_build_ready(root, &dirs))
 }
 
 pub(crate) fn public_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBuf)>, String> {
@@ -906,7 +1024,7 @@ fn migrate_legacy(core: &Core, root: &Path, preserve_legacy: bool) -> Result<(),
                     crate::wanxiang::FLYPY_CUSTOM.as_bytes(),
                 )?;
             }
-            addon.commit_inner(stage.path(), &bytes, &modified)?;
+            addon.commit_inner(stage.path(), &bytes, &modified, false)?;
             if let Some(active) = addon.activation().map_err(CoreError::Other)? {
                 claimed.extend(
                     active
