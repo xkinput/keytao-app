@@ -537,11 +537,15 @@ impl CandidateWindow {
         self.input_pane_rect
     }
 
-    fn ensure_renderer(&mut self) -> bool {
-        if self.renderer.is_some() {
+    fn ensure_renderer(&mut self, family: Option<&str>) -> bool {
+        if self
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.font_family() == family.unwrap_or("").trim())
+        {
             return true;
         }
-        self.renderer = crate::panel::load_font().map(PanelRenderer::new);
+        self.renderer = crate::panel::load_font(family).map(PanelRenderer::new);
         if self.renderer.is_none() {
             tracing::warn!("candidate window: no CJK font found");
         }
@@ -705,11 +709,13 @@ impl CandidateWindow {
             self.hide();
             return false;
         }
-        if !self.ensure_window(owner_hwnd, state) || !self.ensure_renderer() {
+        let theme = current_theme();
+        if !self.ensure_window(owner_hwnd, state)
+            || !self.ensure_renderer(theme.font.family.as_deref())
+        {
             return false;
         }
         let scale = dpi_scale(self.owner_hwnd);
-        let theme = current_theme();
         let mut model = candidate_panel_model(ime_state, embedded, &theme);
         if let Some(hint) = deployment_hint {
             model.preedit = Some(hint.to_string());
@@ -903,7 +909,10 @@ impl CandidateWindow {
         owner_hwnd: HWND,
         state: &WeakState,
     ) {
-        if !self.ensure_window(owner_hwnd, state) || !self.ensure_renderer() {
+        let theme = current_theme();
+        if !self.ensure_window(owner_hwnd, state)
+            || !self.ensure_renderer(theme.font.family.as_deref())
+        {
             return;
         }
         let Some(renderer) = &self.renderer else {
@@ -911,7 +920,6 @@ impl CandidateWindow {
         };
 
         let scale = dpi_scale(self.owner_hwnd);
-        let theme = current_theme();
         let hint_duration_ms = PanelRenderer::mode_hint_duration_ms(&theme);
         let rendered = renderer.render_mode_hint(ascii_mode, scale, theme);
         let (w, h) = (rendered.width, rendered.height);

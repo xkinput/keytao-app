@@ -76,6 +76,12 @@ fn catalog() -> &'static FontCatalog {
     CATALOG.get_or_init(|| {
         let mut database = Database::new();
         database.load_system_fonts();
+        #[cfg(target_os = "windows")]
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            database.load_fonts_dir(
+                std::path::PathBuf::from(local_app_data).join("Microsoft/Windows/Fonts"),
+            );
+        }
         #[cfg(target_os = "android")]
         {
             database.load_fonts_dir("/system/fonts");

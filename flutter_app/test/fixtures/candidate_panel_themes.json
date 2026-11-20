@@ -833,6 +833,7 @@
         "common.accentColor",
         "common.backgroundColor",
         "common.cornerRadius",
+        "common.font.family",
         "pc.panel.orientation",
         "pc.panel.background",
         "pc.panel.borderColor",

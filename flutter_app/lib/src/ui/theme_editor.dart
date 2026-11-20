@@ -95,6 +95,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   String _target = 'light';
   String? _error;
   final Map<String, String> _textDrafts = {};
+  final Map<String, bool> _expandedGroups = {};
+  final _controlKeys = {false: GlobalKey(), true: GlobalKey()};
 
   AppController get _controller => widget.controller;
   SystemFontCatalog get _fonts => SystemFontCatalog.forController(_controller);
@@ -670,7 +672,12 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     },
   );
 
-  Widget _group(String title, List<Widget> children) => FAccordion(
+  Widget _group(String id, String title, List<Widget> children) => FAccordion(
+    key: ValueKey(('theme-group', id)),
+    control: FAccordionControl.lifted(
+      expanded: (_) => _expandedGroups[id] ?? false,
+      onChange: (_, expanded) => setState(() => _expandedGroups[id] = expanded),
+    ),
     style: FAccordionStyleDelta.delta(
       titlePadding: EdgeInsetsGeometryDelta.value(
         EdgeInsets.symmetric(vertical: context.platformVariant.touch ? 12 : 8),
@@ -786,7 +793,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
               'common.backgroundColor': '背景色',
             }),
             _slider('圆角', 'common.cornerRadius', 0, 28, 28),
-            _group('字体', [
+            _group(mobile ? 'mobile.font' : 'pc.font', '字体', [
               if (!mobile) _fontFamily(),
               _fontWeight(),
               if (!mobile)
@@ -811,7 +818,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 'horizontal': '横排',
                 'vertical': '竖排',
               }),
-              _group('面板', [
+              _group('pc.panel', '面板', [
                 _colors(const {
                   'pc.panel.background': '面板背景',
                   'pc.panel.borderColor': '面板边框',
@@ -826,7 +833,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   _toggle('面板阴影', 'pc.panel.shadow'),
                 ]),
               ]),
-              _group('候选', [
+              _group('pc.candidate', '候选', [
                 _colors({
                   for (final entry in const {
                     'background': '候选底色',
@@ -849,7 +856,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 ]),
                 _text('序号后缀', 'pc.candidate.labelSuffix'),
               ]),
-              _group('模式提示', [
+              _group('pc.modeHint', '模式提示', [
                 _colors(const {
                   'pc.modeHint.background': '背景',
                   'pc.modeHint.foreground': '字色',
@@ -882,7 +889,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   scale: true,
                 ),
               ]),
-              _group('功能键', [
+              _group('mobile.keyTypes', '功能键', [
                 _colors({
                   for (final entry in const {
                     'keyTypes.function': '功能键',
@@ -914,7 +921,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                     ),
                 ]),
               ]),
-              _group('按键细节', [
+              _group('mobile.key', '按键细节', [
                 _colors(const {
                   'mobile.keyboard.key.borderColor': '边框',
                   'mobile.keyboard.key.shadowColor': '阴影',
@@ -932,7 +939,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   ),
                 ]),
               ]),
-              _group('候选栏', [
+              _group('mobile.candidateBar', '候选栏', [
                 _colors({
                   for (final entry in const {
                     'background': '栏背景',
@@ -972,7 +979,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   _toggle('显示注释', 'mobile.candidateBar.showComment'),
                 ]),
               ]),
-              _group('工具栏', [
+              _group('mobile.toolbar', '工具栏', [
                 _colors({
                   for (final entry in const {
                     'background': '栏背景',
@@ -1045,12 +1052,16 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       final height = (MediaQuery.sizeOf(context).height * .30)
           .clamp(0, constraints.maxHeight * .55)
           .toDouble();
+      final stableControls = KeyedSubtree(
+        key: _controlKeys[mobile],
+        child: controls,
+      );
       return constraints.maxWidth >= 900
           ? Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               spacing: 16,
               children: [
-                Expanded(child: controls),
+                Expanded(child: stableControls),
                 SizedBox(width: 360, child: preview),
               ],
             )
@@ -1059,7 +1070,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
               spacing: 8,
               children: [
                 SizedBox(height: height, child: preview),
-                Expanded(child: controls),
+                Expanded(child: stableControls),
               ],
             );
     },

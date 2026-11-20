@@ -15,7 +15,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("common.accentColor", ALL),
     ("common.backgroundColor", ALL),
     ("common.cornerRadius", ALL),
-    ("common.font.family", MAC),
+    ("common.font.family", MAC | WINDOWS),
     ("common.font.weight", MAC | MOBILE),
     ("pc.panel.orientation", DESKTOP),
     ("pc.panel.background", DESKTOP),
@@ -278,9 +278,11 @@ mod tests {
                 fields.contains(&"pc.candidate.hoverBackground"),
                 platform == EditorPlatform::Windows
             );
-            for unavailable in ["common.font.family", "common.font.weight"] {
-                assert!(!fields.contains(&unavailable));
-            }
+            assert_eq!(
+                fields.contains(&"common.font.family"),
+                platform == EditorPlatform::Windows
+            );
+            assert!(!fields.contains(&"common.font.weight"));
         }
         assert!(supported(EditorPlatform::LinuxKimpanel).is_empty());
         let mobile = supported(EditorPlatform::Android);

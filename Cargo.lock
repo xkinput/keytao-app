@@ -1763,6 +1763,7 @@ name = "keytao-windows-ime"
 version = "1.2.15-alpha.6"
 dependencies = [
  "embed-resource",
+ "fontdb",
  "fontdue",
  "keytao-core",
  "keytao-ime-ipc",

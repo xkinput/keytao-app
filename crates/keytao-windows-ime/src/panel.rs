@@ -25,30 +25,52 @@ use crate::globals::dll_related_dirs;
 const FONT_PROBE_SIZE: f32 = 24.0;
 
 pub struct FontSet {
-    fonts: Vec<fontdue::Font>,
+    family: String,
+    fonts: Vec<Arc<fontdue::Font>>,
+}
+
+fn font_with_samples(
+    data: &[u8],
+    collection_index: u32,
+    samples: &[char],
+) -> Option<fontdue::Font> {
+    let font = fontdue::Font::from_bytes(
+        data,
+        fontdue::FontSettings {
+            collection_index,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    has_visible_sample(&font, samples).then_some(font)
+}
+
+fn has_visible_sample(font: &fontdue::Font, samples: &[char]) -> bool {
+    samples.iter().any(|sample| {
+        if !font.has_glyph(*sample) {
+            return false;
+        }
+        let (metrics, bitmap) = font.rasterize(*sample, FONT_PROBE_SIZE);
+        metrics.width > 0 && metrics.height > 0 && bitmap.iter().any(|alpha| *alpha != 0)
+    })
 }
 
 fn load_font_with_samples(path: &str, samples: &[char]) -> Option<fontdue::Font> {
     let data = std::fs::read(path).ok()?;
     for collection_index in 0..16 {
-        let settings = fontdue::FontSettings {
-            collection_index,
-            ..Default::default()
-        };
-        let Ok(font) = fontdue::Font::from_bytes(data.as_slice(), settings) else {
+        let Ok(font) = fontdue::Font::from_bytes(
+            data.as_slice(),
+            fontdue::FontSettings {
+                collection_index,
+                ..Default::default()
+            },
+        ) else {
             if collection_index == 0 {
                 tracing::debug!("rejected unreadable font: {path}");
             }
             break;
         };
-        let has_visible_sample = samples.iter().any(|sample| {
-            if !font.has_glyph(*sample) {
-                return false;
-            }
-            let (metrics, bitmap) = font.rasterize(*sample, FONT_PROBE_SIZE);
-            metrics.width > 0 && metrics.height > 0 && bitmap.iter().any(|alpha| *alpha != 0)
-        });
-        if has_visible_sample {
+        if has_visible_sample(&font, samples) {
             tracing::info!("loaded font: {path} (collection index {collection_index})");
             return Some(font);
         }
@@ -56,17 +78,66 @@ fn load_font_with_samples(path: &str, samples: &[char]) -> Option<fontdue::Font>
     None
 }
 
-/// Load a CJK text face plus Windows' system emoji and symbol fallbacks.
-pub fn load_font() -> Option<Arc<FontSet>> {
-    static FONTS: OnceLock<Arc<FontSet>> = OnceLock::new();
-    static LOAD_LOCK: Mutex<()> = Mutex::new(());
-    // Keep failed loads retryable without racing another thread's initialization.
-    let _guard = LOAD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(fonts) = FONTS.get() {
+fn font_database() -> &'static fontdb::Database {
+    static DATABASE: OnceLock<fontdb::Database> = OnceLock::new();
+    DATABASE.get_or_init(|| {
+        let mut database = fontdb::Database::new();
+        database.load_system_fonts();
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            database.load_fonts_dir(PathBuf::from(local_app_data).join("Microsoft/Windows/Fonts"));
+        }
+        database
+    })
+}
+
+/// Share the active theme's faces and the default CJK/emoji fallbacks process-wide.
+pub fn load_font(family: Option<&str>) -> Option<Arc<FontSet>> {
+    static DEFAULT_FONTS: OnceLock<FontSet> = OnceLock::new();
+    static FONTS: Mutex<Option<Arc<FontSet>>> = Mutex::new(None);
+    let family = family.unwrap_or("").trim();
+    let mut cached = FONTS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(fonts) = cached.as_ref().filter(|fonts| fonts.family == family) {
         return Some(Arc::clone(fonts));
     }
-    let fonts = load_font_set()?;
-    Some(Arc::clone(FONTS.get_or_init(|| Arc::new(fonts))))
+    let mut fonts = Vec::new();
+    for name in family
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let database = font_database();
+        let Some(id) = database.query(&fontdb::Query {
+            families: &[fontdb::Family::Name(name)],
+            ..Default::default()
+        }) else {
+            continue;
+        };
+        if let Some(font) = database
+            .with_face_data(id, |data, index| {
+                font_with_samples(data, index, &['中', '候'])
+            })
+            .flatten()
+        {
+            fonts.push(Arc::new(font));
+        }
+    }
+    if DEFAULT_FONTS.get().is_none() {
+        if let Some(defaults) = load_font_set() {
+            let _ = DEFAULT_FONTS.set(defaults);
+        }
+    }
+    if let Some(defaults) = DEFAULT_FONTS.get() {
+        fonts.extend(defaults.fonts.iter().cloned());
+    }
+    if fonts.is_empty() {
+        return None;
+    }
+    let fonts = Arc::new(FontSet {
+        family: family.to_owned(),
+        fonts,
+    });
+    *cached = Some(Arc::clone(&fonts));
+    Some(fonts)
 }
 
 fn load_font_set() -> Option<FontSet> {
@@ -88,7 +159,7 @@ fn load_font_set() -> Option<FontSet> {
     let mut fonts = Vec::new();
     for path in TEXT_PATHS {
         if let Some(font) = load_font_with_samples(path, &['中', '候']) {
-            fonts.push(font);
+            fonts.push(Arc::new(font));
             break;
         }
     }
@@ -100,14 +171,17 @@ fn load_font_set() -> Option<FontSet> {
     let fallback_samples = ['🚫', '😀', '⚠', '♥', '✓'];
     for path in FALLBACK_PATHS {
         if let Some(font) = load_font_with_samples(path, &fallback_samples) {
-            fonts.push(font);
+            fonts.push(Arc::new(font));
         }
     }
     if fonts.len() == 1 {
         tracing::warn!("no Windows emoji or symbol fallback font found");
     }
 
-    Some(FontSet { fonts })
+    Some(FontSet {
+        family: String::new(),
+        fonts,
+    })
 }
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
@@ -145,6 +219,10 @@ impl PanelRenderer {
             fonts,
             glyph_cache: RefCell::new(VecDeque::new()),
         }
+    }
+
+    pub fn font_family(&self) -> &str {
+        &self.fonts.family
     }
 
     /// Render panel to a premultiplied BGRA byte buffer plus the hit areas the
@@ -297,12 +375,8 @@ impl PanelRenderer {
                 y + preedit_size,
                 bgra(theme.candidate.foreground),
                 preedit_size,
-                preedit_caret.map(|index| {
-                    (
-                        index,
-                        bgra(preedit_caret_color(theme.candidate.foreground)),
-                    )
-                }),
+                preedit_caret
+                    .map(|index| (index, bgra(preedit_caret_color(theme.candidate.foreground)))),
             );
             y += preedit_height;
         }
@@ -988,7 +1062,10 @@ mod tests {
 
     #[test]
     fn long_candidates_and_comments_are_limited_only_by_available_width() {
-        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
+        let renderer = PanelRenderer::new(Arc::new(FontSet {
+            family: String::new(),
+            fonts: Vec::new(),
+        }));
         for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
             let mut theme = ResolvedImeTheme::default();
             theme.panel.orientation = orientation;
@@ -1031,7 +1108,10 @@ mod tests {
 
     #[test]
     fn candidate_hit_areas_scale_with_font_size_and_dpi_in_both_orientations() {
-        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
+        let renderer = PanelRenderer::new(Arc::new(FontSet {
+            family: String::new(),
+            fonts: Vec::new(),
+        }));
         let default_theme = ResolvedImeTheme::default();
         for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
             let mut theme = default_theme.clone();
@@ -1099,7 +1179,10 @@ mod tests {
             Some(path.clone()),
             Some(keytao_theme::EffectiveColorScheme::Light),
         );
-        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
+        let renderer = PanelRenderer::new(Arc::new(FontSet {
+            family: String::new(),
+            fonts: Vec::new(),
+        }));
         let render = || {
             let mut theme = resolver.current();
             theme.panel.shadow = false;
@@ -1148,7 +1231,10 @@ mod tests {
 
     #[test]
     fn mode_hint_uses_resolved_font_and_box_fields() {
-        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
+        let renderer = PanelRenderer::new(Arc::new(FontSet {
+            family: String::new(),
+            fonts: Vec::new(),
+        }));
         let mut theme = ResolvedImeTheme::default();
         theme.mode_hint.english_text = "English".into();
         theme.mode_hint.font_size = 26.0;
@@ -1209,7 +1295,7 @@ mod tests {
 
     #[test]
     fn preedit_caret_mutes_only_its_glyph_without_moving_letters() {
-        let renderer = PanelRenderer::new(load_font().expect("load Windows candidate fonts"));
+        let renderer = PanelRenderer::new(load_font(None).expect("load Windows candidate fonts"));
         for (background, foreground) in [
             ([248, 250, 255, 255], [74, 141, 246, 255]),
             ([23, 26, 32, 255], [182, 227, 255, 255]),
@@ -1293,7 +1379,7 @@ mod tests {
 
     #[test]
     fn windows_system_fonts_cover_common_emoji_and_symbols() {
-        let fonts = load_font().expect("load Windows candidate fonts");
+        let fonts = load_font(None).expect("load Windows candidate fonts");
         let renderer = PanelRenderer::new(fonts);
 
         for ch in ['🚫', '😀', '⚠', '♥'] {
@@ -1302,6 +1388,45 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing visible glyph for {ch}"));
             assert!(metrics.width > 0 && metrics.height > 0);
             assert!(bitmap.iter().any(|alpha| *alpha != 0));
+        }
+    }
+
+    #[test]
+    fn theme_family_selects_its_collection_face_and_shares_default_fallbacks() {
+        let defaults = load_font(None).expect("load Windows candidate fonts");
+        let database = super::font_database();
+        let mut checked = 0;
+        for family in ["SimSun", "宋体", "NSimSun", "新宋体", "SimHei", "黑体"] {
+            let Some(id) = database.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                ..Default::default()
+            }) else {
+                continue;
+            };
+            let expected = database
+                .with_face_data(id, |data, index| {
+                    super::font_with_samples(data, index, &['中', '候'])
+                })
+                .flatten()
+                .expect("load selected Windows face");
+            let requested = format!("Missing KeyTao Font, {family}");
+            let selected = load_font(Some(&requested)).expect("load theme font family");
+            assert_eq!(selected.family, requested);
+            assert_eq!(selected.fonts.len(), defaults.fonts.len() + 1);
+            assert_eq!(
+                selected.fonts[0].rasterize('中', 24.0),
+                expected.rasterize('中', 24.0)
+            );
+            for (selected, default) in selected.fonts[1..].iter().zip(&defaults.fonts) {
+                assert!(Arc::ptr_eq(selected, default));
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no Windows CJK test family installed");
+        let missing = load_font(Some("Missing KeyTao Font")).expect("fallback to default fonts");
+        assert_eq!(missing.fonts.len(), defaults.fonts.len());
+        for (missing, default) in missing.fonts.iter().zip(&defaults.fonts) {
+            assert!(Arc::ptr_eq(missing, default));
         }
     }
 
