@@ -23,6 +23,7 @@ const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(test)]
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
 const PUBLIC_BUILD_KEY_FILE: &str = "public-build-key.txt";
+const LEGACY_LAYOUT_FILE: &str = ".legacy-layout.json";
 const LUA_SNAPSHOTS: &str = ".keytao-package-lua";
 const CURRENT_SCHEMA: &str = ".keytao-current-schema";
 #[cfg(target_os = "windows")]
@@ -145,7 +146,7 @@ impl PublicSchemaCheckpoint {
         #[cfg(target_os = "windows")]
         grant_appcontainer_read(&self.root, false)?;
         for generation in self.previous.generations() {
-            if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            if !valid_generation(generation) {
                 return Err("invalid public schema checkpoint identifier".into());
             }
             if !self.root.join(generation).exists() {
@@ -200,6 +201,107 @@ impl GenerationPointers {
     fn generations(&self) -> impl Iterator<Item = &String> {
         self.current.iter().chain(self.pending.iter())
     }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn only_legacy(&self, root: &Path) -> Result<Self, String> {
+        let legacy_generation = |generation: &Option<String>| {
+            let Some(generation) = generation else {
+                return Ok(None);
+            };
+            let snapshot = root.join(generation);
+            if !std::fs::symlink_metadata(&snapshot).is_ok_and(|metadata| metadata.is_dir()) {
+                return Err("public schema snapshot is missing or invalid".to_owned());
+            }
+            match std::fs::symlink_metadata(
+                snapshot.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE),
+            ) {
+                Ok(_) => Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(Some(generation.clone()))
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        Ok(Self {
+            current: legacy_generation(&self.current)?,
+            pending: legacy_generation(&self.pending)?,
+        })
+    }
+}
+
+fn read_legacy_layout(root: &Path) -> Result<Option<GenerationPointers>, String> {
+    let path = root.join(LEGACY_LAYOUT_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err("invalid legacy public schema pointer file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let pointers: GenerationPointers =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if pointers.generations().any(|value| !valid_generation(value)) {
+        return Err("invalid legacy public schema snapshot identifier".into());
+    }
+    Ok(Some(pointers))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn pin_legacy_layout(root: &Path, previous: &GenerationPointers) -> Result<(), String> {
+    let pinned = read_legacy_layout(root)?;
+    let legacy = previous.only_legacy(root)?;
+    if pinned.as_ref() == Some(&legacy) || (pinned.is_some() && &legacy != previous) {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&legacy).map_err(|error| error.to_string())?;
+    crate::scheme_files::write_file_atomic(&root.join(LEGACY_LAYOUT_FILE), &bytes)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn with_legacy_layout_restored(
+    action: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let _guard = PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    with_legacy_layout_restored_at(&public_root()?, action)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn with_legacy_layout_restored_at(
+    root: &Path,
+    action: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let previous = GenerationPointers::read(root)?;
+    let pinned = read_legacy_layout(root)?;
+    let legacy = match &pinned {
+        Some(pointers) => {
+            let legacy = pointers.only_legacy(root)?;
+            if &legacy != pointers {
+                return Err("pinned public schema snapshot is not legacy".into());
+            }
+            legacy
+        }
+        // Older isolated publications did not pin their prior pointers.
+        None => previous.only_legacy(root)?,
+    };
+    if let Err(error) = legacy.write(root).and_then(|()| action()) {
+        previous
+            .write(root)
+            .map_err(|rollback| format!("{error}; restore public schema pointers: {rollback}"))?;
+        return Err(error);
+    }
+    if pinned.is_some() {
+        if let Err(error) = std::fs::remove_file(root.join(LEGACY_LAYOUT_FILE)) {
+            tracing::warn!(%error, "could not remove the legacy public schema pointer file");
+        }
+    }
+    if pinned.is_some() || previous != legacy {
+        prune_snapshots(root);
+    }
+    Ok(())
 }
 
 impl PublicSchemaUpdate {
@@ -438,9 +540,12 @@ fn activate_isolated_snapshot(root: &Path, control_root: &Path, key: &str) -> Re
         current: Some(generation),
         pending: None,
     };
-    if RuntimeDirs::active_package_key(control_root).as_deref() != Some(key) {
+    if !RuntimeDirs::isolation_enabled(control_root)
+        || RuntimeDirs::active_package_key(control_root).as_deref() != Some(key)
+    {
         return Ok(());
     }
+    pin_legacy_layout(root, &previous)?;
     if let Err(error) = next.write(root) {
         previous
             .write(root)
@@ -1314,7 +1419,7 @@ pub fn has_schemas() -> bool {
         return false;
     };
     let current = current.trim();
-    if current.len() != 64 || !current.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !valid_generation(current) {
         return false;
     }
     let snapshot = root.join(current);
@@ -1330,6 +1435,10 @@ pub fn has_schemas() -> bool {
                 && !schema.contains(['/', '\\', ':'])
                 && snapshot.join(format!("{schema}.schema.yaml")).is_file()
         })
+}
+
+fn valid_generation(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn remove_schema(schema_id: &str, package_paths: &[PathBuf]) -> Result<(), String> {
@@ -1738,6 +1847,9 @@ fn prune_snapshots(root: &Path) {
     };
     let cleanup = || -> std::io::Result<()> {
         let mut retained: BTreeSet<_> = pointers.generations().cloned().collect();
+        if let Some(legacy) = read_legacy_layout(root).map_err(std::io::Error::other)? {
+            retained.extend(legacy.generations().cloned());
+        }
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir()
@@ -1774,9 +1886,7 @@ fn prune_snapshots(root: &Path) {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let old_snapshot = !retained.contains(name.as_ref())
-                && name.len() == 64
-                && name.bytes().all(|byte| byte.is_ascii_hexdigit());
+            let old_snapshot = !retained.contains(name.as_ref()) && valid_generation(&name);
             if !old_snapshot {
                 continue;
             }
@@ -1827,6 +1937,64 @@ fn grant_appcontainer_read(_root: &Path, _recursive: bool) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_layout_preserves_public_generations_and_restores_exact_pointers() {
+        for (current, pending, pin) in [
+            (Some('a'), Some('b'), true),
+            (None, None, true),
+            (None, None, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let root = root.path();
+            let legacy = GenerationPointers {
+                current: current.map(|name| name.to_string().repeat(64)),
+                pending: pending.map(|name| name.to_string().repeat(64)),
+            };
+            for generation in legacy.generations() {
+                std::fs::create_dir(root.join(generation)).unwrap();
+            }
+            legacy.write(root).unwrap();
+            if pin {
+                pin_legacy_layout(root, &legacy).unwrap();
+            }
+
+            let generation = "c".repeat(64);
+            let snapshot = root.join(&generation);
+            std::fs::create_dir(&snapshot).unwrap();
+            std::fs::write(
+                snapshot.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE),
+                b"keytao",
+            )
+            .unwrap();
+            let isolated = GenerationPointers {
+                current: Some(generation),
+                pending: None,
+            };
+            isolated.write(root).unwrap();
+            if pin {
+                pin_legacy_layout(root, &isolated).unwrap();
+            }
+            prune_snapshots(root);
+            assert!(legacy
+                .generations()
+                .all(|generation| root.join(generation).is_dir()));
+
+            assert_eq!(
+                with_legacy_layout_restored_at(root, || {
+                    assert!(GenerationPointers::read(root).unwrap() == legacy);
+                    Err("private layout change failed".into())
+                }),
+                Err("private layout change failed".into()),
+            );
+            assert!(GenerationPointers::read(root).unwrap() == isolated);
+            assert!(snapshot.is_dir());
+            with_legacy_layout_restored_at(root, || Ok(())).unwrap();
+            assert!(GenerationPointers::read(root).unwrap() == legacy);
+            assert!(!root.join(LEGACY_LAYOUT_FILE).exists());
+            assert!(!snapshot.exists());
+        }
+    }
 
     #[test]
     fn public_source_selection_accepts_an_uncompiled_new_schema() {

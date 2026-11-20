@@ -751,6 +751,37 @@ class InstalledPackageDto {
           logoPath == other.logoPath;
 }
 
+class IsolatedPackageDto {
+  final String packageKey;
+  final String displayName;
+  final bool active;
+  final bool ready;
+
+  const IsolatedPackageDto({
+    required this.packageKey,
+    required this.displayName,
+    required this.active,
+    required this.ready,
+  });
+
+  @override
+  int get hashCode =>
+      packageKey.hashCode ^
+      displayName.hashCode ^
+      active.hashCode ^
+      ready.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is IsolatedPackageDto &&
+          runtimeType == other.runtimeType &&
+          packageKey == other.packageKey &&
+          displayName == other.displayName &&
+          active == other.active &&
+          ready == other.ready;
+}
+
 class LinuxImeStatusDto {
   final bool kdeSession;
   final bool kdeConfigured;
@@ -806,6 +837,7 @@ class LocalSchemaDto {
   final String? installedScheme;
   final String? installedSchemeVersion;
   final bool? runtimeIsolation;
+  final bool? runtimeMigrationComplete;
 
   const LocalSchemaDto({
     required this.installed,
@@ -815,6 +847,7 @@ class LocalSchemaDto {
     this.installedScheme,
     this.installedSchemeVersion,
     this.runtimeIsolation,
+    this.runtimeMigrationComplete,
   });
 
   @override
@@ -825,7 +858,8 @@ class LocalSchemaDto {
       schemas.hashCode ^
       installedScheme.hashCode ^
       installedSchemeVersion.hashCode ^
-      runtimeIsolation.hashCode;
+      runtimeIsolation.hashCode ^
+      runtimeMigrationComplete.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -838,7 +872,8 @@ class LocalSchemaDto {
           schemas == other.schemas &&
           installedScheme == other.installedScheme &&
           installedSchemeVersion == other.installedSchemeVersion &&
-          runtimeIsolation == other.runtimeIsolation;
+          runtimeIsolation == other.runtimeIsolation &&
+          runtimeMigrationComplete == other.runtimeMigrationComplete;
 }
 
 class LocalSchemasDto {

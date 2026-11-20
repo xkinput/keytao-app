@@ -497,7 +497,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
                 .is_some_and(ImeRuntime::is_initialized)
         {
             if isolated && stamp_changed_peek().is_some() {
-                return reload_now()
+                return reload_now(false)
                     || previous_runtime
                         .as_ref()
                         .is_some_and(ImeRuntime::is_initialized);
@@ -581,10 +581,10 @@ pub extern "C" fn keytao_is_initialized() -> bool {
 /// instead of serving its cached config and dictionaries.
 #[no_mangle]
 pub extern "C" fn keytao_reload() -> bool {
-    guard("keytao_reload", false, reload_now)
+    guard("keytao_reload", false, || reload_now(false))
 }
 
-fn reload_now() -> bool {
+fn reload_now(require_change: bool) -> bool {
     // A reload finalizes librime and brings it back up for the runtime it was
     // started from. Held for reading so that keytao_init() cannot switch to
     // other directories while this one is in flight: the reload would otherwise
@@ -604,12 +604,12 @@ fn reload_now() -> bool {
 
     let loading = begin_reload();
 
-    match runtime.reload_without_deploy() {
-        Ok(()) => {
+    match runtime.reload_without_deploy_changed() {
+        Ok(changed) => {
             if let Some((path, signature)) = loading {
                 mark_deployment_loaded(&path, signature);
             }
-            true
+            changed || !require_change
         }
         Err(e) if e == keytao_core::PACKAGE_SWITCH_PENDING => false,
         Err(e) => {
@@ -696,7 +696,7 @@ pub extern "C" fn keytao_reload_if_stamp_changed() -> bool {
     guard("keytao_reload_if_stamp_changed", false, || {
         // The request is only marked as seen once the reload really ran, so a
         // transient failure is retried on the next tick instead of swallowed.
-        stamp_changed_peek().is_some() && reload_now()
+        stamp_changed_peek().is_some() && reload_now(true)
     })
 }
 

@@ -44,6 +44,8 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         installed_scheme,
         installed_scheme_version,
         runtime_isolation,
+        runtime_migration_complete: runtime_isolation
+            .map(|_| keytao_core::RuntimeDirs::migration_complete(&root)),
     })
 }
 
@@ -135,6 +137,21 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     runtime::dto(packages)
 }
 
+pub async fn isolated_packages() -> Result<Vec<IsolatedPackageDto>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    let core = state.core.clone();
+    tokio::task::spawn_blocking(move || {
+        runtime::dto(
+            keytao_app_core::runtime_materialize::isolated_packages(&core, &root)
+                .map_err(|error| error.to_string())?,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub async fn package_orphan_report() -> Result<PackageOrphanReportDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -147,10 +164,16 @@ pub async fn package_orphan_report() -> Result<PackageOrphanReportDto, String> {
 pub async fn preview_package_migration() -> Result<PackageMigrationReportDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    runtime::dto(
-        keytao_app_core::package_migration::preview(&state.core, &state.host.user_root()?)
-            .map_err(|error| error.to_string())?,
-    )
+    let root = state.host.user_root()?;
+    let core = state.core.clone();
+    tokio::task::spawn_blocking(move || {
+        runtime::dto(
+            keytao_app_core::package_migration::preview(&core, &root)
+                .map_err(|error| error.to_string())?,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn migrate_to_isolated() -> Result<PackageMigrationReportDto, String> {
@@ -167,6 +190,17 @@ pub async fn migrate_to_isolated() -> Result<PackageMigrationReportDto, String> 
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
     runtime::dto(report)
+}
+
+pub async fn use_legacy_layout() -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    tokio::task::spawn_blocking(move || {
+        keytao_app_core::runtime_materialize::use_legacy_layout(&root)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn trash_package_orphans(

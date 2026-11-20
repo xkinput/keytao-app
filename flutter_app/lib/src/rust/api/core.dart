@@ -53,6 +53,9 @@ Future<bool> setPackageSchemas({
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
+Future<List<IsolatedPackageDto>> isolatedPackages() =>
+    RustLib.instance.api.crateApiCoreIsolatedPackages();
+
 Future<PackageOrphanReportDto> packageOrphanReport() =>
     RustLib.instance.api.crateApiCorePackageOrphanReport();
 
@@ -61,6 +64,9 @@ Future<PackageMigrationReportDto> previewPackageMigration() =>
 
 Future<PackageMigrationReportDto> migrateToIsolated() =>
     RustLib.instance.api.crateApiCoreMigrateToIsolated();
+
+Future<void> useLegacyLayout() =>
+    RustLib.instance.api.crateApiCoreUseLegacyLayout();
 
 Future<List<String>> trashPackageOrphans({
   required List<PackageOrphanFileDto> files,

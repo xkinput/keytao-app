@@ -547,9 +547,16 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
 /// turn a claimed key into `VK_PROCESSKEY` and never produce the character when
 /// `OnKeyDown` later declines it.
 pub fn ascii_mode_rejects_key(vk: u16, mods: u32) -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F4, VK_SPACE};
 
     if is_caps_lock_vk(vk) || mods & (RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_MOD_SUPER) != 0 {
+        return false;
+    }
+    if vk == VK_F4.0
+        && keytao_core::switcher_model::is_hotkey(key_policy::XK_F4, mods)
+        && keytao_core::default_user_data_dir()
+            .is_some_and(|root| keytao_core::RuntimeDirs::isolation_enabled(&root))
+    {
         return false;
     }
     !(mods & RIME_MOD_SHIFT != 0 && vk == VK_SPACE.0)

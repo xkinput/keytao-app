@@ -32,6 +32,7 @@ object AndroidKeyMapper {
     const val XK_DELETE = 0xffff
     const val XK_SHIFT_L = 0xffe1
     const val XK_SHIFT_R = 0xffe2
+    const val OPEN_PACKAGE_MENU = 0x02000004
 
     fun fromAndroidKeyEvent(event: KeyEvent): RimeKey? {
         val special = when (event.keyCode) {
@@ -53,9 +54,14 @@ object AndroidKeyMapper {
         }
         if (special != null) return RimeKey(special, modifiers(event))
 
-        return fromUnicodeCodePoint(event.getUnicodeChar(event.metaState), modifiers(event)) {
+        val modifiers = modifiers(event)
+        val key = fromUnicodeCodePoint(event.getUnicodeChar(event.metaState), modifiers) {
             KeytaoNativeBridge.textToKeysym(it)
         }
+        if (key == null && event.keyCode == KeyEvent.KEYCODE_GRAVE &&
+            modifiers and RIME_MOD_LOCK.inv() == RIME_MOD_CONTROL
+        ) return RimeKey(OPEN_PACKAGE_MENU, 0)
+        return key
     }
 
     /**

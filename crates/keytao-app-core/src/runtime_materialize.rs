@@ -87,6 +87,86 @@ struct Settings {
     easy_english_packages: BTreeSet<String>,
 }
 
+pub fn isolated_packages(
+    core: &Core,
+    root: &Path,
+) -> Result<Vec<keytao_core::switcher_model::Package>, CoreError> {
+    if !RuntimeDirs::isolation_enabled(root) {
+        return Ok(Vec::new());
+    }
+    let store = PackageStore::new(core);
+    let activations = crate::package_activation::read_all(core, root)?;
+    let mut keys = installed_main_packages(core, &activations);
+    keys.extend(installed_addons(&store)?.into_iter().map(str::to_owned));
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    if let Some(active) =
+        RuntimeDirs::active_package_key(root).filter(|key| key.starts_with("builtin/"))
+    {
+        keys.insert(active);
+    } else if keys.is_empty() && shared.join("default.yaml").is_file() {
+        keys.insert("builtin/keytao".into());
+    }
+    let installed: BTreeMap<_, _> = keys.into_iter().map(|key| {
+        let name = package_name(core, &key);
+        (key, name)
+    }).collect();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    publish_ime_package_catalog(root, &installed)?;
+    Ok(keytao_core::switcher_model::packages(root, &shared, installed))
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn publish_ime_package_catalog(root: &Path, packages: &BTreeMap<String, String>) -> Result<(), CoreError> {
+    // The keyboard can access the shared control root, but not the app's package store.
+    let relative = keytao_core::switcher_model::MOBILE_PACKAGE_CATALOG;
+    let bytes = serde_json::to_vec(packages)?;
+    if read_optional(&safe(root, relative)?)?.as_deref() != Some(bytes.as_slice()) {
+        write_file(&safe(root, relative)?, &bytes)?;
+    }
+    Ok(())
+}
+
+pub fn use_legacy_layout(root: &Path) -> Result<(), String> {
+    if !RuntimeDirs::isolation_enabled(root) {
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    if crate::windows_public_schemas::is_default_user_root(root) {
+        return crate::windows_public_schemas::with_legacy_layout_restored(|| {
+            disable_isolation(root)
+        });
+    }
+    disable_isolation(root)
+}
+
+fn disable_isolation(root: &Path) -> Result<(), String> {
+    keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
+        let path = safe_path(root, RuntimeDirs::SETTINGS_FILE)?;
+        safe_path(root, keytao_core::RELOAD_STAMP_FILE_NAME)?;
+        let previous = read_optional(&path).map_err(|error| error.to_string())?;
+        let mut settings: serde_json::Map<String, serde_json::Value> = previous
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        settings.insert("runtime_isolation".into(), false.into());
+        let bytes = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
+        crate::scheme_files::write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
+        if let Err(error) = keytao_core::ReloadStamp::write(root) {
+            let restore = match previous {
+                Some(previous) => crate::scheme_files::write_file_atomic(&path, &previous),
+                None => fs::remove_file(&path),
+            };
+            return Err(match restore {
+                Ok(()) => error,
+                Err(restore) => format!("{error}; restore runtime settings: {restore}"),
+            });
+        }
+        Ok(())
+    })
+}
+
 pub fn materialize_all_installed_packages(
     core: &Core,
     control_root: &Path,
@@ -209,6 +289,11 @@ fn prepare_targets(
     if keys.is_empty() && bundled.join("default.yaml").is_file() {
         keys.push("builtin/keytao".into());
     }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    publish_ime_package_catalog(
+        control_root,
+        &keys.iter().map(|key| (key.clone(), package_name(core, key))).collect(),
+    )?;
     if let Some(key) = package_key {
         keys.retain(|candidate| candidate == key);
         if key == "builtin/keytao" && keys.is_empty() && bundled.join("default.yaml").is_file() {
@@ -385,24 +470,7 @@ pub(crate) fn package_name(core: &Core, key: &str) -> String {
         .ok()
         .flatten()
         .and_then(|meta| meta.display_name)
-        .unwrap_or_else(|| {
-            match key {
-                "keytao" => "键道6",
-                "xmjd" => "星猫键道",
-                "xmjd-feiding" => "星猫键道（非顶功）",
-                "txjx" => "天行键",
-                "keydo" => "键道·我流",
-                "snow_jiandao" => "冰雪键道",
-                "easy_en" => "Easy English",
-                "wanxiang" => "万象拼音",
-                "rime_ice" => "雾凇拼音",
-                "rime_mint" => "薄荷拼音",
-                "rime_frost" => "白霜拼音",
-                "triple_pinyin_lssp" => "李氏三拼",
-                _ => key,
-            }
-            .into()
-        })
+        .unwrap_or_else(|| keytao_core::switcher_model::default_package_name(key).into())
 }
 
 fn addon_files(package: &Path, metadata: &StoredPackage) -> Result<Files, CoreError> {
@@ -1207,6 +1275,34 @@ pub(crate) use tests::hashes as test_hashes;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returning_to_legacy_preserves_data_and_can_retry_a_failed_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let settings = root.join(RuntimeDirs::SETTINGS_FILE);
+        let original = br#"{"runtime_isolation":true,"easy_english_packages":["first"]}"#;
+        fs::write(&settings, original).unwrap();
+        let legacy = root.join("user.yaml");
+        fs::write(&legacy, b"legacy schema selection").unwrap();
+        let runtime = root.join("runtime/first/user.yaml");
+        write_file(&runtime, b"isolated schema selection").unwrap();
+        let stamp = keytao_core::ReloadStamp::path(root);
+        fs::create_dir(&stamp).unwrap();
+
+        assert!(use_legacy_layout(root).is_err());
+        assert_eq!(fs::read(&settings).unwrap(), original);
+        fs::remove_dir(&stamp).unwrap();
+
+        use_legacy_layout(root).unwrap();
+        assert!(!RuntimeDirs::isolation_enabled(root));
+        let settings: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        assert_eq!(settings["easy_english_packages"], serde_json::json!(["first"]));
+        assert_eq!(fs::read(legacy).unwrap(), b"legacy schema selection");
+        assert_eq!(fs::read(runtime).unwrap(), b"isolated schema selection");
+        assert!(keytao_core::ReloadStamp::current_signature(root).is_some());
+        assert_eq!(keytao_core::ReloadStamp::package_key(&stamp), None);
+    }
 
     fn materialize(
         control_root: &Path,

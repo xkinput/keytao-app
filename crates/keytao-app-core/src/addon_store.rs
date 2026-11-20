@@ -4,6 +4,7 @@ use crate::{
     package_store::{PackageFile, PackageStore, StoredPackage},
     packages::{PackageMeta, safe_path, sha256_reader},
 };
+use keytao_core::RuntimeDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -487,6 +488,27 @@ pub(crate) fn manifest(core: &Core, root: &Path, id: &str) -> Result<Option<Vec<
     if !root.try_exists().map_err(|e| e.to_string())? {
         return Ok(None);
     }
+    let isolated = RuntimeDirs::isolation_enabled(root);
+    let migrated = root.join(RuntimeDirs::MIGRATION_MARKER).is_file();
+    if isolated || migrated {
+        let addon = AddonStore::read_only(core, root, id)?;
+        let legacy = || {
+            let name = IDS
+                .iter()
+                .zip(LEGACY_RECEIPTS)
+                .find_map(|(&key, &name)| (key == id).then_some(name))
+                .ok_or("Unknown add-on package")?;
+            legacy_receipt(root, id, name).map_err(|error| error.to_string())
+        };
+        if !isolated && let Some(receipt) = legacy()? {
+            return Ok(Some(receipt));
+        }
+        let stored = addon.read_manifest_inner()?;
+        if stored.is_none() && !migrated {
+            return legacy();
+        }
+        return Ok(stored);
+    }
     migrate_inner(core, root).map_err(|e| e.to_string())?;
     AddonStore::new_inner(core, root, id)?.read_manifest_inner()
 }
@@ -519,7 +541,9 @@ pub(crate) fn report_paths(core: &Core, root: &Path) -> Result<BTreeSet<String>,
     if !root.try_exists()? {
         return Ok(BTreeSet::new());
     }
-    migrate_inner(core, root)?;
+    if !RuntimeDirs::isolation_enabled(root) && !root.join(RuntimeDirs::MIGRATION_MARKER).is_file() {
+        migrate_inner(core, root)?;
+    }
     read_report_paths(core, root)
 }
 

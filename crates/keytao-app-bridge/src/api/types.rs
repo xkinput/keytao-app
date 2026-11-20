@@ -44,6 +44,7 @@ pub struct LocalSchemaDto {
     pub installed_scheme: Option<String>,
     pub installed_scheme_version: Option<String>,
     pub runtime_isolation: Option<bool>,
+    pub runtime_migration_complete: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -60,6 +61,14 @@ pub struct InstalledPackageDto {
     pub source: Option<String>,
     pub display_name: Option<String>,
     pub logo_path: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct IsolatedPackageDto {
+    pub package_key: String,
+    pub display_name: String,
+    pub active: bool,
+    pub ready: bool,
 }
 
 #[derive(serde::Deserialize)]

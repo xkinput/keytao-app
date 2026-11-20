@@ -150,17 +150,19 @@ impl Core {
     /// Classify fresh/recovered state once a local IME root can be resolved.
     /// Keep unknown roots pending across both auth writes and restarts.
     pub fn initialize_onboarding(&self, local_schema_dir: Option<PathBuf>) -> Result<(), CoreError> {
-        let mut state = self.lock_state();
-        let first_run = !state.onboarding_initialized;
-        if !first_run {
+        if self.lock_state().onboarding_initialized {
             return Ok(());
         }
         let Some(local_schema_dir) = local_schema_dir else {
             return Ok(());
         };
         let installed = scheme::check_local_schema(self, Some(local_schema_dir))?.installed;
+        let mut state = self.lock_state();
+        if state.onboarding_initialized {
+            return Ok(());
+        }
         let mut next = state.clone();
-        next.onboarding_completed |= state::should_complete_onboarding(first_run, installed);
+        next.onboarding_completed |= state::should_complete_onboarding(true, installed);
         next.onboarding_initialized = true;
         // Persist even a fresh user's false value so later installs do not turn
         // a subsequent startup into an old-user migration.
