@@ -37,3 +37,18 @@ pub(crate) fn should_drop_pending_context(
 pub(crate) fn should_retry_commit(written: bool) -> bool {
     !written
 }
+
+pub(crate) fn composition_end_retry_delay_ms(failures: u8) -> Option<u64> {
+    match failures {
+        0 => Some(0),
+        1..=4 => Some(25 << (failures - 1)),
+        _ => None,
+    }
+}
+
+pub(crate) fn should_clear_terminated_composition(
+    active: Option<usize>,
+    terminated: usize,
+) -> bool {
+    active == Some(terminated)
+}

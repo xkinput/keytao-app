@@ -79,6 +79,58 @@ mod engine_status;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn process_keys_keeps_press_and_release_commits() {
+        struct FakeEngine {
+            calls: Vec<(u32, u32)>,
+            results: std::collections::VecDeque<keytao_core::KeyProcessResult>,
+        }
+
+        impl FakeEngine {
+            fn process_key(
+                &mut self,
+                keysym: u32,
+                mods: u32,
+            ) -> Option<keytao_core::KeyProcessResult> {
+                self.calls.push((keysym, mods));
+                self.results.pop_front()
+            }
+        }
+
+        let mut press = keytao_core::ImeState::empty();
+        press.committed = Some("press".into());
+        press.preedit = "after-press".into();
+        let mut release = keytao_core::ImeState::empty();
+        release.committed = Some("release".into());
+        release.preedit = "after-release".into();
+        release.ascii_mode = true;
+        let mut engine = FakeEngine {
+            calls: Vec::new(),
+            results: [
+                keytao_core::KeyProcessResult {
+                    state: press,
+                    accepted: true,
+                },
+                keytao_core::KeyProcessResult {
+                    state: release,
+                    accepted: false,
+                },
+            ]
+            .into(),
+        };
+        let keys = [(0xffe1, 0), (0xffe1, 1 << 30)];
+        let result = keytao_core::key_batch::process_keys(&keys, |keysym, mods| {
+            engine.process_key(keysym, mods).unwrap()
+        })
+        .unwrap();
+
+        assert_eq!(engine.calls, keys);
+        assert_eq!(result.state.committed.as_deref(), Some("pressrelease"));
+        assert!(result.accepted);
+        assert_eq!(result.state.preedit, "after-release");
+        assert!(result.state.ascii_mode);
+    }
+
+    #[test]
     fn status_writes_do_not_request_refresh() {
         let dir = std::env::temp_dir().join(format!(
             "keytao-status-refresh-{}-{}",

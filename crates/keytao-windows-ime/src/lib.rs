@@ -35,6 +35,7 @@ mod panel;
 mod panel_anchor;
 pub mod pipe_security;
 mod registration;
+mod solo_shift;
 mod state;
 mod text_service;
 

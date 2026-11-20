@@ -162,6 +162,7 @@ pub struct TsfState {
     reload_stamp_checked_at: Option<Instant>,
     reload_stamp_changed: bool,
     pub shift_pressed_without_key: bool,
+    pub shift_pressed_at: Option<Instant>,
     session_reset_pending: bool,
     focus_state_refresh_pending: bool,
     /// What TSF says about the focused context (password field, disabled
@@ -326,6 +327,7 @@ impl TsfState {
             reload_stamp_checked_at: None,
             reload_stamp_changed: false,
             shift_pressed_without_key: false,
+            shift_pressed_at: None,
             session_reset_pending: false,
             focus_state_refresh_pending: false,
             input_context: ContextInputState::default(),
@@ -1792,6 +1794,7 @@ fn take_active_composition(
     st.pending_ime_apply = None;
     let shift_pending = st.shift_pressed_without_key;
     st.shift_pressed_without_key = false;
+    st.shift_pressed_at = None;
     st.session_reset_pending = true;
     st.deployment_state.reset_input();
     st.deployment_hint = None;
@@ -1846,6 +1849,15 @@ pub(crate) fn clear_input_after_composition_terminated(
     }
     let policy = {
         let st = shared_state.borrow();
+        if !crate::composition_rules::should_clear_terminated_composition(
+            st.composition
+                .as_ref()
+                .map(|composition| composition.as_raw() as usize),
+            terminated_identity,
+        ) {
+            append_diagnostic("composition terminated stale_identity=1 cleared=0");
+            return;
+        }
         termination_policy(st.composition_in_flight, terminated_identity)
     };
     if policy == TerminationPolicy::Ignore {
@@ -1865,6 +1877,7 @@ pub(crate) fn clear_input_after_composition_terminated(
         st.claimed_key = None;
         let shift_pending = st.shift_pressed_without_key;
         st.shift_pressed_without_key = false;
+        st.shift_pressed_at = None;
         st.session_reset_pending = true;
         st.composition = None;
         st.composition_context = None;

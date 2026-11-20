@@ -6,3 +6,6 @@ mod generation_activity;
 
 #[path = "../src/generation_response.rs"]
 mod generation_response;
+
+#[path = "../src/solo_shift.rs"]
+mod solo_shift;

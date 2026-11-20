@@ -2,8 +2,9 @@
 mod composition_rules;
 
 use composition_rules::{
-    composition_end_to_finish_first, leftover_to_delete_on_host_termination, may_process_key,
-    may_terminate_composition, should_drop_pending_context, should_retry_commit,
+    composition_end_retry_delay_ms, composition_end_to_finish_first,
+    leftover_to_delete_on_host_termination, may_process_key, may_terminate_composition,
+    should_clear_terminated_composition, should_drop_pending_context, should_retry_commit,
 };
 use std::collections::VecDeque;
 
@@ -61,6 +62,13 @@ fn an_already_written_commit_is_never_retried() {
     assert!(!should_retry_commit(true));
 }
 
+#[test]
+fn late_termination_clears_only_the_active_composition() {
+    assert!(!should_clear_terminated_composition(Some(2), 1));
+    assert!(should_clear_terminated_composition(Some(2), 2));
+    assert!(!should_clear_terminated_composition(None, 1));
+}
+
 struct Composition {
     context: usize,
     start: usize,
@@ -69,6 +77,8 @@ struct Composition {
 }
 
 struct FakeHost {
+    word: &'static str,
+    top_up_key: char,
     document: String,
     compositions: Vec<Composition>,
     pending_ends: Vec<(usize, bool)>,
@@ -84,6 +94,8 @@ struct FakeHost {
 impl FakeHost {
     fn new() -> Self {
         Self {
+            word: "词",
+            top_up_key: 'y',
             document: "x".into(),
             compositions: vec![Composition {
                 context: 1,
@@ -105,17 +117,17 @@ impl FakeHost {
     fn write_word_once(&mut self) {
         if should_retry_commit(self.commit_written) {
             let composition = &mut self.compositions[0];
-            self.document.replace_range(composition.start.., "词");
-            composition.text = "词".into();
+            self.document.replace_range(composition.start.., self.word);
+            composition.text = self.word.into();
             composition.committed = true;
             self.commit_written = true;
-            self.commit_writes.push("词".into());
+            self.commit_writes.push(self.word.into());
         }
     }
 
     fn top_up(&mut self, sync_refused: bool, commit_already_written: bool) {
-        self.engine_keys.push('y');
-        self.pending_letter = Some('y');
+        self.engine_keys.push(self.top_up_key);
+        self.pending_letter = Some(self.top_up_key);
         self.pending_ends.push((1, true));
         if commit_already_written {
             self.write_word_once();
@@ -192,6 +204,9 @@ impl FakeHost {
     fn commit_shift_toggle(&mut self) {
         if should_retry_commit(self.toggle_written) {
             let composition = self.compositions.last_mut().unwrap();
+            composition.text = composition.text.to_uppercase();
+            self.document
+                .replace_range(composition.start.., &composition.text);
             composition.committed = true;
             self.toggle_written = true;
             self.commit_writes.push(composition.text.clone());
@@ -217,16 +232,55 @@ fn refused_top_up_then_next_key_and_host_termination_leave_only_one_word() {
 }
 
 #[test]
-fn shift_toggle_waits_for_top_up_and_commits_once() {
+fn shift_commit_waits_for_top_up_and_replaces_preedit_once() {
+    for commit_already_written in [false, true] {
+        let mut host = FakeHost::new();
+        host.word = "X";
+        host.top_up_key = 'b';
+        host.top_up(true, commit_already_written);
+        host.shift_toggle();
+        assert_eq!(host.engine_keys, vec!['x', 'b']);
+        assert_eq!(host.queued_keys, ['⇧']);
+        host.run_edit_session();
+        assert_eq!(host.engine_keys, vec!['x', 'b', '⇧']);
+        host.commit_shift_toggle();
+        host.host_terminates_newest();
+        assert_eq!(host.document, "XB");
+        assert!(!host.document.contains('b'));
+        assert_eq!(host.commit_writes, vec!["X", "B"]);
+        assert_eq!(host.max_live, 1);
+    }
+}
+
+#[test]
+fn five_failed_composition_ends_release_keys_without_rewriting_the_commit() {
     let mut host = FakeHost::new();
-    host.top_up(true, false);
-    host.shift_toggle();
+    host.top_up(true, true);
+    host.key('u');
+    host.key('n');
     assert_eq!(host.engine_keys, vec!['x', 'y']);
+    let mut failures = 0;
+    let mut delays = Vec::new();
+    while let Some(delay) = composition_end_retry_delay_ms(failures) {
+        delays.push(delay);
+        failures += 1;
+        if composition_end_retry_delay_ms(failures).is_none() {
+            host.pending_ends.clear();
+            host.compositions.clear();
+        }
+        if failures > 5 {
+            break;
+        }
+    }
+    assert_eq!(delays, vec![0, 25, 50, 100, 200]);
+    assert_eq!(failures, 5);
+    assert_eq!(composition_end_retry_delay_ms(u8::MAX), None);
+    assert_eq!(host.document, "词");
+    assert!(host.pending_ends.is_empty());
     host.run_edit_session();
-    assert_eq!(host.engine_keys, vec!['x', 'y', '⇧']);
-    host.commit_shift_toggle();
-    host.host_terminates_newest();
-    assert_eq!(host.document, "词y");
-    assert_eq!(host.commit_writes, vec!["词", "y"]);
+    assert_eq!(host.engine_keys, vec!['x', 'y', 'u', 'n']);
+    assert!(host.queued_keys.is_empty());
+    assert_eq!(host.commit_writes, vec!["词"]);
+    assert_eq!(host.document, "词yun");
     assert_eq!(host.max_live, 1);
 }

@@ -9,7 +9,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,8 +40,9 @@ use windows::{
 
 use crate::{
     composition_rules::{
-        composition_end_to_finish_first, leftover_to_delete_on_host_termination, may_process_key,
-        may_terminate_composition, should_drop_pending_context, should_retry_commit,
+        composition_end_retry_delay_ms, composition_end_to_finish_first,
+        leftover_to_delete_on_host_termination, may_process_key, may_terminate_composition,
+        should_drop_pending_context, should_retry_commit,
     },
     deferred_keys::{DeferredKey, KeyEventSource},
     edit_session::{
@@ -53,11 +54,14 @@ use crate::{
     guard,
     key_map::{
         ascii_mode_rejects_key, chord_keysym_for_vk, current_mod_mask, is_application_shortcut,
-        is_caps_lock_vk, is_enter_vk, is_shift_vk, rime_mod_mask_for_vk, shift_keysym_for_vk,
+        is_caps_lock_vk, is_enter_vk, is_shift_vk, rime_mod_mask_for_vk,
         shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
         vk_to_keysym, RIME_RELEASE_MASK,
     },
     panel_anchor::{start_panel_anchor, PanelAnchor},
+    solo_shift::{
+        solo_shift_keysym, solo_shift_press_time, solo_shift_should_apply, solo_shift_should_send,
+    },
     state::{
         append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
         clear_input_for_blocked_context, clear_layout_sink, current_theme, defer_ime_ui_hide,
@@ -86,6 +90,23 @@ macro_rules! append_key_diagnostic {
 
 fn upgrade_state(state: &WeakState) -> Option<SharedState> {
     state.upgrade()
+}
+
+fn record_shift_press(state: &SharedState, vk: u16, lparam: isize, mods: u32) {
+    let mut st = state.borrow_mut();
+    st.shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
+    if st.shift_pressed_without_key {
+        st.shift_pressed_at = solo_shift_press_time(st.shift_pressed_at, lparam, Instant::now());
+    } else {
+        st.shift_pressed_at = None;
+    }
+}
+
+fn solo_shift_pending(st: &TsfState) -> bool {
+    st.shift_pressed_without_key
+        && st
+            .shift_pressed_at
+            .is_some_and(|pressed| solo_shift_should_send(pressed.elapsed().as_millis()))
 }
 
 // ── Composition helpers ───────────────────────────────────────────────────────
@@ -353,6 +374,16 @@ pub(crate) struct PendingImeApply {
 }
 
 fn request_pending_ime_apply(state: &SharedState, asynchronous: bool) -> Result<()> {
+    {
+        let st = state.borrow();
+        if st.pending_ime_apply.as_ref().is_some_and(|apply| {
+            st.pending_composition_ends
+                .iter()
+                .any(|end| end.context.as_raw() == apply.context.as_raw())
+        }) {
+            return Ok(());
+        }
+    }
     let (context, client_id, generation) = {
         let mut st = state.borrow_mut();
         let Some(pending) = st.pending_ime_apply.as_mut() else {
@@ -451,6 +482,8 @@ pub(crate) struct PendingCompositionEnd {
     clear_text: bool,
     terminated_range: Option<(Option<ITfRange>, String)>,
     panel_anchor: Option<PanelAnchor>,
+    failures: u8,
+    retry_after: Option<Instant>,
 }
 
 fn forget_written_preedit(state: &SharedState, identity: usize) {
@@ -536,6 +569,8 @@ pub(crate) fn defer_failed_composition_end(
             clear_text,
             terminated_range: None,
             panel_anchor: None,
+            failures: 0,
+            retry_after: None,
         });
     }
 }
@@ -560,6 +595,39 @@ impl Drop for CompositionEndFlushGuard {
     }
 }
 
+fn record_composition_end_failure(state: &SharedState, identity: usize) -> bool {
+    let mut st = state.borrow_mut();
+    let Some(pending) = st
+        .pending_composition_ends
+        .iter_mut()
+        .find(|pending| pending.composition.as_raw() as usize == identity)
+    else {
+        return true;
+    };
+    pending.failures = pending.failures.saturating_add(1);
+    pending.queued = false;
+    if let Some(delay) = composition_end_retry_delay_ms(pending.failures) {
+        pending.retry_after = Some(Instant::now() + Duration::from_millis(delay));
+        return false;
+    }
+    let context = pending.context.as_raw();
+    let identities: Vec<_> = st
+        .pending_composition_ends
+        .iter()
+        .filter(|pending| pending.context.as_raw() == context)
+        .map(|pending| pending.composition.as_raw() as usize)
+        .collect();
+    st.pending_composition_ends
+        .retain(|pending| pending.context.as_raw() != context);
+    st.written_preedits
+        .retain(|(written, _, _)| !identities.contains(written));
+    drop(st);
+    append_diagnostic(format!(
+        "composition end retries exhausted attempts=5 context={context:p}; releasing queued keys"
+    ));
+    true
+}
+
 fn finish_pending_composition_end(ec: u32, state: &SharedState, identity: usize) -> Result<()> {
     let pending = state
         .borrow()
@@ -570,6 +638,12 @@ fn finish_pending_composition_end(ec: u32, state: &SharedState, identity: usize)
     let Some(pending) = pending else {
         return Ok(());
     };
+    if pending
+        .retry_after
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        return Err(E_FAIL.into());
+    }
     if pending
         .panel_anchor
         .as_ref()
@@ -617,6 +691,8 @@ fn finish_pending_composition_end(ec: u32, state: &SharedState, identity: usize)
     if result.is_ok() {
         drop(take_pending_composition_end(state, identity));
         forget_written_preedit(state, identity);
+    } else if record_composition_end_failure(state, identity) {
+        return Ok(());
     }
     result
 }
@@ -677,6 +753,8 @@ pub(crate) fn queue_terminated_preedit_cleanup(state: &SharedState, composition:
                 clear_text: true,
                 terminated_range: Some((range, text)),
                 panel_anchor: None,
+                failures: 0,
+                retry_after: None,
             });
     }
 }
@@ -718,52 +796,17 @@ pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
         if discard_disconnected_context(shared_state, &pending.context, false) {
             continue;
         }
+        if pending.queued
+            || pending
+                .retry_after
+                .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            continue;
+        }
         let identity = pending.composition.as_raw() as usize;
         let state = shared_state.clone();
         let client_id = state.borrow().client_id;
         if client_id == 0 {
-            continue;
-        }
-        let result = with_write_session(&pending.context, client_id, move |ec, _| {
-            let _guard = ImeWriteSessionGuard::enter(&state);
-            finish_pending_composition_end(ec, &state, identity)
-        });
-        if result.is_ok() {
-            continue;
-        }
-        if discard_disconnected_context(
-            shared_state,
-            &pending.context,
-            result
-                .as_ref()
-                .is_err_and(|error| error.code() == TF_E_DISCONNECTED),
-        ) {
-            continue;
-        }
-        let current = shared_state
-            .borrow()
-            .pending_composition_ends
-            .iter()
-            .find(|entry| entry.composition.as_raw() as usize == identity)
-            .cloned();
-        let Some(current) = current else {
-            continue;
-        };
-        if current.terminated_range.is_none()
-            && may_terminate_composition(current.clear_text, false)
-        {
-            if let (Ok(services), Ok(view)) = (
-                current.context.cast::<ITfContextOwnerCompositionServices>(),
-                current.composition.cast::<ITfCompositionView>(),
-            ) {
-                if unsafe { services.TerminateComposition(&view) }.is_ok() {
-                    drop(take_pending_composition_end(shared_state, identity));
-                    forget_written_preedit(shared_state, identity);
-                    continue;
-                }
-            }
-        }
-        if current.queued {
             continue;
         }
         if let Some(entry) = shared_state
@@ -774,34 +817,29 @@ pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
         {
             entry.queued = true;
         }
-        let state = shared_state.clone();
-        let composition = pending.composition.clone();
-        let result = with_async_write_session(&pending.context, client_id, move |ec, ctx| {
-            let identity = composition.as_raw() as usize;
-            let _guard = ImeWriteSessionGuard::enter(&state);
-            let result = finish_pending_composition_end(ec, &state, identity);
-            if result.is_err() {
-                if discard_disconnected_context(
-                    &state,
-                    ctx,
-                    result
-                        .as_ref()
-                        .is_err_and(|error| error.code() == TF_E_DISCONNECTED),
-                ) {
-                    return result;
-                }
-                if let Some(entry) = state
-                    .borrow_mut()
-                    .pending_composition_ends
-                    .iter_mut()
-                    .find(|entry| entry.composition.as_raw() as usize == identity)
-                {
-                    entry.queued = false;
-                }
+        let entered = Rc::new(Cell::new(false));
+        let entered_session = entered.clone();
+        let apply = move |ec, ctx: &ITfContext| {
+            entered_session.set(true);
+            let result = {
+                let _guard = ImeWriteSessionGuard::enter(&state);
+                finish_pending_composition_end(ec, &state, identity)
+            };
+            if result.as_ref().is_err_and(|error| {
+                discard_disconnected_context(&state, ctx, error.code() == TF_E_DISCONNECTED)
+            }) {
+                return result;
+            }
+            if result.is_ok() {
                 post_pending_ime_ui(&state);
             }
             result
-        });
+        };
+        let result = if pending.failures == 0 {
+            with_write_session(&pending.context, client_id, apply)
+        } else {
+            with_async_write_session(&pending.context, client_id, apply)
+        };
         if result.is_err() {
             if discard_disconnected_context(
                 shared_state,
@@ -812,15 +850,42 @@ pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
             ) {
                 continue;
             }
-            if let Some(entry) = shared_state
-                .borrow_mut()
+            if !entered.get() && record_composition_end_failure(shared_state, identity) {
+                continue;
+            }
+            let current = shared_state
+                .borrow()
                 .pending_composition_ends
-                .iter_mut()
+                .iter()
                 .find(|entry| entry.composition.as_raw() as usize == identity)
-            {
-                entry.queued = false;
+                .cloned();
+            if let Some(current) = current {
+                if current.terminated_range.is_none()
+                    && may_terminate_composition(current.clear_text, false)
+                {
+                    if let (Ok(services), Ok(view)) = (
+                        current.context.cast::<ITfContextOwnerCompositionServices>(),
+                        current.composition.cast::<ITfCompositionView>(),
+                    ) {
+                        if unsafe { services.TerminateComposition(&view) }.is_ok() {
+                            drop(take_pending_composition_end(shared_state, identity));
+                            forget_written_preedit(shared_state, identity);
+                        }
+                    }
+                }
             }
         }
+    }
+    if {
+        let st = shared_state.borrow();
+        !st.pending_composition_ends.is_empty()
+            || st.pending_ime_apply.is_some()
+            || st.pending_commit_retry.is_some()
+    } {
+        let weak = Rc::downgrade(shared_state);
+        crate::state::with_detached_windows(shared_state, false, |window, _| {
+            window.arm_deferred_keys(&weak);
+        });
     }
 }
 
@@ -2587,7 +2652,17 @@ pub(crate) fn flush_deferred_keys(state: &SharedState) {
                 break;
             };
             state.borrow_mut().deferred_keys.pop();
-            complete_unhandled_key(key.keysym, key.mods, &mut result);
+            if key.shift_toggle {
+                if !solo_shift_should_apply(
+                    result.accepted,
+                    before.ascii_mode,
+                    result.state.ascii_mode,
+                ) {
+                    continue;
+                }
+            } else {
+                complete_unhandled_key(key.keysym, key.mods, &mut result);
+            }
             // Timer replay runs outside TSF key callbacks, where synchronous writes may be rejected.
             apply_ime_state(&context, client_id, state, result.state, true, true, None)?;
             if state.borrow().input_generation != generation {
@@ -2749,7 +2824,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             state.borrow_mut().claimed_key = None;
             // TSF only calls OnKeyDown for keys claimed here, so solo-Shift state
             // has to be maintained in the test callback (windows-1).
-            state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
+            record_shift_press(&state, vk, lparam.0, mods);
             let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
                 || deferred_input_pending(&state, pic);
             if is_application_shortcut(vk, mods, composing) {
@@ -2845,10 +2920,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if is_shift
-                && (!state.borrow().shift_pressed_without_key
+                && (!solo_shift_pending(&state.borrow())
                     || is_application_shortcut(vk, current_mod_mask(), false))
             {
                 state.borrow_mut().shift_pressed_without_key = false;
+                state.borrow_mut().shift_pressed_at = None;
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
@@ -2898,7 +2974,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
             let claimed = state.borrow_mut().claimed_key.take() == Some((vk, lparam.0));
-            state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
+            record_shift_press(&state, vk, lparam.0, mods);
             // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
             // shortcut policy before context inspection, warmup, or Enter's
             // modifier-free process_enter path.
@@ -3049,8 +3125,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
             let is_shift = is_shift_vk(vk);
-            let (keysym, mods) = if let Some(keysym) = shift_keysym_for_vk(vk) {
-                (keysym, 0)
+            let (keysym, mods) = if is_shift {
+                (solo_shift_keysym(vk, lparam.0), 0)
             } else {
                 let Some(before_state) =
                     cached_ime_state(&state).filter(|st| st.chord_composer && !st.ascii_mode)
@@ -3064,10 +3140,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 (keysym, mods)
             };
             if is_shift
-                && (!state.borrow().shift_pressed_without_key
+                && (!solo_shift_pending(&state.borrow())
                     || is_application_shortcut(vk, current_mod_mask(), false))
             {
                 state.borrow_mut().shift_pressed_without_key = false;
+                state.borrow_mut().shift_pressed_at = None;
                 return Ok(BOOL::from(false));
             }
 
@@ -3092,6 +3169,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
             if deferred_input_pending(&state, Some(&context)) {
                 state.borrow_mut().shift_pressed_without_key = false;
+                state.borrow_mut().shift_pressed_at = None;
                 let consumed = defer_key(&state, &context, key, false);
                 flush_deferred_keys(&state);
                 return Ok(BOOL::from(consumed));
@@ -3103,6 +3181,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 }
                 if is_shift {
                     st.shift_pressed_without_key = false;
+                    st.shift_pressed_at = None;
                 }
                 st.key_context = Some(context.clone());
                 drop(st);
@@ -3136,12 +3215,22 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 before_state.ascii_mode,
                 result.state.ascii_mode,
             );
-            let processed =
-                should_consume_processed_state(result.accepted, &before_state, &result.state);
+            let processed = if is_shift {
+                solo_shift_should_apply(
+                    result.accepted,
+                    before_state.ascii_mode,
+                    result.state.ascii_mode,
+                )
+            } else {
+                should_consume_processed_state(result.accepted, &before_state, &result.state)
+            };
             let consumed = result.accepted || (is_shift && processed);
-            if should_apply_processed_state(processed, &before_state, &result.state)
-                && apply_ime_state(&context, client_id, &state, result.state, true, false, None)
-                    .is_err()
+            if (if is_shift {
+                processed
+            } else {
+                should_apply_processed_state(processed, &before_state, &result.state)
+            }) && apply_ime_state(&context, client_id, &state, result.state, true, false, None)
+                .is_err()
             {
                 return Ok(BOOL::from(consumed));
             }

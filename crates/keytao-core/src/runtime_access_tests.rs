@@ -8,6 +8,22 @@ mod smoke_fixture;
 
 thread_local! {
     static ENGINE_CREATION_GATE: std::cell::RefCell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+    static ENGINE_ACCESS_BUDGET: std::cell::RefCell<Option<(usize, usize)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn allow_engine_access() -> bool {
+    ENGINE_ACCESS_BUDGET.with(|budget| {
+        let mut budget = budget.borrow_mut();
+        let Some((remaining, attempts)) = budget.as_mut() else {
+            return true;
+        };
+        *attempts += 1;
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        true
+    })
 }
 
 pub(super) fn pause_engine_creation() {
@@ -44,6 +60,34 @@ fn native_fixture(name: &str) -> Option<(ImeRuntime, PathBuf)> {
     let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
     runtime.init().unwrap();
     Some((runtime, dir))
+}
+
+#[test]
+fn key_batch_uses_one_access_and_preserves_an_earlier_commit() {
+    let Some((runtime, dir)) =
+        native_fixture("key_batch_uses_one_access_and_preserves_an_earlier_commit")
+    else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    for key in smoke_fixture::CODE.bytes() {
+        session.process_key_result(u32::from(key), 0).unwrap();
+    }
+    ENGINE_ACCESS_BUDGET.with(|budget| *budget.borrow_mut() = Some((1, 0)));
+    let result = session.process_keys_result(&[(u32::from(b' '), 0), (0xffe1, RIME_RELEASE_MASK)]);
+    let (_, attempts) = ENGINE_ACCESS_BUDGET.with(|budget| budget.borrow_mut().take().unwrap());
+    assert_eq!(attempts, 1, "a later key must not reacquire runtime access");
+    let result = result.expect("a later access failure must not lose a completed commit");
+    assert_eq!(
+        result.state.committed.as_deref(),
+        Some(smoke_fixture::WORDS[0])
+    );
+    assert!(result.accepted);
+    assert!(result.state.preedit.is_empty());
+    drop(session);
+    drop(runtime);
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

@@ -559,11 +559,7 @@ impl ImeEngineBackend for InProcEngine {
     }
 
     fn process_keys(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
-        let mut result = None;
-        for &(keysym, mods) in keys {
-            result = self.process_key(keysym, mods);
-        }
-        result
+        self.session()?.process_keys_result(keys)
     }
 
     fn process_enter(&self) -> Option<KeyProcessResult> {

@@ -14,6 +14,7 @@ pub use deployment_state::{
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+pub mod key_batch;
 pub mod package_store;
 mod preview;
 pub use preview::{CandidatePreview, PreviewCandidate, PreviewRequest};
@@ -6279,9 +6280,21 @@ impl ImeRuntimeSession {
     }
 
     pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
-        let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
-        let mask = rime_modifier_mask(mask) | (mask & RIME_MOD_LOCK);
         self.process_runtime_key(RuntimeKey::Key(keycode, mask))
+    }
+
+    /// Process one client batch under a single runtime/session access.
+    pub fn process_keys_result(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
+        if keys.is_empty() {
+            return None;
+        }
+        if !self.input_policy().composing {
+            return Some(KeyProcessResult {
+                state: ImeState::empty(),
+                accepted: false,
+            });
+        }
+        self.process_keys_now(keys)
     }
 
     fn process_runtime_key(&self, key: RuntimeKey) -> Option<KeyProcessResult> {
@@ -6326,19 +6339,28 @@ impl ImeRuntimeSession {
     }
 
     fn process_key_now(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
+        self.process_keys_now(&[(keycode, mask)])
+    }
+
+    fn process_keys_now(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
-        let caps = keycode == 0xffe5 && mask & RIME_RELEASE_MASK == 0;
+        let caps = keys
+            .iter()
+            .any(|&(keycode, mask)| keycode == 0xffe5 && mask & RIME_RELEASE_MASK == 0);
         if caps {
             // Physical Caps Lock supersedes a host's context-only language override.
             self.context_ascii_mode.store(0, Ordering::Release);
         }
-        self.with_engine_access_mode(
-            !caps,
-            caps,
-            true,
-            |engine, policy, mode, ime_host, input| {
+        self.with_engine_access_mode(!caps, caps, true, |engine, _, mode, ime_host, input| {
+            key_batch::process_keys(keys, |keycode, mask| {
+                let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
+                let mask = rime_modifier_mask(mask) | (mask & RIME_MOD_LOCK);
+                let (policy, clear_composition) = self.policy.take_for_engine();
+                if clear_composition {
+                    engine.discard_composition();
+                }
                 if policy.composing {
                     let desktop_dictionary =
                         cfg!(not(any(target_os = "android", target_os = "ios")))
@@ -6408,8 +6430,9 @@ impl ImeRuntimeSession {
                         accepted: false,
                     }
                 }
-            },
-        )
+            })
+        })
+        .flatten()
     }
 
     /// `Return` handling shared by every frontend, see [`Engine::process_enter`].
@@ -6718,6 +6741,13 @@ impl ImeRuntimeSession {
             Option<&global_input::InputState>,
         ) -> T,
     ) -> Option<T> {
+        #[cfg(all(
+            test,
+            any(target_os = "windows", target_os = "macos", target_os = "linux")
+        ))]
+        if !runtime_access_tests::allow_engine_access() {
+            return None;
+        }
         // Wait before taking any lock needed by the builder.
         // Keep the loaded schema usable while another process compiles its replacement.
         let use_loaded_schema = deployment_state::cached_deployment_in_progress(&self.dirs.user)
