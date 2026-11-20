@@ -473,17 +473,19 @@ fn deployment_hint_entry_requires_a_handled_key_even_before_engine_ready() {
         }
 
         // OnTestKeyDown only retains key_context through deployment_key_pressed.
-        // Typing must still reach that entry while a deployment delays warmup.
+        // Typing reaches the hint entry and is claimed while warmup is deferred.
         keyboard.set(VK_A, 0);
         let (state, sink) = state_and_sink(ImeState::empty());
         state.borrow_mut().engine_building = true;
         assert!(
-            !unsafe { sink.OnTestKeyDown(&context, WPARAM(VK_A.0 as usize), LPARAM(0)) }
+            unsafe { sink.OnTestKeyDown(&context, WPARAM(VK_A.0 as usize), LPARAM(0)) }
                 .unwrap()
                 .as_bool()
         );
         let st = state.borrow();
         assert!(st.key_context.is_some(), "typing skipped the hint entry");
+        assert_eq!(st.claimed_key, Some((VK_A.0, 0)));
+        assert!(st.deferred_keys.front().is_none());
         assert!(st.runtime.is_none() && st.session.is_none());
         assert_eq!(mapped_input_modules(), initial_modules);
     })

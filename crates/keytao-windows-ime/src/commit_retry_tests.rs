@@ -44,6 +44,9 @@ struct Host {
     range_hook: Rc<RefCell<Option<Box<dyn FnOnce()>>>>,
     writes: RefCell<Vec<String>>,
     fail_text: Cell<bool>,
+    inline_async: Cell<bool>,
+    request_depth: Cell<usize>,
+    reentered_request: Cell<bool>,
     refuse_sync_once: Cell<bool>,
     fail_async_request: Cell<bool>,
     end_count: Rc<Cell<usize>>,
@@ -95,11 +98,20 @@ impl ITfContext_Impl for Context_Impl {
     ) -> Result<HRESULT> {
         let session = session.unwrap();
         self.host.session_flags.borrow_mut().push(flags);
-        if flags.0 & TF_ES_SYNC.0 != 0 {
+        let depth = self.host.request_depth.get();
+        if depth != 0 {
+            self.host.reentered_request.set(true);
+        }
+        if flags.0 & TF_ES_SYNC.0 != 0
+            || (self.host.inline_async.get() && flags.0 & TF_ES_ASYNC.0 == 0)
+        {
             if self.host.refuse_sync_once.replace(false) {
                 return Err(E_FAIL.into());
             }
-            unsafe { session.DoEditSession(1) }.map(|()| S_OK)
+            self.host.request_depth.set(depth + 1);
+            let result = unsafe { session.DoEditSession(1) }.map(|()| S_OK);
+            self.host.request_depth.set(depth);
+            result
         } else {
             if self.host.fail_async_request.get() {
                 return Err(E_FAIL.into());
@@ -369,13 +381,13 @@ fn a_commit_retry_queued_before_focus_reset_never_requests_a_write() {
 
 #[test]
 fn a_requested_retry_expires_before_its_async_callback_on_focus_or_deactivate() {
-    for deactivate in [false, true] {
+    for client_id in [None, Some(0), Some(2)] {
         let (host, context, state) = fixture();
         queue(&context, &state);
         flush_pending_commit_retry(&state);
         assert_eq!(host.queued.borrow().len(), 1);
-        if deactivate {
-            state.borrow_mut().client_id = 0;
+        if let Some(client_id) = client_id {
+            state.borrow_mut().client_id = client_id;
         } else {
             reset_input_for_focus_change(&state);
         }
@@ -615,6 +627,26 @@ fn a_failed_request_still_retries_a_commit_that_never_reached_the_document() {
     assert_eq!(host.queued.borrow().len(), 1);
     host.run_queued();
     assert_eq!(&*host.text.borrow(), "甲");
+    assert_eq!(&*host.writes.borrow(), &["甲"]);
+    assert!(!host.reentered_request.get());
+    assert!(state.borrow().pending_commit_retry.is_none());
+}
+
+#[test]
+fn an_inline_async_failure_finishes_its_request_before_retrying_the_commit() {
+    let (host, context, state) = fixture();
+    host.inline_async.set(true);
+    host.fail_start.set(Some(1));
+    let frame = ImeState {
+        committed: Some("甲".into()),
+        ..ImeState::empty()
+    };
+    assert!(apply_ime_state(&context, 1, &state, frame, false, true, None).is_err());
+    assert!(!host.reentered_request.get());
+    assert_eq!(&*host.writes.borrow(), &["甲"]);
+    assert!(host.queued.borrow().is_empty());
+    assert!(state.borrow().pending_ime_apply.is_none());
+    assert!(state.borrow().pending_commit_retry.is_none());
 }
 
 #[test]
@@ -701,11 +733,13 @@ fn a_failed_first_text_write_does_not_erase_the_original_selection() {
     };
     assert!(apply_ime_state(&context, 1, &state, frame, false, false, None).is_err());
     assert_eq!(&*host.text.borrow(), "original selection");
+    assert!(host.writes.borrow().is_empty());
     assert_eq!(host.end_count.get(), 1);
     assert_eq!(host.queued.borrow().len(), 1);
     reset_input_for_focus_change(&state);
     host.run_queued();
     assert_eq!(&*host.text.borrow(), "original selection");
+    assert!(host.writes.borrow().is_empty());
 }
 
 #[test]
@@ -725,7 +759,7 @@ fn a_failed_new_preedit_is_ended_and_cleared_instead_of_leaking_its_composition(
 }
 
 #[test]
-fn failed_end_and_terminate_keep_the_handle_until_lock_free_cleanup_succeeds() {
+fn failed_end_and_terminate_keep_the_handle_until_a_due_end_retry_succeeds() {
     let (host, context, state) = fixture();
     host.fail_end.set(true);
     host.fail_terminate.set(true);
@@ -734,18 +768,39 @@ fn failed_end_and_terminate_keep_the_handle_until_lock_free_cleanup_succeeds() {
         ..ImeState::empty()
     };
     assert!(apply_ime_state(&context, 1, &state, frame, false, false, None).is_err());
-    let session = host.queued.borrow_mut().pop().unwrap();
-    assert!(unsafe { session.DoEditSession(1) }.is_err());
     assert_eq!(&*host.text.borrow(), "甲");
     assert_eq!(state.borrow().pending_composition_ends.len(), 1);
     assert!(host.terminate_count.get() >= 1);
+    let composition = host.last_composition.borrow().clone().unwrap();
+    assert_eq!(
+        state.borrow().pending_composition_ends[0].composition,
+        composition
+    );
+    state.borrow_mut().pending_composition_ends[0].retry_after =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    let requests = host.session_flags.borrow().len();
+    flush_pending_ime_ui(&state);
+    assert_eq!(host.session_flags.borrow().len(), requests);
+    assert!(host.queued.borrow().is_empty());
+    assert_eq!(
+        state.borrow().pending_composition_ends[0].composition,
+        composition
+    );
     state.borrow_mut().ime_state = Some(ImeState {
         preedit: "new input".into(),
         ..ImeState::empty()
     });
-    host.fail_terminate.set(false);
+    host.fail_end.set(false);
+    state.borrow_mut().pending_composition_ends[0].retry_after = None;
     flush_pending_ime_ui(&state);
+    assert_eq!(host.queued.borrow().len(), 1);
+    assert_eq!(
+        state.borrow().pending_composition_ends[0].composition,
+        composition
+    );
+    host.run_queued();
     assert!(state.borrow().pending_composition_ends.is_empty());
+    assert_eq!(host.active_compositions.get(), 0);
     assert_eq!(
         state.borrow().ime_state.as_ref().unwrap().preedit,
         "new input"

@@ -402,6 +402,8 @@ fn request_pending_ime_apply(state: &SharedState, asynchronous: bool) -> Result<
     if discard_disconnected_context(state, &context, false) {
         return Ok(());
     }
+    let request_active = Rc::new(Cell::new(true));
+    let request_active_for_session = request_active.clone();
     let for_session = state.clone();
     let apply = move |ec, ctx: &ITfContext| {
         if for_session
@@ -428,7 +430,10 @@ fn request_pending_ime_apply(state: &SharedState, asynchronous: bool) -> Result<
         } else {
             Ok(())
         };
-        post_pending_ime_ui(&for_session);
+        // Inline callbacks leave flushing to the caller until the request returns.
+        if !request_active_for_session.get() {
+            post_pending_ime_ui(&for_session);
+        }
         result
     };
     let result = if asynchronous {
@@ -436,6 +441,7 @@ fn request_pending_ime_apply(state: &SharedState, asynchronous: bool) -> Result<
     } else {
         with_write_session(&context, client_id, apply)
     };
+    request_active.set(false);
     if result.as_ref().is_err_and(|error| {
         discard_disconnected_context(state, &context, error.code() == TF_E_DISCONNECTED)
     }) {
@@ -471,6 +477,9 @@ pub(crate) fn flush_pending_ime_apply(state: &SharedState) {
     };
     if ready {
         let _ = request_pending_ime_apply(state, true);
+        if state.borrow().pending_ime_apply.is_none() {
+            post_pending_ime_ui(state);
+        }
     }
 }
 
@@ -1860,7 +1869,12 @@ fn apply_ime_state(
     let input_generation = state_arc_for_session.borrow().input_generation;
     let apply_session = move |ec: u32, ctx: &ITfContext| {
         // A queued mouse edit can run after this input session has ended.
-        if state_arc_for_session.borrow().input_generation != input_generation {
+        if {
+            let st = state_arc_for_session.borrow();
+            st.input_generation != input_generation
+                || st.client_id == 0
+                || st.client_id != client_id
+        } {
             return Ok(());
         }
         if !plan.commit && state_arc_for_session.borrow().ime_update_generation != update_generation
