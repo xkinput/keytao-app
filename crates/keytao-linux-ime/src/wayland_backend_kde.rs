@@ -526,9 +526,9 @@ impl App {
         }
         ctx.preedit_cursor(preedit_cursor_bytes(preedit, caret));
         // The third argument is what the client commits if the text input is
-        // reset while composing (typically on unfocus).  Passing an empty
-        // string there throws away whatever the user had typed.
-        ctx.preedit_string(self.serial, preedit.to_owned(), state.preedit.clone());
+        // reset while composing (typically on unfocus). It stays empty, like
+        // every other frontend: an unfinished code never reaches the document.
+        ctx.preedit_string(self.serial, preedit.to_owned(), String::new());
     }
 
     fn clear_context_preedit(&self) {
