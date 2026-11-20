@@ -5242,6 +5242,7 @@ impl SseDecode for crate::api::types::InstalledPackageDto {
         let mut var_schemeKey = <String>::sse_decode(deserializer);
         let mut var_version = <Option<String>>::sse_decode(deserializer);
         let mut var_active = <bool>::sse_decode(deserializer);
+        let mut var_inUse = <bool>::sse_decode(deserializer);
         let mut var_hasPackageZip = <bool>::sse_decode(deserializer);
         let mut var_supportsUserWords = <bool>::sse_decode(deserializer);
         let mut var_source = <Option<String>>::sse_decode(deserializer);
@@ -5251,6 +5252,7 @@ impl SseDecode for crate::api::types::InstalledPackageDto {
             scheme_key: var_schemeKey,
             version: var_version,
             active: var_active,
+            in_use: var_inUse,
             has_package_zip: var_hasPackageZip,
             supports_user_words: var_supportsUserWords,
             source: var_source,
@@ -7167,6 +7169,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::InstalledPackageDto {
             self.scheme_key.into_into_dart().into_dart(),
             self.version.into_into_dart().into_dart(),
             self.active.into_into_dart().into_dart(),
+            self.in_use.into_into_dart().into_dart(),
             self.has_package_zip.into_into_dart().into_dart(),
             self.supports_user_words.into_into_dart().into_dart(),
             self.source.into_into_dart().into_dart(),
@@ -8413,6 +8416,7 @@ impl SseEncode for crate::api::types::InstalledPackageDto {
         <String>::sse_encode(self.scheme_key, serializer);
         <Option<String>>::sse_encode(self.version, serializer);
         <bool>::sse_encode(self.active, serializer);
+        <bool>::sse_encode(self.in_use, serializer);
         <bool>::sse_encode(self.has_package_zip, serializer);
         <bool>::sse_encode(self.supports_user_words, serializer);
         <Option<String>>::sse_encode(self.source, serializer);

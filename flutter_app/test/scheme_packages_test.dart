@@ -96,6 +96,9 @@ class PackageCore extends FakeCore {
       local.deployed ? '/isolated/logos/${local.schemas.first}.png' : null;
 
   @override
+  Future<void> crateApiCoreSelectSchema({required String schemaId}) async {}
+
+  @override
   Future<List<InstalledPackageDto>> crateApiCoreListInstalledPackages() async =>
       List.of(packages);
 
@@ -271,6 +274,38 @@ void main() {
     await android.progress.close();
     RustLib.dispose();
   });
+
+  test(
+    'schema changes refresh package usage without changing activation',
+    () async {
+      for (final select in [false, true]) {
+        core.packages = [keytaoPackage];
+        await controller.refreshSchemeUpdates();
+        core.packages = [
+          const InstalledPackageDto(
+            schemeKey: 'keytao',
+            active: true,
+            inUse: false,
+            hasPackageZip: true,
+          ),
+          const InstalledPackageDto(
+            schemeKey: 'xmjd',
+            active: true,
+            inUse: true,
+            hasPackageZip: true,
+          ),
+        ];
+        if (select) {
+          expect(await controller.selectSchema('xmjd6'), isTrue);
+        } else {
+          await controller.refreshSchemas();
+        }
+        expect(controller.installedPackageFor('keytao')!.active, isTrue);
+        expect(controller.installedPackageFor('keytao')!.inUse, isFalse);
+        expect(controller.installedPackageFor('xmjd')!.inUse, isTrue);
+      }
+    },
+  );
 
   test('inactive updates require Android storage before downloading', () async {
     controller.dispose();

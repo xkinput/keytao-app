@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -436,7 +438,7 @@ void main() {
           buttons
               .where((button) => button.primary)
               .map((button) => button.label),
-          label == null ? isEmpty : List.filled(4, label),
+          !installed || label == null ? isEmpty : List.filled(4, label),
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
@@ -948,12 +950,68 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
 
+  testWidgets('package cards keep their own logo throughout deployment', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..local = const LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        schemas: ['xmjd6'],
+        installedScheme: 'xmjd',
+      )
+      ..activeSchemaLogoPath = 'assets/logo.png'
+      ..installedPackages = [
+        InstalledPackageDto(
+          schemeKey: 'xmjd',
+          active: true,
+          hasPackageZip: true,
+          logoPath: File('assets/logo.png').absolute.path,
+        ),
+      ];
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 800));
+    for (final operation in [null, OperationKind.deploy, null]) {
+      c.operation = operation;
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: c.info.platform,
+          home: FScaffold(
+            child: SchemePackageRow(controller: c, schemeKey: 'xmjd'),
+          ),
+        ),
+      );
+      final image = tester.widget<Image>(
+        find.descendant(
+          of: find.byType(SchemaLogo),
+          matching: find.byType(Image),
+        ),
+      );
+      expect(
+        (image.image as FileImage).file.path,
+        c.installedPackages.single.logoPath,
+      );
+    }
+  });
+
   testWidgets('package rows expose only applicable actions', (tester) async {
     final c = _PackageController();
     addTearDown(c.dispose);
     _size(tester, const Size(360, 800));
     final cases = [
       (package: null, update: false, labels: ['下载'], calls: ['install:keytao']),
+      (
+        package: const InstalledPackageDto(
+          schemeKey: 'keytao',
+          version: 'v1',
+          active: true,
+          inUse: false,
+          hasPackageZip: true,
+        ),
+        update: false,
+        labels: ['卸载'],
+        calls: ['remove:keytao'],
+      ),
       (
         package: const InstalledPackageDto(
           schemeKey: 'keytao',
@@ -1062,11 +1120,19 @@ void main() {
         _actionLabels(tester),
         entry.labels.where((label) => label != '卸载'),
       );
+      for (final button in tester.widgetList<ActionButton>(
+        find.byType(ActionButton),
+      )) {
+        if (button.label == '下载') expect(button.primary, isFalse);
+        if (button.label == AppStrings.deploy) expect(button.primary, isTrue);
+      }
       expect(find.text('自造词'), findsNothing);
       expect(find.text('卸载'), findsNothing);
       expect(
         find.text('使用中'),
-        entry.package?.active == true ? findsOneWidget : findsNothing,
+        entry.package?.active == true && entry.package!.inUse
+            ? findsOneWidget
+            : findsNothing,
       );
       if (entry.package != null) {
         expect(find.text('v1'), findsOneWidget);
@@ -1288,6 +1354,11 @@ void main() {
               ),
               findsOneWidget,
             );
+          }
+          for (final button in tester.widgetList<ActionButton>(
+            find.widgetWithText(ActionButton, '下载'),
+          )) {
+            expect(button.primary, isFalse);
           }
         }
         await _openAddons(tester);

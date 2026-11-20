@@ -490,10 +490,11 @@ class SchemePackageRow extends StatelessWidget {
     final isLocal = package?.source == 'local';
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
+    final inUse = active && package!.inUse;
     final hasLogo =
         (active && c.activeSchemaLogoPath != null) || package?.logoPath != null;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
-    final deploying = activating || (active && c.isDeploying);
+    final deploying = activating || (inUse && c.isDeploying);
     final installing = c.installingSchemeKey == schemeKey;
     final changelogBody = schemeKey == 'keytao' ? c.changelogBody : null;
     final failedDeploySteps = c.deploySteps.where(
@@ -523,7 +524,7 @@ class SchemePackageRow extends StatelessWidget {
             (package.hasPackageZip || !isLocal))
           ActionButton(
             package.hasPackageZip ? '启用' : '下载',
-            primary: update == null,
+            primary: package.hasPackageZip && update == null,
             icon: package.hasPackageZip
                 ? FLucideIcons.play
                 : FLucideIcons.download,
@@ -695,7 +696,7 @@ class SchemePackageRow extends StatelessWidget {
     );
     final state = deploying
         ? const SizedBox.square(dimension: 18, child: FCircularProgress())
-        : active
+        : inUse
         ? AppBadge(
             deployFailed
                 ? '部署失败'
@@ -790,7 +791,7 @@ class SchemePackageRow extends StatelessWidget {
           Row(
             children: [
               EyebrowLabel(
-                active
+                inUse
                     ? '在用'
                     : isLocal
                     ? '本地'
@@ -807,13 +808,11 @@ class SchemePackageRow extends StatelessWidget {
                       Text(
                         package!.version!,
                         style: context.theme.typography.body.sm.copyWith(
-                          color: active
+                          color: inUse
                               ? palette.successForeground
                               : palette.muted,
                           fontSize: 13,
-                          fontWeight: active
-                              ? FontWeight.w600
-                              : FontWeight.w400,
+                          fontWeight: inUse ? FontWeight.w600 : FontWeight.w400,
                         ),
                       ),
                     if (update != null)
@@ -1233,7 +1232,7 @@ Map<String, Widget> _addonCells(
                 if (showInstall)
                   ActionButton(
                     label,
-                    primary: true,
+                    primary: installed,
                     icon: FLucideIcons.download,
                     tooltip: tooltip,
                     onPress: install,

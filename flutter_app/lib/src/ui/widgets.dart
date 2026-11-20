@@ -34,7 +34,9 @@ class SchemaLogo extends StatelessWidget {
         : const SizedBox.shrink();
     final key = schemeKey ?? controller.activeSchemeKey;
     final package = controller.installedPackageFor(key);
-    final path = key == controller.activeSchemeKey
+    final path = schemeKey != null && package?.logoPath != null
+        ? package!.logoPath
+        : key == controller.activeSchemeKey
         ? controller.activeSchemaLogoPath ?? package?.logoPath
         : package?.logoPath;
     return path == null

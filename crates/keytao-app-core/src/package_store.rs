@@ -800,15 +800,23 @@ impl<'a> PackageStore<'a> {
         self.checked_root()?;
         let core = self.core;
         let state = core.state();
-        let activated = match fs::read(self.checked_activation_path()?) {
+        let (activated, current_schema) = match fs::read(self.checked_activation_path()?) {
             Ok(bytes) => {
-                let record: crate::package_activation::Activation = serde_json::from_slice(&bytes)?;
-                let mut keys = record.activations.unwrap_or_default().into_keys().collect::<BTreeSet<_>>();
-                if !record.key.is_empty() { keys.insert(record.key); }
-                keys
+                let mut record: crate::package_activation::Activation = serde_json::from_slice(&bytes)?;
+                let current_schema = keytao_core::current_schema_id_from_dir(Path::new(&record.root));
+                let mut records = record.activations.take().unwrap_or_default();
+                if !record.key.is_empty() { records.entry(record.key.clone()).or_insert(record); }
+                (records, current_schema)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Default::default(), None),
             Err(error) => return Err(error.into()),
+        };
+        let lua_conflict = activated.values().filter(|record| record.rime_lua.is_some()).take(2).count() > 1;
+        let current_package = match current_schema.as_deref() {
+            Some(schema) => activated.iter()
+                .find(|(_, record)| record.manifest.contains_key(&format!("{schema}.schema.yaml")))
+                .map(|(key, _)| key),
+            None => state.active_scheme.as_ref(),
         };
         Ok(state.installed_packages.into_iter().filter_map(|(scheme_key, package)| {
             let has_package_zip = self.checked_package_path(&scheme_key).is_ok_and(|path| path.is_dir());
@@ -821,11 +829,14 @@ impl<'a> PackageStore<'a> {
                     }
                 }
             } else { None };
+            let active = activated.contains_key(&scheme_key) || state.active_scheme.as_deref() == Some(&scheme_key);
             Some(InstalledPackageInfo {
                 logo_path: if has_package_zip {
                     crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
                 } else { None },
-                active: activated.contains(&scheme_key) || state.active_scheme.as_deref() == Some(&scheme_key),
+                active,
+                in_use: active && (!lua_conflict || activated.get(&scheme_key).is_none_or(|record| record.rime_lua.is_none())
+                        || current_package == Some(&scheme_key)),
                 supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false

@@ -655,6 +655,7 @@ class InstalledPackageDto {
   final String schemeKey;
   final String? version;
   final bool active;
+  final bool inUse;
   final bool hasPackageZip;
   final bool supportsUserWords;
   final String? source;
@@ -665,6 +666,7 @@ class InstalledPackageDto {
     required this.schemeKey,
     this.version,
     required this.active,
+    this.inUse = true,
     required this.hasPackageZip,
     this.supportsUserWords = true,
     this.source,
@@ -677,6 +679,7 @@ class InstalledPackageDto {
       schemeKey.hashCode ^
       version.hashCode ^
       active.hashCode ^
+      inUse.hashCode ^
       hasPackageZip.hashCode ^
       supportsUserWords.hashCode ^
       source.hashCode ^
@@ -691,6 +694,7 @@ class InstalledPackageDto {
           schemeKey == other.schemeKey &&
           version == other.version &&
           active == other.active &&
+          inUse == other.inUse &&
           hasPackageZip == other.hasPackageZip &&
           supportsUserWords == other.supportsUserWords &&
           source == other.source &&

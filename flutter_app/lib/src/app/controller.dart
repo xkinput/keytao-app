@@ -1072,6 +1072,7 @@ class AppController extends ChangeNotifier {
     }
     try {
       await _readSchemas();
+      await _readInstalledPackages();
       _changed();
     } catch (_) {
       // Keep the last schema visible if a foreground refresh is unavailable.
@@ -3118,6 +3119,7 @@ class AppController extends ChangeNotifier {
     if (isAndroid) await _requireStorage();
     await core.selectSchema(schemaId: schemaId);
     await _readLocal();
+    await _readInstalledPackages();
     unawaited(refreshCandidatePreview());
   });
 

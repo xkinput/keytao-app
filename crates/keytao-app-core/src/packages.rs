@@ -58,6 +58,7 @@ pub struct InstalledPackageInfo {
     pub scheme_key: String,
     pub version: Option<String>,
     pub active: bool,
+    pub in_use: bool,
     pub has_package_zip: bool,
     pub supports_user_words: bool,
     pub source: String,
