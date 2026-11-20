@@ -8,7 +8,26 @@ use crate::ime_status::windows::windows_deploy_rime_blocking;
 use crate::{Core, CoreError, ime_host::ImeHost};
 use keytao_core::{DeployProgress, DeployStep, RuntimeDirs, isolated_deploy::PackageDeployTarget};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub fn deploy_shared_data_dir(core: &Core, root: &Path) -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        let _ = core;
+        root.join("rime-data")
+    }
+    #[cfg(target_os = "ios")]
+    {
+        ios_app_shared_data_dir(core, root)
+            .unwrap_or_else(keytao_core::default_shared_data_dir)
+            .into()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = root;
+        crate::ime_status::app_shared_data_dir(core).into()
+    }
+}
 
 pub fn emit_legacy_progress(core: &Core, step: DeployStep, message: impl Into<String>) {
     emit_flat_progress(core, &flat_target(core, None), step, message);
@@ -167,7 +186,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     };
 
     let _plan_lock = isolated_plan_lock(root)?;
-    let shared = root.join("rime-data");
+    let shared = deploy_shared_data_dir(core, root);
     let (targets, _staged_inputs) =
         crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, switch)
             .map_err(|error| error.to_string())?;
@@ -355,9 +374,8 @@ pub async fn switch_package(
     return deploy_isolated_android(core, root, Some(key), deploy).await;
     #[cfg(target_os = "ios")]
     {
-        let shared = ios_app_shared_data_dir(core, root)
-            .unwrap_or_else(keytao_core::default_shared_data_dir);
-        return deploy_isolated_in_process_target(core, root, shared.into(), Some(key))
+        let shared = deploy_shared_data_dir(core, root);
+        return deploy_isolated_in_process_target(core, root, shared, Some(key))
             .await
             .map(|_| ());
     }
@@ -365,8 +383,8 @@ pub async fn switch_package(
     {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if keytao_core::default_user_data_dir().as_deref() != Some(root) {
-            let shared = crate::ime_status::app_shared_data_dir(core);
-            return deploy_isolated_in_process_target(core, root, shared.into(), Some(key))
+            let shared = deploy_shared_data_dir(core, root);
+            return deploy_isolated_in_process_target(core, root, shared, Some(key))
                 .await
                 .map(|_| ());
         }
@@ -611,8 +629,8 @@ async fn deploy_isolated_desktop(
     use std::time::Duration;
 
     let plan_lock = isolated_plan_lock(root)?;
-    let shared = crate::ime_status::app_shared_data_dir(core);
-    let shared_dir = Path::new(&shared);
+    let shared = deploy_shared_data_dir(core, root);
+    let shared_dir = shared.as_path();
     let (targets, staged_inputs) =
         crate::runtime_materialize::prepare_deploy_targets(core, root, shared_dir, switch)
             .map_err(|error| error.to_string())?;
@@ -666,7 +684,7 @@ async fn deploy_isolated_desktop(
     let worker = tokio::task::spawn_blocking(move || {
         let _staged_inputs = staged_inputs;
         command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
-        if !child_shared.is_empty() {
+        if !child_shared.as_os_str().is_empty() {
             command.env("KEYTAO_RIME_SHARED_DATA_DIR", child_shared);
         }
         #[cfg(target_os = "linux")]
@@ -1239,11 +1257,11 @@ pub async fn rime_deploy_default(
 ) -> Result<DeployResult, CoreError> {
     let result: Result<_, String> = async {
         let dest = host.user_root()?;
-        let shared = ios_app_shared_data_dir(core, &dest)
-            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        let shared = deploy_shared_data_dir(core, &dest);
         if RuntimeDirs::isolation_enabled(&dest) {
-            return deploy_isolated_in_process(core, &dest, shared.into()).await;
+            return deploy_isolated_in_process(core, &dest, shared).await;
         }
+        let shared = shared.to_string_lossy().into_owned();
         crate::remove_filter::ensure_remove_filter(&dest)?;
         crate::ime_settings::prepare_candidate_page_size(&dest)?;
         record_result(core, &dest, false).map_err(|e| e.to_string())?;

@@ -56,6 +56,12 @@ Future<List<InstalledPackageDto>> listInstalledPackages() =>
 Future<PackageOrphanReportDto> packageOrphanReport() =>
     RustLib.instance.api.crateApiCorePackageOrphanReport();
 
+Future<PackageMigrationReportDto> previewPackageMigration() =>
+    RustLib.instance.api.crateApiCorePreviewPackageMigration();
+
+Future<PackageMigrationReportDto> migrateToIsolated() =>
+    RustLib.instance.api.crateApiCoreMigrateToIsolated();
+
 Future<List<String>> trashPackageOrphans({
   required List<PackageOrphanFileDto> files,
 }) => RustLib.instance.api.crateApiCoreTrashPackageOrphans(files: files);

@@ -150,6 +150,22 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     let mut gate = ReloadStampGate::new(&root);
     let generation = runtime.generation();
     session.process_key_result(u32::from(b'a'), 0).unwrap();
+    let stale = ReloadStamp::write_package(&root, "first").unwrap();
+    write_file_atomic(
+        &crate::package_store::active_manifest(&root),
+        br#"{"active_package":"second"}"#,
+    )
+    .unwrap();
+    assert_eq!(ReloadStamp::package_key(&stale).as_deref(), Some("first"));
+    let pending = gate.pending().unwrap();
+    assert_eq!(
+        runtime.reload_without_deploy(),
+        Err(PACKAGE_SWITCH_PENDING.into())
+    );
+    assert_eq!(gate.pending().as_deref(), Some(pending.as_str()));
+    assert_eq!(generation, runtime.generation());
+    assert_eq!(session.current_schema().unwrap().id, "keytao_b");
+
     runtime.switch_package("second").unwrap();
     assert_eq!(
         ReloadStamp::package_key(gate.path()).as_deref(),

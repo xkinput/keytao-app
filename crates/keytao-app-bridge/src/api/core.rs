@@ -144,6 +144,31 @@ pub async fn package_orphan_report() -> Result<PackageOrphanReportDto, String> {
     )
 }
 
+pub async fn preview_package_migration() -> Result<PackageMigrationReportDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::package_migration::preview(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn migrate_to_isolated() -> Result<PackageMigrationReportDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    #[cfg(target_os = "windows")]
+    state.host.require_default_windows_root()?;
+    let root = state.host.user_root()?;
+    let core = state.core.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        keytao_app_core::package_migration::migrate_to_isolated(&core, &root)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    runtime::dto(report)
+}
+
 pub async fn trash_package_orphans(
     files: Vec<PackageOrphanFileDto>,
 ) -> Result<Vec<String>, String> {

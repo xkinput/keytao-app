@@ -29,6 +29,8 @@ mod shape_addons;
 mod package_activation;
 mod package_artifacts;
 pub mod package_orphans;
+pub mod package_migration;
+mod migration_userdb;
 #[cfg(test)]
 mod package_activation_tests;
 pub mod packages;

@@ -89,6 +89,18 @@ pub struct PackageOrphanReportDto {
 }
 
 #[derive(serde::Deserialize)]
+pub struct PackageMigrationReportDto {
+    pub version: u32,
+    pub completed: bool,
+    pub active_package: String,
+    pub runtime_package: String,
+    pub packages: Vec<String>,
+    pub user_files: Vec<String>,
+    pub legacy_user_databases: Vec<String>,
+    pub orphans: PackageOrphanReportDto,
+}
+
+#[derive(serde::Deserialize)]
 pub struct SchemeUpdateDto {
     pub scheme_key: String,
     pub installed_version: String,

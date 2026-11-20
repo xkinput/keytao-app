@@ -611,6 +611,7 @@ fn reload_now() -> bool {
             }
             true
         }
+        Err(e) if e == keytao_core::PACKAGE_SWITCH_PENDING => false,
         Err(e) => {
             if !matches!(
                 e.as_str(),

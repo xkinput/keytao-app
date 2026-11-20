@@ -393,6 +393,8 @@ where
 }
 
 const INSTANCE_PREFIX: &str = "# keytao-sync-instance: ";
+pub(crate) const USER_DICTIONARY: &str = "keytao.user.dict.yaml";
+pub(crate) const USER_WORD_REMOVALS: &str = "keytao.user.remove.txt";
 
 fn dictionary_instance(content: &str) -> Option<&str> {
     let mut instances = content
@@ -686,17 +688,23 @@ fn active_import_exists(content: &str, import_name: &str) -> bool {
 fn ensure_import_table_entry(path: &Path, import_name: &str) -> Result<bool, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("读取词典导入表失败 {}: {e}", path.display()))?;
-    if active_import_exists(&content, import_name) {
+    let Some(updated) = patch_import_table(&content, import_name) else {
         return Ok(false);
+    };
+    crate::scheme_files::write_file_atomic(path, updated.as_bytes())
+        .map_err(|e| format!("写入词典导入表失败 {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+fn patch_import_table(content: &str, import_name: &str) -> Option<String> {
+    if active_import_exists(content, import_name) {
+        return None;
     }
 
     let lines: Vec<&str> = content.lines().collect();
-    let Some(index) = lines
+    let index = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("import_tables:"))
-    else {
-        return Ok(false);
-    };
+        .position(|line| line.trim_start().starts_with("import_tables:"))?;
 
     let indent = lines
         .iter()
@@ -719,12 +727,16 @@ fn ensure_import_table_entry(path: &Path, import_name: &str) -> Result<bool, Str
         }
     }
 
-    std::fs::write(path, format!("{}\n", output.join("\n")))
-        .map_err(|e| format!("写入词典导入表失败 {}: {e}", path.display()))?;
-    Ok(true)
+    Some(format!("{}\n", output.join("\n")))
 }
 
 pub(crate) fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
+    if keytao_core::RuntimeDirs::isolation_enabled(root)
+        && keytao_core::RuntimeDirs::active_package_key(root).is_some()
+    {
+        // Isolated deployment generates the import overrides in each package's runtime.
+        return Ok(false);
+    }
     let mut patched = false;
     let entries = std::fs::read_dir(root).map_err(|e| format!("读取输入法目录失败: {e}"))?;
     for entry in entries.filter_map(|item| item.ok()) {
@@ -743,6 +755,87 @@ pub(crate) fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String
     }
     patched |= crate::remove_filter::ensure_remove_filter(root)?;
     Ok(patched)
+}
+
+pub(crate) fn runtime_dictionary_usage<'a>(
+    schemas: impl Iterator<Item = &'a [u8]>,
+    dictionaries: &BTreeMap<String, Vec<u8>>,
+) -> Result<BTreeSet<String>, CoreError> {
+    fn dictionary_references(config: &serde_yaml::Value, names: &mut BTreeSet<String>) {
+        match config {
+            serde_yaml::Value::Mapping(mapping) => {
+                for (key, value) in mapping {
+                    if key.as_str().is_some_and(|key| {
+                        key == "dictionary" || key.ends_with("/dictionary")
+                    }) {
+                        if let Some(name) = value.as_str() {
+                            names.insert(name.to_owned());
+                        }
+                    }
+                    dictionary_references(value, names);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for item in items {
+                    dictionary_references(item, names);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut pending = BTreeSet::new();
+    for schema in schemas {
+        dictionary_references(&crate::upload_bundle::yaml(schema, "schema")?, &mut pending);
+    }
+    let mut used = BTreeSet::new();
+    while let Some(name) = pending.pop_first() {
+        if let Some(bytes) = dictionaries.get(&format!("{name}.dict.yaml")) {
+            let config = crate::upload_bundle::yaml(bytes, &name)?;
+            if let Some(imports) = config["import_tables"].as_sequence() {
+                pending.extend(imports.iter().filter_map(serde_yaml::Value::as_str)
+                    .filter(|import| *import != name && !used.contains(*import))
+                    .map(str::to_owned));
+            }
+        }
+        used.insert(name);
+    }
+    Ok(used)
+}
+
+pub(crate) fn add_runtime_user_dictionary(
+    control_root: &Path,
+    dictionaries: &BTreeMap<String, Vec<u8>>,
+    used: &BTreeSet<String>,
+    generated: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), CoreError> {
+    if !used.iter().any(|dictionary| dictionary.starts_with("keytao")) {
+        return Ok(());
+    }
+
+    for name in [USER_DICTIONARY, USER_WORD_REMOVALS] {
+        let path = crate::packages::safe_path(control_root, name).map_err(CoreError::Other)?;
+        match std::fs::read(path) {
+            Ok(bytes) => { generated.insert(name.into(), bytes); }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if generated.contains_key(USER_DICTIONARY) {
+        for dictionary in used.iter().filter(|name| {
+            name.starts_with("keytao") && name.ends_with(".extended")
+        }) {
+            let name = format!("{dictionary}.dict.yaml");
+            if let Some(bytes) = dictionaries.get(&name) {
+                let content = std::str::from_utf8(bytes)
+                    .map_err(|error| CoreError::Other(format!("{name}: {error}")))?;
+                if let Some(patched) = patch_import_table(content, "keytao.user") {
+                    generated.insert(name, patched.into_bytes());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn sync_user_dictionary(
@@ -1127,6 +1220,34 @@ async fn sync_user_dictionary_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_dictionary_follows_imports_and_preserves_the_control_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = b"---\nname: keytao.user\n...\nuser\taa\n";
+        let removals = b"removed\tbb\n";
+        std::fs::write(root.path().join(USER_DICTIONARY), source).unwrap();
+        std::fs::write(root.path().join(USER_WORD_REMOVALS), removals).unwrap();
+        let dictionaries = BTreeMap::from([
+            ("wrapper.dict.yaml".into(), b"import_tables: [keytao.extended]\n".to_vec()),
+            ("keytao.extended.dict.yaml".into(), b"import_tables:\n  - keytao.phrase\n".to_vec()),
+        ]);
+        let schema: &[u8] = b"patch: {translator/dictionary: wrapper}";
+        let used = runtime_dictionary_usage(std::iter::once(schema), &dictionaries).unwrap();
+        let mut generated = BTreeMap::new();
+        add_runtime_user_dictionary(root.path(), &dictionaries, &used, &mut generated).unwrap();
+        assert_eq!(generated[USER_DICTIONARY], source);
+        assert_eq!(generated[USER_WORD_REMOVALS], removals);
+        assert_eq!(generated["keytao.extended.dict.yaml"], b"import_tables:\n  - keytao.user\n  - keytao.phrase\n");
+        assert_eq!(std::fs::read(root.path().join(USER_DICTIONARY)).unwrap(), source);
+
+        generated.clear();
+        let schema: &[u8] = b"translator: {dictionary: other}";
+        let unrelated = runtime_dictionary_usage(std::iter::once(schema), &dictionaries).unwrap();
+        add_runtime_user_dictionary(root.path(), &dictionaries, &unrelated, &mut generated).unwrap();
+        assert!(generated.is_empty());
+    }
+
     #[test]
     fn test_user_dictionary_imports_only_patch_keytao_extended_dicts() {
         let suffix = std::time::SystemTime::now()

@@ -946,6 +946,8 @@ mod desktop {
         }};
     }
 
+    pub mod userdb_migration;
+
     #[cfg(test)]
     mod api_member_tests {
         use super::{
@@ -3081,8 +3083,7 @@ mod desktop {
             }
             join();
         }
-        let dirs = RuntimeDirs::resolve(user_dir, user_dir)?;
-        initialize_user_dictionary_cache(&dirs.user_data_dir);
+        initialize_user_dictionary_cache(user_dir);
         // Deployer::Run aggregates task failures into the deploy notification.
         if *lock_ignore_poison(&DEPLOY_RESULT) != Some(true) {
             return Err("Rime user data sync failed".into());
@@ -4538,6 +4539,15 @@ mod desktop {
     }
 }
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub use desktop::userdb_migration::with_userdb_migration;
+
 #[cfg(target_os = "linux")]
 pub use desktop::deploy_for_upgrade;
 #[cfg(any(
@@ -5928,19 +5938,19 @@ impl ImeRuntime {
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    fn apply_pending_user_data_sync(&self, root: &Path) -> Result<bool, String> {
+    fn apply_pending_user_data_sync(&self, root: &Path, runtime_root: &Path) -> Result<bool, String> {
         if !self.0.ime_host {
             return Ok(false);
         }
-        let Some(generation) = user_data_sync::claim(root)? else {
+        let Some(generation) = user_data_sync::claim(runtime_root)? else {
             return Ok(false);
         };
         // RimeSyncUserData destroys all native sessions before releasing userdbs.
         PROCESS_RIME.drop_live_engines();
-        let outcome = desktop::sync_user_data_and_wait(root);
+        let outcome = desktop::sync_user_data_and_wait(runtime_root);
         PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
         let rebuilt = PROCESS_RIME.apply_pending_switch_request(root);
-        user_data_sync::finish(root, generation, outcome.and(rebuilt))?;
+        user_data_sync::finish(runtime_root, generation, outcome.and(rebuilt))?;
         Ok(true)
     }
 
@@ -6132,11 +6142,10 @@ impl ImeRuntime {
             let package_changed = desktop::loaded_package_changed(&runtime);
             if self.0.ime_host
                 && runtime.active_package_key.is_some()
-                && (package_changed || initialized.is_none())
                 && ReloadStamp::package_key(&ReloadStamp::path(&dirs.user))
                     .is_some_and(|key| runtime.active_package_key.as_deref() != Some(key.as_str()))
             {
-                return Err("package reload stamp does not match the active package".into());
+                return Err(PACKAGE_SWITCH_PENDING.into());
             }
             let schema_state = resolved_schema_install_state(&runtime);
             if schema_state.schemas.is_empty() {
@@ -6173,7 +6182,7 @@ impl ImeRuntime {
                 && desktop::loaded_lua_is_current(&dirs.user)
             {
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-                if self.apply_pending_user_data_sync(&dirs.user)? {
+                if self.apply_pending_user_data_sync(&dirs.user, &runtime.user_data_dir)? {
                     return Ok(());
                 }
                 let schema_root = desktop::loaded_schema_root(&dirs.user);
@@ -6200,8 +6209,10 @@ impl ImeRuntime {
             *initialized = result.is_ok().then(|| dirs.clone());
             let result = result.and_then(|()| self.apply_pending_switch_request(&dirs.user));
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            let result =
-                result.and_then(|()| self.apply_pending_user_data_sync(&dirs.user).map(|_| ()));
+            let result = result.and_then(|()| {
+                self.apply_pending_user_data_sync(&dirs.user, &runtime.user_data_dir)
+                    .map(|_| ())
+            });
             drop(barrier);
             result
         })();
@@ -9405,6 +9416,9 @@ pub const RELOAD_STAMP_FILE_NAME: &str = "keytao-ime.reload";
 /// detected even when the timestamp resolution is coarse or the content is
 /// stable.
 pub struct ReloadStamp;
+
+/// The package manifest has been published but its reload stamp is still pending.
+pub const PACKAGE_SWITCH_PENDING: &str = "Rime package switch is pending";
 
 impl ReloadStamp {
     pub fn path(user_data_dir: &Path) -> PathBuf {

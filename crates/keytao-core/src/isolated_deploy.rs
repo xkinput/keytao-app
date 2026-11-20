@@ -23,7 +23,6 @@ const DEPLOY_LOCK: &str = ".keytao-package-deploy.lock";
 const MATERIALIZE_LOCK: &str = ".keytao-materialize.lock";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PackageDeployTarget {
     pub package_key: String,
     pub package_name: String,
@@ -49,7 +48,7 @@ pub fn deploy_packages(
     if !RuntimeDirs::isolation_enabled(control_root) {
         return Err("package isolation is disabled".into());
     }
-    let _deploy = lock(&control_root.join(DEPLOY_LOCK))?;
+    let _deploy = deploy_lock(control_root)?;
     crate::with_rime_finalized(|| {
         deploy_packages_with(
             control_root,
@@ -187,9 +186,22 @@ pub fn with_isolated_package_lock<T>(
     action: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let _deploy = RuntimeDirs::isolation_enabled(control_root)
-        .then(|| lock(&control_root.join(DEPLOY_LOCK)))
+        .then(|| deploy_lock(control_root))
         .transpose()?;
     action()
+}
+
+fn deploy_lock(control_root: &Path) -> Result<fs::File, String> {
+    let runtime = control_root.join("runtime");
+    match fs::create_dir(&runtime) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    if !fs::symlink_metadata(&runtime).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err("invalid isolated runtime directory".into());
+    }
+    lock(&runtime.join(DEPLOY_LOCK))
 }
 
 pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
@@ -205,7 +217,7 @@ pub fn switch_ready_package(control_root: &Path, shared: &Path, key: &str) -> Re
     if !dirs.user_data_dir.is_dir() {
         return Err(not_ready());
     }
-    let _deploy = lock(&control_root.join(DEPLOY_LOCK))?;
+    let _deploy = deploy_lock(control_root)?;
     let _materialize = lock(&dirs.user_data_dir.join(MATERIALIZE_LOCK))?;
     let dirs = RuntimeDirs::for_package(control_root, shared, key).ok_or_else(not_ready)?;
     if !package_build_ready(control_root, &dirs) {
@@ -229,6 +241,10 @@ pub fn switch_ready_package(control_root: &Path, shared: &Path, key: &str) -> Re
         .map_err(|error| format!("read active package manifest: {error}"))?
         .unwrap_or_default();
     manifest.insert("active_package".into(), key.into());
+    if let Some(version) = RuntimeDirs::migration_version(control_root) {
+        manifest.insert("runtime_migration_version".into(), version.into());
+    }
+    // Reload readers retry if they observe the manifest before the stamp.
     crate::write_file_atomic(&path, &serde_json::to_vec(&manifest).map_err(|error| error.to_string())?)
         .map_err(|error| format!("write active package manifest: {error}"))?;
     if let Err(error) = crate::ReloadStamp::write_package(control_root, key) {

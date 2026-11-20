@@ -560,7 +560,7 @@ impl Runtime {
 }
 
 // Callers hold MAINTENANCE_LOCK so deployment cannot race the unlocked checks/reload.
-fn refresh(runtime: &Mutex<Runtime>) -> Result<(), String> {
+fn refresh(runtime: &Mutex<Runtime>) -> Result<bool, String> {
     if let Some(engine) = reload_candidate(runtime, InProcEngine::reload_needed) {
         let was_ready = {
             let mut runtime = runtime.lock();
@@ -570,6 +570,15 @@ fn refresh(runtime: &Mutex<Runtime>) -> Result<(), String> {
             was_ready
         };
         let result = engine.reload_server();
+        if result
+            .as_ref()
+            .is_err_and(|error| error == keytao_core::PACKAGE_SWITCH_PENDING)
+        {
+            let mut runtime = runtime.lock();
+            runtime.ready = was_ready;
+            runtime.refreshing = false;
+            return Ok(false);
+        }
         let schema = result.as_ref().ok().map(|_| engine.state().schema_id);
         {
             let mut runtime = runtime.lock();
@@ -595,7 +604,7 @@ fn refresh(runtime: &Mutex<Runtime>) -> Result<(), String> {
         runtime.generation = runtime.generation.wrapping_add(1);
         runtime.ready = true;
     }
-    Ok(())
+    Ok(true)
 }
 
 struct ReloadNotification(HANDLE);
@@ -667,7 +676,7 @@ pub fn run() -> Result<(), String> {
                         continue;
                     }
                     let result = refresh(&watched_runtime);
-                    if result.is_ok() {
+                    if matches!(&result, Ok(true)) {
                         stamp.commit(signature);
                     }
                     drop(_maintenance);
@@ -925,7 +934,7 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
                 let Some(_maintenance) = MAINTENANCE_LOCK.try_lock_for(KEY_WAIT_BUDGET) else {
                     continue;
                 };
-                break refresh(runtime).and_then(|()| runtime.lock().session());
+                break refresh(runtime).and_then(|_| runtime.lock().session());
             };
             match result {
                 Ok((engine, generation, schema_id)) => {

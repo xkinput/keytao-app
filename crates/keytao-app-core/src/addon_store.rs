@@ -14,6 +14,15 @@ use std::{
 };
 
 pub(crate) const IDS: &[&str] = &["easy_en", "wanxiang", "rime_ice", "rime_mint", "rime_frost", "snow_jiandao", "triple_pinyin_lssp"];
+const LEGACY_RECEIPTS: &[&str] = &[
+    ".keytao-easy-en.json",
+    ".keytao-wanxiang.json",
+    ".keytao-rime-ice.json",
+    ".keytao-rime-mint.json",
+    ".keytao-rime-frost.json",
+    ".keytao-rime-snow.json",
+    ".keytao-rime-lssp.json",
+];
 const GRAMMAR: &str = "wanxiang-lts-zh-hans.gram";
 static STORE_OPERATION: Mutex<()> = Mutex::new(());
 
@@ -24,9 +33,9 @@ fn operation() -> MutexGuard<'static, ()> {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ManifestFile {
-    path: String,
-    sha256: String,
+pub(crate) struct ManifestFile {
+    pub path: String,
+    pub sha256: String,
     size: u64,
 }
 
@@ -66,9 +75,14 @@ impl AddonStore {
     }
 
     fn new_inner(core: &Core, root: &Path, id: &str) -> Result<Self, String> {
+        let addon = Self::read_only(core, root, id)?;
+        PackageStore::new(core).recover_addon(id).map_err(|e| e.to_string())?;
+        Ok(addon)
+    }
+
+    fn read_only(core: &Core, root: &Path, id: &str) -> Result<Self, String> {
         let store = PackageStore::new(core);
         let destination = store.checked_addon_path(id).map_err(|e| e.to_string())?;
-        store.recover_addon(id).map_err(|e| e.to_string())?;
         let root = root.canonicalize().map_err(|e| e.to_string())?;
         let staging = safe_path(
             &store.checked_root().map_err(|e| e.to_string())?,
@@ -506,9 +520,13 @@ pub(crate) fn report_paths(core: &Core, root: &Path) -> Result<BTreeSet<String>,
         return Ok(BTreeSet::new());
     }
     migrate_inner(core, root)?;
+    read_report_paths(core, root)
+}
+
+pub(crate) fn read_report_paths(core: &Core, root: &Path) -> Result<BTreeSet<String>, CoreError> {
     let mut paths = BTreeSet::new();
     for id in IDS {
-        let addon = AddonStore::new_inner(core, root, id).map_err(CoreError::Other)?;
+        let addon = AddonStore::read_only(core, root, id).map_err(CoreError::Other)?;
         let Some(active) = addon.activation().map_err(CoreError::Other)? else {
             continue;
         };
@@ -690,6 +708,55 @@ pub(crate) fn finish_snow_takeover(core: &Core, root: &Path) -> Result<(), CoreE
 }
 
 fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let isolated = keytao_core::RuntimeDirs::isolation_enabled(root)
+        && root.join(keytao_core::RuntimeDirs::MIGRATION_MARKER).is_file();
+    if isolated {
+        return Ok(());
+    }
+    migrate_legacy(core, root, false)
+}
+
+pub(crate) fn project_legacy_for_isolation(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let _guard = operation();
+    migrate_legacy(core, root, true)
+}
+
+fn legacy_receipt(root: &Path, id: &str, name: &str) -> Result<Option<Vec<u8>>, CoreError> {
+    let legacy = safe_path(root, name).map_err(CoreError::Other)?;
+    if fs::metadata(&legacy).is_ok_and(|m| m.len() > 1024 * 1024) {
+        return Err(CoreError::Other(format!("Legacy add-on manifest is too large: {id}")));
+    }
+    match fs::read(&legacy) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if id == "easy_en" {
+                crate::addon::legacy_manifest(root).map_err(CoreError::Other)
+            } else {
+                Ok(None)
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn unprojected_legacy_addons(
+    core: &Core, root: &Path,
+) -> Result<BTreeMap<String, Vec<ManifestFile>>, CoreError> {
+    let store = PackageStore::new(core);
+    let mut addons = BTreeMap::new();
+    for (&id, &name) in IDS.iter().zip(LEGACY_RECEIPTS) {
+        if store.checked_addon_path(id)?.try_exists()? {
+            continue;
+        }
+        if let Some(bytes) = legacy_receipt(root, id, name)? {
+            let document = serde_json::from_slice(&bytes)?;
+            addons.insert(id.to_owned(), parse_manifest(&document, id).map_err(CoreError::Other)?);
+        }
+    }
+    Ok(addons)
+}
+
+fn migrate_legacy(core: &Core, root: &Path, preserve_legacy: bool) -> Result<(), CoreError> {
     if !root.try_exists()? {
         return Ok(());
     }
@@ -699,10 +766,12 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
     for id in IDS {
         store.recover_addon(id)?;
     }
-    if marker.try_exists()? && !root.join(".keytao-rime-snow.json").try_exists()? {
+    if !preserve_legacy && marker.try_exists()? && !root.join(".keytao-rime-snow.json").try_exists()? {
         return Ok(());
     }
-    fs::create_dir_all(&addons)?;
+    if !preserve_legacy {
+        fs::create_dir_all(&addons)?;
+    }
     let mut claimed = BTreeSet::new();
     for active in crate::package_activation::read_all(core, root)?.into_values() {
         claimed.extend(
@@ -729,34 +798,15 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
         }
     }
     let mut complete = true;
-    for (id, name) in IDS.iter().zip([
-        ".keytao-easy-en.json",
-        ".keytao-wanxiang.json",
-        ".keytao-rime-ice.json",
-        ".keytao-rime-mint.json",
-        ".keytao-rime-frost.json",
-        ".keytao-rime-snow.json",
-        ".keytao-rime-lssp.json",
-    ]) {
-        let legacy = safe_path(root, name).map_err(CoreError::Other)?;
-        if fs::metadata(&legacy).is_ok_and(|m| m.len() > 1024 * 1024) {
-            tracing::warn!(
-                addon = *id,
-                "Legacy add-on manifest is too large; retained for retry"
-            );
-            complete = false;
-            continue;
-        }
-        let bytes = match fs::read(&legacy) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if *id == "easy_en" {
-                    crate::addon::legacy_manifest(root).map_err(CoreError::Other)?
-                } else {
-                    None
-                }
+    for (id, name) in IDS.iter().zip(LEGACY_RECEIPTS) {
+        let bytes = match legacy_receipt(root, id, name) {
+            Ok(bytes) => bytes,
+            Err(error @ CoreError::Other(_)) if !preserve_legacy => {
+                tracing::warn!(addon = *id, %error, "Legacy add-on manifest retained for retry");
+                complete = false;
+                continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         };
         let Some(bytes) = bytes else { continue };
         let addon = AddonStore::new_inner(core, root, id).map_err(CoreError::Other)?;
@@ -771,6 +821,9 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
             let (value, mut files) = match parsed {
                 Ok(parsed) => parsed,
                 Err(error) => {
+                    if preserve_legacy {
+                        return Err(CoreError::Other(error));
+                    }
                     tracing::warn!(addon = *id, %error, "Invalid legacy add-on manifest retained for retry");
                     complete = false;
                     continue;
@@ -841,11 +894,18 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
             }
         }
         validate_directory(&addon.destination, id)?;
+        if preserve_legacy {
+            continue;
+        }
+        let legacy = safe_path(root, name).map_err(CoreError::Other)?;
         match fs::remove_file(&legacy) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    if preserve_legacy {
+        return Ok(());
     }
     if AddonStore::new_inner(core, root, "easy_en")
         .map_err(CoreError::Other)?

@@ -1,3 +1,4 @@
+pub(crate) use crate::deploy::deploy_shared_data_dir as shared_data_dir;
 use crate::wanxiang::{self, InstallReceipt, InstalledFile, RemotePackage};
 use crate::{
     Core, CoreError, CoreEvent, events::InstallProgress, scheme_files::*, scheme_host::SchemeHost,
@@ -566,25 +567,6 @@ async fn install_package(
     })
     .await
     .map_err(|e| format!("English 安装任务失败：{e}"))?
-}
-
-pub(crate) fn shared_data_dir(core: &Core, root: &Path) -> PathBuf {
-    #[cfg(target_os = "android")]
-    {
-        let _ = core;
-        root.join("rime-data")
-    }
-    #[cfg(target_os = "ios")]
-    {
-        crate::deploy::ios_app_shared_data_dir(core, root)
-            .unwrap_or_else(keytao_core::default_shared_data_dir)
-            .into()
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let _ = root;
-        crate::ime_status::app_shared_data_dir(core).into()
-    }
 }
 
 pub(crate) fn owned_addon_default(root: &Path) -> Result<Option<PathBuf>, String> {

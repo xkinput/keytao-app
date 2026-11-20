@@ -239,6 +239,7 @@ fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
                         reload_bus::notify();
                     }
                     // The request stays pending: the next tick retries it.
+                    Err(e) if e == keytao_core::PACKAGE_SWITCH_PENDING => {}
                     Err(e) => tracing::error!("librime reload failed: {e}"),
                 }
             }
