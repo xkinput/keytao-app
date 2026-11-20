@@ -1141,7 +1141,6 @@ impl ResolvedImeTheme {
         self.candidate.hover_background =
             with_alpha(mix_color(panel_background, accent, hover_weight), 0xff);
         self.mode_hint.border_color = opaque(accent);
-        self.mode_hint.foreground = rgba(0xff, 0xff, 0xff, 0xff);
     }
 
     fn sanitized(mut self) -> Self {
@@ -2346,8 +2345,8 @@ mod tests {
         let theme = ResolvedImeTheme::default();
         assert_eq!(theme.panel.orientation, PanelOrientation::Horizontal);
         assert_eq!(theme.candidate.min_height, 34.0);
-        assert_eq!(theme.mode_hint.background, rgba(0x2d, 0x4b, 0x63, 0xff));
-        assert_eq!(theme.mode_hint.foreground, rgba(0xff, 0xff, 0xff, 0xff));
+        assert_eq!(theme.mode_hint.background, rgba(0xf8, 0xfa, 0xff, 0xf2));
+        assert_eq!(theme.mode_hint.foreground, rgba(0x26, 0x34, 0x42, 0xff));
     }
 
     #[test]
@@ -2648,19 +2647,30 @@ mod tests {
 
     #[test]
     fn accent_color_derives_highlight_colors() {
-        let theme =
-            resolve_theme_from_paths_with_system_scheme(None, None, EffectiveColorScheme::Light);
-        let mut theme = theme;
-        theme.ui.accent_color = Some(rgba(0x12, 0x34, 0x56, 0xff));
-        theme.apply_accent_color(rgba(0x12, 0x34, 0x56, 0xff));
+        for (scheme, background, foreground) in [
+            (
+                EffectiveColorScheme::Light,
+                rgba(0xf8, 0xfa, 0xff, 0xf2),
+                rgba(0x26, 0x34, 0x42, 0xff),
+            ),
+            (
+                EffectiveColorScheme::Dark,
+                rgba(0x2d, 0x4b, 0x63, 0xff),
+                rgba(0xff, 0xff, 0xff, 0xff),
+            ),
+        ] {
+            let mut theme = resolve_theme_from_paths_with_system_scheme(None, None, scheme);
+            theme.ui.accent_color = Some(rgba(0x12, 0x34, 0x56, 0xff));
+            theme.apply_accent_color(rgba(0x12, 0x34, 0x56, 0xff));
 
-        assert_eq!(
-            theme.candidate.selected_label_color,
-            rgba(0x12, 0x34, 0x56, 0xff)
-        );
-        assert_eq!(theme.mode_hint.background, rgba(0x2d, 0x4b, 0x63, 0xff));
-        assert_eq!(theme.mode_hint.foreground, rgba(0xff, 0xff, 0xff, 0xff));
-        assert_eq!(theme.mode_hint.border_color, rgba(0x12, 0x34, 0x56, 0xff));
+            assert_eq!(
+                theme.candidate.selected_label_color,
+                rgba(0x12, 0x34, 0x56, 0xff)
+            );
+            assert_eq!(theme.mode_hint.background, background);
+            assert_eq!(theme.mode_hint.foreground, foreground);
+            assert_eq!(theme.mode_hint.border_color, rgba(0x12, 0x34, 0x56, 0xff));
+        }
     }
 
     #[test]

@@ -71,8 +71,8 @@ navigation:
   cornerRadius: 10
 
 modeHint:
-  background: "#2D4B63"
-  foreground: "#FFFFFF"
+  background: "#F8FAFFF2"
+  foreground: "#263442"
   borderColor: "#5DA7D7"
   borderWidth: 1
   fontSize: 24
