@@ -419,6 +419,12 @@ pub(crate) fn resolved_to_flat(theme: &ResolvedImeTheme) -> Value {
         .as_object_mut()
         .unwrap()
         .retain(|k, _| !matches!(k.as_str(), "version" | "ui" | "mobile"));
+    value["font"].as_object_mut().unwrap().retain(|key, _| {
+        !matches!(
+            key.as_str(),
+            "effectiveFamily" | "effectiveFile" | "effectiveIndex"
+        )
+    });
     encode_colors(&mut value);
     if value["font"]["family"].is_null() {
         value["font"]["family"] = json!("");
@@ -552,7 +558,7 @@ pub fn resolve_theme_source(
                 > contrast_ratio(bg, theme.candidate.foreground)
             {
                 let alt = resolved_to_flat(&alternate);
-                let mut flat = resolved_to_flat(&theme);
+                let mut flat = json!({"panel":{}, "candidate":{}, "navigation":{}, "modeHint":{}});
                 for section in ["panel", "candidate", "navigation", "modeHint"] {
                     for (key, val) in alt[section].as_object().unwrap() {
                         if val.as_str().is_some_and(|s| s.starts_with('#'))
@@ -1013,6 +1019,68 @@ mod tests {
         );
     }
     #[test]
+    fn panel_sides_inherit_axes_and_explicit_sides_win() {
+        let default = resolve_theme_source(&source(json!({})), EffectiveColorScheme::Light);
+        assert_eq!(default.panel.padding_top, default.panel.padding_y);
+        assert_eq!(default.panel.padding_bottom, default.panel.padding_y);
+        assert_eq!(default.panel.padding_left, default.panel.padding_x);
+        assert_eq!(default.panel.padding_right, default.panel.padding_x);
+        let s = source(json!({
+            "common":{"backgroundColor":"#000000"},
+            "pc":{"panel":{"paddingX":17,"paddingY":9,"paddingLeft":3,"paddingTop":4}},
+            "dark":{"pc":{"panel":{"paddingX":21,"paddingBottom":5}}}
+        }));
+        for (scheme, expected) in [
+            (EffectiveColorScheme::Light, [4.0, 17.0, 9.0, 3.0]),
+            (EffectiveColorScheme::Dark, [4.0, 21.0, 5.0, 3.0]),
+        ] {
+            let theme = resolve_theme_source(&s, scheme);
+            assert_eq!(
+                [
+                    theme.panel.padding_top,
+                    theme.panel.padding_right,
+                    theme.panel.padding_bottom,
+                    theme.panel.padding_left,
+                ],
+                expected
+            );
+            let compiled = compile_theme(&s, "").unwrap();
+            let native = crate::resolve_compiled_theme_yaml(&compiled, scheme);
+            assert_eq!(
+                crate::resolved_theme_json(&native).unwrap(),
+                crate::resolved_theme_json(&theme).unwrap()
+            );
+        }
+        let legacy = resolve_legacy_theme_yaml("panel:\n  paddingX: 18\n  paddingY: 8\n  paddingLeft: 2\ndark:\n  panel:\n    paddingX: 22\n", EffectiveColorScheme::Dark);
+        assert_eq!(legacy.panel.padding_left, 2.0);
+        assert_eq!(legacy.panel.padding_right, 22.0);
+        assert_eq!(legacy.panel.padding_top, 8.0);
+    }
+
+    #[test]
+    fn device_font_resolution_is_never_compiled_or_shared() {
+        let s = source(json!({"common":{"font":{"family":"PingFang SC, Noto Sans CJK SC"}}}));
+        let compiled: Value = serde_yaml::from_str(&compile_theme(&s, "").unwrap()).unwrap();
+        for font in [&compiled["font"], &compiled["dark"]["font"]] {
+            assert!(font.get("effectiveFamily").is_none());
+            assert!(font.get("effectiveFile").is_none());
+            assert!(font.get("effectiveIndex").is_none());
+        }
+        let t = resolve_theme_source(&s, EffectiveColorScheme::Light);
+        assert_eq!(
+            t.font.family.as_deref(),
+            Some("PingFang SC, Noto Sans CJK SC")
+        );
+        assert_eq!(
+            s.value["common"]["font"]["family"],
+            "PingFang SC, Noto Sans CJK SC"
+        );
+        assert!(source_schema(false)["pc"]["font"]
+            .get("effectiveFamily")
+            .is_none());
+    }
+
+    #[test]
     fn compiled_v2_preserves_native_contract_and_local_flags() {
         let s = source(
             json!({"common":{"font":{"family":"A, B","weight":"light"}},"dark":{"pc":{"panel":{"maxWidth":999}}}}),
@@ -1021,6 +1089,7 @@ mod tests {
         let v: Value = serde_yaml::from_str(&compiled).unwrap();
         assert_eq!(v["version"], 2);
         assert!(v["ui"].get("accentColor").is_none());
+        assert!(v["font"].get("effectiveFamily").is_none());
         assert_eq!(v["dark"]["panel"]["maxWidth"], 999.0);
         assert_eq!(v["themeHash"].as_str().unwrap().len(), 16);
         let partial: PartialTheme = serde_yaml::from_str(&compiled).unwrap();

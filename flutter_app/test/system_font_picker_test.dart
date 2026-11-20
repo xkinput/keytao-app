@@ -53,6 +53,10 @@ class _FontController extends ViewController {
       ...?source[dark ? 'dark' : 'light']?['common']?['font']
           as Map<String, dynamic>?,
     };
+    final family = preview['font']['family'] as String?;
+    preview['font']['effectiveFamily'] = family?.isEmpty ?? true
+        ? null
+        : family;
     return preview;
   }
 

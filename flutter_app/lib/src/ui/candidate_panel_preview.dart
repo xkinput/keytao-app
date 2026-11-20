@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../rust/api/types.dart';
 import 'mobile_keyboard_preview.dart';
+import 'system_font_picker.dart';
 
 class CandidatePanelPreview extends StatelessWidget {
   const CandidatePanelPreview({
@@ -17,6 +18,7 @@ class CandidatePanelPreview extends StatelessWidget {
     this.keyboardSchemeName = 'KeyTao',
     this.keyboardLogo,
     this.editorPreview = false,
+    this.fontCatalog,
   }) : assert(candidateCount >= 1 && candidateCount <= 255);
 
   final Map<String, dynamic> theme;
@@ -27,6 +29,7 @@ class CandidatePanelPreview extends StatelessWidget {
   final String keyboardSchemeName;
   final Widget? keyboardLogo;
   final bool editorPreview;
+  final SystemFontCatalog? fontCatalog;
   // The IME shows the preedit in the panel only when it is not embedded.
   final bool showPreedit;
 
@@ -70,6 +73,19 @@ class CandidatePanelPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final family = theme['font']['effectiveFamily'] as String?;
+    final catalog = fontCatalog;
+    if (family == null || family.isEmpty || catalog == null) {
+      return _build(context, family);
+    }
+    return FutureBuilder<String>(
+      key: ValueKey(family),
+      future: catalog.load(family),
+      builder: (context, snapshot) => _build(context, snapshot.data ?? family),
+    );
+  }
+
+  Widget _build(BuildContext context, String? family) {
     if (keyboard) {
       return MobileKeyboardPreview(
         theme: theme,
@@ -77,6 +93,7 @@ class CandidatePanelPreview extends StatelessWidget {
         logo: keyboardLogo,
         candidates: this.candidates,
         editorPreview: editorPreview,
+        fontFamily: family,
       );
     }
     final font = theme['font'] as Map<String, dynamic>;
@@ -87,12 +104,6 @@ class CandidatePanelPreview extends StatelessWidget {
         ? panel['orientation'] == 'vertical'
         : orientation == PanelOrientationDto.vertical;
     final fontSize = _metric(font, 'size');
-    final family = font['family'] as String?;
-    final families = family
-        ?.split(',')
-        .map((family) => family.trim())
-        .where((family) => family.isNotEmpty)
-        .toList();
     final weight = switch (font['weight']) {
       'ultralight' => FontWeight.w100,
       'thin' => FontWeight.w200,
@@ -106,12 +117,7 @@ class CandidatePanelPreview extends StatelessWidget {
     };
     TextStyle style(double size, Color color, FontWeight weight) => TextStyle(
       inherit: false,
-      fontFamily: editorPreview
-          ? families?.firstOrNull
-          : family == null || family.isEmpty
-          ? null
-          : family,
-      fontFamilyFallback: editorPreview ? families : null,
+      fontFamily: family,
       fontSize: size,
       fontWeight: weight,
       color: color,
@@ -127,8 +133,12 @@ class CandidatePanelPreview extends StatelessWidget {
       return size;
     }
 
-    final paddingX = _metric(panel, 'paddingX');
-    final paddingY = _metric(panel, 'paddingY');
+    final padding = EdgeInsets.fromLTRB(
+      _metric(panel, 'paddingLeft'),
+      _metric(panel, 'paddingTop'),
+      _metric(panel, 'paddingRight'),
+      _metric(panel, 'paddingBottom'),
+    );
     final gap = _metric(panel, 'gap');
     final inlineGap = _metric(option, 'inlineGap');
     final foreground = _color(option, 'foreground');
@@ -322,7 +332,7 @@ class CandidatePanelPreview extends StatelessWidget {
           child: LayoutBuilder(
             builder: (context, constraints) {
               final width = math.max(
-                naturalWidth + paddingX * 2,
+                naturalWidth + padding.horizontal,
                 _metric(panel, 'minWidth'),
               );
               return Semantics(
@@ -367,10 +377,7 @@ class CandidatePanelPreview extends StatelessWidget {
                           )
                         : null,
                   ),
-                  padding: EdgeInsets.symmetric(
-                    horizontal: paddingX,
-                    vertical: paddingY,
-                  ),
+                  padding: padding,
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
                     alignment: Alignment.topLeft,

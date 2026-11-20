@@ -77,6 +77,7 @@ public struct KeyTaoImeTheme: Codable {
 
     public struct Font: Codable {
         public var family: String?
+        public var effectiveFamily: String?
         public var size: CGFloat
         public var labelSize: CGFloat
         public var commentSize: CGFloat
@@ -330,12 +331,12 @@ enum KeyTaoIOSThemeResolver {
 
 extension UIFont {
     static func keytaoThemeFont(family: String?, size: CGFloat, weight: KeyTaoThemeFontWeight) -> UIFont {
-        if let family {
-            for name in family.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
-                if let font = UIFont(name: name, size: size) {
-                    return font
-                }
-            }
+        if let family, !family.isEmpty {
+            let descriptor = UIFontDescriptor(fontAttributes: [
+                .family: family,
+                .traits: [UIFontDescriptor.TraitKey.weight: weight.uiWeight.rawValue],
+            ])
+            return UIFont(descriptor: descriptor, size: size)
         }
         return .systemFont(ofSize: size, weight: weight.uiWeight)
     }

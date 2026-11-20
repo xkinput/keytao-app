@@ -9,6 +9,7 @@ class MobileKeyboardPreview extends StatelessWidget {
     this.logo,
     this.candidates = const [],
     this.editorPreview = false,
+    this.fontFamily,
   });
 
   final Map<String, dynamic> theme;
@@ -16,6 +17,7 @@ class MobileKeyboardPreview extends StatelessWidget {
   final Widget? logo;
   final List<({String text, String comment})> candidates;
   final bool editorPreview;
+  final String? fontFamily;
 
   static const _letterRows = [
     ('qwertyuiop', '1234567890'),
@@ -87,7 +89,13 @@ class MobileKeyboardPreview extends StatelessWidget {
     final enter = {...function, ...types['enter'] as Map<String, dynamic>};
     final accent = {...character, ...classes['accent'] as Map<String, dynamic>};
     TextStyle textStyle(double size, Color color, FontWeight weight) =>
-        TextStyle(fontSize: size, fontWeight: weight, height: 1, color: color);
+        TextStyle(
+          fontFamily: fontFamily ?? theme['font']['effectiveFamily'] as String?,
+          fontSize: size,
+          fontWeight: weight,
+          height: 1,
+          color: color,
+        );
 
     Widget key(
       String label,

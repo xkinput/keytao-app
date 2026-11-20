@@ -29,6 +29,7 @@ pub struct FontSet {
     fonts: Vec<Arc<fontdue::Font>>,
 }
 
+#[cfg(test)]
 fn font_with_samples(
     data: &[u8],
     collection_index: u32,
@@ -114,7 +115,14 @@ pub fn load_font(family: Option<&str>) -> Option<Arc<FontSet>> {
         };
         if let Some(font) = database
             .with_face_data(id, |data, index| {
-                font_with_samples(data, index, &['中', '候'])
+                fontdue::Font::from_bytes(
+                    data,
+                    fontdue::FontSettings {
+                        collection_index: index,
+                        ..Default::default()
+                    },
+                )
+                .ok()
             })
             .flatten()
         {
@@ -263,8 +271,10 @@ impl PanelRenderer {
         let label_size = theme.font.label_size;
         let comment_size = theme.font.comment_size;
         let preedit_size = theme.font.preedit_size;
-        let panel_pad_x = theme.panel.padding_x;
-        let panel_pad_y = theme.panel.padding_y;
+        let panel_pad_left = theme.panel.padding_left;
+        let panel_pad_right = theme.panel.padding_right;
+        let panel_pad_top = theme.panel.padding_top;
+        let panel_pad_bottom = theme.panel.padding_bottom;
         let panel_gap = theme.panel.gap;
         let option_pad_x = theme.candidate.padding_x;
         let option_pad_y = theme.candidate.padding_y;
@@ -302,7 +312,9 @@ impl PanelRenderer {
         let preedit_width = model
             .preedit
             .as_ref()
-            .map(|preedit| self.text_width(preedit, preedit_size) + panel_pad_x * 2.0)
+            .map(|preedit| {
+                self.text_width(preedit, preedit_size) + panel_pad_left + panel_pad_right
+            })
             .unwrap_or(0.0);
         let (content_width, content_height) = if model.orientation == PanelOrientation::Vertical {
             let max_option_width = option_widths.iter().copied().fold(0.0, f32::max);
@@ -334,7 +346,7 @@ impl PanelRenderer {
         let width = theme
             .panel
             .min_width
-            .max(content_width + panel_pad_x * 2.0)
+            .max(content_width + panel_pad_left + panel_pad_right)
             .max(preedit_width)
             .ceil()
             .min(
@@ -344,7 +356,7 @@ impl PanelRenderer {
                 .floor()
                 .max(1.0),
             ) as u32;
-        let height = (content_height + panel_pad_y * 2.0)
+        let height = (content_height + panel_pad_top + panel_pad_bottom)
             .min(theme.panel.max_height)
             .ceil()
             .max(1.0) as u32;
@@ -366,12 +378,12 @@ impl PanelRenderer {
             theme.panel.border_width,
         );
 
-        let mut y = panel_pad_y;
+        let mut y = panel_pad_top;
         if let Some(preedit) = model.preedit.as_ref() {
             self.draw_text_with_caret(
                 &mut pm,
                 preedit,
-                panel_pad_x,
+                panel_pad_left,
                 y + preedit_size,
                 bgra(theme.candidate.foreground),
                 preedit_size,
@@ -383,7 +395,7 @@ impl PanelRenderer {
 
         let mut hit_areas = layout(&PanelGeometry {
             vertical: model.orientation == PanelOrientation::Vertical,
-            pad_x: panel_pad_x,
+            pad_x: panel_pad_left,
             top: y,
             gap: panel_gap,
             option_widths: &option_widths,
@@ -833,6 +845,10 @@ fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
     theme.panel.corner_radius *= scale;
     theme.panel.padding_x *= scale;
     theme.panel.padding_y *= scale;
+    theme.panel.padding_top *= scale;
+    theme.panel.padding_right *= scale;
+    theme.panel.padding_bottom *= scale;
+    theme.panel.padding_left *= scale;
     theme.panel.gap *= scale;
     theme.panel.preedit_gap *= scale;
     theme.panel.min_width *= scale;

@@ -15,6 +15,7 @@ sha2 = "0.10"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 ryu-js = "1"
+fontdb = "0.18.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

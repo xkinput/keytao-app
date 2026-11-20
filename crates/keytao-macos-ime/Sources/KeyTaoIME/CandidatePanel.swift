@@ -101,7 +101,7 @@ class CandidatePanel: NSPanel {
         candidateStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if let preedit = model.preedit, !preedit.isEmpty {
             let label = NSTextField(labelWithString: preedit)
-            label.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.preeditSize, weight: theme.font.weight)
+            label.font = NSFont.keytaoThemeFont(family: theme.font.effectiveFamily, size: theme.font.preeditSize, weight: theme.font.weight)
             let foreground = theme.candidate.foreground.nsColor
             label.textColor = foreground
             if let caretRange = model.preeditCaretRange {
@@ -116,13 +116,13 @@ class CandidatePanel: NSPanel {
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            label.widthAnchor.constraint(lessThanOrEqualToConstant: max(1, maxWidth - theme.panel.paddingX * 2)).isActive = true
+            label.widthAnchor.constraint(lessThanOrEqualToConstant: max(1, maxWidth - theme.panel.paddingLeft - theme.panel.paddingRight)).isActive = true
             stackView.addArrangedSubview(label)
             stackView.setCustomSpacing(theme.panel.preeditGap, after: label)
         }
         if !model.candidates.isEmpty || model.navigation.canGoPrevious || model.navigation.canGoNext {
             stackView.addArrangedSubview(candidateStack)
-            candidateWidthConstraint.constant = max(1, maxWidth - theme.panel.paddingX * 2)
+            candidateWidthConstraint.constant = max(1, maxWidth - theme.panel.paddingLeft - theme.panel.paddingRight)
             candidateWidthConstraint.isActive = true
         }
 
@@ -152,8 +152,8 @@ class CandidatePanel: NSPanel {
         contentView?.layoutSubtreeIfNeeded()
         let contentSize = stackView.fittingSize
         let panelSize = NSSize(
-            width: min(max(contentSize.width + theme.panel.paddingX * 2, theme.panel.minWidth), maxWidth),
-            height: min(contentSize.height + theme.panel.paddingY * 2, maxHeight)
+            width: min(max(contentSize.width + theme.panel.paddingLeft + theme.panel.paddingRight, theme.panel.minWidth), maxWidth),
+            height: min(contentSize.height + theme.panel.paddingTop + theme.panel.paddingBottom, maxHeight)
         )
         let windowSize = NSSize(
             width: panelSize.width + chromeInset * 2,
@@ -200,10 +200,10 @@ class CandidatePanel: NSPanel {
         candidateStack.orientation = orientation == .vertical ? .vertical : .horizontal
         candidateStack.alignment = orientation == .vertical ? .leading : .centerY
         candidateStack.spacing = theme.panel.gap
-        stackLeadingConstraint?.constant = theme.panel.paddingX
-        stackTrailingConstraint?.constant = -theme.panel.paddingX
-        stackTopConstraint?.constant = theme.panel.paddingY
-        stackBottomConstraint?.constant = -theme.panel.paddingY
+        stackLeadingConstraint?.constant = theme.panel.paddingLeft
+        stackTrailingConstraint?.constant = -theme.panel.paddingRight
+        stackTopConstraint?.constant = theme.panel.paddingTop
+        stackBottomConstraint?.constant = -theme.panel.paddingBottom
     }
 
     // MARK: - Actions
@@ -261,7 +261,7 @@ class CandidatePanel: NSPanel {
         separator.layer?.backgroundColor = theme.candidate.separatorColor.cgColor
         if orientation == .vertical {
             separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
-            separator.widthAnchor.constraint(greaterThanOrEqualToConstant: theme.panel.minWidth - theme.panel.paddingX * 2).isActive = true
+            separator.widthAnchor.constraint(greaterThanOrEqualToConstant: theme.panel.minWidth - theme.panel.paddingLeft - theme.panel.paddingRight).isActive = true
         } else {
             separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
             separator.heightAnchor.constraint(equalToConstant: max(1, theme.candidate.minHeight - theme.candidate.paddingY * 2)).isActive = true
@@ -393,9 +393,9 @@ private final class CandidateOptionView: NSControl {
         layer?.borderWidth = option.borderWidth
         layer?.borderColor = (isSelectedOption ? option.selectedBorderColor : option.borderColor).cgColor
 
-        labelField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.labelSize, weight: theme.font.weight)
-        textField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.size, weight: theme.font.weight)
-        commentField.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.commentSize, weight: theme.font.weight)
+        labelField.font = NSFont.keytaoThemeFont(family: theme.font.effectiveFamily, size: theme.font.labelSize, weight: theme.font.weight)
+        textField.font = NSFont.keytaoThemeFont(family: theme.font.effectiveFamily, size: theme.font.size, weight: theme.font.weight)
+        commentField.font = NSFont.keytaoThemeFont(family: theme.font.effectiveFamily, size: theme.font.commentSize, weight: theme.font.weight)
 
         labelField.textColor = (isSelectedOption ? option.selectedLabelColor : option.labelColor).nsColor
         textField.textColor = (pressed ? option.pressedForeground : isSelectedOption ? option.selectedForeground : option.foreground).nsColor
@@ -419,7 +419,7 @@ private final class CandidateNavigationButton: NSControl {
         translatesAutoresizingMaskIntoConstraints = false
         label.stringValue = symbol
         label.alignment = .center
-        label.font = .systemFont(ofSize: theme.font.size * 1.3, weight: .regular)
+        label.font = .keytaoThemeFont(family: theme.font.effectiveFamily, size: theme.font.size * 1.3)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
 

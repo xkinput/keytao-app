@@ -15,7 +15,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("common.accentColor", ALL),
     ("common.backgroundColor", ALL),
     ("common.cornerRadius", ALL),
-    ("common.font.family", MAC | WINDOWS),
+    ("common.font.family", ALL),
     ("common.font.weight", MAC | MOBILE),
     ("pc.panel.orientation", DESKTOP),
     ("pc.panel.background", DESKTOP),
@@ -24,6 +24,10 @@ const FIELDS: &[(&str, u8)] = &[
     ("pc.panel.cornerRadius", DESKTOP),
     ("pc.panel.paddingX", DESKTOP),
     ("pc.panel.paddingY", DESKTOP),
+    ("pc.panel.paddingTop", DESKTOP),
+    ("pc.panel.paddingRight", DESKTOP),
+    ("pc.panel.paddingBottom", DESKTOP),
+    ("pc.panel.paddingLeft", DESKTOP),
     ("pc.panel.gap", DESKTOP),
     ("pc.panel.preeditGap", DESKTOP),
     ("pc.panel.shadow", DESKTOP),
@@ -278,10 +282,7 @@ mod tests {
                 fields.contains(&"pc.candidate.hoverBackground"),
                 platform == EditorPlatform::Windows
             );
-            assert_eq!(
-                fields.contains(&"common.font.family"),
-                platform == EditorPlatform::Windows
-            );
+            assert!(fields.contains(&"common.font.family"));
             assert!(!fields.contains(&"common.font.weight"));
         }
         assert!(supported(EditorPlatform::LinuxKimpanel).is_empty());
@@ -289,6 +290,7 @@ mod tests {
         assert_eq!(mobile, supported(EditorPlatform::Ios));
         assert!(mobile.contains(&"mobile.keyboard.key.shadowColor"));
         assert!(mobile.contains(&"common.font.weight"));
+        assert!(mobile.contains(&"common.font.family"));
         assert!(mobile.contains(&"mobile.candidateBar.showComment"));
         assert!(!mobile.iter().any(|path| path.starts_with("pc.")));
         let mut unique = std::collections::HashSet::new();
@@ -310,8 +312,9 @@ mod tests {
             "size" | "labelSize" | "commentSize" | "preeditSize" | "fontSize" => json!(21),
             "width" => json!(60),
             "height" => json!(40),
-            "cornerRadius" | "buttonCornerRadius" | "paddingX" | "paddingY" | "gap"
-            | "inlineGap" | "preeditGap" => json!(7),
+            "cornerRadius" | "buttonCornerRadius" | "paddingX" | "paddingY" | "paddingTop"
+            | "paddingRight" | "paddingBottom" | "paddingLeft" | "gap" | "inlineGap"
+            | "preeditGap" => json!(7),
             "borderWidth" | "selectedBorderWidth" | "buttonBorderWidth" | "shadowOffsetY" => {
                 json!(1)
             }

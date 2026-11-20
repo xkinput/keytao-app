@@ -97,7 +97,7 @@ final class ModeIndicatorPanel: NSPanel {
         containerView.layer?.borderColor = theme.modeHint.borderColor.cgColor
         containerView.layer?.borderWidth = theme.modeHint.borderWidth
         containerView.layer?.cornerRadius = theme.modeHint.cornerRadius
-        label.font = .keytaoThemeFont(family: theme.font.family, size: theme.modeHint.fontSize, weight: theme.font.weight)
+        label.font = .keytaoThemeFont(family: theme.font.effectiveFamily, size: theme.modeHint.fontSize, weight: theme.font.weight)
         label.textColor = theme.modeHint.foreground.nsColor
     }
 }

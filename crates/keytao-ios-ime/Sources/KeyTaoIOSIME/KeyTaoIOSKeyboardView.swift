@@ -7289,7 +7289,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func themedFont(size: CGFloat, weight: KeyTaoThemeFontWeight) -> UIFont {
-        .keytaoThemeFont(family: theme.font.family, size: size, weight: weight)
+        .keytaoThemeFont(family: theme.font.effectiveFamily, size: size, weight: weight)
     }
 
     private static func loadLogoImage() -> UIImage? {

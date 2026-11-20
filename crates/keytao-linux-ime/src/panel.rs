@@ -342,6 +342,8 @@ fn detect_x11_panel_scale() -> f32 {
 
 pub struct PanelRenderer {
     faces: Vec<Face>,
+    theme_face: Option<Face>,
+    font_family: String,
     _library: Library,
     scale: f32,
     theme_resolver: ThemeResolver,
@@ -690,6 +692,8 @@ impl PanelRenderer {
         }
         Some(Self {
             faces,
+            theme_face: None,
+            font_family: String::new(),
             _library: library,
             scale: clamp_panel_scale(scale),
             theme_resolver: ThemeResolver::from_default_locations(),
@@ -782,18 +786,19 @@ impl PanelRenderer {
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
-    pub fn render(&self, state: &ImeState, screen_width: f32) -> (Vec<u8>, u32, u32) {
+    pub fn render(&mut self, state: &ImeState, screen_width: f32) -> (Vec<u8>, u32, u32) {
         let (pixels, width, height, _) = self.render_with_hit_areas(state, screen_width);
         (pixels, width, height)
     }
 
     /// Like `render`, plus where each candidate and paging button was drawn.
     pub fn render_with_hit_areas(
-        &self,
+        &mut self,
         state: &ImeState,
         screen_width: f32,
     ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
         let theme = scaled_candidate_panel(&self.theme_resolver.current());
+        self.update_theme_font(theme.font.effective_family.as_deref());
         let model = theme.candidate_panel_model(
             state_to_panel_input(state),
             &UiCapabilities {
@@ -805,8 +810,10 @@ impl PanelRenderer {
         let label_size = self.s(theme.font.label_size);
         let comment_size = self.s(theme.font.comment_size);
         let preedit_size = self.s(theme.font.preedit_size);
-        let panel_pad_x = self.s(theme.panel.padding_x);
-        let panel_pad_y = self.s(theme.panel.padding_y);
+        let panel_pad_left = self.s(theme.panel.padding_left);
+        let panel_pad_right = self.s(theme.panel.padding_right);
+        let panel_pad_top = self.s(theme.panel.padding_top);
+        let panel_pad_bottom = self.s(theme.panel.padding_bottom);
         let panel_gap = self.s(theme.panel.gap);
         let option_pad_x = self.s(theme.candidate.padding_x);
         let option_pad_y = self.s(theme.candidate.padding_y);
@@ -844,7 +851,9 @@ impl PanelRenderer {
         let preedit_width = model
             .preedit
             .as_ref()
-            .map(|preedit| self.text_width(preedit, preedit_size) + panel_pad_x * 2.0)
+            .map(|preedit| {
+                self.text_width(preedit, preedit_size) + panel_pad_left + panel_pad_right
+            })
             .unwrap_or(0.0);
 
         let (content_width, content_height) = if model.orientation == PanelOrientation::Vertical {
@@ -876,7 +885,7 @@ impl PanelRenderer {
         };
         let width = self
             .s(theme.panel.min_width)
-            .max(content_width + panel_pad_x * 2.0)
+            .max(content_width + panel_pad_left + panel_pad_right)
             .max(preedit_width)
             .ceil()
             .min(
@@ -886,7 +895,7 @@ impl PanelRenderer {
                     .floor()
                     .max(1.0),
             ) as u32;
-        let height = (content_height + panel_pad_y * 2.0)
+        let height = (content_height + panel_pad_top + panel_pad_bottom)
             .min(self.s(theme.panel.max_height))
             .ceil()
             .max(1.0) as u32;
@@ -905,13 +914,13 @@ impl PanelRenderer {
             self.s(theme.panel.border_width),
         );
 
-        let mut y = panel_pad_y;
+        let mut y = panel_pad_top;
         if let Some(preedit) = model.preedit.as_ref() {
             let baseline = y + preedit_size;
             if theme.ui.hide_candidate_panel {
                 draw_rounded_rect(
                     &mut pm,
-                    panel_pad_x,
+                    panel_pad_left,
                     y,
                     self.text_width(preedit, preedit_size),
                     preedit_size,
@@ -924,7 +933,7 @@ impl PanelRenderer {
             self.draw_text(
                 &mut pm,
                 preedit,
-                panel_pad_x,
+                panel_pad_left,
                 baseline,
                 bgra(if theme.ui.hide_candidate_panel {
                     theme.candidate.selected_foreground
@@ -938,7 +947,7 @@ impl PanelRenderer {
 
         let mut areas = layout(&PanelGeometry {
             vertical: model.orientation == PanelOrientation::Vertical,
-            pad_x: panel_pad_x,
+            pad_x: panel_pad_left,
             top: y,
             gap: panel_gap,
             option_widths: &option_widths,
@@ -1025,14 +1034,15 @@ impl PanelRenderer {
         (out, width, height, areas)
     }
 
-    pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
+    pub fn render_mode_hint(&mut self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
         let model = theme.mode_hint_model(ascii_mode);
         self.render_text_hint(&model.text)
     }
 
-    pub fn render_text_hint(&self, label: &str) -> (Vec<u8>, u32, u32) {
+    pub fn render_text_hint(&mut self, label: &str) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
+        self.update_theme_font(theme.font.effective_family.as_deref());
         let hint_size = self.s(theme.mode_hint.font_size);
         let padding = hint_size / 3.0;
         let (left, top, right, bottom) = self.text_bounds(&label, hint_size);
@@ -1203,6 +1213,20 @@ impl PanelRenderer {
 
     fn s(&self, value: f32) -> f32 {
         value * self.scale
+    }
+
+    fn update_theme_font(&mut self, family: Option<&str>) {
+        let family = family.unwrap_or("").trim();
+        if self.font_family == family {
+            return;
+        }
+        self.theme_face = if family.is_empty() {
+            None
+        } else {
+            fc_match(&fontconfig_pattern(family, Some("zh")))
+                .and_then(|(path, index)| self._library.new_face(path, index.unwrap_or(0)).ok())
+        };
+        self.font_family = family.to_owned();
     }
 
     fn layout_glyph(&self, ch: char, size: f32) -> Option<GlyphLayout<'_>> {
@@ -1381,8 +1405,9 @@ impl PanelRenderer {
     }
 
     fn face_for_char(&self, ch: char) -> Option<&Face> {
-        self.faces
+        self.theme_face
             .iter()
+            .chain(self.faces.iter())
             .find(|face| face.get_char_index(ch as usize).unwrap_or_default() != 0)
     }
 }
@@ -1614,7 +1639,7 @@ mod tests {
             eprintln!("skipping panel render test: no CJK font found");
             return;
         };
-        let Some(renderer) = PanelRenderer::new(source) else {
+        let Some(mut renderer) = PanelRenderer::new(source) else {
             eprintln!("skipping panel render test: font source could not be reopened");
             return;
         };
@@ -1651,7 +1676,7 @@ mod tests {
             eprintln!("skipping comment render test: no CJK font found");
             return;
         };
-        let Some(renderer) = PanelRenderer::new(source) else {
+        let Some(mut renderer) = PanelRenderer::new(source) else {
             eprintln!("skipping comment render test: font source could not be reopened");
             return;
         };
@@ -1701,7 +1726,7 @@ mod tests {
             eprintln!("skipping mode hint render test: no CJK font found");
             return;
         };
-        let Some(renderer) = PanelRenderer::new(source) else {
+        let Some(mut renderer) = PanelRenderer::new(source) else {
             eprintln!("skipping mode hint render test: font source could not be reopened");
             return;
         };
@@ -1754,11 +1779,11 @@ mod tests {
             eprintln!("skipping panel scale test: no CJK font found");
             return;
         };
-        let Some(normal) = PanelRenderer::with_scale(source.clone(), 1.0) else {
+        let Some(mut normal) = PanelRenderer::with_scale(source.clone(), 1.0) else {
             eprintln!("skipping panel scale test: font source could not be reopened");
             return;
         };
-        let Some(scaled) = PanelRenderer::with_scale(source, 2.0) else {
+        let Some(mut scaled) = PanelRenderer::with_scale(source, 2.0) else {
             eprintln!("skipping panel scale test: font source could not be reopened");
             return;
         };

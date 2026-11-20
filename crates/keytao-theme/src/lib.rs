@@ -9,6 +9,7 @@
 //! from `keyboard.yaml`; v3 theme sources compile to backward-compatible v2.
 
 pub mod editor;
+pub mod font_resolution;
 pub mod mobile_layout;
 pub mod mobile_theme;
 pub mod panel_hit;
@@ -288,11 +289,23 @@ impl Serialize for UiTheme {
 #[serde(rename_all = "camelCase")]
 pub struct FontTheme {
     pub family: Option<String>,
+    pub effective_family: Option<String>,
+    #[cfg(target_os = "android")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_file: Option<String>,
+    #[cfg(target_os = "android")]
+    #[serde(skip_serializing_if = "is_zero_font_index")]
+    pub effective_index: u32,
     pub size: f32,
     pub label_size: f32,
     pub comment_size: f32,
     pub preedit_size: f32,
     pub weight: FontWeight,
+}
+
+#[cfg(target_os = "android")]
+fn is_zero_font_index(index: &u32) -> bool {
+    *index == 0
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -305,6 +318,12 @@ pub struct PanelTheme {
     pub corner_radius: f32,
     pub padding_x: f32,
     pub padding_y: f32,
+    pub padding_top: f32,
+    pub padding_right: f32,
+    pub padding_bottom: f32,
+    pub padding_left: f32,
+    #[serde(skip)]
+    padding_overrides: [Option<f32>; 4],
     pub gap: f32,
     pub preedit_gap: f32,
     pub min_width: f32,
@@ -658,6 +677,10 @@ pub fn scaled_candidate_panel(theme: &ResolvedImeTheme) -> ResolvedImeTheme {
     theme.font.preedit_size *= scale;
     theme.panel.padding_x *= scale;
     theme.panel.padding_y *= scale;
+    theme.panel.padding_top *= scale;
+    theme.panel.padding_right *= scale;
+    theme.panel.padding_bottom *= scale;
+    theme.panel.padding_left *= scale;
     theme.panel.gap *= scale;
     theme.panel.preedit_gap *= scale;
     theme.candidate.padding_x *= scale;
@@ -956,6 +979,11 @@ impl ResolvedImeTheme {
             ui,
             font: FontTheme {
                 family: None,
+                effective_family: None,
+                #[cfg(target_os = "android")]
+                effective_file: None,
+                #[cfg(target_os = "android")]
+                effective_index: 0,
                 size: 20.0,
                 label_size: 15.0,
                 comment_size: 16.0,
@@ -970,6 +998,11 @@ impl ResolvedImeTheme {
                 corner_radius: 16.0,
                 padding_x: 10.0,
                 padding_y: 10.0,
+                padding_top: 10.0,
+                padding_right: 10.0,
+                padding_bottom: 10.0,
+                padding_left: 10.0,
+                padding_overrides: [None; 4],
                 gap: 4.0,
                 preedit_gap: 10.0,
                 min_width: 128.0,
@@ -1163,6 +1196,26 @@ impl ResolvedImeTheme {
         self.panel.corner_radius = clamp(self.panel.corner_radius, 0.0, 28.0);
         self.panel.padding_x = clamp(self.panel.padding_x, 0.0, 32.0);
         self.panel.padding_y = clamp(self.panel.padding_y, 0.0, 28.0);
+        self.panel.padding_top = clamp(
+            self.panel.padding_overrides[0].unwrap_or(self.panel.padding_y),
+            0.0,
+            28.0,
+        );
+        self.panel.padding_right = clamp(
+            self.panel.padding_overrides[1].unwrap_or(self.panel.padding_x),
+            0.0,
+            32.0,
+        );
+        self.panel.padding_bottom = clamp(
+            self.panel.padding_overrides[2].unwrap_or(self.panel.padding_y),
+            0.0,
+            28.0,
+        );
+        self.panel.padding_left = clamp(
+            self.panel.padding_overrides[3].unwrap_or(self.panel.padding_x),
+            0.0,
+            32.0,
+        );
         self.panel.gap = clamp(self.panel.gap, 0.0, 24.0);
         self.panel.preedit_gap = clamp(self.panel.preedit_gap, 0.0, 48.0);
         self.panel.min_width = clamp(self.panel.min_width, 48.0, 480.0);
@@ -1184,6 +1237,7 @@ impl ResolvedImeTheme {
         self.mode_hint.height = clamp(self.mode_hint.height, 28.0, 140.0);
         self.mode_hint.corner_radius = clamp(self.mode_hint.corner_radius, 0.0, 32.0);
         self.mode_hint.duration = clamp(self.mode_hint.duration, 0.15, 4.0);
+        self.font.resolve_family();
         self
     }
 }
@@ -1284,6 +1338,10 @@ struct PartialPanelTheme {
     corner_radius: Option<f32>,
     padding_x: Option<f32>,
     padding_y: Option<f32>,
+    padding_top: Option<f32>,
+    padding_right: Option<f32>,
+    padding_bottom: Option<f32>,
+    padding_left: Option<f32>,
     gap: Option<f32>,
     preedit_gap: Option<f32>,
     min_width: Option<f32>,
@@ -1422,6 +1480,16 @@ impl PanelTheme {
         assign(&mut self.corner_radius, partial.corner_radius);
         assign(&mut self.padding_x, partial.padding_x);
         assign(&mut self.padding_y, partial.padding_y);
+        for (value, side) in self.padding_overrides.iter_mut().zip([
+            partial.padding_top,
+            partial.padding_right,
+            partial.padding_bottom,
+            partial.padding_left,
+        ]) {
+            if side.is_some() {
+                *value = side;
+            }
+        }
         assign(&mut self.gap, partial.gap);
         assign(&mut self.preedit_gap, partial.preedit_gap);
         assign(&mut self.min_width, partial.min_width);
@@ -2579,6 +2647,10 @@ mod tests {
                 (scaled.font.preedit_size, base.font.preedit_size),
                 (scaled.panel.padding_x, base.panel.padding_x),
                 (scaled.panel.padding_y, base.panel.padding_y),
+                (scaled.panel.padding_top, base.panel.padding_top),
+                (scaled.panel.padding_right, base.panel.padding_right),
+                (scaled.panel.padding_bottom, base.panel.padding_bottom),
+                (scaled.panel.padding_left, base.panel.padding_left),
                 (scaled.panel.gap, base.panel.gap),
                 (scaled.panel.preedit_gap, base.panel.preedit_gap),
                 (scaled.candidate.padding_x, base.candidate.padding_x),

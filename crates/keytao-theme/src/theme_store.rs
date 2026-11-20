@@ -906,7 +906,17 @@ fn preserve_manual_changes(
     ] {
         let actual = compiled_variant_for_migration(actual, scheme)?;
         let expected = compiled_variant_for_migration(&expected, scheme)?;
-        let changed = difference(&actual, &expected);
+        let mut changed = difference(&actual, &expected);
+        for (axis, sides) in [
+            ("paddingX", ["paddingLeft", "paddingRight"]),
+            ("paddingY", ["paddingTop", "paddingBottom"]),
+        ] {
+            if changed["panel"].get(axis).is_some() {
+                for side in sides {
+                    changed["panel"][side] = actual["panel"][side].clone();
+                }
+            }
+        }
         let mut mapped = json!({});
         map_legacy_layer(&changed, &mut mapped);
         if let Some(selected) = mapped

@@ -711,7 +711,7 @@ impl CandidateWindow {
         }
         let theme = current_theme();
         if !self.ensure_window(owner_hwnd, state)
-            || !self.ensure_renderer(theme.font.family.as_deref())
+            || !self.ensure_renderer(theme.font.effective_family.as_deref())
         {
             return false;
         }
@@ -911,7 +911,7 @@ impl CandidateWindow {
     ) {
         let theme = current_theme();
         if !self.ensure_window(owner_hwnd, state)
-            || !self.ensure_renderer(theme.font.family.as_deref())
+            || !self.ensure_renderer(theme.font.effective_family.as_deref())
         {
             return;
         }

@@ -1748,6 +1748,7 @@ dependencies = [
  "base64",
  "dirs",
  "flate2",
+ "fontdb",
  "ryu-js",
  "serde",
  "serde_json",

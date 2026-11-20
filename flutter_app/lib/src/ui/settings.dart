@@ -8,6 +8,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
+import 'system_font_picker.dart';
 import 'theme.dart';
 import 'theme_editor.dart';
 import 'user_words.dart';
@@ -525,6 +526,7 @@ class _SettingsCardState extends State<SettingsCard> {
         : _previewRadius ?? s?.cornerRadius;
     final backgroundColor = _previewBackground ?? s?.backgroundColor ?? '';
     final preview = CandidatePanelPreview(
+      fontCatalog: SystemFontCatalog.forController(c),
       key: ValueKey((
         _previewScheme ?? s?.colorScheme,
         accent,

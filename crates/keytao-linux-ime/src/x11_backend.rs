@@ -432,7 +432,7 @@ impl KeyTaoHandler {
 
     /// Draw a composition at the last anchor.
     fn draw_composition(&mut self, state: &ImeState) {
-        let Some(renderer) = &self.renderer else {
+        let Some(renderer) = &mut self.renderer else {
             return;
         };
         // XIM clients cannot embed preedit, so keep it visible without candidates.
@@ -497,7 +497,7 @@ impl KeyTaoHandler {
 
     /// Show the same 中/英 hint the other backends draw when Rime switches.
     fn show_mode_hint(&mut self, ascii_mode: bool) {
-        let Some(renderer) = &self.renderer else {
+        let Some(renderer) = &mut self.renderer else {
             return;
         };
         let (pixels, w, h) = renderer.render_mode_hint(ascii_mode);
@@ -511,7 +511,7 @@ impl KeyTaoHandler {
     }
 
     fn show_deployment_hint(&mut self, text: &str) {
-        let Some(renderer) = &self.renderer else {
+        let Some(renderer) = &mut self.renderer else {
             return;
         };
         let (pixels, w, h) = renderer.render_text_hint(text);

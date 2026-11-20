@@ -281,7 +281,16 @@ class ViewController extends AppController {
       font[field] = (font[field] as num) * scale;
     }
     for (final entry in {
-      'panel': ['paddingX', 'paddingY', 'gap', 'preeditGap'],
+      'panel': [
+        'paddingX',
+        'paddingY',
+        'paddingTop',
+        'paddingRight',
+        'paddingBottom',
+        'paddingLeft',
+        'gap',
+        'preeditGap',
+      ],
       'candidate': ['paddingX', 'paddingY', 'inlineGap', 'minHeight'],
       'navigation': ['buttonSize'],
     }.entries) {

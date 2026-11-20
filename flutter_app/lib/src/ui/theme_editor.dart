@@ -9,7 +9,6 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
-import 'mobile_keyboard_preview.dart';
 import 'system_font_picker.dart';
 import 'theme.dart';
 import 'theme_library.dart';
@@ -97,6 +96,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   final Map<String, String> _textDrafts = {};
   final Map<String, bool> _expandedGroups = {};
   final _controlKeys = {false: GlobalKey(), true: GlobalKey()};
+  Future<List<SystemFontFamilyDto>>? _fontListing;
 
   AppController get _controller => widget.controller;
   SystemFontCatalog get _fonts => SystemFontCatalog.forController(_controller);
@@ -105,17 +105,6 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   Map<String, dynamic> get _source =>
       _snapshot!['source'] as Map<String, dynamic>;
   Map<String, dynamic> get _resolved => _draft ?? _previews[_target]!;
-
-  Map<String, dynamic> get _fontPreview {
-    final font = _resolved['font'] as Map<String, dynamic>;
-    final alias = _fonts.alias(font['family'] as String? ?? '');
-    return alias == null
-        ? _resolved
-        : {
-            ..._resolved,
-            'font': {...font, 'family': alias},
-          };
-  }
 
   Set<String> get _disabledTargets {
     final light = _snapshot!['resolvedLight']['ui']['effectiveColorScheme'];
@@ -136,6 +125,18 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     }
     _draft = null;
     _textDrafts.clear();
+    _loadFontWeights();
+  }
+
+  void _loadFontWeights() {
+    final family = _resolved['font']['effectiveFamily'] as String?;
+    if (family == null || family.isEmpty || _fontListing != null) return;
+    _fontListing = _fonts.list();
+    unawaited(
+      _fontListing!.then((_) {
+        if (mounted) setState(() {});
+      }, onError: (Object _) => _fontListing = null),
+    );
   }
 
   @override
@@ -300,6 +301,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         _draft = preview;
         _previewField = (path, value);
       });
+      _loadFontWeights();
     } catch (failure) {
       setState(() => _error = errorText(failure));
     }
@@ -337,6 +339,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     String path,
     Widget child, {
     bool swatch = false,
+    bool compact = false,
   }) {
     final supported = _supported(path);
     final reset = _reset(
@@ -353,7 +356,20 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       enabled: _enabled && supported,
       child: child,
     );
-    final row = swatch
+    final row = compact
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(child: Text(label)),
+                  reset,
+                ],
+              ),
+              control,
+            ],
+          )
+        : swatch
         ? Row(
             spacing: 4,
             children: [
@@ -378,6 +394,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     double max,
     int divisions, {
     bool scale = false,
+    bool compact = false,
   }) {
     final value = ((_value(path) as num).toDouble() * (scale ? 100 : 1)).clamp(
       min,
@@ -419,7 +436,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           FTooltip(
             tipBuilder: (_, _) => Text('$label ${display(value)}'),
             child: SizedBox(
-              width: 40,
+              width: compact ? 20 : 40,
               child: Text(
                 display(value),
                 textAlign: TextAlign.right,
@@ -429,6 +446,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           ),
         ],
       ),
+      compact: compact,
     );
   }
 
@@ -518,25 +536,20 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     setState(() {});
     if (family == null || !_enabled) return;
     final weight = _value('common.font.weight') as String;
-    final supported = _fonts.supportedWeights(family);
+    _preview('common.font.family', family);
+    final supported = _fonts.supportedWeights(
+      _resolved['font']['effectiveFamily'] as String? ?? '',
+    );
     final nextWeight = supported == null
         ? weight
         : closestThemeFontWeight(weight, supported);
-    _preview('common.font.family', family);
-    await _perform(() async {
-      if (family.isNotEmpty) {
-        try {
-          await _fonts.load(family);
-        } catch (_) {
-          // The platform family remains usable when Flutter rejects a font file.
-        }
-      }
-      return _controller.updateThemeEditor(
+    await _perform(
+      () => _controller.updateThemeEditor(
         target: _target,
         path: 'common.font',
         value: {'family': family, 'weight': nextWeight},
-      );
-    });
+      ),
+    );
   }
 
   Widget _fontFamily() {
@@ -565,7 +578,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   Widget _fontWeight() {
     final selected = _value('common.font.weight') as String;
     final supported = _fonts.supportedWeights(
-      _value('common.font.family') as String? ?? '',
+      _resolved['font']['effectiveFamily'] as String? ?? '',
     );
     return _field(
       '字重',
@@ -751,6 +764,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 ? (value) => setState(() {
                     _target = value;
                     _draft = null;
+                    _loadFontWeights();
                   })
                 : null,
           ),
@@ -794,7 +808,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             }),
             _slider('圆角', 'common.cornerRadius', 0, 28, 28),
             _group(mobile ? 'mobile.font' : 'pc.font', '字体', [
-              if (!mobile) _fontFamily(),
+              _fontFamily(),
               _fontWeight(),
               if (!mobile)
                 _compactRows([
@@ -826,8 +840,32 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 _compactRows([
                   _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
                   _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
-                  _slider('横向内边距', 'pc.panel.paddingX', 0, 32, 32),
-                  _slider('纵向内边距', 'pc.panel.paddingY', 0, 28, 28),
+                ]),
+                Semantics(
+                  label: '面板内边距',
+                  child: Row(
+                    spacing: 12,
+                    children: [
+                      for (final side in const {
+                        'Top': '上',
+                        'Right': '右',
+                        'Bottom': '下',
+                        'Left': '左',
+                      }.entries)
+                        Expanded(
+                          child: _slider(
+                            side.value,
+                            'pc.panel.padding${side.key}',
+                            0,
+                            side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
+                            side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
+                            compact: true,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                _compactRows([
                   _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
                   _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
                   _toggle('面板阴影', 'pc.panel.shadow'),
@@ -1021,16 +1059,19 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         child: SizedBox(
           width: 360,
           child: mobile
-              ? MobileKeyboardPreview(
+              ? CandidatePanelPreview(
                   editorPreview: true,
-                  theme: _fontPreview,
-                  schemeName:
+                  theme: _resolved,
+                  fontCatalog: _fonts,
+                  keyboard: true,
+                  showPreedit: false,
+                  keyboardSchemeName:
                       _controller
                           .installedPackageFor(_controller.activeSchemeKey)
                           ?.displayName ??
                       schemeDisplayName(_controller.activeSchemeKey),
                   candidates: _controller.candidatePreviewCandidates,
-                  logo: SchemaLogo(controller: _controller, size: 28),
+                  keyboardLogo: SchemaLogo(controller: _controller, size: 28),
                 )
               : Column(
                   mainAxisSize: MainAxisSize.min,
@@ -1039,7 +1080,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   children: [
                     CandidatePanelPreview(
                       editorPreview: true,
-                      theme: _fontPreview,
+                      theme: _resolved,
+                      fontCatalog: _fonts,
                       showPreedit: true,
                       candidateCount: 3,
                       candidates: _controller.candidatePreviewCandidates,
@@ -1089,7 +1131,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     }
 
     final shadow = hint['shadowStyle'] as Map<String, dynamic>?;
-    return Semantics(
+    final family = _resolved['font']['effectiveFamily'] as String?;
+    Widget preview(String? fontFamily) => Semantics(
       label: '模式提示预览',
       child: Container(
         width: (hint['width'] as num).toDouble(),
@@ -1120,11 +1163,18 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           hint['chineseText'] as String,
           textScaler: TextScaler.noScaling,
           style: TextStyle(
+            fontFamily: fontFamily,
             color: color(hint, 'foreground'),
             fontSize: (hint['fontSize'] as num).toDouble(),
           ),
         ),
       ),
+    );
+    if (family == null || family.isEmpty) return preview(null);
+    return FutureBuilder<String>(
+      key: ValueKey(('mode-hint-font', family)),
+      future: _fonts.load(family),
+      builder: (context, snapshot) => preview(snapshot.data ?? family),
     );
   }
 }

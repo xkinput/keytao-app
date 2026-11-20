@@ -4,6 +4,10 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
+import androidx.core.graphics.TypefaceCompat
+import androidx.core.provider.FontsContractCompat
+import java.io.File
 import org.json.JSONObject
 
 data class KeytaoColor(val red: Int, val green: Int, val blue: Int, val alpha: Int = 255) {
@@ -25,7 +29,7 @@ internal fun JSONObject.themeColor(field: String): KeytaoColor = getJSONObject(f
     KeytaoColor(it.getInt("red"), it.getInt("green"), it.getInt("blue"), it.getInt("alpha"))
 }
 
-private fun themeTypeface(weight: String): Typeface {
+private fun themeTypeface(weight: String, family: Typeface): Typeface {
     val fontWeight = when (weight) {
         "ultralight" -> 100
         "thin" -> 200
@@ -38,13 +42,13 @@ private fun themeTypeface(weight: String): Typeface {
         else -> 400
     }
     return if (android.os.Build.VERSION.SDK_INT >= 28) {
-        Typeface.create(Typeface.DEFAULT, fontWeight, false)
+        Typeface.create(family, fontWeight, false)
     } else {
-        Typeface.create(Typeface.DEFAULT, if (fontWeight >= 700) Typeface.BOLD else Typeface.NORMAL)
+        Typeface.create(family, if (fontWeight >= 700) Typeface.BOLD else Typeface.NORMAL)
     }
 }
 
-class KeytaoKeyStyle(json: JSONObject) {
+class KeytaoKeyStyle(json: JSONObject, family: Typeface) {
     val background = json.themeColor("background")
     val foreground = json.themeColor("foreground")
     val hintForeground = json.themeColor("hintForeground")
@@ -59,19 +63,29 @@ class KeytaoKeyStyle(json: JSONObject) {
     val hintFontScale = json.getDouble("hintFontScale").toFloat()
     val swipeHintForeground = json.themeColor("swipeHintForeground")
     val swipeHintVisible = json.getBoolean("swipeHintVisible")
-    val typeface = themeTypeface(json.getString("fontWeight"))
+    val typeface = themeTypeface(json.getString("fontWeight"), family)
 }
 
-class KeytaoImeTheme private constructor(root: JSONObject) {
+class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {
     private val ui = root.getJSONObject("ui")
     private val font = root.getJSONObject("font")
+    private val fontFamily = if (font.isNull("effectiveFamily")) Typeface.DEFAULT else {
+        val file = font.optString("effectiveFile").takeIf { it.isNotEmpty() }
+        val loaded = file?.let {
+            runCatching {
+                val face = FontsContractCompat.FontInfo(Uri.fromFile(File(it)), font.optInt("effectiveIndex"), 400, false, 0)
+                TypefaceCompat.createFromFontInfo(context, null, arrayOf(face), Typeface.NORMAL)
+            }.getOrNull()
+        }
+        loaded ?: Typeface.create(font.getString("effectiveFamily"), Typeface.NORMAL)
+    }
     private val modeHint = root.getJSONObject("modeHint")
     private val mobile = root.getJSONObject("mobile")
     val keyboard = mobile.getJSONObject("keyboard")
     val candidateBar = mobile.getJSONObject("candidateBar")
     val toolbar = keyboard.getJSONObject("toolbar")
     val floating = keyboard.getJSONObject("floating")
-    val key = KeytaoKeyStyle(keyboard.getJSONObject("key"))
+    val key = KeytaoKeyStyle(keyboard.getJSONObject("key"), fontFamily)
     val isDark = mobile.getBoolean("isDark")
     val uiColorScheme = ui.getString("colorScheme")
     val effectiveColorScheme = ui.getString("effectiveColorScheme")
@@ -101,7 +115,7 @@ class KeytaoImeTheme private constructor(root: JSONObject) {
     val candidateSelectedBackground = candidateBar.themeColor("selectedBackground")
     val candidateSelectedForeground = candidateBar.themeColor("selectedForeground")
     val candidateForeground = candidateBar.themeColor("foreground")
-    val typeface = themeTypeface(font.getString("weight"))
+    val typeface = themeTypeface(font.getString("weight"), fontFamily)
     val panelCornerRadiusDp = key.cornerRadius
     val keyCornerRadiusDp = key.cornerRadius
     val modeHintChineseText = modeHint.getString("chineseText")
@@ -134,7 +148,7 @@ class KeytaoImeTheme private constructor(root: JSONObject) {
                 if (function || accent || punctuation) style.put("background", state.getJSONObject("softBackground"))
             }
             if (shiftOn && type == "shift") overlay(states.getJSONObject("shiftOn"), colorsOnly = true)
-            KeytaoKeyStyle(style)
+            KeytaoKeyStyle(style, fontFamily)
         }
     }
 
@@ -146,20 +160,20 @@ class KeytaoImeTheme private constructor(root: JSONObject) {
             if (bundledDefault == null) bundledDefault = context.assets.open("keytao-default-theme.json").bufferedReader().use { it.readText() }
         }
 
-        fun fallback(context: Context? = null): KeytaoImeTheme {
+        fun fallback(context: Context): KeytaoImeTheme {
             defaultTheme?.let { return it }
-            context?.let(::loadDefault)
+            loadDefault(context)
             val resolved = KeytaoNativeBridge.resolveThemeJson(null, null, null)
-                ?.let { runCatching { KeytaoImeTheme(JSONObject(it)) }.getOrNull() }
+                ?.let { runCatching { KeytaoImeTheme(JSONObject(it), context) }.getOrNull() }
             return (resolved ?: KeytaoImeTheme(JSONObject(bundledDefault
-                ?: error("The bundled theme has not been loaded")))).also { defaultTheme = it }
+                ?: error("The bundled theme has not been loaded")), context)).also { defaultTheme = it }
         }
 
-        fun fromJson(json: String?): KeytaoImeTheme = runCatching {
-            KeytaoImeTheme(JSONObject(json ?: error("Theme resolution failed")))
+        fun fromJson(json: String?, context: Context): KeytaoImeTheme = runCatching {
+            KeytaoImeTheme(JSONObject(json ?: error("Theme resolution failed")), context)
         }.getOrElse {
             KeytaoRuntimeLog.event("error", "theme_resolve_failed")
-            fallback()
+            fallback(context)
         }
     }
 }
@@ -175,7 +189,7 @@ object KeytaoThemeResolver {
         val scheme = systemColorScheme(context)
         val signature = "${fileSignature(userTheme)}|$scheme"
         cachedTheme?.let { if (signature == cachedSignature) return it }
-        val theme = KeytaoImeTheme.fromJson(KeytaoNativeBridge.resolveThemeJson(null, userTheme?.takeIf { it.isFile }?.absolutePath, scheme))
+        val theme = KeytaoImeTheme.fromJson(KeytaoNativeBridge.resolveThemeJson(null, userTheme?.takeIf { it.isFile }?.absolutePath, scheme), context)
         cachedSignature = signature
         cachedTheme = theme
         return theme
