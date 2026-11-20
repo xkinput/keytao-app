@@ -22,7 +22,7 @@ use windows::{
                 LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
                 LOAD_LIBRARY_SEARCH_SYSTEM32,
             },
-            Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+            Threading::{CreateMutexW, GetCurrentProcess, ReleaseMutex, WaitForSingleObject},
         },
     },
 };
@@ -77,12 +77,14 @@ pub(crate) fn build_backend() -> Result<
     ),
     String,
 > {
-    if read_engine_mode() == crate::engine_config::EngineMode::Pipe {
+    let allow_in_process = host_allows_in_process_fallback();
+    if read_engine_mode() == crate::engine_config::EngineMode::Pipe || !allow_in_process {
         let pipe = crate::engine_pipe::PipeEngine::default();
         match pipe.build() {
             Ok(handle) => {
                 return Ok((Arc::new(pipe), handle, None, None));
             }
+            Err(_) if !allow_in_process => return Err("server unavailable".into()),
             Err(error) => keytao_core::rt_log!(
                 keytao_core::runtime_log::Level::Info,
                 "ipc",
@@ -112,6 +114,17 @@ pub(crate) fn build_backend() -> Result<
     let handle = engine.build()?;
     let (path, signature) = engine.reload_stamp();
     Ok((engine, handle, path, signature))
+}
+
+fn host_allows_in_process_fallback() -> bool {
+    crate::pipe_security::process_image(unsafe { GetCurrentProcess() })
+        .ok()
+        .is_some_and(|image| {
+            image
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::engine_host::allow_in_process_fallback)
+        })
 }
 
 fn read_engine_mode() -> crate::engine_config::EngineMode {
@@ -511,6 +524,10 @@ fn start_pipe_retry(engine: &Arc<InProcEngine>) -> Result<(), String> {
 
 impl ImeEngineBackend for InProcEngine {
     fn build(&self) -> Result<EngineHandle, String> {
+        // TSF can share the host's rime.dll while owning separate Rust initialization state.
+        if !host_allows_in_process_fallback() {
+            return Err("server unavailable".into());
+        }
         let sandboxed = crate::appcontainer::is_appcontainer()
             .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
         self.install(if self.no_learning {

@@ -838,6 +838,7 @@ mod desktop {
     /// and initializes again so that a redeploy is not served from the caches
     /// above.
     static RIME_INITIALIZED: Mutex<bool> = Mutex::new(false);
+    static RIME_USER_DATA_DIR: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
     static RIME_DEPLOYMENT_SIGNATURE: Mutex<Option<String>> = Mutex::new(None);
     static RIME_LUA_SIGNATURE: Mutex<Option<String>> = Mutex::new(None);
     /// `RimeSetup` configures process-wide librime logging and modules. In
@@ -1288,6 +1289,7 @@ mod desktop {
                 finalize();
             }
             *initialized = false;
+            *lock_ignore_poison(&RIME_USER_DATA_DIR) = None;
         }
         clear_user_dictionary_cache();
         Ok(())
@@ -2323,6 +2325,17 @@ mod desktop {
             if let Some(set_notification_handler) = (*api).set_notification_handler {
                 set_notification_handler(Some(notification_handler), std::ptr::null_mut());
             }
+            // Windows librime returns ANSI bytes here, even when the input path was UTF-8.
+            *lock_ignore_poison(&RIME_USER_DATA_DIR) = rime_api_member!(api, get_user_data_dir)
+                .and_then(|get| {
+                    let current = get();
+                    (!current.is_null()).then(|| {
+                        (
+                            PathBuf::from(user_data_dir.to_str().expect("valid user data dir")),
+                            CStr::from_ptr(current).to_bytes().to_vec(),
+                        )
+                    })
+                });
         }
     }
 
@@ -3771,18 +3784,35 @@ mod desktop {
         }
     }
 
+    pub(super) fn initialized_user_dir() -> Result<Option<PathBuf>, String> {
+        let _rime = rime_api_lock();
+        if !*lock_ignore_poison(&RIME_INITIALIZED) {
+            return Ok(None);
+        }
+        let directory = lock_ignore_poison(&RIME_USER_DATA_DIR);
+        let (path, expected) = directory
+            .as_ref()
+            .ok_or("librime user directory is unavailable")?;
+        unsafe {
+            let api = rime_get_api();
+            let get_dir = rime_api_member!(api, get_user_data_dir)
+                .ok_or("librime user directory API is unavailable")?;
+            let current = get_dir();
+            if current.is_null() {
+                return Err("librime user directory is unavailable".into());
+            }
+            if CStr::from_ptr(current).to_bytes() != expected {
+                return Err("librime is initialized for another user directory".into());
+            }
+        }
+        Ok(Some(path.clone()))
+    }
+
     pub(super) fn setup_switch_config(user_dir: &Path, shared_dir: &str) -> Result<(), String> {
         let _rime = rime_api_lock();
-        if *lock_ignore_poison(&RIME_INITIALIZED) {
-            unsafe {
-                let api = rime_get_api();
-                let get_dir = rime_api_member!(api, get_user_data_dir)
-                    .ok_or("librime user directory API is unavailable")?;
-                let current =
-                    cstr_to_str(get_dir()).ok_or("librime user directory is unavailable")?;
-                if Path::new(&current) != user_dir {
-                    return Err("librime is initialized for another user directory".into());
-                }
+        if let Some(current) = initialized_user_dir()? {
+            if current != user_dir {
+                return Err("librime is initialized for another user directory".into());
             }
             return Ok(());
         }
@@ -4399,6 +4429,7 @@ fn with_schema_switch_config<T>(
             user: user_dir.into(),
             shared: default_shared_data_dir(),
         });
+    desktop::initialized_user_dir()?;
     PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
     desktop::setup_switch_config(user_dir, &dirs.shared)?;
     *initialized = Some(dirs);

@@ -260,6 +260,7 @@ class AppController extends ChangeNotifier {
   int _candidatePreviewRequest = 0;
   Future<void>? _candidatePreviewRefresh;
   List<SchemaSwitchDto> schemaSwitches = [];
+  String? schemaSwitchError;
   List<SchemaDto> schemas = [];
   String? currentSchemaId;
   String? get currentSchemaName =>
@@ -750,6 +751,7 @@ class AppController extends ChangeNotifier {
     windowsImeError,
     linuxImeError,
     imeUiError,
+    schemaSwitchError,
     debugError,
     rimeSyncError,
     schemeSyncError,
@@ -1087,8 +1089,14 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readSchemaSwitches() async {
     schemaSwitches = [];
+    schemaSwitchError = null;
     if (local?.deployed == true) {
-      schemaSwitches = await core.getSchemaSwitches();
+      try {
+        schemaSwitches = await core.getSchemaSwitches();
+      } catch (failure) {
+        schemaSwitchError = AppStrings.schemaSwitchUnavailable;
+        debugPrint('Schema switch refresh failed: ${errorText(failure)}');
+      }
     }
   }
 
@@ -3115,11 +3123,18 @@ class AppController extends ChangeNotifier {
   Future<bool> saveSchemaSwitch(SchemaSwitchDto entry, int value) =>
       run(() async {
         if (isAndroid) await _requireStorage();
-        schemaSwitches = await core.setSchemaSwitch(
-          schemaId: entry.schemaId,
-          name: entry.name,
-          value: value,
-        );
+        try {
+          schemaSwitches = await core.setSchemaSwitch(
+            schemaId: entry.schemaId,
+            name: entry.name,
+            value: value,
+          );
+          schemaSwitchError = null;
+        } catch (failure) {
+          schemaSwitchError = AppStrings.schemaSwitchUnavailable;
+          debugPrint('Schema switch save failed: ${errorText(failure)}');
+          throw StateError(schemaSwitchError!);
+        }
         unawaited(refreshCandidatePreview());
       });
 

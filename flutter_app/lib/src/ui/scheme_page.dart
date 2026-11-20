@@ -396,7 +396,8 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ],
         ),
-        if (c.local?.deployed == true && c.schemaSwitches.isNotEmpty)
+        if (c.local?.deployed == true &&
+            (c.schemaSwitches.isNotEmpty || c.schemaSwitchError != null))
           HairlineGridCell(child: SchemaSwitchesSection(controller: c)),
         HairlineGridCell(
           child: const FTextField(

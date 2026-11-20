@@ -1120,6 +1120,20 @@ class SchemaSwitchesSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
+    if (c.schemaSwitchError case final error?) {
+      return Section(
+        title: '方案开关',
+        icon: FLucideIcons.slidersHorizontal,
+        children: [
+          ErrorMessage(error),
+          ActionRow(
+            children: [
+              ActionButton('重试', onPress: c.busy ? null : c.refreshState),
+            ],
+          ),
+        ],
+      );
+    }
     final switches = [
       for (final entry in c.schemaSwitches)
         if (entry.options.isEmpty)

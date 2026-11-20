@@ -24,6 +24,7 @@ mod display_attribute;
 mod edit_session;
 pub mod engine_backend;
 pub mod engine_config;
+mod engine_host;
 mod engine_pipe;
 pub mod engine_status;
 mod globals;
