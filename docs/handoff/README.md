@@ -38,13 +38,13 @@ crates/keytao-macos-ime/build.sh --debug --skip-pkg   # if Swift changed
 
 Known noise:
 
-- `flutter test` has 2 pre-existing `controller_parity_test.dart` failures.
+- `flutter test` has 1 pre-existing `controller_parity_test.dart` failure (`source switching keeps fetched releases and never refetches`).
 - Two keytao-core runtime tests occasionally fail on temp-dir cleanup under load; they pass on rerun.
 - The `cfg(windows)` TSF tests (`commit_retry_tests`, `shortcut_passthrough_tests`) only run on Windows CI. That is the "IME regressions" workflow, which runs on every push to main.
 
 ## Repository state
 
-- `main` is 9 commits ahead of `origin/main` and **not pushed**. The last release is `v1.2.15-alpha.6`.
+- `main` is ahead of `origin/main` (run `git log --oneline origin/main..main`) and **not pushed**. The last release is `v1.2.15-alpha.6`.
 - Unpushed, user-visible changes:
   - Windows font list enabled, and the chosen family is used by the Windows panel.
   - Theme editor groups keep their expansion state while dragging.
@@ -55,9 +55,8 @@ Known noise:
 - Unpushed, no user-visible change:
   - Isolation B0 (`crates/keytao-core/src/runtime_dirs.rs`).
   - Isolation B1 (`crates/keytao-app-core/src/runtime_materialize.rs`, flag `KEYTAO_RUNTIME_ISOLATION` / `runtime_isolation`, default off).
-- **Isolation B2 may be in progress** in `.worktrees/iso` on branch `feat/per-package-deploy`. Check `git -C .worktrees/iso status` first.
-  - If the worktree exists with uncommitted changes, review them against the B2 spec below before continuing.
-  - Do not start B3 until B2 is merged.
+  - Isolation B2 (per-package deploy, structured progress), merged. With the flag off, deploy behaves as before.
+- No worktrees are in flight.
 - Release procedure, run only when the owner says so:
   1. Bump `Cargo.toml` line 18 and the `flutter_app/pubspec.yaml` version (keep the `+1002015` build number).
   2. `cargo update -q --workspace --offline`.
@@ -68,7 +67,7 @@ Known noise:
 
 ## Next work, in order
 
-### 1. Isolation B2: per-package deploy (in progress, see above)
+### 1. Isolation B2: per-package deploy (done, merged; for reference)
 
 - With the flag on:
   - Deploy every stale package in order, with the active package first.
@@ -78,7 +77,7 @@ Known noise:
 - Scheme cards show 部署中 / 等待部署 in order. The deploy text reads `正在部署 <name>（i/n）`, and the IME hints use the same string.
 - iOS stays on full deploy but emits structured progress.
 
-### 2. Isolation B3–B6, per `package-isolation-design.md` section 6, as amended by the critique
+### 2. Isolation B3–B6 (start here), per `package-isolation-design.md` section 6, as amended by the critique
 
 - **Before the flag can ever be on**, fix the two items noted at the end of the design file:
   1. Orphan listing must not treat legacy flat `build/*` as orphans while the flag is on (`package_orphans.rs:122`).
@@ -124,6 +123,13 @@ Open questions for the owner, all unanswered:
 Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` trait refactor) starts after B3.
 
 ## Known follow-ups (not blocking)
+
+- B2 review nits (all behind the isolation flag):
+  - `deploy.rs:493`: isolated paths skip `ensure_remove_filter`/`prepare_candidate_page_size`; Linux skips `launch_keytao_ime`. Confirm materialize regenerates managed patches.
+  - `lib.rs:8035`: with the flag on, `deployed=true` comes from the committed marker without a fingerprint check, so source edits do not prompt a redeploy.
+  - `deploy_child.rs:475`: old app + new deploy child gives `invalid deployment protocol line` on object progress lines.
+  - `controller.dart:2155`: `_packageDeployProgress` clears only on the next deploy.
+  - B1 pre-materialized Lua sources are not rolled back when a build fails.
 
 - Windows (from review):
   - The first candidate render scans system fonts once per process, twice when a theme font is set (`font_resolution.rs:107`, Windows `panel.rs`).
