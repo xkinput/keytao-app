@@ -1783,6 +1783,7 @@ dependencies = [
  "keytao-core",
  "keytao-ime-ipc",
  "keytao-windows-ime",
+ "parking_lot",
  "serde_json",
  "windows",
 ]

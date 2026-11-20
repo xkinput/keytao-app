@@ -47,6 +47,9 @@ use crate::pipe_security::{keytao_runtime_root, process_image, OwnedHandle};
 #[path = "generation_activity.rs"]
 mod generation_activity;
 use generation_activity::{reaper_wait, GenerationActivity};
+#[path = "generation_response.rs"]
+mod generation_response;
+use generation_response::{GenerationResponse, RequestError};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(80);
 const KEY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -141,49 +144,6 @@ fn request_timeout(request: &Request) -> Duration {
     match request {
         Request::Generation => REQUEST_TIMEOUT,
         _ => KEY_TIMEOUT,
-    }
-}
-
-#[derive(Debug)]
-struct RequestError {
-    message: String,
-    written: bool,
-    timed_out: bool,
-}
-
-impl RequestError {
-    fn timeout() -> Self {
-        Self {
-            message: "engine pipe request timed out".into(),
-            written: false,
-            timed_out: true,
-        }
-    }
-
-    fn consume_key(&self) -> bool {
-        self.written && self.timed_out
-    }
-}
-
-impl From<String> for RequestError {
-    fn from(message: String) -> Self {
-        Self {
-            message,
-            written: false,
-            timed_out: false,
-        }
-    }
-}
-
-impl From<&str> for RequestError {
-    fn from(message: &str) -> Self {
-        message.to_owned().into()
-    }
-}
-
-impl From<RequestError> for String {
-    fn from(error: RequestError) -> Self {
-        error.message
     }
 }
 
@@ -395,8 +355,6 @@ impl ImeEngineBackend for PipeEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_key(Instant::now());
         if was_idle {
-            // Check before State decides whether this key needs a new session.
-            poll_generation(&self.shared, true);
             if let Some(reaper) = self.shared.reaper.get() {
                 let _ = reaper.send(ReaperMessage::Activity);
             }
@@ -525,7 +483,7 @@ impl Connection {
         Ok((connection, control, EngineHandle { schema_id }))
     }
 
-    fn open(reaper: Sender<ReaperMessage>, deadline: Instant) -> Result<Self, String> {
+    fn open(reaper: Sender<ReaperMessage>, deadline: Instant) -> Result<Self, RequestError> {
         let identity = crate::pipe_security::current_identity()?;
         let name = wide(&crate::engine_config::pipe_name(
             &identity.sid,
@@ -542,7 +500,9 @@ impl Connection {
                 HANDLE::default(),
             )
         }
-        .map_err(|error| format!("connect to engine pipe: {error}"))?;
+        .map_err(|error| {
+            RequestError::open(format!("connect to engine pipe: {error}"), error.code().0)
+        })?;
         let pipe = Arc::new(OwnedHandle(pipe));
         verify_server_image(pipe.0, &identity)?;
         let mut connection = Self {
@@ -561,7 +521,7 @@ impl Connection {
             deadline,
         )? {
             Response::HelloOk { protocol, .. } if protocol == PROTOCOL_VERSION => {}
-            Response::HelloErr(error) => return Err(format!("engine handshake: {error}")),
+            Response::HelloErr(error) => return Err(format!("engine handshake: {error}").into()),
             _ => return Err("invalid engine handshake response".into()),
         }
         Ok(connection)
@@ -783,7 +743,7 @@ fn reap_pending(receiver: Receiver<ReaperMessage>, shared: std::sync::Weak<Share
                     .remaining(Instant::now())
                     .is_some();
                 if active {
-                    poll_generation(&shared, false);
+                    poll_generation(&shared);
                 }
             }
         }
@@ -796,7 +756,14 @@ fn reap_pending(receiver: Receiver<ReaperMessage>, shared: std::sync::Weak<Share
     }
 }
 
-fn poll_generation(shared: &Shared, synchronous: bool) {
+fn poll_generation(shared: &Shared) {
+    poll_generation_with(shared, Connection::open);
+}
+
+fn poll_generation_with(
+    shared: &Shared,
+    open: impl FnOnce(Sender<ReaperMessage>, Instant) -> Result<Connection, RequestError>,
+) {
     if !shared.active.load(Ordering::Acquire)
         || shared.reload_required.load(Ordering::Acquire)
         || shared.reconnect_required.load(Ordering::Acquire)
@@ -804,16 +771,8 @@ fn poll_generation(shared: &Shared, synchronous: bool) {
         return;
     }
     let deadline = Instant::now() + REQUEST_TIMEOUT;
-    let mut control = if synchronous {
-        shared
-            .control
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    } else {
-        let Ok(control) = shared.control.try_lock() else {
-            return;
-        };
-        control
+    let Ok(mut control) = shared.control.try_lock() else {
+        return;
     };
     if !shared.active.load(Ordering::Acquire)
         || shared.reload_required.load(Ordering::Acquire)
@@ -822,10 +781,21 @@ fn poll_generation(shared: &Shared, synchronous: bool) {
         return;
     }
     let epoch = shared.epoch.load(Ordering::Acquire);
-    let Some(connection) = control.as_mut() else {
-        return;
-    };
-    let response = connection.request(Request::Generation, deadline);
+    let response = (|| {
+        if control.is_none() {
+            // A timed-out control stream cannot be reused, but its key session is still valid.
+            let reaper = shared
+                .reaper
+                .get()
+                .ok_or("pipe reaper unavailable")?
+                .clone();
+            *control = Some(open(reaper, deadline)?);
+        }
+        control
+            .as_mut()
+            .unwrap()
+            .request(Request::Generation, deadline)
+    })();
     if shared.epoch.load(Ordering::Acquire) != epoch {
         *control = None;
         return;
@@ -853,24 +823,25 @@ fn apply_generation_response(
     {
         return;
     }
+    let generation_response = match &response {
+        Ok(Response::Generation(generation)) => GenerationResponse::Generation(*generation),
+        Ok(Response::Err(EngineError::Busy)) => GenerationResponse::Busy,
+        Err(error) => error.generation_response(),
+        _ => GenerationResponse::Disconnected,
+    };
+    if !generation_response.requires_reload(shared.generation.load(Ordering::Acquire)) {
+        return;
+    }
+    shared.clear_usable_session();
+    shared.reload_required.store(true, Ordering::Release);
     match response {
-        Ok(Response::Generation(generation)) => {
-            if shared.generation.load(Ordering::Acquire) != generation {
-                shared.clear_usable_session();
-                shared.reload_required.store(true, Ordering::Release);
-            }
-        }
-        Ok(Response::Err(EngineError::Busy)) => {}
+        Ok(Response::Generation(_)) => {}
         Ok(_) => {
-            shared.clear_usable_session();
             inner.connection = None;
-            shared.reload_required.store(true, Ordering::Release);
             log_disconnect("invalid engine generation response");
         }
         Err(error) => {
-            shared.clear_usable_session();
             inner.connection = None;
-            shared.reload_required.store(true, Ordering::Release);
             log_disconnect(&error.message);
         }
     }
@@ -879,10 +850,15 @@ fn apply_generation_response(
 fn verify_server_image(
     pipe: HANDLE,
     identity: &crate::pipe_security::Identity,
-) -> Result<(), String> {
+) -> Result<(), RequestError> {
     let mut process_id = 0;
     unsafe { GetNamedPipeServerProcessId(pipe, &mut process_id) }
-        .map_err(|error| format!("read engine server process ID: {error}"))?;
+        .map_err(|error| {
+            RequestError::verification(
+                format!("read engine server process ID: {error}"),
+                error.code().0,
+            )
+        })?;
     let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
     {
         Ok(process) => OwnedHandle(process),
@@ -891,7 +867,12 @@ fn verify_server_image(
         {
             return verify_pipe_owner(pipe, &identity.sid);
         }
-        Err(error) => return Err(format!("open engine server process: {error}")),
+        Err(error) => {
+            return Err(RequestError::verification(
+                format!("open engine server process: {error}"),
+                error.code().0,
+            ));
+        }
     };
     let image = match process_image(process.0) {
         Ok(image) => image,
@@ -900,12 +881,21 @@ fn verify_server_image(
         {
             return verify_pipe_owner(pipe, &identity.sid);
         }
-        Err(error) => return Err(format!("read engine server image path: {error}")),
+        Err(error) => {
+            return Err(RequestError::verification(
+                format!("read engine server image path: {error}"),
+                error.code().0,
+            ));
+        }
     };
-    let root = keytao_runtime_root()?;
+    let root = keytao_runtime_root().map_err(RequestError::verification_unavailable)?;
     let image = image
         .canonicalize()
-        .map_err(|error| format!("resolve engine server image path: {error}"))?;
+        .map_err(|error| {
+            RequestError::verification_unavailable(format!(
+                "resolve engine server image path: {error}"
+            ))
+        })?;
     if !is_descendant(&image, &root) {
         return Err("engine server image is outside the KeyTao runtime root".into());
     }
@@ -913,7 +903,7 @@ fn verify_server_image(
     Ok(())
 }
 
-fn verify_pipe_owner(pipe: HANDLE, user_sid: &str) -> Result<(), String> {
+fn verify_pipe_owner(pipe: HANDLE, user_sid: &str) -> Result<(), RequestError> {
     let mut owner = PSID::default();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     unsafe {
@@ -929,17 +919,26 @@ fn verify_pipe_owner(pipe: HANDLE, user_sid: &str) -> Result<(), String> {
         )
     }
     .ok()
-    .map_err(|error| format!("read engine pipe owner: {error}"))?;
+    .map_err(|error| {
+        RequestError::verification(format!("read engine pipe owner: {error}"), error.code().0)
+    })?;
     let owner_sid = (|| {
         if owner.0.is_null() {
             return Err("engine pipe has no owner SID".into());
         }
         let mut sid_text = PWSTR::null();
         unsafe { ConvertSidToStringSidW(owner, &mut sid_text) }
-            .map_err(|error| format!("encode engine pipe owner SID: {error}"))?;
+            .map_err(|error| {
+                RequestError::verification(
+                    format!("encode engine pipe owner SID: {error}"),
+                    error.code().0,
+                )
+            })?;
         let sid = unsafe { sid_text.to_string() };
         unsafe { LocalFree(HLOCAL(sid_text.0.cast())) };
-        sid.map_err(|error| format!("decode engine pipe owner SID: {error}"))
+        sid.map_err(|error| {
+            RequestError::verification_unavailable(format!("decode engine pipe owner SID: {error}"))
+        })
     })();
     unsafe { LocalFree(HLOCAL(descriptor.0)) };
     if owner_sid? != user_sid {
@@ -1231,7 +1230,86 @@ mod tests {
     }
 
     #[test]
-    fn generation_failure_is_applied_after_current_key_releases_connection() {
+    fn generation_timeout_and_busy_do_not_reload_current_session() {
+        let engine = engine();
+        apply_generation_response(&engine.shared, 0, Err(RequestError::timeout()));
+        assert!(!engine.reload_needed());
+        apply_generation_response(&engine.shared, 0, Ok(Response::Err(EngineError::Busy)));
+        assert!(!engine.reload_needed());
+    }
+
+    #[test]
+    fn control_reopen_after_timeout_preserves_or_invalidates_the_session_by_failure() {
+        use windows::Win32::Foundation::{
+            ERROR_BROKEN_PIPE, ERROR_NOT_ENOUGH_MEMORY, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
+            ERROR_TIMEOUT,
+        };
+
+        for (error, requires_reload) in [
+            (
+                RequestError::open("pipe busy".into(), ERROR_PIPE_BUSY.to_hresult().0),
+                false,
+            ),
+            (
+                RequestError::open("open timeout".into(), ERROR_SEM_TIMEOUT.to_hresult().0),
+                false,
+            ),
+            (
+                RequestError::open("open timeout".into(), ERROR_TIMEOUT.to_hresult().0),
+                false,
+            ),
+            (RequestError::timeout(), false),
+            (
+                RequestError::verification(
+                    "server query unavailable".into(),
+                    ERROR_NOT_ENOUGH_MEMORY.to_hresult().0,
+                ),
+                false,
+            ),
+            (
+                RequestError::open("pipe disconnected".into(), ERROR_BROKEN_PIPE.to_hresult().0),
+                true,
+            ),
+            (
+                RequestError::from("engine server image is outside the KeyTao runtime root"),
+                true,
+            ),
+            (
+                RequestError::from("engine pipe owner does not match the client user"),
+                true,
+            ),
+        ] {
+            let engine = engine();
+            let (reaper, _receiver) = mpsc::channel();
+            engine.shared.reaper.set(reaper).unwrap();
+            *engine.shared.usable_session.lock().unwrap() = Some(Arc::new(()));
+            apply_generation_response(&engine.shared, 0, Err(RequestError::timeout()));
+            assert!(!engine.reload_needed());
+
+            let opened = std::cell::Cell::new(false);
+            poll_generation_with(&engine.shared, |_, _| {
+                opened.set(true);
+                Err(error)
+            });
+            assert!(opened.get());
+            assert!(engine.shared.control.lock().unwrap().is_none());
+            assert_eq!(engine.reload_needed(), requires_reload);
+            assert_eq!(
+                engine.shared.usable_session.lock().unwrap().is_some(),
+                !requires_reload
+            );
+        }
+    }
+
+    #[test]
+    fn generation_mismatch_reloads_current_session() {
+        let engine = engine();
+        apply_generation_response(&engine.shared, 0, Ok(Response::Generation(1)));
+        assert!(engine.reload_needed());
+    }
+
+    #[test]
+    fn generation_disconnect_is_applied_after_current_key_releases_connection() {
         let engine = engine();
         let inner = engine.shared.inner.lock().unwrap();
         let shared = engine.shared.clone();
@@ -1240,7 +1318,7 @@ mod tests {
         let (done, completed) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             worker_ready.wait();
-            apply_generation_response(&shared, 0, Err(RequestError::timeout()));
+            apply_generation_response(&shared, 0, Err("engine pipe disconnected".into()));
             done.send(()).unwrap();
         });
         ready.wait();

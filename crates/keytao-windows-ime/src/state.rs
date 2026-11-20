@@ -143,6 +143,10 @@ pub struct TsfState {
     pub windows_hide_pending: bool,
     pub(crate) pending_window_update: Option<PendingWindowUpdate>,
     pub(crate) pending_commit_retry: Option<PendingCommitRetry>,
+    pub(crate) deferred_keys: crate::deferred_keys::DeferredKeys,
+    pub(crate) deferred_context: Option<ITfContext>,
+    pub(crate) deferred_replaying: bool,
+    pub(crate) claimed_key: Option<(u16, isize)>,
     pub(crate) pending_composition_ends: Vec<crate::key_event_sink::PendingCompositionEnd>,
     pub(crate) composition_end_flush_in_progress: bool,
     pub candidate_ui: Option<CandidateUiManager>,
@@ -303,6 +307,10 @@ impl TsfState {
             windows_hide_pending: false,
             pending_window_update: None,
             pending_commit_retry: None,
+            deferred_keys: crate::deferred_keys::DeferredKeys::default(),
+            deferred_context: None,
+            deferred_replaying: false,
+            claimed_key: None,
             pending_composition_ends: Vec::new(),
             composition_end_flush_in_progress: false,
             candidate_ui: Some(CandidateUiManager::new()),
@@ -1829,6 +1837,9 @@ fn take_active_composition(
     shared_state: &SharedState,
 ) -> Option<(ITfContext, ITfComposition, u32)> {
     let mut st = shared_state.borrow_mut();
+    st.deferred_keys.reset();
+    st.deferred_context = None;
+    st.claimed_key = None;
     st.input_generation = st.input_generation.wrapping_add(1);
     st.pending_commit_retry = None;
     let shift_pending = st.shift_pressed_without_key;
@@ -1897,6 +1908,9 @@ pub(crate) fn clear_input_after_composition_terminated(
         st.input_generation = st.input_generation.wrapping_add(1);
         st.pending_commit_retry = None;
         let in_write_session = st.ime_write_session_active;
+        st.deferred_keys.reset();
+        st.deferred_context = None;
+        st.claimed_key = None;
         let shift_pending = st.shift_pressed_without_key;
         st.shift_pressed_without_key = false;
         st.session_reset_pending = true;

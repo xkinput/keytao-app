@@ -37,6 +37,7 @@ use windows::{
 };
 
 use crate::{
+    deferred_keys::{DeferredKey, KeyEventSource},
     edit_session::{
         take_selection_range, with_async_dontcare_write_session, with_read_session,
         with_write_session,
@@ -2120,6 +2121,146 @@ fn process_key_result(
     runtime_session(shared_state)?.process_key(keysym, mods)
 }
 
+fn process_deferred_key(
+    state: &SharedState,
+    key: DeferredKey,
+    before: &ImeState,
+) -> Option<KeyProcessResult> {
+    if key.enter {
+        return runtime_session(state)?.process_enter();
+    }
+    let theme = current_theme();
+    let panel_layout = if theme.ui.hide_candidate_panel {
+        key_policy::CandidatePanelLayout::Hidden
+    } else {
+        match theme.panel.orientation {
+            keytao_theme::PanelOrientation::Horizontal => {
+                key_policy::CandidatePanelLayout::Horizontal
+            }
+            keytao_theme::PanelOrientation::Vertical => key_policy::CandidatePanelLayout::Vertical,
+        }
+    };
+    let keysym = key_policy::candidate_arrow_key(key.keysym, key.mods, before, panel_layout);
+    process_key_result(state, keysym, key.mods)
+}
+
+fn defer_key(
+    state: &SharedState,
+    context: &ITfContext,
+    key: DeferredKey,
+    already_written: bool,
+) -> bool {
+    let consumed = {
+        let mut st = state.borrow_mut();
+        if st
+            .deferred_context
+            .as_ref()
+            .is_some_and(|old| old.as_raw() != context.as_raw())
+        {
+            st.deferred_keys.reset();
+        }
+        let consumed = st
+            .deferred_keys
+            .defer_failed(key, already_written, Instant::now());
+        if !already_written {
+            st.deferred_context = consumed.then(|| context.clone());
+        }
+        consumed
+    };
+    if consumed && !already_written {
+        let weak = Rc::downgrade(state);
+        crate::state::with_detached_windows(state, false, |window, _| {
+            window.arm_deferred_keys(&weak);
+        });
+    }
+    consumed
+}
+
+fn deferred_input_pending(state: &SharedState) -> bool {
+    let st = state.borrow();
+    st.deferred_keys.front().is_some() || st.deferred_replaying
+}
+
+pub(crate) fn flush_deferred_keys(state: &SharedState) {
+    let (context, generation) = {
+        let Ok(mut st) = state.try_borrow_mut() else {
+            return;
+        };
+        st.deferred_keys.expire(Instant::now());
+        if st.deferred_replaying
+            || st.ime_write_session_active
+            || st.caret_probe_session_in_progress
+            || st.pending_commit_retry.is_some()
+        {
+            return;
+        }
+        if st.deferred_keys.front().is_none() {
+            st.deferred_context = None;
+            return;
+        }
+        let Some(context) = st.deferred_context.clone() else {
+            return;
+        };
+        st.deferred_replaying = true;
+        (context, st.input_generation)
+    };
+    let _ = (|| -> Result<()> {
+        if input_is_blocked(state, Some(&context)) {
+            reset_input_for_focus_change(state);
+            return Ok(());
+        }
+        let Some(client_id) =
+            prepare_engine_for_key(&context, state, KeyEventSource::DeferredKey)?
+        else {
+            return Ok(());
+        };
+        loop {
+            let key = {
+                let mut st = state.borrow_mut();
+                if st.input_generation != generation
+                    || st
+                        .deferred_context
+                        .as_ref()
+                        .is_none_or(|bound| bound.as_raw() != context.as_raw())
+                {
+                    break;
+                }
+                st.deferred_keys.expire(Instant::now());
+                let Some(key) = st.deferred_keys.front() else {
+                    break;
+                };
+                key
+            };
+            let before = cached_ime_state(state).unwrap_or_else(ImeState::empty);
+            let result = process_deferred_key(state, key, &before);
+            if state.borrow().input_generation != generation {
+                break;
+            }
+            let Some(mut result) = result else {
+                if runtime_session(state).is_some_and(|session| session.consume_failed_key()) {
+                    state.borrow_mut().deferred_keys.pop();
+                    continue;
+                }
+                start_reload_if_needed(state);
+                break;
+            };
+            state.borrow_mut().deferred_keys.pop();
+            complete_unhandled_key(key.keysym, key.mods, &mut result);
+            // Timer replay runs outside TSF key callbacks, where synchronous writes may be rejected.
+            apply_ime_state(&context, client_id, state, result.state, true, true, None)?;
+            if state.borrow().input_generation != generation {
+                break;
+            }
+        }
+        Ok(())
+    })();
+    let mut st = state.borrow_mut();
+    st.deferred_replaying = false;
+    if st.deferred_keys.front().is_none() {
+        st.deferred_context = None;
+    }
+}
+
 /// What a click on the candidate panel maps to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelClick {
@@ -2168,7 +2309,7 @@ pub(crate) fn handle_panel_click(shared_state: &SharedState, click: PanelClick) 
 fn prepare_engine_for_key(
     context: &ITfContext,
     shared_state: &SharedState,
-    callback: &str,
+    callback: KeyEventSource,
 ) -> Result<Option<u32>> {
     poll_engine_builds(shared_state);
     let (engine_ready, engine_building, engine_error) = {
@@ -2182,7 +2323,7 @@ fn prepare_engine_for_key(
     if !engine_ready {
         start_engine_warmup(shared_state);
         append_key_diagnostic!(
-            "{callback} engine not ready building={engine_building} error={engine_error:?}"
+            "{callback:?} engine not ready building={engine_building} error={engine_error:?}"
         );
         return Ok(None);
     }
@@ -2209,7 +2350,7 @@ fn prepare_engine_for_key(
             shared_state,
             ImeState::empty(),
             false,
-            false,
+            callback.async_dontcare(),
             None,
         )?;
     }
@@ -2254,10 +2395,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
+            state.borrow_mut().claimed_key = None;
             // TSF only calls OnKeyDown for keys claimed here, so solo-Shift state
             // has to be maintained in the test callback (windows-1).
             state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+                || deferred_input_pending(&state);
             if is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
@@ -2267,7 +2410,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             }
             prime_theme_resolver();
             poll_engine_builds(&state);
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+                || deferred_input_pending(&state);
             if !should_eat_key(vk, composing, mods)
                 && !cached_ime_state(&state)
                     .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
@@ -2297,6 +2441,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     st.ascii_mode,
                 )
             };
+            let is_composing = cached_state.as_ref().is_some_and(has_visible_state)
+                || deferred_input_pending(&state);
+            let ascii_rejects = !is_composing
+                && cached_state.as_ref().map_or(persisted_ascii_mode, |st| st.ascii_mode)
+                && ascii_mode_rejects_key(vk, mods);
+            if ascii_rejects { return Ok(BOOL::from(false)); }
             if !engine_ready || reload_needed {
                 if !engine_ready {
                     start_engine_warmup(&state);
@@ -2305,25 +2455,16 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     start_reload_if_needed(&state);
                 }
                 crate::state::refresh_deployment_hint(&state);
-                append_key_diagnostic!(
-                    "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing=false eat=false"
-                );
-                return Ok(BOOL::from(false));
+                let eat = !is_caps_lock_vk(vk)
+                    && state.borrow_mut().deferred_keys.can_queue(Instant::now());
+                state.borrow_mut().claimed_key = eat.then_some((vk, lparam.0));
+                return Ok(BOOL::from(eat));
             }
-            let is_composing = cached_state
-                .as_ref()
-                .map(has_visible_state)
-                .unwrap_or(false);
-            let ascii_rejects = !is_composing
-                // A focus change clears `ime_state`; fall back to the persisted mode.
-                && cached_state
-                    .as_ref()
-                    .map_or(persisted_ascii_mode, |st| st.ascii_mode)
-                && ascii_mode_rejects_key(vk, mods);
             let chord_key = cached_state
                 .as_ref()
                 .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, st).is_some());
             let eat = !ascii_rejects && (chord_key || should_eat_key(vk, is_composing, mods));
+            state.borrow_mut().claimed_key = eat.then_some((vk, lparam.0));
             append_key_diagnostic!(
                 "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
             );
@@ -2405,20 +2546,33 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
+            let claimed = state.borrow_mut().claimed_key.take() == Some((vk, lparam.0));
             state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
             // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
             // shortcut policy before context inspection, warmup, or Enter's
             // modifier-free process_enter path.
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
-            if is_application_shortcut(vk, mods, composing) {
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+                || deferred_input_pending(&state);
+            if !claimed && is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
-            if !should_eat_key(vk, composing, mods)
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+                || deferred_input_pending(&state);
+            let ascii_mode = {
+                let st = state.borrow();
+                st.ime_state
+                    .as_ref()
+                    .map_or(st.ascii_mode, |ime| ime.ascii_mode)
+            };
+            if !claimed && !composing && ascii_mode && ascii_mode_rejects_key(vk, mods) {
+                return Ok(BOOL::from(false));
+            }
+            if !claimed
+                && !should_eat_key(vk, composing, mods)
                 && !cached_ime_state(&state)
                     .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
             {
@@ -2435,63 +2589,57 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
 
+            let Some(keysym) = vk_to_keysym(vk, lparam.0, mods) else {
+                return Ok(BOOL::from(false));
+            };
+            let key = DeferredKey {
+                keysym,
+                mods: rime_mod_mask_for_vk(vk, mods),
+                enter: is_enter_vk(vk),
+            };
+            if deferred_input_pending(&state) {
+                let consumed = !is_caps_lock_vk(vk) && defer_key(&state, &context, key, false);
+                flush_deferred_keys(&state);
+                return Ok(BOOL::from(consumed));
+            }
+
             let prepared_engine = {
                 let mut st = state.borrow_mut();
                 st.shift_pressed_without_key = false;
                 st.key_context = Some(context.clone());
                 drop(st);
-                prepare_engine_for_key(&context, &state, "OnKeyDown")?
+                prepare_engine_for_key(&context, &state, KeyEventSource::OnKeyDown)?
             };
             let client_id = match prepared_engine {
                 Some(client_id) => client_id,
-                None => return Ok(BOOL::from(false)),
+                None => {
+                    return Ok(BOOL::from(
+                        !is_caps_lock_vk(vk) && defer_key(&state, &context, key, false),
+                    ))
+                }
             };
 
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
 
-            if should_bypass_empty_composition(vk, mods, &before_state)
+            if !claimed
+                && should_bypass_empty_composition(vk, mods, &before_state)
                 && chord_keysym_for_vk(vk, lparam.0, mods, &before_state).is_none()
             {
                 hide_candidate_window(&state);
                 return Ok(BOOL::from(false));
             }
 
-            let keysym = match vk_to_keysym(vk, lparam.0, mods) {
-                Some(keysym) => keysym,
-                None => {
-                    append_key_diagnostic!("OnKeyDown mapped=false");
-                    return Ok(BOOL::from(false));
-                }
-            };
-            let mods = rime_mod_mask_for_vk(vk, mods);
+            let mods = key.mods;
             // Enter has exactly one meaning across all platforms: hand XK_Return to
             // Rime and let core fall back to committing the raw input (D5).
-            let result = if is_enter_vk(vk) {
-                runtime_session(&state).and_then(|session| session.process_enter())
-            } else {
-                let theme = current_theme();
-                let panel_layout = if theme.ui.hide_candidate_panel {
-                    key_policy::CandidatePanelLayout::Hidden
-                } else {
-                    match theme.panel.orientation {
-                        keytao_theme::PanelOrientation::Horizontal => {
-                            key_policy::CandidatePanelLayout::Horizontal
-                        }
-                        keytao_theme::PanelOrientation::Vertical => {
-                            key_policy::CandidatePanelLayout::Vertical
-                        }
-                    }
-                };
-                let mapped_keysym =
-                    key_policy::candidate_arrow_key(keysym, mods, &before_state, panel_layout);
-                process_key_result(&state, mapped_keysym, mods)
-            };
+            let result = process_deferred_key(&state, key, &before_state);
             let mut result = match result {
                 Some(r) => r,
                 None => {
-                    let consumed = !is_caps_lock_vk(vk)
-                        && runtime_session(&state)
-                            .is_some_and(|session| session.consume_failed_key());
+                    let already_written =
+                        runtime_session(&state).is_some_and(|session| session.consume_failed_key());
+                    let consumed =
+                        !is_caps_lock_vk(vk) && defer_key(&state, &context, key, already_written);
                     append_key_diagnostic!("OnKeyDown result=false eat={consumed}");
                     // Another text service in this host may be deploying a
                     // new public snapshot. Core declines without waiting for
@@ -2501,6 +2649,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     return Ok(BOOL::from(consumed));
                 }
             };
+            state.borrow_mut().deferred_keys.reset();
             state.borrow_mut().deployment_loaded();
             complete_unhandled_key(keysym, mods, &mut result);
             let ime_state = result.state;
@@ -2589,7 +2738,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 }
                 st.key_context = Some(context.clone());
                 drop(st);
-                prepare_engine_for_key(&context, &state, "OnKeyUp")?
+                prepare_engine_for_key(&context, &state, KeyEventSource::OnKeyUp)?
             };
             let client_id = match prepared_engine {
                 Some(client_id) => client_id,

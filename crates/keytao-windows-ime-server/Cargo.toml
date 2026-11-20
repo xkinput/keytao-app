@@ -4,7 +4,11 @@ version.workspace = true
 edition = "2021"
 description = "Per-user-session KeyTao Windows IME engine server"
 
+[dependencies]
+parking_lot = "0.12"
+
 [dev-dependencies]
+keytao-core = { path = "../keytao-core" }
 keytao-ime-ipc = { path = "../keytao-ime-ipc" }
 
 [target.'cfg(windows)'.dependencies]

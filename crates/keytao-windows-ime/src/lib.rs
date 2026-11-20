@@ -18,6 +18,7 @@ mod app_actions;
 mod appcontainer;
 mod candidate_ui;
 mod candidate_win;
+mod deferred_keys;
 mod display_attribute;
 mod edit_session;
 pub mod engine_backend;

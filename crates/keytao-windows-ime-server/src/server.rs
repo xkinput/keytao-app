@@ -1,3 +1,4 @@
+use crate::runtime_state::{lock_for_key, reload_candidate, KEY_WAIT_BUDGET};
 use keytao_core::runtime_log::{self, Level};
 use keytao_ime_ipc::{
     read_frame, read_response, write_frame, ClientRole, EngineError, Request, RequestEnvelope,
@@ -11,6 +12,7 @@ use keytao_windows_ime::{
         process_identity, process_image, Identity, OwnedHandle,
     },
 };
+use parking_lot::Mutex;
 use std::{
     fs::File,
     io::{self, Read, Write},
@@ -19,7 +21,7 @@ use std::{
         io::{AsRawHandle, FromRawHandle},
     },
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, TryLockError},
+    sync::{Arc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant},
 };
 use windows::{
@@ -298,13 +300,9 @@ fn installed_process(
     Ok(image)
 }
 
-#[derive(Default)]
-struct Runtime {
-    engine: Option<InProcEngine>,
-    generation: u64,
-    ready: bool,
-    deploying: bool,
-}
+type Runtime = crate::runtime_state::Runtime<InProcEngine>;
+
+static MAINTENANCE_LOCK: Mutex<()> = Mutex::new(());
 
 fn ensure_deploy_job() -> Result<(), String> {
     // Keep the sole, non-inherited handle until server exit; children inherit job membership.
@@ -363,14 +361,9 @@ fn finish_deploy(
 }
 
 fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
-    static DEPLOY_LOCK: Mutex<()> = Mutex::new(());
-    let _deploy = DEPLOY_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _deploy = MAINTENANCE_LOCK.lock();
     {
-        let mut runtime = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut runtime = runtime.lock();
         if !runtime.ready {
             return runtime.deploy();
         }
@@ -393,9 +386,7 @@ fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
         if !keytao_core::schema_install_state(stage.path()).deployed {
             return Err("staged deployment has no usable schema".into());
         }
-        let mut runtime = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut runtime = runtime.lock();
         let engine = runtime
             .engine
             .as_ref()
@@ -429,12 +420,9 @@ fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
         }
         result
     })();
-    let mut runtime = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.deploying = false;
-    runtime.write_status(
-        result.as_ref().err().map(String::as_str),
+    let schema = {
+        let mut runtime = runtime.lock();
+        runtime.deploying = false;
         runtime
             .ready
             .then(|| {
@@ -443,8 +431,9 @@ fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
                     .as_ref()
                     .map(|engine| engine.state().schema_id)
             })
-            .flatten(),
-    );
+            .flatten()
+    };
+    Runtime::write_status(result.as_ref().err().map(String::as_str), schema);
     result
 }
 
@@ -490,7 +479,7 @@ impl Runtime {
                     } else {
                         let engine = InProcEngine::default();
                         engine.build_server()?;
-                        self.engine = Some(engine);
+                        self.engine = Some(Arc::new(engine));
                     }
                     Ok(())
                 },
@@ -517,7 +506,7 @@ impl Runtime {
         } else {
             result
         };
-        self.write_status(
+        Self::write_status(
             result.as_ref().err().map(String::as_str),
             self.ready
                 .then(|| self.engine.as_ref().map(|engine| engine.state().schema_id))
@@ -526,46 +515,7 @@ impl Runtime {
         result
     }
 
-    fn refresh(&mut self) -> Result<(), String> {
-        if self.deploying {
-            return Ok(());
-        }
-        let changed = self
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.reload_needed());
-        if self.engine.is_some() && (changed || !self.ready) {
-            let was_ready = self.ready;
-            self.ready = false;
-            let engine = self.engine.as_ref().unwrap();
-            let result = engine.reload_server();
-            // Schema-only requests preserve sessions, including their composition.
-            if was_ready && !matches!(&result, Ok(false)) {
-                self.generation = self.generation.wrapping_add(1);
-            }
-            self.write_status(
-                result.as_ref().err().map(String::as_str),
-                result.as_ref().ok().map(|_| engine.state().schema_id),
-            );
-            result?;
-            self.ready = true;
-        }
-        if self.engine.is_none() {
-            let engine = InProcEngine::default();
-            let result = engine.build_server();
-            self.write_status(
-                result.as_ref().err().map(String::as_str),
-                result.as_ref().ok().map(|handle| handle.schema_id.clone()),
-            );
-            result?;
-            self.engine = Some(engine);
-            self.generation = self.generation.wrapping_add(1);
-            self.ready = true;
-        }
-        Ok(())
-    }
-
-    fn write_status(&self, error: Option<&str>, schema: Option<String>) {
+    fn write_status(error: Option<&str>, schema: Option<String>) {
         if let Some(dir) = keytao_core::default_user_data_dir() {
             if let Err(error) = engine_status::write_status(&dir, error, schema.as_deref()) {
                 keytao_core::rt_log!(
@@ -578,13 +528,50 @@ impl Runtime {
         }
     }
 
-    fn session(&mut self) -> Result<(InProcEngine, u64), String> {
-        self.refresh()?;
-        Ok((
-            self.engine.as_ref().unwrap().fork_session()?,
-            self.generation,
-        ))
+    fn session(&self) -> Result<(InProcEngine, u64, String), String> {
+        let engine = self.engine.as_ref().unwrap().fork_session()?;
+        let schema_id = engine.state().schema_id;
+        Ok((engine, self.generation, schema_id))
     }
+}
+
+// Callers hold MAINTENANCE_LOCK so deployment cannot race the unlocked checks/reload.
+fn refresh(runtime: &Mutex<Runtime>) -> Result<(), String> {
+    if let Some(engine) = reload_candidate(runtime, InProcEngine::reload_needed) {
+        let was_ready = {
+            let mut runtime = runtime.lock();
+            let was_ready = runtime.ready;
+            runtime.ready = false;
+            runtime.refreshing = true;
+            was_ready
+        };
+        let result = engine.reload_server();
+        let schema = result.as_ref().ok().map(|_| engine.state().schema_id);
+        {
+            let mut runtime = runtime.lock();
+            // Schema-only requests preserve sessions, including their composition.
+            if was_ready && !matches!(&result, Ok(false)) {
+                runtime.generation = runtime.generation.wrapping_add(1);
+            }
+            runtime.ready = result.is_ok();
+            runtime.refreshing = false;
+        }
+        Runtime::write_status(result.as_ref().err().map(String::as_str), schema);
+        result?;
+    } else if runtime.lock().engine.is_none() {
+        let engine = Arc::new(InProcEngine::default());
+        let result = engine.build_server();
+        Runtime::write_status(
+            result.as_ref().err().map(String::as_str),
+            result.as_ref().ok().map(|handle| handle.schema_id.clone()),
+        );
+        result?;
+        let mut runtime = runtime.lock();
+        runtime.engine = Some(engine);
+        runtime.generation = runtime.generation.wrapping_add(1);
+        runtime.ready = true;
+    }
+    Ok(())
 }
 
 struct ReloadNotification(HANDLE);
@@ -634,6 +621,7 @@ pub fn run() -> Result<(), String> {
     loop {
         let watched_runtime = Arc::clone(&runtime);
         let watched_dir = dir.clone();
+        let mut stamp = keytao_core::ReloadStampGate::new(&watched_dir);
         let started = std::thread::Builder::new()
             .name("ime-runtime-reload".into())
             .spawn(move || {
@@ -644,13 +632,21 @@ pub fn run() -> Result<(), String> {
                         std::thread::sleep(Duration::from_secs(1));
                         notification = ReloadNotification::new(&watched_dir);
                     }
-                    let result = {
-                        let mut runtime = watched_runtime.lock().unwrap_or_else(|p| p.into_inner());
-                        if runtime.engine.is_none() {
-                            continue;
-                        }
-                        runtime.refresh()
+                    // Status/current-schema writes and timeouts are not reload requests.
+                    let Some(signature) = stamp.pending() else {
+                        continue;
                     };
+                    let Some(_maintenance) = MAINTENANCE_LOCK.try_lock() else {
+                        continue;
+                    };
+                    if watched_runtime.lock().engine.is_none() {
+                        continue;
+                    }
+                    let result = refresh(&watched_runtime);
+                    if result.is_ok() {
+                        stamp.commit(signature);
+                    }
+                    drop(_maintenance);
                     if let Err(error) = result {
                         keytao_core::rt_log!(Level::Info, "ipc", "reload_failed", msg = error);
                         std::thread::sleep(Duration::from_secs(5));
@@ -703,7 +699,7 @@ pub fn run() -> Result<(), String> {
                 continue;
             }
         };
-        let connection = Arc::new(Mutex::new(Some(std::mem::replace(&mut listener, next))));
+        let connection = Arc::new(StdMutex::new(Some(std::mem::replace(&mut listener, next))));
         let client_connection = Arc::clone(&connection);
         let identity = identity.clone();
         let runtime = runtime.clone();
@@ -831,7 +827,7 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
             )
             .is_ok()
         {
-            Some(runtime.lock().unwrap_or_else(|p| p.into_inner()))
+            Some((MAINTENANCE_LOCK.lock(), runtime.lock()))
         } else {
             None
         };
@@ -880,12 +876,20 @@ struct ClientSession {
 fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runtime>) -> Response {
     match request {
         Request::CreateSession => {
-            // Keep the schema read inside the deploy barrier as it may rebuild a session.
-            let mut runtime = runtime.lock().unwrap_or_else(|p| p.into_inner());
-            let result = runtime.session();
+            let result = loop {
+                let current = runtime.lock();
+                if current.deploying && current.ready {
+                    // Staging keeps the live engine available to new sessions too.
+                    break current.session();
+                }
+                drop(current);
+                let Some(_maintenance) = MAINTENANCE_LOCK.try_lock_for(KEY_WAIT_BUDGET) else {
+                    continue;
+                };
+                break refresh(runtime).and_then(|()| runtime.lock().session());
+            };
             match result {
-                Ok((engine, generation)) => {
-                    let schema_id = engine.state().schema_id;
+                Ok((engine, generation, schema_id)) => {
                     session.engine = Some(engine);
                     session.generation = Some(generation);
                     session.initial_generation = Some(generation);
@@ -903,7 +907,7 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
             if let Some(generation) = session.initial_generation.take() {
                 return Response::Generation(generation);
             }
-            let Ok(runtime) = runtime.try_lock() else {
+            let Some(runtime) = runtime.try_lock() else {
                 return Response::Err(EngineError::Busy);
             };
             Response::Generation(runtime.generation)
@@ -915,19 +919,11 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
             "Shutdown requires caller authorization".into(),
         )),
         request => {
-            // Brief stamp checks must not turn a composition key into raw input.
-            let deadline = Instant::now() + Duration::from_millis(10);
-            let runtime = loop {
-                match runtime.try_lock() {
-                    Ok(runtime) => break runtime,
-                    Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(_) => return Response::Err(EngineError::Busy),
-                }
+            let Some(runtime) = lock_for_key(runtime) else {
+                return Response::Err(EngineError::Busy);
             };
-            if !runtime.ready || session.generation != Some(runtime.generation) {
-                return Response::Err(EngineError::NotReady);
+            if let Some(error) = runtime.key_error(session.generation) {
+                return Response::Err(error);
             }
             let Some(engine) = &session.engine else {
                 return Response::Err(EngineError::NotReady);
@@ -1143,7 +1139,7 @@ mod tests {
     #[test]
     fn generation_does_not_build_or_wait_for_a_runtime() {
         let runtime = Mutex::new(Runtime::default());
-        let guard = runtime.lock().unwrap();
+        let guard = runtime.lock();
         assert!(matches!(
             dispatch(
                 &Request::Generation,
@@ -1161,7 +1157,7 @@ mod tests {
             ),
             Response::Generation(0)
         ));
-        assert!(runtime.lock().unwrap().engine.is_none());
+        assert!(runtime.lock().engine.is_none());
     }
 
     #[test]
@@ -1171,6 +1167,7 @@ mod tests {
             generation: 8,
             ready: false,
             deploying: false,
+            refreshing: false,
         });
         let mut session = ClientSession {
             engine: None,
@@ -1190,10 +1187,11 @@ mod tests {
     #[test]
     fn reload_invalidates_sessions_even_when_the_runtime_is_not_ready() {
         let runtime = Mutex::new(Runtime {
-            engine: Some(InProcEngine::default()),
+            engine: Some(Arc::new(InProcEngine::default())),
             generation: 8,
             ready: true,
             deploying: false,
+            refreshing: false,
         });
         let mut session = ClientSession {
             engine: Some(InProcEngine::default()),
@@ -1210,7 +1208,7 @@ mod tests {
             dispatch(&request, &mut session, &runtime),
             Response::Key(None)
         ));
-        runtime.lock().unwrap().ready = false;
+        runtime.lock().ready = false;
         assert!(matches!(
             dispatch(&request, &mut session, &runtime),
             Response::Err(EngineError::NotReady)

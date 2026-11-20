@@ -43,7 +43,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_key_after_idle_requires_generation_check() {
+    fn first_key_after_idle_wakes_background_generation_check() {
         let mut activity = GenerationActivity::default();
         let start = Instant::now();
         assert_eq!(activity.remaining(start), None);

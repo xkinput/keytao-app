@@ -70,6 +70,7 @@ const MODE_HINT_TIMER_ID: usize = 1;
 const CARET_RETRY_TIMER_ID: usize = 2;
 const LAYOUT_REPOSITION_TIMER_ID: usize = 3;
 const DEPLOYMENT_HINT_TIMER_ID: usize = 4;
+const DEFERRED_KEY_TIMER_ID: usize = 5;
 const PENDING_IME_UI_MESSAGE: u32 = WM_APP + 0x4B;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CARET_RETRY_DELAYS_MS: [u32; 5] = [16, 32, 64, 128, 256];
@@ -285,6 +286,18 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         WM_TIMER if wparam.0 == DEPLOYMENT_HINT_TIMER_ID => {
             if let Some(state) = click_target(hwnd).and_then(|target| target.state.upgrade()) {
                 crate::state::poll_deployment_hint(&state);
+            }
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == DEFERRED_KEY_TIMER_ID => {
+            if let Some(state) = click_target(hwnd).and_then(|target| target.state.upgrade()) {
+                crate::key_event_sink::flush_deferred_keys(&state);
+                if state
+                    .try_borrow()
+                    .is_ok_and(|st| st.deferred_keys.front().is_none())
+                {
+                    let _ = KillTimer(hwnd, DEFERRED_KEY_TIMER_ID);
+                }
             }
             return LRESULT(0);
         }
@@ -636,6 +649,15 @@ impl CandidateWindow {
             return false;
         }
         unsafe { SetTimer(self.hwnd, LAYOUT_REPOSITION_TIMER_ID, 16, None) != 0 }
+    }
+
+    pub(crate) fn arm_deferred_keys(&mut self, state: &WeakState) -> bool {
+        if !self.has_live_window()
+            && !self.ensure_window(crate::state::fallback_focus_window(), state)
+        {
+            return false;
+        }
+        unsafe { SetTimer(self.hwnd, DEFERRED_KEY_TIMER_ID, 25, None) != 0 }
     }
 
     fn disarm_layout_reposition(&mut self) {

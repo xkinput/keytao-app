@@ -10,7 +10,12 @@ use keytao_theme::{
     CandidatePanelModel, PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate,
     ThemeResolver, UiCapabilities,
 };
-use std::path::PathBuf;
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
 use tiny_skia::*;
 
 use crate::globals::dll_related_dirs;
@@ -30,7 +35,7 @@ fn load_font_with_samples(path: &str, samples: &[char]) -> Option<fontdue::Font>
             collection_index,
             ..Default::default()
         };
-        let Ok(font) = fontdue::Font::from_bytes(data.clone(), settings) else {
+        let Ok(font) = fontdue::Font::from_bytes(data.as_slice(), settings) else {
             if collection_index == 0 {
                 tracing::debug!("rejected unreadable font: {path}");
             }
@@ -52,7 +57,19 @@ fn load_font_with_samples(path: &str, samples: &[char]) -> Option<fontdue::Font>
 }
 
 /// Load a CJK text face plus Windows' system emoji and symbol fallbacks.
-pub fn load_font() -> Option<FontSet> {
+pub fn load_font() -> Option<Arc<FontSet>> {
+    static FONTS: OnceLock<Arc<FontSet>> = OnceLock::new();
+    static LOAD_LOCK: Mutex<()> = Mutex::new(());
+    // Keep failed loads retryable without racing another thread's initialization.
+    let _guard = LOAD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(fonts) = FONTS.get() {
+        return Some(Arc::clone(fonts));
+    }
+    let fonts = load_font_set()?;
+    Some(Arc::clone(FONTS.get_or_init(|| Arc::new(fonts))))
+}
+
+fn load_font_set() -> Option<FontSet> {
     const TEXT_PATHS: &[&str] = &[
         r"C:\Windows\Fonts\msyh.ttc", // Microsoft YaHei
         r"C:\Windows\Fonts\msyhbd.ttc",
@@ -95,8 +112,11 @@ pub fn load_font() -> Option<FontSet> {
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
+type RasterizedGlyph = (fontdue::Metrics, Arc<[u8]>);
+
 pub struct PanelRenderer {
-    fonts: Vec<fontdue::Font>,
+    fonts: Arc<FontSet>,
+    glyph_cache: RefCell<VecDeque<((char, u32), Option<RasterizedGlyph>)>>,
 }
 
 pub struct RenderedPanel {
@@ -120,8 +140,11 @@ impl RenderedPanel {
 }
 
 impl PanelRenderer {
-    pub fn new(fonts: FontSet) -> Self {
-        Self { fonts: fonts.fonts }
+    pub fn new(fonts: Arc<FontSet>) -> Self {
+        Self {
+            fonts,
+            glyph_cache: RefCell::new(VecDeque::new()),
+        }
     }
 
     /// Render panel to a premultiplied BGRA byte buffer plus the hit areas the
@@ -685,10 +708,18 @@ impl PanelRenderer {
         (left, bottom, right.max(advance), top)
     }
 
-    fn rasterize_char(&self, ch: char, size: f32) -> Option<(fontdue::Metrics, Vec<u8>)> {
-        for font in &self.fonts {
+    fn rasterize_char(&self, ch: char, size: f32) -> Option<RasterizedGlyph> {
+        let key = (ch, size.to_bits());
+        let mut cache = self.glyph_cache.borrow_mut();
+        if let Some(index) = cache.iter().position(|(cached_key, _)| *cached_key == key) {
+            let entry = cache.remove(index).unwrap();
+            let glyph = entry.1.clone();
+            cache.push_back(entry);
+            return glyph;
+        }
+        let glyph = self.fonts.fonts.iter().find_map(|font| {
             if !font.has_glyph(ch) {
-                continue;
+                return None;
             }
             let (metrics, bitmap) = font.rasterize(ch, size);
             if ch.is_whitespace()
@@ -696,10 +727,15 @@ impl PanelRenderer {
                     && metrics.height > 0
                     && bitmap.iter().any(|alpha| *alpha != 0))
             {
-                return Some((metrics, bitmap));
+                return Some((metrics, Arc::from(bitmap)));
             }
+            None
+        });
+        if cache.len() == 512 {
+            cache.pop_front();
         }
-        None
+        cache.push_back((key, glyph.clone()));
+        glyph
     }
 }
 
@@ -940,6 +976,8 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
         is_zero_width_emoji_component, load_font, state_to_panel_input, FontSet, PanelRenderer,
     };
@@ -950,7 +988,7 @@ mod tests {
 
     #[test]
     fn long_candidates_and_comments_are_limited_only_by_available_width() {
-        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
         for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
             let mut theme = ResolvedImeTheme::default();
             theme.panel.orientation = orientation;
@@ -993,7 +1031,7 @@ mod tests {
 
     #[test]
     fn candidate_hit_areas_scale_with_font_size_and_dpi_in_both_orientations() {
-        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
         let default_theme = ResolvedImeTheme::default();
         for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
             let mut theme = default_theme.clone();
@@ -1061,7 +1099,7 @@ mod tests {
             Some(path.clone()),
             Some(keytao_theme::EffectiveColorScheme::Light),
         );
-        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
         let render = || {
             let mut theme = resolver.current();
             theme.panel.shadow = false;
@@ -1110,7 +1148,7 @@ mod tests {
 
     #[test]
     fn mode_hint_uses_resolved_font_and_box_fields() {
-        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let renderer = PanelRenderer::new(Arc::new(FontSet { fonts: Vec::new() }));
         let mut theme = ResolvedImeTheme::default();
         theme.mode_hint.english_text = "English".into();
         theme.mode_hint.font_size = 26.0;
