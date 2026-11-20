@@ -73,7 +73,7 @@ class KeytaoAndroidChannel(
                 "readLocalSchemas" -> readLocalSchemas(call, reply)
                 "smartExtractZip" -> smartExtractZip(call, reply)
                 "smartExtractZipToPrivate" -> smartExtractZipToPrivate(call, reply)
-                "deployImeData" -> deployImeData(reply)
+                "deployImeData" -> deployImeData(call.argument<Boolean>("isolated") == true, reply)
                 "adoptAppLogger" -> adoptAppLogger(reply)
                 "openUrl" -> openUrl(call, reply)
                 "shareRuntimeLog" -> shareRuntimeLog(reply)
@@ -995,11 +995,11 @@ class KeytaoAndroidChannel(
         ))
     }
 
-    private fun deployImeData(reply: Reply) {
+    private fun deployImeData(isolated: Boolean, reply: Reply) {
         Thread {
             try {
                 val root = KeytaoAndroidPaths.requireRoot(activity)
-                if (!KeytaoAndroidPaths.hasInstalledSchema(root)) {
+                if (!isolated && !KeytaoAndroidPaths.hasInstalledSchema(root)) {
                     return@Thread reply.error("请先安装键道方案")
                 }
                 val configuredSchemas = runCatching {
@@ -1009,7 +1009,8 @@ class KeytaoAndroidChannel(
                 }.getOrDefault(emptyList())
                 KeytaoRimeDeployClient.deploy(
                     activity,
-                    timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(configuredSchemas),
+                    timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(configuredSchemas, isolated),
+                    isolated = isolated,
                 ) { result ->
                     try {
                         if (result.success) {

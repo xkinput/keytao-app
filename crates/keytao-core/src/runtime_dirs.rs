@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const PREVIOUS_BUILD: &str = "previous-build";
+
 fn read_regular_file(path: &Path) -> Option<Vec<u8>> {
     fs::symlink_metadata(path).ok()?.is_file().then_some(())?;
     fs::read(path).ok()
@@ -36,13 +38,8 @@ impl RuntimeDirs {
     pub fn resolve(control_root: &Path, shared: &Path) -> Self {
         if Self::isolation_enabled(control_root) {
             for store in Self::package_stores(control_root) {
-                let manifest = store.join("active-manifest.json");
-                let active = read_regular_file(&manifest).and_then(|bytes| {
-                    let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-                    Some(manifest["active_package"].as_str()?.to_owned())
-                });
-                if let Some(dirs) =
-                    active.and_then(|key| Self::isolated(control_root, shared, &store, &key))
+                if let Some(dirs) = manifest_package_key(&store)
+                    .and_then(|key| Self::isolated(control_root, shared, Some(&store), &key))
                 {
                     return dirs;
                 }
@@ -51,12 +48,50 @@ impl RuntimeDirs {
         Self::flat(control_root, shared)
     }
 
+    pub fn active_package_key(control_root: &Path) -> Option<String> {
+        Self::package_stores(control_root).find_map(|store| manifest_package_key(&store))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    pub(crate) fn flat_active_package_key(control_root: &Path) -> Option<String> {
+        let local = control_root.join(crate::ACTIVE_SCHEME_MANIFEST);
+        Self::package_stores(control_root)
+            .map(|store| store.join("active-manifest.json"))
+            .chain([local])
+            .find_map(|path| {
+                let manifest: serde_json::Value =
+                    serde_json::from_slice(&read_regular_file(&path)?).ok()?;
+                ["scheme_key", "key", "active_package"]
+                    .iter()
+                    .filter_map(|field| manifest[*field].as_str())
+                    .find(|key| !key.is_empty())
+                    .map(str::to_owned)
+            })
+    }
+
     pub fn for_package(control_root: &Path, shared: &Path, key: &str) -> Option<Self> {
         if !Self::isolation_enabled(control_root) {
             return None;
         }
+        if key.starts_with("builtin/") {
+            return Self::isolated(control_root, shared, None, key);
+        }
         Self::package_stores(control_root)
-            .find_map(|store| Self::isolated(control_root, shared, &store, key))
+            .find_map(|store| Self::isolated(control_root, shared, Some(&store), key))
+    }
+
+    pub fn for_package_in_store(
+        control_root: &Path,
+        shared: &Path,
+        data_root: &Path,
+        key: &str,
+    ) -> Option<Self> {
+        if !Self::isolation_enabled(control_root) {
+            return None;
+        }
+        let store = crate::package_store::root(data_root);
+        fs::symlink_metadata(&store).ok()?.is_dir().then_some(())?;
+        Self::isolated(control_root, shared, Some(&store), key)
     }
 
     fn package_stores(control_root: &Path) -> impl Iterator<Item = PathBuf> {
@@ -93,9 +128,14 @@ impl RuntimeDirs {
         Some(path)
     }
 
-    fn isolated(control_root: &Path, shared: &Path, store: &Path, key: &str) -> Option<Self> {
+    fn isolated(
+        control_root: &Path,
+        shared: &Path,
+        store: Option<&Path>,
+        key: &str,
+    ) -> Option<Self> {
         let user_data_dir = Self::isolated_user_data_dir(control_root, key)?;
-        let staging_dir = user_data_dir.join("build");
+        let staging_dir = runtime_build_dir(&user_data_dir);
         let runtime_prebuilt = user_data_dir.join("prebuilt");
         if [&staging_dir, &runtime_prebuilt]
             .into_iter()
@@ -118,6 +158,7 @@ impl RuntimeDirs {
                 shared.to_path_buf()
             }
         } else {
+            let store = store?;
             let namespace = if key.starts_with("local-") {
                 "local"
             } else {
@@ -191,6 +232,25 @@ impl RuntimeDirs {
         // Keep directory strings alive until librime has consumed the traits.
         action(traits)
     }
+}
+
+fn manifest_package_key(store: &Path) -> Option<String> {
+    let bytes = read_regular_file(&store.join("active-manifest.json"))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let key = manifest["active_package"].as_str()?;
+    Some(key.to_owned())
+}
+
+fn runtime_build_dir(user_dir: &Path) -> PathBuf {
+    let build = user_dir.join("build");
+    let previous = user_dir.join(PREVIOUS_BUILD);
+    // Two renames may leave only the preserved build if the deployer exits between them.
+    if fs::symlink_metadata(&build).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        && fs::symlink_metadata(&previous).is_ok_and(|entry| entry.is_dir())
+    {
+        return previous;
+    }
+    build
 }
 
 #[cfg(test)]

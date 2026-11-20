@@ -220,7 +220,7 @@ class PackageCore extends FakeCore {
   @override
   Future<List<String>> crateApiCoreRemoveSchemePackage({
     required String schemeKey,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('packageRemove:$schemeKey');
     final active = packages.any(
@@ -228,7 +228,7 @@ class PackageCore extends FakeCore {
     );
     packages.removeWhere((package) => package.schemeKey == schemeKey);
     if (active) {
-      if (androidRemoval) expect(await androidDeploy(), isEmpty);
+      if (androidRemoval) expect(await androidDeploy(false), isEmpty);
       local = localAfterRemoval;
     }
     if (removalFailure case final failure?) throw StateError(failure);

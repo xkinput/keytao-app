@@ -13,6 +13,16 @@ import 'package:keytao/src/rust/api/core.dart'
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
+DeployProgressDto _legacyDeployProgress(String message) => DeployProgressDto(
+  packageKey: 'keytao',
+  packageName: '键道',
+  index: 1,
+  total: 1,
+  step: DeployStepDto.compile,
+  legacyMessage: message,
+  queuedPackageKeys: const [],
+);
+
 const installedLocal = LocalSchemaDto(
   installed: true,
   deployed: false,
@@ -117,7 +127,7 @@ class FakeCore implements RustLibApi {
       events.add(
         BridgeEvent(
           kind: BridgeEventKind.deployProgress,
-          deployProgress: message,
+          deployProgress: _legacyDeployProgress(message),
         ),
       );
     }
@@ -125,7 +135,7 @@ class FakeCore implements RustLibApi {
       events.add(
         BridgeEvent(
           kind: BridgeEventKind.deployProgress,
-          deployProgress: '系统搜索框方案未更新：$warning',
+          deployProgress: _legacyDeployProgress('系统搜索框方案未更新：$warning'),
         ),
       );
     }
@@ -175,11 +185,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<WanxiangGrammarStatusDto> crateApiCoreManageWanxiangGrammar({
     required bool installed,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('wanxiangGrammar:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return wanxiangGrammarStatus = WanxiangGrammarStatusDto(
@@ -323,11 +333,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreAddonSchemaInstall({
     required String id,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('addonInstall:$id');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return addonStatus = installedAddon;
@@ -336,7 +346,7 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreAddonSchemaUninstall({
     required String id,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('addonUninstall:$id');
     await emitAddonDeployProgress();
@@ -348,11 +358,11 @@ class FakeCore implements RustLibApi {
   Future<AddonStatusDto> crateApiCoreManageWanxiang({
     required bool installed,
     required String variant,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('wanxiang:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return AddonStatusDto(
@@ -367,11 +377,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeIce({
     required bool installed,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('rimeIce:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeIceStatus = installed ? installedAddon : missingAddon;
@@ -380,11 +390,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeMint({
     required bool installed,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('rimeMint:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeMintStatus = installed ? installedAddon : missingAddon;
@@ -393,11 +403,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeFrost({
     required bool installed,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('rimeFrost:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeFrostStatus = installed ? installedAddon : missingAddon;
@@ -406,14 +416,22 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeLssp({
     required bool installed,
-    required FutureOr<String> Function() androidDeploy,
+    required FutureOr<String> Function(bool) androidDeploy,
   }) async {
     calls.add('rimeLssp:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy();
+    final failure = await androidDeploy(false);
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeLsspStatus = installed ? installedAddon : missingAddon;
+  }
+
+  @override
+  Future<void> crateApiCoreDeployAndroid({
+    required FutureOr<String> Function(bool) androidDeploy,
+  }) async {
+    final failure = await androidDeploy(false);
+    if (failure.isNotEmpty) throw StateError(failure);
   }
 
   @override
@@ -494,7 +512,7 @@ class FakeAndroid extends AndroidHost {
   }
 
   @override
-  Future<Map<String, dynamic>> deployImeData() async {
+  Future<Map<String, dynamic>> deployImeData({bool isolated = false}) async {
     calls.add('deployImeData');
     if (failDeploy) {
       throw PlatformException(code: 'deploy', message: 'deploy failed');
@@ -714,9 +732,9 @@ void main() {
           expect(controller.operationLogs, everyElement(contains('[ADDON]')));
         }
         core.events.add(
-          const BridgeEvent(
+          BridgeEvent(
             kind: BridgeEventKind.deployProgress,
-            deployProgress: 'late event',
+            deployProgress: _legacyDeployProgress('late event'),
           ),
         );
         await settle();
@@ -1276,15 +1294,15 @@ void main() {
       controller.addOperationLogs(['earlier']);
       final deploy = controller.deploy();
       core.events.add(
-        const BridgeEvent(
+        BridgeEvent(
           kind: BridgeEventKind.deployProgress,
-          deployProgress: 'compile',
+          deployProgress: _legacyDeployProgress('compile'),
         ),
       );
       core.events.add(
-        const BridgeEvent(
+        BridgeEvent(
           kind: BridgeEventKind.deployProgress,
-          deployProgress: 'reload',
+          deployProgress: _legacyDeployProgress('reload'),
         ),
       );
       await settle();
@@ -1320,9 +1338,9 @@ void main() {
       final deploying = controller.deploy();
       if (withProgress) {
         core.events.add(
-          const BridgeEvent(
+          BridgeEvent(
             kind: BridgeEventKind.deployProgress,
-            deployProgress: warningMessage,
+            deployProgress: _legacyDeployProgress(warningMessage),
           ),
         );
         await settle();
@@ -1345,6 +1363,79 @@ void main() {
       expect(controller.operationLogs, contains(contains('[WARN] $warningMessage')));
     }
   });
+
+  test(
+    'package progress tracks the ordered queue and scoped failure',
+    () async {
+      controller.dispose();
+      controller = create(mobile: false)..local = installedLocal;
+      await controller.connectEvents();
+      await settle();
+      core.deployGate = Completer<void>();
+      final deployment = controller.deploy();
+
+      Future<void> step(
+        String key,
+        String name,
+        int index,
+        DeployStepDto step, {
+        String? error,
+        List<String> queued = const [],
+      }) async {
+        core.events.add(
+          BridgeEvent(
+            kind: BridgeEventKind.deployProgress,
+            deployProgress: DeployProgressDto(
+              packageKey: key,
+              packageName: name,
+              index: index,
+              total: 2,
+              step: step,
+              error: error,
+              queuedPackageKeys: queued,
+            ),
+          ),
+        );
+        await settle();
+      }
+
+      await step(
+        'keytao',
+        '键道',
+        1,
+        DeployStepDto.materialize,
+        queued: ['rime_ice'],
+      );
+      expect(controller.packageDeployLabel('keytao'), '部署中');
+      expect(controller.packageDeployLabel('rime_ice'), '等待部署');
+      expect(controller.progress, '正在部署 键道（1/2）');
+
+      await step('keytao', '键道', 1, DeployStepDto.done);
+      await step('rime_ice', '雾凇', 2, DeployStepDto.compile);
+      expect(controller.packageDeployLabel('keytao'), isNull);
+      expect(controller.packageDeployLabel('rime_ice'), '部署中');
+      expect(controller.progress, '正在部署 雾凇（2/2）');
+
+      await step(
+        'rime_ice',
+        '雾凇',
+        2,
+        DeployStepDto.failed,
+        error: 'invalid yaml',
+      );
+      expect(controller.packageDeployLabel('rime_ice'), isNull);
+      expect(controller.packageDeployError('keytao'), isNull);
+      expect(controller.packageDeployError('rime_ice'), 'invalid yaml');
+      expect(controller.deploySteps.map((step) => step.packageKey), [
+        'keytao',
+        'rime_ice',
+      ]);
+      core.deployFailure = '雾凇：invalid yaml';
+      core.deployGate!.complete();
+      expect(await deployment, isFalse);
+      expect(controller.packageDeployError('rime_ice'), 'invalid yaml');
+    },
+  );
 
   test(
     'each debug read survives failures in the other sources on every visit',

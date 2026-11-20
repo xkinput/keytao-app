@@ -96,6 +96,8 @@ abstract final class AppStrings {
   static const checkingPermission = '检测权限…';
   static const installing = '安装中…';
   static const deploying = '部署中…';
+  static const packageDeploying = '部署中';
+  static const packageDeployQueued = '等待部署';
   static const deploy = '部署';
   static const deployingLibrime = '正在部署 librime…';
   static const deployCurrent = '部署当前方案';

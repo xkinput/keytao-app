@@ -47,9 +47,10 @@ enum ImeBadgeState {
 }
 
 class DeployStep {
-  const DeployStep(this.message, this.state);
+  const DeployStep(this.message, this.state, {this.packageKey});
   final String message;
   final DeployStepState state;
+  final String? packageKey;
 }
 
 LogLineKind operationLogKind(String line) {
@@ -220,6 +221,7 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? rimeFrostProgress;
   InstallProgressDto? rimeLsspProgress;
   final List<DeployStep> deploySteps = [];
+  final _packageDeployProgress = <String, DeployProgressDto?>{};
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
@@ -265,6 +267,28 @@ class AppController extends ChangeNotifier {
   String? currentSchemaId;
   String? currentAddonKey;
   String? deployingSchemeKey;
+
+  bool get hasPackageDeployProgress => _packageDeployProgress.isNotEmpty;
+
+  String? packageDeployLabel(String key) {
+    final packageKey = _packageDeployKey(key);
+    if (!busy || !_packageDeployProgress.containsKey(packageKey)) return null;
+    return switch (_packageDeployProgress[packageKey]?.step) {
+      null => AppStrings.packageDeployQueued,
+      DeployStepDto.materialize ||
+      DeployStepDto.compile ||
+      DeployStepDto.validate ||
+      DeployStepDto.prune => AppStrings.packageDeploying,
+      DeployStepDto.skip || DeployStepDto.done || DeployStepDto.failed => null,
+    };
+  }
+
+  String? packageDeployError(String key) =>
+      _packageDeployProgress[_packageDeployKey(key)]?.error;
+
+  String _packageDeployKey(String key) =>
+      _packageDeployProgress.containsKey(key) ? key : 'builtin/$key';
+
   String? get currentSchemaName =>
       schemas.where((schema) => schema.id == currentSchemaId).firstOrNull?.name;
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
@@ -832,30 +856,8 @@ class AppController extends ChangeNotifier {
           _changed();
           return;
         }
-        if (event.deployProgress case final value?
-            when isManagingAddon || isManagingRimeIce) {
-          deployingSchemeKey = isManagingAddon ? 'easy_en' : 'rime_ice';
-          progress = value;
-        }
-        if (event.deployProgress == AppStrings.deployDone) deployWarning = null;
-        if (event.deployProgress case final value?
-            when value.contains('编译失败，已跳过：')) {
-          deployWarning = value;
-        }
-        if (event.deployProgress case final value?
-            when isDeploying ||
-                ((isManagingAddon ||
-                        isManagingWanxiang ||
-                        isManagingWanxiangGrammar ||
-                        isManagingRimeIce ||
-                        isManagingRimeMint ||
-                        isManagingRimeFrost ||
-                        isManagingRimeLssp) &&
-                    (value.startsWith('系统搜索框方案未更新：') ||
-                        value.contains('编译失败，已跳过：')))) {
-          progress = value;
-          _deployStep(value, DeployStepState.neutral);
-          if (!isDeploying) addOperationLogs(['[WARN] $value']);
+        if (event.deployProgress case final value?) {
+          _receiveDeployProgress(value);
         }
         if (isWindows) {
           if (event.windowsImeStatus case final status?) {
@@ -934,6 +936,72 @@ class AppController extends ChangeNotifier {
     if (isManagingRimeFrost) rimeFrostProgress = value;
     if (isManagingRimeLssp) rimeLsspProgress = value;
     _changed();
+  }
+
+  void _receiveDeployProgress(DeployProgressDto value) {
+    if (value.legacyMessage case final message?) {
+      if (message.isEmpty) return;
+      if (isManagingAddon || isManagingRimeIce) {
+        deployingSchemeKey = isManagingAddon ? 'easy_en' : 'rime_ice';
+        progress = message;
+      }
+      if (message == AppStrings.deployDone) deployWarning = null;
+      final compileWarning = message.contains('编译失败，已跳过：');
+      if (compileWarning) deployWarning = message;
+      if (isDeploying ||
+          ((isManagingAddon ||
+                  isManagingWanxiang ||
+                  isManagingWanxiangGrammar ||
+                  isManagingRimeIce ||
+                  isManagingRimeMint ||
+                  isManagingRimeFrost ||
+                  isManagingRimeLssp) &&
+              (message.startsWith('系统搜索框方案未更新：') || compileWarning))) {
+        progress = message;
+        _deployStep(message, DeployStepState.neutral);
+        if (!isDeploying) addOperationLogs(['[WARN] $message']);
+      }
+      return;
+    }
+
+    if (value.index == 1 && value.step == DeployStepDto.materialize) {
+      _packageDeployProgress
+        ..clear()
+        ..[value.packageKey] = value;
+      for (final key in value.queuedPackageKeys) {
+        _packageDeployProgress.putIfAbsent(key, () => null);
+      }
+      deploySteps.clear();
+      deployWarning = null;
+    }
+    _packageDeployProgress[value.packageKey] = value;
+    final heading = '正在部署 ${value.packageName}（${value.index}/${value.total}）';
+    final step = switch (value.step) {
+      DeployStepDto.skip || DeployStepDto.done => DeployStep(
+        value.packageName,
+        DeployStepState.ok,
+        packageKey: value.packageKey,
+      ),
+      DeployStepDto.failed => DeployStep(
+        '${value.packageName}：${value.error ?? AppStrings.deployFailed}',
+        DeployStepState.failed,
+        packageKey: value.packageKey,
+      ),
+      _ => DeployStep(
+        heading,
+        DeployStepState.neutral,
+        packageKey: value.packageKey,
+      ),
+    };
+    if (step.state == DeployStepState.neutral) progress = heading;
+    final row = deploySteps.indexWhere(
+      (step) => step.packageKey == value.packageKey,
+    );
+    if (row == -1) {
+      deploySteps.add(step);
+    } else {
+      deploySteps[row] = step;
+    }
   }
 
   void addOperationLogs(Iterable<String> lines) {
@@ -2084,7 +2152,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _deploy({int? imeActionId, String? schemeKey}) async {
     _pendingCloudPackageUploads.clear();
-    // shortcut: Global progress has no package identity; use package events when available.
+    _packageDeployProgress.clear();
     deployingSchemeKey =
         schemeKey ??
         installedPackages
@@ -2106,12 +2174,30 @@ class AppController extends ChangeNotifier {
       String? warning;
       if (isAndroid) {
         await _requireStorage();
-        await core.recordAndroidDeploy(success: false);
-        final result = await android.deployImeData();
-        if (result['deployed'] != true) {
-          throw StateError(AppStrings.deployIncomplete);
+        late Map<String, dynamic> result;
+        Object? platformFailure;
+        try {
+          await core.deployAndroid(
+            androidDeploy: (isolated) async {
+              try {
+                result = await android.deployImeData(isolated: isolated);
+                if (result['deployed'] == true) return '';
+                final text = result['message'] as String?;
+                throw StateError(
+                  isolated && text != null && text.isNotEmpty
+                      ? text
+                      : AppStrings.deployIncomplete,
+                );
+              } catch (failure) {
+                if (!isolated) platformFailure = failure;
+                return errorText(failure);
+              }
+            },
+          );
+        } catch (_) {
+          if (platformFailure case final failure?) throw failure;
+          rethrow;
         }
-        await core.recordAndroidDeploy(success: true);
         message = result['message'] as String? ?? AppStrings.deployDone;
         warning = result['warning'] as String?;
       } else {
@@ -2123,7 +2209,7 @@ class AppController extends ChangeNotifier {
         warning = result.warning;
       }
       await _readState();
-      if (local?.deployed != true) {
+      if (!hasPackageDeployProgress && local?.deployed != true) {
         throw StateError(AppStrings.deployCheckFailed);
       }
       deployWarning = warning?.isNotEmpty == true ? warning : null;
@@ -2876,9 +2962,9 @@ class AppController extends ChangeNotifier {
 
   // The bridge holds its install lock while invoking this callback. Never
   // re-enter a bridge install/deploy call here, including during rollback.
-  Future<String> _androidDeploy() async {
+  Future<String> _androidDeploy(bool isolated) async {
     try {
-      final result = await android.deployImeData();
+      final result = await android.deployImeData(isolated: isolated);
       if (result['deployed'] == true) {
         final warning = result['warning'] as String?;
         deployWarning = warning?.isNotEmpty == true ? warning : null;

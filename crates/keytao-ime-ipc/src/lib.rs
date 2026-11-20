@@ -5,7 +5,7 @@ mod framing;
 
 pub use engine_config::{pipe_name, EngineMode};
 pub use framing::{read_frame, read_response, write_frame, MAX_FRAME_SIZE};
-use keytao_core::{ImeState, InputContextPolicy, KeyProcessResult};
+use keytao_core::{DeployProgress, ImeState, InputContextPolicy, KeyProcessResult};
 use serde::{Deserialize, Serialize};
 
 /// The server accepts this protocol version and its immediate predecessor.
@@ -53,6 +53,10 @@ pub enum Request {
     Generation,
     /// The App's deployment path; requires server authorization.
     Deploy,
+    /// Uses the same authorization as Deploy and streams progress before Deployed.
+    DeployPackages {
+        plan: String,
+    },
     /// A replacement server may ask the installed server to exit.
     Shutdown,
     SetContextAsciiMode {
@@ -92,6 +96,7 @@ pub enum Response {
     State(Option<ImeState>),
     English(Result<ImeState, String>),
     Generation(u64),
+    DeployProgress(DeployProgress),
     Deployed(Result<(), String>),
     Err(EngineError),
 }

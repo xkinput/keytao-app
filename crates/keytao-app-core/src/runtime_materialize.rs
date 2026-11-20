@@ -5,7 +5,7 @@ use crate::{
     package_store::{PackageStore, StoredPackage},
     packages::{safe_path, sha256_reader},
 };
-use keytao_core::RuntimeDirs;
+use keytao_core::{RuntimeDirs, isolated_deploy::PackageDeployTarget};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -80,63 +80,86 @@ struct Settings {
     easy_english_packages: BTreeSet<String>,
 }
 
-/// Prepare isolated librime inputs for the installed packages when isolation is enabled.
-/// `bundled` is the platform's resolved bundled rime-data directory.
 pub fn materialize_all_installed_packages(
     core: &Core,
     control_root: &Path,
     bundled: &Path,
 ) -> Result<(), CoreError> {
-    if !RuntimeDirs::isolation_enabled(control_root) {
-        return Ok(());
+    if RuntimeDirs::isolation_enabled(control_root) {
+        for target in prepare_deploy_targets(core, control_root, bundled)? {
+            if let Some(error) = target.materialize_error {
+                return Err(CoreError::Other(error));
+            }
+        }
     }
+    Ok(())
+}
+
+/// Prepare isolated librime inputs for the installed packages when isolation is enabled.
+/// `bundled` is the platform's resolved bundled rime-data directory.
+pub(crate) fn prepare_deploy_targets(
+    core: &Core,
+    control_root: &Path,
+    bundled: &Path,
+) -> Result<Vec<PackageDeployTarget>, CoreError> {
     let settings: Settings = read_optional(&safe(control_root, RuntimeDirs::SETTINGS_FILE)?)?
         .map(|bytes| serde_json::from_slice(&bytes))
         .transpose()?
         .unwrap_or_default();
     let store = PackageStore::new(core);
     let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
-    for record in crate::package_activation::read_all(core, control_root)?.into_values() {
-        for file in record.owned.into_iter().chain(record.generated) {
-            owners.entry(file.path).or_default().insert(file.sha256);
+    let activations = crate::package_activation::read_all(core, control_root)?;
+    for record in activations.values() {
+        for file in record.owned.iter().chain(&record.generated) {
+            owners
+                .entry(file.path.clone())
+                .or_default()
+                .insert(file.sha256.clone());
         }
-        for (path, sha256) in record.manifest {
-            owners.entry(path).or_default().insert(sha256);
+        for (path, sha256) in &record.manifest {
+            owners
+                .entry(path.clone())
+                .or_default()
+                .insert(sha256.clone());
         }
     }
     let mut addons = BTreeMap::new();
     for &id in crate::addon_store::IDS {
         let package = store.checked_addon_path(id)?;
         if package.try_exists()? {
-            crate::addon_store::validate_directory(&package, id)?;
-            let metadata: StoredPackage =
-                serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
-            let activation: crate::package_activation::Activation =
-                serde_json::from_slice(&fs::read(safe(&package, "activation.json")?)?)?;
-            for file in activation.owned.into_iter().chain(activation.generated) {
-                owners.entry(file.path).or_default().insert(file.sha256);
-            }
-            addons.insert(id, (package, metadata));
+            let source: Result<_, CoreError> = (|| {
+                let activation: crate::package_activation::Activation =
+                    serde_json::from_slice(&fs::read(safe(&package, "activation.json")?)?)?;
+                for file in activation.owned.into_iter().chain(activation.generated) {
+                    owners.entry(file.path).or_default().insert(file.sha256);
+                }
+                crate::addon_store::validate_directory(&package, id)?;
+                let metadata: StoredPackage =
+                    serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
+                Ok((package, metadata))
+            })();
+            addons.insert(id.to_owned(), source);
         }
     }
-    let english = if settings.easy_english_packages.is_empty() {
-        None
-    } else {
+    let english = (!settings.easy_english_packages.is_empty()).then(|| {
         addons
             .get(EASY_EN_ADDON_ID)
-            .map(|(path, metadata)| addon_files(path, metadata))
-            .transpose()?
-    };
-    let overlay_for = |key: &str| {
-        if key != EASY_EN_ADDON_ID && settings.easy_english_packages.contains(key) {
-            english.as_ref().map(Some).ok_or_else(|| {
-                CoreError::Other(
-                    "Easy English must be installed before enabling its overlay".into(),
-                )
+            .ok_or_else(|| "Easy English must be installed before enabling its overlay".to_owned())
+            .and_then(|entry| {
+                let (path, metadata) = entry.as_ref().map_err(ToString::to_string)?;
+                addon_files(path, metadata).map_err(|error| error.to_string())
             })
-        } else {
-            Ok(None)
-        }
+    });
+    let overlay_for = |key: &str| {
+        english
+            .as_ref()
+            .filter(|_| key != EASY_EN_ADDON_ID && settings.easy_english_packages.contains(key))
+            .map(|files| {
+                files
+                    .as_ref()
+                    .map_err(|error| CoreError::Other(error.clone()))
+            })
+            .transpose()
     };
     let mut legacy = user_files(control_root, &owners)?;
     if let Some(active) = crate::package_activation::read(core, control_root)? {
@@ -159,41 +182,118 @@ pub fn materialize_all_installed_packages(
             }
         }
     }
-    let installed: Vec<_> = core
-        .lock_state()
-        .installed_packages
-        .keys()
+    let (installed, selected) = {
+        let state = core.lock_state();
+        (
+            state
+                .installed_packages
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            state.active_scheme.clone(),
+        )
+    };
+    let active = RuntimeDirs::active_package_key(control_root)
+        .or_else(|| RuntimeDirs::active_package_key(&core.env().data_dir))
+        .or_else(|| in_use_package(control_root, &activations))
+        .or(selected);
+    let mut keys = installed
+        .union(&addons.keys().cloned().collect())
         .cloned()
-        .collect();
-    for key in installed {
-        let (files, _) = store.read_files(&key)?;
-        let selection =
-            crate::package_schemas::read_selection(&store.checked_metadata_path(&key)?)?;
-        materialize(
-            control_root,
-            bundled,
-            &key,
-            files.into_iter().collect(),
-            selection.as_deref(),
-            overlay_for(&key)?,
-            &legacy,
-        )?;
-        // Snow can also have a standalone add-on record during store migration.
-        addons.remove(key.as_str());
+        .collect::<Vec<_>>();
+    if let Some(active) = &active {
+        if !keys.contains(active) {
+            keys.push(active.clone());
+        }
+        keys.sort_by_key(|key| key != active);
     }
-    for (key, (package, metadata)) in addons {
-        let owned_files = addon_files(&package, &metadata)?;
-        materialize(
-            control_root,
-            bundled,
-            key,
-            owned_files,
-            metadata.selected_schemas.as_deref(),
-            overlay_for(key)?,
-            &legacy,
-        )?;
+    if keys.is_empty() && bundled.join("default.yaml").is_file() {
+        keys.push("builtin/keytao".into());
     }
-    Ok(())
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            let mut name = package_name(core, &key);
+            let result: Result<(), CoreError> = (|| {
+                let (files, selection) = if key.starts_with("builtin/") {
+                    let mut files = Files::new();
+                    walk_files(bundled, "", private_path, &mut |source, name| {
+                        files.insert(name.to_owned(), fs::read(source)?);
+                        Ok(())
+                    })?;
+                    (files, None)
+                } else if installed.contains(&key) {
+                    let (files, _) = store.read_files(&key)?;
+                    let selection = crate::package_schemas::read_selection(
+                        &store.checked_metadata_path(&key)?,
+                    )?;
+                    (files.into_iter().collect(), selection)
+                } else if let Some(entry) = addons.remove(&key) {
+                    let (package, metadata) = entry?;
+                    if let Some(display_name) = metadata.meta.display_name.as_ref() {
+                        name.clone_from(display_name);
+                    }
+                    (addon_files(&package, &metadata)?, metadata.selected_schemas)
+                } else {
+                    return Err(CoreError::Other(format!(
+                        "Missing package source for {key}"
+                    )));
+                };
+                materialize(
+                    control_root,
+                    bundled,
+                    &key,
+                    files,
+                    selection.as_deref(),
+                    overlay_for(&key)?,
+                    &legacy,
+                )
+            })();
+            PackageDeployTarget {
+                package_key: key,
+                package_name: name,
+                materialize_error: result.err().map(|error| error.to_string()),
+            }
+        })
+        .collect())
+}
+
+pub(crate) fn in_use_package(
+    root: &Path,
+    activations: &BTreeMap<String, crate::package_activation::Activation>,
+) -> Option<String> {
+    let schema = keytao_core::current_schema_id_from_dir(root)?;
+    let source = format!("{schema}.schema.yaml");
+    activations
+        .iter()
+        .find_map(|(key, record)| record.manifest.contains_key(&source).then(|| key.clone()))
+}
+
+pub(crate) fn package_name(core: &Core, key: &str) -> String {
+    let key = key.strip_prefix("builtin/").unwrap_or(key);
+    PackageStore::new(core)
+        .read_meta(key)
+        .ok()
+        .flatten()
+        .and_then(|meta| meta.display_name)
+        .unwrap_or_else(|| {
+            match key {
+                "keytao" => "键道6",
+                "xmjd" => "星猫键道",
+                "xmjd-feiding" => "星猫键道（非顶功）",
+                "txjx" => "天行键",
+                "keydo" => "键道·我流",
+                "snow_jiandao" => "冰雪键道",
+                "easy_en" => "Easy English",
+                "wanxiang" => "万象拼音",
+                "rime_ice" => "雾凇拼音",
+                "rime_mint" => "薄荷拼音",
+                "rime_frost" => "白霜拼音",
+                "triple_pinyin_lssp" => "李氏三拼",
+                _ => key,
+            }
+            .into()
+        })
 }
 
 fn addon_files(package: &Path, metadata: &StoredPackage) -> Result<Files, CoreError> {

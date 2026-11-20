@@ -1,5 +1,7 @@
 use crate::runtime_state::{lock_for_key, reload_candidate, KEY_WAIT_BUDGET};
+use keytao_core::deploy_child;
 use keytao_core::runtime_log::{self, Level};
+use keytao_core::DeployProgress;
 use keytao_ime_ipc::{
     read_frame, read_response, write_frame, ClientRole, EngineError, Request, RequestEnvelope,
     Response, PROTOCOL_VERSION,
@@ -360,12 +362,16 @@ fn finish_deploy(
     (result, ready)
 }
 
-fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
+fn deploy(
+    runtime: &Mutex<Runtime>,
+    package_plan: Option<&str>,
+    progress: impl FnMut(&DeployProgress),
+) -> Result<(), String> {
     let _deploy = MAINTENANCE_LOCK.lock();
     {
         let mut runtime = runtime.lock();
-        if !runtime.ready {
-            return runtime.deploy();
+        if !runtime.should_stage_deploy(package_plan.is_some()) {
+            return runtime.deploy(package_plan, progress);
         }
         runtime.deploying = true;
     }
@@ -438,7 +444,11 @@ fn deploy(runtime: &Mutex<Runtime>) -> Result<(), String> {
 }
 
 impl Runtime {
-    fn deploy(&mut self) -> Result<(), String> {
+    fn deploy(
+        &mut self,
+        package_plan: Option<&str>,
+        progress: impl FnMut(&DeployProgress),
+    ) -> Result<(), String> {
         self.ready = false;
         self.generation = self.generation.wrapping_add(1);
         let mut prepared = false;
@@ -459,19 +469,26 @@ impl Runtime {
                 prepared = true;
                 engine.prepare_server_deploy()?;
             }
-            let child = keytao_core::deploy_child::run_deploy_child(
-                executable.as_deref().unwrap(),
+            let mut command = std::process::Command::new(executable.as_deref().unwrap());
+            if let Some(plan) = package_plan {
+                command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
+            }
+            let child = deploy_child::run_deploy_child_command_with_progress(
+                &mut command,
                 Duration::from_secs(600),
+                progress,
             );
             failed_child = child.is_err();
             child?;
-            keytao_core::ReloadStamp::write(user_dir.as_deref().unwrap())?;
+            if package_plan.is_none() {
+                keytao_core::ReloadStamp::write(user_dir.as_deref().unwrap())?;
+            }
             Ok(())
         })();
         let result = if prepared || failed_child || result.is_ok() {
             let (result, ready) = finish_deploy(
                 result,
-                failed_child,
+                failed_child && package_plan.is_none(),
                 user_dir.as_deref(),
                 || {
                     if let Some(engine) = &self.engine {
@@ -839,14 +856,29 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
                     "Shutdown requires an authenticated caller under the KeyTao app or runtime root".into(),
                 ))
             }
-        } else if matches!(request.message, Request::Deploy) {
+        } else if matches!(
+            request.message,
+            Request::Deploy | Request::DeployPackages { .. }
+        ) {
             // Identification tokens' AppContainer flag cannot independently authorize deployment.
             if crate::authorization::deployment_allowed(
                 role,
                 client.is_appcontainer,
                 installed_process(pid, &client.sid, &server.sid, &[keytao_app_root()]).is_ok(),
             ) {
-                Response::Deployed(deploy(runtime))
+                let package_plan = match &request.message {
+                    Request::DeployPackages { plan } => Some(plan.as_str()),
+                    _ => None,
+                };
+                Response::Deployed(deploy(runtime, package_plan, |progress| {
+                    if package_plan.is_some() {
+                        // A disconnected App must not interrupt the deployment or engine reload.
+                        let _ = write_frame(
+                            &mut file,
+                            &request.reply(Response::DeployProgress(progress.clone())),
+                        );
+                    }
+                }))
             } else {
                 Response::Deployed(Err(
                     "Deploy requires an authenticated App caller under the KeyTao app root".into(),
@@ -914,7 +946,9 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
         }
         Request::Hello { .. } => Response::HelloErr("connection is already initialized".into()),
         // Privileged requests are authorized against the authenticated process in serve.
-        Request::Deploy => Response::Deployed(Err("Deploy requires caller authorization".into())),
+        Request::Deploy | Request::DeployPackages { .. } => {
+            Response::Deployed(Err("Deploy requires caller authorization".into()))
+        }
         Request::Shutdown => Response::Err(EngineError::Failed(
             "Shutdown requires caller authorization".into(),
         )),
@@ -1126,14 +1160,19 @@ mod tests {
 
     #[test]
     fn deployment_dispatch_requires_authenticated_caller_authorization() {
-        assert!(matches!(
-            dispatch(
-                &Request::Deploy,
-                &mut ClientSession::default(),
-                &Mutex::new(Runtime::default())
-            ),
-            Response::Deployed(Err(_))
-        ));
+        for request in [
+            Request::Deploy,
+            Request::DeployPackages { plan: "[]".into() },
+        ] {
+            assert!(matches!(
+                dispatch(
+                    &request,
+                    &mut ClientSession::default(),
+                    &Mutex::new(Runtime::default())
+                ),
+                Response::Deployed(Err(_))
+            ));
+        }
     }
 
     #[test]

@@ -55,7 +55,9 @@ class KeytaoRimeDeployWorkerService : Service() {
                 {
                     try {
                         val result = try {
-                            if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraRenderLogos, false)) {
+                            if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraIsolated, false)) {
+                                runIsolatedDeployment()
+                            } else if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraRenderLogos, false)) {
                                 runCatching {
                                     val root = KeytaoAndroidPaths.userRoot(applicationContext)
                                     KeytaoNativeBridge.nativeRenderSchemaLogos(root.absolutePath)
@@ -145,7 +147,7 @@ class KeytaoRimeDeployWorkerService : Service() {
         )
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(progressMessage: String? = null): Notification {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, notificationChannelId)
         } else {
@@ -154,11 +156,46 @@ class KeytaoRimeDeployWorkerService : Service() {
         }
         return builder
             .setContentTitle(getString(R.string.keytao_deploy_notification_title))
-            .setContentText(getString(R.string.keytao_deploy_notification_text))
+            .setContentText(progressMessage ?: getString(R.string.keytao_deploy_notification_text))
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
+    }
+
+    private fun runIsolatedDeployment(): DeploymentResult {
+        val root = KeytaoAndroidPaths.userRoot(applicationContext).absolutePath
+        val handler = Handler(Looper.getMainLooper())
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        val refresh = object : Runnable {
+            private var lastMessage: String? = null
+
+            override fun run() {
+                if (deploymentOwner.get() !== this@KeytaoRimeDeployWorkerService) return
+                val message = KeytaoNativeBridge.deploymentProgressMessage(root)
+                if (message != null && message != lastMessage) {
+                    runCatching {
+                        notificationManager?.notify(
+                            KeytaoRimeDeployContract.notificationId, buildNotification(message),
+                        )
+                    }
+                    lastMessage = message
+                }
+                handler.postDelayed(this, 250L)
+            }
+        }
+        handler.post(refresh)
+        try {
+            check(KeytaoNativeBridge.loaded) { "KeyTao native bridge is unavailable" }
+            val error = checkNotNull(
+                KeytaoNativeBridge.nativeDeployPackages(root, applicationContext.dataDir.absolutePath),
+            ) {
+                "Android RIME 部署失败"
+            }
+            return DeploymentResult(success = error.isEmpty(), error = error)
+        } finally {
+            handler.removeCallbacks(refresh)
+        }
     }
 
     private fun runDeployment(schemaId: String?): DeploymentResult {

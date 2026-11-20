@@ -134,7 +134,7 @@ pub struct TsfState {
     pub layout_reposition_pending: bool,
     pub ime_state: Option<ImeState>,
     deployment_state: DeploymentState,
-    pub(crate) deployment_hint: Option<&'static str>,
+    pub(crate) deployment_hint: Option<String>,
     pub candidate_win: Option<crate::candidate_win::CandidateWindow>,
     pub mode_hint_win: Option<crate::candidate_win::CandidateWindow>,
     pub windows_dirty: bool,
@@ -1430,13 +1430,14 @@ pub(crate) fn update_ime_windows(
         let st = shared_state.borrow();
         (
             keytao_core::DeploymentState::visible_hint(
-                st.deployment_hint,
+                st.deployment_hint.as_deref(),
                 !ime_state.candidates.is_empty(),
-            ),
+            )
+            .map(str::to_owned),
             st.input_generation,
         )
     };
-    let hint_state = deployment_hint.map(|hint| {
+    let hint_state = deployment_hint.as_deref().map(|hint| {
         let mut state = ImeState::empty();
         state.candidates.push(keytao_core::Candidate {
             text: hint.to_string(),
@@ -1498,7 +1499,7 @@ pub(crate) fn update_ime_windows(
                     caret.owner_hwnd,
                     &weak_state,
                     embedded,
-                    deployment_hint,
+                    deployment_hint.as_deref(),
                 ) {
                     shared_state.borrow_mut().last_shown_caret = Some(caret);
                 }
@@ -1587,16 +1588,18 @@ pub(crate) fn poll_deployment_hint(shared_state: &SharedState) {
 }
 
 pub(crate) fn refresh_deployment_hint(shared_state: &SharedState) {
-    let (hint, changed, context, has_candidates) = {
+    let (has_hint, changed, context, has_candidates) = {
         let mut st = shared_state.borrow_mut();
-        let hint = default_user_data_dir().and_then(|root| st.deployment_state.hint(&root));
+        let hint = default_user_data_dir().and_then(|root| {
+            keytao_core::DeploymentState::display_hint(&root, st.deployment_state.hint(&root))
+        });
         let changed = st.deployment_hint != hint;
         st.deployment_hint = hint;
         if changed {
             st.last_shown_caret = None;
         }
         (
-            hint,
+            st.deployment_hint.is_some(),
             changed,
             st.key_context.clone().or_else(|| st.panel_context.clone()),
             st.ime_state
@@ -1604,10 +1607,10 @@ pub(crate) fn refresh_deployment_hint(shared_state: &SharedState) {
                 .is_some_and(|state| !state.preedit.is_empty() || !state.candidates.is_empty()),
         )
     };
-    if hint.is_none() && !changed {
+    if !has_hint && !changed {
         return;
     }
-    if hint.is_none() && !has_candidates {
+    if !has_hint && !has_candidates {
         hide_candidate_window(shared_state);
     } else if let Some(context) = context {
         crate::key_event_sink::reposition_ime_windows(shared_state, &context, false);

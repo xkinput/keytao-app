@@ -11,6 +11,27 @@ const RECEIPT_FILE: &str = ".keytao-schema-inputs.json";
 
 /// Save source/output hashes only after the deployment has fully succeeded.
 pub fn record_schema_input_fingerprints(root: &Path, deployed: &[String]) -> Result<(), String> {
+    record_resolved_schema_input_fingerprints(root, deployed, None)
+}
+
+pub(crate) fn record_resolved_schema_input_fingerprints(
+    root: &Path,
+    deployed: &[String],
+    package_shared: Option<&Path>,
+) -> Result<(), String> {
+    let path = crate::RuntimeDirs::resolve(root, root)
+        .staging_dir
+        .join(RECEIPT_FILE);
+    if let Some(shared) = package_shared {
+        let fingerprints: BTreeMap<_, _> = schema_closure(root, deployed)
+            .into_iter()
+            .filter_map(|id| {
+                let hash = fingerprint(root, &id, &mut BTreeSet::new(), Some(shared))?;
+                Some((id, hash))
+            })
+            .collect();
+        return write_receipt(&path, &fingerprints);
+    }
     let raw = raw_fingerprints(root, deployed)?;
     // Android's bundled shared data lives below the user root.
     let shared = root.join("rime-data");
@@ -30,12 +51,13 @@ pub fn record_schema_input_fingerprints(root: &Path, deployed: &[String]) -> Res
             fingerprints.insert(format!("android:{id}"), value);
         }
     }
-    let bytes = serde_json::to_vec(&fingerprints).map_err(|error| error.to_string())?;
-    let path = crate::RuntimeDirs::resolve(root, root)
-        .staging_dir
-        .join(RECEIPT_FILE);
-    if fs::read(&path).ok().as_deref() != Some(&bytes) {
-        write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
+    write_receipt(&path, &fingerprints)
+}
+
+fn write_receipt(path: &Path, fingerprints: &BTreeMap<String, [u8; 32]>) -> Result<(), String> {
+    let bytes = serde_json::to_vec(fingerprints).map_err(|error| error.to_string())?;
+    if fs::read(path).ok().as_deref() != Some(&bytes) {
+        write_file_atomic(path, &bytes).map_err(|error| error.to_string())?;
     }
     Ok(())
 }

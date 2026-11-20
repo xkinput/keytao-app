@@ -1,6 +1,8 @@
 //! JSON-lines protocol for deployment in a short-lived desktop process.
 
+pub use crate::isolated_deploy::{PackageDeployTarget, PACKAGE_TARGETS_ENV};
 pub use crate::{CandidatePreview, PreviewRequest};
+use crate::{DeployProgress, DeployStep, RuntimeDirs};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -14,6 +16,8 @@ use std::{
 
 pub const DEPLOY_SUBCOMMAND: &str = "--deploy";
 pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
+pub const FLAT_TARGET_ENV: &str = "KEYTAO_DEPLOY_FLAT_TARGET";
+const PACKAGE_DEPLOY_ARG: &str = "--packages";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
 #[cfg(any(target_os = "windows", test))]
@@ -177,6 +181,9 @@ pub fn inherited_linux_deploy_lock() -> Result<std::fs::File, String> {
 #[serde(untagged, deny_unknown_fields)]
 enum Message {
     Progress {
+        progress: DeployProgress,
+    },
+    LegacyProgress {
         progress: String,
     },
     Preview {
@@ -198,16 +205,71 @@ fn write_message(output: &mut impl Write, message: &Message) -> Result<(), Strin
         .map_err(|error| format!("cannot flush deployment protocol: {error}"))
 }
 
-/// Handle exactly `--deploy`; binaries must pass the code to [`exit_deploy_child`].
+/// Handle `--deploy` or `--deploy --packages`; pass the code to [`exit_deploy_child`].
 /// No engine session or caller-supplied data paths are accepted.
 pub fn run_deploy_child_main() -> i32 {
-    run_deploy_child_main_with_action(DEPLOY_SUBCOMMAND, || {
-        #[cfg(target_os = "linux")]
-        let _lock = inherited_linux_deploy_lock()?;
-        let user_dir = crate::default_user_data_dir()
-            .ok_or("cannot determine the librime user data directory")?;
-        deploy_directory(&user_dir)
-    })
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    let package_plan =
+        args.len() == 2 && args[0] == DEPLOY_SUBCOMMAND && args[1] == PACKAGE_DEPLOY_ARG;
+    if package_plan {
+        args.pop();
+    }
+    child_main_with_progress(
+        args.into_iter(),
+        &mut io::stdout().lock(),
+        DEPLOY_SUBCOMMAND,
+        |emit| {
+            #[cfg(target_os = "linux")]
+            let _lock = inherited_linux_deploy_lock()?;
+            let user_dir = crate::default_user_data_dir()
+                .ok_or("cannot determine the librime user data directory")?;
+            if RuntimeDirs::isolation_enabled(&user_dir) {
+                let targets = if package_plan {
+                    let plan = std::env::var(PACKAGE_TARGETS_ENV)
+                        .map_err(|error| format!("read package deployment plan: {error}"))?;
+                    serde_json::from_str(&plan)
+                        .map_err(|error| format!("invalid package deployment plan: {error}"))?
+                } else {
+                    let package_key = RuntimeDirs::active_package_key(&user_dir)
+                        .ok_or("cannot determine active package for deployment")?;
+                    vec![PackageDeployTarget {
+                        package_name: package_key.clone(),
+                        package_key,
+                        materialize_error: None,
+                    }]
+                };
+                crate::isolated_deploy::deploy_packages(
+                    &user_dir,
+                    Path::new(&crate::default_shared_data_dir()),
+                    None,
+                    &targets,
+                    emit,
+                )
+            } else if package_plan {
+                Err("package isolation is disabled".into())
+            } else {
+                emit(flat_compile_progress(Some(&user_dir)));
+                deploy_directory(&user_dir)
+            }
+        },
+    )
+}
+
+fn flat_compile_progress(user_dir: Option<&Path>) -> DeployProgress {
+    if let Some(target) = std::env::var(FLAT_TARGET_ENV)
+        .ok()
+        .and_then(|target| serde_json::from_str::<PackageDeployTarget>(&target).ok())
+    {
+        return DeployProgress::flat(
+            &target.package_key,
+            &target.package_name,
+            DeployStep::Compile,
+            "Deploying librime...",
+        );
+    }
+    let key = user_dir.and_then(RuntimeDirs::flat_active_package_key);
+    let key = key.as_deref().unwrap_or("librime");
+    DeployProgress::flat(key, key, DeployStep::Compile, "Deploying librime...")
 }
 
 /// Compile a host-owned isolated deployment directory in a short-lived process.
@@ -304,11 +366,15 @@ pub fn run_deploy_child_main_with_action(
     subcommand: &str,
     action: impl FnOnce() -> Result<(), String>,
 ) -> i32 {
-    child_main(
+    child_main_with_progress(
         std::env::args_os().skip(1),
         &mut io::stdout().lock(),
         subcommand,
-        action,
+        |emit| {
+            let user_dir = crate::default_user_data_dir();
+            emit(flat_compile_progress(user_dir.as_deref()));
+            action()
+        },
     )
 }
 
@@ -341,21 +407,34 @@ pub fn exit_deploy_child(code: i32) -> ! {
     }
 }
 
+#[cfg(test)]
 fn child_main(
     args: impl Iterator<Item = OsString>,
     output: &mut impl Write,
     subcommand: &str,
     action: impl FnOnce() -> Result<(), String>,
 ) -> i32 {
+    child_main_with_progress(args, output, subcommand, |emit| {
+        emit(flat_compile_progress(None));
+        action()
+    })
+}
+
+fn child_main_with_progress(
+    args: impl Iterator<Item = OsString>,
+    output: &mut impl Write,
+    subcommand: &str,
+    action: impl FnOnce(&mut dyn FnMut(DeployProgress)) -> Result<(), String>,
+) -> i32 {
     let valid_args = args.eq([OsString::from(subcommand)]);
     let result = if valid_args {
-        write_message(
-            output,
-            &Message::Progress {
-                progress: "Deploying librime...".into(),
-            },
-        )
-        .and_then(|()| action())
+        let mut protocol_result = Ok(());
+        let result = action(&mut |progress| {
+            if protocol_result.is_ok() {
+                protocol_result = write_message(output, &Message::Progress { progress });
+            }
+        });
+        protocol_result.and(result)
     } else {
         Err(format!("usage: {subcommand} (no additional arguments)"))
     };
@@ -388,7 +467,7 @@ struct Protocol {
 }
 
 impl Protocol {
-    fn line(&mut self, line: &[u8]) -> Result<Option<String>, String> {
+    fn line(&mut self, line: &[u8]) -> Result<Option<DeployProgress>, String> {
         if self.final_result.is_some() {
             return Err("deploy child emitted output after its final result".into());
         }
@@ -396,6 +475,15 @@ impl Protocol {
             .map_err(|error| format!("invalid deployment protocol line: {error}"))?
         {
             Message::Progress { progress } => return Ok(Some(progress)),
+            // App and installed IME can temporarily run different versions.
+            Message::LegacyProgress { progress } => {
+                return Ok(Some(DeployProgress::flat(
+                    "librime",
+                    "librime",
+                    DeployStep::Compile,
+                    progress,
+                )));
+            }
             Message::Preview { preview } => {
                 if !self.expect_preview
                     || self.preview.is_some()
@@ -503,7 +591,7 @@ pub fn run_deploy_child_with_subcommand(
 pub fn run_deploy_child_with_progress(
     exe: &Path,
     timeout: Duration,
-    progress: impl FnMut(&str),
+    progress: impl FnMut(&DeployProgress),
 ) -> Result<(), String> {
     run_deploy_child_command_with_progress(&mut Command::new(exe), timeout, progress)
 }
@@ -512,7 +600,7 @@ pub fn run_deploy_child_with_progress(
 pub fn run_deploy_child_command_with_progress(
     command: &mut Command,
     timeout: Duration,
-    progress: impl FnMut(&str),
+    progress: impl FnMut(&DeployProgress),
 ) -> Result<(), String> {
     run_deploy_child_command_with_subcommand(command, DEPLOY_SUBCOMMAND, timeout, progress)
 }
@@ -521,10 +609,18 @@ pub fn run_deploy_child_command_with_subcommand(
     command: &mut Command,
     subcommand: &str,
     timeout: Duration,
-    mut progress: impl FnMut(&str),
+    mut progress: impl FnMut(&DeployProgress),
 ) -> Result<(), String> {
+    let package_plan = subcommand == DEPLOY_SUBCOMMAND
+        && command
+            .get_envs()
+            .any(|(name, value)| name == PACKAGE_TARGETS_ENV && value.is_some());
+    command.arg(subcommand);
+    if package_plan {
+        // A pre-isolation helper rejects the extra argument before touching the active build.
+        command.arg(PACKAGE_DEPLOY_ARG);
+    }
     let mut child = command
-        .arg(subcommand)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -546,7 +642,7 @@ impl Drop for ChildGuard<'_> {
 fn wait_for_child(
     child: &mut Child,
     timeout: Duration,
-    progress: &mut impl FnMut(&str),
+    progress: &mut impl FnMut(&DeployProgress),
 ) -> Result<(), String> {
     wait_for_child_protocol(child, timeout, progress, &mut Protocol::default())
 }
@@ -554,7 +650,7 @@ fn wait_for_child(
 fn wait_for_child_protocol(
     child: &mut Child,
     timeout: Duration,
-    progress: &mut impl FnMut(&str),
+    progress: &mut impl FnMut(&DeployProgress),
     protocol: &mut Protocol,
 ) -> Result<(), String> {
     let guard = ChildGuard(child);
@@ -1015,7 +1111,12 @@ mod tests {
             assert_eq!(
                 progress,
                 if output.starts_with("{\"progress\"") {
-                    vec!["Compiling..."]
+                    vec![DeployProgress::flat(
+                        "librime",
+                        "librime",
+                        DeployStep::Compile,
+                        "Compiling...",
+                    )]
                 } else {
                     vec![]
                 }
@@ -1231,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_deploy_child_compiles_only_the_active_package() {
+    fn isolated_deploy_child_compiles_each_package_then_skips_the_unchanged_build() {
         use std::{collections::BTreeMap, fs, path::PathBuf};
 
         const FIXTURE: &str = "KEYTAO_ISOLATED_DEPLOY_FIXTURE";
@@ -1247,12 +1348,24 @@ mod tests {
                 root.join("scheme-packages/local/local-fixture/files")
             );
             assert_eq!(dirs.prebuilt_data_dir, dirs.shared_data_dir.join("build"));
-            let code = child_main(
+            let targets = [
+                PackageDeployTarget {
+                    package_key: "local-other".into(),
+                    package_name: "Other".into(),
+                    materialize_error: None,
+                },
+                PackageDeployTarget {
+                    package_key: "local-fixture".into(),
+                    package_name: "Active".into(),
+                    materialize_error: None,
+                },
+            ];
+            let code = child_main_with_progress(
                 [OsString::from(DEPLOY_SUBCOMMAND)].into_iter(),
                 &mut io::stdout().lock(),
                 DEPLOY_SUBCOMMAND,
-                || {
-                    deploy_directory(&root)?;
+                |emit| {
+                    crate::isolated_deploy::deploy_packages(&root, &shared, None, &targets, emit)?;
                     assert!(crate::schema_install_state(&root).deployed);
                     Ok(())
                 },
@@ -1303,11 +1416,13 @@ mod tests {
         let package = root.join("scheme-packages/local/local-fixture/files");
         let runtime = root.join("runtime/local-fixture");
         let other = root.join("runtime/local-other");
+        let other_package = root.join("scheme-packages/local/local-other/files");
         let bundled = root.join("bundled");
         for dir in [
             package.join("build"),
             runtime.clone(),
-            other.join("build"),
+            other.clone(),
+            other_package.clone(),
             bundled.clone(),
         ] {
             fs::create_dir_all(dir).unwrap();
@@ -1357,45 +1472,129 @@ mod tests {
             "patch: {menu/page_size: 7}\n",
         )
         .unwrap();
-        fs::write(other.join("symbols.yaml"), "symbols: {other: keep}\n").unwrap();
-        fs::write(other.join("build/other.table.bin"), b"keep build").unwrap();
-        let before = tree(&other);
+        for name in [
+            "default.yaml".into(),
+            format!("{SCHEMA}.schema.yaml"),
+            format!("{SCHEMA}.dict.yaml"),
+        ] {
+            fs::copy(package.join(&name), other_package.join(&name)).unwrap();
+        }
+        fs::copy(
+            other_package.join("default.yaml"),
+            bundled.join("default.yaml"),
+        )
+        .unwrap();
+        fs::copy(
+            runtime.join("default.custom.yaml"),
+            other.join("default.custom.yaml"),
+        )
+        .unwrap();
+        fs::write(
+            other.join(format!("{SCHEMA}.custom.yaml")),
+            "patch: {menu/page_size: 3}\n",
+        )
+        .unwrap();
 
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "deploy_child::tests::isolated_deploy_child_compiles_only_the_active_package",
-                "--nocapture",
-            ])
-            .env(FIXTURE, &root)
-            .env("KEYTAO_RIME_SHARED_DATA_DIR", &bundled)
-            .env_remove("KEYTAO_RUNTIME_ISOLATION")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8(output.stdout).unwrap();
+        let run = || {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "deploy_child::tests::isolated_deploy_child_compiles_each_package_then_skips_the_unchanged_build",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, &root)
+                .env("KEYTAO_RIME_SHARED_DATA_DIR", &bundled)
+                .env_remove("KEYTAO_RUNTIME_ISOLATION")
+                .output()
+                .unwrap();
+            let messages = std::str::from_utf8(&output.stdout)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Message>(line).ok())
+                .collect::<Vec<_>>();
+            (output, messages)
+        };
+        let (output, messages) = run();
         assert!(
             output.status.success(),
-            "{stdout}\n{}",
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(stdout.lines().any(|line| matches!(
-            serde_json::from_str::<Message>(line),
-            Ok(Message::Final {
+        assert!(matches!(
+            messages.last(),
+            Some(Message::Final {
                 ok: true,
                 error: None
             })
-        )));
+        ));
+        let steps = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::Progress { progress } => {
+                        Some((progress.index, progress.total, progress.step))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        use DeployStep::*;
+        assert_eq!(
+            steps(&messages),
+            [1, 2]
+                .into_iter()
+                .flat_map(|index| {
+                    [Materialize, Compile, Validate, Prune, Done]
+                        .into_iter()
+                        .map(move |step| (index, 2, step))
+                })
+                .collect::<Vec<_>>()
+        );
         let build = runtime.join("build");
-        let compiled: serde_yaml::Value =
-            serde_yaml::from_slice(&fs::read(build.join(format!("{SCHEMA}.schema.yaml"))).unwrap())
-                .unwrap();
-        assert_eq!(compiled["menu"]["page_size"].as_u64(), Some(7));
-        assert!(build.join(format!("{SCHEMA}.table.bin")).is_file());
+        let other_build = other.join("build");
+        for (build, size) in [(&build, 7), (&other_build, 3)] {
+            let compiled: serde_yaml::Value = serde_yaml::from_slice(
+                &fs::read(build.join(format!("{SCHEMA}.schema.yaml"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(compiled["menu"]["page_size"].as_u64(), Some(size));
+            assert!(build.join(format!("{SCHEMA}.table.bin")).is_file());
+        }
         assert!(!root.join("build").exists());
-        let after = tree(&other);
-        #[cfg(target_os = "macos")]
-        assert_eq!(md5(&before), md5(&after));
-        assert_eq!(before, after);
+        let originals = [tree(&build), tree(&other_build)];
+        let (output, messages) = run();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            steps(&messages),
+            [
+                (1, 2, Materialize),
+                (1, 2, Skip),
+                (2, 2, Materialize),
+                (2, 2, Skip)
+            ]
+        );
+
+        fs::write(
+            runtime.join("default.custom.yaml"),
+            "patch: {schema_list: [{schema: missing}]}\n",
+        )
+        .unwrap();
+        let (output, messages) = run();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(messages.iter().any(|message| matches!(message, Message::Progress { progress } if progress.index == 1 && progress.step == Failed && progress.error.is_some())));
+        assert!(steps(&messages).ends_with(&[(1, 2, Failed), (2, 2, Materialize), (2, 2, Skip)]));
+        assert_eq!(
+            RuntimeDirs::active_package_key(&root).as_deref(),
+            Some("local-fixture")
+        );
+        assert!(crate::schema_install_state(&root).deployed);
+        for (original, build) in originals.iter().zip([&build, &other_build]) {
+            let after = tree(build);
+            #[cfg(target_os = "macos")]
+            assert_eq!(md5(original), md5(&after));
+            assert_eq!(*original, after);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1435,12 +1634,17 @@ mod tests {
                 || result.clone(),
             );
             let mut protocol = Protocol::default();
+            let mut progress = Vec::new();
             for line in output
                 .split(|byte| *byte == b'\n')
                 .filter(|line| !line.is_empty())
             {
-                protocol.line(line).unwrap();
+                progress.extend(protocol.line(line).unwrap());
             }
+            assert_eq!(progress.len(), 1);
+            assert_eq!(progress[0].step, DeployStep::Compile);
+            assert_eq!((progress[0].index, progress[0].total), (1, 1));
+            assert_eq!(progress[0].message(), "Deploying librime...");
             assert_eq!(code, if result.is_ok() { 0 } else { 1 });
             assert_eq!(protocol.final_result, Some(result));
         }
@@ -1562,7 +1766,33 @@ printf '%s\n' '{"progress":"Compiling..."}' '{"ok":true}'
         });
         std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
         assert_eq!(result, Ok(()));
-        assert_eq!(progress, ["Compiling..."]);
+        assert_eq!(
+            progress,
+            [DeployProgress::flat(
+                "librime",
+                "librime",
+                DeployStep::Compile,
+                "Compiling..."
+            )]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_plan_passes_an_argument_older_children_will_reject() {
+        let exe = helper_script(
+            "package-plan",
+            r#"
+case "$#:$1:$2:$KEYTAO_DEPLOY_PACKAGES" in '2:--deploy:--packages:[]') ;; *) exit 2 ;; esac
+printf '%s\n' '{"ok":true}'
+"#,
+        );
+        let mut command = Command::new(&exe);
+        command.env(PACKAGE_TARGETS_ENV, "[]");
+        let result =
+            run_deploy_child_command_with_progress(&mut command, Duration::from_secs(5), |_| {});
+        std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
+        assert_eq!(result, Ok(()));
     }
 
     #[cfg(unix)]

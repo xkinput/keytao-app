@@ -854,9 +854,11 @@ where
             host.deploy().await?;
             #[cfg(target_os = "windows")]
             if let Some(warning) = public_source_warning {
-                core.emit(CoreEvent::DeployProgress(format!(
-                    "系统搜索框方案未更新：{warning}"
-                )));
+                crate::deploy::emit_legacy_progress(
+                    core,
+                    keytao_core::DeployStep::Done,
+                    format!("系统搜索框方案未更新：{warning}"),
+                );
             }
             if !addon_schema_status_at(&root, id).deployed {
                 return Err("附加方案文件已安装，但部署产物缺失".to_string());
@@ -954,9 +956,11 @@ pub async fn addon_schema_uninstall(
             }
             #[cfg(target_os = "windows")]
             if let Some(warning) = public_source_warning {
-                core.emit(CoreEvent::DeployProgress(format!(
-                    "系统搜索框方案未更新：{warning}"
-                )));
+                crate::deploy::emit_legacy_progress(
+                    core,
+                    keytao_core::DeployStep::Done,
+                    format!("系统搜索框方案未更新：{warning}"),
+                );
             }
             cleanup_removed(&root, &removed)?;
             receipt.commit_store(false)?;

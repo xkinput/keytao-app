@@ -267,7 +267,7 @@ class BridgeEvent {
   final BridgeEventKind kind;
   final InstallProgressDto? installProgress;
   final CloudTransferProgressDto? cloudTransferProgress;
-  final String? deployProgress;
+  final DeployProgressDto? deployProgress;
   final WindowsImeStatusDto? windowsImeStatus;
 
   const BridgeEvent({
@@ -439,6 +439,53 @@ class DebugLogsDto {
           macosIme == other.macosIme;
 }
 
+class DeployProgressDto {
+  final String packageKey;
+  final String packageName;
+  final int index;
+  final int total;
+  final DeployStepDto step;
+  final String? error;
+  final String? legacyMessage;
+  final List<String> queuedPackageKeys;
+
+  const DeployProgressDto({
+    required this.packageKey,
+    required this.packageName,
+    required this.index,
+    required this.total,
+    required this.step,
+    this.error,
+    this.legacyMessage,
+    required this.queuedPackageKeys,
+  });
+
+  @override
+  int get hashCode =>
+      packageKey.hashCode ^
+      packageName.hashCode ^
+      index.hashCode ^
+      total.hashCode ^
+      step.hashCode ^
+      error.hashCode ^
+      legacyMessage.hashCode ^
+      queuedPackageKeys.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeployProgressDto &&
+          runtimeType == other.runtimeType &&
+          packageKey == other.packageKey &&
+          packageName == other.packageName &&
+          index == other.index &&
+          total == other.total &&
+          step == other.step &&
+          error == other.error &&
+          legacyMessage == other.legacyMessage &&
+          queuedPackageKeys == other.queuedPackageKeys;
+}
+
 class DeployResultDto {
   final bool success;
   final String message;
@@ -462,6 +509,8 @@ class DeployResultDto {
           message == other.message &&
           warning == other.warning;
 }
+
+enum DeployStepDto { materialize, compile, validate, prune, skip, done, failed }
 
 class DownloadUrlsDto {
   final String? macos;

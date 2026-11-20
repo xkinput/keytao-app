@@ -352,9 +352,11 @@ impl Addon {
                 }
                 #[cfg(target_os = "windows")]
                 if let Some(warning) = public_source_warning {
-                    core.emit(CoreEvent::DeployProgress(format!(
-                        "系统搜索框方案未更新：{warning}"
-                    )));
+                    crate::deploy::emit_legacy_progress(
+                        core,
+                        keytao_core::DeployStep::Done,
+                        format!("系统搜索框方案未更新：{warning}"),
+                    );
                 }
                 let pending = receipt
                     .manifest_bytes(self.manifest)?

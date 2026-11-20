@@ -1490,7 +1490,7 @@ pub fn windows_deploy_rime_blocking(
     crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
     // The child reads the previous repair gate before clearing it, after hosts release their maps.
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
-    let deployed_by_server = server::deploy_if_available()?;
+    let deployed_by_server = server::deploy_if_available(None, |_| {})?;
     if !deployed_by_server {
         let exe = server::installed_server_exe()?;
         keytao_core::deploy_child::run_deploy_child(&exe, std::time::Duration::from_secs(600))?;
@@ -1500,14 +1500,57 @@ pub fn windows_deploy_rime_blocking(
         write_keytao_ime_reload_stamp()
             .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
     }
-    keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+    finish_windows_deploy(&user_dir, profile_guard)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_deploy_packages_blocking(
+    user_dir: &Path,
+    plan: &str,
+    mut progress: impl FnMut(&keytao_core::DeployProgress),
+) -> Result<Option<String>, String> {
+    use keytao_core::{DeployStep, deploy_child};
+
+    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
+    let mut reload_warning = None;
+    let mut report = |event: &keytao_core::DeployProgress| {
+        if event.legacy_message.is_none() && event.index == 1 && event.step == DeployStep::Done {
+            reload_warning = keytao_core::ReloadStamp::write(user_dir)
+                .err()
+                .map(|error| format!("系统输入法重载通知失败：{error}"));
+        }
+        progress(event);
+    };
+    if !server::deploy_if_available(Some(plan), &mut report)? {
+        let mut command = std::process::Command::new(server::installed_server_exe()?);
+        command.env(deploy_child::PACKAGE_TARGETS_ENV, plan);
+        deploy_child::run_deploy_child_command_with_progress(
+            &mut command,
+            std::time::Duration::from_secs(600),
+            report,
+        )?;
+    }
+    let public_warning = finish_windows_deploy(user_dir, profile_guard)?
+        .map(|warning| format!("系统搜索框方案未更新：{warning}"));
+    Ok(match (reload_warning, public_warning) {
+        (Some(reload), Some(public)) => Some(format!("{reload}\n{public}")),
+        (reload, public) => reload.or(public),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn finish_windows_deploy(
+    user_dir: &Path,
+    profile_guard: WindowsImeProfileDeploymentGuard,
+) -> Result<Option<String>, String> {
+    keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
     profile_guard.resume()?;
-    keytao_core::runtime_log::init_for_engine(&user_dir);
+    keytao_core::runtime_log::init_for_engine(user_dir);
     crate::windows_public_schemas::after_private_deploy(Ok(()), || {
         let update = crate::windows_public_schemas::update_public_schemas(|| {
             crate::windows_public_schemas::publish_english_settings(
-                &user_dir,
-                keytao_core::english_mode::read_english_mode(&user_dir)
+                user_dir,
+                keytao_core::english_mode::read_english_mode(user_dir)
                     == keytao_core::english_mode::EnglishMode::Schema,
             )
             .map_err(|error| format!("publish-settings: {error}"))?;

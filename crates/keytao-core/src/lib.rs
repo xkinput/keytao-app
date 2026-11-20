@@ -9,11 +9,21 @@ pub mod deploy_child;
 mod deployment_log;
 mod deployment_state;
 pub use deployment_state::{
-    deployment_in_progress, mark_deployment_failed, track_usable_input_session, DeploymentState,
+    current_deploy_progress, deployment_in_progress, deployment_progress_message,
+    mark_deployment_failed, track_usable_input_session, DeployProgress, DeployStep,
+    DeploymentState,
 };
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub mod isolated_deploy;
 pub mod key_batch;
 pub mod package_store;
 mod preview;
@@ -1447,6 +1457,50 @@ mod desktop {
         result
     }
 
+    pub(crate) fn deploy_resolved_runtime(
+        control_root: &Path,
+        dirs: &RuntimeDirs,
+        mut progress: impl FnMut(DeployStep),
+    ) -> Result<(), String> {
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        let user_dir = dirs.user_data_dir.as_path();
+        let shared_dir = dirs.shared_data_dir.as_path();
+        let package_shared = dirs.package_shared();
+        let deploy_log = capture_deployment_log(control_root);
+        begin_deployment_with_invalidation(user_dir, false)?;
+        #[cfg(target_os = "windows")]
+        patch_windows_lua_compatibility(user_dir)?;
+        {
+            let _rime = rime_api_lock();
+            let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
+            if *initialized {
+                return Err("librime is already initialized in the deployment worker".into());
+            }
+            // Materialization already prepared this package's Lua in the staged user directory.
+            initialize_rime(control_root, dirs, false);
+            *initialized = true;
+        }
+        let result = (|| {
+            progress(DeployStep::Compile);
+            if !full_deploy_and_wait(user_dir)
+                .map_err(|error| deploy_log.failure_message(Some(&error)))?
+            {
+                return Err(deploy_log.failure_message(None));
+            }
+            let deployed = deploy_desktop_schema_dependencies(user_dir, None, package_shared)
+                .map_err(|error| deploy_log.failure_message(Some(&error)))?
+                .ok_or("full deployment did not finish")?;
+            progress(DeployStep::Validate);
+            validate_deployed_schemas(user_dir, &deployed)
+                .map_err(|error| deploy_log.failure_message(Some(&error)))?;
+            complete_resolved_deployment(user_dir, package_shared, || {
+                progress(DeployStep::Prune);
+                prune_rime_build_artifacts(user_dir, Some(shared_dir)).map(|_| ())
+            })
+        })();
+        result.and(finalize_rime())
+    }
+
     /// Deploy in a fresh upgrade child without opening user dictionaries.
     #[cfg(target_os = "linux")]
     pub fn deploy_for_upgrade(
@@ -1656,7 +1710,6 @@ mod desktop {
             .is_ok_and(|signature| *lock_ignore_poison(&RIME_LUA_SIGNATURE) == signature)
     }
 
-    #[cfg(not(target_os = "android"))]
     fn deploy_desktop_schema_dependencies(
         user_dir: &Path,
         changed: Option<&[String]>,
@@ -1670,7 +1723,10 @@ mod desktop {
         let mut visited: HashSet<String> = initial_schemas.iter().cloned().collect();
         let mut pending = std::collections::VecDeque::new();
         let mut deployed = Vec::new();
+        #[cfg(not(target_os = "android"))]
         let trusted = changed.and_then(|_| desktop_inputs::recorded_schema_ids(user_dir));
+        #[cfg(target_os = "android")]
+        let trusted: Option<std::collections::BTreeSet<String>> = None;
         for schema_id in &initial_schemas {
             let compiled = compiled_schema_path(user_dir, schema_id);
             let needs_deploy = changed.is_some_and(|ids| ids.contains(schema_id))
@@ -1911,7 +1967,6 @@ mod desktop {
         result
     }
 
-    #[cfg(not(target_os = "android"))]
     fn validate_deployed_schema_files(user_dir: &Path) -> Result<Vec<String>, String> {
         let schemas = effective_schema_list(user_dir, parse_schema_list_from_dir(user_dir));
         if schemas.is_empty() {
@@ -1923,7 +1978,6 @@ mod desktop {
         Ok(schemas)
     }
 
-    #[cfg(not(target_os = "android"))]
     fn validate_deployed_schemas(user_dir: &Path, deployed: &[String]) -> Result<(), String> {
         let schemas = validate_deployed_schema_files(user_dir)?;
         // Validation selections persist in user.yaml, even when validation fails.
@@ -2917,7 +2971,6 @@ mod desktop {
         unsafe { CStr::from_ptr(ptr).to_str().ok().map(str::to_owned) }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn prepare_deployment_log_directory() -> Result<(), String> {
         // RimeFinalize does not reset glog's process-wide log directory. A
         // previous user root may have been removed after switching runtimes;
@@ -2934,7 +2987,6 @@ mod desktop {
         Ok(())
     }
 
-    #[cfg(not(target_os = "android"))]
     fn full_deploy_and_wait(user_dir: &Path) -> Result<bool, String> {
         let _rime = rime_api_lock();
         prepare_deployment_log_directory()?;
@@ -5675,9 +5727,14 @@ pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<()
     result
 }
 
-/// Release every session and mapped build before a deployment child writes them.
-#[cfg(target_os = "windows")]
-pub fn prepare_server_deploy() -> Result<(), String> {
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub(crate) fn with_rime_finalized(action: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let _build = PROCESS_RIME
         .build
         .acquire()
@@ -5687,7 +5744,14 @@ pub fn prepare_server_deploy() -> Result<(), String> {
     PROCESS_RIME.drop_live_engines();
     *initialized = None;
     PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
-    desktop::finalize_rime()
+    desktop::finalize_rime()?;
+    action()
+}
+
+/// Release every session and mapped build before a deployment child writes them.
+#[cfg(target_os = "windows")]
+pub fn prepare_server_deploy() -> Result<(), String> {
+    with_rime_finalized(|| Ok(()))
 }
 
 #[cfg(any(
@@ -7905,7 +7969,11 @@ fn complete_resolved_deployment(
     write_effective_default_schema_list(user_data_dir, &effective)?;
     patch_neutral_grammar(user_data_dir);
     persist_standalone_addon_selection(user_data_dir)?;
-    if let Err(error) = record_schema_input_fingerprints(user_data_dir, &effective) {
+    if let Err(error) = schema_inputs::record_resolved_schema_input_fingerprints(
+        user_data_dir,
+        &effective,
+        package_shared,
+    ) {
         crate::rt_log!(
             Level::Info,
             "rime",
@@ -7960,6 +8028,27 @@ pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
 fn resolved_schema_install_state(dirs: &RuntimeDirs) -> SchemaInstallState {
     let package_shared = dirs.package_shared();
     let user_data_dir = dirs.user_data_dir.as_path();
+    let build = &dirs.staging_dir;
+    let marker = std::fs::read(build.join(DEPLOYED_FILE))
+        .ok()
+        .and_then(|content| serde_json::from_slice::<DeploymentMarker>(&content).ok());
+    let committed = marker.as_ref().filter(|marker| {
+        package_shared.is_some()
+            && !build.join(DEPLOYING_FILE).exists()
+            && build.join("default.yaml").is_file()
+            && !marker.schemas.is_empty()
+            && marker.schemas.iter().all(|id| {
+                valid_rime_build_id(id) && build.join(format!("{id}.schema.yaml")).is_file()
+            })
+    });
+    if let Some(marker) = committed {
+        // A new source selection can fail to compile while the published build is still usable.
+        return SchemaInstallState {
+            installed: true,
+            deployed: true,
+            schemas: marker.schemas.clone(),
+        };
+    }
     let installed_schemas = managed_primary_schemas(user_data_dir, false, package_shared.is_some());
     let schemas = managed_primary_schemas(user_data_dir, true, package_shared.is_some());
     let skipped = skipped_schemas(user_data_dir);
@@ -7969,23 +8058,16 @@ fn resolved_schema_install_state(dirs: &RuntimeDirs) -> SchemaInstallState {
             schema_source_path(user_data_dir, package_shared, schema).is_file()
                 || skipped.contains_key(schema)
         });
-    let build = &dirs.staging_dir;
     let deployed = installed
         && !schemas.is_empty()
         && schemas
             .iter()
             .all(|schema| build.join(format!("{schema}.schema.yaml")).is_file())
         && !build.join(DEPLOYING_FILE).exists()
-        && match std::fs::read(build.join(DEPLOYED_FILE)) {
-            Ok(content) => {
-                serde_json::from_slice::<DeploymentMarker>(&content).is_ok_and(|marker| {
-                    deployment_fingerprint(user_data_dir)
-                        .is_ok_and(|current| marker.fingerprint == current)
-                        && schemas.iter().all(|schema| marker.schemas.contains(schema))
-                })
-            }
-            Err(_) => false,
-        };
+        && marker.is_some_and(|marker| {
+            deployment_fingerprint(user_data_dir).is_ok_and(|current| marker.fingerprint == current)
+                && schemas.iter().all(|schema| marker.schemas.contains(schema))
+        });
 
     SchemaInstallState {
         installed,
@@ -8077,8 +8159,11 @@ pub fn caret_extent_is_usable(left: i32, top: i32, right: i32, bottom: i32) -> b
 }
 
 pub fn windows_rime_build_repair_required(user_data_dir: &Path) -> bool {
-    if std::fs::read_to_string(user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER))
-        .is_ok_and(|content| content == WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
+    if RuntimeDirs::resolve(user_data_dir, user_data_dir)
+        .active_package_key
+        .is_some()
+        || std::fs::read_to_string(user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER))
+            .is_ok_and(|content| content == WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
     {
         return false;
     }

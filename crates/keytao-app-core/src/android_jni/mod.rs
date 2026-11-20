@@ -814,7 +814,37 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploym
             .lock()
             .ok()
             .and_then(|mut state| state.hint(&root));
-        hint.map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
+        keytao_core::DeploymentState::display_hint(&root, hint)
+            .as_deref()
+            .map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentProgressMessage(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeDeploymentProgressMessage", std::ptr::null_mut(), || {
+        optional_jni_path(&mut env, user_dir)
+            .and_then(|root| keytao_core::deployment_progress_message(&root))
+            .as_deref()
+            .map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeRuntimeIsolationEnabled(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeRuntimeIsolationEnabled", 0, || {
+        optional_jni_path(&mut env, user_dir)
+            .is_some_and(|root| keytao_core::RuntimeDirs::isolation_enabled(&root)) as jboolean
     })
 }
 
@@ -851,7 +881,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploym
             state.key_pressed(&root);
             state.cached_hint()
         });
-        hint.map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
+        keytao_core::DeploymentState::display_hint(&root, hint)
+            .as_deref()
+            .map_or(std::ptr::null_mut(), |hint| jni_string(&mut env, hint))
     })
 }
 
@@ -996,6 +1028,81 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployS
             Err(error) => serde_json::json!({ "success": false, "error": error }),
         };
         jni_string(&mut env, &payload.to_string())
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployPackages(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+    data_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeDeployPackages", std::ptr::null_mut(), || {
+        use crate::deploy::{ANDROID_DEPLOY_PLAN_FILE, ANDROID_DEPLOY_PROGRESS_FILE};
+        use keytao_core::isolated_deploy::{deploy_packages, PackageDeployTarget};
+        use std::io::Write;
+
+        let result = (|| {
+            let root = optional_jni_path(&mut env, user_dir).ok_or("missing user directory")?;
+            let data = optional_jni_path(&mut env, data_dir).ok_or("missing package data directory")?;
+            if !keytao_core::RuntimeDirs::isolation_enabled(&root) {
+                return Err("package isolation is disabled".to_string());
+            }
+            let plan = root.join(ANDROID_DEPLOY_PLAN_FILE);
+            let journal = root.join(ANDROID_DEPLOY_PROGRESS_FILE);
+            for path in [&plan, &journal] {
+                if !std::fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file()) {
+                    return Err(format!("invalid Android deployment file: {}", path.display()));
+                }
+            }
+            let claimed = plan.with_extension("running");
+            std::fs::rename(&plan, &claimed)
+                .map_err(|error| format!("claim Android deployment plan: {error}"))?;
+            let bytes = std::fs::read(&claimed);
+            let _ = std::fs::remove_file(claimed);
+            let bytes = bytes.map_err(|error| format!("read Android deployment plan: {error}"))?;
+            let targets: Vec<PackageDeployTarget> = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("decode Android deployment plan: {error}"))?;
+            let mut journal = std::fs::OpenOptions::new()
+                .append(true)
+                .open(journal)
+                .map_err(|error| format!("open Android deployment progress: {error}"))?;
+            let mut journal_error = None;
+            let mut stamp_error = None;
+            let result = deploy_packages(
+                &root,
+                &root.join("rime-data"),
+                Some(&data),
+                &targets,
+                |progress| {
+                    if progress.index == 1 && progress.step == keytao_core::DeployStep::Done {
+                        stamp_error = keytao_core::ReloadStamp::write(&root)
+                            .err()
+                            .map(|error| format!("系统输入法重载通知失败：{error}"));
+                    }
+                    if journal_error.is_none() {
+                        journal_error = (|| -> std::io::Result<()> {
+                            let mut line = serde_json::to_vec(&progress)?;
+                            line.push(b'\n');
+                            journal.write_all(&line)
+                        })()
+                        .err();
+                    }
+                },
+            );
+            Ok([
+                result.err(),
+                stamp_error,
+                journal_error.map(|error| format!("write Android deployment progress: {error}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n"))
+        })();
+        jni_string(&mut env, &result.unwrap_or_else(|error| error))
     })
 }
 

@@ -452,7 +452,7 @@ fn deployment_hint_entry_requires_a_handled_key_even_before_engine_ready() {
                 {
                     let mut st = state.borrow_mut();
                     st.engine_building = true;
-                    st.deployment_hint = Some("正在部署中");
+                    st.deployment_hint = Some("正在部署中".to_owned());
                 }
                 let eaten = unsafe {
                     if test_callback {
@@ -467,7 +467,7 @@ fn deployment_hint_entry_requires_a_handled_key_even_before_engine_ready() {
                 assert!(calls.borrow().is_empty(), "{:?}", calls.borrow());
                 let st = state.borrow();
                 assert!(st.key_context.is_none(), "passthrough requested a hint");
-                assert_eq!(st.deployment_hint, Some("正在部署中"));
+                assert_eq!(st.deployment_hint.as_deref(), Some("正在部署中"));
                 assert!(st.runtime.is_none() && st.session.is_none());
             }
         }

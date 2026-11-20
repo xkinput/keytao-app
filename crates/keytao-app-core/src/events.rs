@@ -40,7 +40,7 @@ pub struct WindowsImeStatus {
 pub enum CoreEvent {
     InstallProgress(InstallProgress),
     CloudTransferProgress(CloudTransferProgress),
-    DeployProgress(String),
+    DeployProgress(keytao_core::DeployProgress),
     WindowsImeStatus(WindowsImeStatus),
     WindowsImeAction(()),
 }

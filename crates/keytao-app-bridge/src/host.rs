@@ -33,7 +33,7 @@ impl<F> InstallHost<F> {
 
 impl<F, Fut> SchemeHost for InstallHost<F>
 where
-    F: Fn() -> Fut + Send + Sync,
+    F: Fn(bool) -> Fut + Send + Sync,
     Fut: Future<Output = String> + Send,
 {
     fn user_root(&self) -> Result<PathBuf, String> {
@@ -42,20 +42,13 @@ where
 
     async fn deploy(&self) -> Result<(), String> {
         if let Some(deploy) = &self.android_deploy {
-            keytao_app_core::deploy::record_result(&self.host.core, &self.host.root, false)
-                .map_err(|error| error.to_string())?;
-            let error = deploy().await;
-            keytao_app_core::deploy::record_android_result(
+            keytao_app_core::deploy::deploy_with_android_host(
                 &self.host.core,
                 &self.host.root,
-                error.is_empty(),
+                true,
+                deploy,
             )
-            .map_err(|error| error.to_string())?;
-            if error.is_empty() {
-                Ok(())
-            } else {
-                Err(error)
-            }
+            .await
         } else {
             SchemeHost::deploy(&self.host).await
         }
@@ -165,13 +158,21 @@ impl BridgeHost {
                     .await
                     .map_err(|error| error.to_string());
             }
+            if keytao_core::RuntimeDirs::isolation_enabled(&self.root) {
+                let (_, shared) = self.deploy_paths();
+                return keytao_app_core::deploy::deploy_isolated_in_process(
+                    &self.core, &self.root, shared,
+                ).await;
+            }
             keytao_app_core::deploy::record_result(&self.core, &self.root, false)
                 .map_err(|error| error.to_string())?;
             keytao_app_core::ime_settings::prepare_candidate_page_size(&self.root)?;
             let (user, shared) = self.deploy_paths();
-            self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
-                "正在部署 librime...".into(),
-            ));
+            keytao_app_core::deploy::emit_legacy_progress(
+                &self.core,
+                keytao_core::DeployStep::Compile,
+                "正在部署 librime...",
+            );
             tokio::task::spawn_blocking(move || {
                 keytao_core::ImeRuntime::with_dirs(
                     user.clone(),
@@ -184,9 +185,11 @@ impl BridgeHost {
             .await
             .map_err(|error| error.to_string())??;
             self.stamp()?;
-            self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
-                "部署完成".into(),
-            ));
+            keytao_app_core::deploy::emit_legacy_progress(
+                &self.core,
+                keytao_core::DeployStep::Done,
+                "部署完成",
+            );
             keytao_app_core::deploy::record_result(&self.core, &self.root, true)
                 .map_err(|error| error.to_string())?;
             Ok(keytao_app_core::deploy::DeployResult {
@@ -328,14 +331,14 @@ mod tests {
         // Select the Android delegate on host builds without invoking an IME.
         let failed = InstallHost {
             host: host.clone(),
-            android_deploy: Some(|| std::future::ready("platform deploy failed".to_string())),
+            android_deploy: Some(|_| std::future::ready("platform deploy failed".to_string())),
         };
         assert_eq!(failed.deploy().await, Err("platform deploy failed".into()));
         assert!(!core.state().last_deploy.unwrap().success);
 
         let successful = InstallHost {
             host,
-            android_deploy: Some(|| std::future::ready(String::new())),
+            android_deploy: Some(|_| std::future::ready(String::new())),
         };
         let error = successful.deploy().await.unwrap_err();
         assert!(error.contains("build/easy_en.prism.bin"), "{error}");

@@ -68,6 +68,12 @@ fn responses() -> Vec<Response> {
         Response::State(Some(state())),
         Response::English(Ok(state())),
         Response::Generation(u64::MAX),
+        Response::DeployProgress(DeployProgress::flat(
+            "keytao",
+            "KeyTao",
+            keytao_core::DeployStep::Compile,
+            "Deploying",
+        )),
         Response::Deployed(Ok(())),
         Response::Err(EngineError::Busy),
     ]
@@ -111,13 +117,14 @@ fn every_request_variant_round_trips() {
         Request::SetEnglishMode { enabled: true },
         Request::Generation,
         Request::Deploy,
+        Request::DeployPackages { plan: "[]".into() },
         Request::Shutdown,
         Request::SetContextAsciiMode {
             enabled: Some(true),
         },
         Request::SetContextAsciiMode { enabled: None },
     ];
-    assert_eq!(requests.len(), 16);
+    assert_eq!(requests.len(), 17);
     for (seq, message) in requests.into_iter().enumerate() {
         assert_round_trip(&Envelope {
             seq: seq as u64,
@@ -129,7 +136,7 @@ fn every_request_variant_round_trips() {
 #[test]
 fn every_response_variant_round_trips() {
     let responses = responses();
-    assert_eq!(responses.len(), 10);
+    assert_eq!(responses.len(), 11);
     for (seq, message) in responses.into_iter().enumerate() {
         assert_round_trip(&Envelope {
             seq: seq as u64,
