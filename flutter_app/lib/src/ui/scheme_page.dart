@@ -101,24 +101,17 @@ class SchemePage extends StatefulWidget {
 }
 
 class _SchemePageState extends State<SchemePage> {
-  String? _activatingScheme;
   bool _schemesExpanded = false;
 
   Future<void> _activate(String key) async {
     FocusManager.instance.primaryFocus?.unfocus();
-    setState(() => _activatingScheme = key);
-    try {
-      await widget.controller.activateSchemePackage(key);
-    } finally {
-      if (mounted) setState(() => _activatingScheme = null);
-    }
+    await widget.controller.activateSchemePackage(key);
   }
 
   Widget _package(String key) => SchemePackageRow(
     controller: widget.controller,
     schemeKey: key,
     showSource: false,
-    activating: _activatingScheme == key,
     onActivate: () => _activate(key),
   );
 
@@ -475,14 +468,12 @@ class SchemePackageRow extends StatelessWidget {
     super.key,
     required this.controller,
     required this.schemeKey,
-    this.activating = false,
     this.onActivate,
     this.compact = false,
     this.showSource = true,
   });
   final AppController controller;
   final String schemeKey;
-  final bool activating;
   final VoidCallback? onActivate;
   final bool compact;
   final bool showSource;
@@ -501,15 +492,17 @@ class SchemePackageRow extends StatelessWidget {
     final active = package?.active == true;
     final inUse = active && package!.inUse;
     final hasLogo = package?.logoPath != null;
-    final activeLegacy = active && !package!.hasPackageZip && update == null;
-    final deploying = activating || (inUse && c.isDeploying);
+    final legacyDownload =
+        active && !isLocal && !package!.hasPackageZip && update == null;
+    final deploying = c.isDeploying && c.deployingSchemeKey == schemeKey;
     final installing = c.installingSchemeKey == schemeKey;
     final changelogBody = schemeKey == 'keytao' ? c.changelogBody : null;
     final failedDeploySteps = c.deploySteps.where(
       (step) => step.state == DeployStepState.failed,
     );
     final deployFailed = failedDeploySteps.isNotEmpty;
-    final needsDeploy = active && (deployFailed || c.local?.deployed != true);
+    final needsDeploy =
+        active && !c.isDeploying && (deployFailed || c.local?.deployed != true);
     final actions = ActionRow(
       children: [
         if (schemeKey == 'keytao' && showSource) _SchemeSource(controller: c),
@@ -520,34 +513,38 @@ class SchemePackageRow extends StatelessWidget {
             icon: FLucideIcons.arrowUpCircle,
             onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
           ),
-        if (!isLocal && (package == null || activeLegacy))
+        if (deploying)
+          const ActionButton(AppStrings.deploying, primary: true)
+        else if (!isLocal && package == null)
           ActionButton(
             '下载',
             primary: false,
             icon: FLucideIcons.download,
             onPress: c.busy ? null : () => c.installSchemePackage(schemeKey),
           )
-        else if (package != null &&
-            !active &&
-            (package.hasPackageZip || !isLocal))
+        else if (package != null && (active || package.hasPackageZip))
           ActionButton(
-            package.hasPackageZip ? '启用' : '下载',
-            primary: package.hasPackageZip && update == null,
-            icon: package.hasPackageZip
-                ? FLucideIcons.play
-                : FLucideIcons.download,
-            onPress: c.busy
+            needsDeploy
+                ? '使用'
+                : inUse
+                ? '使用中'
+                : '使用',
+            primary: needsDeploy || (!inUse && update == null),
+            success: inUse && !needsDeploy,
+            icon: inUse && !needsDeploy
+                ? FLucideIcons.check
+                : FLucideIcons.play,
+            onPress: c.busy || (inUse && !needsDeploy)
                 ? null
-                : package.hasPackageZip
-                ? onActivate ?? () => c.activateSchemePackage(schemeKey)
-                : () => c.downloadSchemePackage(schemeKey),
-          ),
-        if (active)
+                : needsDeploy && inUse
+                ? () => c.deploy(schemeKey: schemeKey)
+                : onActivate ?? () => c.activateSchemePackage(schemeKey),
+          )
+        else if (package != null && !isLocal)
           ActionButton(
-            c.isDeploying ? AppStrings.deploying : AppStrings.deploy,
-            primary: true,
-            icon: FLucideIcons.play,
-            onPress: c.canDeploy ? c.deploy : null,
+            '下载',
+            icon: FLucideIcons.download,
+            onPress: c.busy ? null : () => c.downloadSchemePackage(schemeKey),
           ),
         if (changelogBody != null ||
             schemeRepositoryUrls[schemeKey] != null ||
@@ -582,6 +579,28 @@ class SchemePackageRow extends StatelessWidget {
                       },
                     ),
                   if (package != null) ...[
+                    if (legacyDownload)
+                      FItem(
+                        title: const Text('下载'),
+                        prefix: const Icon(FLucideIcons.download),
+                        onPress: c.busy
+                            ? null
+                            : () {
+                                popover.hide();
+                                c.downloadSchemePackage(schemeKey);
+                              },
+                      ),
+                    if (active)
+                      FItem(
+                        title: const Text('重新部署'),
+                        prefix: const Icon(FLucideIcons.refreshCw),
+                        onPress: c.canDeploy
+                            ? () {
+                                popover.hide();
+                                c.deploy(schemeKey: schemeKey);
+                              }
+                            : null,
+                      ),
                     FItem(
                       title: const Text(AppStrings.selectSchemas),
                       prefix: const Icon(FLucideIcons.listChecks),
@@ -702,20 +721,16 @@ class SchemePackageRow extends StatelessWidget {
         ),
       ),
     );
-    final state = deploying
-        ? const SizedBox.square(dimension: 18, child: FCircularProgress())
-        : inUse
+    final state = needsDeploy
         ? AppBadge(
-            deployFailed
-                ? '部署失败'
-                : c.local?.deployed == true
-                ? '使用中'
-                : '待部署',
+            deployFailed ? '部署失败' : '待部署',
             background: deployFailed
                 ? palette.error.withValues(alpha: .12)
                 : null,
             foreground: deployFailed ? palette.error : null,
           )
+        : inUse || deploying
+        ? null
         : StatusPill(
             update != null
                 ? '可更新'
@@ -754,7 +769,7 @@ class SchemePackageRow extends StatelessWidget {
               color: palette.muted,
             ),
           ),
-        if (compact) state,
+        if (compact && state != null) state,
       ],
     );
     final heading = compact
@@ -788,7 +803,7 @@ class SchemePackageRow extends StatelessWidget {
                   appLogoFallback: false,
                 ),
               Flexible(child: title),
-              state,
+              ?state,
             ],
           );
     return Column(
@@ -1140,7 +1155,10 @@ Map<String, Widget> _addonCells(
     final hasUpdate = packageKey == 'easy_en'
         ? c.addonHasUpdate
         : c.rimeIceHasUpdate;
-    final inUse = installed && c.activeSchemeKey == packageKey;
+    final inUse =
+        installed && info?.deployed == true && c.currentAddonKey == packageKey;
+    final deploying =
+        c.deployingSchemeKey == packageKey && (c.isDeploying || active);
     final palette = AppPalette.of(context);
     final titleStyle = context.theme.typography.body.sm.copyWith(
       fontSize: compact
@@ -1199,9 +1217,7 @@ Map<String, Widget> _addonCells(
                 spacing: 6,
                 children: [
                   Flexible(child: name),
-                  if (inUse)
-                    AppBadge(info!.deployed ? '使用中' : AppStrings.pendingDeploy)
-                  else
+                  if (!inUse)
                     StatusPill(
                       info == null
                           ? AppStrings.checking
@@ -1237,13 +1253,27 @@ Map<String, Widget> _addonCells(
             ],
             ActionRow(
               children: [
-                if (showInstall)
+                if (showInstall && (!cloudCard || !installed || hasUpdate))
                   ActionButton(
-                    label,
+                    cloudCard ? (installed ? '更新' : '下载') : label,
                     primary: installed,
                     icon: FLucideIcons.download,
                     tooltip: tooltip,
                     onPress: install,
+                  ),
+                if (cloudCard && (installed || deploying))
+                  ActionButton(
+                    deploying
+                        ? AppStrings.deploying
+                        : inUse
+                        ? '使用中'
+                        : '使用',
+                    primary: !inUse,
+                    success: inUse && !deploying,
+                    icon: inUse ? FLucideIcons.check : FLucideIcons.play,
+                    onPress: c.busy || inUse || deploying
+                        ? null
+                        : () => c.activateSchemePackage(packageKey),
                   ),
                 if (installed)
                   ActionButton(AppStrings.uninstall, onPress: uninstall),
@@ -1254,6 +1284,17 @@ Map<String, Widget> _addonCells(
                   menuBuilder: (_, popover, _) => [
                     FItemGroup(
                       children: [
+                        if (cloudCard && installed)
+                          FItem(
+                            title: const Text('重新部署'),
+                            prefix: const Icon(FLucideIcons.refreshCw),
+                            onPress: c.canDeploy
+                                ? () {
+                                    popover.hide();
+                                    c.deploy(schemeKey: packageKey);
+                                  }
+                                : null,
+                          ),
                         if (installed)
                           FItem(
                             title: const Text(AppStrings.selectSchemas),
@@ -1286,7 +1327,17 @@ Map<String, Widget> _addonCells(
                 ),
               ],
             ),
-            if (active) ...[const SizedBox(height: 12), progress],
+            if (active || deploying) ...[
+              const SizedBox(height: 12),
+              if (deploying && c.isDeploying)
+                InstallProgressView(
+                  active: true,
+                  fraction: c.installFraction,
+                  message: c.progress,
+                )
+              else
+                progress,
+            ],
             if (error != null) ...[
               const SizedBox(height: 8),
               ErrorMessage(error),

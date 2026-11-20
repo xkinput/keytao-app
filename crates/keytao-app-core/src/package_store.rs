@@ -811,7 +811,6 @@ impl<'a> PackageStore<'a> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Default::default(), None),
             Err(error) => return Err(error.into()),
         };
-        let lua_conflict = activated.values().filter(|record| record.rime_lua.is_some()).take(2).count() > 1;
         let current_package = match current_schema.as_deref() {
             Some(schema) => activated.iter()
                 .find(|(_, record)| record.manifest.contains_key(&format!("{schema}.schema.yaml")))
@@ -835,8 +834,7 @@ impl<'a> PackageStore<'a> {
                     crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
                 } else { None },
                 active,
-                in_use: active && (!lua_conflict || activated.get(&scheme_key).is_none_or(|record| record.rime_lua.is_none())
-                        || current_package == Some(&scheme_key)),
+                in_use: active && current_package == Some(&scheme_key),
                 supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false

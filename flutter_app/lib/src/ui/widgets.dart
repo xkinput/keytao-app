@@ -801,19 +801,29 @@ class ActionButton extends StatelessWidget {
     this.onPress,
     this.icon,
     this.primary = false,
+    this.success = false,
     this.tooltip,
   });
   final String label;
   final VoidCallback? onPress;
   final IconData? icon;
   final bool primary;
+  final bool success;
   final String? tooltip;
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
     final colors = context.theme.colors;
-    final background = primary ? ChromeAccent.of(context) : Colors.transparent;
-    final foreground = primary ? Colors.white : palette.ink;
+    final background = success
+        ? palette.successBackground
+        : primary
+        ? ChromeAccent.of(context)
+        : Colors.transparent;
+    final foreground = success
+        ? palette.successForeground
+        : primary
+        ? Colors.white
+        : palette.ink;
     ShapeDecoration decoration(Color fill, Color stroke) => ShapeDecoration(
       color: fill,
       shape: RoundedRectangleBorder(
@@ -840,8 +850,12 @@ class ActionButton extends StatelessWidget {
             ),
             [FTappableVariant.disabled]: DecorationDelta.value(
               decoration(
-                primary ? colors.disable(background) : Colors.transparent,
-                colors.disable(palette.ink),
+                success
+                    ? background
+                    : primary
+                    ? colors.disable(background)
+                    : Colors.transparent,
+                success ? palette.success : colors.disable(palette.ink),
               ),
             ),
           },
@@ -863,7 +877,7 @@ class ActionButton extends StatelessWidget {
             ),
             variants: {
               [FTappableVariant.disabled]: TextStyleDelta.delta(
-                color: colors.disable(foreground),
+                color: success ? foreground : colors.disable(foreground),
               ),
             },
           ),
@@ -871,7 +885,7 @@ class ActionButton extends StatelessWidget {
             IconThemeData(color: foreground),
             variants: {
               [FTappableVariant.disabled]: IconThemeDataDelta.delta(
-                color: colors.disable(foreground),
+                color: success ? foreground : colors.disable(foreground),
               ),
             },
           ),
