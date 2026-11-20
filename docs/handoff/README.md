@@ -144,3 +144,10 @@ Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` tr
   - Android keyboard chips/tiles.
   - Scheme conflict prompts.
   - Theme dialog: padding, fonts.
+
+## Status update (2026-11-21, later)
+
+- Isolation B3–B6 merged into local `main` (flag still off by default): pre-flag fixes, package switching in every IME, reversible migration, migration prompt + two-level home selector + F4 package level, add-ons as packages with the Easy English per-package overlay, legacy flat activation isolated in `legacy_flat`.
+- ime-jd engine J0–J2 merged: `ImeBackend` trait (`RimeBackend`, `JdBackend`), user-initiated libjd download from GitHub latest with sha256/ABI checks, per-package engine choice (keytao only), 键道6 card actions, Linux/Windows-server/Android wiring. No libjd binary is bundled.
+- Remaining owner decisions: when to turn isolation on by default (try a real migration first), how long to keep the legacy layout, when to push/release.
+- Verify in CI after push: `keytao-linux-ime` (not compiled locally; dbus missing), Windows TSF tests.
