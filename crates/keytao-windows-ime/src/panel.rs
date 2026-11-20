@@ -1082,7 +1082,7 @@ mod tests {
         keytao_theme::write_ime_ui_settings_to_path(
             &path,
             keytao_theme::UiColorScheme::Light,
-            PanelOrientation::Vertical,
+            PanelOrientation::Horizontal,
             Some("#4A8DF6".into()),
             20.0,
             Some(0.0),
