@@ -115,7 +115,7 @@ pub fn editor_capabilities(platform: EditorPlatform) -> EditorCapabilities {
     }
 }
 
-/// Validate just the incoming leaf, so edits preserve unrelated local source text.
+/// Validate incoming editor values so edits preserve unrelated local source text.
 pub fn edit_theme_source_field(
     source: &ThemeSource,
     target: &str,
@@ -124,6 +124,27 @@ pub fn edit_theme_source_field(
 ) -> Result<ThemeSource, String> {
     if !matches!(target, "light" | "dark") {
         return Err("Theme edit target must be light or dark".into());
+    }
+    if path == "common.font" {
+        let font = value
+            .as_ref()
+            .and_then(Value::as_object)
+            .filter(|font| {
+                font.len() == 2 && font.contains_key("family") && font.contains_key("weight")
+            })
+            .ok_or("Font edit requires family and weight")?;
+        let next = edit_theme_source_field(
+            source,
+            target,
+            "common.font.family",
+            Some(font["family"].clone()),
+        )?;
+        return edit_theme_source_field(
+            &next,
+            target,
+            "common.font.weight",
+            Some(font["weight"].clone()),
+        );
     }
     if !FIELDS.iter().any(|(field, _)| *field == path) {
         return Err("Unsupported theme editor field".into());
@@ -374,5 +395,47 @@ mod tests {
         let preview: Value = serde_json::from_str(&preview).unwrap();
         assert_eq!(preview["mobile"]["isDark"], true);
         assert_eq!(preview["mobile"]["keyboard"]["key"]["fontScale"], 1.3);
+    }
+
+    #[test]
+    fn font_pair_updates_both_leaves_and_preserves_other_source_fields() {
+        for target in ["light", "dark"] {
+            let other = if target == "light" { "dark" } else { "light" };
+            let original = crate::source::parse_local_theme_source(json!({
+                "version": 3,
+                "meta": {"id": "my.font", "name": "Font"},
+                "common": {"font": {"family": "Base", "weight": "bold", "extension": 1}},
+                "pc": {"font": {"size": 24}},
+                target: {"common": {"font": {"family": "Old", "extension": 2}}},
+                other: {"common": {"font": {"family": "Other", "weight": "black"}}}
+            }))
+            .unwrap();
+            let edited = edit_theme_source_field(
+                &original,
+                target,
+                "common.font",
+                Some(json!({"family": "New", "weight": "regular"})),
+            )
+            .unwrap();
+            assert_eq!(edited.value[target]["common"]["font"]["family"], "New");
+            assert_eq!(edited.value[target]["common"]["font"]["weight"], "regular");
+            assert_eq!(edited.value[target]["common"]["font"]["extension"], 2);
+            assert_eq!(edited.value["common"], original.value["common"]);
+            assert_eq!(edited.value["pc"], original.value["pc"]);
+            assert_eq!(edited.value[other], original.value[other]);
+
+            for value in [
+                None,
+                Some(json!(null)),
+                Some(json!({"family": "New"})),
+                Some(json!({"family": "New", "weight": "regular", "size": 24})),
+                Some(json!({"family": 42, "weight": "regular"})),
+                Some(json!({"family": "New", "weight": "unsupported"})),
+            ] {
+                let before = original.value.clone();
+                assert!(edit_theme_source_field(&original, target, "common.font", value).is_err());
+                assert_eq!(original.value, before);
+            }
+        }
     }
 }

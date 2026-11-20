@@ -20,6 +20,8 @@ keytao-schema-logo = { path = "../keytao-schema-logo" }
 tracing = "0.1"
 dirs.workspace = true
 time = { version = "0.3", features = ["parsing"] }
+fontdb = "0.18.0"
+ttf-parser = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

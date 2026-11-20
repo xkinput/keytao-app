@@ -1224,6 +1224,30 @@ class SchemeUpdateDto {
           hasUpdate == other.hasUpdate;
 }
 
+class SystemFontFamilyDto {
+  final String family;
+  final String displayName;
+  final List<String> weights;
+
+  const SystemFontFamilyDto({
+    required this.family,
+    required this.displayName,
+    required this.weights,
+  });
+
+  @override
+  int get hashCode => family.hashCode ^ displayName.hashCode ^ weights.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SystemFontFamilyDto &&
+          runtimeType == other.runtimeType &&
+          family == other.family &&
+          displayName == other.displayName &&
+          weights == other.weights;
+}
+
 class ThemeExportDto {
   final String id;
   final String fileName;

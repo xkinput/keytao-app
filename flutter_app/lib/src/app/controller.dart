@@ -3221,6 +3221,12 @@ class AppController extends ChangeNotifier {
   Future<Map<String, dynamic>> getThemeEditor() async =>
       jsonDecode(await core.getThemeEditor()) as Map<String, dynamic>;
 
+  Future<List<SystemFontFamilyDto>> listSystemFontFamilies() =>
+      core.listSystemFontFamilies();
+
+  Future<Uint8List> loadSystemFontBytes({required String family}) =>
+      core.loadSystemFontBytes(family: family);
+
   Map<String, dynamic> resolveThemeEditorPreview({
     required Map<String, dynamic> source,
     required bool dark,

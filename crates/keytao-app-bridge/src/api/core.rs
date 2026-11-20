@@ -1105,6 +1105,31 @@ pub fn get_theme_editor() -> Result<String, String> {
     keytao_app_core::theme_library::get_theme_editor(theme_library_host()?)
 }
 
+pub async fn list_system_font_families() -> Result<Vec<SystemFontFamilyDto>, String> {
+    tokio::task::spawn_blocking(|| {
+        keytao_app_core::system_fonts::list_system_font_families().map(|families| {
+            families
+                .into_iter()
+                .map(|font| SystemFontFamilyDto {
+                    family: font.family,
+                    display_name: font.display_name,
+                    weights: font.weights,
+                })
+                .collect()
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub async fn load_system_font_bytes(family: String) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || {
+        keytao_app_core::system_fonts::load_system_font_bytes(family)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub fn update_theme_editor(
     target: String,
     path: String,

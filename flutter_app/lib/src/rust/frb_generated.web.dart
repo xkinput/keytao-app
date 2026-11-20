@@ -226,6 +226,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SchemeUpdateDto> dco_decode_list_scheme_update_dto(dynamic raw);
 
   @protected
+  List<SystemFontFamilyDto> dco_decode_list_system_font_family_dto(dynamic raw);
+
+  @protected
   List<ThemeSummaryDto> dco_decode_list_theme_summary_dto(dynamic raw);
 
   @protected
@@ -355,6 +358,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeUpdateDto dco_decode_scheme_update_dto(dynamic raw);
+
+  @protected
+  SystemFontFamilyDto dco_decode_system_font_family_dto(dynamic raw);
 
   @protected
   ThemeExportDto dco_decode_theme_export_dto(dynamic raw);
@@ -659,6 +665,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<SystemFontFamilyDto> sse_decode_list_system_font_family_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ThemeSummaryDto> sse_decode_list_theme_summary_dto(
     SseDeserializer deserializer,
   );
@@ -822,6 +833,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeUpdateDto sse_decode_scheme_update_dto(SseDeserializer deserializer);
+
+  @protected
+  SystemFontFamilyDto sse_decode_system_font_family_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ThemeExportDto sse_decode_theme_export_dto(SseDeserializer deserializer);
@@ -1225,6 +1241,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_system_font_family_dto(
+    List<SystemFontFamilyDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_theme_summary_dto(
     List<ThemeSummaryDto> self,
     SseSerializer serializer,
@@ -1431,6 +1453,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_scheme_update_dto(
     SchemeUpdateDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_system_font_family_dto(
+    SystemFontFamilyDto self,
     SseSerializer serializer,
   );
 

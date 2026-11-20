@@ -10,6 +10,7 @@ import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
 import 'mobile_keyboard_preview.dart';
+import 'system_font_picker.dart';
 import 'theme.dart';
 import 'theme_library.dart';
 import 'widgets.dart';
@@ -96,11 +97,23 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   final Map<String, String> _textDrafts = {};
 
   AppController get _controller => widget.controller;
+  SystemFontCatalog get _fonts => SystemFontCatalog.forController(_controller);
   bool get _ready => !_controller.isAndroid || _controller.storageReady;
   bool get _enabled => _ready && !_loading && !_working && !_controller.busy;
   Map<String, dynamic> get _source =>
       _snapshot!['source'] as Map<String, dynamic>;
   Map<String, dynamic> get _resolved => _draft ?? _previews[_target]!;
+
+  Map<String, dynamic> get _fontPreview {
+    final font = _resolved['font'] as Map<String, dynamic>;
+    final alias = _fonts.alias(font['family'] as String? ?? '');
+    return alias == null
+        ? _resolved
+        : {
+            ..._resolved,
+            'font': {...font, 'family': alias},
+          };
+  }
 
   Set<String> get _disabledTargets {
     final light = _snapshot!['resolvedLight']['ui']['effectiveColorScheme'];
@@ -493,6 +506,97 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     );
   }
 
+  Future<void> _pickFont() async {
+    final family = await showThemeFontPicker(
+      context,
+      controller: _controller,
+      selected: _value('common.font.family') as String? ?? '',
+    );
+    if (!mounted) return;
+    setState(() {});
+    if (family == null || !_enabled) return;
+    final weight = _value('common.font.weight') as String;
+    final supported = _fonts.supportedWeights(family);
+    final nextWeight = supported == null
+        ? weight
+        : closestThemeFontWeight(weight, supported);
+    _preview('common.font.family', family);
+    await _perform(() async {
+      if (family.isNotEmpty) {
+        try {
+          await _fonts.load(family);
+        } catch (_) {
+          // The platform family remains usable when Flutter rejects a font file.
+        }
+      }
+      return _controller.updateThemeEditor(
+        target: _target,
+        path: 'common.font',
+        value: {'family': family, 'weight': nextWeight},
+      );
+    });
+  }
+
+  Widget _fontFamily() {
+    final family = _value('common.font.family') as String? ?? '';
+    final name = _fonts.families
+        ?.where((font) => font.family == family)
+        .firstOrNull
+        ?.displayName;
+    return _field(
+      '字体族',
+      'common.font.family',
+      FButton(
+        variant: FButtonVariant.outline,
+        onPress: _enabled && _supported('common.font.family')
+            ? _pickFont
+            : null,
+        child: Text(
+          family.isEmpty ? '默认' : name ?? family,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    );
+  }
+
+  Widget _fontWeight() {
+    final selected = _value('common.font.weight') as String;
+    final supported = _fonts.supportedWeights(
+      _value('common.font.family') as String? ?? '',
+    );
+    return _field(
+      '字重',
+      'common.font.weight',
+      Wrap(
+        spacing: 4,
+        runSpacing: 4,
+        children: [
+          for (final weight in themeFontWeights.entries)
+            Semantics(
+              label: '字重：${weight.value}',
+              selected:
+                  selected == weight.key &&
+                  (supported == null || supported.contains(weight.key)),
+              child: ActionButton(
+                weight.value,
+                primary:
+                    selected == weight.key &&
+                    (supported == null || supported.contains(weight.key)),
+                tooltip: weight.value,
+                onPress:
+                    _enabled &&
+                        _supported('common.font.weight') &&
+                        (supported == null || supported.contains(weight.key))
+                    ? () => _save('common.font.weight', weight.key)
+                    : null,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   String _colorValue(String path) {
     final color = _value(path);
     if (color is String) {
@@ -678,18 +782,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             }),
             _slider('圆角', 'common.cornerRadius', 0, 28, 28),
             _group('字体', [
-              if (!mobile) _text('字体族', 'common.font.family'),
-              _choice('字重', 'common.font.weight', const {
-                'ultralight': '极细',
-                'thin': '纤细',
-                'light': '细',
-                'regular': '常规',
-                'medium': '中等',
-                'semibold': '半粗',
-                'bold': '粗',
-                'heavy': '重',
-                'black': '特粗',
-              }),
+              if (!mobile) _fontFamily(),
+              _fontWeight(),
               if (!mobile) ...[
                 _slider(
                   AppStrings.candidateFontSize,
@@ -830,7 +924,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           child: mobile
               ? MobileKeyboardPreview(
                   editorPreview: true,
-                  theme: _resolved,
+                  theme: _fontPreview,
                   schemeName:
                       _controller
                           .installedPackageFor(_controller.activeSchemeKey)
@@ -846,7 +940,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   children: [
                     CandidatePanelPreview(
                       editorPreview: true,
-                      theme: _resolved,
+                      theme: _fontPreview,
                       showPreedit: true,
                       candidateCount: 3,
                       candidates: _controller.candidatePreviewCandidates,

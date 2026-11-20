@@ -23,6 +23,12 @@ pub struct BridgeInfo {
     pub user_root: String,
 }
 
+pub struct SystemFontFamilyDto {
+    pub family: String,
+    pub display_name: String,
+    pub weights: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 pub struct RimeSyncSettingsDto {
     pub installation_id: String,

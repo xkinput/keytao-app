@@ -596,7 +596,7 @@ pub fn get_theme_editor(
     editor_snapshot_unlocked(theme_path, platform)
 }
 
-/// Save one appearance-specific leaf using the normal manual-edit and fork policy.
+/// Save one appearance-specific edit using the normal manual-edit and fork policy.
 pub fn update_theme_editor(
     theme_path: &Path,
     platform: crate::editor::EditorPlatform,
@@ -1502,6 +1502,16 @@ mod tests {
                 "dark",
                 "mobile.candidateBar.showComment",
                 Some(json!("false")),
+            ),
+            (
+                "light",
+                "common.font",
+                Some(json!({"family": "New", "weight": "unsupported"})),
+            ),
+            (
+                "dark",
+                "common.font",
+                Some(json!({"family": 42, "weight": "regular"})),
             ),
         ] {
             assert!(update_theme_editor(&dir.theme(), platform, target, path, value).is_err());

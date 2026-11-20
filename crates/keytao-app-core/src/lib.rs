@@ -15,6 +15,7 @@ pub mod ime_host;
 pub mod ime_paths;
 pub mod ime_settings;
 pub mod theme_library;
+pub mod system_fonts;
 pub mod rime_sync;
 pub mod ime_status;
 pub mod download;
