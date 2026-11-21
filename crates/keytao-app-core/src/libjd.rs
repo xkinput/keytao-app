@@ -313,6 +313,8 @@ pub async fn install_or_update_libjd(
         archive.rewind()?;
         let library = stage.path().join(platform.library);
         extract_library(archive, &library, platform)?;
+        #[cfg(target_os = "android")]
+        fix_android_libjd_dependency(&library, &sha256)?;
         let abi_layout = crate::validate_libjd_library(&library).map_err(|error| {
             tracing::warn!(%error, "ime-jd library validation failed");
             CoreError::Other("ime-jd 动态库加载或 ABI 校验失败".into())
@@ -341,6 +343,32 @@ pub async fn install_or_update_libjd(
     publish(&root, &tag, &destination, stage.path(), platform)?;
     emit_progress(core, "done", 100, "ime-jd 已安装");
     Ok(libjd_status(core))
+}
+
+#[cfg(any(target_os = "android", test))]
+fn fix_android_libjd_dependency(library: &Path, archive_sha256: &str) -> io::Result<()> {
+    // shortcut: v0.13.0 Android archives omit libc.so; remove this when upstream replaces them.
+    let (tag_offset, name_offset) = match archive_sha256 {
+        "321b471349472c66302d731b66d8205aa985507f314d9b861e5e8de274b842fa" => (0x5292f8, 0x6ad),
+        "4357521d54b02c6cc025af1c94be4b1ee97dab6314b6607f7770328d8f8bfa19" => (0x52b420, 0x622),
+        _ => return Ok(()),
+    };
+    let mut image = fs::read(library)?;
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "unexpected Android libjd ELF");
+    let tag = image
+        .get_mut(tag_offset..tag_offset + 8)
+        .filter(|bytes| *bytes == 14u64.to_le_bytes())
+        .ok_or_else(invalid)?;
+    // Loaded by absolute path, libjd can use its SONAME slot for DT_NEEDED.
+    tag.copy_from_slice(&1u64.to_le_bytes());
+    let name = image
+        .get_mut(name_offset..name_offset + 9)
+        .filter(|bytes| *bytes == b"libjd.so\0")
+        .ok_or_else(invalid)?;
+    name.copy_from_slice(b"libc.so\0\0");
+    let mut output = OpenOptions::new().write(true).open(library)?;
+    std::io::Write::write_all(&mut output, &image)?;
+    output.sync_all()
 }
 
 fn publish(
@@ -389,6 +417,26 @@ fn publish(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn only_known_android_libjd_archives_get_the_libc_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("libjd.so");
+        let mut image = vec![0; 0x5292f8 + 8];
+        image[0x5292f8..].copy_from_slice(&14u64.to_le_bytes());
+        image[0x6ad..0x6ad + 9].copy_from_slice(b"libjd.so\0");
+        fs::write(&library, &image).unwrap();
+        fix_android_libjd_dependency(&library, "unknown").unwrap();
+        assert_eq!(fs::read(&library).unwrap(), image);
+
+        let digest = "321b471349472c66302d731b66d8205aa985507f314d9b861e5e8de274b842fa";
+        fix_android_libjd_dependency(&library, digest).unwrap();
+        image[0x5292f8..].copy_from_slice(&1u64.to_le_bytes());
+        image[0x6ad..0x6ad + 9].copy_from_slice(b"libc.so\0\0");
+        assert_eq!(fs::read(&library).unwrap(), image);
+        assert!(fix_android_libjd_dependency(&library, digest).is_err());
+        assert_eq!(fs::read(&library).unwrap(), image);
+    }
 
     #[test]
     fn release_from_location_parses_latest_redirect_without_api() {

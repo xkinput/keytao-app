@@ -171,11 +171,7 @@ fn lock(path: &Path, wait: bool) -> Result<fs::File, String> {
         .truncate(false)
         .open(path)
         .map_err(|error| format!("open deployment lock: {error}"))?;
-    if wait {
-        file.lock().map_err(|error| format!("lock deployment: {error}"))?;
-    } else {
-        file.try_lock().map_err(|error| format!("lock deployment: {error}"))?;
-    }
+    crate::lock_file(&file, wait).map_err(|error| format!("lock deployment: {error}"))?;
     Ok(file)
 }
 

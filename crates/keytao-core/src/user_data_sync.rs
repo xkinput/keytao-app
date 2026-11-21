@@ -17,7 +17,7 @@ fn lock_request(root: &Path) -> Result<std::fs::File, String> {
         .truncate(false)
         .open(root.join(".keytao-user-data-sync.lock"))
         .map_err(|error| format!("open sync request lock: {error}"))?;
-    file.lock()
+    crate::lock_file(&file, true)
         .map_err(|error| format!("lock sync request: {error}"))?;
     Ok(file)
 }

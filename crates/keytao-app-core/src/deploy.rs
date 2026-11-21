@@ -1316,7 +1316,7 @@ fn isolated_plan_lock(root: &Path) -> Result<std::fs::File, String> {
         .truncate(false)
         .open(lock)
         .map_err(|error| error.to_string())?;
-    lock.try_lock()
+    keytao_core::lock_file(&lock, false)
         .map_err(|error| format!("Cannot acquire the package deployment plan lock: {error}"))?;
     Ok(lock)
 }

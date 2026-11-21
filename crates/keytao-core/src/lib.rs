@@ -16,6 +16,8 @@ pub use deployment_state::{
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+mod file_lock;
+pub use file_lock::lock_file;
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",

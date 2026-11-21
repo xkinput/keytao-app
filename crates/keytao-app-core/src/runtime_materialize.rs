@@ -840,7 +840,7 @@ fn prepare_runtime(
         .create(true)
         .truncate(false)
         .open(safe(&runtime, ".keytao-materialize.lock")?)?;
-    lock.lock()?;
+    keytao_core::lock_file(&lock, true)?;
     let previous = current_manifest(&runtime, key)?;
 
     let mut selected = selected_schemas(key, &sources, selection)?;
