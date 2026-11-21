@@ -133,7 +133,7 @@ pub(crate) const ANDROID_DEPLOY_PROGRESS_FILE: &str = ".keytao-android-deploy-pr
 pub async fn deploy_with_android_host<F: std::future::Future<Output = String>>(
     core: &Core,
     root: &Path,
-    deploy: impl FnOnce() -> F,
+    deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
     deploy_isolated_android(core, root, IsolatedDeploy::All, deploy).await
 }
@@ -143,27 +143,68 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     core: &Core,
     root: &Path,
     mode: IsolatedDeploy<'_>,
-    deploy: impl FnOnce() -> F,
+    mut deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
+    let active_before = RuntimeDirs::active_package_key(root);
+    match deploy_isolated_android_once(core, root, mode, &mut deploy).await {
+        Ok(()) => Ok(()),
+        Err(failure) if !failure.failed_packages.is_empty() => {
+            if let Err(repair_err) =
+                repair_failed_packages(core, root, &failure.failed_packages).await
+            {
+                tracing::warn!(%repair_err, "auto-repair after Android deploy failure did not complete");
+                return Err(failure.error);
+            }
+            let retry_mode = retry_mode_after_repair(mode);
+            deploy_isolated_android_once(core, root, retry_mode, &mut deploy)
+                .await
+                .map_err(|retry_failure| retry_failure.error)?;
+            restore_previous_active_if_needed(core, root, retry_mode, active_before).await?;
+            Ok(())
+        }
+        Err(failure) => Err(failure.error),
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn deploy_isolated_android_once<F: std::future::Future<Output = String>>(
+    core: &Core,
+    root: &Path,
+    mode: IsolatedDeploy<'_>,
+    deploy: &mut impl FnMut() -> F,
+) -> Result<(), DeployAttemptFailure> {
     use std::{
         fs,
         io::{BufRead, BufReader},
         time::Duration,
     };
 
-    crate::package_migration::ensure_before_write(core, root).await.map_err(|error| error.to_string())?;
+    crate::package_migration::ensure_before_write(core, root)
+        .await
+        .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     let _plan_lock = isolated_plan_lock(root)?;
     let shared = deploy_shared_data_dir(core, root);
     let (targets, _staged_inputs) =
         crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, mode.target())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     if targets.is_empty() {
-        return Err("没有可部署的方案包".into());
+        if matches!(mode, IsolatedDeploy::All) && active_uses_libjd(core, root) {
+            keytao_core::ReloadStamp::write(root)?;
+            return Ok(());
+        }
+        return Err("没有可部署的方案包".to_owned().into());
     }
-    if matches!(mode, IsolatedDeploy::Switch(_))
-        && switch_cached_package(root, &shared, &targets[0]).await?
-    {
-        return Ok(());
+    if let IsolatedDeploy::Switch { schema_id, .. } = mode {
+        match switch_cached_package(root, &shared, &targets[0], schema_id).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(DeployAttemptFailure {
+                    error,
+                    failed_packages: vec![targets[0].package_key.clone()],
+                });
+            }
+        }
     }
     let journal = crate::packages::safe_path(root, ANDROID_DEPLOY_PROGRESS_FILE)?;
     keytao_core::write_file_atomic(&journal, b"").map_err(|error| error.to_string())?;
@@ -174,6 +215,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
 
     let mut active_step = None;
     let mut completed = 0;
+    let mut failed_packages = Vec::new();
     let mut line = Vec::new();
     let mut drain_progress = || -> Result<(), String> {
         while reader
@@ -190,6 +232,9 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
                 DeployStep::Done | DeployStep::Skip | DeployStep::Failed
             ) {
                 completed += 1;
+                if progress.step == DeployStep::Failed {
+                    push_unique_failed(&mut failed_packages, progress.package_key.clone());
+                }
                 if progress.index == 1 {
                     active_step = Some(progress.step);
                 }
@@ -212,15 +257,40 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     if mode.publishes_all() && matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
         persist_result(core, root, true).map_err(|error| error.to_string())?;
     }
+    let fallback_failed = |mut list: Vec<String>| {
+        if list.is_empty() {
+            for target in &targets {
+                if target.materialize_error.is_some() {
+                    push_unique_failed(&mut list, target.package_key.clone());
+                }
+            }
+        }
+        if list.is_empty() && targets.len() == 1 {
+            push_unique_failed(&mut list, targets[0].package_key.clone());
+        }
+        list
+    };
     if !error.is_empty() {
-        return Err(error);
+        return Err(DeployAttemptFailure {
+            error,
+            failed_packages: fallback_failed(failed_packages),
+        });
     }
     if completed != targets.len()
         || !matches!(active_step, Some(DeployStep::Done | DeployStep::Skip))
     {
-        return Err("Android package deployment did not report all results".into());
+        return Err(DeployAttemptFailure {
+            error: "Android package deployment did not report all results".into(),
+            failed_packages: fallback_failed(failed_packages),
+        });
     }
-    finish_isolated_target(core, root, &shared, mode, &targets[0].package_key).await
+    let first = targets[0].package_key.clone();
+    finish_isolated_target(core, root, &shared, mode, &first)
+        .await
+        .map_err(|error| DeployAttemptFailure {
+            error,
+            failed_packages: vec![first],
+        })
 }
 
 #[cfg(any(all(target_os = "android", debug_assertions), test))]
@@ -324,7 +394,10 @@ pub struct DeployResult {
 #[derive(Clone, Copy)]
 enum IsolatedDeploy<'a> {
     All,
-    Switch(&'a str),
+    Switch {
+        key: &'a str,
+        schema_id: Option<&'a str>,
+    },
     Refresh(&'a str),
 }
 
@@ -332,7 +405,7 @@ impl<'a> IsolatedDeploy<'a> {
     fn target(self) -> Option<&'a str> {
         match self {
             Self::All => None,
-            Self::Switch(key) | Self::Refresh(key) => Some(key),
+            Self::Switch { key, .. } | Self::Refresh(key) => Some(key),
         }
     }
 
@@ -341,16 +414,150 @@ impl<'a> IsolatedDeploy<'a> {
     }
 }
 
+pub const LIBJD_SWITCH_BACK_HINT: &str = keytao_core::isolated_deploy::LIBJD_SWITCH_BACK_HINT;
+
+pub(crate) fn active_uses_libjd(core: &Core, root: &Path) -> bool {
+    let key = keytao_core::engine_choice::PACKAGE_KEY;
+    core.lock_state().installed_packages.contains_key(key)
+        && keytao_core::engine_choice::read(root, Some(key))
+            == keytao_core::engine_choice::PackageEngine::Libjd
+        && crate::libjd::libjd_status(core).installed_version.is_some()
+}
+
+pub fn ensure_not_using_libjd(core: &Core, root: &Path) -> Result<(), CoreError> {
+    if active_uses_libjd(core, root) {
+        return Err(CoreError::Other(LIBJD_SWITCH_BACK_HINT.into()));
+    }
+    Ok(())
+}
+
+struct DeployAttemptFailure {
+    error: String,
+    failed_packages: Vec<String>,
+}
+
+impl From<String> for DeployAttemptFailure {
+    fn from(error: String) -> Self {
+        Self {
+            error,
+            failed_packages: Vec::new(),
+        }
+    }
+}
+
+fn push_unique_failed(list: &mut Vec<String>, key: impl Into<String>) {
+    let key = key.into();
+    if !key.is_empty() && !list.contains(&key) {
+        list.push(key);
+    }
+}
+
+fn retry_mode_after_repair<'a>(mode: IsolatedDeploy<'a>) -> IsolatedDeploy<'a> {
+    match mode {
+        IsolatedDeploy::Switch {
+            key: "builtin/keytao",
+            schema_id,
+        } => IsolatedDeploy::Switch {
+            key: "keytao",
+            schema_id,
+        },
+        IsolatedDeploy::Refresh("builtin/keytao") => IsolatedDeploy::Refresh("keytao"),
+        other => other,
+    }
+}
+
+async fn restore_previous_active_if_needed(
+    core: &Core,
+    root: &Path,
+    mode: IsolatedDeploy<'_>,
+    active_before: Option<String>,
+) -> Result<(), String> {
+    if !matches!(mode, IsolatedDeploy::All) {
+        return Ok(());
+    }
+    let Some(previous) = active_before else {
+        return Ok(());
+    };
+    let normalized = previous.strip_prefix("builtin/").unwrap_or(&previous);
+    if RuntimeDirs::active_package_key(root).as_deref() == Some(normalized) {
+        return Ok(());
+    }
+    let shared = deploy_shared_data_dir(core, root);
+    if RuntimeDirs::for_package(root, &shared, normalized)
+        .is_some_and(|dirs| keytao_core::package_build_ready(root, &dirs))
+    {
+        switch_prepared_package(root, &shared, Some(&core.env().data_dir), normalized, None)
+            .await?;
+        persist_result(core, root, true).map_err(|error| error.to_string())?;
+        render_user_schema_logos(root);
+    }
+    Ok(())
+}
+
+async fn repair_failed_packages(
+    core: &Core,
+    root: &Path,
+    failed_packages: &[String],
+) -> Result<Option<String>, String> {
+    let mut repaired = Vec::new();
+    for key in failed_packages {
+        let name = crate::runtime_materialize::package_name(core, key);
+        core.emit(CoreEvent::InstallProgress(crate::events::InstallProgress {
+            stage: "repairing".into(),
+            percent: 10,
+            message: format!("检测到 {name} 部署异常，正在自动备份并修复…"),
+        }));
+        let backup = crate::packages::repair_package_for_redeploy(core, root, key)
+            .await
+            .map_err(|error| error.to_string())?;
+        repaired.push(match backup {
+            Some(dir) => format!("已自动备份并重新下载修复方案 {name}（备份目录：{dir}）"),
+            None => format!("已清理并重新部署用户方案 {name}"),
+        });
+    }
+    Ok((!repaired.is_empty()).then(|| repaired.join("\n")))
+}
+
 pub async fn switch_package<#[cfg(target_os = "android")] F: std::future::Future<Output = String> + Send>(
     core: &Core,
     root: &Path,
     key: &str,
-    #[cfg(target_os = "android")] deploy: impl FnOnce() -> F,
+    #[cfg(target_os = "android")] deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
+    switch_package_with_schema(
+        core,
+        root,
+        key,
+        None,
+        #[cfg(target_os = "android")]
+        deploy,
+    )
+    .await
+}
+
+pub async fn switch_package_with_schema<#[cfg(target_os = "android")] F: std::future::Future<Output = String> + Send>(
+    core: &Core,
+    root: &Path,
+    key: &str,
+    schema_id: Option<&str>,
+    #[cfg(target_os = "android")] deploy: impl FnMut() -> F,
+) -> Result<(), String> {
+    if active_uses_libjd(core, root) {
+        if key != keytao_core::engine_choice::PACKAGE_KEY
+            || schema_id.is_some_and(|id| id != keytao_core::engine_choice::PACKAGE_KEY)
+        {
+            return Err(LIBJD_SWITCH_BACK_HINT.into());
+        }
+        crate::package_migration::ensure_before_write(core, root)
+            .await
+            .map_err(|error| error.to_string())?;
+        let shared = deploy_shared_data_dir(core, root);
+        return switch_prepared_package(root, &shared, Some(&core.env().data_dir), key, None).await;
+    }
     deploy_package_mode(
         core,
         root,
-        IsolatedDeploy::Switch(key),
+        IsolatedDeploy::Switch { key, schema_id },
         #[cfg(target_os = "android")]
         deploy,
     )
@@ -361,7 +568,7 @@ pub async fn deploy_package<#[cfg(target_os = "android")] F: std::future::Future
     core: &Core,
     root: &Path,
     key: &str,
-    #[cfg(target_os = "android")] deploy: impl FnOnce() -> F,
+    #[cfg(target_os = "android")] deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
     deploy_package_mode(
         core,
@@ -377,7 +584,7 @@ async fn deploy_package_mode<#[cfg(target_os = "android")] F: std::future::Futur
     core: &Core,
     root: &Path,
     mode: IsolatedDeploy<'_>,
-    #[cfg(target_os = "android")] deploy: impl FnOnce() -> F,
+    #[cfg(target_os = "android")] deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
 
     #[cfg(target_os = "android")]
@@ -407,6 +614,7 @@ async fn switch_cached_package(
     root: &Path,
     shared: &Path,
     target: &PackageDeployTarget,
+    schema_id: Option<&str>,
 ) -> Result<bool, String> {
     if let Some(error) = &target.materialize_error {
         return Err(error.clone());
@@ -420,11 +628,17 @@ async fn switch_cached_package(
     if !keytao_core::package_build_ready(root, &dirs) {
         return Ok(false);
     }
-    switch_prepared_package(root, shared, key).await?;
+    switch_prepared_package(root, shared, None, key, schema_id).await?;
     Ok(true)
 }
 
-async fn switch_prepared_package(root: &Path, shared: &Path, key: &str) -> Result<(), String> {
+async fn switch_prepared_package(
+    root: &Path,
+    shared: &Path,
+    data_root: Option<&Path>,
+    key: &str,
+    schema_id: Option<&str>,
+) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let key = key.to_owned();
@@ -434,7 +648,13 @@ async fn switch_prepared_package(root: &Path, shared: &Path, key: &str) -> Resul
         .await
         .map_err(|error| error.to_string())??;
     }
-    keytao_core::switch_ready_package(root, shared, key)?;
+    keytao_core::isolated_deploy::switch_ready_package_in_store(
+        root,
+        shared,
+        data_root,
+        key,
+        schema_id,
+    )?;
     #[cfg(target_os = "windows")]
     crate::windows_public_schemas::activate_cached_isolated_package(key)
         .map_err(|error| format!("方案包已切换，系统搜索框方案未更新：{error}"))?;
@@ -448,18 +668,21 @@ async fn finish_isolated_target(
     mode: IsolatedDeploy<'_>,
     first: &str,
 ) -> Result<(), String> {
+    let data_root = Some(core.env().data_dir.as_path());
     match mode {
         IsolatedDeploy::All if RuntimeDirs::active_package_key(root).is_none() => {
-            switch_prepared_package(root, shared, first).await?;
+            switch_prepared_package(root, shared, data_root, first, None).await?;
             persist_result(core, root, true).map_err(|error| error.to_string())?;
             render_user_schema_logos(root);
         }
         IsolatedDeploy::Refresh(key) if RuntimeDirs::active_package_key(root).is_none() => {
-            switch_prepared_package(root, shared, key).await?;
+            switch_prepared_package(root, shared, data_root, key, None).await?;
             persist_result(core, root, true).map_err(|error| error.to_string())?;
             render_user_schema_logos(root);
         }
-        IsolatedDeploy::Switch(key) => switch_prepared_package(root, shared, key).await?,
+        IsolatedDeploy::Switch { key, schema_id } => {
+            switch_prepared_package(root, shared, data_root, key, schema_id).await?
+        }
         #[cfg(not(target_os = "android"))]
         IsolatedDeploy::Refresh(key) => finish_package_refresh(root, key).await?,
         _ => {}
@@ -690,6 +913,35 @@ async fn deploy_isolated_desktop(
     root: &Path,
     mode: IsolatedDeploy<'_>,
 ) -> Result<DeployResult, String> {
+    let active_before = RuntimeDirs::active_package_key(root);
+    match deploy_isolated_desktop_once(core, root, mode).await {
+        Ok(result) => Ok(result),
+        Err(failure) if !failure.failed_packages.is_empty() => {
+            let notice = match repair_failed_packages(core, root, &failure.failed_packages).await {
+                Ok(notice) => notice,
+                Err(repair_err) => {
+                    tracing::warn!(%repair_err, "auto-repair after desktop deploy failure did not complete");
+                    return Err(failure.error);
+                }
+            };
+            let retry_mode = retry_mode_after_repair(mode);
+            let mut result = deploy_isolated_desktop_once(core, root, retry_mode)
+                .await
+                .map_err(|retry_failure| retry_failure.error)?;
+            restore_previous_active_if_needed(core, root, retry_mode, active_before).await?;
+            result.warning = merge_warnings([notice, result.warning]);
+            Ok(result)
+        }
+        Err(failure) => Err(failure.error),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+async fn deploy_isolated_desktop_once(
+    core: &Core,
+    root: &Path,
+    mode: IsolatedDeploy<'_>,
+) -> Result<DeployResult, DeployAttemptFailure> {
     #[cfg(not(target_os = "windows"))]
     use keytao_core::deploy_child;
     #[cfg(target_os = "macos")]
@@ -697,20 +949,37 @@ async fn deploy_isolated_desktop(
     #[cfg(not(target_os = "windows"))]
     use std::time::Duration;
 
-    crate::package_migration::ensure_before_write(core, root).await.map_err(|error| error.to_string())?;
+    crate::package_migration::ensure_before_write(core, root)
+        .await
+        .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     let plan_lock = isolated_plan_lock(root)?;
     let shared = deploy_shared_data_dir(core, root);
     let shared_dir = shared.as_path();
     let (targets, staged_inputs) =
         crate::runtime_materialize::prepare_deploy_targets(core, root, shared_dir, mode.target())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     if targets.is_empty() {
-        return Err("没有可部署的方案包".into());
+        if matches!(mode, IsolatedDeploy::All) && active_uses_libjd(core, root) {
+            keytao_core::ReloadStamp::write(root)?;
+            return Ok(DeployResult {
+                success: true,
+                message: "已更新 ime-jd 配置".into(),
+                warning: None,
+            });
+        }
+        return Err("没有可部署的方案包".to_owned().into());
     }
-    if matches!(mode, IsolatedDeploy::Switch(_))
-        && switch_cached_package(root, shared_dir, &targets[0]).await?
-    {
-        return Ok(package_switch_result(root, shared_dir));
+    if let IsolatedDeploy::Switch { schema_id, .. } = mode {
+        match switch_cached_package(root, shared_dir, &targets[0], schema_id).await {
+            Ok(true) => return Ok(package_switch_result(root, shared_dir)),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(DeployAttemptFailure {
+                    error,
+                    failed_packages: vec![targets[0].package_key.clone()],
+                });
+            }
+        }
     }
     #[cfg(target_os = "linux")]
     let linux_lock = {
@@ -721,9 +990,15 @@ async fn deploy_isolated_desktop(
             })
         })
         .await
-        .map_err(|error| error.to_string())??
+        .map_err(|error| DeployAttemptFailure::from(error.to_string()))??
     };
     let expected = targets.len();
+    let first = targets[0].package_key.clone();
+    let materialize_failed: Vec<String> = targets
+        .iter()
+        .filter(|target| target.materialize_error.is_some())
+        .map(|target| target.package_key.clone())
+        .collect();
     let publish_deploy = mode.publishes_all() && RuntimeDirs::active_package_key(root).is_some();
     #[cfg(not(target_os = "windows"))]
     let child_shared = shared.clone();
@@ -772,9 +1047,23 @@ async fn deploy_isolated_desktop(
         drop(linux_lock);
         (result.map(|()| None), plan_lock)
     });
-    let (mut result, _plan_lock) =
-        finish_isolated_deploy(core, root, expected, events, worker, publish_deploy).await?;
-    finish_isolated_target(core, root, shared_dir, mode, &targets[0].package_key).await?;
+    let (mut result, _plan_lock) = finish_isolated_deploy(
+        core,
+        root,
+        expected,
+        events,
+        worker,
+        publish_deploy,
+        &materialize_failed,
+        (expected == 1).then_some(first.as_str()),
+    )
+    .await?;
+    finish_isolated_target(core, root, shared_dir, mode, &first)
+        .await
+        .map_err(|error| DeployAttemptFailure {
+            error,
+            failed_packages: vec![first],
+        })?;
     result.warning = merge_warnings([
         keytao_core::deployment_warning_with_shared(root, shared_dir),
         result.warning,
@@ -798,21 +1087,90 @@ async fn deploy_isolated_in_process_target(
     shared: std::path::PathBuf,
     mode: IsolatedDeploy<'_>,
 ) -> Result<DeployResult, String> {
-    crate::package_migration::migrate_if_needed(core, root, &shared).map_err(|error| error.to_string())?;
+    deploy_isolated_in_process_with_repair(core, root, shared, mode, |failed| async move {
+        repair_failed_packages(core, root, &failed).await
+    })
+    .await
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+async fn deploy_isolated_in_process_with_repair<Repair, RepairFut>(
+    core: &Core,
+    root: &Path,
+    shared: std::path::PathBuf,
+    mode: IsolatedDeploy<'_>,
+    repair: Repair,
+) -> Result<DeployResult, String>
+where
+    Repair: FnOnce(Vec<String>) -> RepairFut,
+    RepairFut: std::future::Future<Output = Result<Option<String>, String>>,
+{
+    let active_before = RuntimeDirs::active_package_key(root);
+    match deploy_isolated_in_process_once(core, root, shared.clone(), mode).await {
+        Ok(result) => Ok(result),
+        Err(failure) if !failure.failed_packages.is_empty() => {
+            let notice = match repair(failure.failed_packages).await {
+                Ok(notice) => notice,
+                Err(repair_err) => {
+                    tracing::warn!(%repair_err, "auto-repair after in-process deploy failure did not complete");
+                    return Err(failure.error);
+                }
+            };
+            let retry_mode = retry_mode_after_repair(mode);
+            let mut result = deploy_isolated_in_process_once(core, root, shared.clone(), retry_mode)
+                .await
+                .map_err(|retry_failure| retry_failure.error)?;
+            restore_previous_active_if_needed(core, root, retry_mode, active_before).await?;
+            result.warning = merge_warnings([notice, result.warning]);
+            Ok(result)
+        }
+        Err(failure) => Err(failure.error),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+async fn deploy_isolated_in_process_once(
+    core: &Core,
+    root: &Path,
+    shared: std::path::PathBuf,
+    mode: IsolatedDeploy<'_>,
+) -> Result<DeployResult, DeployAttemptFailure> {
+    crate::package_migration::migrate_if_needed(core, root, &shared)
+        .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     let plan_lock = isolated_plan_lock(root)?;
     let (targets, staged_inputs) =
         crate::runtime_materialize::prepare_deploy_targets(core, root, &shared, mode.target())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     if targets.is_empty() {
-        return Err("没有可部署的方案包".into());
+        if matches!(mode, IsolatedDeploy::All) && active_uses_libjd(core, root) {
+            keytao_core::ReloadStamp::write(root)?;
+            return Ok(DeployResult {
+                success: true,
+                message: "已更新 ime-jd 配置".into(),
+                warning: None,
+            });
+        }
+        return Err("没有可部署的方案包".to_owned().into());
     }
-    if matches!(mode, IsolatedDeploy::Switch(_))
-        && switch_cached_package(root, &shared, &targets[0]).await?
-    {
-        return Ok(package_switch_result(root, &shared));
+    if let IsolatedDeploy::Switch { schema_id, .. } = mode {
+        match switch_cached_package(root, &shared, &targets[0], schema_id).await {
+            Ok(true) => return Ok(package_switch_result(root, &shared)),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(DeployAttemptFailure {
+                    error,
+                    failed_packages: vec![targets[0].package_key.clone()],
+                });
+            }
+        }
     }
     let expected = targets.len();
     let first = targets[0].package_key.clone();
+    let materialize_failed: Vec<String> = targets
+        .iter()
+        .filter(|target| target.materialize_error.is_some())
+        .map(|target| target.package_key.clone())
+        .collect();
     let (sender, events) = tokio::sync::mpsc::unbounded_channel();
     let worker_root = root.to_owned();
     let worker_shared = shared.clone();
@@ -830,9 +1188,23 @@ async fn deploy_isolated_in_process_target(
         (result.map(|()| None), plan_lock)
     });
     let publish_deploy = mode.publishes_all() && RuntimeDirs::active_package_key(root).is_some();
-    let (mut result, _plan_lock) =
-        finish_isolated_deploy(core, root, expected, events, worker, publish_deploy).await?;
-    finish_isolated_target(core, root, &shared, mode, &first).await?;
+    let (mut result, _plan_lock) = finish_isolated_deploy(
+        core,
+        root,
+        expected,
+        events,
+        worker,
+        publish_deploy,
+        &materialize_failed,
+        (expected == 1).then_some(first.as_str()),
+    )
+    .await?;
+    finish_isolated_target(core, root, &shared, mode, &first)
+        .await
+        .map_err(|error| DeployAttemptFailure {
+            error,
+            failed_packages: vec![first],
+        })?;
     result.warning = merge_warnings([
         keytao_core::deployment_warning_with_shared(root, &shared),
         result.warning,
@@ -853,10 +1225,13 @@ async fn finish_isolated_deploy(
     mut events: tokio::sync::mpsc::UnboundedReceiver<DeployProgress>,
     worker: tokio::task::JoinHandle<(Result<Option<String>, String>, std::fs::File)>,
     publish_deploy: bool,
-) -> Result<(DeployResult, std::fs::File), String> {
+    materialize_failed: &[String],
+    single_target: Option<&str>,
+) -> Result<(DeployResult, std::fs::File), DeployAttemptFailure> {
     let mut active_step = None;
     let mut completed = 0;
     let mut reload_warning = None;
+    let mut failed_packages = Vec::new();
     while let Some(progress) = events.recv().await {
         if progress.legacy_message.is_none()
             && matches!(
@@ -865,6 +1240,9 @@ async fn finish_isolated_deploy(
             )
         {
             completed += 1;
+            if progress.step == DeployStep::Failed {
+                push_unique_failed(&mut failed_packages, progress.package_key.clone());
+            }
             if progress.index == 1 {
                 active_step = Some(progress.step);
                 if publish_deploy
@@ -879,16 +1257,45 @@ async fn finish_isolated_deploy(
         }
         core.emit(CoreEvent::DeployProgress(progress));
     }
-    let (result, plan_lock) = worker.await.map_err(|error| error.to_string())?;
+    let (result, plan_lock) = worker
+        .await
+        .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
     if publish_deploy && matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
-        persist_result(core, root, true).map_err(|error| error.to_string())?;
+        persist_result(core, root, true)
+            .map_err(|error| DeployAttemptFailure::from(error.to_string()))?;
         if active_step == Some(DeployStep::Done) {
             render_user_schema_logos(root);
         }
     }
-    let worker_warning = result.map_err(|error| format!("部署失败: {error}"))?;
+    let enrich_failed = |mut list: Vec<String>| {
+        if list.is_empty() {
+            for key in materialize_failed {
+                push_unique_failed(&mut list, key.clone());
+            }
+        }
+        if list.is_empty()
+            && let Some(single) = single_target
+        {
+            push_unique_failed(&mut list, single);
+        }
+        list
+    };
+    let worker_warning = match result {
+        Ok(warning) => warning,
+        Err(error) => {
+            drop(plan_lock);
+            return Err(DeployAttemptFailure {
+                error: format!("部署失败: {error}"),
+                failed_packages: enrich_failed(failed_packages),
+            });
+        }
+    };
     if completed != expected || !matches!(active_step, Some(DeployStep::Done | DeployStep::Skip)) {
-        return Err("方案包部署未返回完整结果".into());
+        drop(plan_lock);
+        return Err(DeployAttemptFailure {
+            error: "方案包部署未返回完整结果".into(),
+            failed_packages: enrich_failed(failed_packages),
+        });
     }
     Ok((
         DeployResult {
@@ -1000,6 +1407,7 @@ mod tests {
             source: "local".into(),
             display_name: None,
             selection_base_version: None,
+            git: None,
             manifest: Default::default(),
             zip_sha256: crate::packages::sha256_reader(archive.as_slice()).unwrap(),
         };
@@ -1010,7 +1418,15 @@ mod tests {
             key.into(),
             crate::state::InstalledPackage { version: None },
         );
-        deploy_isolated_in_process_target(&core, root, shared.clone(), IsolatedDeploy::Switch(key))
+        deploy_isolated_in_process_target(
+            &core,
+            root,
+            shared.clone(),
+            IsolatedDeploy::Switch {
+                key,
+                schema_id: None,
+            },
+        )
             .await
             .unwrap();
         let resolved = RuntimeDirs::for_package(root, &shared, key).unwrap();
@@ -1022,7 +1438,15 @@ mod tests {
             br#"{"active_package":"builtin/other"}"#,
         ).unwrap();
 
-        deploy_isolated_in_process_target(&core, root, shared, IsolatedDeploy::Switch(key))
+        deploy_isolated_in_process_target(
+            &core,
+            root,
+            shared,
+            IsolatedDeploy::Switch {
+                key,
+                schema_id: None,
+            },
+        )
             .await
             .unwrap();
         assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(key));
@@ -1154,6 +1578,137 @@ mod tests {
         )
         .unwrap();
         assert!(active_schema_logo_path(&root).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn deploy_failure_detects_broken_cloud_package_backs_up_and_redownloads_cleanly() {
+        use std::{
+            fs,
+            io::{Cursor, Write},
+            sync::Arc,
+        };
+
+        struct NullSink;
+        impl crate::EventSink for NullSink {
+            fn emit(&self, _: CoreEvent) {}
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rime");
+        let shared = temp.path().join("rime-data");
+        fs::create_dir_all(root.join("runtime")).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("default.yaml"), "config_version: '1'\n").unwrap();
+        fs::write(
+            root.join(RuntimeDirs::MIGRATION_MARKER),
+            br#"{"version":1}"#,
+        )
+        .unwrap();
+
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: temp.path().join("data"),
+                cache_dir: temp.path().join("cache"),
+                resource_dir: temp.path().to_path_buf(),
+                platform: crate::Platform::MacOs,
+                app_version: "fixture".into(),
+            },
+            Arc::new(NullSink),
+        )
+        .unwrap();
+
+        let make_zip = |files: &[(&str, &str)]| {
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (name, body) in files {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+
+        // Install a broken cloud package + leftover runtime file that causes compilation to fail.
+        let broken_zip = make_zip(&[(
+            "keytao.schema.yaml",
+            "schema: {schema_id: keytao, name: Broken, version: '1'}\nengine:\n  translators: [table_translator]\ntranslator: {dictionary: missing_dict_xyz, enable_user_dict: false}\n",
+        )]);
+        crate::packages::store_cloud_archive(
+            &core,
+            "keytao",
+            Some("v1-broken"),
+            "official",
+            None,
+            &broken_zip,
+            &root,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("runtime/keytao")).unwrap();
+        fs::write(root.join("runtime/keytao/leftover.custom.yaml"), b"bad: [\n").unwrap();
+
+        let clean_zip = make_zip(&[
+            (
+                "default.custom.yaml",
+                "patch:\n  schema_list:\n    - schema: keytao\n",
+            ),
+            (
+                "keytao.schema.yaml",
+                "schema: {schema_id: keytao, name: CleanKeytao, version: '2'}\nengine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\nspeller: {alphabet: abcde}\ntranslator: {dictionary: keytao, enable_user_dict: false}\n",
+            ),
+            (
+                "keytao.dict.yaml",
+                "---\nname: keytao\nversion: '2'\nsort: by_weight\nuse_preset_vocabulary: false\n...\n好\thao\t100\n",
+            ),
+        ]);
+
+        let core_for_repair = core.clone();
+        let root_for_repair = root.clone();
+        let result = deploy_isolated_in_process_with_repair(
+            &core,
+            &root,
+            shared.clone(),
+            IsolatedDeploy::Switch {
+                key: "keytao",
+                schema_id: None,
+            },
+            move |failed| async move {
+                assert_eq!(failed, vec!["keytao".to_owned()]);
+                let backup = crate::packages::repair_package_for_redeploy_with(
+                    &core_for_repair,
+                    &root_for_repair,
+                    "keytao",
+                    |key| {
+                        let core = core_for_repair.clone();
+                        let root = root_for_repair.clone();
+                        let clean = clean_zip.clone();
+                        async move {
+                            assert_eq!(key, "keytao");
+                            crate::packages::store_cloud_archive(
+                                &core,
+                                "keytao",
+                                Some("v2-clean"),
+                                "official",
+                                None,
+                                &clean,
+                                &root,
+                            )?;
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                Ok(backup)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.success);
+        assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("keytao"));
+        assert!(root.join("runtime/keytao/build/keytao.schema.yaml").is_file());
+        assert!(!root.join("runtime/keytao/leftover.custom.yaml").exists());
+        assert!(root.join("migrations").is_dir());
     }
 }
 

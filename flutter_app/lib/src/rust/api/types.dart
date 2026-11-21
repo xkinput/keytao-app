@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LibjdReleaseDto>>
 abstract class LibjdReleaseDto implements RustOpaqueInterface {
@@ -578,6 +578,34 @@ class FileItemDto {
           isDir == other.isDir;
 }
 
+class GitSchemeConfigDto {
+  final String repoUrl;
+  final String mode;
+  final String? branch;
+  final String? assetName;
+
+  const GitSchemeConfigDto({
+    required this.repoUrl,
+    required this.mode,
+    this.branch,
+    this.assetName,
+  });
+
+  @override
+  int get hashCode =>
+      repoUrl.hashCode ^ mode.hashCode ^ branch.hashCode ^ assetName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GitSchemeConfigDto &&
+          runtimeType == other.runtimeType &&
+          repoUrl == other.repoUrl &&
+          mode == other.mode &&
+          branch == other.branch &&
+          assetName == other.assetName;
+}
+
 class ImeUiSettingsDto {
   final UiColorSchemeDto colorScheme;
   final EffectiveColorSchemeDto effectiveColorScheme;
@@ -720,6 +748,7 @@ class InstalledPackageDto {
   final String? displayName;
   final String? logoPath;
   final String engine;
+  final GitSchemeConfigDto? git;
 
   const InstalledPackageDto({
     required this.schemeKey,
@@ -732,6 +761,7 @@ class InstalledPackageDto {
     this.displayName,
     this.logoPath,
     this.engine = r"rime",
+    this.git,
   });
 
   @override
@@ -745,7 +775,8 @@ class InstalledPackageDto {
       source.hashCode ^
       displayName.hashCode ^
       logoPath.hashCode ^
-      engine.hashCode;
+      engine.hashCode ^
+      git.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -761,7 +792,8 @@ class InstalledPackageDto {
           source == other.source &&
           displayName == other.displayName &&
           logoPath == other.logoPath &&
-          engine == other.engine;
+          engine == other.engine &&
+          git == other.git;
 }
 
 class IsolatedPackageDto {
@@ -769,12 +801,14 @@ class IsolatedPackageDto {
   final String displayName;
   final bool active;
   final bool ready;
+  final List<SchemaDto> schemas;
 
   const IsolatedPackageDto({
     required this.packageKey,
     required this.displayName,
     required this.active,
     required this.ready,
+    this.schemas = const [],
   });
 
   @override
@@ -782,7 +816,8 @@ class IsolatedPackageDto {
       packageKey.hashCode ^
       displayName.hashCode ^
       active.hashCode ^
-      ready.hashCode;
+      ready.hashCode ^
+      schemas.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -792,7 +827,8 @@ class IsolatedPackageDto {
           packageKey == other.packageKey &&
           displayName == other.displayName &&
           active == other.active &&
-          ready == other.ready;
+          ready == other.ready &&
+          schemas == other.schemas;
 }
 
 class LibjdStatusDto {

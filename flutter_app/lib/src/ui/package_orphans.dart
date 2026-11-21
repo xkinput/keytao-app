@@ -81,11 +81,36 @@ class _PackageOrphanDialog extends StatefulWidget {
 class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
   PackageOrphanReportDto? _report;
   final Set<String> _selected = {};
+  final Set<String> _selectedBackups = {};
   final Set<String> _expanded = {};
   bool _loading = true;
   bool _moving = false;
   String? _error;
   String? _notice;
+
+  int get _selectedCount => _selected.length + _selectedBackups.length;
+
+  int _availableCount(PackageOrphanReportDto report) =>
+      report.files.length + report.keptBackups.length;
+
+  bool _allSelected(PackageOrphanReportDto report) {
+    final total = _availableCount(report);
+    return total > 0 && _selectedCount == total;
+  }
+
+  void _toggleSelectAll(PackageOrphanReportDto report) {
+    if (_allSelected(report)) {
+      _selected.clear();
+      _selectedBackups.clear();
+    } else {
+      _selected
+        ..clear()
+        ..addAll(report.files.map((file) => file.path));
+      _selectedBackups
+        ..clear()
+        ..addAll(report.keptBackups.map((backup) => backup.backup));
+    }
+  }
 
   @override
   void initState() {
@@ -100,6 +125,7 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
       setState(() {
         _report = report;
         _selected.clear();
+        _selectedBackups.clear();
         _expanded.clear();
       });
     } catch (failure) {
@@ -113,15 +139,19 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
     final files = _report!.files
         .where((file) => _selected.contains(file.path))
         .toList();
+    final backups = _report!.keptBackups
+        .where((backup) => _selectedBackups.contains(backup.backup))
+        .toList();
+    final total = files.length + backups.length;
     setState(() {
       _moving = true;
       _error = null;
       _notice = null;
     });
-    final ok = await widget.controller.trashPackageOrphans(files);
+    final ok = await widget.controller.trashPackageOrphans(files, backups);
     if (!mounted) return;
     setState(() {
-      _notice = ok ? '已移到废纸篓（${files.length} 项）' : null;
+      _notice = ok ? '已移到废纸篓（$total 项）' : null;
       _error = ok ? null : widget.controller.error ?? '移动失败，请刷新后重试。';
     });
     await _load();
@@ -234,21 +264,29 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
   @override
   Widget build(BuildContext context) {
     final report = _report;
+    final hasItems = report != null && _availableCount(report) > 0;
     return PopScope(
       canPop: !_moving,
       child: AppDialog(
         title: '清理残留文件',
         animation: widget.animation,
         actions: [
+          if (hasItems)
+            ActionButton(
+              _allSelected(report) ? '取消全选' : '全选',
+              onPress: _loading || _moving
+                  ? null
+                  : () => setState(() => _toggleSelectAll(report)),
+            ),
           ActionButton(
             AppStrings.close,
             onPress: _moving ? null : () => Navigator.pop(context),
           ),
           ActionButton(
-            '移到废纸篓 (${_selected.length})',
+            '移到废纸篓 ($_selectedCount)',
             icon: FLucideIcons.trash2,
             primary: true,
-            onPress: _loading || _moving || _selected.isEmpty ? null : _move,
+            onPress: _loading || _moving || _selectedCount == 0 ? null : _move,
           ),
         ],
         child: SizedBox(
@@ -261,16 +299,39 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
               if (_error case final error?) ErrorMessage(error),
               if (_notice case final notice?) Text(notice),
               if (report != null) ...[
-                if (report.files.isEmpty) const Text('没有发现残留文件。'),
+                if (!hasItems) const Text('没有发现残留文件。'),
                 ..._treeRows(context, buildPackageOrphanTree(report.files)),
                 if (report.keptBackups.isNotEmpty) ...[
-                  const SizedBox(height: 16),
+                  if (report.files.isNotEmpty) const SizedBox(height: 16),
                   const Text('已保留的文件备份'),
                   for (final backup in report.keptBackups)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
-                      child: SelectableText(
-                        '${backup.path}\n备份：${backup.backup}',
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: FCheckbox(
+                              value: _selectedBackups.contains(backup.backup),
+                              enabled: !_moving,
+                              semanticsLabel: '选择备份 ${backup.path}',
+                              onChange: (value) => setState(() {
+                                if (value) {
+                                  _selectedBackups.add(backup.backup);
+                                } else {
+                                  _selectedBackups.remove(backup.backup);
+                                }
+                              }),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: SelectableText(
+                              '${backup.path}\n备份：${backup.backup}',
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                 ],

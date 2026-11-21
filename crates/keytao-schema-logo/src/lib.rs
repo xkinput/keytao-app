@@ -43,6 +43,16 @@ pub fn render_schema_logos(user_dir: &Path, schemas: &[(String, String)], size_p
     }
 }
 
+pub fn render_ico_bytes(bytes: &[u8], size_px: u32) -> Option<Vec<u8>> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BYTES {
+        return None;
+    }
+    let size = size_px.clamp(16, 256);
+    catch_unwind(AssertUnwindSafe(|| render_ico(bytes, size)))
+        .ok()
+        .flatten()
+}
+
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && !matches!(name, "." | "..")

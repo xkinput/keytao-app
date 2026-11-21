@@ -30,10 +30,14 @@ impl RuntimeDirs {
     pub const SETTINGS_FILE: &str = "keytao-runtime-settings.json";
     pub const MANIFEST_FILE: &str = ".keytao-runtime.json";
     pub const MIGRATION_MARKER: &str = "runtime/.keytao-migration.json";
+    pub const MIGRATION_VERSION: u64 = 1;
     pub const PUBLIC_PACKAGE_FILE: &str = ".keytao-public-package";
 
     pub fn needs_migration(control_root: &Path) -> bool {
-        !Self::migration_complete(control_root) && Self::has_legacy_data(control_root)
+        match Self::raw_migration_version(control_root) {
+            Some(version) => version < Self::MIGRATION_VERSION,
+            None => Self::has_legacy_data(control_root),
+        }
     }
 
     fn has_legacy_data(control_root: &Path) -> bool {
@@ -145,11 +149,18 @@ impl RuntimeDirs {
         Self::migration_version(control_root).is_some()
     }
 
+    fn raw_migration_version(control_root: &Path) -> Option<u64> {
+        let path = control_root.join(Self::MIGRATION_MARKER);
+        fs::symlink_metadata(path.parent()?).ok()?.is_dir().then_some(())?;
+        let marker: serde_json::Value = serde_json::from_slice(&read_regular_file(&path)?).ok()?;
+        marker["version"].as_u64()
+    }
+
     fn migration_marker(control_root: &Path) -> Option<serde_json::Value> {
         let path = control_root.join(Self::MIGRATION_MARKER);
         fs::symlink_metadata(path.parent()?).ok()?.is_dir().then_some(())?;
         let marker: serde_json::Value = serde_json::from_slice(&read_regular_file(&path)?).ok()?;
-        (marker["version"].as_u64()? == 1).then_some(marker)
+        (marker["version"].as_u64()? == Self::MIGRATION_VERSION).then_some(marker)
     }
 
     pub(crate) fn flat_active_package_key(control_root: &Path) -> Option<String> {

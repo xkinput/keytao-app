@@ -184,6 +184,7 @@ pub(crate) fn write(core: &Core, active: &Activation) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn backup_bytes(core: &Core, backup: &Backup) -> Result<Vec<u8>, CoreError> {
     let path = safe_path(&PackageStore::new(core).checked_root()?, &backup.backup)
         .map_err(CoreError::Other)?;

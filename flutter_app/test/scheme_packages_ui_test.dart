@@ -75,7 +75,8 @@ class _PackageController extends ViewController {
   }
 
   @override
-  Future<bool> switchPackage(String key) => activateSchemePackage(key);
+  Future<bool> switchPackage(String key, {String? schemaId}) =>
+      activateSchemePackage(schemaId == null ? key : '$key:$schemaId');
 
   @override
   Future<bool> setPackageEasyEnglish(String key, bool enabled) async {

@@ -64,6 +64,22 @@ pub fn active_schema_logo_path() -> Result<Option<String>, String> {
     )
 }
 
+pub async fn remote_scheme_logo(
+    scheme_key: String,
+    repo_url: String,
+    branch: Option<String>,
+) -> Result<Option<String>, String> {
+    let state = runtime::state()?;
+    keytao_app_core::packages::package_logos::remote_scheme_logo(
+        &state.core,
+        &scheme_key,
+        &repo_url,
+        branch.as_deref(),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 pub fn onboarding() -> Result<OnboardingDto, String> {
     Ok(OnboardingDto {
         completed: runtime::state()?.core.onboarding().completed,
@@ -137,6 +153,18 @@ pub fn package_migration_pending() -> Result<bool, String> {
     Ok(keytao_core::RuntimeDirs::needs_migration(&root))
 }
 
+pub fn pending_migration_backup_dir() -> Result<Option<String>, String> {
+    let root = runtime::state()?.host.user_root()?;
+    keytao_app_core::package_migration::pending_backup_notice(&root)
+        .map_err(|error| error.to_string())
+}
+
+pub fn dismiss_migration_backup_notice() -> Result<(), String> {
+    let root = runtime::state()?.host.user_root()?;
+    keytao_app_core::package_migration::dismiss_backup_notice(&root)
+        .map_err(|error| error.to_string())
+}
+
 pub async fn migrate_to_isolated() -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -150,6 +178,7 @@ pub async fn migrate_to_isolated() -> Result<(), String> {
 
 pub async fn trash_package_orphans(
     files: Vec<PackageOrphanFileDto>,
+    kept_backups: Option<Vec<PackageKeptBackupDto>>,
 ) -> Result<Vec<String>, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -161,8 +190,21 @@ pub async fn trash_package_orphans(
             size: file.size,
         })
         .collect();
-    keytao_app_core::package_orphans::trash_selected(&state.core, &state.host.user_root()?, &files)
-        .map_err(|error| error.to_string())
+    let kept_backups: Vec<_> = kept_backups
+        .unwrap_or_default()
+        .into_iter()
+        .map(|backup| keytao_app_core::package_orphans::KeptBackup {
+            path: backup.path,
+            backup: backup.backup,
+        })
+        .collect();
+    keytao_app_core::package_orphans::trash_selected_with_backups(
+        &state.core,
+        &state.host.user_root()?,
+        &files,
+        &kept_backups,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub async fn import_local_scheme(
@@ -172,7 +214,10 @@ pub async fn import_local_scheme(
 ) -> Result<String, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    keytao_app_core::package_migration::ensure_before_write(&state.core, &state.host.user_root()?)
+    let root = state.host.user_root()?;
+    keytao_app_core::deploy::ensure_not_using_libjd(&state.core, &root)
+        .map_err(|error| error.to_string())?;
+    keytao_app_core::package_migration::ensure_before_write(&state.core, &root)
         .await
         .map_err(|error| error.to_string())?;
     keytao_app_core::packages::import_local_scheme(
@@ -181,6 +226,35 @@ pub async fn import_local_scheme(
         &display_name,
         scheme_key.as_deref(),
     )
+    .map_err(|error| error.to_string())
+}
+
+pub async fn import_git_scheme(
+    repo_url: String,
+    mode: String,
+    branch: Option<String>,
+    asset_name: Option<String>,
+    display_name: String,
+    scheme_key: Option<String>,
+) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    let parsed_mode = keytao_app_core::packages::GitSchemeMode::parse(&mode)
+        .map_err(|error| error.to_string())?;
+    keytao_app_core::packages::import_git_scheme(
+        &state.core,
+        &root,
+        keytao_app_core::packages::GitSchemeConfig {
+            repo_url,
+            mode: parsed_mode,
+            branch,
+            asset_name,
+        },
+        &display_name,
+        scheme_key.as_deref(),
+    )
+    .await
     .map_err(|error| error.to_string())
 }
 
@@ -506,6 +580,7 @@ pub fn dismiss_scheme_update(scheme_key: String, version: String) -> Result<(), 
 
 pub async fn switch_package(
     package_key: String,
+    schema_id: Option<String>,
     android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
 ) -> Result<(), String> {
     let state = runtime::state()?;
@@ -514,10 +589,11 @@ pub async fn switch_package(
     state.host.require_default_windows_root()?;
     #[cfg(not(target_os = "android"))]
     let _ = android_deploy;
-    keytao_app_core::deploy::switch_package(
+    keytao_app_core::deploy::switch_package_with_schema(
         &state.core,
         &state.host.user_root()?,
         &package_key,
+        schema_id.as_deref(),
         #[cfg(target_os = "android")]
         android_deploy,
     )
@@ -613,6 +689,54 @@ pub async fn remove_scheme_package(
     keytao_app_core::packages::remove_scheme_package(&state.core, &scheme_key, &host)
         .await
         .map_err(|error| error.to_string())
+}
+
+pub async fn repair_scheme_package(
+    package_key: String,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<Option<String>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    #[cfg(target_os = "windows")]
+    state.host.require_default_windows_root()?;
+    let root = state.host.user_root()?;
+    let was_active = keytao_core::RuntimeDirs::active_package_key(&root).is_some_and(|active| {
+        active == package_key
+            || active.strip_prefix("builtin/") == Some(package_key.as_str())
+    });
+    let backup = keytao_app_core::packages::repair_package_for_redeploy(
+        &state.core,
+        &root,
+        &package_key,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let normalized = package_key
+        .strip_prefix("builtin/")
+        .unwrap_or(&package_key);
+    #[cfg(not(target_os = "android"))]
+    let _ = &android_deploy;
+    if was_active {
+        keytao_app_core::deploy::switch_package_with_schema(
+            &state.core,
+            &root,
+            normalized,
+            None,
+            #[cfg(target_os = "android")]
+            android_deploy,
+        )
+        .await?;
+    } else {
+        keytao_app_core::deploy::deploy_package(
+            &state.core,
+            &root,
+            normalized,
+            #[cfg(target_os = "android")]
+            android_deploy,
+        )
+        .await?;
+    }
+    Ok(backup)
 }
 
 /// The persisted account, if a token is stored. The token never leaves Rust.
@@ -1443,7 +1567,15 @@ pub async fn set_candidate_page_size(size: Option<u8>) -> Result<Option<u8>, Str
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let root = state.host.user_root()?;
-    keytao_app_core::ime_settings::set_candidate_page_size(&root, size)
+    let updated = keytao_app_core::ime_settings::set_candidate_page_size(&root, size)?;
+    if keytao_core::engine_choice::read(
+        &root,
+        keytao_core::engine_choice::active_package(&root).as_deref(),
+    ) == keytao_core::engine_choice::PackageEngine::Libjd
+    {
+        state.host.write_reload_stamp(&root)?;
+    }
+    Ok(updated)
 }
 
 pub async fn set_desktop_english_mode(mode: EnglishModeDto) -> Result<EnglishModeDto, String> {

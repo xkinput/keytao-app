@@ -112,20 +112,28 @@ pub(crate) fn enumerate(
         defaults = if crate::addon_store::IDS.contains(&key) && key != "snow_jiandao" {
             vec![key.into()]
         } else {
-            sources
+            let primary: Vec<_> = sources
                 .keys()
                 .filter(|id| !dependencies.contains(*id))
                 .cloned()
-                .collect()
+                .collect();
+            if primary.is_empty() {
+                sources.keys().cloned().collect()
+            } else {
+                primary
+            }
         };
     }
-    let mut ids = defaults.clone();
-    ids.extend(
-        sources
-            .keys()
-            .filter(|id| !dependencies.contains(*id) && !defaults.contains(*id))
-            .cloned(),
-    );
+    let mut ids: Vec<_> = defaults
+        .iter()
+        .filter(|id| sources.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in sources.keys() {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
     let selected: Vec<_> = selection
         .unwrap_or(&defaults)
         .iter()
@@ -335,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_uses_names_defaults_and_hides_dependencies() {
+    fn enumeration_lists_all_schema_yaml_files_and_marks_defaults_selected() {
         let mut files = fixture();
         let schemas = enumerate("local-demo", &files, None).unwrap();
         assert_eq!(
@@ -343,7 +351,12 @@ mod tests {
                 .iter()
                 .map(|schema| (schema.id.as_str(), schema.name.as_str(), schema.selected))
                 .collect::<Vec<_>>(),
-            [("beta", "Beta", true), ("alpha", "Alpha", false)]
+            [
+                ("beta", "Beta", true),
+                ("alpha", "Alpha", false),
+                ("helper", "Helper", false),
+                ("reverse", "Reverse", false),
+            ]
         );
         files.push((
             "default.custom.yaml".into(),
@@ -355,26 +368,43 @@ mod tests {
                 .iter()
                 .map(|schema| (schema.id.as_str(), schema.selected))
                 .collect::<Vec<_>>(),
-            [("alpha", true), ("reverse", true), ("beta", false)]
+            [
+                ("alpha", true),
+                ("reverse", true),
+                ("beta", false),
+                ("helper", false),
+            ]
         );
         files.retain(|(path, _)| !path.starts_with("default"));
-        assert!(
-            enumerate("local-demo", &files, None)
-                .unwrap()
+        let without_default = enumerate("local-demo", &files, None).unwrap();
+        assert_eq!(
+            without_default
                 .iter()
-                .all(|schema| schema.selected)
+                .map(|schema| (schema.id.as_str(), schema.selected))
+                .collect::<Vec<_>>(),
+            [
+                ("alpha", true),
+                ("beta", true),
+                ("helper", false),
+                ("reverse", false),
+            ]
         );
     }
 
     #[test]
-    fn repeated_patch_keys_do_not_hide_schema_metadata_or_dependencies() {
+    fn repeated_patch_keys_preserve_schema_names_and_keep_all_schemas_selectable() {
         let files = vec![
             ("alpha.schema.yaml".into(), b"schema: {schema_id: alpha, name: Alpha, dependencies: [reverse]}\n__patch: first\n__patch: second".to_vec()),
-            ("reverse.schema.yaml".into(), b"schema: {schema_id: reverse}".to_vec()),
+            ("reverse.schema.yaml".into(), b"schema: {schema_id: reverse, name: Reverse}".to_vec()),
         ];
         let schemas = enumerate("local-demo", &files, None).unwrap();
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0].name, "Alpha");
+        assert_eq!(
+            schemas
+                .iter()
+                .map(|s| (s.id.as_str(), s.name.as_str(), s.selected))
+                .collect::<Vec<_>>(),
+            [("alpha", "Alpha", true), ("reverse", "Reverse", false)]
+        );
     }
 
     #[test]

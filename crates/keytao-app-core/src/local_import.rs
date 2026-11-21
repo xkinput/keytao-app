@@ -17,10 +17,11 @@ fn excluded(relative: &str) -> bool {
     let top = relative.split('/').next().unwrap_or(relative);
     matches!(
         top,
-        "build" | "sync" | "log" | "installation.yaml" | "user.yaml"
+        "build" | "sync" | "log" | "installation.yaml" | "user.yaml" | "__MACOSX"
     )
         || relative.split('/').any(|part| {
             part.starts_with('.')
+                || part == "__MACOSX"
                 || part.eq_ignore_ascii_case("System Volume Information")
                 || part.eq_ignore_ascii_case("$RECYCLE.BIN")
                 || part.eq_ignore_ascii_case("app-state.json")
@@ -49,7 +50,7 @@ fn import_io<T>(
     result.map_err(|error| context(operation, path, error).into())
 }
 
-fn has_root_schema(directory: &Path) -> Result<bool, CoreError> {
+pub(super) fn has_root_schema(directory: &Path) -> Result<bool, CoreError> {
     let entries = fs::read_dir(directory).map_err(|error| context("读取目录", directory, error))?;
     for entry in entries {
         let entry = import_io(entry, "读取目录项", directory)?;
@@ -145,11 +146,7 @@ fn collect(
     Ok(())
 }
 
-fn slug(directory: &Path) -> String {
-    let name = directory
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
+fn slug_from_str(name: &str) -> String {
     let mut slug = String::new();
     for character in name.chars() {
         if character.is_ascii_alphanumeric() {
@@ -169,11 +166,65 @@ fn slug(directory: &Path) -> String {
     }
 }
 
+fn slug(directory: &Path) -> String {
+    slug_from_str(
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )
+}
+
+fn infer_schema_display_name(files: &BTreeMap<String, Vec<u8>>, schemas: &[String]) -> Option<String> {
+    for schema_id in schemas {
+        let Some(bytes) = files.get(&format!("{schema_id}.schema.yaml")) else {
+            continue;
+        };
+        let Ok(value) = serde_yaml::from_slice::<serde_yaml::Value>(bytes) else {
+            continue;
+        };
+        if let Some(name) = value
+            .get("schema")
+            .and_then(|s| s.get("name"))
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(name.to_owned());
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+pub(super) struct LocalImportOptions<'a> {
+    pub slug_hint: Option<&'a str>,
+    pub version_override: Option<&'a str>,
+    pub origin: Option<&'a str>,
+    pub git: Option<super::GitSchemeConfig>,
+}
+
 pub fn import_local_scheme(
     core: &Core,
     directory: &Path,
     display_name: &str,
     scheme_key: Option<&str>,
+) -> Result<String, CoreError> {
+    import_local_scheme_with(
+        core,
+        directory,
+        display_name,
+        scheme_key,
+        LocalImportOptions::default(),
+    )
+}
+
+pub(super) fn import_local_scheme_with(
+    core: &Core,
+    directory: &Path,
+    display_name: &str,
+    scheme_key: Option<&str>,
+    options: LocalImportOptions<'_>,
 ) -> Result<String, CoreError> {
     let directory = directory
         .canonicalize()
@@ -218,7 +269,7 @@ pub fn import_local_scheme(
         let candidates = crate::package_schemas::enumerate("local-import", &files.iter()
             .filter(|(path, _)| path.ends_with(".schema.yaml"))
             .map(|(path, bytes)| (path.clone(), bytes.clone())).collect::<Vec<_>>(), None)?;
-        schemas.retain(|id| candidates.iter().any(|schema| &schema.id == id));
+        schemas.retain(|id| candidates.iter().any(|schema| schema.selected && &schema.id == id));
     }
     schemas.sort_by_key(|schema| {
         schema_order
@@ -226,6 +277,11 @@ pub fn import_local_scheme(
             .position(|id| id == schema)
             .unwrap_or(usize::MAX)
     });
+    let inferred_name = if options.git.is_some() {
+        infer_schema_display_name(&files, &schemas)
+    } else {
+        None
+    };
     let mut config = String::from("patch:\n  schema_list:\n");
     for schema in schemas {
         config.push_str(&format!(
@@ -256,9 +312,15 @@ pub fn import_local_scheme(
         .map_err(|error| CoreError::Other(error.to_string()))?
         .into_inner();
     let digest = format!("{:x}", Sha256::digest(&bytes));
-    let version = digest[..12].to_owned();
+    let version = match options.version_override.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(tag) if matches!(tag, "latest" | "nightly") => format!("{tag}-{}", &digest[..8]),
+        Some(tag) => tag.to_owned(),
+        None => digest[..12].to_owned(),
+    };
     let store = PackageStore::new(core);
     let store_root = store.checked_root()?;
+    let existing_meta = scheme_key
+        .and_then(|key| store.read_meta(key).ok().flatten());
     let _guard = core
         .pending_package
         .lock()
@@ -271,7 +333,11 @@ pub fn import_local_scheme(
         }
         key.to_owned()
     } else {
-        let base = format!("local-{}", slug(&directory));
+        let base_slug = options
+            .slug_hint
+            .map(slug_from_str)
+            .unwrap_or_else(|| slug(&directory));
+        let base = format!("local-{base_slug}");
         let mut key = base.clone();
         let mut suffix = 2u64;
         while state.installed_packages.contains_key(&key)
@@ -283,14 +349,25 @@ pub fn import_local_scheme(
         }
         key
     };
-    let name = display_name.trim();
-    let name = if name.is_empty() {
+    let trimmed_name = display_name.trim();
+    let resolved_name = if !trimmed_name.is_empty() {
+        trimmed_name.to_owned()
+    } else if let Some(existing_name) = existing_meta
+        .as_ref()
+        .and_then(|meta| meta.display_name.clone())
+        .filter(|name| !name.trim().is_empty())
+    {
+        existing_name
+    } else if let Some(inferred) = inferred_name {
+        inferred
+    } else if let Some(hint) = options.slug_hint.filter(|s| !s.trim().is_empty()) {
+        hint.to_owned()
+    } else {
         directory
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(&scheme_key)
-    } else {
-        name
+            .to_owned()
     };
     let metadata = PackageMeta {
         scheme_key: scheme_key.clone(),
@@ -301,15 +378,17 @@ pub fn import_local_scheme(
             .unwrap_or_default()
             .as_secs(),
         source: "local".into(),
-        display_name: Some(name.into()),
+        display_name: Some(resolved_name),
         selection_base_version: None,
+        git: options.git.or_else(|| existing_meta.and_then(|meta| meta.git)),
         manifest,
         zip_sha256: digest,
     };
+    let default_origin = directory.to_string_lossy().into_owned();
     store.write_archive(
         Cursor::new(bytes),
         &metadata,
-        Some(directory.to_string_lossy().as_ref()),
+        Some(options.origin.unwrap_or(&default_origin)),
     )?;
     core.update_state(|state| {
         state.installed_packages.insert(

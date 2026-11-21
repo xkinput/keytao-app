@@ -144,8 +144,19 @@ impl Package {
                     .replace("radical_pinyin", "snow_radical_pinyin")
                     .replace("snow_pinyin.user", "snow_pinyin.user_pack");
                 if SNOW_REQUIRED.contains(&renamed.as_str())
+                    || (!renamed.contains('/')
+                        && renamed.starts_with("snow_")
+                        && !renamed.ends_with(".custom.yaml")
+                        && (renamed.ends_with(".schema.yaml")
+                            || renamed.ends_with(".dict.yaml")
+                            || renamed.ends_with(".fixed.txt")
+                            || renamed.ends_with(".yaml")))
                     || name.starts_with("lua/snow/")
                         && (name.ends_with(".lua") || name.ends_with(".txt"))
+                    || name.starts_with("opencc/")
+                        && (name.ends_with(".json")
+                            || name.ends_with(".txt")
+                            || name.ends_with(".ocd2"))
                 {
                     Some(renamed)
                 } else {

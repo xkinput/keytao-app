@@ -47,6 +47,14 @@ pub struct LocalSchemaDto {
     pub deploy_warning: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct GitSchemeConfigDto {
+    pub repo_url: String,
+    pub mode: String,
+    pub branch: Option<String>,
+    pub asset_name: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 #[flutter_rust_bridge::frb]
 pub struct InstalledPackageDto {
@@ -63,6 +71,8 @@ pub struct InstalledPackageDto {
     pub logo_path: Option<String>,
     #[frb(default = "rime")]
     pub engine: String,
+    #[serde(default)]
+    pub git: Option<GitSchemeConfigDto>,
 }
 
 pub struct LibjdStatusDto {
@@ -91,11 +101,15 @@ impl LibjdReleaseDto {
 }
 
 #[derive(serde::Deserialize)]
+#[flutter_rust_bridge::frb]
 pub struct IsolatedPackageDto {
     pub package_key: String,
     pub display_name: String,
     pub active: bool,
     pub ready: bool,
+    #[serde(default)]
+    #[frb(default = [])]
+    pub schemas: Vec<SchemaDto>,
 }
 
 #[derive(serde::Deserialize)]

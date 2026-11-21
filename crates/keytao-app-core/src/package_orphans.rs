@@ -18,7 +18,7 @@ pub struct OrphanFile {
     pub size: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeptBackup {
     pub path: String,
     pub backup: String,
@@ -240,16 +240,28 @@ pub fn trash_selected(
     root: &Path,
     selected: &[OrphanFile],
 ) -> Result<Vec<String>, CoreError> {
-    trash_with(core, root, selected, None)
+    trash_with(core, root, selected, &[], None)
+}
+
+pub fn trash_selected_with_backups(
+    core: &Core,
+    root: &Path,
+    selected: &[OrphanFile],
+    selected_backups: &[KeptBackup],
+) -> Result<Vec<String>, CoreError> {
+    trash_with(core, root, selected, selected_backups, None)
 }
 
 fn trash_with(
     core: &Core,
     root: &Path,
     selected: &[OrphanFile],
+    selected_backups: &[KeptBackup],
     trash_override: Option<&Path>,
 ) -> Result<Vec<String>, CoreError> {
-    let available = report(core, root)?.files;
+    let current = report(core, root)?;
+    let available = current.files;
+    let available_backups = current.kept_backups;
     let mut seen = BTreeSet::new();
     for file in selected {
         safe_path(root, &file.path).map_err(CoreError::Other)?;
@@ -260,6 +272,21 @@ fn trash_with(
             )));
         }
     }
+    let store = PackageStore::new(core);
+    let store_root = store.root();
+    let mut seen_backups = BTreeSet::new();
+    for backup in selected_backups {
+        if !seen_backups.insert((&backup.path, &backup.backup))
+            || !available_backups.contains(backup)
+        {
+            return Err(CoreError::Other(format!(
+                "Backup changed or is no longer available: {}",
+                backup.backup
+            )));
+        }
+        validate_kept_backup_path(root, &store_root, backup)?;
+    }
+
     let mut moved = Vec::new();
     let backups = crate::package_migration::completed_backups(root)?;
     for file in selected {
@@ -284,7 +311,106 @@ fn trash_with(
         }
         moved.push(file.path.clone());
     }
+
+    let mut removed_store_backups = BTreeSet::new();
+    for backup in selected_backups {
+        let (target_path, store_relative) = validate_kept_backup_path(root, &store_root, backup)?;
+        match fs::symlink_metadata(&target_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(CoreError::Other(format!(
+                        "Backup is not a regular file: {}",
+                        backup.backup
+                    )));
+                }
+                if let Err(error) = move_to_trash(core, &target_path, trash_override) {
+                    return Err(CoreError::Other(format!(
+                        "Could not move {}; already moved: {}: {error}",
+                        backup.backup,
+                        moved.join(", ")
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(relative) = store_relative {
+            prune_empty_backup_parents(&store_root.join("backups"), target_path.parent());
+            removed_store_backups.insert((backup.path.clone(), relative));
+        }
+        moved.push(backup.backup.clone());
+    }
+
+    if !removed_store_backups.is_empty() {
+        remove_activation_kept_backups(core, root, &removed_store_backups)?;
+    }
+
     Ok(moved)
+}
+
+fn validate_kept_backup_path(
+    root: &Path,
+    store_root: &Path,
+    backup: &KeptBackup,
+) -> Result<( std::path::PathBuf, Option<String>), CoreError> {
+    let candidate = Path::new(&backup.backup);
+    if let Ok(relative) = candidate.strip_prefix(store_root) {
+        let relative_str = relative.to_string_lossy().replace('\\', "/");
+        if relative_str.starts_with("backups/") {
+            let checked = safe_path(store_root, &relative_str).map_err(CoreError::Other)?;
+            return Ok((checked, Some(relative_str)));
+        }
+    }
+    if candidate.parent() == Some(root) {
+        if let Some(name) = candidate.file_name().and_then(|n| n.to_str()) {
+            if backup.path == "rime.lua"
+                && name.starts_with(".keytao-rime-user-")
+                && name.ends_with(".lua")
+            {
+                let checked = safe_path(root, name).map_err(CoreError::Other)?;
+                return Ok((checked, None));
+            }
+        }
+    }
+    Err(CoreError::Other(format!(
+        "Invalid kept backup path: {}",
+        backup.backup
+    )))
+}
+
+fn prune_empty_backup_parents(backups_root: &Path, mut dir: Option<&Path>) {
+    while let Some(current) = dir {
+        if current == backups_root || !current.starts_with(backups_root) {
+            break;
+        }
+        if fs::remove_dir(current).is_err() {
+            break;
+        }
+        dir = current.parent();
+    }
+}
+
+fn remove_activation_kept_backups(
+    core: &Core,
+    root: &Path,
+    removed: &BTreeSet<(String, String)>,
+) -> Result<(), CoreError> {
+    let Some(mut active) = package_activation::read(core, root)? else {
+        return Ok(());
+    };
+    active
+        .kept_backups
+        .retain(|entry| !removed.contains(&(entry.path.clone(), entry.backup.clone())));
+    if let Some(records) = active.activations.as_mut() {
+        for record in records.values_mut() {
+            record
+                .kept_backups
+                .retain(|entry| !removed.contains(&(entry.path.clone(), entry.backup.clone())));
+        }
+    }
+    let path = PackageStore::new(core).checked_activation_path()?;
+    crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec(&active)?)?;
+    Ok(())
 }
 
 fn move_to_trash(core: &Core, path: &Path, trash_override: Option<&Path>) -> Result<(), CoreError> {
@@ -514,7 +640,7 @@ mod tests {
             sha256: sha256_reader(b"legacy contents".as_slice()).unwrap(),
             size: b"legacy contents".len() as u64,
         };
-        assert!(trash_with(&core, &root, &[selected], Some(&temp.path().join("trash"))).is_err());
+        assert!(trash_with(&core, &root, &[selected], &[], Some(&temp.path().join("trash"))).is_err());
         assert_eq!(fs::read(root.join(path)).unwrap(), b"legacy contents");
     }
 
@@ -640,7 +766,7 @@ mod tests {
                 size: fs::metadata(&path).unwrap().len(),
             };
             assert!(
-                trash_with(&core, &root, &[selected], Some(&temp.path().join("trash"))).is_err()
+                trash_with(&core, &root, &[selected], &[], Some(&temp.path().join("trash"))).is_err()
             );
             assert_eq!(fs::read(path).unwrap(), b"user settings\n");
         }
@@ -652,11 +778,11 @@ mod tests {
         fs::write(&source, b"user bytes\r\n").unwrap();
         let selected = report(&core, &root).unwrap().files;
         fs::write(&source, b"new bytes").unwrap();
-        assert!(trash_with(&core, &root, &selected, Some(&temp.path().join("trash"))).is_err());
+        assert!(trash_with(&core, &root, &selected, &[], Some(&temp.path().join("trash"))).is_err());
         fs::write(&source, b"user bytes\r\n").unwrap();
         let trash = temp.path().join("trash");
         assert_eq!(
-            trash_with(&core, &root, &selected, Some(&trash)).unwrap(),
+            trash_with(&core, &root, &selected, &[], Some(&trash)).unwrap(),
             ["old.bak"]
         );
         assert!(!source.exists());
@@ -674,7 +800,40 @@ mod tests {
             sha256: String::new(),
             size: 0,
         };
-        assert!(trash_with(&core, &root, &[unsafe_file], Some(&trash)).is_err());
+        assert!(trash_with(&core, &root, &[unsafe_file], &[], Some(&trash)).is_err());
+    }
+    #[test]
+    fn trashes_kept_backups_and_removes_activation_records() {
+        let (temp, core, root) = setup();
+        let lua_backup = root.join(".keytao-rime-user-0.lua");
+        fs::write(&lua_backup, b"user lua").unwrap();
+        let store = PackageStore::new(&core);
+        let store_backup = store.root().join("backups/abc123/JD6_userdata/JD6_overrides.tsv");
+        fs::create_dir_all(store_backup.parent().unwrap()).unwrap();
+        fs::write(&store_backup, b"overrides").unwrap();
+        let active = package_activation::Activation {
+            root: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+            kept_backups: vec![package_activation::Backup {
+                path: "JD6_userdata/JD6_overrides.tsv".into(),
+                backup: "backups/abc123/JD6_userdata/JD6_overrides.tsv".into(),
+                sha256: "abc123".into(),
+            }],
+            ..Default::default()
+        };
+        fs::write(
+            store.checked_activation_path().unwrap(),
+            serde_json::to_vec(&active).unwrap(),
+        )
+        .unwrap();
+
+        let initial = report(&core, &root).unwrap();
+        assert_eq!(initial.kept_backups.len(), 2);
+        let trash = temp.path().join("trash");
+        let moved = trash_with(&core, &root, &[], &initial.kept_backups, Some(&trash)).unwrap();
+        assert_eq!(moved.len(), 2);
+        assert!(!lua_backup.exists());
+        assert!(!store_backup.exists());
+        assert!(report(&core, &root).unwrap().kept_backups.is_empty());
     }
     #[test]
     fn missing_root_has_no_orphans() {

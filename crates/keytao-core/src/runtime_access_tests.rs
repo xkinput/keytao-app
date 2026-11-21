@@ -155,9 +155,24 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     );
     assert_eq!(ReloadStamp::current_signature(&root), first_signature);
     let menu = session.process_key_result(key_policy::XK_F4, 0).unwrap();
-    assert_eq!(menu.state.candidates.len(), 2);
-    assert_eq!(menu.state.candidates[1].text, "雾凇拼音（rime_ice） 未部署");
-    assert_eq!(session.select_candidate_on_page(1).unwrap().schema_id, switcher_model::SCHEMA_ID);
+    assert!(
+        menu.state
+            .candidates
+            .iter()
+            .any(|c| c.text.ends_with(" 未部署")),
+        "candidates: {:?}",
+        menu.state.candidates
+    );
+    let unready_idx = menu
+        .state
+        .candidates
+        .iter()
+        .position(|c| c.text.ends_with(" 未部署"))
+        .unwrap();
+    assert_eq!(
+        session.select_candidate_on_page(unready_idx).unwrap().schema_id,
+        switcher_model::SCHEMA_ID
+    );
     session.process_key_result(key_policy::XK_ESCAPE, 0).unwrap();
 
     std::fs::write(receipt_path, receipt).unwrap();
@@ -203,15 +218,21 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     runtime.reload_without_deploy().unwrap();
     assert_eq!(session.current_schema().unwrap().id, "keytao_b");
 
-    use crate::key_policy::{XK_ESCAPE, XK_F4};
+    use crate::key_policy::XK_F4;
     let menu = session.process_key_result(XK_F4, 0).unwrap();
     assert!(menu.accepted);
     assert_eq!(menu.state.schema_id, switcher_model::SCHEMA_ID);
-    assert_eq!(session.peek_state().candidates[1].text, "雾凇拼音（rime_ice）");
-    assert_eq!(session.process_enter().unwrap().state.schema_id, ".default");
-    session.process_key_result(XK_ESCAPE, 0).unwrap();
+    assert_eq!(menu.state.highlighted_candidate_index, 1);
+    assert!(
+        session
+            .peek_state()
+            .candidates
+            .iter()
+            .all(|c| !c.text.ends_with(" 未部署"))
+    );
+    assert_eq!(session.process_enter().unwrap().state.schema_id, "keytao_b");
     let ctrl_grave = [(0xffe3, 0), (0x60, RIME_MOD_CONTROL)];
-    for expected in [switcher_model::SCHEMA_ID, ".default"] {
+    for expected in [switcher_model::SCHEMA_ID, "keytao_b"] {
         let result = session.process_keys_result(&ctrl_grave).unwrap();
         assert!(result.accepted);
         assert_eq!(result.state.schema_id, expected);
@@ -222,14 +243,13 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
             ])
             .unwrap();
     }
-    session.process_key_result(XK_ESCAPE, 0).unwrap();
     let composition = session.process_keys_result(&[(b'a'.into(), 0), (b'a'.into(), 0)]).unwrap();
     assert!(!composition.state.preedit.is_empty());
     let preview = composition.state.commit_preview;
     assert!(!preview.is_empty());
     session.process_key_result(XK_F4, 0).unwrap();
     isolated_deploy::with_isolated_package_lock(&root, || {
-        let rejected = session.select_candidate_on_page(1).unwrap();
+        let rejected = session.select_candidate_on_page(3).unwrap();
         assert_eq!(rejected.preedit, composition.state.preedit);
         assert!(rejected.committed.is_none());
         assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("first"));
@@ -237,15 +257,13 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     }).unwrap();
     session.process_key_result(XK_F4, 0).unwrap();
     let generation = runtime.generation();
-    let native_menu = session.select_candidate_on_page(1).unwrap();
+    let switched = session.select_candidate_on_page(3).unwrap();
     assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("rime_ice"));
-    assert_eq!(native_menu.schema_id, ".default");
-    assert_eq!(native_menu.committed.as_deref(), Some(preview.as_str()));
+    assert_eq!(switched.schema_id, "keytao_d");
+    assert_eq!(switched.committed.as_deref(), Some(preview.as_str()));
     assert!(runtime.generation() > generation);
     assert!(!runtime.reload_without_deploy_changed().unwrap());
-    assert_eq!(session.state().schema_id, ".default");
-    let resumed = session.process_key_result(XK_ESCAPE, 0).unwrap();
-    assert_eq!(resumed.state.schema_id, "keytao_c");
+    assert_eq!(session.state().schema_id, "keytao_d");
     ReloadStamp::write_package(&root, "rime_ice").unwrap();
     assert!(runtime.reload_without_deploy_changed().unwrap());
     runtime.switch_package("first").unwrap();

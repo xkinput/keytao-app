@@ -561,10 +561,6 @@ impl ImeBackend for JdBackend {
         self.process_key_result(XK_RETURN, 0)
     }
 
-    fn open_schema_switcher(&self) -> ImeState {
-        self.state()
-    }
-
     fn select_candidate_on_page(&self, index: usize) -> ImeState {
         let mut session = lock_ignore_poison(&self.session);
         match session.index_on_page(index) {
@@ -631,6 +627,18 @@ impl ImeBackend for JdBackend {
     fn list_schemas(&self) -> Vec<SchemaInfo> {
         self.current_schema().into_iter().collect()
     }
+
+    fn active_switches(&self) -> Vec<crate::SchemaSwitchSetting> {
+        vec![crate::SchemaSwitchSetting {
+            schema_id: "keytao".into(),
+            name: "ascii_mode".into(),
+            states: vec!["中文".into(), "西文".into()],
+            value: usize::from(self.is_ascii_mode()),
+            options: Vec::new(),
+        }]
+    }
+
+    fn persist_switch_options(&self, _options: &[(String, bool)]) {}
 
     fn apply_switch_request(
         &self,

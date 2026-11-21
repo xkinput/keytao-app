@@ -112,6 +112,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_box_autoadd_f_32(dynamic raw);
 
   @protected
+  GitSchemeConfigDto dco_decode_box_autoadd_git_scheme_config_dto(dynamic raw);
+
+  @protected
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw);
 
   @protected
@@ -185,6 +188,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FileItemDto dco_decode_file_item_dto(dynamic raw);
+
+  @protected
+  GitSchemeConfigDto dco_decode_git_scheme_config_dto(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -320,6 +326,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double? dco_decode_opt_box_autoadd_f_32(dynamic raw);
 
   @protected
+  GitSchemeConfigDto? dco_decode_opt_box_autoadd_git_scheme_config_dto(
+    dynamic raw,
+  );
+
+  @protected
   InstallProgressDto? dco_decode_opt_box_autoadd_install_progress_dto(
     dynamic raw,
   );
@@ -346,6 +357,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
+    dynamic raw,
+  );
+
+  @protected
+  List<PackageKeptBackupDto>? dco_decode_opt_list_package_kept_backup_dto(
     dynamic raw,
   );
 
@@ -564,6 +580,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_box_autoadd_f_32(SseDeserializer deserializer);
 
   @protected
+  GitSchemeConfigDto sse_decode_box_autoadd_git_scheme_config_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   InstallProgressDto sse_decode_box_autoadd_install_progress_dto(
     SseDeserializer deserializer,
   );
@@ -653,6 +674,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FileItemDto sse_decode_file_item_dto(SseDeserializer deserializer);
+
+  @protected
+  GitSchemeConfigDto sse_decode_git_scheme_config_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -822,6 +848,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double? sse_decode_opt_box_autoadd_f_32(SseDeserializer deserializer);
 
   @protected
+  GitSchemeConfigDto? sse_decode_opt_box_autoadd_git_scheme_config_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   InstallProgressDto? sse_decode_opt_box_autoadd_install_progress_dto(
     SseDeserializer deserializer,
   );
@@ -850,6 +881,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PackageKeptBackupDto>? sse_decode_opt_list_package_kept_backup_dto(
     SseDeserializer deserializer,
   );
 
@@ -1136,6 +1172,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_f_32(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_git_scheme_config_dto(
+    GitSchemeConfigDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_install_progress_dto(
     InstallProgressDto self,
     SseSerializer serializer,
@@ -1251,6 +1293,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_file_item_dto(FileItemDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_git_scheme_config_dto(
+    GitSchemeConfigDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -1469,6 +1517,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_f_32(double? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_git_scheme_config_dto(
+    GitSchemeConfigDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_install_progress_dto(
     InstallProgressDto? self,
     SseSerializer serializer,
@@ -1501,6 +1555,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_package_kept_backup_dto(
+    List<PackageKeptBackupDto>? self,
     SseSerializer serializer,
   );
 

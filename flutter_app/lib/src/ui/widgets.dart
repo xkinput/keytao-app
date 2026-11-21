@@ -35,7 +35,7 @@ class SchemaLogo extends StatelessWidget {
     final key = schemeKey ?? controller.activeSchemeKey;
     final package = controller.installedPackageFor(key);
     final path = schemeKey != null
-        ? package?.logoPath
+        ? package?.logoPath ?? controller.remoteSchemeLogoFor(key)
         : controller.activeSchemaLogoPath ?? package?.logoPath;
     return path == null
         ? fallback()

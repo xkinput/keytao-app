@@ -64,6 +64,10 @@ pub fn status_at(root: &Path) -> Status {
     MINT.status_at(root)
 }
 
+pub(crate) async fn reinstall_store_only(core: &Core, root: &Path) -> Result<(), String> {
+    MINT.reinstall_store_only(core, root, latest_package()).await
+}
+
 pub fn rime_mint_status(core: &Core, root: &Path) -> Result<Status, CoreError> {
     MINT.status(core, root)
 }

@@ -119,9 +119,38 @@ pub fn android_libjd_enabled() -> bool {
 
 #[cfg(target_os = "android")]
 pub fn android_libjd_ready(root: &Path) -> bool {
-    engine_choice::read(root, engine_choice::active_package(root).as_deref())
-        == engine_choice::PackageEngine::Libjd
-        && installed_library(root).is_some()
+    package_libjd_ready(root, engine_choice::active_package(root).as_deref())
+}
+
+pub(crate) fn package_libjd_ready(root: &Path, key: Option<&str>) -> bool {
+    package_libjd_ready_in_store(root, None, key)
+}
+
+pub(crate) fn package_libjd_ready_in_store(
+    root: &Path,
+    data_root: Option<&Path>,
+    key: Option<&str>,
+) -> bool {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "android"
+    ))]
+    return key == Some(engine_choice::PACKAGE_KEY)
+        && engine_choice::read(root, key) == engine_choice::PackageEngine::Libjd
+        && (data_root.and_then(libjd::installed_library).is_some()
+            || installed_library(root).is_some());
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "android"
+    )))]
+    {
+        let _ = (root, data_root, key);
+        false
+    }
 }
 
 #[cfg(target_os = "android")]

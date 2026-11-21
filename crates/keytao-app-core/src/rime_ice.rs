@@ -392,6 +392,10 @@ where
     ADDON.manage(core, installed, host, install_package).await
 }
 
+pub(crate) async fn reinstall_store_only(core: &Core, root: &Path) -> Result<(), String> {
+    ADDON.reinstall_store_only(core, root, latest_package()).await
+}
+
 pub fn rime_ice_status(core: &Core, root: &Path) -> Result<Status, CoreError> {
     ADDON.status(core, root)
 }

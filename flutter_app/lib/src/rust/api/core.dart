@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `downloaded_archive_path`, `install_result_dto`, `libjd_failure`, `theme_library_host`
+// These functions are ignored because they are not marked as `pub`: `downloaded_archive_path`, `format_libjd_error`, `install_result_dto`, `libjd_failure`, `theme_library_host`
 
 /// Creates the process-wide Core, or returns its existing info when the resolved
 /// directories, platform and user root match. Restart the process to change them.
@@ -26,6 +26,16 @@ Future<LocalSchemaDto> checkLocalSchema() =>
 
 Future<String?> activeSchemaLogoPath() =>
     RustLib.instance.api.crateApiCoreActiveSchemaLogoPath();
+
+Future<String?> remoteSchemeLogo({
+  required String schemeKey,
+  required String repoUrl,
+  String? branch,
+}) => RustLib.instance.api.crateApiCoreRemoteSchemeLogo(
+  schemeKey: schemeKey,
+  repoUrl: repoUrl,
+  branch: branch,
+);
 
 Future<OnboardingDto> onboarding() =>
     RustLib.instance.api.crateApiCoreOnboarding();
@@ -56,12 +66,22 @@ Future<PackageOrphanReportDto> packageOrphanReport() =>
 Future<bool> packageMigrationPending() =>
     RustLib.instance.api.crateApiCorePackageMigrationPending();
 
+Future<String?> pendingMigrationBackupDir() =>
+    RustLib.instance.api.crateApiCorePendingMigrationBackupDir();
+
+Future<void> dismissMigrationBackupNotice() =>
+    RustLib.instance.api.crateApiCoreDismissMigrationBackupNotice();
+
 Future<void> migrateToIsolated() =>
     RustLib.instance.api.crateApiCoreMigrateToIsolated();
 
 Future<List<String>> trashPackageOrphans({
   required List<PackageOrphanFileDto> files,
-}) => RustLib.instance.api.crateApiCoreTrashPackageOrphans(files: files);
+  List<PackageKeptBackupDto>? keptBackups,
+}) => RustLib.instance.api.crateApiCoreTrashPackageOrphans(
+  files: files,
+  keptBackups: keptBackups,
+);
 
 Future<String> importLocalScheme({
   required String directoryPath,
@@ -69,6 +89,22 @@ Future<String> importLocalScheme({
   String? schemeKey,
 }) => RustLib.instance.api.crateApiCoreImportLocalScheme(
   directoryPath: directoryPath,
+  displayName: displayName,
+  schemeKey: schemeKey,
+);
+
+Future<String> importGitScheme({
+  required String repoUrl,
+  required String mode,
+  String? branch,
+  String? assetName,
+  required String displayName,
+  String? schemeKey,
+}) => RustLib.instance.api.crateApiCoreImportGitScheme(
+  repoUrl: repoUrl,
+  mode: mode,
+  branch: branch,
+  assetName: assetName,
   displayName: displayName,
   schemeKey: schemeKey,
 );
@@ -236,9 +272,11 @@ Future<void> dismissSchemeUpdate({
 
 Future<void> switchPackage({
   required String packageKey,
+  String? schemaId,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreSwitchPackage(
   packageKey: packageKey,
+  schemaId: schemaId,
   androidDeploy: androidDeploy,
 );
 
@@ -271,6 +309,14 @@ Future<List<String>> removeSchemePackage({
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreRemoveSchemePackage(
   schemeKey: schemeKey,
+  androidDeploy: androidDeploy,
+);
+
+Future<String?> repairSchemePackage({
+  required String packageKey,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreRepairSchemePackage(
+  packageKey: packageKey,
   androidDeploy: androidDeploy,
 );
 

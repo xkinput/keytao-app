@@ -479,6 +479,19 @@ fn isolated_public_cache(root: &Path, key: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn remove_isolated_package_cache(key: &str) {
+    let _guard = PUBLISH_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Ok(root) = public_root() {
+        let cache = isolated_public_cache(&root, key);
+        if cache.exists() {
+            let _ = std::fs::remove_dir_all(cache);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn activate_cached_isolated_package(key: &str) -> Result<(), String> {
     let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
     let _guard = PUBLISH_LOCK
@@ -641,6 +654,8 @@ fn deploy_and_publish_at(
     keytao_core::rebase_active_scheme_manifest(stage.path())?;
     trim_missing_dependencies(stage.path())
         .map_err(|error| format!("prepare-dependencies: {error}"))?;
+    ensure_imported_user_dict_stubs(stage.path())
+        .map_err(|error| format!("prepare-user-dicts: {error}"))?;
     deploy(stage.path()).map_err(|error| format!("compile: {error}"))?;
     let complete = keytao_core::deployment_warning(stage.path()).is_none();
     let build = keytao_core::RuntimeDirs::resolve(stage.path(), shared)?.staging_dir;
@@ -731,6 +746,50 @@ fn trim_missing_dependencies(stage: &Path) -> Result<(), String> {
                 })
                 .map_err(|error| error.to_string())?;
         }
+    }
+    Ok(())
+}
+
+fn ensure_imported_user_dict_stubs(stage: &Path) -> Result<(), String> {
+    let mut missing_tables = BTreeSet::new();
+    for entry in std::fs::read_dir(stage).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if !path.to_string_lossy().ends_with(".dict.yaml") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let normalized = content.replace("\r\n", "\n");
+        let header_text = normalized
+            .split_once("\n...\n")
+            .map_or(normalized.as_str(), |(head, _)| head);
+        let Ok(header) = serde_yaml::from_str::<serde_yaml::Value>(header_text) else {
+            continue;
+        };
+        if let Some(imports) = header
+            .get("import_tables")
+            .and_then(serde_yaml::Value::as_sequence)
+        {
+            for table in imports.iter().filter_map(serde_yaml::Value::as_str) {
+                let relative = format!("{table}.dict.yaml");
+                checked_relative(Path::new(&relative))?;
+                if table.ends_with(".user") && !stage.join(&relative).is_file() {
+                    missing_tables.insert((table.to_owned(), relative));
+                }
+            }
+        }
+    }
+    for (table, relative) in missing_tables {
+        let output = stage.join(&relative);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut file = std::fs::File::create(&output).map_err(|error| error.to_string())?;
+        file.write_all(format!("---\nname: {table}\nversion: \"1\"\nsort: by_weight\n...\n").as_bytes())
+            .map_err(|error| error.to_string())?;
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -1267,12 +1326,7 @@ fn public_activation_files(
         }
         let incoming = entries
             .into_iter()
-            .map(|(path, bytes)| (PathBuf::from(path), bytes))
-            .into_iter()
-            .filter(|(path, _)| {
-                !crate::package_activation::user_file(&path.to_string_lossy().replace('\\', "/"))
-                    && !addons.contains_key(&path.to_string_lossy().replace('\\', "/"))
-            })
+            .filter_map(|(path, bytes)| sanitize_public_package_entry(&path, bytes, addons))
             .collect::<Vec<_>>();
         update_public_lua_package(&mut files, &key, Some(&incoming))?;
         merge_public_files(&mut files, &incoming)?;
@@ -1311,6 +1365,43 @@ fn public_activation_files(
         files.retain(|path, _| !path.starts_with("build"));
     }
     Ok(files)
+}
+
+fn sanitize_public_package_entry(
+    raw_path: &str,
+    bytes: Vec<u8>,
+    addons: &BTreeMap<String, String>,
+) -> Option<(PathBuf, Vec<u8>)> {
+    let normalized = raw_path.replace('\\', "/");
+    if addons.contains_key(&normalized) {
+        return None;
+    }
+    if !crate::package_activation::user_file(&normalized) {
+        return Some((PathBuf::from(raw_path), bytes));
+    }
+    if !normalized.contains('/') && normalized.ends_with(".user.dict.yaml") {
+        // Keep only the dictionary YAML header so `import_tables: [*.user]` compiles in
+        // the public AppContainer build without publishing any personal user words.
+        let header = std::str::from_utf8(&bytes)
+            .ok()
+            .map(|text| {
+                let text = text.replace("\r\n", "\n");
+                if let Some((head, _)) = text.split_once("\n...\n") {
+                    format!("{head}\n...\n").into_bytes()
+                } else if text.ends_with("\n...") {
+                    format!("{text}\n").into_bytes()
+                } else {
+                    text.into_bytes()
+                }
+            })
+            .unwrap_or_default();
+        return Some((PathBuf::from(raw_path), header));
+    }
+    if !normalized.contains('/') && (normalized.ends_with("_user.txt") || normalized == "user_dict.txt")
+    {
+        return Some((PathBuf::from(raw_path), Vec::new()));
+    }
+    None
 }
 
 pub fn has_schemas() -> bool {
@@ -3517,5 +3608,65 @@ mod tests {
         assert!(!files.contains_key(Path::new(keytao_core::SCHEMA_SWITCH_APPLIED_FILE)));
         assert!(!root.join(first).exists());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn public_activation_preserves_sanitized_user_dict_headers_and_stubs_missing_user_imports() {
+        let root = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        let sources = package.path().join("files");
+        std::fs::create_dir(&sources).unwrap();
+        std::fs::write(
+            sources.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.join("keytao.schema.yaml"),
+            "schema: {schema_id: keytao, name: 键道6}\ntranslator: {dictionary: keytao.extended}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.join("keytao-dz.schema.yaml"),
+            "schema: {schema_id: keytao-dz, name: 键道6单字}\ntranslator: {dictionary: keytao-dz.extended}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.join("keytao.extended.dict.yaml"),
+            "---\nname: keytao.extended\nimport_tables:\n  - keytao.user\n...\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.join("keytao-dz.extended.dict.yaml"),
+            "---\nname: keytao-dz.extended\nimport_tables:\n  - keytao.user\n  - extra.user\n...\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.join("keytao.user.dict.yaml"),
+            "---\nname: keytao.user\nversion: \"1\"\n...\n私密词\tsmc\t100\n",
+        )
+        .unwrap();
+
+        let activated = public_activation_files(
+            BTreeMap::new(),
+            Some(&sources),
+            None,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        let sanitized = std::str::from_utf8(&activated[Path::new("keytao.user.dict.yaml")]).unwrap();
+        assert!(sanitized.contains("name: keytao.user"));
+        assert!(!sanitized.contains("私密词"), "personal entries must never enter public stage");
+
+        store_snapshot(root.path(), &activated, false).unwrap();
+        deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
+            assert!(stage.join("keytao.user.dict.yaml").is_file());
+            assert!(stage.join("extra.user.dict.yaml").is_file());
+            std::fs::create_dir(stage.join("build")).unwrap();
+            std::fs::write(stage.join("build/keytao.schema.yaml"), "compiled").unwrap();
+            Ok(())
+        })
+        .unwrap();
     }
 }

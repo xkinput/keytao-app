@@ -597,17 +597,17 @@ async fn main_scheme_keeps_priority_when_installing_wanxiang() {
     .unwrap();
     assert_eq!(
         crate::scheme_files::parse_schema_list(
-            &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
+            &fs::read_to_string(root.path.join("migrations/test/default.custom.yaml")).unwrap()
         ),
         ["keytao"]
     );
     assert_eq!(
-        fs::read_to_string(root.path.join("rime.lua")).unwrap(),
+        fs::read_to_string(root.path.join("migrations/test/rime.lua")).unwrap(),
         main_lua
     );
     assert_eq!(
         RuntimeDirs::active_package_key(&root.path).as_deref(),
-        Some("builtin/keytao")
+        Some("wanxiang")
     );
 }
 

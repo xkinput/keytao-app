@@ -154,6 +154,7 @@ impl<'a> PackageStore<'a> {
         Ok(self.addon_path(id))
     }
 
+    #[cfg(any(target_os = "windows", test))]
     pub(crate) fn addon_stage(&self) -> Result<tempfile::TempDir, CoreError> {
         let root = self.staging_root()?;
         Ok(tempfile::tempdir_in(&root).map_err(|error| context("创建临时目录", &root, error))?)
@@ -868,6 +869,7 @@ impl<'a> PackageStore<'a> {
             } else { None };
             let active = state.active_scheme.as_deref() == Some(&scheme_key);
             let engine = meta.as_ref().map_or(PackageEngine::Rime, |meta| meta.engine);
+            let git = meta.as_ref().and_then(|meta| meta.git.clone());
             Some(InstalledPackageInfo {
                 logo_path: if has_package_zip {
                     crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
@@ -884,6 +886,7 @@ impl<'a> PackageStore<'a> {
                 has_package_zip,
                 source: meta.as_ref().map(|meta| meta.source.clone()).unwrap_or_else(|| "official".into()),
                 display_name: meta.and_then(|meta| meta.display_name),
+                git,
             })
         }).collect())
     }
@@ -1070,6 +1073,7 @@ mod tests {
             .into(),
             display_name: Some("Example".into()),
             selection_base_version: None,
+            git: None,
             manifest: BTreeMap::new(),
             zip_sha256: sha256_reader(zip).unwrap(),
         }

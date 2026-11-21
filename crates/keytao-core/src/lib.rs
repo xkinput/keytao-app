@@ -850,7 +850,6 @@ pub(crate) trait ImeBackend: Send + Sync + english_mode::EnglishBackend {
         key_batch::process_keys(keys, |keycode, mask| self.process_key_result(keycode, mask))
     }
     fn process_enter(&self) -> KeyProcessResult;
-    fn open_schema_switcher(&self) -> ImeState;
     fn select_candidate_on_page(&self, index: usize) -> ImeState;
     fn select_candidate_global(&self, index: usize) -> ImeState;
     fn highlight_candidate_on_page(&self, index: usize) -> ImeState;
@@ -864,6 +863,8 @@ pub(crate) trait ImeBackend: Send + Sync + english_mode::EnglishBackend {
     fn raw_input(&self) -> Option<String>;
     fn commit_raw_input(&self) -> ImeState;
     fn list_schemas(&self) -> Vec<SchemaInfo>;
+    fn active_switches(&self) -> Vec<SchemaSwitchSetting>;
+    fn persist_switch_options(&self, options: &[(String, bool)]);
     fn apply_switch_request(
         &self,
         request: &SchemaSwitchRequest,
@@ -3352,47 +3353,6 @@ mod desktop {
             result
         }
 
-        fn open_schema_switcher(&self) -> ImeState {
-            let _rime = rime_api_lock();
-            let mut hotkeys = Vec::new();
-            // SAFETY: config and session access are serialized by the librime lock.
-            unsafe {
-                let api = rime_get_api();
-                if let (Some(open), Some(close)) = (
-                    rime_api_member!(api, config_open),
-                    rime_api_member!(api, config_close),
-                ) {
-                    let mut config: RimeConfig = std::mem::zeroed();
-                    if open(c"default".as_ptr(), &mut config) != 0 {
-                        hotkeys = config_string_list_locked(&mut config, "switcher/hotkeys");
-                        close(&mut config);
-                    }
-                }
-                if let Some(simulate) = rime_api_member!(api, simulate_key_sequence) {
-                    if hotkeys.is_empty() {
-                        hotkeys = vec!["F4".into(), "Control+grave".into()];
-                    }
-                    for hotkey in hotkeys {
-                        if hotkey.is_empty()
-                            || hotkey.chars().any(|ch| ch.is_whitespace() || matches!(ch, '{' | '}'))
-                        {
-                            continue;
-                        }
-                        if let Ok(sequence) = CString::new(format!("{{{hotkey}}}")) {
-                            simulate(self.session.session_id, sequence.as_ptr());
-                            let state = extract_state_with_commit(self);
-                            if state.schema_id == ".default" || state.committed.is_some() {
-                                return state;
-                            }
-                        }
-                    }
-                    return extract_state_readonly(self);
-                }
-            }
-            self.session.process_key(key_event(key_policy::XK_F4, 0));
-            extract_state_with_commit(self)
-        }
-
         /// Pick the `index`-th candidate of the current page through librime's
         /// own API, so that selection does not depend on `menu/select_keys`
         /// being long enough or on the schema's alphabet.
@@ -3671,6 +3631,42 @@ mod desktop {
                 return resolved_deployed_schemas(&dirs);
             }
             deployed_schemas(user_data_dir)
+        }
+
+        fn active_switches(&self) -> Vec<SchemaSwitchSetting> {
+            let _rime = rime_api_lock();
+            let Ok(status) = self.session.status() else {
+                return Vec::new();
+            };
+            let schema_id = status.schema_id().to_owned();
+            if schema_id.is_empty() || schema_id == ".default" {
+                return Vec::new();
+            }
+            let switches = read_schema_switches_locked(&schema_id);
+            use crate::english_mode::EnglishBackend as _;
+            visible_switch_settings(&schema_id, switches, |name, _| Some(self.get_option(name)))
+        }
+
+        fn persist_switch_options(&self, options: &[(String, bool)]) {
+            if options.is_empty() {
+                return;
+            }
+            let _rime = rime_api_lock();
+            let Ok(status) = self.session.status() else {
+                return;
+            };
+            let schema_id = status.schema_id().to_owned();
+            if schema_id.is_empty() || schema_id == ".default" {
+                return;
+            }
+            let request = SchemaSwitchRequest {
+                generation: 0,
+                schema_id: None,
+                options: options.iter().cloned().collect(),
+            };
+            if let Err(error) = persist_requested_switches_locked(&schema_id, &request) {
+                crate::rt_log!(Level::Info, "error", "persist_switch_options", msg = error);
+            }
         }
 
         fn apply_switch_request(
@@ -4598,6 +4594,12 @@ fn with_schema_switch_config<T>(
 ))]
 pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>, String> {
     let dirs = RuntimeDirs::resolve(user_dir, user_dir)?;
+    if dirs.active_package_key.as_deref() == Some(engine_choice::PACKAGE_KEY)
+        && engine_choice::read(user_dir, Some(engine_choice::PACKAGE_KEY))
+            == engine_choice::PackageEngine::Libjd
+    {
+        return Ok(Vec::new());
+    }
     let Some(schema_id) = deployed_schema_id_from_dir(user_dir) else {
         return Ok(Vec::new());
     };
@@ -5942,17 +5944,23 @@ impl ImeRuntime {
     fn switch_package_from_ime(
         &self,
         key: &str,
+        schema_id: Option<&str>,
         finish_composition: impl FnOnce(),
     ) -> Result<(), String> {
         // Keep a local stamp watcher from reloading between publishing the
-        // switch and bringing up the selected package's native switcher.
+        // switch and bringing up the selected package's runtime.
         let mut applied = try_lock_ignore_poison(&PROCESS_RIME.package_reload)
             .ok_or("Rime package reload is busy")?;
         let dirs = self.data_dirs()?;
         if deployment_in_progress(&dirs.user) {
             return Err("Rime deployment is busy".into());
         }
-        isolated_deploy::try_switch_ready_package(&dirs.user, Path::new(&dirs.shared), key)?;
+        isolated_deploy::try_switch_ready_package_with_schema(
+            &dirs.user,
+            Path::new(&dirs.shared),
+            key,
+            schema_id,
+        )?;
         let signature = ReloadStamp::current_signature(&dirs.user);
         finish_composition();
         self.reload_without_deploy_inner()?;
@@ -6757,22 +6765,32 @@ impl ImeRuntimeSession {
         if switcher_model::is_hotkey(key, mask)
             && try_lock_ignore_poison(&self.inner).is_some_and(|inner| inner.ime_host)
         {
-            if let Some(mut menu) =
-                switcher_model::Menu::load(&self.dirs.user, Path::new(&self.dirs.shared))
-            {
-                let opened = self.with_engine_and_policy(|engine, policy| {
-                    let state = engine.state();
-                    if !policy.composing || state.schema_id == ".default" {
-                        return None;
-                    }
-                    menu.keep_input_mode(state);
-                    let state = menu.state();
-                    lock_ignore_poison(&self.pending).package_menu = Some(menu);
-                    Some(KeyProcessResult { state, accepted: true })
-                });
-                if let Some(result) = opened.flatten() {
-                    return Some(result);
+            let force_open = PROCESS_RIME.using_libjd() || key == switcher_model::OPEN_PACKAGE_MENU;
+            let opened = self.with_engine_and_policy(|engine, policy| {
+                let state = engine.state();
+                if !policy.composing || state.schema_id == ".default" {
+                    return None;
                 }
+                let active_schemas = engine.list_schemas();
+                let active_switches = engine.active_switches();
+                let mut menu = switcher_model::Menu::load(
+                    &self.dirs.user,
+                    Path::new(&self.dirs.shared),
+                    &state.schema_id,
+                    active_schemas,
+                    active_switches,
+                    force_open,
+                )?;
+                menu.keep_input_mode(state);
+                let state = menu.state();
+                lock_ignore_poison(&self.pending).package_menu = Some(menu);
+                Some(KeyProcessResult {
+                    state,
+                    accepted: true,
+                })
+            });
+            if let Some(result) = opened.flatten() {
+                return Some(result);
             }
         }
         (key == switcher_model::OPEN_PACKAGE_MENU)
@@ -6783,9 +6801,40 @@ impl ImeRuntimeSession {
         use switcher_model::Decision;
         match decision {
             Decision::Pass => return None,
-            Decision::Native => return Some(self.open_native_switcher()),
-            Decision::Switch(key) => {
-                let runtime = ImeRuntime::with_dirs(&self.dirs.user, &self.dirs.shared).with_ime_host();
+            Decision::SelectActiveSchema(schema_id) => {
+                let committed = self
+                    .with_engine_and_policy(|engine, policy| {
+                        if !policy.composing || !engine.is_composing() {
+                            return None;
+                        }
+                        let raw = engine.raw_input().filter(|raw| !raw.is_empty());
+                        engine.commit_composition().committed.or(raw)
+                    })
+                    .flatten();
+                let mut state = match self.select_schema(&schema_id) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        crate::rt_log!(Level::Info, "error", "schema_switch", msg = error);
+                        self.state()
+                    }
+                };
+                if let Some(mut text) = committed {
+                    if let Some(next) = state.committed.take() {
+                        text.push_str(&next);
+                    }
+                    state.committed = Some(text);
+                }
+                return Some(KeyProcessResult {
+                    state,
+                    accepted: true,
+                });
+            }
+            Decision::SwitchPackage {
+                package_key,
+                schema_id,
+            } => {
+                let runtime =
+                    ImeRuntime::with_dirs(&self.dirs.user, &self.dirs.shared).with_ime_host();
                 #[cfg(windows)]
                 let runtime = if lock_ignore_poison(&self.inner).libjd_server {
                     runtime.with_libjd_server()
@@ -6793,20 +6842,44 @@ impl ImeRuntimeSession {
                     runtime
                 };
                 let mut committed = None;
-                let switched = runtime.switch_package_from_ime(&key, || {
-                    committed = self.with_engine_and_policy(|engine, policy| {
-                        if !policy.composing {
-                            return None;
-                        }
-                        let raw = engine.raw_input().filter(|raw| !raw.is_empty());
-                        engine.commit_composition().committed.or(raw)
-                    }).flatten();
-                });
+                let switched = runtime.switch_package_from_ime(
+                    &package_key,
+                    schema_id.as_deref(),
+                    || {
+                        committed = self
+                            .with_engine_and_policy(|engine, policy| {
+                                if !policy.composing {
+                                    return None;
+                                }
+                                let raw = engine.raw_input().filter(|raw| !raw.is_empty());
+                                engine.commit_composition().committed.or(raw)
+                            })
+                            .flatten();
+                    },
+                );
                 let mut result = match switched {
-                    Ok(()) => self.open_native_switcher(),
+                    Ok(()) => {
+                        let state = match schema_id.as_deref() {
+                            Some(id)
+                                if !PROCESS_RIME.using_libjd()
+                                    && self.current_schema().as_ref().map(|s| s.id.as_str())
+                                        != Some(id) =>
+                            {
+                                self.select_schema(id).unwrap_or_else(|_| self.state())
+                            }
+                            _ => self.state(),
+                        };
+                        KeyProcessResult {
+                            state,
+                            accepted: true,
+                        }
+                    }
                     Err(error) => {
                         crate::rt_log!(Level::Info, "error", "package_switch", msg = error);
-                        KeyProcessResult { state: self.state(), accepted: true }
+                        KeyProcessResult {
+                            state: self.state(),
+                            accepted: true,
+                        }
                     }
                 };
                 if let Some(mut text) = committed {
@@ -6817,23 +6890,45 @@ impl ImeRuntimeSession {
                 }
                 return Some(result);
             }
+            Decision::ToggleSwitch {
+                name,
+                options,
+                next_value,
+            } => {
+                let state = if options.is_empty() {
+                    let enabled = next_value != 0;
+                    let state = if name == "ascii_mode" {
+                        self.set_ascii_mode(enabled)
+                    } else {
+                        self.set_option(&name, enabled)
+                    };
+                    self.with_engine(|engine| {
+                        engine.persist_switch_options(&[(name.clone(), enabled)]);
+                    });
+                    state
+                } else {
+                    let pairs: Vec<_> = options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, opt)| (opt.clone(), index == next_value))
+                        .collect();
+                    let mut last = None;
+                    for (opt, enabled) in &pairs {
+                        last = self.set_option(opt, *enabled);
+                    }
+                    self.with_engine(|engine| {
+                        engine.persist_switch_options(&pairs);
+                    });
+                    last
+                };
+                return Some(KeyProcessResult {
+                    state: state.unwrap_or_else(|| self.state()),
+                    accepted: true,
+                });
+            }
             Decision::Close | Decision::Stay => {}
         }
         Some(KeyProcessResult { state: self.state(), accepted: true })
-    }
-
-    fn open_native_switcher(&self) -> KeyProcessResult {
-        let state = self.with_engine_and_mode(|engine, policy, _, _, _| {
-            if policy.composing {
-                engine.open_schema_switcher()
-            } else {
-                engine.state()
-            }
-        });
-        KeyProcessResult {
-            state: state.unwrap_or_else(|| self.peek_state()),
-            accepted: true,
-        }
     }
 
     fn process_native_keys(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
@@ -7718,7 +7813,99 @@ pub fn deployed_schemas(root: &Path) -> Vec<SchemaInfo> {
     let Ok(dirs) = RuntimeDirs::resolve(root, root) else {
         return Vec::new();
     };
+    if runtime_libjd::package_libjd_ready(root, dirs.active_package_key.as_deref()) {
+        return vec![SchemaInfo {
+            id: engine_choice::PACKAGE_KEY.into(),
+            name: "键道6".into(),
+        }];
+    }
     resolved_deployed_schemas(&dirs)
+}
+
+pub fn package_switchable_schemas(
+    control_root: &Path,
+    shared: &Path,
+    data_root: Option<&Path>,
+    package_key: &str,
+) -> Vec<SchemaInfo> {
+    if package_key == engine_choice::PACKAGE_KEY
+        && engine_choice::read(control_root, Some(package_key))
+            == engine_choice::PackageEngine::Libjd
+    {
+        return vec![SchemaInfo {
+            id: engine_choice::PACKAGE_KEY.into(),
+            name: "键道6".into(),
+        }];
+    }
+    let Some(dirs) = data_root
+        .and_then(|data| RuntimeDirs::for_package_in_store(control_root, shared, data, package_key))
+        .or_else(|| RuntimeDirs::for_package(control_root, shared, package_key))
+    else {
+        return Vec::new();
+    };
+    let deployed = resolved_deployed_schemas(&dirs);
+    if !deployed.is_empty() {
+        return deployed;
+    }
+
+    let mut ids = dirs
+        .shared_data_dir
+        .parent()
+        .and_then(|pkg_dir| runtime_dirs::read_regular_file(&pkg_dir.join("package.json")))
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|meta| meta.get("selected_schemas")?.as_array().cloned())
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if ids.is_empty() {
+        for name in ["default.custom.yaml", "default-custom.yaml", "default.yaml"] {
+            if let Ok(content) = std::fs::read_to_string(dirs.shared_data_dir.join(name)) {
+                let parsed = parse_schema_list(&content);
+                if !parsed.is_empty() {
+                    ids = parsed;
+                    break;
+                }
+            }
+        }
+    }
+
+    if ids.is_empty() {
+        let normalized = package_key.strip_prefix("builtin/").unwrap_or(package_key);
+        if dirs
+            .shared_data_dir
+            .join(format!("{normalized}.schema.yaml"))
+            .is_file()
+        {
+            ids.push(normalized.to_owned());
+        } else if let Ok(entries) = std::fs::read_dir(&dirs.shared_data_dir) {
+            let mut sources = std::collections::BTreeSet::new();
+            let mut deps = std::collections::BTreeSet::new();
+            for entry in entries.flatten() {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(id) = name.strip_suffix(".schema.yaml") {
+                    sources.insert(id.to_owned());
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        deps.extend(parse_schema_dependencies(&content));
+                    }
+                }
+            }
+            ids.extend(sources.into_iter().filter(|id| !deps.contains(id)));
+        }
+    }
+
+    ids.into_iter()
+        .filter(|id| valid_rime_build_id(id))
+        .map(|id| SchemaInfo {
+            name: resolved_schema_name(&dirs, &id).unwrap_or_else(|| id.clone()),
+            id,
+        })
+        .collect()
 }
 
 fn resolved_deployed_schemas(dirs: &RuntimeDirs) -> Vec<SchemaInfo> {
@@ -7738,6 +7925,9 @@ fn resolved_deployed_schemas(dirs: &RuntimeDirs) -> Vec<SchemaInfo> {
 
 pub fn current_schema_id_from_dir(root: &Path) -> Option<String> {
     let dirs = RuntimeDirs::resolve(root, root).ok()?;
+    if runtime_libjd::package_libjd_ready(root, dirs.active_package_key.as_deref()) {
+        return Some(engine_choice::PACKAGE_KEY.into());
+    }
     std::fs::read_to_string(dirs.user_data_dir.join(".keytao-current-schema"))
         .ok()
         .map(|id| id.trim().to_owned())
@@ -7754,6 +7944,13 @@ pub fn write_current_schema(root: &Path, id: &str) -> Result<(), String> {
         return Err(format!("invalid current schema id: {id}"));
     }
     let dirs = RuntimeDirs::resolve(root, root)?;
+    write_current_schema_in_dirs(&dirs, id)
+}
+
+fn write_current_schema_in_dirs(dirs: &RuntimeDirs, id: &str) -> Result<(), String> {
+    if id == ".default" || !valid_rime_build_id(id) {
+        return Err(format!("invalid current schema id: {id}"));
+    }
     std::fs::create_dir_all(&dirs.user_data_dir)
         .map_err(|error| format!("save current schema: {error}"))?;
     write_file_atomic(
@@ -7765,6 +7962,18 @@ pub fn write_current_schema(root: &Path, id: &str) -> Result<(), String> {
 
 fn persist_selected_schema(root: &Path, id: &str) -> Result<(), String> {
     let dirs = RuntimeDirs::resolve(root, root)?;
+    persist_selected_schema_only(&dirs, id)
+}
+
+pub(crate) fn persist_selected_schema_in_dirs(dirs: &RuntimeDirs, id: &str) -> Result<(), String> {
+    persist_selected_schema_only(dirs, id)?;
+    write_current_schema_in_dirs(dirs, id)
+}
+
+fn persist_selected_schema_only(dirs: &RuntimeDirs, id: &str) -> Result<(), String> {
+    if id == ".default" || !valid_rime_build_id(id) {
+        return Err(format!("invalid current schema id: {id}"));
+    }
     let path = dirs.user_data_dir.join("user.yaml");
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -8494,6 +8703,13 @@ pub fn schema_install_state_with_shared(
     let Ok(dirs) = RuntimeDirs::resolve(user_data_dir, shared_dir) else {
         return SchemaInstallState::default();
     };
+    if runtime_libjd::package_libjd_ready(user_data_dir, dirs.active_package_key.as_deref()) {
+        return SchemaInstallState {
+            installed: true,
+            deployed: true,
+            schemas: vec![engine_choice::PACKAGE_KEY.into()],
+        };
+    }
     let state = resolved_schema_install_state(&dirs);
     #[cfg(any(
         target_os = "linux",

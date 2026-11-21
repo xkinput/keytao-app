@@ -4,7 +4,6 @@ use crate::{
 };
 use keytao_core::libjd::{self, LibjdManifest, LibjdPlatform};
 use reqwest::{Url, redirect::Policy};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -13,7 +12,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const RELEASE_API: &str = "https://api.github.com/repos/hronro/ime-jd/releases/latest";
+const RELEASE_LATEST: &str = "https://github.com/hronro/ime-jd/releases/latest";
+const RELEASE_TAG_PREFIX: &str = "/hronro/ime-jd/releases/tag/";
 const RELEASE_DOWNLOAD: &str = "https://github.com/hronro/ime-jd/releases/download/";
 const RELEASE_CDN_PREFIX: &str = "/github-production-release-asset/612575122/";
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -48,7 +48,6 @@ pub struct LibjdRelease {
     platform: LibjdPlatform,
     tag: String,
     asset: Asset,
-    sha256: String,
 }
 
 impl LibjdRelease {
@@ -65,17 +64,9 @@ impl LibjdRelease {
     }
 }
 
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
 struct Asset {
     name: String,
     browser_download_url: String,
-    digest: Option<String>,
     size: u64,
 }
 
@@ -87,10 +78,6 @@ fn allowed_asset_redirect(from: &Url, to: &Url) -> bool {
         && to.username().is_empty()
         && to.password().is_none()
         && to.path().starts_with(RELEASE_CDN_PREFIX)
-}
-
-async fn latest_release(client: &reqwest::Client) -> Result<Release, CoreError> {
-    latest_release_at(client, RELEASE_API).await
 }
 
 fn format_release_request_error(error: reqwest::Error) -> CoreError {
@@ -106,88 +93,78 @@ fn format_release_request_error(error: reqwest::Error) -> CoreError {
     CoreError::Other(format!("查询 ime-jd 版本失败：{reason}"))
 }
 
-async fn latest_release_at(client: &reqwest::Client, url: &str) -> Result<Release, CoreError> {
+fn release_from_location(
+    location: &str,
+    platform: LibjdPlatform,
+) -> Result<LibjdRelease, CoreError> {
+    let url = Url::parse(RELEASE_LATEST)
+        .and_then(|base| base.join(location))
+        .map_err(|error| CoreError::Other(format!("查询 ime-jd 版本失败：发布地址无效（{error}）")))?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(CoreError::Other("查询 ime-jd 版本失败：发布地址无效".into()));
+    }
+    let tag = url
+        .path()
+        .strip_prefix(RELEASE_TAG_PREFIX)
+        .filter(|tag| libjd::valid_tag(tag))
+        .ok_or_else(|| CoreError::Other("ime-jd 版本号无效".into()))?
+        .to_owned();
+    let name = platform.asset_name(&tag);
+    let browser_download_url = format!("{RELEASE_DOWNLOAD}{tag}/{name}");
+    Ok(LibjdRelease {
+        platform,
+        tag,
+        asset: Asset {
+            name,
+            browser_download_url,
+            size: 0,
+        },
+    })
+}
+
+async fn latest_release_at(
+    client: &reqwest::Client,
+    url: &str,
+    platform: LibjdPlatform,
+) -> Result<LibjdRelease, CoreError> {
     let response = client
         .get(url)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
         .map_err(format_release_request_error)?;
     let status = response.status();
-    if !status.is_success() {
-        let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || (status == reqwest::StatusCode::FORBIDDEN
-                && response
-                    .headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    == Some("0"));
-        let detail = if rate_limited {
-            format!("GitHub API 请求过于频繁（HTTP {}），请稍后再试", status.as_u16())
-        } else if status == reqwest::StatusCode::NOT_FOUND {
-            "未找到已发布的版本（HTTP 404）".to_owned()
-        } else if status.is_server_error() {
-            format!("GitHub 服务异常（HTTP {}）", status.as_u16())
-        } else {
-            format!("HTTP {status}")
-        };
-        return Err(CoreError::Other(format!("查询 ime-jd 版本失败：{detail}")));
+    if status.is_redirection() {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| CoreError::Other("查询 ime-jd 版本失败：缺少重定向地址".into()))?;
+        return release_from_location(location, platform);
     }
-    response.json().await.map_err(|error| {
-        let detail = if error.is_decode() {
-            "返回的版本信息格式无效".to_owned()
-        } else if error.is_timeout() {
-            "读取版本信息超时".to_owned()
-        } else {
-            format!("读取响应失败（{}）", error.without_url())
-        };
-        CoreError::Other(format!("查询 ime-jd 版本失败：{detail}"))
-    })
+    let detail = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        format!("GitHub 请求过于频繁（HTTP {}），请稍后再试", status.as_u16())
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        "未找到已发布的版本（HTTP 404）".to_owned()
+    } else if status.is_server_error() {
+        format!("GitHub 服务异常（HTTP {}）", status.as_u16())
+    } else {
+        format!("发布地址未返回重定向（HTTP {status}）")
+    };
+    Err(CoreError::Other(format!("查询 ime-jd 版本失败：{detail}")))
 }
 
-fn select_asset(release: Release, platform: LibjdPlatform) -> Result<LibjdRelease, CoreError> {
-    let tag = release.tag_name;
-    if !libjd::valid_tag(&tag) {
-        return Err(CoreError::Other("ime-jd 版本号无效".into()));
-    }
-    let name = platform.asset_name(&tag);
-    let mut candidates = release
-        .assets
-        .into_iter()
-        .filter(|asset| asset.name == name);
-    let asset = candidates
-        .next()
-        .ok_or_else(|| CoreError::Other("当前平台没有 ime-jd 安装包".into()))?;
-    if candidates.next().is_some()
-        || asset.browser_download_url != format!("{RELEASE_DOWNLOAD}{tag}/{name}")
-        || asset.size == 0
-        || asset.size > MAX_ARCHIVE_BYTES
-    {
-        return Err(CoreError::Other("ime-jd 安装包信息无效".into()));
-    }
-    let sha256 = asset
-        .digest
-        .as_deref()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
-        .filter(|digest| libjd::valid_sha256(digest))
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| CoreError::Other("ime-jd 安装包缺少 SHA-256".into()))?;
-    Ok(LibjdRelease {
-        platform,
-        tag,
-        asset,
-        sha256,
-    })
-}
-
-fn verify_digest(file: &mut File, expected: &str) -> Result<(), CoreError> {
+fn compute_digest(file: &mut File) -> Result<String, CoreError> {
     let mut hash = Sha256::new();
     io::copy(file, &mut hash)?;
-    if format!("{:x}", hash.finalize()) != expected {
-        return Err(CoreError::Other("ime-jd SHA-256 校验失败".into()));
-    }
-    Ok(())
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn write_library(input: impl Read, size: u64, target: &Path) -> Result<(), CoreError> {
@@ -233,6 +210,17 @@ fn extract_library(file: File, target: &Path, platform: LibjdPlatform) -> Result
     Err(CoreError::Other("安装包缺少 ime-jd 动态库".into()))
 }
 
+fn latest_redirect_client(core: &Core) -> Result<reqwest::Client, CoreError> {
+    reqwest::Client::builder()
+        .user_agent(format!("keytao-app/{}", core.env().app_version))
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(30))
+        .https_only(true)
+        .redirect(Policy::none())
+        .build()
+        .map_err(|error| CoreError::Network(error.without_url().to_string()))
+}
+
 fn release_client(core: &Core) -> Result<reqwest::Client, CoreError> {
     reqwest::Client::builder()
         .user_agent(format!("keytao-app/{}", core.env().app_version))
@@ -257,13 +245,12 @@ pub async fn libjd_release(core: &Core) -> Result<LibjdRelease, CoreError> {
         .ok_or_else(|| CoreError::Unsupported("当前平台不支持 ime-jd".into()))?;
     let mut cancel = core.download_cancel.subscribe();
     cancel.borrow_and_update();
-    let client = release_client(core)?;
-    let release = tokio::select! {
+    let client = latest_redirect_client(core)?;
+    tokio::select! {
         biased;
-        _ = cancel.changed() => return Err(CoreError::Other(DOWNLOAD_CANCELLED.into())),
-        release = latest_release(&client) => release?,
-    };
-    select_asset(release, platform)
+        _ = cancel.changed() => Err(CoreError::Other(DOWNLOAD_CANCELLED.into())),
+        release = latest_release_at(&client, RELEASE_LATEST, platform) => release,
+    }
 }
 
 pub async fn install_or_update_libjd(
@@ -274,7 +261,6 @@ pub async fn install_or_update_libjd(
         platform,
         tag,
         asset,
-        sha256,
     } = release;
     if supported_platform() != Some(platform) {
         return Err(CoreError::Unsupported("当前平台不支持 ime-jd".into()));
@@ -302,7 +288,7 @@ pub async fn install_or_update_libjd(
         core,
         client.get(asset.browser_download_url),
         &mut cancel,
-        Some(asset.size),
+        (asset.size > 0).then_some(asset.size),
     )
     .await
     .map_err(CoreError::Other)?;
@@ -319,7 +305,11 @@ pub async fn install_or_update_libjd(
     let stage_tag = tag.clone();
     let stage = tokio::task::spawn_blocking(move || -> Result<_, CoreError> {
         let mut archive = download.reopen()?;
-        verify_digest(&mut archive, &sha256)?;
+        let archive_len = archive.metadata()?.len();
+        if archive_len == 0 || archive_len > MAX_ARCHIVE_BYTES {
+            return Err(CoreError::Other("ime-jd 安装包大小无效".into()));
+        }
+        let sha256 = compute_digest(&mut archive)?;
         archive.rewind()?;
         let library = stage.path().join(platform.library);
         extract_library(archive, &library, platform)?;
@@ -401,48 +391,40 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn release_offer_requires_the_exact_platform_asset_and_digest() {
+    fn release_from_location_parses_latest_redirect_without_api() {
         let platform = libjd::platform_for("windows", "aarch64").unwrap();
         let tag = "v0.13.0";
         let name = platform.asset_name(tag);
         let url = format!("{RELEASE_DOWNLOAD}{tag}/{name}");
-        let release = |source: &str, digest: Option<String>| Release {
-            tag_name: tag.to_owned(),
-            assets: vec![Asset {
-                name: name.clone(),
-                browser_download_url: source.to_owned(),
-                digest,
-                size: 123,
-            }],
-        };
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let offer = select_asset(release(&url, Some(digest.clone())), platform).unwrap();
+        let offer = release_from_location("/hronro/ime-jd/releases/tag/v0.13.0", platform).unwrap();
         assert_eq!(
             (offer.version(), offer.size(), offer.source_url()),
-            (tag, 123, url.as_str())
+            (tag, 0, url.as_str())
         );
-        assert!(select_asset(release(&url, None), platform).is_err());
-        assert!(
-            select_asset(
-                release(&url.replace("hronro", "elsewhere"), Some(digest.clone())),
-                platform
-            )
-            .is_err()
-        );
-        let x64 = libjd::platform_for("windows", "x86_64").unwrap();
-        assert!(select_asset(release(&url, Some(digest)), x64).is_err());
+        let full = release_from_location(
+            "https://github.com/hronro/ime-jd/releases/tag/v0.13.0",
+            platform,
+        )
+        .unwrap();
+        assert_eq!((full.version(), full.source_url()), (tag, url.as_str()));
+
+        for bad in [
+            "https://evil.invalid/hronro/ime-jd/releases/tag/v0.13.0",
+            "/elsewhere/ime-jd/releases/tag/v0.13.0",
+            "/hronro/ime-jd/releases/tag/v0.13.0?foo=bar",
+            "/hronro/ime-jd/releases/tag/not-a-tag!",
+        ] {
+            assert!(release_from_location(bad, platform).is_err(), "{bad}");
+        }
     }
 
     #[test]
-    fn changed_archive_does_not_pass_the_release_digest() {
+    fn compute_digest_matches_sha256_of_archive() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let original = b"release archive";
         let sha256 = format!("{:x}", Sha256::digest(original));
         file.write_all(original).unwrap();
-        assert!(verify_digest(&mut file.reopen().unwrap(), &sha256).is_ok());
-        file.write_all(b"tampered").unwrap();
-        let error = verify_digest(&mut file.reopen().unwrap(), &sha256).unwrap_err();
-        assert!(error.to_string().contains("SHA-256"));
+        assert_eq!(compute_digest(&mut file.reopen().unwrap()).unwrap(), sha256);
     }
 
     #[test]
@@ -462,13 +444,13 @@ mod tests {
         .unwrap();
         assert!(!allowed_asset_redirect(&asset, &other_repo));
         assert!(!allowed_asset_redirect(
-            &Url::parse(RELEASE_API).unwrap(),
+            &Url::parse(RELEASE_LATEST).unwrap(),
             &cdn
         ));
     }
 
     #[tokio::test]
-    async fn release_query_reports_accurate_http_parse_and_network_reasons() {
+    async fn release_query_uses_latest_redirect_and_reports_http_or_network_reasons() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -489,33 +471,56 @@ mod tests {
             format!("http://{addr}/releases/latest")
         }
 
-        let client = reqwest::Client::new();
+        let platform = libjd::platform_for("macos", "aarch64").unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .unwrap();
 
-        let rate_url = serve_once(
-            "403 Forbidden",
-            "x-ratelimit-remaining: 0\r\n",
-            r#"{"message":"API rate limit exceeded"}"#,
+        let redirect_url = serve_once(
+            "302 Found",
+            "Location: https://github.com/hronro/ime-jd/releases/tag/v0.14.0\r\n",
+            "",
         )
         .await;
-        let rate_err = latest_release_at(&client, &rate_url).await.err().unwrap().to_string();
-        assert!(rate_err.contains("请求过于频繁"), "{rate_err}");
+        let offer = latest_release_at(&client, &redirect_url, platform)
+            .await
+            .unwrap();
+        assert_eq!(offer.version(), "v0.14.0");
+        assert!(
+            offer
+                .source_url()
+                .ends_with("/v0.14.0/libjd-v0.14.0-macos-arm64.dylib.tar.xz")
+        );
 
-        let missing_url = serve_once("404 Not Found", "", "{}").await;
-        let missing_err = latest_release_at(&client, &missing_url).await.err().unwrap().to_string();
-        assert!(missing_err.contains("未找到已发布的版本"), "{missing_err}");
-
-        let html_url = serve_once("200 OK", "Content-Type: text/html\r\n", "<html>portal</html>").await;
-        let html_err = latest_release_at(&client, &html_url).await.err().unwrap().to_string();
-        assert!(html_err.contains("格式无效"), "{html_err}");
-
-        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let closed_addr = closed.local_addr().unwrap();
-        drop(closed);
-        let conn_err = latest_release_at(&client, &format!("http://{closed_addr}/releases/latest"))
+        let missing_url = serve_once("404 Not Found", "", "").await;
+        let missing_err = latest_release_at(&client, &missing_url, platform)
             .await
             .err()
             .unwrap()
             .to_string();
+        assert!(missing_err.contains("未找到已发布的版本"), "{missing_err}");
+
+        let html_url = serve_once("200 OK", "Content-Type: text/html\r\n", "<html>portal</html>").await;
+        let html_err = latest_release_at(&client, &html_url, platform)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(html_err.contains("未返回重定向"), "{html_err}");
+
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+        let conn_err = latest_release_at(
+            &client,
+            &format!("http://{closed_addr}/releases/latest"),
+            platform,
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
         assert!(conn_err.contains("无法连接"), "{conn_err}");
     }
 

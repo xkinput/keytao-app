@@ -30,6 +30,10 @@ pub fn status_at(root: &Path) -> Status {
     LSSP.status_at(root)
 }
 
+pub(crate) async fn reinstall_store_only(core: &Core, root: &Path) -> Result<(), String> {
+    LSSP.reinstall_store_only(core, root, latest_package()).await
+}
+
 pub fn rime_lssp_status(core: &Core, root: &Path) -> Result<Status, CoreError> {
     LSSP.status(core, root)
 }

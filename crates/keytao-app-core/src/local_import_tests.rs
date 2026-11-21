@@ -42,7 +42,7 @@ fn stored_files(core: &Core, key: &str) -> BTreeMap<String, Vec<u8>> {
 }
 
 #[test]
-fn local_import_without_defaults_hides_dependency_only_schemas() {
+fn local_import_without_defaults_lists_all_schemas_and_selects_primary_only() {
     let directory = tempfile::tempdir().unwrap();
     let core = open_core(directory.path());
     let path = source(directory.path(), "source");
@@ -50,7 +50,13 @@ fn local_import_without_defaults_hides_dependency_only_schemas() {
     fs::write(path.join("reverse.schema.yaml"), "schema: {schema_id: reverse, name: Reverse}").unwrap();
     let key = import_local_scheme(&core, &path, "Local", None).unwrap();
     let schemas = crate::package_schemas::package_schemas(&core, &key).unwrap();
-    assert_eq!(schemas.iter().map(|schema| schema.id.as_str()).collect::<Vec<_>>(), ["example"]);
+    assert_eq!(
+        schemas
+            .iter()
+            .map(|schema| (schema.id.as_str(), schema.selected))
+            .collect::<Vec<_>>(),
+        [("example", true), ("reverse", false)]
+    );
     assert!(stored_files(&core, &key).contains_key("reverse.schema.yaml"));
 }
 

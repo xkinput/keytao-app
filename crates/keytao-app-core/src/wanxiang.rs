@@ -1626,6 +1626,21 @@ pub async fn install(
     install_receipt(InstallReceipt::new(root)?, variant, progress).await
 }
 
+pub(crate) async fn reinstall_store_only(
+    core: &Core,
+    root: &Path,
+    variant_hint: Option<&str>,
+) -> Result<(), String> {
+    let variant = variant_hint
+        .filter(|v| variant_source(v).is_ok())
+        .unwrap_or("base");
+    let mut receipt = InstallReceipt::new(root)?;
+    receipt.attach_store(core, SCHEMA_ID)?;
+    let mut receipt = install_receipt(receipt, variant, |_, _| {}).await?;
+    receipt.commit_store(true)?;
+    receipt.finish()
+}
+
 async fn install_receipt(
     receipt: InstallReceipt,
     variant: &str,
@@ -1699,6 +1714,10 @@ pub async fn manage_grammar(
             return Err("当前平台未加载语法模型插件".into());
         }
         let root = host.user_root()?;
+        if installed {
+            crate::deploy::ensure_not_using_libjd(core, &root)
+                .map_err(|error| error.to_string())?;
+        }
         crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         if !wanxiang_status(core, &root)
             .map_err(|e| e.to_string())?
@@ -1808,6 +1827,10 @@ where
     let result: Result<_, String> = async {
         variant_source(&variant)?;
         let root = host.user_root()?;
+        if installed {
+            crate::deploy::ensure_not_using_libjd(core, &root)
+                .map_err(|error| error.to_string())?;
+        }
         crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, SCHEMA_ID)?;

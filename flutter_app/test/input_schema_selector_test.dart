@@ -25,6 +25,7 @@ class _SchemaController extends ViewController {
   }
 
   final selections = <String>[];
+  final packageSelections = <String>[];
 
   @override
   Future<void> refreshSchemas() async {}
@@ -34,6 +35,12 @@ class _SchemaController extends ViewController {
     selections.add(schemaId);
     currentSchemaId = schemaId;
     notifyListeners();
+    return true;
+  }
+
+  @override
+  Future<bool> selectPackageSchema(String packageKey, String schemaId) async {
+    packageSelections.add('$packageKey:$schemaId');
     return true;
   }
 }
@@ -107,6 +114,84 @@ void main() {
         find.descendant(of: selector, matching: find.text('键道6·并击')),
         findsOneWidget,
       );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'flattens active and inactive package schemas without top package dropdown',
+    (tester) async {
+      final c = _SchemaController()
+        ..schemas = const [
+          SchemaDto(id: 'xmjd6', name: '🌟🐈'),
+          SchemaDto(id: 'easy_en', name: 'English'),
+        ]
+        ..currentSchemaId = 'xmjd6'
+        ..isolatedPackages = const [
+          IsolatedPackageDto(
+            packageKey: 'xmjd',
+            displayName: '星猫键道',
+            active: true,
+            ready: true,
+            schemas: [
+              SchemaDto(id: 'xmjd6', name: '🌟🐈'),
+              SchemaDto(id: 'easy_en', name: 'English'),
+            ],
+          ),
+          IsolatedPackageDto(
+            packageKey: 'keytao',
+            displayName: '键道6',
+            active: false,
+            ready: true,
+            schemas: [
+              SchemaDto(id: 'keytao', name: '键道6'),
+              SchemaDto(id: 'keytao_dz', name: '键道6单字'),
+              SchemaDto(id: 'easy_en', name: 'English'),
+            ],
+          ),
+        ];
+      addTearDown(c.dispose);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1200, 1000);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: c.info.platform,
+          home: ListenableBuilder(
+            listenable: c,
+            builder: (_, _) => FScaffold(child: InputPage(controller: c)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('current-package-selector')),
+        findsNothing,
+      );
+      final selector = find.byKey(const ValueKey('current-schema-selector'));
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widgetList<Text>(
+              find.descendant(
+                of: find.byType(FItem),
+                matching: find.byType(Text),
+              ),
+            )
+            .map((text) => text.data),
+        ['🌟🐈', 'English', '键道6', '键道6单字'],
+      );
+
+      await tester.tap(
+        find.descendant(of: find.byType(FItem), matching: find.text('键道6单字')),
+      );
+      await tester.pumpAndSettle();
+      expect(c.packageSelections, ['keytao:keytao_dz']);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },

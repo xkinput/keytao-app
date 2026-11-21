@@ -780,6 +780,8 @@ where
     let result: Result<_, String> = async {
         let id = validate_addon_schema_id(&id)?;
         let root = host.user_root()?;
+        crate::deploy::ensure_not_using_libjd(core, &root)
+            .map_err(|error| error.to_string())?;
         crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "addon-download".into(),
@@ -826,6 +828,8 @@ pub async fn addon_schema_uninstall(
     let result: Result<_, String> = async {
         let id = validate_addon_schema_id(&id)?;
         let root = host.user_root()?;
+        crate::deploy::ensure_not_using_libjd(core, &root)
+            .map_err(|error| error.to_string())?;
         crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         let key = keytao_core::RuntimeDirs::active_package_key(&root)
             .ok_or("没有使用中的方案包")?;
@@ -845,6 +849,8 @@ pub async fn set_package_easy_english(
     use crate::runtime_materialize::{easy_english_enabled, update_easy_english};
     use keytao_core::RuntimeDirs;
     let root = host.user_root()?;
+    crate::deploy::ensure_not_using_libjd(core, &root)
+        .map_err(|error| error.to_string())?;
     crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
     if key == EASY_EN_ADDON_ID
         || RuntimeDirs::active_package_key(&root).as_deref() != Some(key)
@@ -960,6 +966,7 @@ mod tests {
 
         let directory = TestRoot::new();
         let root = directory.path();
+        let _ = fs::remove_file(root.join("default.custom.yaml"));
         let host = AddonHost::new(root);
         let bundled = host.core.env().resource_dir.join("rime-data");
         smoke_fixture::write(&bundled).unwrap();
@@ -1169,19 +1176,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            parse_schema_list(
-                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
-            ),
-            ["keytao"]
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("rime.lua")).unwrap(),
+            std::fs::read_to_string(root.path().join("migrations/test/rime.lua")).unwrap(),
             main_lua
         );
-        assert_eq!(
-            keytao_core::RuntimeDirs::active_package_key(root.path()).as_deref(),
-            Some("builtin/keytao")
-        );
+        assert!(root.path().join("migrations/test/default.custom.yaml").is_file());
         assert!(
             !root
                 .path()

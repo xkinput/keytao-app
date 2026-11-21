@@ -14,6 +14,7 @@ futures-util = "0.3"
 sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate", "time"] }
 tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
 tokio.workspace = true
 keytao-core = { path = "../keytao-core" }

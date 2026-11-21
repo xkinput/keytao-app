@@ -1,9 +1,12 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
+import 'git_scheme_dialog.dart';
 import 'progress.dart';
 import 'package_orphans.dart';
 import 'package_schema_selection.dart';
@@ -17,6 +20,7 @@ const _homeSchemeKeys = {'keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'};
 const _homeAddonKeys = ['rime_ice', 'easy_en'];
 
 void _showAddonSchemes(BuildContext context, AppController c) {
+  if (!c.requireRimeEngine()) return;
   showFDialog<void>(
     context: context,
     builder: (context, _, animation) => ListenableBuilder(
@@ -307,12 +311,24 @@ class _SchemePageState extends State<SchemePage> {
                         ),
                     ],
                   ),
-                  ActionButton(
-                    '清理残留文件',
-                    icon: FLucideIcons.trash2,
-                    onPress: c.busy
-                        ? null
-                        : () => showPackageOrphans(context, c),
+                  ActionRow(
+                    children: [
+                      ActionButton(
+                        '从 Git 添加',
+                        key: const ValueKey('add-git-scheme-button'),
+                        icon: FLucideIcons.download,
+                        onPress: c.busy
+                            ? null
+                            : () => showGitSchemeDialog(context, c),
+                      ),
+                      ActionButton(
+                        '清理残留文件',
+                        icon: FLucideIcons.trash2,
+                        onPress: c.busy
+                            ? null
+                            : () => showPackageOrphans(context, c),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -391,6 +407,7 @@ class _SchemePageState extends State<SchemePage> {
           ],
         ),
         if (c.local?.deployed == true &&
+            !c.usesLibjd(c.activeSchemeKey) &&
             (c.schemaSwitches.isNotEmpty || c.schemaSwitchError != null))
           HairlineGridCell(child: SchemaSwitchesSection(controller: c)),
         HairlineGridCell(
@@ -508,7 +525,8 @@ class SchemePackageRow extends StatelessWidget {
             spacing: 8,
             children: [
               ValueRow('版本', release.version),
-              ValueRow('大小', formatLogBytes(BigInt.from(release.size))),
+              if (release.size > 0)
+                ValueRow('大小', formatLogBytes(BigInt.from(release.size))),
               ValueRow('来源', release.sourceUrl),
               const ValueRow('许可证', 'GPL-3.0'),
               const Text('会加载第三方原生代码。'),
@@ -587,7 +605,10 @@ class SchemePackageRow extends StatelessWidget {
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
     final inUse = active && package!.inUse;
-    final hasLogo = package?.logoPath != null;
+    if (package == null || !package.hasPackageZip) {
+      unawaited(c.ensureRemoteSchemeLogo(schemeKey));
+    }
+    final hasLogo = c.effectiveSchemeLogoPath(schemeKey) != null;
     final legacyDownload =
         active && !isLocal && !package!.hasPackageZip && update == null;
     final deployLabel = c.hasPackageDeployProgress
@@ -674,7 +695,9 @@ class SchemePackageRow extends StatelessWidget {
                               showChangelog(context, c, changelogBody);
                             },
                     ),
-                  if (schemeRepositoryUrls[schemeKey] case final url?)
+                  if ((schemeRepositoryUrls[schemeKey] ??
+                          package?.git?.repoUrl)
+                      case final url?)
                     FItem(
                       title: const Text('仓库地址'),
                       prefix: const Icon(FLucideIcons.externalLink),
@@ -706,6 +729,21 @@ class SchemePackageRow extends StatelessWidget {
                                 c.deploy(schemeKey: schemeKey);
                               }
                             : null,
+                      ),
+                    if (deployFailed || c.packageDeployError(schemeKey) != null)
+                      FItem(
+                        title: Text(
+                          isLocal && package.git == null
+                              ? '重置并重新部署'
+                              : '备份并重下修复',
+                        ),
+                        prefix: const Icon(FLucideIcons.wrench),
+                        onPress: c.busy
+                            ? null
+                            : () {
+                                popover.hide();
+                                c.repairSchemePackage(schemeKey);
+                              },
                       ),
                     FItem(
                       title: const Text(AppStrings.selectSchemas),
@@ -744,7 +782,32 @@ class SchemePackageRow extends StatelessWidget {
                                 );
                               },
                       ),
-                    if (isLocal)
+                    if (isLocal && package.git != null) ...[
+                      FItem(
+                        title: const Text('同步更新'),
+                        prefix: const Icon(FLucideIcons.refreshCw),
+                        onPress: c.busy
+                            ? null
+                            : () {
+                                popover.hide();
+                                c.downloadSchemePackage(schemeKey);
+                              },
+                      ),
+                      FItem(
+                        title: const Text('配置 Git 来源'),
+                        prefix: const Icon(FLucideIcons.slidersHorizontal),
+                        onPress: c.busy
+                            ? null
+                            : () {
+                                popover.hide();
+                                showGitSchemeDialog(
+                                  context,
+                                  c,
+                                  existing: package,
+                                );
+                              },
+                      ),
+                    ] else if (isLocal)
                       FItem(
                         title: const Text('重新导入'),
                         prefix: const Icon(FLucideIcons.folderOpen),
@@ -922,6 +985,8 @@ class SchemePackageRow extends StatelessWidget {
               EyebrowLabel(
                 inUse
                     ? '在用'
+                    : package?.git != null
+                    ? 'Git'
                     : isLocal
                     ? '本地'
                     : '云端',
@@ -1317,7 +1382,15 @@ Map<String, Widget> _addonCells(
       fontWeight: FontWeight.w700,
       letterSpacing: cloudCard ? -.34 : null,
     );
-    final name = Text(
+    unawaited(
+      c.ensureRemoteSchemeLogo(
+        packageKey,
+        repoUrl: repositoryUrl,
+        addonInstalled: installed,
+      ),
+    );
+    final hasAddonLogo = c.effectiveSchemeLogoPath(packageKey) != null;
+    final titleText = Text(
       title,
       maxLines: cloudCard ? 1 : null,
       overflow: cloudCard ? TextOverflow.ellipsis : null,
@@ -1328,6 +1401,23 @@ Map<String, Widget> _addonCells(
           ? titleStyle.copyWith(fontSize: 18)
           : titleStyle,
     );
+    final name = hasAddonLogo
+        ? Row(
+            spacing: 6,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SchemaLogo(
+                controller: c,
+                size: cloudCard
+                    ? (MediaQuery.sizeOf(context).width >= 720 ? 32 : 30)
+                    : 24,
+                schemeKey: packageKey,
+                appLogoFallback: false,
+              ),
+              Flexible(child: titleText),
+            ],
+          )
+        : titleText;
     return HairlineGridCell(
       key: ValueKey(key),
       padding: compact

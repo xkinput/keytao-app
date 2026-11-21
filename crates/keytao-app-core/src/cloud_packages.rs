@@ -595,6 +595,7 @@ pub(crate) async fn download_at(
 }
 
 pub async fn download(core: &Core, id: &str, user_root: &Path) -> Result<(), CoreError> {
+    crate::deploy::ensure_not_using_libjd(core, user_root)?;
     crate::package_migration::ensure_before_write(core, user_root).await?;
     download_at(core, id, user_root, API_BASE).await
 }

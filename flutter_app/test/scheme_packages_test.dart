@@ -195,9 +195,10 @@ class PackageCore extends FakeCore {
   @override
   Future<void> crateApiCoreSwitchPackage({
     required String packageKey,
+    String? schemaId,
     required FutureOr<String> Function() androidDeploy,
   }) async {
-    calls.add('switch:$packageKey');
+    calls.add(schemaId == null ? 'switch:$packageKey' : 'switch:$packageKey:$schemaId');
     await activationGate?.future;
     await deployGate?.future;
     if (packages.any((package) => package.schemeKey == packageKey)) {

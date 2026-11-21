@@ -1,9 +1,10 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:forui/forui.dart';
 
 import '../rust/api/types.dart';
 import '../ui/menus.dart';
 import '../ui/onboarding.dart';
-import '../ui/progress.dart';
 import '../ui/shell.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
@@ -56,32 +57,8 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
       controller: widget.controller,
       child: AppErrorPresenter(
         controller: widget.controller,
-        child: ListenableBuilder(
-          listenable: widget.controller,
-          builder: (context, child) {
-            final c = widget.controller;
-            return Column(
-              children: [
-                if (c.packageMigrationFailed || c.isMigratingPackages)
-                  SafeArea(
-                    bottom: false,
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: c.isMigratingPackages
-                          ? const InstallProgressView(
-                              active: true,
-                              message: AppStrings.migratingPackageDirs,
-                            )
-                          : ActionButton(
-                              AppStrings.retryPackageMigration,
-                              onPress: c.busy ? null : c.retryPackageMigration,
-                            ),
-                    ),
-                  ),
-                Expanded(child: child!),
-              ],
-            );
-          },
+        child: _MigrationNoticePresenter(
+          controller: widget.controller,
           child: Builder(
             builder: (context) => AnimatedSwitcher(
               duration: MediaQuery.disableAnimationsOf(context)
@@ -99,4 +76,170 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
       ),
     ),
   );
+}
+
+class _MigrationNoticePresenter extends StatefulWidget {
+  const _MigrationNoticePresenter({
+    required this.controller,
+    required this.child,
+  });
+
+  final AppController controller;
+  final Widget child;
+
+  @override
+  State<_MigrationNoticePresenter> createState() =>
+      _MigrationNoticePresenterState();
+}
+
+class _MigrationNoticePresenterState extends State<_MigrationNoticePresenter> {
+  bool _dialogOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onChanged);
+    _onChanged();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MigrationNoticePresenter oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onChanged);
+      widget.controller.addListener(_onChanged);
+      _onChanged();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    final c = widget.controller;
+    if (!c.hasPendingMigrationFailureToast &&
+        !c.hasPendingToast &&
+        c.migrationBackupDir == null) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      if (c.takeMigrationFailureToast() case final message?) {
+        final toaster = FToaster.of(context);
+        if (toaster.mounted) {
+          toaster.show(
+            duration: const Duration(seconds: 5),
+            builder: (_, _) => FToast(title: Text(message)),
+          );
+        }
+      }
+      if (c.takePendingToast() case final message?) {
+        final toaster = FToaster.of(context);
+        if (toaster.mounted) {
+          toaster.show(
+            duration: const Duration(seconds: 4),
+            builder: (_, _) => FToast(title: Text(message)),
+          );
+        }
+      }
+      final backupDir = c.migrationBackupDir;
+      if (backupDir == null || _dialogOpen) return;
+      _dialogOpen = true;
+      try {
+        await showFDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext, _, animation) => AppDialog(
+            title: '方案目录已更新',
+            animation: animation,
+            actions: [
+              ActionButton(
+                AppStrings.close,
+                onPress: () async {
+                  Navigator.pop(dialogContext);
+                  await c.dismissMigrationBackupNotice();
+                },
+              ),
+              ActionButton(
+                '复制文件目录',
+                icon: FLucideIcons.copy,
+                primary: c.isMobile,
+                onPress: () async {
+                  await Clipboard.setData(ClipboardData(text: backupDir));
+                  if (mounted) {
+                    final toaster = FToaster.of(context);
+                    if (toaster.mounted) {
+                      toaster.show(
+                        duration: const Duration(seconds: 3),
+                        builder: (_, _) =>
+                            const FToast(title: Text('已复制备份文件目录')),
+                      );
+                    }
+                  }
+                },
+              ),
+              if (!c.isMobile)
+                ActionButton(
+                  '打开备份文件目录',
+                  icon: FLucideIcons.folderOpen,
+                  primary: true,
+                  onPress: () async {
+                    final opened = await c.open(backupDir);
+                    if (!opened) {
+                      await Clipboard.setData(ClipboardData(text: backupDir));
+                      if (mounted) {
+                        final toaster = FToaster.of(context);
+                        if (toaster.mounted) {
+                          toaster.show(
+                            duration: const Duration(seconds: 5),
+                            builder: (_, _) => const FToast(
+                              title: Text('无法直接打开，已复制备份文件目录'),
+                            ),
+                          );
+                        }
+                      }
+                    }
+                    if (dialogContext.mounted) Navigator.pop(dialogContext);
+                    await c.dismissMigrationBackupNotice();
+                  },
+                ),
+            ],
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              spacing: 12,
+              children: [
+                const Text(
+                  '方案目录已升级为独立隔离结构，原有方案已清空并备份至以下目录，可前往该目录找回备份文件：',
+                ),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: AppPalette.of(dialogContext).controlSurface,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: SelectableText(
+                      backupDir,
+                      style: dialogContext.theme.typography.body.xs.copyWith(
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      } finally {
+        _dialogOpen = false;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

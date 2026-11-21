@@ -54,6 +54,76 @@ fn snow_preparation_preserves_source_defaults_instead_of_replacing_them() {
     assert_eq!(archive.file_names().filter(|name| *name == "default.custom.yaml").count(), 1);
 }
 
+#[test]
+fn snow_preparation_lists_every_schema_yaml_for_selection() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let host = crate::scheme_host::tests::AddonHost::new(directory.path());
+    fs::create_dir_all(&host.core.env().cache_dir).unwrap();
+    let path = fixture(Package::Snow, &host.core.env().cache_dir);
+    let mut archive = zip::ZipArchive::new(Cursor::new(fs::read(&path).unwrap())).unwrap();
+    let mut entries = BTreeMap::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content).unwrap();
+        entries.insert(entry.name().to_owned(), content);
+    }
+    let extra_schemas = [
+        ("snow_bushou", "冰雪部首"),
+        ("snow_lingpin", "冰雪零拼"),
+        ("snow_qingyun", "冰雪清韵"),
+        ("snow_qingyun_chaifen", "冰雪清韵拆分"),
+        ("snow_qingyun_xingma", "冰雪清韵形码"),
+        ("snow_sipin", "冰雪四拼"),
+        ("snow_xingpang", "冰雪形旁"),
+        ("snow_yingpin", "冰雪映拼"),
+        ("snow_yipin", "冰雪一拼"),
+    ];
+    for (id, name) in extra_schemas {
+        entries.insert(
+            format!("{id}.schema.yaml"),
+            format!("schema:\n  schema_id: {id}\n  name: {name}\ntranslator:\n  dictionary: snow_pinyin\n"),
+        );
+    }
+    zip_at(&path, "", entries);
+    let prepared = crate::rime_snow::prepare_archive(&host.core, fs::read(path).unwrap()).unwrap();
+    crate::packages::store_cloud_archive(
+        &host.core,
+        "snow_jiandao",
+        Some("v0.3.14"),
+        "official",
+        None,
+        &prepared,
+        &host.root,
+    )
+    .unwrap();
+    let listed = crate::package_schemas::package_schemas(&host.core, "snow_jiandao").unwrap();
+    let ids: Vec<_> = listed.iter().map(|s| s.id.as_str()).collect();
+    for expected in [
+        "snow_jiandao",
+        "snow_pinyin",
+        "snow_bihua",
+        "snow_jiandao_bihua",
+        "snow_jiandao_jianpin",
+        "snow_jiandao_chaifen",
+        "snow_sanpin",
+        "snow_radical_pinyin",
+        "snow_bushou",
+        "snow_lingpin",
+        "snow_qingyun",
+        "snow_qingyun_chaifen",
+        "snow_qingyun_xingma",
+        "snow_sipin",
+        "snow_xingpang",
+        "snow_yingpin",
+        "snow_yipin",
+    ] {
+        assert!(ids.contains(&expected), "missing schema {expected} in {ids:?}");
+    }
+    assert_eq!(listed.len(), 17);
+}
+
 fn fixture(kind: Package, work: &Path) -> PathBuf {
     let mut entries = BTreeMap::new();
     for name in kind.addon().required {
@@ -86,10 +156,14 @@ fn fixture(kind: Package, work: &Path) -> PathBuf {
         Package::Snow => {
             entries.insert("radical_pinyin.schema.yaml".into(), "schema:\n  schema_id: radical_pinyin\n  description: https://github.com/mirtlecn/rime_radical_pinyin\ntranslator:\n  dictionary: radical_pinyin\n".into());
             entries.insert("snow_jiandao.schema.yaml".into(), "schema:\n  schema_id: snow_jiandao\n  dependencies: [snow_pinyin, radical_pinyin]\nengine:\n  filters: [lua_filter@*snow.snow]\ntranslator:\n  dictionary: snow_pinyin\nradical:\n  dictionary: radical_pinyin\n  prism: radical_pinyin\n".into());
-            entries.insert("snow_sipin.schema.yaml".into(), "omit other layouts".into());
+            entries.insert("snow_sipin.schema.yaml".into(), "schema:\n  schema_id: snow_sipin\n  name: 冰雪四拼\ntranslator:\n  dictionary: snow_pinyin\n".into());
             entries.insert(
                 "snow_sanpin.fixed.txt".into(),
-                "omit unused fixed data".into(),
+                "字\tsan\n".into(),
+            );
+            entries.insert(
+                "unrelated_layout.schema.yaml".into(),
+                "omit non-snow layouts".into(),
             );
             ""
         }
@@ -205,12 +279,15 @@ fn packages_are_isolated_and_uninstall_preserves_customizations_and_learning() {
         for omitted in [
             "default.custom.yaml",
             "grammar.custom.yaml",
-            "snow_sipin.schema.yaml",
-            "snow_sanpin.fixed.txt",
+            "unrelated_layout.schema.yaml",
             "triple_pinyin_lsspaeo.schema.yaml",
             "lua/unrelated.lua",
         ] {
             assert!(!root.path().join(omitted).exists(), "{omitted}");
+        }
+        if matches!(kind, Package::Snow) {
+            assert!(root.path().join("snow_sipin.schema.yaml").is_file());
+            assert!(root.path().join("snow_sanpin.fixed.txt").is_file());
         }
         if matches!(kind, Package::Lssp) {
             let schema =

@@ -158,9 +158,133 @@ class _RecentOperation extends StatelessWidget {
   }
 }
 
+class _SchemaMenuChoice {
+  const _SchemaMenuChoice({
+    required this.activePackage,
+    required this.packageKey,
+    required this.schemaId,
+    required this.title,
+    required this.subtitle,
+    required this.checked,
+  });
+
+  final bool activePackage;
+  final String? packageKey;
+  final String schemaId;
+  final String title;
+  final String? subtitle;
+  final bool checked;
+}
+
 class _CurrentSchemeHero extends StatelessWidget {
   const _CurrentSchemeHero({required this.controller});
   final AppController controller;
+
+  List<_SchemaMenuChoice> _buildChoices(IsolatedPackageDto? activePackage) {
+    final c = controller;
+    if (c.isolatedPackages.isEmpty) {
+      return [
+        for (final schema in c.schemas)
+          _SchemaMenuChoice(
+            activePackage: true,
+            packageKey: null,
+            schemaId: schema.id,
+            title: schema.name,
+            subtitle: null,
+            checked: schema.id == c.currentSchemaId,
+          ),
+      ];
+    }
+
+    final raw =
+        <({
+          bool activePkg,
+          String packageKey,
+          String packageName,
+          String schemaId,
+          String name,
+          bool ready,
+        })>[];
+
+    final activeSchemas = c.schemas.isNotEmpty
+        ? c.schemas
+        : (activePackage?.schemas ?? const <SchemaDto>[]);
+    if (activePackage != null) {
+      for (final schema in activeSchemas) {
+        raw.add((
+          activePkg: true,
+          packageKey: activePackage.packageKey,
+          packageName: activePackage.displayName,
+          schemaId: schema.id,
+          name: schema.name,
+          ready: activePackage.ready,
+        ));
+      }
+    } else {
+      for (final schema in c.schemas) {
+        raw.add((
+          activePkg: true,
+          packageKey: '',
+          packageName: '',
+          schemaId: schema.id,
+          name: schema.name,
+          ready: true,
+        ));
+      }
+    }
+
+    for (final pkg in c.isolatedPackages.where((pkg) => !pkg.active)) {
+      if (pkg.schemas.isEmpty) {
+        raw.add((
+          activePkg: false,
+          packageKey: pkg.packageKey,
+          packageName: pkg.displayName,
+          schemaId: pkg.packageKey,
+          name: pkg.displayName,
+          ready: pkg.ready,
+        ));
+      } else {
+        for (final schema in pkg.schemas) {
+          if (schema.id == 'easy_en') continue;
+          raw.add((
+            activePkg: false,
+            packageKey: pkg.packageKey,
+            packageName: pkg.displayName,
+            schemaId: schema.id,
+            name: schema.name,
+            ready: pkg.ready,
+          ));
+        }
+      }
+    }
+
+    final counts = <String, int>{};
+    for (final item in raw) {
+      counts[item.name] = (counts[item.name] ?? 0) + 1;
+    }
+
+    return [
+      for (final item in raw)
+        _SchemaMenuChoice(
+          activePackage: item.activePkg,
+          packageKey: item.packageKey.isEmpty ? null : item.packageKey,
+          schemaId: item.schemaId,
+          title: item.name,
+          subtitle: switch ((
+            (counts[item.name] ?? 0) > 1 &&
+                item.packageName.isNotEmpty &&
+                item.packageName != item.name,
+            !item.ready,
+          )) {
+            (true, true) => '${item.packageName} · 部署后可用',
+            (true, false) => item.packageName,
+            (false, true) => '部署后可用',
+            (false, false) => null,
+          },
+          checked: item.activePkg && item.schemaId == c.currentSchemaId,
+        ),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -178,7 +302,7 @@ class _CurrentSchemeHero extends StatelessWidget {
     final isolatedPackage = c.isolatedPackages
         .where((package) => package.active)
         .firstOrNull;
-    final schemas = c.schemas;
+    final choices = _buildChoices(isolatedPackage);
     final needsScheme = !c.isMobile && local?.installed == false;
     final version =
         package?.version ??
@@ -228,11 +352,6 @@ class _CurrentSchemeHero extends StatelessWidget {
           EyebrowLabel(
             desktop ? '当前方案 · ${c.aboutValues['平台']} 系统输入法' : '当前方案',
           ),
-          if (c.isolatedPackages.isNotEmpty)
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: _packageSelector(isolatedPackage),
-            ),
           Row(
             spacing: 12,
             children: [
@@ -245,18 +364,29 @@ class _CurrentSchemeHero extends StatelessWidget {
                     FItemGroup(
                       enabled: !c.busy,
                       children: [
-                        for (final schema in schemas)
+                        for (final choice in choices)
                           FItem(
-                            title: Text(schema.name),
-                            semanticsChecked: schema.id == c.currentSchemaId,
-                            suffix: schema.id == c.currentSchemaId
+                            title: Text(choice.title),
+                            subtitle: choice.subtitle == null
+                                ? null
+                                : Text(choice.subtitle!),
+                            semanticsChecked: choice.checked,
+                            suffix: choice.checked
                                 ? const Icon(FLucideIcons.check)
                                 : null,
                             onPress: c.busy
                                 ? null
                                 : () {
                                     popover.hide();
-                                    c.selectSchema(schema.id);
+                                    if (choice.activePackage ||
+                                        choice.packageKey == null) {
+                                      c.selectSchema(choice.schemaId);
+                                    } else {
+                                      c.selectPackageSchema(
+                                        choice.packageKey!,
+                                        choice.schemaId,
+                                      );
+                                    }
                                   },
                           ),
                       ],
@@ -266,7 +396,11 @@ class _CurrentSchemeHero extends StatelessWidget {
                     key: const ValueKey('current-schema-selector'),
                     variant: FButtonVariant.ghost,
                     semanticsLabel: '方案，$title',
-                    onPress: c.busy || schemas.isEmpty
+                    onPress: c.busy
+                        ? null
+                        : c.isUsingLibjd
+                        ? () => c.requireRimeEngine()
+                        : choices.isEmpty
                         ? null
                         : () {
                             c.refreshSchemas();
@@ -288,7 +422,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                             ),
                           ),
                         ),
-                        if (schemas.isNotEmpty)
+                        if (choices.isNotEmpty && !c.isUsingLibjd)
                           Icon(
                             FLucideIcons.chevronDown,
                             size: desktop ? 20 : 18,
@@ -339,58 +473,6 @@ class _CurrentSchemeHero extends StatelessWidget {
             ],
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _packageSelector(IsolatedPackageDto? activePackage) {
-    final c = controller;
-    final name = activePackage?.displayName;
-    return FPopoverMenu(
-      menuAnchor: Alignment.topLeft,
-      childAnchor: Alignment.bottomLeft,
-      menuBuilder: (_, popover, _) => [
-        FItemGroup(
-          enabled: !c.busy,
-          children: [
-            for (final package in c.isolatedPackages)
-              FItem(
-                title: Text(package.displayName),
-                subtitle: package.ready ? null : const Text('部署后可用'),
-                semanticsChecked: package.active,
-                semanticsInMutuallyExclusiveGroup: true,
-                suffix: package.active ? const Icon(FLucideIcons.check) : null,
-                onPress: c.busy
-                    ? null
-                    : () {
-                        popover.hide();
-                        if (!package.active || !package.ready) {
-                          c.switchPackage(package.packageKey);
-                        }
-                      },
-              ),
-          ],
-        ),
-      ],
-      builder: (_, popover, _) => FButton(
-        key: const ValueKey('current-package-selector'),
-        variant: FButtonVariant.ghost,
-        mainAxisSize: MainAxisSize.min,
-        semanticsLabel: name == null ? '选择方案包' : '方案包，$name',
-        onPress: c.busy
-            ? null
-            : () {
-                c.refreshIsolatedPackages();
-                popover.toggle();
-              },
-        suffix: const Icon(FLucideIcons.chevronDown),
-        child: Flexible(
-          child: Text(
-            name ?? '方案包',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
       ),
     );
   }

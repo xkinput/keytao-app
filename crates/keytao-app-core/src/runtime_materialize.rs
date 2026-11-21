@@ -157,9 +157,15 @@ pub fn isolated_packages(
             (key, name)
         })
         .collect();
+    let list = keytao_core::switcher_model::packages_in_store(
+        root,
+        &shared,
+        Some(&core.env().data_dir),
+        installed,
+    );
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    publish_ime_package_catalog(root, &installed)?;
-    Ok(keytao_core::switcher_model::packages(root, &shared, installed))
+    publish_ime_package_catalog_entries(root, &list)?;
+    Ok(list)
 }
 
 fn isolated_package_keys(
@@ -186,10 +192,41 @@ fn isolated_package_keys(
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn publish_ime_package_catalog(root: &Path, packages: &BTreeMap<String, String>) -> Result<(), CoreError> {
+fn publish_ime_package_catalog(
+    core: &Core,
+    root: &Path,
+    shared: &Path,
+    packages: &BTreeMap<String, String>,
+) -> Result<(), CoreError> {
+    let list = keytao_core::switcher_model::packages_in_store(
+        root,
+        shared,
+        Some(&core.env().data_dir),
+        packages.clone(),
+    );
+    publish_ime_package_catalog_entries(root, &list)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn publish_ime_package_catalog_entries(
+    root: &Path,
+    packages: &[keytao_core::switcher_model::Package],
+) -> Result<(), CoreError> {
     // The keyboard can access the shared control root, but not the app's package store.
     let relative = keytao_core::switcher_model::MOBILE_PACKAGE_CATALOG;
-    let bytes = serde_json::to_vec(packages)?;
+    let catalog: BTreeMap<_, _> = packages
+        .iter()
+        .map(|pkg| {
+            (
+                pkg.package_key.clone(),
+                keytao_core::switcher_model::CatalogEntry {
+                    display_name: pkg.display_name.clone(),
+                    schemas: pkg.schemas.clone(),
+                },
+            )
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&catalog)?;
     if read_optional(&safe(root, relative)?)?.as_deref() != Some(bytes.as_slice()) {
         write_file(&safe(root, relative)?, &bytes)?;
     }
@@ -220,6 +257,8 @@ pub(crate) fn prepare_deploy_targets(
     prepare_targets(core, control_root, bundled, true, package_key, None)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn materialize_migration(
     core: &Core,
     root: &Path,
@@ -305,7 +344,9 @@ fn prepare_targets(
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     publish_ime_package_catalog(
+        core,
         control_root,
+        bundled,
         &keys.iter().map(|key| (key.clone(), package_name(core, key))).collect(),
     )?;
     if let Some(key) = package_key {
@@ -313,6 +354,12 @@ fn prepare_targets(
         if key == "builtin/keytao" && keys.is_empty() && bundled.join("default.yaml").is_file() {
             keys.push(key.into());
         }
+    } else if stage {
+        keys.retain(|candidate| {
+            !(candidate == keytao_core::engine_choice::PACKAGE_KEY
+                && keytao_core::engine_choice::read(control_root, Some(candidate))
+                    == keytao_core::engine_choice::PackageEngine::Libjd)
+        });
     }
     let mut stages = Vec::new();
     let targets = keys
@@ -551,6 +598,8 @@ pub(crate) fn legacy_sync_dir(root: &Path) -> Result<PathBuf, CoreError> {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn legacy_user_files(core: &Core, root: &Path) -> Result<Files, CoreError> {
     let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
     let store = PackageStore::new(core);
@@ -619,6 +668,7 @@ fn private_path(path: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn user_files(
     root: &Path,
     owners: &BTreeMap<String, BTreeSet<String>>,
@@ -643,6 +693,7 @@ fn user_files(
     Ok(result)
 }
 
+#[cfg(test)]
 fn restore_user_default(
     current: &[u8],
     applied: &serde_yaml::Value,
@@ -697,6 +748,7 @@ fn restore_user_default(
         .map_err(|error| CoreError::Other(error.to_string()))
 }
 
+#[cfg(test)]
 fn restore_user_key(
     original: &mut serde_yaml::Mapping,
     current: &serde_yaml::Mapping,
@@ -856,33 +908,46 @@ fn prepare_runtime(
     }
     add_common_files(bundled, &available, &mut generated)?;
 
-    let mut user = legacy.clone();
-    let mut runtime_overrides = previous.runtime_overrides.clone();
-    walk_files(&runtime, "", private_path, &mut |path, relative| {
-        if user_path(relative) {
-            let bytes = fs::read(path)?;
-            let changed = previous.fingerprint(relative) != Some(&sha256_reader(bytes.as_slice())?);
-            if changed {
-                runtime_overrides.insert(relative.to_owned());
-            }
-            if relative == DEFAULT_CUSTOM[0]
-                && !runtime_overrides.contains(relative)
-                && let Some(default) = &previous.user_default
-            {
-                user.entry(relative.to_owned()).or_insert_with(|| default.as_bytes().to_vec());
-                return Ok(());
-            }
-            if runtime_overrides.contains(relative)
-                || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
-            {
-                let bytes = strip_generated(relative, bytes)?;
-                if !bytes.is_empty() {
-                    user.insert(relative.to_owned(), bytes);
+    let is_local = crate::scheme::is_local_scheme_key(key);
+    let mut user = if is_local {
+        Files::new()
+    } else {
+        legacy.clone()
+    };
+    let mut runtime_overrides = if is_local {
+        BTreeSet::new()
+    } else {
+        previous.runtime_overrides.clone()
+    };
+    if !is_local {
+        walk_files(&runtime, "", private_path, &mut |path, relative| {
+            if user_path(relative) {
+                let bytes = fs::read(path)?;
+                let changed =
+                    previous.fingerprint(relative) != Some(&sha256_reader(bytes.as_slice())?);
+                if changed {
+                    runtime_overrides.insert(relative.to_owned());
+                }
+                if relative == DEFAULT_CUSTOM[0]
+                    && !runtime_overrides.contains(relative)
+                    && let Some(default) = &previous.user_default
+                {
+                    user.entry(relative.to_owned())
+                        .or_insert_with(|| default.as_bytes().to_vec());
+                    return Ok(());
+                }
+                if runtime_overrides.contains(relative)
+                    || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
+                {
+                    let bytes = strip_generated(relative, bytes)?;
+                    if !bytes.is_empty() {
+                        user.insert(relative.to_owned(), bytes);
+                    }
                 }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        })?;
+    }
 
     let incoming = take_default_custom(&mut owned);
     let existing = take_default_custom(&mut user);
@@ -1119,6 +1184,7 @@ fn write_runtime(
         user_default: user.get(DEFAULT_CUSTOM[0]).map(|bytes| utf8(bytes).map(str::to_owned)).transpose()?,
         runtime_overrides,
     };
+    let is_local = crate::scheme::is_local_scheme_key(key);
     let mut files = owned;
     files.extend(user);
     files.extend(generated);
@@ -1133,7 +1199,8 @@ fn write_runtime(
                 continue;
             }
             let digest = sha256_reader(existing.as_slice())?;
-            if !manifest.user_owned.contains_key(&relative)
+            if !is_local
+                && !manifest.user_owned.contains_key(&relative)
                 && previous.fingerprint(&relative) != Some(&digest)
             {
                 return Err(CoreError::Other(format!(
@@ -1147,19 +1214,38 @@ fn write_runtime(
         writes.push((path, bytes, previous_sha256));
     }
     let mut removals = Vec::new();
+    let mut scheduled_removals = BTreeSet::new();
     for (relative, hash) in previous.owned.iter().chain(&previous.generated).chain(
         previous.user_owned.get_key_value(crate::account::USER_DICTIONARY),
     ) {
         if manifest.fingerprint(relative).is_none()
-            && (relative == crate::account::USER_DICTIONARY || !previous.user_owned.contains_key(relative))
+            && (is_local
+                || relative == crate::account::USER_DICTIONARY
+                || !previous.user_owned.contains_key(relative))
         {
             let path = safe(runtime, relative)?;
             if let Some(bytes) = read_optional(&path)? {
-                if sha256_reader(bytes.as_slice())? == *hash {
-                    removals.push((path, hash.clone()));
+                let actual = sha256_reader(bytes.as_slice())?;
+                if is_local || actual == *hash {
+                    scheduled_removals.insert(relative.clone());
+                    removals.push((path, actual));
                 }
             }
         }
+    }
+    if is_local {
+        walk_files(runtime, "", private_path, &mut |path, relative| {
+            if (user_path(relative) || lua_path(relative))
+                && relative != crate::account::USER_WORD_REMOVALS
+                && manifest.fingerprint(relative).is_none()
+                && !scheduled_removals.contains(relative)
+            {
+                let bytes = fs::read(path)?;
+                scheduled_removals.insert(relative.to_owned());
+                removals.push((safe(runtime, relative)?, sha256_reader(bytes.as_slice())?));
+            }
+            Ok(())
+        })?;
     }
     let pending_path = safe(runtime, PENDING)?;
     let patch = Pending {

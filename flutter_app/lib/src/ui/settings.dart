@@ -1122,6 +1122,7 @@ class SchemaSwitchesSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
+    if (c.usesLibjd(c.activeSchemeKey)) return const SizedBox.shrink();
     if (c.schemaSwitchError case final error?) {
       return Section(
         title: '方案开关',

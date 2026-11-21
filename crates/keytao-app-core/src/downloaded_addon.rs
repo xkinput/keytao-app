@@ -325,6 +325,10 @@ impl Addon {
     {
         let result: Result<_, String> = async {
             let root = host.user_root()?;
+            if installed {
+                crate::deploy::ensure_not_using_libjd(core, &root)
+                    .map_err(|error| error.to_string())?;
+            }
             crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
             let mut receipt = InstallReceipt::new(&root)?;
             receipt.attach_store(core, self.id)?;
@@ -340,6 +344,19 @@ impl Addon {
         }
         .await;
         result.map_err(CoreError::Other)
+    }
+
+    pub(crate) async fn reinstall_store_only(
+        &'static self,
+        core: &Core,
+        root: &Path,
+        package: impl std::future::Future<Output = Result<RemotePackage, String>>,
+    ) -> Result<(), String> {
+        let mut receipt = InstallReceipt::new(root)?;
+        receipt.attach_store(core, self.id)?;
+        let mut receipt = self.install_receipt(receipt, package, |_, _| {}).await?;
+        receipt.commit_store(true)?;
+        receipt.finish()
     }
 
     fn emit_completed(&self, core: &Core, installed: bool) {

@@ -213,6 +213,21 @@ fn runtime_lock_directory(control_root: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
+    package_build_ready_in_store(control_root, None, dirs)
+}
+
+fn package_build_ready_in_store(
+    control_root: &Path,
+    data_root: Option<&Path>,
+    dirs: &RuntimeDirs,
+) -> bool {
+    if crate::runtime_libjd::package_libjd_ready_in_store(
+        control_root,
+        data_root,
+        dirs.active_package_key.as_deref(),
+    ) {
+        return true;
+    }
     dirs.active_package_key.is_some()
         && crate::resolved_schema_install_state(dirs).deployed
         && package_receipt_matches(control_root, dirs)
@@ -220,31 +235,86 @@ pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
 
 /// The IME can select a committed build. Only the app can prepare an unready package.
 pub fn switch_ready_package(control_root: &Path, shared: &Path, key: &str) -> Result<(), String> {
-    switch_package(control_root, shared, key, true)
+    switch_package(control_root, shared, None, key, None, true)
 }
 
-pub(crate) fn try_switch_ready_package(
+pub fn switch_ready_package_with_schema(
     control_root: &Path,
     shared: &Path,
     key: &str,
+    schema_id: Option<&str>,
 ) -> Result<(), String> {
-    switch_package(control_root, shared, key, false)
+    switch_package(control_root, shared, None, key, schema_id, true)
 }
 
-fn switch_package(control_root: &Path, shared: &Path, key: &str, wait: bool) -> Result<(), String> {
+pub fn switch_ready_package_in_store(
+    control_root: &Path,
+    shared: &Path,
+    data_root: Option<&Path>,
+    key: &str,
+    schema_id: Option<&str>,
+) -> Result<(), String> {
+    switch_package(control_root, shared, data_root, key, schema_id, true)
+}
+
+pub(crate) fn try_switch_ready_package_with_schema(
+    control_root: &Path,
+    shared: &Path,
+    key: &str,
+    schema_id: Option<&str>,
+) -> Result<(), String> {
+    switch_package(control_root, shared, None, key, schema_id, false)
+}
+
+pub const LIBJD_SWITCH_BACK_HINT: &str = "请先切换回 Rime 才能使用";
+
+fn switch_package(
+    control_root: &Path,
+    shared: &Path,
+    data_root: Option<&Path>,
+    key: &str,
+    schema_id: Option<&str>,
+    wait: bool,
+) -> Result<(), String> {
     let not_ready = || "请在键道 App 部署此方案包".to_owned();
     if RuntimeDirs::needs_migration(control_root) {
         return Err(not_ready());
     }
-    let dirs = RuntimeDirs::for_package(control_root, shared, key).ok_or_else(not_ready)?;
+    if key != crate::engine_choice::PACKAGE_KEY
+        && crate::runtime_libjd::package_libjd_ready_in_store(
+            control_root,
+            data_root,
+            RuntimeDirs::active_package_key(control_root).as_deref(),
+        )
+    {
+        return Err(LIBJD_SWITCH_BACK_HINT.into());
+    }
+    let resolve = || {
+        data_root
+            .and_then(|data| RuntimeDirs::for_package_in_store(control_root, shared, data, key))
+            .or_else(|| RuntimeDirs::for_package(control_root, shared, key))
+            .ok_or_else(not_ready)
+    };
+    let dirs = resolve()?;
+    let libjd_ready =
+        crate::runtime_libjd::package_libjd_ready_in_store(control_root, data_root, Some(key));
     if !dirs.user_data_dir.is_dir() {
-        return Err(not_ready());
+        if libjd_ready {
+            fs::create_dir_all(&dirs.user_data_dir).map_err(|error| error.to_string())?;
+        } else {
+            return Err(not_ready());
+        }
     }
     let _deploy = deploy_lock(control_root, wait)?;
     let _materialize = lock(&dirs.user_data_dir.join(MATERIALIZE_LOCK), wait)?;
-    let dirs = RuntimeDirs::for_package(control_root, shared, key).ok_or_else(not_ready)?;
-    if !package_build_ready(control_root, &dirs) {
+    let dirs = resolve()?;
+    if !package_build_ready_in_store(control_root, data_root, &dirs) {
         return Err(not_ready());
+    }
+    if !libjd_ready {
+        if let Some(schema_id) = schema_id.filter(|id| !id.is_empty()) {
+            crate::persist_selected_schema_in_dirs(&dirs, schema_id)?;
+        }
     }
 
     let path = crate::package_store::active_manifest(control_root);

@@ -1704,6 +1704,7 @@ name = "keytao-app-core"
 version = "1.2.15-alpha.7"
 dependencies = [
  "dirs",
+ "flate2",
  "fontdb",
  "futures-util",
  "jni",

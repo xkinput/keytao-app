@@ -95,7 +95,10 @@ fn addon_multi_schema_defaults_selection_update_and_migration() {
     let store = AddonStore::new(&core, &root, "rime_mint").unwrap();
     store.commit(&source, &manifest_bytes(entries)).unwrap();
     let schemas = crate::package_schemas::package_schemas(&core, "rime_mint").unwrap();
-    assert_eq!(schemas.iter().map(|schema| (schema.id.as_str(), schema.selected)).collect::<Vec<_>>(), [("wubi98_mint", true), ("rime_mint", false)]);
+    assert_eq!(
+        schemas.iter().map(|schema| (schema.id.as_str(), schema.selected)).collect::<Vec<_>>(),
+        [("wubi98_mint", true), ("rime_mint", false), ("rime_mint_stroke", false)]
+    );
     assert!(public_files(&core, "rime_mint").unwrap().iter().all(|(_, path)| path != Path::new("default.yaml")));
     crate::package_schemas::set_package_schemas(&core, "rime_mint", &["wubi98_mint".into()]).unwrap();
     store.commit(&source, &manifest_bytes(entries)).unwrap();

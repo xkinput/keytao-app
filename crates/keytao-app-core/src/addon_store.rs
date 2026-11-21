@@ -410,6 +410,7 @@ impl AddonStore {
                 source: value["source"].as_str().unwrap_or_default().into(),
                 display_name: None,
                 selection_base_version: None,
+                git: None,
                 manifest: BTreeMap::new(),
                 zip_sha256: value["archive_sha256"].as_str().unwrap_or_default().into(),
             },
@@ -751,6 +752,7 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
             source: "official".into(),
             display_name: None,
             selection_base_version: None,
+            git: None,
             manifest: files
                 .iter()
                 .filter(|(path, _)| !crate::packages::excluded_from_manifest(path))
@@ -828,6 +830,8 @@ fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn project_legacy_for_isolation(core: &Core, root: &Path) -> Result<(), CoreError> {
     let _guard = operation();
     migrate_legacy(core, root)
@@ -851,6 +855,8 @@ fn legacy_receipt(root: &Path, id: &str, name: &str) -> Result<Option<Vec<u8>>, 
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn unprojected_legacy_addons(
     core: &Core, root: &Path,
 ) -> Result<BTreeMap<String, Vec<ManifestFile>>, CoreError> {
@@ -868,6 +874,7 @@ pub(crate) fn unprojected_legacy_addons(
     Ok(addons)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn migrate_legacy(core: &Core, root: &Path) -> Result<(), CoreError> {
     if !root.try_exists()? {
         return Ok(());

@@ -136,6 +136,7 @@ pub async fn install_live_scheme(
     scheme_key: &str,
     version: Option<&str>,
 ) -> Result<InstallResult, CoreError> {
+    crate::deploy::ensure_not_using_libjd(core, root)?;
     crate::package_migration::ensure_before_write(core, root).await?;
     crate::packages::store_cloud_archive_reader(
         core,
