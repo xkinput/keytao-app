@@ -179,6 +179,14 @@ pub enum PanelOrientation {
     Vertical,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentPosition {
+    #[default]
+    Inline,
+    Below,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FontWeight {
@@ -347,6 +355,7 @@ pub struct CandidateTheme {
     pub selected_label_color: RgbaColor,
     pub comment_color: RgbaColor,
     pub selected_comment_color: RgbaColor,
+    pub comment_position: CommentPosition,
     pub border_color: RgbaColor,
     pub selected_border_color: RgbaColor,
     pub border_width: f32,
@@ -1023,6 +1032,7 @@ impl ResolvedImeTheme {
                 selected_label_color: rgba(0x4A, 0x8D, 0xF6, 0xFF),
                 comment_color: rgba(0x84, 0x92, 0x9E, 0xFF),
                 selected_comment_color: rgba(0x61, 0x72, 0x86, 0xFF),
+                comment_position: CommentPosition::Inline,
                 border_color: rgba(0, 0, 0, 0),
                 selected_border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
                 border_width: 1.0,
@@ -1376,6 +1386,7 @@ struct PartialCandidateTheme {
     comment_color: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
     selected_comment_color: Option<RgbaColor>,
+    comment_position: Option<String>,
     #[serde(default, deserialize_with = "optional_color")]
     border_color: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
@@ -1516,6 +1527,11 @@ impl CandidateTheme {
             &mut self.selected_comment_color,
             partial.selected_comment_color,
         );
+        match partial.comment_position.as_deref() {
+            Some("inline") => self.comment_position = CommentPosition::Inline,
+            Some("below") => self.comment_position = CommentPosition::Below,
+            _ => (),
+        }
         assign(&mut self.border_color, partial.border_color);
         assign(
             &mut self.selected_border_color,

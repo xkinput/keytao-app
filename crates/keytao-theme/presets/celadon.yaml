@@ -1,0 +1,40 @@
+version: 3
+meta:
+  id: keytao.celadon
+  name: 青瓷
+  appearance: both
+common:
+  cornerRadius: 18
+  font: {weight: medium}
+pc:
+  panel: {gap: 5, paddingX: 9, paddingY: 8}
+  candidate: {cornerRadius: 12, borderWidth: 1}
+mobile:
+  keyboard:
+    key: {cornerRadius: 10}
+light:
+  common: {accentColor: "#18766A", backgroundColor: "#F2FAF7"}
+  pc:
+    panel: {borderColor: "#BBD9D0"}
+    candidate:
+      foreground: "#183A33"
+      labelColor: "#496B62"
+      commentColor: "#496B62"
+      selectedBackground: "#D2EFE5"
+      selectedForeground: "#12382F"
+      selectedLabelColor: "#176257"
+      selectedCommentColor: "#315D51"
+      selectedBorderColor: "#89BDB1"
+dark:
+  common: {accentColor: "#82D9C3", backgroundColor: "#142B28"}
+  pc:
+    panel: {borderColor: "#42645D"}
+    candidate:
+      foreground: "#DFF3ED"
+      labelColor: "#A8C8BF"
+      commentColor: "#A8C8BF"
+      selectedBackground: "#294E46"
+      selectedForeground: "#F1FFF9"
+      selectedLabelColor: "#A5E8D7"
+      selectedCommentColor: "#C1E6DB"
+      selectedBorderColor: "#578F80"

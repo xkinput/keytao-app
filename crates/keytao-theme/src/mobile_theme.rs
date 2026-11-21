@@ -197,6 +197,11 @@ fn resolve_mobile_theme_for_platform(
     let mut overrides = overrides.clone();
     normalize_colors(&mut overrides);
     merge(&mut mobile, &overrides);
+    let comment_position = overrides
+        .pointer("/candidateBar/commentPosition")
+        .and_then(|position| serde_json::from_value(position.clone()).ok())
+        .unwrap_or(pc.candidate.comment_position);
+    mobile["candidateBar"]["commentPosition"] = json!(comment_position);
     for (target, inherited) in [
         ("/keyboard/pageBackground", "/keyboard/background"),
         (

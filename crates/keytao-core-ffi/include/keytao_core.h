@@ -341,6 +341,12 @@ char *keytao_session_all_candidates_json(void *session, uint32_t limit);
 
 char *keytao_session_list_schemas_json(void *session);
 
+char *keytao_session_list_switcher_packages_json(void *session);
+
+char *keytao_session_select_package_schema_json(void *session,
+                                                const char *package_key,
+                                                const char *schema_id);
+
 char *keytao_session_schema_switches_json(void *session);
 
 char *keytao_session_current_schema_json(void *session);

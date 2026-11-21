@@ -50,6 +50,29 @@ pub fn packages_in_store(
     data_root: Option<&Path>,
     installed: impl IntoIterator<Item = (String, String)>,
 ) -> Vec<Package> {
+    collect_packages(root, shared, data_root, installed, |dirs| {
+        package_build_ready(root, dirs)
+    })
+}
+
+pub(crate) fn mobile_packages(root: &Path, shared: &Path) -> Vec<Package> {
+    // Reading the last build is enough for display. Selection validates current inputs.
+    collect_packages(
+        root,
+        shared,
+        None,
+        installed_packages(root),
+        crate::isolated_deploy::has_published_package_build,
+    )
+}
+
+fn collect_packages(
+    root: &Path,
+    shared: &Path,
+    data_root: Option<&Path>,
+    installed: impl IntoIterator<Item = (String, String)>,
+    build_ready: impl Fn(&RuntimeDirs) -> bool,
+) -> Vec<Package> {
     if RuntimeDirs::needs_migration(root) {
         return Vec::new();
     }
@@ -64,9 +87,7 @@ pub fn packages_in_store(
                 .and_then(|data| RuntimeDirs::for_package_in_store(root, shared, data, &package_key))
                 .or_else(|| RuntimeDirs::for_package(root, shared, &package_key));
             let ready = crate::runtime_libjd::package_libjd_ready(root, Some(&package_key))
-                || dirs
-                    .as_ref()
-                    .is_some_and(|dirs| package_build_ready(root, dirs));
+                || dirs.as_ref().is_some_and(&build_ready);
             let mut schemas =
                 crate::package_switchable_schemas(root, shared, data_root, &package_key);
             if schemas.is_empty() {

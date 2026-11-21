@@ -239,6 +239,15 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
+  Future<void> _deferAddonSchemaSelection(
+    String key,
+    core.AddonStatusDto status,
+  ) async {
+    if (status.installed && !status.deployed) {
+      await _deferDeployForSchemaSelection(key, activateOnConfirm: false);
+    }
+  }
+
   void _recordMigrationFailure(String message) {
     _packageMigrationFailed = true;
     if (_migrationFailureToastShown) return;
@@ -1223,7 +1232,9 @@ class AppController extends ChangeNotifier {
       }
       if (message == AppStrings.deployDone) deployWarning = null;
       final compileWarning = message.contains('编译失败，已跳过：');
+      final publicWarning = message.startsWith('系统搜索框方案未更新：');
       if (compileWarning) deployWarning = message;
+      if (publicWarning) addOperationLogs(['[WARN] $message']);
       if (isDeploying ||
           ((isManagingAddon ||
                   isManagingWanxiang ||
@@ -1232,10 +1243,10 @@ class AppController extends ChangeNotifier {
                   isManagingRimeMint ||
                   isManagingRimeFrost ||
                   isManagingRimeLssp) &&
-              (message.startsWith('系统搜索框方案未更新：') || compileWarning))) {
+              (publicWarning || compileWarning))) {
         progress = message;
         _deployStep(message, DeployStepState.neutral);
-        if (!isDeploying) addOperationLogs(['[WARN] $message']);
+        if (!isDeploying && !publicWarning) addOperationLogs(['[WARN] $message']);
       }
       return;
     }
@@ -2139,7 +2150,16 @@ class AppController extends ChangeNotifier {
 
   Future<bool> install() {
     if (!canInstall || !requireRimeEngine()) return Future.value(false);
-    return run(_install);
+    return run(() async {
+      final installing = scheme;
+      await _install();
+      if (verification.every((entry) => entry.ok)) {
+        await _deferDeployForSchemaSelection(
+          installing,
+          activateOnConfirm: true,
+        );
+      }
+    });
   }
 
   Future<void> _install() async {
@@ -3657,7 +3677,10 @@ class AppController extends ChangeNotifier {
         variant: selectedWanxiangVariant,
         androidDeploy: _androidDeploy,
       );
-      if (installed) wanxiangLatestVersion = wanxiang!.version;
+      if (installed) {
+        wanxiangLatestVersion = wanxiang!.version;
+        await _deferAddonSchemaSelection('wanxiang', wanxiang!);
+      }
       await _readWanxiangGrammar();
       await _readLocal();
       addOperationLogs([
@@ -3741,7 +3764,10 @@ class AppController extends ChangeNotifier {
         installed: installed,
         androidDeploy: _androidDeploy,
       );
-      if (installed) rimeIceLatestVersion = rimeIce!.version;
+      if (installed) {
+        rimeIceLatestVersion = rimeIce!.version;
+        await _deferAddonSchemaSelection('rime_ice', rimeIce!);
+      }
       await _readLocal();
       addOperationLogs([
         installed ? AppStrings.rimeIceInstalled : AppStrings.rimeIceRemoved,
@@ -3780,12 +3806,7 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         rimeMintLatestVersion = rimeMint!.version;
-        if (rimeMint!.installed && !rimeMint!.deployed) {
-          await _deferDeployForSchemaSelection(
-            'rime_mint',
-            activateOnConfirm: false,
-          );
-        }
+        await _deferAddonSchemaSelection('rime_mint', rimeMint!);
       }
       await _readLocal();
       addOperationLogs([
@@ -3824,12 +3845,7 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         rimeFrostLatestVersion = rimeFrost!.version;
-        if (rimeFrost!.installed && !rimeFrost!.deployed) {
-          await _deferDeployForSchemaSelection(
-            'rime_frost',
-            activateOnConfirm: false,
-          );
-        }
+        await _deferAddonSchemaSelection('rime_frost', rimeFrost!);
       }
       await _readLocal();
       addOperationLogs([
@@ -3866,7 +3882,10 @@ class AppController extends ChangeNotifier {
         installed: installed,
         androidDeploy: _androidDeploy,
       );
-      if (installed) rimeLsspLatestVersion = rimeLssp!.version;
+      if (installed) {
+        rimeLsspLatestVersion = rimeLssp!.version;
+        await _deferAddonSchemaSelection('triple_pinyin_lssp', rimeLssp!);
+      }
       await _readLocal();
       addOperationLogs([
         installed ? AppStrings.rimeLsspInstalled : AppStrings.rimeLsspRemoved,

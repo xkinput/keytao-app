@@ -1524,6 +1524,27 @@ pub extern "C" fn keytao_session_list_schemas_json(session: *mut c_void) -> *mut
 }
 
 #[no_mangle]
+pub extern "C" fn keytao_session_list_switcher_packages_json(session: *mut c_void) -> *mut c_char {
+    session_json("keytao_session_list_switcher_packages_json", session, |s| {
+        serde_json::to_string(&s.list_switcher_packages()).ok()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn keytao_session_select_package_schema_json(
+    session: *mut c_void,
+    package_key: *const c_char,
+    schema_id: *const c_char,
+) -> *mut c_char {
+    session_json("keytao_session_select_package_schema_json", session, |s| {
+        let package_key = c_string_arg(package_key, "package_key").ok()?;
+        let schema_id = c_string_arg(schema_id, "schema_id").ok()?;
+        let result = s.select_package_schema(&package_key, &schema_id)?;
+        Some(state_json(result.state, result.accepted))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn keytao_session_schema_switches_json(session: *mut c_void) -> *mut c_char {
     session_json("keytao_session_schema_switches_json", session, |s| {
         let value = s.schema_switches()?;

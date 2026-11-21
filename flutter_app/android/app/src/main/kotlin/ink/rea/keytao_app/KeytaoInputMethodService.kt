@@ -1155,6 +1155,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onKeyCommand(command: KeyCommand) {
         if (!runningDeferredDeploymentKey) inputCounts.recordCommand(command.type)
+        if (command.type == KeyCommandTypes.RIME_MENU) {
+            onUserInteraction()
+            openRimeMenu()
+            return
+        }
         if (deferDeploymentKey(markPressed = false) { onKeyCommand(command) }) return
         onUserInteraction()
         if (command.type != KeyCommandTypes.BACKSPACE) discardPendingHostBackspace()
@@ -1190,8 +1195,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 KeyCommandTypes.NEXT_PAGE -> applyState(engine.changePage(backward = false))
                 KeyCommandTypes.PREVIOUS_PAGE -> applyState(engine.changePage(backward = true))
                 KeyCommandTypes.RESET -> applyState(engine.reset())
-                KeyCommandTypes.RIME_MENU -> openRimeMenu()
-                KeyCommandTypes.RIME_SCHEMA -> selectRimeSchema(command.value.orEmpty())
+                KeyCommandTypes.RIME_SCHEMA -> {
+                    val schemaId = command.value.orEmpty()
+                    val packageKey = command.fallbackValue
+                    if (packageKey == null) selectRimeSchema(schemaId) else selectRimePackageSchema(packageKey, schemaId)
+                }
                 KeyCommandTypes.RIME_OPTION -> setRimeOption(
                     command.value.orEmpty(),
                     command.fallbackValue,
@@ -1378,12 +1386,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.showMessage(
             if (copied) "已复制到系统剪贴板，请在输入框长按粘贴" else "复制到系统剪贴板失败",
         )
-    }
-
-    override fun onToolbarCustomization(order: List<String>, pinnedCount: Int, symbolLayer: Boolean) {
-        if (!KeytaoAndroidImeConfig.persistToolbarCustomization(this, order, pinnedCount, symbolLayer)) {
-            keyboardView?.showMessage("工具栏顺序保存失败")
-        }
     }
 
     override fun onSettingPreview(key: String, value: String) {
@@ -2196,14 +2198,29 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun openRimeMenu() {
-        if (!bypassesComposition()) {
-            val state = engine.processKey(AndroidKeyMapper.OPEN_PACKAGE_MENU, 0)
-            if (state.accepted) {
-                applyState(state)
-                return
-            }
+        if (!inputAvailable) {
+            keyboardView?.updateRimeOptions(KeytaoRimeOptionsState.EMPTY)
+            scheduleAvailabilityRefresh()
+            return
         }
-        refreshRimeOptions()
+        if (currentState.isPackageSwitcher) {
+            applyState(engine.processKey(AndroidKeyMapper.XK_ESCAPE, 0))
+        }
+        refreshRimeOptions(inBackground = true)
+    }
+
+    private fun selectRimePackageSchema(packageKey: String, schemaId: String) {
+        if (packageKey.isBlank() || schemaId.isBlank()) return
+        val state = engine.selectPackageSchema(packageKey, schemaId)
+        if (state?.accepted == true) {
+            lastChineseSchemaId = null
+            chineseSwitchSnapshot = emptyMap()
+        }
+        state?.let(::applyState)
+        if (state?.accepted != true) {
+            showRimePanelError("无法切换输入方案")
+        }
+        refreshRimeOptions(inBackground = true)
     }
 
     private fun selectRimeSchema(schemaId: String) {
@@ -2220,7 +2237,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         val state = engine.selectSchema(schemaId)
         if (state == null) {
-            keyboardView?.showMessage("无法切换输入方案")
+            showRimePanelError("无法切换输入方案")
             refreshRimeOptions()
             return
         }
@@ -2241,7 +2258,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val previous = action.removePrefix(rimeOptionChoicePrefix)
             if (previous.isNotEmpty() && previous != optionName) {
                 engine.setOption(previous, false) ?: run {
-                    keyboardView?.showMessage("无法更新 Rime 选项")
+                    showRimePanelError("无法更新 Rime 选项")
                     return
                 }
             }
@@ -2250,15 +2267,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             return
         }
         if (state == null) {
-            keyboardView?.showMessage("无法更新 Rime 选项")
+            showRimePanelError("无法更新 Rime 选项")
             return
         }
         applyState(state)
         refreshRimeOptions()
     }
 
+    private fun showRimePanelError(message: String) {
+        if (keyboardView?.rimePanelOpen == true) {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        } else {
+            keyboardView?.showMessage(message)
+        }
+    }
+
     private fun refreshRimeOptions(inBackground: Boolean = false) {
         val generation = ++rimeOptionsGeneration
+        val refreshPackages = inBackground && keyboardView?.rimePanelOpen == true
+        val visiblePackages = keyboardView?.visibleRimeSwitcherPackages.orEmpty()
         val refresh = {
             val schemas = engine.listSchemas()
             val currentSchema = engine.currentSchema()
@@ -2284,6 +2311,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     .flatMap { it.optionNames }
                     .distinct()
                     .associateWith(engine::getOption),
+                packages = if (refreshPackages) engine.listSwitcherPackages() else visiblePackages,
             )
             val publish = publish@{
                 if (generation != rimeOptionsGeneration) return@publish
@@ -2299,7 +2327,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             if (inBackground) mainHandler.post { publish() } else publish()
         }
         // Preserve synchronous mode-switch bookkeeping for existing key commands.
-        // Only show/readiness callers use the engine queue and main-thread post.
+        // Refresh package metadata on the engine queue while the panel is open.
         if (inBackground) engine.runInBackground { refresh() } else refresh()
     }
 

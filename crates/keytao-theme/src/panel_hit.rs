@@ -60,6 +60,8 @@ pub struct PanelGeometry<'a> {
     pub top: f32,
     pub gap: f32,
     pub option_widths: &'a [f32],
+    /// Optional per-option heights for vertical panels.
+    pub option_heights: Option<&'a [f32]>,
     pub option_height: f32,
     pub nav_button: f32,
     pub can_go_previous: bool,
@@ -71,15 +73,20 @@ pub struct PanelGeometry<'a> {
 pub fn layout(g: &PanelGeometry) -> PanelHitAreas {
     let mut areas = PanelHitAreas::default();
     let (mut x, mut y) = (g.pad_x, g.top);
-    for &width in g.option_widths {
+    let vertical_heights = g.option_heights.filter(|_| g.vertical).unwrap_or_default();
+    for (index, &width) in g.option_widths.iter().enumerate() {
+        let height = vertical_heights
+            .get(index)
+            .copied()
+            .unwrap_or(g.option_height);
         areas.candidates.push(PanelRect {
             x,
             y,
             width,
-            height: g.option_height,
+            height,
         });
         if g.vertical {
-            y += g.option_height + g.gap;
+            y += height + g.gap;
         } else {
             x += width + g.gap;
         }
@@ -116,6 +123,7 @@ mod tests {
             top: 8.0 * scale,
             gap: 4.0 * scale,
             option_widths: &scaled,
+            option_heights: None,
             option_height: 30.0 * scale,
             nav_button: 20.0 * scale,
             can_go_previous: false,
@@ -154,6 +162,7 @@ mod tests {
             top: 8.0,
             gap: 4.0,
             option_widths: &[50.0, 80.0],
+            option_heights: None,
             option_height: 30.0,
             nav_button: 20.0,
             can_go_previous: true,
@@ -167,6 +176,26 @@ mod tests {
         assert_eq!(areas.click_at(15.0, 80.0), Some(PanelClick::PreviousPage));
         assert_eq!(areas.click_at(40.0, 80.0), Some(PanelClick::NextPage));
         assert_eq!(areas.click_at(32.0, 80.0), None);
+    }
+
+    #[test]
+    fn vertical_rows_and_paging_follow_individual_heights() {
+        let areas = layout(&PanelGeometry {
+            vertical: true,
+            pad_x: 10.0,
+            top: 8.0,
+            gap: 4.0,
+            option_widths: &[50.0, 80.0],
+            option_heights: Some(&[30.0, 50.0]),
+            option_height: 50.0,
+            nav_button: 20.0,
+            can_go_previous: false,
+            can_go_next: true,
+        });
+        assert_eq!(areas.click_at(20.0, 37.0), Some(PanelClick::Candidate(0)));
+        assert_eq!(areas.click_at(20.0, 40.0), None);
+        assert_eq!(areas.click_at(20.0, 91.0), Some(PanelClick::Candidate(1)));
+        assert_eq!(areas.click_at(20.0, 96.0), Some(PanelClick::NextPage));
     }
 
     #[test]

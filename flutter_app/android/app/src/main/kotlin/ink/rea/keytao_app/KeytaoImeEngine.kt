@@ -27,6 +27,7 @@ data class KeytaoRimeOptionsState(
     val englishSchemaId: String?,
     val switches: List<KeytaoRimeSchemaSwitch>,
     val options: Map<String, Boolean>,
+    val packages: List<KeytaoRimeSwitcherPackage> = emptyList(),
 ) {
     companion object {
         val EMPTY = KeytaoRimeOptionsState(emptyList(), null, null, emptyList(), emptyMap())
@@ -281,6 +282,12 @@ class KeytaoImeEngine(context: Context) {
         return KeytaoNativeBridge.listSchemas(session)
     }
 
+    fun listSwitcherPackages(): List<KeytaoRimeSwitcherPackage> {
+        val activeSession = session
+        if (!nativeReady || activeSession == 0L) return emptyList()
+        return KeytaoNativeBridge.listSwitcherPackages(activeSession)
+    }
+
     @Synchronized
     fun schemaSwitches(): List<KeytaoRimeSchemaSwitch> {
         if (!nativeReady || session == 0L) return emptyList()
@@ -309,6 +316,17 @@ class KeytaoImeEngine(context: Context) {
             val ok = success
             KeytaoRuntimeLog.event("rime", "schema_switch", KeytaoRuntimeLog.elapsedMs(started)) { put("success", ok) }
         }
+    }
+
+    @Synchronized
+    fun selectPackageSchema(packageKey: String, schemaId: String): KeytaoImeState? {
+        if (!nativeReady || session == 0L) return null
+        invalidateSchemaNameCache()
+        val state = KeytaoNativeBridge.selectPackageSchema(session, packageKey, schemaId)
+            ?.let(::stableSchemaState)
+            ?: return null
+        lastState = state.withoutTransientCommit()
+        return state
     }
 
     @Synchronized

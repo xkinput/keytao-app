@@ -6880,61 +6880,9 @@ impl ImeRuntimeSession {
                 package_key,
                 schema_id,
             } => {
-                let runtime =
-                    ImeRuntime::with_dirs(&self.dirs.user, &self.dirs.shared).with_ime_host();
-                #[cfg(windows)]
-                let runtime = if lock_ignore_poison(&self.inner).libjd_server {
-                    runtime.with_libjd_server()
-                } else {
-                    runtime
-                };
-                let mut committed = None;
-                let switched = runtime.switch_package_from_ime(
-                    &package_key,
-                    schema_id.as_deref(),
-                    || {
-                        committed = self
-                            .with_engine_and_policy(|engine, policy| {
-                                if !policy.composing {
-                                    return None;
-                                }
-                                let raw = engine.raw_input().filter(|raw| !raw.is_empty());
-                                engine.commit_composition().committed.or(raw)
-                            })
-                            .flatten();
-                    },
-                );
-                let mut result = match switched {
-                    Ok(()) => {
-                        let state = match schema_id.as_deref() {
-                            Some(id)
-                                if !PROCESS_RIME.using_libjd()
-                                    && self.current_schema().as_ref().map(|s| s.id.as_str())
-                                        != Some(id) =>
-                            {
-                                self.select_schema(id).unwrap_or_else(|_| self.state())
-                            }
-                            _ => self.state(),
-                        };
-                        KeyProcessResult {
-                            state,
-                            accepted: true,
-                        }
-                    }
-                    Err(error) => {
-                        crate::rt_log!(Level::Info, "error", "package_switch", msg = error);
-                        KeyProcessResult {
-                            state: self.state(),
-                            accepted: true,
-                        }
-                    }
-                };
-                if let Some(mut text) = committed {
-                    if let Some(native) = result.state.committed.take() {
-                        text.push_str(&native);
-                    }
-                    result.state.committed = Some(text);
-                }
+                let mut result = self.switch_package_selection(&package_key, schema_id.as_deref());
+                // Once the desktop menu handles a key, even a rejected switch consumes it.
+                result.accepted = true;
                 return Some(result);
             }
             Decision::ToggleSwitch {
@@ -6976,6 +6924,55 @@ impl ImeRuntimeSession {
             Decision::Close | Decision::Stay => {}
         }
         Some(KeyProcessResult { state: self.state(), accepted: true })
+    }
+
+    fn switch_package_selection(
+        &self,
+        package_key: &str,
+        schema_id: Option<&str>,
+    ) -> KeyProcessResult {
+        let runtime = ImeRuntime::with_dirs(&self.dirs.user, &self.dirs.shared).with_ime_host();
+        #[cfg(windows)]
+        let runtime = if lock_ignore_poison(&self.inner).libjd_server {
+            runtime.with_libjd_server()
+        } else {
+            runtime
+        };
+        let mut committed = None;
+        let switched = runtime.switch_package_from_ime(package_key, schema_id, || {
+            committed = self
+                .with_engine_and_policy(|engine, policy| {
+                    if !policy.composing {
+                        return None;
+                    }
+                    let raw = engine.raw_input().filter(|raw| !raw.is_empty());
+                    engine.commit_composition().committed.or(raw)
+                })
+                .flatten();
+        });
+        let accepted = switched.is_ok();
+        let mut state = match switched {
+            Ok(()) => match schema_id {
+                Some(id)
+                    if !PROCESS_RIME.using_libjd()
+                        && self.current_schema().as_ref().map(|s| s.id.as_str()) != Some(id) =>
+                {
+                    self.select_schema(id).unwrap_or_else(|_| self.state())
+                }
+                _ => self.state(),
+            },
+            Err(error) => {
+                crate::rt_log!(Level::Info, "error", "package_switch", msg = error);
+                self.state()
+            }
+        };
+        if let Some(mut text) = committed {
+            if let Some(native) = state.committed.take() {
+                text.push_str(&native);
+            }
+            state.committed = Some(text);
+        }
+        KeyProcessResult { state, accepted }
     }
 
     fn process_native_keys(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult> {
@@ -7220,6 +7217,31 @@ impl ImeRuntimeSession {
 
     pub fn list_schemas(&self) -> Option<Vec<SchemaInfo>> {
         self.with_engine(|engine| engine.list_schemas())
+    }
+
+    pub fn list_switcher_packages(&self) -> Vec<switcher_model::Package> {
+        if !self.can_use_mobile_package_switcher() {
+            return Vec::new();
+        }
+        switcher_model::mobile_packages(&self.dirs.user, Path::new(&self.dirs.shared))
+    }
+
+    pub fn select_package_schema(
+        &self,
+        package_key: &str,
+        schema_id: &str,
+    ) -> Option<KeyProcessResult> {
+        if schema_id.is_empty() || !self.can_use_mobile_package_switcher() {
+            return None;
+        }
+        self.close_package_menu();
+        Some(self.switch_package_selection(package_key, Some(schema_id)))
+    }
+
+    fn can_use_mobile_package_switcher(&self) -> bool {
+        self.policy.current().composing
+            && try_lock_ignore_poison(&self.inner).is_some_and(|inner| inner.ime_host)
+            && !PROCESS_RIME.using_libjd()
     }
 
     pub fn current_schema(&self) -> Option<SchemaInfo> {
@@ -9453,7 +9475,8 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
         let Some(patched) = rewrite_lua_component_autoloads(&content, &bindings) else {
             continue;
         };
-        std::fs::write(&path, patched)
+        // A deployment stage can share this file with the live package via a hard link.
+        write_file_atomic(&path, patched.as_bytes())
             .map_err(|error| format!("write {}: {error}", path.display()))?;
         changed.push(file_name.to_string());
 
@@ -9461,7 +9484,7 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
         match std::fs::read_to_string(&compiled_path) {
             Ok(compiled) => {
                 if let Some(patched) = rewrite_lua_component_autoloads(&compiled, &bindings) {
-                    std::fs::write(&compiled_path, patched)
+                    write_file_atomic(&compiled_path, patched.as_bytes())
                         .map_err(|error| format!("write {}: {error}", compiled_path.display()))?;
                     changed.push(format!("build/{file_name}"));
                 }
@@ -9474,7 +9497,7 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
     let helpers_path = user_data_dir.join("lua").join("helpers.lua");
     if let Ok(content) = std::fs::read_to_string(&helpers_path) {
         if let Some(patched) = patch_keydo_helpers(&content) {
-            std::fs::write(&helpers_path, patched)
+            write_file_atomic(&helpers_path, patched.as_bytes())
                 .map_err(|error| format!("write {}: {error}", helpers_path.display()))?;
             changed.push("lua/helpers.lua".to_string());
         }
@@ -11289,7 +11312,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_lua_compatibility_patches_source_and_compiled_schema() {
+    fn windows_lua_compatibility_replaces_staged_files_without_changing_hard_links() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -11348,6 +11371,18 @@ mod tests {
         )
         .unwrap();
 
+        let original_files = [
+            "keydo.schema.yaml",
+            "build/keydo.schema.yaml",
+            "lua/helpers.lua",
+        ]
+        .map(|relative| {
+            let path = dir.join(relative);
+            let original = path.with_extension("original");
+            std::fs::hard_link(&path, &original).unwrap();
+            (original, std::fs::read(path).unwrap())
+        });
+
         let changed = patch_windows_lua_compatibility(&dir).unwrap();
         assert_eq!(
             changed,
@@ -11372,6 +11407,9 @@ mod tests {
             patch_windows_lua_compatibility(&dir).unwrap(),
             Vec::<String>::new()
         );
+        for (original, bytes) in original_files {
+            assert_eq!(std::fs::read(original).unwrap(), bytes);
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

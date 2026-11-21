@@ -203,14 +203,38 @@ class CandidatePanelPreview extends StatelessWidget {
         _color(option, selected ? 'selectedCommentColor' : 'commentColor'),
         FontWeight.w400,
       );
+      final stacked = option['commentPosition'] == 'below' && comment.isNotEmpty;
+      final labelSize = measure(label, labelStyle);
+      final wordSize = measure(candidate.text, textStyle);
+      final commentWidth = comment.isEmpty
+          ? 0.0
+          : measure(comment, commentStyle).width;
       final width =
-          measure(label, labelStyle).width +
-          measure(candidate.text, textStyle).width +
+          labelSize.width +
           inlineGap +
-          (comment.isEmpty
-              ? 0
-              : measure(comment, commentStyle).width + inlineGap) +
+          (stacked
+              ? math.max(wordSize.width, commentWidth)
+              : wordSize.width +
+                    (comment.isEmpty ? 0 : commentWidth + inlineGap)) +
           _metric(option, 'paddingX') * 2;
+      final word = Text(
+        candidate.text,
+        key: ValueKey('candidate-preview-text-$index'),
+        style: textStyle,
+        textScaler: TextScaler.noScaling,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+      final annotation = Text(
+        comment,
+        style: commentStyle,
+        textScaler: TextScaler.noScaling,
+      );
+      final number = Text(
+        label,
+        style: labelStyle,
+        textScaler: TextScaler.noScaling,
+      );
       widths.add(width);
       candidates.add(
         Semantics(
@@ -263,30 +287,37 @@ class CandidatePanelPreview extends StatelessWidget {
                 alignment: Alignment.centerLeft,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  crossAxisAlignment: stacked
+                      ? CrossAxisAlignment.start
+                      : CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    Text(
-                      label,
-                      style: labelStyle,
-                      textScaler: TextScaler.noScaling,
-                    ),
+                    if (stacked)
+                      Padding(
+                        padding: EdgeInsets.only(
+                          top: math.max(
+                            0,
+                            (wordSize.height - labelSize.height) / 2,
+                          ),
+                        ),
+                        child: number,
+                      )
+                    else
+                      number,
                     SizedBox(width: inlineGap),
-                    Text(
-                      candidate.text,
-                      key: ValueKey('candidate-preview-text-$index'),
-                      style: textStyle,
-                      textScaler: TextScaler.noScaling,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (comment.isNotEmpty) ...[
-                      SizedBox(width: inlineGap),
-                      Text(
-                        comment,
-                        style: commentStyle,
-                        textScaler: TextScaler.noScaling,
-                      ),
+                    if (stacked)
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        spacing: inlineGap / 2,
+                        children: [word, annotation],
+                      )
+                    else ...[
+                      word,
+                      if (comment.isNotEmpty) ...[
+                        SizedBox(width: inlineGap),
+                        annotation,
+                      ],
                     ],
                   ],
                 ),

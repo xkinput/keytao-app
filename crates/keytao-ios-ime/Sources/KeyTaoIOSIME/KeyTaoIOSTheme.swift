@@ -252,6 +252,7 @@ public struct KeyTaoImeTheme: Codable {
             public var inlineGap: CGFloat
             public var fontScale: CGFloat
             public var showComment: Bool
+            public var commentPosition: String?
             public var preeditForeground: KeyTaoThemeColor
             public var preeditBackground: KeyTaoThemeColor
             public var expandedBackground: KeyTaoThemeColor

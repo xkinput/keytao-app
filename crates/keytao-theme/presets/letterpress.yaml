@@ -1,0 +1,42 @@
+version: 3
+meta:
+  id: keytao.letterpress
+  name: 铅字
+  appearance: both
+common:
+  cornerRadius: 3
+  font: {weight: semibold}
+pc:
+  font: {size: 19, labelSize: 13, commentSize: 14}
+  panel: {orientation: vertical, gap: 1, paddingX: 6, paddingY: 6, shadow: false}
+  candidate: {cornerRadius: 2, paddingX: 8, paddingY: 4, borderWidth: 1, labelSuffix: "·"}
+mobile:
+  keyboard:
+    key: {cornerRadius: 4, shadowOffsetY: 0}
+  candidateBar: {cornerRadius: 2}
+light:
+  common: {accentColor: "#3F5C85", backgroundColor: "#F4F6FA"}
+  pc:
+    panel: {borderColor: "#A8B4C5"}
+    candidate:
+      foreground: "#202837"
+      labelColor: "#536176"
+      commentColor: "#536176"
+      selectedBackground: "#344968"
+      selectedForeground: "#FFFFFF"
+      selectedLabelColor: "#D3E2F7"
+      selectedCommentColor: "#E0E8F5"
+      selectedBorderColor: "#344968"
+dark:
+  common: {accentColor: "#9BB7E1", backgroundColor: "#1C222C"}
+  pc:
+    panel: {borderColor: "#657186"}
+    candidate:
+      foreground: "#ECF1F8"
+      labelColor: "#B5C1D3"
+      commentColor: "#B5C1D3"
+      selectedBackground: "#C3D3EA"
+      selectedForeground: "#172334"
+      selectedLabelColor: "#304B6D"
+      selectedCommentColor: "#304B6D"
+      selectedBorderColor: "#C3D3EA"

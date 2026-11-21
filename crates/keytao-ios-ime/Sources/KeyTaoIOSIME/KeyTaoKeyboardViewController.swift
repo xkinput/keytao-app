@@ -8,7 +8,6 @@ import os
 private let rimeKeySpace: UInt32 = 0x0020
 private let rimeKeyBackspace: UInt32 = 0xff08
 private let rimeKeyEscape: UInt32 = 0xff1b
-private let openPackageMenuKey: UInt32 = 0x02000004
 private let keyTaoKeyboardLog = Logger(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 private let keyTaoKeyboardTraitsLog = OSLog(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 
@@ -620,17 +619,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.reset:
             apply(engine.reset())
         case KeyTaoCommandType.rimeMenu:
-            if !hostTraits.bypassesRime, keyboardView?.isEmojiSearching != true {
-                let state = engine.processKey(openPackageMenuKey)
-                if state.accepted {
-                    keyboardView?.closeRimeMenu()
-                    apply(state)
-                    return
-                }
+            if currentState.isPackageSwitcher {
+                apply(engine.processKey(rimeKeyEscape))
             }
             refreshRimeOptions()
         case KeyTaoCommandType.rimeSchema:
-            selectRimeSchema(command.value)
+            selectRimeSchema(command.value, packageKey: command.fallbackValue)
         case KeyTaoCommandType.rimeOption:
             setRimeOption(command.value, action: command.fallbackValue)
         case KeyTaoCommandType.openPage:
@@ -907,12 +901,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                 self.clipboardLastReadChangeCount = changeCount
                 self.showMessage("已复制到剪贴板，请在输入框长按粘贴")
             }
-        }
-    }
-
-    func keyboardView(_ view: KeyTaoIOSKeyboardView, persistToolbarOrder order: [String], pinnedCount: Int) {
-        if !engine.persistToolbarCustomization(order: order, pinnedCount: pinnedCount) {
-            showMessage("工具栏顺序保存失败")
         }
     }
 
@@ -1510,8 +1498,22 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         refreshRimeOptions()
     }
 
-    private func selectRimeSchema(_ schemaID: String?) {
+    private func selectRimeSchema(_ schemaID: String?, packageKey: String?) {
         guard let schemaID, !schemaID.isEmpty else {
+            return
+        }
+        if let packageKey {
+            let state = engine.selectPackageSchema(packageKey, schemaID: schemaID)
+            if let state {
+                if state.accepted {
+                    lastChineseSchemaID = nil
+                    chineseSwitchSnapshot = [:]
+                    refreshEngineCapabilities()
+                }
+                apply(state)
+            }
+            if state?.accepted != true { showMessage("无法切换输入方案") }
+            refreshRimeOptions()
             return
         }
         if usesEnglishSchema, schemaID == englishSchemaID {
@@ -1587,7 +1589,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             currentSchema: currentSchema,
             englishSchemaID: usesEnglishSchema ? englishSchemaID : nil,
             switches: switches,
-            options: optionStates
+            options: optionStates,
+            packages: keyboardView?.isRimeMenuOpen == true ? engine.listSwitcherPackages() : []
         ))
     }
 
@@ -2272,6 +2275,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             config: engine.loadConfig(),
             force: true
         )
+        if keyboardView?.isRimeMenuOpen == true { refreshRimeOptions() }
     }
 
     // MARK: - Host traits

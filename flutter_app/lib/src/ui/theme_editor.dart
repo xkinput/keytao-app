@@ -81,6 +81,8 @@ class ThemeEditorSection extends StatefulWidget {
 }
 
 class _ThemeEditorSectionState extends State<ThemeEditorSection> {
+  static const _commentPositions = {'inline': '词条旁', 'below': '词条下'};
+
   Map<String, dynamic>? _snapshot;
   Map<String, dynamic>? _draft;
   final Map<String, Map<String, dynamic>> _previews = {};
@@ -476,7 +478,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         path,
         _select(
           label,
-          _value(path) as String,
+          (_value(path) as String?) ?? options.keys.first,
           options,
           _enabled && _supported(path) ? (value) => _save(path, value) : null,
         ),
@@ -872,6 +874,11 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 ]),
               ]),
               _group('pc.candidate', '候选', [
+                _choice(
+                  '注释位置',
+                  'pc.candidate.commentPosition',
+                  _commentPositions,
+                ),
                 _colors({
                   for (final entry in const {
                     'background': '候选底色',
@@ -978,6 +985,11 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 ]),
               ]),
               _group('mobile.candidateBar', '候选栏', [
+                _choice(
+                  '注释位置',
+                  'mobile.candidateBar.commentPosition',
+                  _commentPositions,
+                ),
                 _colors({
                   for (final entry in const {
                     'background': '栏背景',

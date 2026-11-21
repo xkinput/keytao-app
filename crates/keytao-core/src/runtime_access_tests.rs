@@ -144,6 +144,10 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     let receipt_path = addon_dirs.staging_dir.join(".keytao-desktop-inputs.json");
     let receipt = std::fs::read(&receipt_path).unwrap();
     std::fs::remove_file(&receipt_path).unwrap();
+    assert!(session
+        .list_switcher_packages()
+        .iter()
+        .any(|package| package.package_key == "rime_ice" && !package.ready));
     let first_signature = ReloadStamp::current_signature(&root);
     assert_eq!(
         runtime.switch_package("rime_ice"),
@@ -303,6 +307,37 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     assert!(runtime.reload_without_deploy_changed().unwrap());
     runtime.switch_package("first").unwrap();
     runtime.reload_without_deploy().unwrap();
+
+    let packages = session.list_switcher_packages();
+    assert!(packages
+        .iter()
+        .any(|package| package.package_key == "first" && package.active));
+    let other = packages
+        .iter()
+        .find(|package| package.package_key == "rime_ice")
+        .unwrap();
+    assert!(other.ready && !other.active);
+    assert!(other.schemas.iter().any(|schema| schema.id == "keytao_c"));
+    assert_eq!(session.state().schema_id, "keytao_b");
+    let pending = session
+        .process_keys_result(&[(b'a'.into(), 0), (b'a'.into(), 0)])
+        .unwrap();
+    assert!(!pending.state.commit_preview.is_empty());
+    isolated_deploy::with_isolated_package_lock(&root, || {
+        let rejected = session.select_package_schema("rime_ice", "keytao_c").unwrap();
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.state.preedit, pending.state.preedit);
+        assert!(rejected.state.committed.is_none());
+        Ok(())
+    }).unwrap();
+    let selected = session.select_package_schema("rime_ice", "keytao_c").unwrap();
+    assert!(selected.accepted);
+    assert_eq!(selected.state.schema_id, "keytao_c");
+    assert_eq!(
+        selected.state.committed.as_deref(),
+        Some(pending.state.commit_preview.as_str())
+    );
+    assert!(session.state().committed.is_none());
 
     drop(session);
     runtime.shutdown().unwrap();

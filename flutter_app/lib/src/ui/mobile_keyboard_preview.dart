@@ -194,8 +194,8 @@ class MobileKeyboardPreview extends StatelessWidget {
       ),
       child: child,
     );
-    Widget toolbarIcon(IconData icon, {bool active = false}) => Expanded(
-      flex: 100,
+    Widget toolbarIcon(IconData icon, {bool active = false}) => SizedBox(
+      width: 44,
       child: tile(
         Icon(icon, size: 22, color: _color(toolbar, 'foreground')),
         active: active,
@@ -206,7 +206,84 @@ class MobileKeyboardPreview extends StatelessWidget {
     final candidateScale = _metric(candidateBar, 'fontScale');
     final candidateWeight = _weight(theme['font']['weight']);
     final showComment = candidateBar['showComment'] as bool;
-    const candidateHeight = 38.0;
+    final commentsBelow = candidateBar['commentPosition'] == 'below';
+    final candidateHeight = commentsBelow &&
+            showComment &&
+            previewCandidates.any((candidate) => candidate.comment.trim().isNotEmpty)
+        ? 44.8
+        : 38.0;
+    Widget candidateContents(int index) {
+      final candidate = previewCandidates[index];
+      final hasComment = showComment && candidate.comment.trim().isNotEmpty;
+      final stacked = hasComment && commentsBelow;
+      Text styled(
+        String value,
+        double size,
+        String field,
+        String selectedField,
+      ) => Text(
+        value,
+        textScaler: TextScaler.noScaling,
+        style: textStyle(
+          size * candidateScale,
+          _color(candidateBar, index == 0 ? selectedField : field),
+          candidateWeight,
+        ).copyWith(height: stacked ? 1 : null),
+      );
+      final label = styled(
+        '${index + 1}.',
+        14,
+        'labelColor',
+        'selectedLabelColor',
+      );
+      final word = styled(
+        candidate.text,
+        20,
+        'foreground',
+        'selectedForeground',
+      );
+      final annotation = styled(
+        candidate.comment,
+        12,
+        'commentColor',
+        'selectedCommentColor',
+      );
+      final row = Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: stacked
+            ? CrossAxisAlignment.start
+            : CrossAxisAlignment.center,
+        spacing: _metric(candidateBar, 'inlineGap'),
+        children: [
+          if (stacked)
+            Padding(
+              padding: EdgeInsets.only(top: 3 * candidateScale),
+              child: label,
+            )
+          else
+            label,
+          if (stacked)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: 1,
+              children: [word, annotation],
+            )
+          else ...[
+            word,
+            if (hasComment) annotation,
+          ],
+        ],
+      );
+      return stacked
+          ? FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: row,
+            )
+          : row;
+    }
+
     final height = editorPreview ? _height : _homeHeight;
     Widget content = AspectRatio(
       aspectRatio: _width / height,
@@ -286,58 +363,7 @@ class MobileKeyboardPreview extends StatelessWidget {
                                         ? surfaceShadow
                                         : null,
                                   ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    spacing: _metric(candidateBar, 'inlineGap'),
-                                    children: [
-                                      Text(
-                                        '${index + 1}.',
-                                        textScaler: TextScaler.noScaling,
-                                        style: textStyle(
-                                          14 * candidateScale,
-                                          _color(
-                                            candidateBar,
-                                            index == 0
-                                                ? 'selectedLabelColor'
-                                                : 'labelColor',
-                                          ),
-                                          candidateWeight,
-                                        ),
-                                      ),
-                                      Text(
-                                        previewCandidates[index].text,
-                                        textScaler: TextScaler.noScaling,
-                                        style: textStyle(
-                                          20 * candidateScale,
-                                          _color(
-                                            candidateBar,
-                                            index == 0
-                                                ? 'selectedForeground'
-                                                : 'foreground',
-                                          ),
-                                          candidateWeight,
-                                        ),
-                                      ),
-                                      if (showComment &&
-                                          previewCandidates[index]
-                                              .comment
-                                              .isNotEmpty)
-                                        Text(
-                                          previewCandidates[index].comment,
-                                          textScaler: TextScaler.noScaling,
-                                          style: textStyle(
-                                            12 * candidateScale,
-                                            _color(
-                                              candidateBar,
-                                              index == 0
-                                                  ? 'selectedCommentColor'
-                                                  : 'commentColor',
-                                            ),
-                                            candidateWeight,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
+                                  child: candidateContents(index),
                                 ),
                             ],
                           ),
@@ -361,48 +387,51 @@ class MobileKeyboardPreview extends StatelessWidget {
                   height: _toolbarHeight,
                   color: _color(toolbar, 'background'),
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Row(
-                    spacing: 6,
-                    children: [
-                      toolbarIcon(FLucideIcons.grid2x2, active: true),
-                      Expanded(
-                        flex: 140,
-                        child: tile(
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            spacing: 5,
-                            children: [
-                              Text(
-                                '中',
-                                textScaler: TextScaler.noScaling,
-                                style: textStyle(
-                                  14,
-                                  _color(toolbar, 'foreground'),
-                                  _weight(baseKey['fontWeight']),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      spacing: 6,
+                      children: [
+                        toolbarIcon(FLucideIcons.grid2x2, active: true),
+                        SizedBox(
+                          width: 58,
+                          child: tile(
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              spacing: 5,
+                              children: [
+                                Text(
+                                  '中',
+                                  textScaler: TextScaler.noScaling,
+                                  style: textStyle(
+                                    14,
+                                    _color(toolbar, 'foreground'),
+                                    _weight(baseKey['fontWeight']),
+                                  ),
                                 ),
-                              ),
-                              Text(
-                                'En',
-                                textScaler: TextScaler.noScaling,
-                                style: textStyle(
-                                  12,
-                                  _color(baseKey, 'hintForeground'),
-                                  _weight(baseKey['fontWeight']),
+                                Text(
+                                  'En',
+                                  textScaler: TextScaler.noScaling,
+                                  style: textStyle(
+                                    12,
+                                    _color(baseKey, 'hintForeground'),
+                                    _weight(baseKey['fontWeight']),
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
+                            active: true,
                           ),
-                          active: true,
                         ),
-                      ),
-                      toolbarIcon(FLucideIcons.mousePointer2, active: true),
-                      toolbarIcon(FLucideIcons.clipboard, active: true),
-                      toolbarIcon(FLucideIcons.smile, active: true),
-                      toolbarIcon(FLucideIcons.panelLeft),
-                      toolbarIcon(FLucideIcons.ellipsis),
-                      if (logo != null)
-                        SizedBox.square(dimension: 28, child: logo),
-                    ],
+                        toolbarIcon(FLucideIcons.mousePointer2, active: true),
+                        toolbarIcon(FLucideIcons.clipboard, active: true),
+                        toolbarIcon(FLucideIcons.smile, active: true),
+                        toolbarIcon(FLucideIcons.panelLeft),
+                        toolbarIcon(FLucideIcons.keyboard),
+                        if (logo != null)
+                          SizedBox.square(dimension: 28, child: logo),
+                      ],
+                    ),
                   ),
                 ),
               const SizedBox(height: _verticalGap),

@@ -203,6 +203,53 @@ void main() {
     }
   });
 
+  testWidgets('desktop and mobile previews keep number left of a two-line candidate', (
+    tester,
+  ) async {
+    _narrowScreen(tester);
+    final controller = ViewController(BridgePlatform.macOs);
+    addTearDown(controller.dispose);
+    final theme = controller.resolveCandidatePanelPreview(
+      colorScheme: UiColorSchemeDto.light,
+      accentColor: '#3B73D9',
+      fontSize: 20,
+      systemDark: false,
+    );
+    theme['candidate']['commentPosition'] = 'below';
+    theme['mobile']['candidateBar']['commentPosition'] = 'below';
+
+    for (final (keyboard, orientation) in [
+      (false, PanelOrientationDto.horizontal),
+      (false, PanelOrientationDto.vertical),
+      (true, PanelOrientationDto.horizontal),
+    ]) {
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.macOs,
+          home: FScaffold(
+            child: CandidatePanelPreview(
+              theme: theme,
+              orientation: orientation,
+              showPreedit: false,
+              candidateCount: 1,
+              candidates: const [(text: '词条', comment: '测试注释')],
+              keyboard: keyboard,
+              editorPreview: keyboard,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final label = tester.getRect(find.text('1.'));
+      final word = tester.getRect(find.text('词条'));
+      final comment = tester.getRect(find.text('测试注释'));
+      expect(label.right, lessThanOrEqualTo(word.left));
+      expect(comment.left, closeTo(word.left, 0.1));
+      expect(comment.top, greaterThanOrEqualTo(word.bottom));
+      expect(tester.takeException(), isNull);
+    }
+  });
+
   testWidgets('phone preview renders keyboard rows without desktop settings', (
     tester,
   ) async {

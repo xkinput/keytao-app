@@ -676,16 +676,19 @@ async fn interactive_manage_defers_deploy_only_when_schema_count_exceeds_three()
         let host = AddonHost::new(root.path());
         let addon = kind.addon();
         host.write_bundled_keytao();
-        let status = addon
-            .manage_interactive(&host.core, true, &host, |receipt| async move {
-                Ok(stage_deployable(kind, receipt, "deferred"))
-            })
-            .await
-            .unwrap();
-        let schemas = crate::package_schemas::package_schemas(&host.core, addon.id).unwrap();
-        assert!(schemas.len() > 3, "{} schemas: {}", addon.id, schemas.len());
-        assert!(status.installed);
-        assert!(!status.deployed);
-        assert_eq!(host.deploys.load(Ordering::SeqCst), 0);
+        for version in ["initial", "update"] {
+            let status = addon
+                .manage_interactive(&host.core, true, &host, |receipt| async move {
+                    Ok(stage_deployable(kind, receipt, version))
+                })
+                .await
+                .unwrap();
+            let schemas = crate::package_schemas::package_schemas(&host.core, addon.id).unwrap();
+            assert!(schemas.len() > 3, "{} schemas: {}", addon.id, schemas.len());
+            assert!(status.installed);
+            assert_eq!(status.version, version);
+            assert!(!status.deployed);
+            assert_eq!(host.deploys.load(Ordering::SeqCst), 0);
+        }
     }
 }

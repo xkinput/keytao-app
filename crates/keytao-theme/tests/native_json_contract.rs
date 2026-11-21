@@ -31,6 +31,7 @@ fn check_fields(name: &str, value: &Value) {
         match kind.trim_end_matches('?') {
             "String"
             | "ThemeFontWeight"
+            | "CandidateCommentPosition"
             | "CandidatePanelOrientation"
             | "ThemeColorScheme"
             | "EffectiveThemeColorScheme" => assert!(v.is_string(), "{name}.{field}"),
@@ -53,7 +54,16 @@ fn check_fields(name: &str, value: &Value) {
 #[test]
 fn compiled_json_round_trips_against_swift_decoder_fields() {
     for appearance in ["both", "light", "dark"] {
-        let source = parse_theme_source_json(&json!({"version":3,"meta":{"id":"my.contract","name":"Contract","appearance":appearance},"common":{"accentColor":"#12345678","font":{"family":"A, B","weight":"heavy"}},"mobile":{"keyboard":{"key":{"background":"#12345678"}}}}).to_string()).unwrap();
+        let source = parse_theme_source_json(&json!({
+            "version": 3,
+            "meta": {"id": "my.contract", "name": "Contract", "appearance": appearance},
+            "common": {"accentColor": "#12345678", "font": {"family": "A, B", "weight": "heavy"}},
+            "pc": {"candidate": {"commentPosition": "below"}},
+            "mobile": {
+                "keyboard": {"key": {"background": "#12345678"}},
+                "candidateBar": {"commentPosition": "inline"}
+            }
+        }).to_string()).unwrap();
         let compiled = compile_theme(&source, "").unwrap();
         let path = std::env::temp_dir().join(format!(
             "keytao-swift-contract-{}-{appearance}.yaml",
@@ -75,6 +85,8 @@ fn compiled_json_round_trips_against_swift_decoder_fields() {
                 check_fields(name, &decoded[field]);
             }
             assert_eq!(decoded["version"], 2);
+            assert_eq!(decoded["candidate"]["commentPosition"], "below");
+            assert_eq!(decoded["mobile"]["candidateBar"]["commentPosition"], "inline");
             assert_eq!(
                 decoded["mobile"],
                 resolve_theme_source(&source, scheme).mobile

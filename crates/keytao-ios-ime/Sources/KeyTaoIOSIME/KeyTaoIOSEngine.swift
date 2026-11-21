@@ -178,6 +178,14 @@ struct KeyTaoRimeSchema: Codable, Equatable {
     var name: String
 }
 
+struct KeyTaoRimePackage: Decodable, Equatable {
+    var packageKey: String
+    var displayName: String
+    var active: Bool
+    var ready: Bool
+    var schemas: [KeyTaoRimeSchema]
+}
+
 struct KeyTaoRimeSchemaSwitch: Codable, Equatable {
     var name: String?
     var options: [String]
@@ -195,13 +203,15 @@ struct KeyTaoRimeOptionsState: Equatable {
     var englishSchemaID: String?
     var switches: [KeyTaoRimeSchemaSwitch]
     var options: [String: Bool]
+    var packages: [KeyTaoRimePackage]
 
     static let empty = KeyTaoRimeOptionsState(
         schemas: [],
         currentSchema: nil,
         englishSchemaID: nil,
         switches: [],
-        options: [:]
+        options: [:],
+        packages: []
     )
 }
 
@@ -663,36 +673,6 @@ final class KeyTaoIOSEngine {
         }
     }
 
-    func persistToolbarCustomization(order: [String], pinnedCount: Int) -> Bool {
-        let url = KeyTaoIOSPaths.configFile(userRoot: userRoot)
-        do {
-            var root: [String: Any] = [:]
-            if FileManager.default.fileExists(atPath: url.path) {
-                let data = try Data(contentsOf: url)
-                root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-            }
-            let normalizedOrder = order.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty && $0 != "settings" }
-                .reduce(into: [String]()) { result, id in
-                    if !result.contains(id) { result.append(id) }
-                }
-            root["toolbarActionOrder"] = normalizedOrder
-            root["toolbarPinnedCount"] = max(1, min(pinnedCount, 12))
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url, options: .atomic)
-            lastConfig = nil
-            lastConfigSignature = nil
-            return true
-        } catch {
-            KeyTaoLog.configWriteFailed("toolbar")
-            return false
-        }
-    }
-
     func persistSettings(patch: [String: Any]) -> Bool {
         let url = KeyTaoIOSPaths.configFile(userRoot: userRoot)
         do {
@@ -850,6 +830,14 @@ final class KeyTaoIOSEngine {
         return (try? JSONDecoder().decode([KeyTaoRimeSchema].self, from: data)) ?? []
     }
 
+    func listSwitcherPackages() -> [KeyTaoRimePackage] {
+        guard let session,
+              let json = ownedCString(keytao_session_list_switcher_packages_json(session)) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return (try? decoder.decode([KeyTaoRimePackage].self, from: Data(json.utf8))) ?? []
+    }
+
     func schemaSwitches() -> [KeyTaoRimeSchemaSwitch] {
         guard let session,
               let json = ownedCString(keytao_session_schema_switches_json(session)),
@@ -888,6 +876,23 @@ final class KeyTaoIOSEngine {
         let stable = stableSchemaState(state)
         lastState = stable.withoutTransientCommit()
         selected = true
+        return stable
+    }
+
+    func selectPackageSchema(_ packageKey: String, schemaID: String) -> KeyTaoImeState? {
+        guard let session else { return nil }
+        let state = packageKey.withCString { packageKey in
+            schemaID.withCString { schemaID in
+                decodeState(keytao_session_select_package_schema_json(session, packageKey, schemaID))
+            }
+        }
+        guard let state else { return nil }
+        if state.accepted {
+            schemaLogoGeneration &+= 1
+            refreshCapabilities()
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
         return stable
     }
 

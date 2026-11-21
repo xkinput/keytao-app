@@ -195,7 +195,7 @@ async fn deploy_isolated_android_once<F: std::future::Future<Output = String>>(
         return Err("没有可部署的方案包".to_owned().into());
     }
     if let IsolatedDeploy::Switch { schema_id, .. } = mode {
-        match switch_cached_package(root, &shared, &targets[0], schema_id).await {
+        match switch_cached_package(core, root, &shared, &targets[0], schema_id).await {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) => {
@@ -486,8 +486,10 @@ async fn restore_previous_active_if_needed(
     if RuntimeDirs::for_package(root, &shared, normalized)
         .is_some_and(|dirs| keytao_core::package_build_ready(root, &dirs))
     {
-        switch_prepared_package(root, &shared, Some(&core.env().data_dir), normalized, None)
-            .await?;
+        switch_prepared_package(
+            core, root, &shared, Some(&core.env().data_dir), normalized, None,
+        )
+        .await?;
         persist_result(core, root, true).map_err(|error| error.to_string())?;
         render_user_schema_logos(root);
     }
@@ -552,7 +554,8 @@ pub async fn switch_package_with_schema<#[cfg(target_os = "android")] F: std::fu
             .await
             .map_err(|error| error.to_string())?;
         let shared = deploy_shared_data_dir(core, root);
-        return switch_prepared_package(root, &shared, Some(&core.env().data_dir), key, None).await;
+        return switch_prepared_package(core, root, &shared, Some(&core.env().data_dir), key, None)
+            .await;
     }
     deploy_package_mode(
         core,
@@ -611,6 +614,7 @@ async fn deploy_package_mode<#[cfg(target_os = "android")] F: std::future::Futur
 }
 
 async fn switch_cached_package(
+    core: &Core,
     root: &Path,
     shared: &Path,
     target: &PackageDeployTarget,
@@ -628,11 +632,12 @@ async fn switch_cached_package(
     if !keytao_core::package_build_ready(root, &dirs) {
         return Ok(false);
     }
-    switch_prepared_package(root, shared, None, key, schema_id).await?;
+    switch_prepared_package(core, root, shared, None, key, schema_id).await?;
     Ok(true)
 }
 
 async fn switch_prepared_package(
+    core: &Core,
     root: &Path,
     shared: &Path,
     data_root: Option<&Path>,
@@ -640,14 +645,12 @@ async fn switch_prepared_package(
     schema_id: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    {
-        let key = key.to_owned();
-        tokio::task::spawn_blocking(move || {
-            crate::windows_public_schemas::publish_isolated_package(&key, false)
-        })
-        .await
-        .map_err(|error| error.to_string())??;
-    }
+    let public = if crate::windows_public_schemas::is_default_user_root(root) {
+        // Prepare the snapshot before the private reload needs the Windows engine lock.
+        Some(publish_windows_search_package(key, false).await)
+    } else {
+        None
+    };
     keytao_core::isolated_deploy::switch_ready_package_in_store(
         root,
         shared,
@@ -656,8 +659,14 @@ async fn switch_prepared_package(
         schema_id,
     )?;
     #[cfg(target_os = "windows")]
-    crate::windows_public_schemas::activate_cached_isolated_package(key)
-        .map_err(|error| format!("方案包已切换，系统搜索框方案未更新：{error}"))?;
+    if let Some(result) = public
+        && let Err(error) = result
+            .and_then(|()| crate::windows_public_schemas::activate_cached_isolated_package(key))
+    {
+        report_windows_search_warning(core, &error);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = core;
     Ok(())
 }
 
@@ -671,27 +680,27 @@ async fn finish_isolated_target(
     let data_root = Some(core.env().data_dir.as_path());
     match mode {
         IsolatedDeploy::All if RuntimeDirs::active_package_key(root).is_none() => {
-            switch_prepared_package(root, shared, data_root, first, None).await?;
+            switch_prepared_package(core, root, shared, data_root, first, None).await?;
             persist_result(core, root, true).map_err(|error| error.to_string())?;
             render_user_schema_logos(root);
         }
         IsolatedDeploy::Refresh(key) if RuntimeDirs::active_package_key(root).is_none() => {
-            switch_prepared_package(root, shared, data_root, key, None).await?;
+            switch_prepared_package(core, root, shared, data_root, key, None).await?;
             persist_result(core, root, true).map_err(|error| error.to_string())?;
             render_user_schema_logos(root);
         }
         IsolatedDeploy::Switch { key, schema_id } => {
-            switch_prepared_package(root, shared, data_root, key, schema_id).await?
+            switch_prepared_package(core, root, shared, data_root, key, schema_id).await?
         }
         #[cfg(not(target_os = "android"))]
-        IsolatedDeploy::Refresh(key) => finish_package_refresh(root, key).await?,
+        IsolatedDeploy::Refresh(key) => finish_package_refresh(core, root, key).await?,
         _ => {}
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
-async fn finish_package_refresh(root: &Path, key: &str) -> Result<(), String> {
+async fn finish_package_refresh(core: &Core, root: &Path, key: &str) -> Result<(), String> {
     keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
         if RuntimeDirs::active_package_key(root).as_deref() == Some(key) {
             keytao_core::ReloadStamp::write_package(root, key)?;
@@ -699,15 +708,31 @@ async fn finish_package_refresh(root: &Path, key: &str) -> Result<(), String> {
         Ok(())
     })?;
     #[cfg(target_os = "windows")]
-    if RuntimeDirs::active_package_key(root).as_deref() == Some(key) {
-        let key = key.to_owned();
-        tokio::task::spawn_blocking(move || {
-            crate::windows_public_schemas::publish_isolated_package(&key, true)
-        })
-        .await
-        .map_err(|error| error.to_string())??;
+    if crate::windows_public_schemas::is_default_user_root(root)
+        && RuntimeDirs::active_package_key(root).as_deref() == Some(key)
+        && let Err(error) = publish_windows_search_package(key, true).await
+    {
+        report_windows_search_warning(core, &error);
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = core;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+async fn publish_windows_search_package(key: &str, activate: bool) -> Result<(), String> {
+    let key = key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::windows_public_schemas::publish_isolated_package(&key, activate)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn report_windows_search_warning(core: &Core, error: &str) {
+    let warning = crate::windows_public_schemas::public_warning("系统搜索框方案未更新", error);
+    emit_legacy_progress(core, DeployStep::Done, warning);
 }
 
 #[cfg(not(target_os = "android"))]
@@ -970,7 +995,7 @@ async fn deploy_isolated_desktop_once(
         return Err("没有可部署的方案包".to_owned().into());
     }
     if let IsolatedDeploy::Switch { schema_id, .. } = mode {
-        match switch_cached_package(root, shared_dir, &targets[0], schema_id).await {
+        match switch_cached_package(core, root, shared_dir, &targets[0], schema_id).await {
             Ok(true) => return Ok(package_switch_result(root, shared_dir)),
             Ok(false) => {}
             Err(error) => {
@@ -1153,7 +1178,7 @@ async fn deploy_isolated_in_process_once(
         return Err("没有可部署的方案包".to_owned().into());
     }
     if let IsolatedDeploy::Switch { schema_id, .. } = mode {
-        match switch_cached_package(root, &shared, &targets[0], schema_id).await {
+        match switch_cached_package(core, root, &shared, &targets[0], schema_id).await {
             Ok(true) => return Ok(package_switch_result(root, &shared)),
             Ok(false) => {}
             Err(error) => {

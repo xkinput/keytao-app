@@ -26,8 +26,9 @@ fn rejected_library_entry_does_not_block_listing_or_unrelated_imports() {
     symlink(&target, &link).unwrap();
 
     let themes = list_themes(&theme_path).unwrap();
-    assert_eq!(themes.len(), 2);
-    assert!(themes.iter().any(|theme| theme.id == "my.good"));
+    let installed: Vec<_> = themes.iter().filter(|theme| !theme.built_in).collect();
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id, "my.good");
     let incoming = source("my.incoming");
     assert!(
         !preview_theme_import(&theme_path, &incoming)

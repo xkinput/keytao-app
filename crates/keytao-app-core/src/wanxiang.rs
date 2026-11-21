@@ -924,6 +924,34 @@ impl InstallReceipt {
         Ok(())
     }
 
+    pub(crate) async fn deploy_downloaded_package(
+        mut self,
+        core: &Core,
+        id: &str,
+        name: &str,
+        defer_multi_schema: bool,
+        host: &impl SchemeHost,
+    ) -> Result<bool, String> {
+        if defer_multi_schema {
+            let files = crate::package_schemas::directory_schemas(&self.work.join("files"))
+                .map_err(|error| error.to_string())?;
+            let schemas = crate::package_schemas::enumerate(id, &files, None)
+                .map_err(|error| error.to_string())?;
+            if schemas.len() > 3 {
+                self.commit_store(true)?;
+                self.finish()?;
+                core.emit(CoreEvent::InstallProgress(InstallProgress {
+                    stage: "done".into(),
+                    percent: 100,
+                    message: format!("{name}已下载，请选择需要部署的方案"),
+                }));
+                return Ok(false);
+            }
+        }
+        self.deploy_isolated(core, id, host).await?;
+        Ok(true)
+    }
+
     pub(crate) async fn deploy_isolated(
         mut self,
         core: &Core,
@@ -1868,7 +1896,14 @@ where
         receipt.attach_store(core, SCHEMA_ID)?;
         if installed {
             let receipt = install_package(receipt, variant).await?;
-            receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
+            if !receipt
+                .deploy_downloaded_package(core, SCHEMA_ID, "万象拼音", true, host)
+                .await?
+            {
+                let mut status = wanxiang_status(core, &root).map_err(|error| error.to_string())?;
+                status.deployed = false;
+                return Ok(status);
+            }
         } else {
             receipt.uninstall_isolated(core, SCHEMA_ID, host).await?;
             receipt.finish()?;

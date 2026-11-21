@@ -136,12 +136,13 @@ fn deploy_packages_with(
         match result {
             Ok(step) => emit(step, None),
             Err(error) => {
-                let error = error
-                    .lines()
-                    .next()
-                    .unwrap_or("deployment failed")
-                    .to_owned();
-                failures.push(format!("{}: {error}", target.package_name));
+                let message = if total == 1 {
+                    &error
+                } else {
+                    // Detailed errors are sent separately to keep the batch reply short.
+                    error.lines().next().unwrap_or("deployment failed")
+                };
+                failures.push(format!("{}: {message}", target.package_name));
                 emit(DeployStep::Failed, Some(error));
             }
         }
@@ -224,9 +225,13 @@ fn package_build_ready_in_store(
     ) {
         return true;
     }
+    has_published_package_build(dirs) && package_receipt_matches(control_root, dirs)
+}
+
+pub(crate) fn has_published_package_build(dirs: &RuntimeDirs) -> bool {
     dirs.active_package_key.is_some()
+        && dirs.staging_dir.join(RECEIPT).is_file()
         && crate::resolved_schema_install_state(dirs).deployed
-        && package_receipt_matches(control_root, dirs)
 }
 
 /// The IME can select a committed build. Only the app can prepare an unready package.
@@ -1183,7 +1188,7 @@ mod tests {
             terminal,
             [
                 (1, 3, DeployStep::Skip, None),
-                (2, 3, DeployStep::Failed, Some("compile failed".into())),
+                (2, 3, DeployStep::Failed, Some("compile failed\nmore details".into())),
                 (3, 3, DeployStep::Done, None),
             ]
         );

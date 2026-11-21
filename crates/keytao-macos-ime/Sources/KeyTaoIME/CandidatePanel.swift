@@ -278,6 +278,9 @@ private final class CandidateOptionView: NSControl {
     private var trackingArea: NSTrackingArea?
     private let theme: ImeTheme
     private let isSelectedOption: Bool
+    private var stacksComment: Bool {
+        theme.candidate.commentPosition == .below && !commentField.isHidden
+    }
     private var hovered = false {
         didSet { applyState() }
     }
@@ -310,12 +313,20 @@ private final class CandidateOptionView: NSControl {
         commentField.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
         contentStack.orientation = .horizontal
-        contentStack.alignment = .firstBaseline
+        contentStack.alignment = stacksComment ? .top : .firstBaseline
         contentStack.spacing = theme.candidate.inlineGap
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.addArrangedSubview(labelField)
-        contentStack.addArrangedSubview(textField)
-        contentStack.addArrangedSubview(commentField)
+        if stacksComment {
+            let wordStack = NSStackView(views: [textField, commentField])
+            wordStack.orientation = .vertical
+            wordStack.alignment = .leading
+            wordStack.spacing = theme.candidate.inlineGap * 0.5
+            contentStack.addArrangedSubview(wordStack)
+        } else {
+            contentStack.addArrangedSubview(textField)
+            contentStack.addArrangedSubview(commentField)
+        }
         addSubview(contentStack)
 
         NSLayoutConstraint.activate([
@@ -335,12 +346,19 @@ private final class CandidateOptionView: NSControl {
 
     override var intrinsicContentSize: NSSize {
         let contentSize = contentStack.fittingSize
+        let gap = theme.candidate.inlineGap
+        let contentWidth: CGFloat
         // Fitting size compresses the comment even when the screen has room.
-        let fields = [labelField, textField, commentField].filter { !$0.isHidden }
+        if stacksComment {
+            contentWidth = labelField.intrinsicContentSize.width + gap
+                + max(textField.intrinsicContentSize.width, commentField.intrinsicContentSize.width)
+        } else {
+            let fields = [labelField, textField, commentField].filter { !$0.isHidden }
+            contentWidth = fields.reduce(0) { $0 + $1.intrinsicContentSize.width }
+                + CGFloat(fields.count - 1) * gap
+        }
         return NSSize(
-            width: fields.reduce(0) { $0 + $1.intrinsicContentSize.width }
-                + CGFloat(fields.count - 1) * theme.candidate.inlineGap
-                + theme.candidate.paddingX * 2,
+            width: contentWidth + theme.candidate.paddingX * 2,
             height: max(
                 contentSize.height + theme.candidate.paddingY * 2,
                 theme.candidate.minHeight

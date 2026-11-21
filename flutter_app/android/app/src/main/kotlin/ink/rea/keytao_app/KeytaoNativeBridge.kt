@@ -301,6 +301,13 @@ object KeytaoNativeBridge {
         return KeytaoRimeSchema.parseArray(runCatching { nativeListSchemas(session) }.getOrNull())
     }
 
+    fun listSwitcherPackages(session: Long): List<KeytaoRimeSwitcherPackage> {
+        if (!loaded || session == 0L) return emptyList()
+        return KeytaoRimeSwitcherPackage.parseArray(
+            runCatching { nativeListSwitcherPackages(session) }.getOrNull()
+        )
+    }
+
     fun schemaSwitches(session: Long): List<KeytaoRimeSchemaSwitch> {
         if (!loaded || session == 0L) return emptyList()
         return KeytaoRimeSchemaSwitch.parseArray(
@@ -317,6 +324,13 @@ object KeytaoNativeBridge {
         if (!loaded || session == 0L || schemaId.isBlank()) return null
         return KeytaoImeState.fromJson(
             runCatching { nativeSelectSchema(session, schemaId) }.getOrNull()
+        )
+    }
+
+    fun selectPackageSchema(session: Long, packageKey: String, schemaId: String): KeytaoImeState? {
+        if (!loaded || session == 0L || packageKey.isBlank() || schemaId.isBlank()) return null
+        return KeytaoImeState.fromJson(
+            runCatching { nativeSelectPackageSchema(session, packageKey, schemaId) }.getOrNull()
         )
     }
 
@@ -527,11 +541,15 @@ object KeytaoNativeBridge {
 
     external fun nativeListSchemas(session: Long): String?
 
+    external fun nativeListSwitcherPackages(session: Long): String?
+
     external fun nativeSchemaSwitches(session: Long): String?
 
     external fun nativeCurrentSchema(session: Long): String?
 
     external fun nativeSelectSchema(session: Long, schemaId: String): String?
+
+    external fun nativeSelectPackageSchema(session: Long, packageKey: String, schemaId: String): String?
 
     external fun nativeGetOption(session: Long, optionName: String): Boolean
 
@@ -578,14 +596,16 @@ data class KeytaoRimeSchema(
 
         fun parseArray(json: String?): List<KeytaoRimeSchema> {
             if (json.isNullOrBlank()) return emptyList()
-            return runCatching {
-                val array = JSONArray(json)
-                buildList {
-                    for (index in 0 until array.length()) {
-                        array.optJSONObject(index)?.let(::fromJsonObject)?.let(::add)
-                    }
+            return runCatching { parseArray(JSONArray(json)) }.getOrDefault(emptyList())
+        }
+
+        fun parseArray(array: JSONArray?): List<KeytaoRimeSchema> {
+            if (array == null) return emptyList()
+            return buildList {
+                for (index in 0 until array.length()) {
+                    array.optJSONObject(index)?.let(::fromJsonObject)?.let(::add)
                 }
-            }.getOrDefault(emptyList())
+            }
         }
 
         private fun fromJsonObject(root: JSONObject): KeytaoRimeSchema? {
@@ -598,6 +618,38 @@ data class KeytaoRimeSchema(
         }
     }
 }
+
+data class KeytaoRimeSwitcherPackage(
+    val key: String,
+    val displayName: String,
+    val active: Boolean,
+    val ready: Boolean,
+    val schemas: List<KeytaoRimeSchema>,
+) {
+    companion object {
+        fun parseArray(json: String?): List<KeytaoRimeSwitcherPackage> {
+            if (json.isNullOrBlank()) return emptyList()
+            return runCatching {
+                val array = JSONArray(json)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val entry = array.optJSONObject(index) ?: continue
+                        val key = entry.optString("package_key").trim()
+                        if (key.isEmpty()) continue
+                        add(KeytaoRimeSwitcherPackage(
+                            key = key,
+                            displayName = entry.optString("display_name").trim().ifEmpty { key },
+                            active = entry.optBoolean("active"),
+                            ready = entry.optBoolean("ready"),
+                            schemas = KeytaoRimeSchema.parseArray(entry.optJSONArray("schemas")),
+                        ))
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+    }
+}
+
 data class KeytaoRimeSchemaSwitch(
     val name: String?,
     val options: List<String>,

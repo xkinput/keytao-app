@@ -122,6 +122,7 @@ class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {
     val modeHintEnglishText = modeHint.getString("englishText")
     val candidateFontScale = candidateBar.getDouble("fontScale").toFloat()
     val showComment = candidateBar.getBoolean("showComment")
+    val commentBelow = candidateBar.optString("commentPosition") == "below"
 
     private val keyStyleCache = mutableMapOf<String, KeytaoKeyStyle>()
 

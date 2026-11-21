@@ -1449,6 +1449,50 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeListSch
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeListSwitcherPackages(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    android_jni_guard("nativeListSwitcherPackages", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(json) = serde_json::to_string(&session.list_switcher_packages()) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &json)
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSelectPackageSchema(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    package_key: JString<'_>,
+    schema_id: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeSelectPackageSchema", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(package_key) = optional_jni_text(&mut env, package_key) else {
+            return std::ptr::null_mut();
+        };
+        let Some(schema_id) = optional_jni_text(&mut env, schema_id) else {
+            return std::ptr::null_mut();
+        };
+        let Some(result) = session.select_package_schema(&package_key, &schema_id) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(result.state, result.accepted))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSchemaSwitches(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

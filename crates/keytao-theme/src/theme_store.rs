@@ -26,6 +26,12 @@ use unicode_segmentation::UnicodeSegmentation;
 /// The first v2 migration always uses this editable source identity.
 pub const CURRENT_THEME_ID: &str = "my.current";
 pub const DEFAULT_THEME_ID: &str = "keytao.default";
+const BUILT_IN_THEMES: &[(&str, &str)] = &[
+    (DEFAULT_THEME_ID, r#"{"version":3,"meta":{"id":"keytao.default","name":"默认","appearance":"both"}}"#),
+    ("keytao.celadon", include_str!("../presets/celadon.yaml")),
+    ("keytao.letterpress", include_str!("../presets/letterpress.yaml")),
+    ("keytao.aurora", include_str!("../presets/aurora.yaml")),
+];
 
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -87,10 +93,17 @@ pub struct ThemeImportPreview {
 }
 
 fn built_in_theme() -> ThemeSource {
-    parse_source_value(
-        json!({"version":3,"meta":{"id":DEFAULT_THEME_ID,"name":"默认","appearance":"both"}}),
-    )
-    .expect("built-in theme source is valid")
+    parse_built_in_theme(DEFAULT_THEME_ID, BUILT_IN_THEMES[0].1)
+}
+
+fn parse_built_in_theme(id: &str, yaml: &str) -> ThemeSource {
+    let source = parse_theme_source_yaml(yaml).expect("built-in theme source is valid");
+    assert_eq!(source.id(), id);
+    source
+}
+
+fn built_in_yaml(id: &str) -> Option<&'static str> {
+    BUILT_IN_THEMES.iter().find(|(key, _)| *key == id).map(|(_, yaml)| *yaml)
 }
 
 fn is_built_in(id: &str) -> bool {
@@ -124,8 +137,8 @@ fn check_store_path(theme_path: &Path, path: &Path) -> Result<(), String> {
 
 fn read_source(theme_path: &Path, id: &str) -> Result<ThemeSource, String> {
     crate::source::validate_theme_id(id)?;
-    if id == DEFAULT_THEME_ID {
-        return Ok(built_in_theme());
+    if let Some(yaml) = built_in_yaml(id) {
+        return Ok(parse_built_in_theme(id, yaml));
     }
     if is_built_in(id) {
         return Err("Unknown built-in theme".into());
@@ -154,7 +167,9 @@ fn installed_sources(theme_path: &Path) -> Result<Vec<ThemeSource>, String> {
         .unwrap()
         .to_owned();
     check_store_path(theme_path, &directory)?;
-    let mut sources = vec![built_in_theme()];
+    let mut sources: Vec<_> = BUILT_IN_THEMES.iter()
+        .map(|(id, yaml)| parse_built_in_theme(id, yaml))
+        .collect();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(sources),
@@ -200,7 +215,7 @@ fn preview_colors(source: &ThemeSource, scheme: EffectiveColorScheme) -> ThemePr
     }
 }
 
-/// List the embedded default and validated installed source files.
+/// List embedded presets and validated installed source files.
 pub fn list_themes(theme_path: &Path) -> Result<Vec<ThemeSummary>, String> {
     let _lock = lock_store();
     check_store_path(theme_path, theme_path)?;
@@ -696,7 +711,7 @@ pub fn migrate_current_theme_once(theme_path: &Path) -> Result<bool, String> {
 }
 
 fn migrate_theme_from_base(theme_path: &Path, base: &Value) -> Result<bool, String> {
-    if base.get("themeId").and_then(Value::as_str) == Some(DEFAULT_THEME_ID) {
+    if base.get("themeId").and_then(Value::as_str).and_then(built_in_yaml).is_some() {
         return Ok(false);
     }
     if let Some(path) = source_path_from_base(theme_path, base)? {
@@ -2496,10 +2511,39 @@ mod tests {
     }
 
     #[test]
+    fn embedded_presets_apply_and_keep_their_ids_on_restart() {
+        let dir = TempDir::new();
+        for &(id, yaml) in &BUILT_IN_THEMES[1..] {
+            let preset = parse_built_in_theme(id, yaml);
+            assert!(preset.report.dropped.is_empty(), "{id}");
+            assert!(preset.report.clamped.is_empty(), "{id}");
+            assert!(preset.report.unknown.is_empty(), "{id}");
+            for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+                let theme = resolve_theme_source(&preset, scheme);
+                for (background, foreground) in [
+                    (theme.panel.background, theme.candidate.foreground),
+                    (theme.panel.background, theme.candidate.comment_color),
+                    (theme.candidate.selected_background, theme.candidate.selected_foreground),
+                    (theme.candidate.selected_background, theme.candidate.selected_comment_color),
+                ] {
+                    assert!(crate::contrast_ratio(background, foreground) >= 4.5, "{id} {scheme:?}");
+                }
+            }
+            apply_theme(&dir.theme(), id).unwrap();
+            assert!(!migrate_current_theme_once(&dir.theme()).unwrap());
+            assert_eq!(read_current_theme_source(&dir.theme()).unwrap().unwrap().id(), id);
+            assert!(!source_path(&dir.theme(), id).exists());
+            assert!(list_themes(&dir.theme()).unwrap().iter().any(|preset| {
+                preset.id == id && preset.built_in && preset.current
+            }));
+        }
+    }
+
+    #[test]
     fn library_builtin_protection_and_fork_names_are_stable() {
         let dir = TempDir::new();
         let default = list_themes(&dir.theme()).unwrap();
-        assert_eq!(default.len(), 1);
+        assert_eq!(default.len(), BUILT_IN_THEMES.len());
         assert!(default[0].built_in && default[0].current);
         assert!(delete_theme(&dir.theme(), DEFAULT_THEME_ID).is_err());
         apply_theme(&dir.theme(), DEFAULT_THEME_ID).unwrap();
@@ -2634,7 +2678,7 @@ mod tests {
                 .len(),
             crate::source::MAX_THEME_SOURCE_BYTES
         );
-        assert_eq!(list_themes(&dir.theme()).unwrap().len(), 2);
+        assert_eq!(list_themes(&dir.theme()).unwrap().len(), BUILT_IN_THEMES.len() + 1);
         assert_eq!(
             export_theme(&dir.theme(), "my.boundary")
                 .unwrap()
@@ -2723,7 +2767,7 @@ mod tests {
             let bad_path = dir.0.join("themes").join(file);
             fs::write(&bad_path, &content).unwrap();
             let themes = list_themes(&dir.theme()).unwrap();
-            assert_eq!(themes.len(), 2);
+            assert_eq!(themes.len(), BUILT_IN_THEMES.len() + 1);
             assert!(themes.iter().any(|theme| theme.id == "my.good"));
             let incoming = import_source("my.new", json!({}));
             assert!(

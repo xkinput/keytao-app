@@ -1,0 +1,40 @@
+version: 3
+meta:
+  id: keytao.aurora
+  name: 极光
+  appearance: both
+common:
+  cornerRadius: 14
+  font: {weight: semibold}
+pc:
+  font: {size: 21, labelSize: 14, commentSize: 13}
+  panel: {gap: 6, paddingX: 10, paddingY: 9}
+  candidate: {commentPosition: below, cornerRadius: 9, inlineGap: 6, borderWidth: 1}
+mobile:
+  candidateBar: {cornerRadius: 8, inlineGap: 5}
+light:
+  common: {accentColor: "#6940B1", backgroundColor: "#F7F3FF"}
+  pc:
+    panel: {borderColor: "#D0BFE9"}
+    candidate:
+      foreground: "#30234C"
+      labelColor: "#674F8C"
+      commentColor: "#674F8C"
+      selectedBackground: "#E8D9FF"
+      selectedForeground: "#302047"
+      selectedLabelColor: "#5B329E"
+      selectedCommentColor: "#573C78"
+      selectedBorderColor: "#AE8CDA"
+dark:
+  common: {accentColor: "#CCB5FF", backgroundColor: "#211B36"}
+  pc:
+    panel: {borderColor: "#61517E"}
+    candidate:
+      foreground: "#F1EAFD"
+      labelColor: "#C5B7E1"
+      commentColor: "#C5B7E1"
+      selectedBackground: "#513B77"
+      selectedForeground: "#FFFFFF"
+      selectedLabelColor: "#E0CFFF"
+      selectedCommentColor: "#E3D5FB"
+      selectedBorderColor: "#9879C5"

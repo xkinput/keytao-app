@@ -81,6 +81,22 @@ class PackageCore extends FakeCore {
   }
 
   Map<String, List<PackageSchemaDto>> schemasByPackage = {};
+  AddonStatusDto? rimeIceDownloadStatus;
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeIce({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    final status = rimeIceDownloadStatus;
+    if (installed && status != null) {
+      return rimeIceStatus = status;
+    }
+    return super.crateApiCoreManageRimeIce(
+      installed: installed,
+      androidDeploy: androidDeploy,
+    );
+  }
 
   @override
   Future<List<PackageSchemaDto>> crateApiCorePackageSchemas({
@@ -392,6 +408,28 @@ void main() {
       }
     },
   );
+
+  test('a pending Rime Ice download prompts for schema selection', () async {
+    core.rimeIceDownloadStatus = const AddonStatusDto(
+      installed: true,
+      deployed: false,
+      version: '2026.06.30',
+      englishAvailable: false,
+    );
+    core.schemasByPackage['rime_ice'] = const [
+      PackageSchemaDto(id: 'rime_ice', name: '雾凇拼音', selected: true),
+      PackageSchemaDto(id: 't9', name: '中文九键', selected: true),
+      PackageSchemaDto(id: 'double_pinyin', name: '自然码双拼', selected: true),
+      PackageSchemaDto(id: 'double_pinyin_flypy', name: '小鹤双拼', selected: true),
+    ];
+
+    expect(await controller.manageRimeIce(true), isTrue);
+    expect(
+      controller.takePendingSchemaSelectionPrompt(),
+      (packageKey: 'rime_ice', activateOnConfirm: false),
+    );
+    expect(core.calls, isNot(contains('deployImeData')));
+  });
 
   test('implicit addon deployments track only the managed package', () async {
     controller.local = core.local;

@@ -16,7 +16,6 @@ protocol KeyTaoIOSKeyboardViewDelegate: AnyObject {
     func keyboardViewEmojiSearchModeDidChange(_ view: KeyTaoIOSKeyboardView)
     func keyboardViewClearClipboardHistory(_ view: KeyTaoIOSKeyboardView)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, commitClipboardMedia key: String)
-    func keyboardView(_ view: KeyTaoIOSKeyboardView, persistToolbarOrder order: [String], pinnedCount: Int)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, previewSetting key: String, value: String)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, persistSetting key: String, value: String)
     func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool
@@ -76,7 +75,6 @@ private enum KeyTaoToolbarIcon {
     case back
     case edit
     case settings
-    case ellipsis
 }
 
 private enum SettingsPanelLayout {
@@ -130,6 +128,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private let commentSize: CGFloat = 16
     private let preeditSize: CGFloat = 15
     private let panelGap: CGFloat = 4
+    private let stackedCandidateHeight: CGFloat = 46
 
     private struct KeyRect {
         var spec: KeyTaoKeySpec
@@ -234,9 +233,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         var icon: KeyTaoToolbarIcon?
         var longPressCommand: KeyTaoKeyCommand?
         var id: String?
-        var customizable: Bool { id != nil && id != Self.pinnedBoundaryID }
-
-        private static let pinnedBoundaryID = "__toolbar_pinned_boundary__"
     }
 
     private struct ToolbarRect {
@@ -340,18 +336,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var candidateTouchStartScrollX: CGFloat = 0
     private var toolbarScrollX: CGFloat = 0
     private var toolbarContentWidth: CGFloat = 0
-    private var toolbarViewportWidth: CGFloat = 0
     private var toolbarTouchStartScrollX: CGFloat = 0
     private var toolbarTouchActive = false
     private var toolbarDragging = false
     private var toolbarLongPressWorkItem: DispatchWorkItem?
     private var toolbarLongPressConsumed = false
-    private var toolbarMoreExpanded = false
-    private var toolbarEditMode = false
-    private var toolbarActionOrderOverride: [String]?
-    private var toolbarPinnedCountOverride: Int?
-    private var toolbarDragActionID: String?
-    private var toolbarInactiveActionIDs: [String] = []
     private var inlineCandidateTouchActive = false
     private var candidateDragging = false
     private var candidatePagingConsumed = false
@@ -477,17 +466,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         self.config = config
         scheduleClipboardSuggestionExpiry()
-        if !toolbarEditMode {
-            toolbarActionOrderOverride = config.toolbarActionOrder.isEmpty ? nil : config.toolbarActionOrder
-            toolbarPinnedCountOverride = config.toolbarPinnedCount
-        }
         if !config.hapticsEnabled {
             hapticsAccessMessageShown = false
         } else {
             showHapticsAccessMessageIfNeeded()
         }
         resetCandidateScroll()
-        toolbarScrollX = 0
         resetExpandedCandidateScroll()
         resetKeyboardScroll()
         invalidateLayoutAndDisplay()
@@ -575,9 +559,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
-    func closeRimeMenu() {
-        if functionPanelActive && functionPanelMode == .rime { closeCandidatePanel() }
-    }
+    var isRimeMenuOpen: Bool { functionPanelActive && functionPanelMode == .rime }
 
     /// Controls that need a librime entry point the running build does not
     /// export are dropped instead of being drawn and then synthesizing a key
@@ -767,6 +749,19 @@ final class KeyTaoIOSKeyboardView: UIView {
         rebuildAccessibilityElements()
     }
 
+    override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+        guard candidateBarContent() == .toolbar, !toolbarRects.isEmpty,
+              direction == .left || direction == .right else {
+            return super.accessibilityScroll(direction)
+        }
+        let step = max(44, toolbarViewportRect().width - 44)
+        if scrollToolbar(to: toolbarScrollX + (direction == .left ? step : -step)) {
+            UIAccessibility.post(notification: .pageScrolled, argument: nil)
+            return true
+        }
+        return super.accessibilityScroll(direction)
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil {
@@ -950,7 +945,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         toolbarTouchActive = false
         toolbarDragging = false
         toolbarLongPressConsumed = false
-        toolbarDragActionID = nil
         expandedScrollWasAnimatingAtDown = false
         activeSettingItem = nil
         activeSettingRect = nil
@@ -1035,10 +1029,9 @@ final class KeyTaoIOSKeyboardView: UIView {
             && point.y < config.candidateBarHeightDp
             && candidateExpandRect?.contains(point) == true
         pressedToolbar = point.y < config.candidateBarHeightDp ? toolbarRects.first { $0.rect.contains(point) } : nil
-        toolbarTouchActive = !functionPanelActive
-            && !hasInlineCandidates
-            && !usesFullHeightSymbolKeyboard()
-            && point.y < config.candidateBarHeightDp
+        toolbarTouchActive = candidateBarContent() == .toolbar
+            && !toolbarRects.isEmpty
+            && toolbarViewportRect().contains(point)
         pressedCandidate = nil
         toolbarLongPressConsumed = false
         if pressedToolbar?.action.longPressCommand != nil {
@@ -1102,8 +1095,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
         if toolbarTouchActive {
-            let toolbar = pressedToolbar
-            let dragActionID = toolbarDragActionID ?? toolbar?.action.id
             let deltaX = point.x - gestureTouchStart.x
             let deltaY = point.y - gestureTouchStart.y
             let dragSlop = KeyTaoIMEInteractionTuning.candidateDragSlop
@@ -1111,23 +1102,16 @@ final class KeyTaoIOSKeyboardView: UIView {
                 toolbarDragging = true
                 toolbarLongPressWorkItem?.cancel()
                 toolbarLongPressWorkItem = nil
-                if !toolbarEditMode || toolbar?.action.customizable != true {
-                    pressedToolbar = nil
-                }
+                pressedToolbar = nil
             }
             if toolbarDragging {
-                if toolbarEditMode, let dragActionID, toolbar?.action.customizable == true {
-                    toolbarDragActionID = dragActionID
-                    reorderToolbarAction(dragActionID, at: point.x)
-                } else {
-                    toolbarScrollX = max(0, min(maxToolbarScroll(), toolbarTouchStartScrollX - deltaX))
-                }
+                scrollToolbar(to: toolbarTouchStartScrollX - deltaX)
             } else if let toolbar = pressedToolbar, !toolbar.rect.contains(point) {
                 toolbarLongPressWorkItem?.cancel()
                 toolbarLongPressWorkItem = nil
                 pressedToolbar = nil
             }
-            invalidateLayoutAndDisplay()
+            setNeedsDisplay()
             return
         }
         if inlineCandidateTouchActive {
@@ -1245,12 +1229,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         if toolbarTouchActive {
             let toolbar = pressedToolbar
-            let wasDragging = toolbarDragging
-            let longPressConsumed = toolbarLongPressConsumed
+            let canTap = !toolbarDragging && !toolbarLongPressConsumed
             clearCandidateOrPanelTouchState()
-            if wasDragging, toolbarEditMode {
-                persistToolbarCustomization()
-            } else if !longPressConsumed, let toolbar, toolbar.rect.contains(point) {
+            if canTap, let toolbar, toolbar.rect.contains(point) {
                 handleToolbarCommand(toolbar.action.command)
             }
             return
@@ -2340,14 +2321,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
         if let context = UIGraphicsGetCurrentContext() {
             context.saveGState()
-            let compactToolbar = bounds.width < 300
-            let viewport = CGRect(
-                x: leftPadding,
-                y: 0,
-                width: max(0, logoRect().minX - (compactToolbar ? 4 : 8) - leftPadding),
-                height: barHeight
-            )
-            UIBezierPath(rect: viewport).addClip()
+            UIBezierPath(rect: toolbarViewportRect()).addClip()
             for toolbar in toolbarRects {
                 drawToolbarChip(toolbar)
             }
@@ -3442,6 +3416,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawInlineCandidateOption(_ item: CandidateDrawItem, rect: CGRect) {
+        if let comment = belowComment(item) {
+            drawStackedCandidateOption(item, comment: comment, rect: rect)
+            return
+        }
         let selected = item.selected
         let paddingX = candidatePaddingX()
         let inlineGap = candidateInlineGap()
@@ -3475,6 +3453,45 @@ final class KeyTaoIOSKeyboardView: UIView {
                 weight: theme.font.weight
             )
         }
+    }
+
+    private func drawStackedCandidateOption(_ item: CandidateDrawItem, comment: String, rect: CGRect) {
+        let candidateBar = theme.mobile.candidateBar
+        let scale = stackedCandidateTextScale()
+        let textSize = candidateTextSize() * scale
+        let commentSize = candidateCommentSize() * scale
+        let textHeight = themedFont(size: textSize, weight: theme.font.weight).lineHeight
+        let commentHeight = themedFont(size: commentSize, weight: theme.font.weight).lineHeight
+        let lineGap: CGFloat = 1
+        let textY = rect.midY - (commentHeight + lineGap) / 2
+        let commentY = rect.midY + (textHeight + lineGap) / 2
+        let padding = candidatePaddingX()
+        var x = rect.minX + padding
+        if !item.label.isEmpty {
+            x += drawInlineText(
+                item.label,
+                x: x,
+                centerY: textY,
+                color: (item.selected ? candidateBar.selectedLabelColor : candidateBar.labelColor).uiColor,
+                size: candidateLabelSize() * scale,
+                weight: theme.font.weight
+            ) + candidateInlineGap()
+        }
+        let width = max(0, rect.maxX - padding - x)
+        drawTruncatedText(
+            item.text,
+            in: CGRect(x: x, y: textY - textHeight / 2, width: width, height: textHeight),
+            color: (item.selected ? candidateBar.selectedForeground : candidateBar.foreground).uiColor,
+            size: textSize,
+            alignment: .left
+        )
+        drawTruncatedText(
+            comment,
+            in: CGRect(x: x, y: commentY - commentHeight / 2, width: width, height: commentHeight),
+            color: (item.selected ? candidateBar.selectedCommentColor : candidateBar.commentColor).uiColor,
+            size: commentSize,
+            alignment: .left
+        )
     }
 
     private func drawToolbarChip(_ item: ToolbarRect) {
@@ -3586,16 +3603,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawEditIcon(in: iconRect)
         case .settings:
             drawSettingsIcon(in: iconRect)
-        case .ellipsis:
-            let diameter = iconRect.width * 0.15
-            for offset in [-0.30, 0.0, 0.30] {
-                UIBezierPath(ovalIn: CGRect(
-                    x: iconRect.midX + iconRect.width * CGFloat(offset) - diameter / 2,
-                    y: iconRect.midY - diameter / 2,
-                    width: diameter,
-                    height: diameter
-                )).fill()
-            }
         }
         context.restoreGState()
     }
@@ -4362,9 +4369,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         let gap = panelGap
         let viewport = inlineCandidateViewportRect()
         candidateViewportWidth = viewport.width
-        let candidateHeight = min(38, barHeight - gap * 1.8)
-        let top = (barHeight - candidateHeight) / 2
         let items = candidateDrawItems(inlineOnly: true)
+        let candidateHeight = inlineCandidateHeight(stacked: items.contains { belowComment($0) != nil })
+        let top = (barHeight - candidateHeight) / 2
         let itemWidths = items.map(candidateWidth)
         candidateContentWidth = itemWidths.reduce(0, +) + gap * CGFloat(max(0, itemWidths.count - 1))
         coerceCandidateScroll()
@@ -4420,7 +4427,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         case 1:
             defaultRowHeight = config.clipboardRowHeightDp
         default:
-            defaultRowHeight = 36
+            defaultRowHeight = items.contains { belowComment($0) != nil } ? stackedCandidateHeight : 36
         }
         let cellWidth = columns.map { columnCount in
             (right - left - gap * CGFloat(columnCount - 1)) / CGFloat(columnCount)
@@ -4857,7 +4864,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             return []
         }
         let barHeight = config.candidateBarHeightDp
-        let leftPadding = panelGap * 1.5
         if !state.candidatePanel.candidates.isEmpty {
             return []
         }
@@ -4867,21 +4873,17 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         let chipHeight = min(34, barHeight - 12)
         let top = (barHeight - chipHeight) / 2
-        let compactToolbar = bounds.width < 300
-        let maxRight = logoRect().minX - (compactToolbar ? 4 : 8)
+        let viewport = toolbarViewportRect()
         let actions = toolbarActions()
-        let availableWidth = max(0, maxRight - leftPadding)
         let naturalWidths = actions.map { toolbarChipWidth($0) }
         let naturalGap: CGFloat = 6
         let naturalTotal = naturalWidths.reduce(0, +) + naturalGap * CGFloat(max(0, actions.count - 1))
-        let compression = naturalTotal > 0 ? max(0.85, min(1, availableWidth / naturalTotal)) : 1
+        let compression = naturalTotal > 0 ? max(0.85, min(1, viewport.width / naturalTotal)) : 1
         let gap = naturalGap * compression
         let widths = naturalWidths.map { max(44, $0 * compression) }
-        toolbarViewportWidth = availableWidth
         toolbarContentWidth = widths.reduce(0, +) + gap * CGFloat(max(0, actions.count - 1))
-        coerceToolbarScroll()
-        let viewport = CGRect(x: leftPadding, y: 0, width: availableWidth, height: barHeight)
-        var x = leftPadding - toolbarScrollX
+        toolbarScrollX = max(0, min(maxToolbarScroll(), toolbarScrollX))
+        var x = viewport.minX - toolbarScrollX
         var rects: [ToolbarRect] = []
         for (action, width) in zip(actions, widths) {
             let drawingRect = CGRect(x: x, y: top, width: width, height: chipHeight)
@@ -4892,6 +4894,12 @@ final class KeyTaoIOSKeyboardView: UIView {
             x = drawingRect.maxX + gap
         }
         return rects
+    }
+
+    private func toolbarViewportRect() -> CGRect {
+        let left = panelGap * 1.5
+        let right = logoRect().minX - (bounds.width < 300 ? 4 : 8)
+        return CGRect(x: left, y: 0, width: max(0, right - left), height: config.candidateBarHeightDp)
     }
 
     private func expandButtonRect() -> CGRect? {
@@ -5061,6 +5069,38 @@ final class KeyTaoIOSKeyboardView: UIView {
                 items.append(contentsOf: visibleSwitches.enumerated().map { index, schemaSwitch in
                     rimeSwitchItem(index: index, schemaSwitch: schemaSwitch)
                 })
+            }
+            for package in rimeOptionsState.packages where !package.active {
+                let headingIndex = -10000 - items.count
+                items.append(CandidateDrawItem(
+                    identifierIndex: headingIndex,
+                    selectIndex: headingIndex,
+                    label: package.ready ? package.displayName : "\(package.displayName)（未部署）",
+                    text: "",
+                    comment: nil,
+                    selected: false,
+                    global: false,
+                    command: nil,
+                    style: .section
+                ))
+                for schema in package.schemas {
+                    let index = -10000 - items.count
+                    items.append(CandidateDrawItem(
+                        identifierIndex: index,
+                        selectIndex: index,
+                        label: schema.name,
+                        text: schema.id,
+                        comment: nil,
+                        selected: false,
+                        global: false,
+                        command: package.ready ? KeyTaoKeyCommand(
+                            type: KeyTaoCommandType.rimeSchema,
+                            value: schema.id,
+                            fallbackValue: package.packageKey
+                        ) : nil,
+                        style: package.ready ? .schema : .empty
+                    ))
+                }
             }
             return items
         }
@@ -5311,12 +5351,34 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func candidateWidth(_ item: CandidateDrawItem) -> CGFloat {
-        let labelWidth = textWidth(item.label, size: candidateLabelSize())
-        let bodyWidth = textWidth(item.text, size: candidateTextSize())
-        let commentWidth = theme.mobile.candidateBar.showComment ? (item.comment.map { textWidth($0, size: candidateCommentSize()) } ?? 0) : 0
-        let segmentCount = [labelWidth, bodyWidth, commentWidth].filter { $0 > 0 }.count
+        let stacked = belowComment(item) != nil
+        let scale = stacked ? stackedCandidateTextScale() : 1
+        let labelWidth = textWidth(item.label, size: candidateLabelSize() * scale)
+        let bodyWidth = textWidth(item.text, size: candidateTextSize() * scale)
+        let commentWidth = theme.mobile.candidateBar.showComment ? (item.comment.map { textWidth($0, size: candidateCommentSize() * scale) } ?? 0) : 0
+        let widths = stacked ? [labelWidth, max(bodyWidth, commentWidth)] : [labelWidth, bodyWidth, commentWidth]
+        let segmentCount = widths.filter { $0 > 0 }.count
         let gaps = CGFloat(max(0, segmentCount - 1)) * candidateInlineGap()
-        return labelWidth + bodyWidth + commentWidth + gaps + candidatePaddingX() * 2
+        let width = widths.reduce(0, +) + gaps + candidatePaddingX() * 2
+        return stacked ? ceil(width) : width
+    }
+
+    private func belowComment(_ item: CandidateDrawItem) -> String? {
+        let candidateBar = theme.mobile.candidateBar
+        guard candidateBar.commentPosition == "below", candidateBar.showComment, item.command == nil,
+              let comment = item.comment, comment.contains(where: { !$0.isWhitespace }) else { return nil }
+        return comment
+    }
+
+    private func inlineCandidateHeight(stacked: Bool) -> CGFloat {
+        min(stacked ? stackedCandidateHeight : 38, config.candidateBarHeightDp - panelGap * 1.8)
+    }
+
+    private func stackedCandidateTextScale() -> CGFloat {
+        let textHeight = themedFont(size: candidateTextSize(), weight: theme.font.weight).lineHeight
+        let commentHeight = themedFont(size: candidateCommentSize(), weight: theme.font.weight).lineHeight
+        let availableHeight = inlineCandidateHeight(stacked: true) - 5
+        return max(0, min(1, availableHeight / (textHeight + commentHeight)))
     }
 
     private func toolbarChipWidth(_ action: ToolbarAction, horizontalPadding: CGFloat = 22, minimumWidth: CGFloat? = nil) -> CGFloat {
@@ -5474,32 +5536,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         let byID = Dictionary(uniqueKeysWithValues: base.compactMap { action in
             action.id.map { ($0, action) }
         })
-        let ordered = currentToolbarOrder().compactMap { byID[$0] }
-        let pinnedCount = max(1, min(toolbarPinnedCountOverride ?? config.toolbarPinnedCount, max(1, ordered.count)))
-        let more = ToolbarAction(
-            label: toolbarMoreExpanded ? "收起" : "更多",
-            command: .panel("toolbarMore"),
-            selected: toolbarMoreExpanded,
-            icon: .ellipsis,
-            longPressCommand: .panel("toolbarEdit")
-        )
-        if toolbarEditMode {
-            var actions = Array(ordered.prefix(pinnedCount))
-            actions.append(
-                ToolbarAction(
-                    label: "置顶｜更多",
-                    command: .panel("toolbarPinnedBoundary"),
-                    id: Self.toolbarPinnedBoundaryID
-                )
-            )
-            actions.append(contentsOf: ordered.dropFirst(pinnedCount))
-            actions.append(ToolbarAction(label: "完成", command: .panel("toolbarDone")))
-            return actions
-        }
-        if toolbarMoreExpanded {
-            return ordered + [more, ToolbarAction(label: "编辑", command: .panel("toolbarEdit"))]
-        }
-        return Array(ordered.prefix(pinnedCount)) + [more]
+        return keyTaoToolbarActionOrder(
+            config.toolbarActionOrder,
+            available: base.compactMap(\.id),
+            clipboardHistoryEnabled: config.clipboardHistoryEnabled
+        ).compactMap { byID[$0] }
     }
 
     private func baseToolbarActions() -> [ToolbarAction] {
@@ -5540,61 +5581,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             ),
             layout,
         ]
-    }
-
-    private func currentToolbarOrder() -> [String] {
-        let available = baseToolbarActions().compactMap(\.id)
-        return keyTaoToolbarActionOrder(
-            toolbarActionOrderOverride ?? config.toolbarActionOrder,
-            available: available,
-            clipboardHistoryEnabled: config.clipboardHistoryEnabled
-        )
-    }
-
-    private func currentToolbarPinnedCount() -> Int {
-        max(1, min(toolbarPinnedCountOverride ?? config.toolbarPinnedCount, max(1, currentToolbarOrder().count)))
-    }
-
-    private func reorderToolbarAction(_ actionID: String, at x: CGFloat) {
-        var order = currentToolbarOrder()
-        guard let sourceIndex = order.firstIndex(of: actionID),
-              let targetID = toolbarRects
-                .filter({ $0.action.customizable })
-                .min(by: {
-                    abs(($0.drawingRect ?? $0.rect).midX - x) < abs(($1.drawingRect ?? $1.rect).midX - x)
-                })?
-                .action.id,
-              var targetIndex = order.firstIndex(of: targetID) else {
-            return
-        }
-        let oldOrder = order
-        let oldPinnedCount = currentToolbarPinnedCount()
-        var pinnedIDs = Set(order.prefix(oldPinnedCount))
-        let boundaryMidX = toolbarRects
-            .first(where: { $0.action.id == Self.toolbarPinnedBoundaryID })
-            .map { ($0.drawingRect ?? $0.rect).midX }
-        let movingToPinned = boundaryMidX.map { x < $0 } ?? (targetIndex < oldPinnedCount)
-        order.remove(at: sourceIndex)
-        if sourceIndex < targetIndex { targetIndex -= 1 }
-        order.insert(actionID, at: max(0, min(targetIndex, order.count)))
-        if movingToPinned { pinnedIDs.insert(actionID) } else { pinnedIDs.remove(actionID) }
-        let pinnedCount = max(1, min(pinnedIDs.count, max(1, order.count)))
-        guard order != oldOrder || pinnedCount != oldPinnedCount else { return }
-        toolbarActionOrderOverride = order
-        toolbarPinnedCountOverride = pinnedCount
-        performSelectionFeedback(playSound: false)
-    }
-
-    private func persistToolbarCustomization() {
-        let persistedOrder = (currentToolbarOrder() + toolbarInactiveActionIDs).reduce(into: [String]()) { result, id in
-            if id != Self.toolbarSettingsActionID, !result.contains(id) { result.append(id) }
-        }
-        toolbarActionOrderOverride = persistedOrder
-        delegate?.keyboardView(
-            self,
-            persistToolbarOrder: persistedOrder,
-            pinnedCount: currentToolbarPinnedCount()
-        )
     }
 
     private func drawLayoutInteractionHints() {
@@ -5639,9 +5625,6 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func handleToolbarCommand(_ command: KeyTaoKeyCommand) {
-        if !["toolbarMore", "toolbarEdit", "toolbarPinnedBoundary"].contains(command.value ?? "") {
-            toolbarMoreExpanded = false
-        }
         if command.type == KeyTaoCommandType.keyboardMode,
            (command.value == "editor" && layerMode.id == "editor" || command.value == "emoji:last" && isEmojiLayer) {
             navigate(to: .layer("back"))
@@ -5725,28 +5708,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             case "clearClipboardHistoryNow":
                 openFunctionPanel(.clipboard)
                 clipboardClearConfirmationPending = true
-            case "toolbarMore":
-                toolbarMoreExpanded.toggle()
-                toolbarScrollX = 0
-                rebuildInteractiveRects()
-            case "toolbarEdit":
-                let visibleOrder = currentToolbarOrder()
-                let configuredOrder = toolbarActionOrderOverride ?? config.toolbarActionOrder
-                toolbarInactiveActionIDs = configuredOrder.filter { !visibleOrder.contains($0) }
-                toolbarEditMode = true
-                toolbarMoreExpanded = true
-                toolbarScrollX = 0
-                toolbarActionOrderOverride = visibleOrder
-                toolbarPinnedCountOverride = currentToolbarPinnedCount()
-                rebuildInteractiveRects()
-            case "toolbarDone":
-                toolbarEditMode = false
-                toolbarMoreExpanded = false
-                toolbarScrollX = 0
-                persistToolbarCustomization()
-                rebuildInteractiveRects()
-            case "toolbarPinnedBoundary":
-                break
             // The hue strip / SV square are drag surfaces; a plain activation does nothing.
             case "colorPickerDrag":
                 break
@@ -5873,8 +5834,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         default: break
         }
         if case .reset = action {
-            toolbarMoreExpanded = false
-            toolbarEditMode = false
             toolbarScrollX = 0
             lastShiftTap = .distantPast
         }
@@ -6041,11 +6000,18 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func maxToolbarScroll() -> CGFloat {
-        max(0, toolbarContentWidth - toolbarViewportWidth)
+        max(0, toolbarContentWidth - toolbarViewportRect().width)
     }
 
-    private func coerceToolbarScroll() {
-        toolbarScrollX = max(0, min(maxToolbarScroll(), toolbarScrollX))
+    @discardableResult
+    private func scrollToolbar(to offset: CGFloat) -> Bool {
+        let scrollX = max(0, min(maxToolbarScroll(), offset))
+        guard scrollX != toolbarScrollX else { return false }
+        toolbarScrollX = scrollX
+        toolbarRects = toolbarLayout()
+        rebuildAccessibilityElements()
+        setNeedsDisplay()
+        return true
     }
 
     private func coerceCandidateScroll() {
@@ -7363,8 +7329,6 @@ final class KeyTaoIOSKeyboardView: UIView {
     private static let backspacePreviewDuration: TimeInterval = 2
     private static let maxBackspaceGestureUnitsPerGesture = 96
     private static let emojiRecentLayer = "symbols_emoji_face"
-    private static let toolbarPinnedBoundaryID = "__toolbar_pinned_boundary__"
-    private static let toolbarSettingsActionID = "settings"
     private static let recentEmojiPreferenceKey = "recent_emoji"
     private static let maxRecentEmojiCount = 32
     private static let softAccentPunctuation: Set<String> = ["，", "。", ",", "."]

@@ -15,12 +15,12 @@ use std::{
 use freetype::{bitmap::PixelMode, face::LoadFlag, ffi, Face, Library};
 use keytao_core::ImeState;
 use keytao_theme::{
-    resolved_panel_shadow, scaled_candidate_panel, CandidatePanelInput, PanelOrientation,
-    RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
+    resolved_panel_shadow, scaled_candidate_panel, CandidatePanelInput, CommentPosition,
+    PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use tiny_skia::*;
 
-use crate::panel_hit::{layout, PanelGeometry, PanelHitAreas};
+use crate::panel_hit::{layout, PanelGeometry, PanelHitAreas, PanelRect};
 use x11rb::{
     connection::Connection as _,
     protocol::xproto::{
@@ -365,6 +365,14 @@ struct GlyphLayout<'a> {
     width: usize,
     rows: usize,
     advance: f32,
+}
+
+#[derive(Clone, Copy)]
+struct StackedCandidate {
+    word_x: f32,
+    word_baseline: f32,
+    comment_baseline: f32,
+    height: f32,
 }
 
 pub enum OverlayPanelMessage {
@@ -797,7 +805,16 @@ impl PanelRenderer {
         state: &ImeState,
         screen_width: f32,
     ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
-        let theme = scaled_candidate_panel(&self.theme_resolver.current());
+        self.render_themed(state, screen_width, &self.theme_resolver.current())
+    }
+
+    fn render_themed(
+        &mut self,
+        state: &ImeState,
+        screen_width: f32,
+        theme: &keytao_theme::ResolvedImeTheme,
+    ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
+        let theme = scaled_candidate_panel(theme);
         self.update_theme_font(theme.font.effective_family.as_deref());
         let model = theme.candidate_panel_model(
             state_to_panel_input(state),
@@ -818,29 +835,74 @@ impl PanelRenderer {
         let option_pad_x = self.s(theme.candidate.padding_x);
         let option_pad_y = self.s(theme.candidate.padding_y);
         let inline_gap = self.s(theme.candidate.inline_gap);
-        let option_gap = panel_gap;
-        let option_height = self
-            .s(theme.candidate.min_height)
-            .max(font_size.max(label_size).max(comment_size) + option_pad_y * 2.0);
+        let below = theme.candidate.comment_position == CommentPosition::Below;
+        let min_option_height = self.s(theme.candidate.min_height);
+        let single_line_height = font_size.max(label_size);
+        let single_line_height = if below {
+            single_line_height
+        } else {
+            single_line_height.max(comment_size)
+        };
+        let single_option_height = min_option_height.max(single_line_height + option_pad_y * 2.0);
         let nav_button = self.s(theme.navigation.button_size);
         let preedit_height = model
             .preedit
             .as_ref()
             .map(|_| preedit_size + self.s(theme.panel.preedit_gap))
             .unwrap_or(0.0);
-        let option_widths: Vec<f32> = model
+        let (option_widths, stacked): (Vec<_>, Vec<_>) = model
             .candidates
             .iter()
             .map(|candidate| {
-                option_pad_x * 2.0
+                if let Some(comment) = candidate.comment.as_deref().filter(|_| below) {
+                    let (_, label_top, label_right, label_bottom) =
+                        self.text_bounds(&candidate.label, label_size);
+                    let (word_left, word_top, word_right, word_bottom) =
+                        self.text_bounds(&candidate.text, font_size);
+                    let (comment_left, comment_top, comment_right, comment_bottom) =
+                        self.text_bounds(comment, comment_size);
+                    let word_x = label_right + inline_gap - word_left.min(comment_left);
+                    let word_baseline = -label_top.min(word_top);
+                    let comment_baseline =
+                        word_baseline + label_bottom.max(word_bottom) + inline_gap * 0.5
+                            - comment_top;
+                    let width = word_x + word_right.max(comment_right) + option_pad_x * 2.0;
+                    return (
+                        width,
+                        Some(StackedCandidate {
+                            word_x,
+                            word_baseline,
+                            comment_baseline,
+                            height: comment_baseline + comment_bottom,
+                        }),
+                    );
+                }
+                let width = option_pad_x * 2.0
                     + self.text_width(&candidate.label, label_size)
                     + inline_gap
                     + self.text_width(&candidate.text, font_size)
                     + candidate.comment.as_ref().map_or(0.0, |comment| {
                         inline_gap + self.text_width(comment, comment_size)
-                    })
+                    });
+                (width, None)
             })
-            .collect();
+            .unzip();
+        let option_heights = below.then(|| {
+            stacked
+                .iter()
+                .map(|option| {
+                    option.map_or(single_option_height, |option| {
+                        min_option_height.max(option.height + option_pad_y * 2.0)
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let option_height = option_heights
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .fold(single_option_height, f32::max);
         let nav_count = usize::from(model.navigation.can_go_previous)
             + usize::from(model.navigation.can_go_next);
         let nav_width = if nav_count == 0 {
@@ -858,8 +920,10 @@ impl PanelRenderer {
 
         let (content_width, content_height) = if model.orientation == PanelOrientation::Vertical {
             let max_option_width = option_widths.iter().copied().fold(0.0, f32::max);
-            let candidate_height = model.candidates.len() as f32 * option_height
-                + model.candidates.len().saturating_sub(1) as f32 * option_gap;
+            let candidate_height = option_heights.as_deref().map_or_else(
+                || model.candidates.len() as f32 * option_height,
+                |heights| heights.iter().sum(),
+            ) + model.candidates.len().saturating_sub(1) as f32 * panel_gap;
             (
                 max_option_width.max(nav_width).max(preedit_width),
                 preedit_height
@@ -872,7 +936,7 @@ impl PanelRenderer {
             )
         } else {
             let candidate_width = option_widths.iter().sum::<f32>()
-                + model.candidates.len().saturating_sub(1) as f32 * option_gap;
+                + model.candidates.len().saturating_sub(1) as f32 * panel_gap;
             let nav_extra = if nav_count > 0 {
                 panel_gap + nav_width
             } else {
@@ -890,7 +954,7 @@ impl PanelRenderer {
             .ceil()
             .min(
                 (screen_width
-                    - self.screen_margin() as f32 * 2.0
+                    - self.s(theme.panel.screen_margin).ceil() * 2.0
                     - self.shadow_inset(theme.panel.shadow) as f32 * 2.0)
                     .floor()
                     .max(1.0),
@@ -951,6 +1015,7 @@ impl PanelRenderer {
             top: y,
             gap: panel_gap,
             option_widths: &option_widths,
+            option_heights: option_heights.as_deref(),
             option_height,
             nav_button,
             can_go_previous: model.navigation.can_go_previous,
@@ -965,10 +1030,8 @@ impl PanelRenderer {
             self.draw_candidate_option(
                 &mut pm,
                 candidate,
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
+                *rect,
+                stacked[index],
                 label_size,
                 font_size,
                 comment_size,
@@ -1014,13 +1077,17 @@ impl PanelRenderer {
             theme.panel.shadow && self.supports_alpha,
             self.scale,
         );
-        let (width, height) = (pm.width(), pm.height());
+        let (buffer_width, buffer_height) = (pm.width(), pm.height());
         for rect in areas
             .candidates
             .iter_mut()
             .chain(areas.previous_page.iter_mut())
             .chain(areas.next_page.iter_mut())
         {
+            if below {
+                rect.width = rect.width.min((width as f32 - rect.x).max(0.0));
+                rect.height = rect.height.min((height as f32 - rect.y).max(0.0));
+            }
             rect.x += inset;
             rect.y += inset;
         }
@@ -1031,7 +1098,7 @@ impl PanelRenderer {
             px.swap(0, 2); // R↔B
         }
 
-        (out, width, height, areas)
+        (out, buffer_width, buffer_height, areas)
     }
 
     pub fn render_mode_hint(&mut self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
@@ -1110,15 +1177,19 @@ impl PanelRenderer {
         &self,
         pm: &mut Pixmap,
         candidate: &keytao_theme::CandidateOptionModel,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
+        rect: PanelRect,
+        stacked: Option<StackedCandidate>,
         label_size: f32,
         font_size: f32,
         comment_size: f32,
         theme: &keytao_theme::ResolvedImeTheme,
     ) {
+        let PanelRect {
+            x,
+            y,
+            width,
+            height,
+        } = rect;
         let candidate_theme = &theme.candidate;
         let background = if candidate.selected {
             candidate_theme.selected_background
@@ -1144,8 +1215,22 @@ impl PanelRenderer {
 
         let option_pad_x = self.s(candidate_theme.padding_x);
         let inline_gap = self.s(candidate_theme.inline_gap);
-        let baseline = y + (height + font_size) * 0.5 - self.s(4.0);
-        let mut text_x = x + option_pad_x;
+        let label_x = x + option_pad_x;
+        let (text_x, baseline, comment_baseline) = if let Some(stacked) = stacked {
+            let top = y + (height - stacked.height) * 0.5;
+            (
+                label_x + stacked.word_x,
+                top + stacked.word_baseline,
+                top + stacked.comment_baseline,
+            )
+        } else {
+            let baseline = y + (height + font_size) * 0.5 - self.s(4.0);
+            (
+                label_x + self.text_width(&candidate.label, label_size) + inline_gap,
+                baseline,
+                baseline,
+            )
+        };
         let label_color = if candidate.selected {
             candidate_theme.selected_label_color
         } else {
@@ -1164,12 +1249,11 @@ impl PanelRenderer {
         self.draw_text(
             pm,
             &candidate.label,
-            text_x,
+            label_x,
             baseline,
             bgra(label_color),
             label_size,
         );
-        text_x += self.text_width(&candidate.label, label_size) + inline_gap;
         self.draw_text(
             pm,
             &candidate.text,
@@ -1178,14 +1262,17 @@ impl PanelRenderer {
             bgra(text_color),
             font_size,
         );
-        text_x += self.text_width(&candidate.text, font_size);
         if let Some(comment) = candidate.comment.as_ref() {
-            text_x += inline_gap;
+            let comment_x = if stacked.is_some() {
+                text_x
+            } else {
+                text_x + self.text_width(&candidate.text, font_size) + inline_gap
+            };
             self.draw_text(
                 pm,
                 comment,
-                text_x,
-                baseline,
+                comment_x,
+                comment_baseline,
                 bgra(comment_color),
                 comment_size,
             );
@@ -1195,7 +1282,7 @@ impl PanelRenderer {
     fn draw_navigation_button(
         &self,
         pm: &mut Pixmap,
-        rect: crate::panel_hit::PanelRect,
+        rect: PanelRect,
         glyph: &str,
         font_size: f32,
         theme: &keytao_theme::ResolvedImeTheme,
@@ -1701,6 +1788,77 @@ mod tests {
             comment_width > 320,
             "long comment was capped at the legacy theme width"
         );
+    }
+
+    #[test]
+    fn candidate_below_uses_glyph_bounds_and_clickable_rows() {
+        let Some(mut renderer) = load_font().and_then(PanelRenderer::new) else {
+            eprintln!("skipping stacked candidate render test: no CJK font found");
+            return;
+        };
+        let mut state = ImeState::empty();
+        state.candidates = vec![
+            Candidate {
+                text: "候选文字".into(),
+                comment: Some("注释拼音 gpq".into()),
+            },
+            Candidate {
+                text: "空".into(),
+                comment: None,
+            },
+        ];
+        let color = |red, green, blue| RgbaColor {
+            red,
+            green,
+            blue,
+            alpha: 255,
+        };
+        let mut theme = keytao_theme::ResolvedImeTheme::default();
+        theme.panel.shadow = false;
+        theme.candidate.selected_label_color = color(255, 0, 0);
+        theme.candidate.selected_foreground = color(0, 255, 0);
+        theme.candidate.selected_comment_color = color(0, 0, 255);
+        for orientation in [PanelOrientation::Vertical, PanelOrientation::Horizontal] {
+            theme.panel.orientation = orientation;
+            theme.candidate.comment_position = CommentPosition::Inline;
+            let (_, _, _, inline) = renderer.render_themed(&state, 1920.0, &theme);
+            theme.candidate.comment_position = CommentPosition::Below;
+            let (pixels, width, _, stacked) = renderer.render_themed(&state, 1920.0, &theme);
+            let first = stacked.candidates[0];
+            assert!(first.width < inline.candidates[0].width);
+            assert!(first.height > inline.candidates[0].height);
+            if orientation == PanelOrientation::Vertical {
+                assert_eq!(stacked.candidates[1].height, inline.candidates[1].height);
+            }
+
+            let glyph_positions = |color| {
+                pixels
+                    .chunks_exact(4)
+                    .enumerate()
+                    .filter(|(_, pixel)| *pixel == bgra(color))
+                    .map(|(i, _)| (i % width as usize, i / width as usize))
+                    .collect::<Vec<_>>()
+            };
+            let label = glyph_positions(theme.candidate.selected_label_color);
+            let word = glyph_positions(theme.candidate.selected_foreground);
+            let comment = glyph_positions(theme.candidate.selected_comment_color);
+            assert!(
+                label.iter().map(|(x, _)| x).max().unwrap()
+                    < word.iter().map(|(x, _)| x).min().unwrap()
+            );
+            assert!(
+                word.iter().map(|(_, y)| y).max().unwrap()
+                    < comment.iter().map(|(_, y)| y).min().unwrap()
+            );
+            let (x, y) = comment[0];
+            assert_eq!(
+                stacked.click_at(x as f64, y as f64),
+                Some(crate::panel_hit::PanelClick::Candidate(0))
+            );
+        }
+        let (_, width, _, constrained) = renderer.render_themed(&state, 70.0, &theme);
+        let first = constrained.candidates[0];
+        assert!(first.x + first.width <= width as f32);
     }
 
     #[test]

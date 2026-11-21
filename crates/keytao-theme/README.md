@@ -82,6 +82,7 @@ candidate:
   foreground: "#F8FAF7"
   selectedForeground: "#FFFFFF"
   separatorVisible: true
+  commentPosition: below
 
 modeHint:
   background: "#E6F0FFF2"
@@ -102,6 +103,8 @@ modeHint:
 `ui.cornerRadius` accepts 0–28 logical pixels. When present, it sets the panel radius and scales candidate, navigation, and mode-hint radii by 11/16, 10/16, and 14/16. When omitted, each theme radius remains unchanged.
 
 `ui.backgroundColor` accepts `#RRGGBB` and replaces the resolved panel RGB after light/dark variants while retaining its alpha. Missing, empty, or invalid values retain the theme background. Both appearance overrides are applied before deriving accent colors.
+
+主题编辑器的「注释位置」支持「词条旁」(`inline`) 和「词条下」(`below`)。后者把序号留在左侧，右侧先显示词条，再显示注释。面板的横排、竖排可以独立设置。v3 主题使用 `pc.candidate.commentPosition`，移动端可用 `mobile.candidateBar.commentPosition` 单独覆盖。
 
 主题可以提供模式变体，根级字段作为通用配置，`light:` 和 `dark:` 下的字段只在对应实际模式生效：
 

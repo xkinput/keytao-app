@@ -7,8 +7,8 @@ use keytao_core::ImeState;
 use keytao_theme::{
     panel_hit::{layout, PanelClick, PanelGeometry, PanelHitAreas},
     preedit_caret_color, resolved_panel_shadow, scaled_candidate_panel, CandidatePanelInput,
-    CandidatePanelModel, PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate,
-    ThemeResolver, UiCapabilities,
+    CandidatePanelModel, CommentPosition, PanelOrientation, ResolvedImeTheme, RgbaColor,
+    ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use std::{
     cell::RefCell,
@@ -271,10 +271,36 @@ impl PanelRenderer {
         let option_pad_x = theme.candidate.padding_x;
         let option_pad_y = theme.candidate.padding_y;
         let inline_gap = theme.candidate.inline_gap;
+        let comment_below = theme.candidate.comment_position == CommentPosition::Below;
+        let single_line_height = if comment_below {
+            font_size.max(label_size)
+        } else {
+            font_size.max(label_size).max(comment_size)
+        };
         let option_height = theme
             .candidate
             .min_height
-            .max(font_size.max(label_size).max(comment_size) + option_pad_y * 2.0);
+            .max(single_line_height + option_pad_y * 2.0);
+        let option_heights: Option<Vec<_>> = comment_below.then(|| {
+            let annotated_height = theme
+                .candidate
+                .min_height
+                .max(single_line_height + inline_gap * 0.5 + comment_size + option_pad_y * 2.0);
+            model
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    if candidate.comment.is_some() {
+                        annotated_height
+                    } else {
+                        option_height
+                    }
+                })
+                .collect()
+        });
+        let option_height = option_heights.as_ref().map_or(option_height, |heights| {
+            heights.iter().copied().fold(option_height, f32::max)
+        });
         let nav_button = theme.navigation.button_size;
         let preedit_height = model
             .preedit
@@ -285,13 +311,19 @@ impl PanelRenderer {
             .candidates
             .iter()
             .map(|candidate| {
+                let text_width = self.text_width(&candidate.text, font_size);
+                let word_width = candidate.comment.as_ref().map_or(text_width, |comment| {
+                    let comment_width = self.text_width(comment, comment_size);
+                    if comment_below {
+                        text_width.max(comment_width)
+                    } else {
+                        text_width + inline_gap + comment_width
+                    }
+                });
                 option_pad_x * 2.0
                     + self.text_width(&candidate.label, label_size)
                     + inline_gap
-                    + self.text_width(&candidate.text, font_size)
-                    + candidate.comment.as_ref().map_or(0.0, |comment| {
-                        inline_gap + self.text_width(comment, comment_size)
-                    })
+                    + word_width
             })
             .collect();
         let nav_count = usize::from(model.navigation.can_go_previous)
@@ -310,7 +342,11 @@ impl PanelRenderer {
             .unwrap_or(0.0);
         let (content_width, content_height) = if model.orientation == PanelOrientation::Vertical {
             let max_option_width = option_widths.iter().copied().fold(0.0, f32::max);
-            let candidate_height = model.candidates.len() as f32 * option_height
+            let candidate_height = option_heights
+                .as_ref()
+                .map_or(model.candidates.len() as f32 * option_height, |heights| {
+                    heights.iter().sum()
+                })
                 + model.candidates.len().saturating_sub(1) as f32 * panel_gap;
             (
                 max_option_width.max(nav_width).max(preedit_width),
@@ -392,6 +428,7 @@ impl PanelRenderer {
             gap: panel_gap,
             option_widths: &option_widths,
             option_height,
+            option_heights: option_heights.as_deref(),
             nav_button,
             can_go_previous: model.navigation.can_go_previous,
             can_go_next: model.navigation.can_go_next,
@@ -633,8 +670,18 @@ impl PanelRenderer {
             option.border_width,
         );
 
-        let mut text_x = x + option.padding_x;
-        let baseline = y + (height + font_size) * 0.5 - 3.0 * scale;
+        let label_x = x + option.padding_x;
+        let text_x = label_x + self.text_width(&candidate.label, label_size) + option.inline_gap;
+        let comment_below =
+            option.comment_position == CommentPosition::Below && candidate.comment.is_some();
+        let comment_gap = option.inline_gap * 0.5;
+        let baseline = if comment_below {
+            let word_row_height = font_size.max(label_size);
+            let content_height = word_row_height + comment_gap + comment_size;
+            y + (height - content_height) * 0.5 + word_row_height - 3.0 * scale
+        } else {
+            y + (height + font_size) * 0.5 - 3.0 * scale
+        };
         let label_color = if candidate.selected {
             option.selected_label_color
         } else {
@@ -655,12 +702,11 @@ impl PanelRenderer {
         self.draw_text(
             pm,
             &candidate.label,
-            text_x,
+            label_x,
             baseline,
             bgra(label_color),
             label_size,
         );
-        text_x += self.text_width(&candidate.label, label_size) + option.inline_gap;
         self.draw_text(
             pm,
             &candidate.text,
@@ -669,14 +715,20 @@ impl PanelRenderer {
             bgra(text_color),
             font_size,
         );
-        text_x += self.text_width(&candidate.text, font_size);
         if let Some(comment) = candidate.comment.as_ref() {
-            text_x += option.inline_gap;
+            let (comment_x, comment_baseline) = if comment_below {
+                (text_x, baseline + comment_gap + comment_size)
+            } else {
+                (
+                    text_x + self.text_width(&candidate.text, font_size) + option.inline_gap,
+                    baseline,
+                )
+            };
             self.draw_text(
                 pm,
                 comment,
-                text_x,
-                baseline,
+                comment_x,
+                comment_baseline,
                 bgra(comment_color),
                 comment_size,
             );
@@ -1065,8 +1117,68 @@ mod tests {
     };
     use keytao_core::ImeState;
     use keytao_theme::{
-        CandidatePanelInput, PanelOrientation, ResolvedImeTheme, ThemeCandidate, UiCapabilities,
+        CandidatePanelInput, CommentPosition, PanelOrientation, ResolvedImeTheme, ThemeCandidate,
+        UiCapabilities,
     };
+
+    #[test]
+    fn below_comments_use_their_own_line_and_fit_the_candidate_hit_area() {
+        let renderer = PanelRenderer::new(Arc::new(FontSet {
+            family: String::new(),
+            fonts: Vec::new(),
+        }));
+        for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
+            let mut theme = ResolvedImeTheme::default();
+            theme.panel.orientation = orientation;
+            theme.panel.shadow = false;
+            let mut model = theme.candidate_panel_model(
+                CandidatePanelInput {
+                    preedit: String::new(),
+                    candidates: vec![
+                        ThemeCandidate {
+                            text: "word".into(),
+                            comment: Some("reverse lookup".into()),
+                        },
+                        ThemeCandidate {
+                            text: "word".into(),
+                            comment: None,
+                        },
+                    ],
+                    highlighted_candidate_index: 0,
+                    page: 0,
+                    is_last_page: true,
+                    select_keys: None,
+                },
+                &UiCapabilities::full_custom(),
+            );
+            let inline = renderer.render(&model, 1.0, theme.clone(), 1920.0, None);
+            theme.candidate.comment_position = CommentPosition::Below;
+            let stacked = renderer.render(&model, 1.0, theme.clone(), 1920.0, None);
+            let first = stacked.hit_areas.candidates[0];
+            let second = stacked.hit_areas.candidates[1];
+            assert!(first.width < inline.hit_areas.candidates[0].width);
+            assert!(first.height > inline.hit_areas.candidates[0].height);
+            assert_eq!(
+                stacked.hit_areas.click_at(
+                    (first.x + 1.0).into(),
+                    (first.y + first.height - 1.0).into()
+                ),
+                Some(keytao_theme::panel_hit::PanelClick::Candidate(0))
+            );
+            if orientation == PanelOrientation::Vertical {
+                assert_eq!(second.height, inline.hit_areas.candidates[1].height);
+                assert!(second.y > inline.hit_areas.candidates[1].y);
+            } else {
+                assert_eq!(second.height, first.height);
+            }
+            model.candidates[0].comment = None;
+            let unannotated = renderer.render(&model, 1.0, theme, 1920.0, None);
+            assert_eq!(
+                unannotated.hit_areas.candidates[0].height,
+                inline.hit_areas.candidates[0].height
+            );
+        }
+    }
 
     #[test]
     fn long_candidates_and_comments_are_limited_only_by_available_width() {

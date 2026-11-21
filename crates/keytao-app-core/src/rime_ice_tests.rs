@@ -509,6 +509,16 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
     .await
     .unwrap();
     assert_eq!(status.version, "2026.07.01");
+    assert!(!status.deployed);
+    assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
+    crate::package_schemas::set_package_schemas(
+        &host.core,
+        SCHEMA_ID,
+        &[SCHEMA_ID.into(), "double_pinyin_flypy".into()],
+    )
+    .unwrap();
+    host.deploy_package(SCHEMA_ID).await.unwrap();
+    assert!(rime_ice_status(&host.core, root.path()).unwrap().deployed);
     fs::write(runtime.join("rime_ice.user.dict.yaml"), "private dictionary").unwrap();
     fs::write(runtime.join("rime_ice.userdb"), "learned").unwrap();
     let status = manage_rime_ice(&host.core, false, &host).await.unwrap();

@@ -340,38 +340,6 @@ data class KeytaoAndroidImeConfig(
         }
 
         @Synchronized
-        fun persistToolbarCustomization(
-            context: Context,
-            order: List<String>,
-            pinnedCount: Int,
-            symbolLayer: Boolean = false,
-        ): Boolean {
-            val file = KeytaoAndroidPaths.imeConfigFileOrNull(context) ?: return false
-            return runCatching {
-                val root = file.takeIf { it.isFile }
-                    ?.readText()
-                    ?.let(::JSONObject)
-                    ?: JSONObject()
-                val normalizedOrder = normalizeToolbarActionOrder(order)
-                root.put(if (symbolLayer) "toolbarSymbolActionOrder" else "toolbarActionOrder", JSONArray(normalizedOrder))
-                root.put(if (symbolLayer) "toolbarSymbolPinnedCount" else "toolbarPinnedCount", pinnedCount.coerceIn(1, 12))
-                root.put("toolbarSeenActionIds", JSONArray(
-                    (stringList(root.optJSONArray("toolbarSeenActionIds")) + normalizedOrder).distinct(),
-                ))
-                file.parentFile?.mkdirs()
-                val temporary = File(file.parentFile, ".${file.name}.toolbar.tmp")
-                temporary.writeText(root.toString(2))
-                if (!temporary.renameTo(file)) {
-                    file.writeText(root.toString(2))
-                    temporary.delete()
-                }
-                cachedSignature = null
-                cachedConfig = null
-                true
-            }.getOrDefault(false)
-        }
-
-        @Synchronized
         fun persistSettings(context: Context, patch: Map<String, Any>): Boolean {
             val file = KeytaoAndroidPaths.imeConfigFileOrNull(context) ?: return false
             return persistSettings(file, patch)
