@@ -884,6 +884,7 @@ fn refused_sync_composition_end_queues_async_immediately_without_timer_backoff()
 fn five_refused_ends_release_apply_and_clean_up_raw_preedit_on_next_write_session() {
     let (host, context, state) = fixture();
     state.borrow_mut().thread_mgr_flags = TF_TMF_UIELEMENTENABLEDONLY;
+    host.reject_overlapping_compositions.set(true);
     let preedit = ImeState {
         preedit: "y".into(),
         ..ImeState::empty()
@@ -891,18 +892,18 @@ fn five_refused_ends_release_apply_and_clean_up_raw_preedit_on_next_write_sessio
     apply_ime_state(&context, 1, &state, preedit, false, false, None).unwrap();
     assert_eq!(&*host.text.borrow(), "y");
 
-    host.fail_end.set(true);
+    host.refuse_sync_once.set(true);
     host.fail_async_request.set(true);
     reset_input_for_focus_change(&state);
     for _ in 0..4 {
         state.borrow_mut().pending_composition_ends[0].retry_after = None;
         flush_pending_ime_ui(&state);
     }
+    assert_eq!(&*host.text.borrow(), "y");
     assert_eq!(state.borrow().pending_composition_ends.len(), 1);
     assert!(state.borrow().pending_composition_ends[0].exhausted);
     assert!(!super::has_active_composition_ends(&state.borrow()));
 
-    host.fail_end.set(false);
     host.fail_async_request.set(false);
     let next = ImeState {
         committed: Some("字".into()),
@@ -911,5 +912,7 @@ fn five_refused_ends_release_apply_and_clean_up_raw_preedit_on_next_write_sessio
     apply_ime_state(&context, 1, &state, next, false, false, None).unwrap();
     assert!(state.borrow().pending_composition_ends.is_empty());
     assert!(state.borrow().written_preedits.is_empty());
+    assert_eq!(host.active_compositions.get(), 0);
+    assert_eq!(&*host.writes.borrow(), &["y", "", "字"]);
     assert_eq!(&*host.text.borrow(), "字");
 }
