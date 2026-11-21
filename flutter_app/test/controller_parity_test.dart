@@ -168,6 +168,8 @@ class FakeCore implements RustLibApi {
   Future<List<InstalledPackageDto>> crateApiCoreListInstalledPackages() async =>
       [];
   @override
+  Future<List<IsolatedPackageDto>> crateApiCoreIsolatedPackages() async => [];
+  @override
   Future<List<SchemeUpdateDto>> crateApiCoreCheckSchemeUpdates() async => [];
   @override
   Future<Map<String, String>> crateApiCoreGetDismissedSchemeUpdates() async =>
@@ -185,11 +187,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<WanxiangGrammarStatusDto> crateApiCoreManageWanxiangGrammar({
     required bool installed,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('wanxiangGrammar:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return wanxiangGrammarStatus = WanxiangGrammarStatusDto(
@@ -333,11 +335,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreAddonSchemaInstall({
     required String id,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('addonInstall:$id');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return addonStatus = installedAddon;
@@ -346,7 +348,7 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreAddonSchemaUninstall({
     required String id,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('addonUninstall:$id');
     await emitAddonDeployProgress();
@@ -358,11 +360,11 @@ class FakeCore implements RustLibApi {
   Future<AddonStatusDto> crateApiCoreManageWanxiang({
     required bool installed,
     required String variant,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('wanxiang:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return AddonStatusDto(
@@ -377,11 +379,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeIce({
     required bool installed,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('rimeIce:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeIceStatus = installed ? installedAddon : missingAddon;
@@ -390,11 +392,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeMint({
     required bool installed,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('rimeMint:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeMintStatus = installed ? installedAddon : missingAddon;
@@ -403,11 +405,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeFrost({
     required bool installed,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('rimeFrost:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeFrostStatus = installed ? installedAddon : missingAddon;
@@ -416,11 +418,11 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageRimeLssp({
     required bool installed,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('rimeLssp:$installed');
     await emitAddonDeployProgress();
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
     return rimeLsspStatus = installed ? installedAddon : missingAddon;
@@ -428,9 +430,9 @@ class FakeCore implements RustLibApi {
 
   @override
   Future<void> crateApiCoreDeployAndroid({
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
-    final failure = await androidDeploy(false);
+    final failure = await androidDeploy();
     if (failure.isNotEmpty) throw StateError(failure);
   }
 
@@ -512,7 +514,7 @@ class FakeAndroid extends AndroidHost {
   }
 
   @override
-  Future<Map<String, dynamic>> deployImeData({bool isolated = false}) async {
+  Future<Map<String, dynamic>> deployImeData() async {
     calls.add('deployImeData');
     if (failDeploy) {
       throw PlatformException(code: 'deploy', message: 'deploy failed');

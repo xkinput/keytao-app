@@ -485,29 +485,82 @@ fn unowned_source_conflicts_leave_every_existing_file_untouched() {
 #[tokio::test]
 async fn addon_only_install_update_failure_and_uninstall_use_deploy_transactions() {
     use crate::scheme_host::tests::AddonHost;
+    use keytao_core::{ReloadStamp, RuntimeDirs};
     use std::sync::atomic::Ordering;
+
+    fn stage_deployable(kind: Package, mut receipt: InstallReceipt, version: &str) -> InstallReceipt {
+        let addon = kind.addon();
+        let files = addon
+            .required
+            .iter()
+            .map(|&name| {
+                let content = if let Some(id) = name.strip_suffix(".schema.yaml") {
+                    format!(
+                        "schema: {{schema_id: {id}, name: Fixture {version}}}\n\
+                         engine: {{translators: [table_translator]}}\n\
+                         translator: {{dictionary: {id}, enable_user_dict: false}}\n"
+                    )
+                } else if let Some(id) = name.strip_suffix(".dict.yaml") {
+                    format!("---\nname: {id}\nversion: {version}\n...\n词\tci\n")
+                } else {
+                    "fixture".into()
+                };
+                let path = receipt.work.join("files").join(name);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, content).unwrap();
+                let (sha256, size) = wanxiang::fingerprint(&path).unwrap();
+                InstalledFile {
+                    path: name.into(),
+                    sha256,
+                    size,
+                }
+            })
+            .collect();
+        addon
+            .commit_files(&mut receipt, files, &package(kind, version), "a".repeat(64))
+            .unwrap();
+        receipt
+    }
+
     for kind in [Package::Mint, Package::Frost] {
         let root = TestRoot::new();
         let host = AddonHost::new(root.path());
         let addon = kind.addon();
-        fs::write(root.path().join("rime.lua"), "stale main lua").unwrap();
+        let bundled = host.core.env().resource_dir.join("rime-data");
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(bundled.join("default.yaml"), "schema_list:\n  - schema: keytao\n").unwrap();
+        fs::write(
+            bundled.join("keytao.schema.yaml"),
+            "schema: {schema_id: keytao, name: Fixture fallback}\n\
+             engine: {translators: [table_translator]}\n\
+             translator: {dictionary: keytao, enable_user_dict: false}\n",
+        )
+        .unwrap();
+        fs::write(bundled.join("keytao.dict.yaml"), "---\nname: keytao\nversion: '1'\n...\n词\tci\n").unwrap();
         let status = addon
             .manage(&host.core, true, &host, |receipt| async move {
-                Ok(stage_receipt(kind, receipt, "first"))
+                Ok(stage_deployable(kind, receipt, "first"))
             })
             .await
             .unwrap();
         assert!(status.installed && status.deployed);
         assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
-        assert!(!root.path().join("rime.lua").exists());
+        assert!(!root.path().join("build").exists());
+        assert_eq!(
+            RuntimeDirs::active_package_key(root.path()).as_deref(),
+            Some(addon.id),
+        );
         assert_eq!(
             keytao_core::deployed_schema_id_from_dir(root.path()).as_deref(),
             Some(addon.id)
         );
+        let stored = crate::addon_store::isolated_files(&host.core, addon.id).unwrap();
+        let schema = stored.join(format!("{}.schema.yaml", addon.id));
+        let first_schema = fs::read(&schema).unwrap();
         host.fail_deploys.store(1, Ordering::SeqCst);
         let error = addon
             .manage(&host.core, true, &host, |receipt| async move {
-                Ok(stage_receipt(kind, receipt, "second"))
+                Ok(stage_deployable(kind, receipt, "second"))
             })
             .await
             .unwrap_err();
@@ -516,10 +569,11 @@ async fn addon_only_install_update_failure_and_uninstall_use_deploy_transactions
             addon.status(&host.core, root.path()).unwrap().version,
             "first"
         );
+        assert_eq!(fs::read(&schema).unwrap(), first_schema);
         assert!(!root.path().join(addon.manifest).exists());
         let status = addon
             .manage(&host.core, true, &host, |receipt| async move {
-                Ok(stage_receipt(kind, receipt, "second"))
+                Ok(stage_deployable(kind, receipt, "second"))
             })
             .await
             .unwrap();
@@ -530,25 +584,36 @@ async fn addon_only_install_update_failure_and_uninstall_use_deploy_transactions
                 .iter()
                 .any(|(_, path)| path == Path::new(&format!("{}.schema.yaml", addon.id)))
         );
-        let private = format!("{}.dict.yaml", addon.id);
-        fs::write(root.path().join(&private), "private dictionary").unwrap();
-        fs::write(root.path().join(format!("{}.userdb", addon.id)), "learned").unwrap();
+        let runtime = RuntimeDirs::isolated_user_data_dir(root.path(), addon.id).unwrap();
+        let private = runtime.join(format!("{}.dict.yaml", addon.id));
+        let userdb = runtime.join(format!("{}.userdb", addon.id));
+        fs::write(&private, "private dictionary").unwrap();
+        fs::write(&userdb, "learned").unwrap();
+        let reload = ReloadStamp::path(root.path());
+        let previous_reload = fs::read(&reload).unwrap();
         let status = addon
             .manage(&host.core, false, &host, |_| async { unreachable!() })
             .await
             .unwrap();
         assert!(!status.installed && !status.deployed);
         assert_eq!(
-            fs::read_to_string(root.path().join(private)).unwrap(),
+            fs::read_to_string(private).unwrap(),
             "private dictionary"
         );
         assert_eq!(
-            fs::read_to_string(root.path().join(format!("{}.userdb", addon.id))).unwrap(),
+            fs::read_to_string(userdb).unwrap(),
             "learned"
         );
         assert!(crate::addon_store::public_files(&host.core, addon.id).is_err());
-        assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
-        assert_eq!(keytao_core::deployed_schema_id_from_dir(root.path()), None);
+        assert_ne!(fs::read(reload).unwrap(), previous_reload);
+        assert_eq!(
+            RuntimeDirs::active_package_key(root.path()).as_deref(),
+            Some("builtin/keytao"),
+        );
+        assert_eq!(
+            keytao_core::deployed_schema_id_from_dir(root.path()).as_deref(),
+            Some("keytao"),
+        );
     }
 }
 

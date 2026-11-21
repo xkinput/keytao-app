@@ -1,9 +1,3 @@
-#[cfg(test)]
-pub(crate) use crate::legacy_flat::{cleanup_manifest, finalize_pending, stage_install};
-#[cfg(test)]
-use crate::legacy_flat::{ActiveManifest, sha256_file};
-pub(crate) use crate::legacy_flat::PendingPackage;
-pub use crate::legacy_flat::{record_package, sync_generated};
 use crate::package_store::PackageStore;
 use crate::{Core, CoreError};
 use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine};
@@ -152,6 +146,7 @@ pub async fn download_scheme_package(
     source: &str,
     user_root: &Path,
 ) -> Result<(), CoreError> {
+    crate::package_migration::ensure_before_write(core, user_root).await?;
     download_scheme_package_with(
         core,
         scheme_key,
@@ -454,34 +449,118 @@ pub async fn remove_scheme_package(
     host: &impl crate::scheme_host::SchemeHost,
 ) -> Result<Vec<String>, CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-    if scheme_key == crate::rime_snow::SCHEMA_ID {
-        crate::rime_snow::remove_legacy(core, host).await?;
-    }
     let root = host.user_root().map_err(CoreError::Other)?;
-    let installed = crate::package_activation::read_package(core, &root, scheme_key)?;
-    let retained = if installed.is_some() || core.state().active_scheme.as_deref() == Some(scheme_key) {
-        match crate::legacy_flat::remove_active_package(core, scheme_key, host).await {
-            Ok(retained) => retained,
-            Err(error) => {
-                *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
-                return Err(error);
-            }
-        }
-    } else {
-        Vec::new()
-    };
+    crate::package_migration::ensure_before_write(core, &root).await?;
     let store = PackageStore::new(core);
     store.checked_root()?;
-    if scheme_key == PACKAGE_KEY
-        && keytao_core::engine_choice::read(&root, Some(scheme_key)) == PackageEngine::Libjd
-    {
-        set_package_engine(core, &root, scheme_key, "rime")?;
+    if keytao_core::RuntimeDirs::active_package_key(&root).as_deref() == Some(scheme_key) {
+        let mut installed: BTreeSet<_> = core.state().installed_packages.into_keys().collect();
+        installed.extend(
+            crate::runtime_materialize::installed_addons(&store)?
+                .into_iter()
+                .filter(|key| *key != crate::addon::EASY_EN_ADDON_ID)
+                .map(str::to_owned),
+        );
+        installed.remove(scheme_key);
+        if let Some(replacement) = installed.first() {
+            host.switch_package(replacement).await.map_err(CoreError::Other)?;
+        } else {
+            clear_active_package(&root, scheme_key)?;
+        }
     }
-    store.remove(scheme_key)?;
-    core.update_state(|state| {
-        state.installed_packages.remove(scheme_key);
-    })?;
+    keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
+        if keytao_core::RuntimeDirs::active_package_key(&root).as_deref() == Some(scheme_key) {
+            return Err("请先切换方案包".into());
+        }
+        let namespace = if scheme_key.starts_with("local-") { "local" } else { "cloud" };
+        let projected = safe_path(&root, &format!("scheme-packages/{namespace}/{scheme_key}"))?;
+        let owner = safe_path(&projected, ".keytao-source-projection")?;
+        let source_backup = match fs::read(&owner) {
+            Ok(bytes) if bytes == b"1\n" => {
+                let backup = tempfile::tempdir_in(root.join("runtime"))
+                    .map_err(|error| error.to_string())?;
+                crate::package_fs::rename(&projected, &backup.path().join("source"))
+                    .map_err(|error| error.to_string())?;
+                Some(backup)
+            }
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let removed = (|| {
+            if scheme_key == crate::rime_snow::SCHEMA_ID {
+                crate::addon_store::AddonStore::new(core, &root, scheme_key)?.remove()?;
+            }
+            store.remove(scheme_key).map_err(|error| error.to_string())
+        })();
+        if let Err(error) = removed {
+            if let Some(backup) = source_backup
+                && let Err(restore) = crate::package_fs::rename(&backup.path().join("source"), &projected)
+            {
+                return Err(format!(
+                    "{error}; restore projected sources: {restore}; backup: {}",
+                    backup.keep().display()
+                ));
+            }
+            return Err(error);
+        }
+        core.update_state(|state| {
+            state.installed_packages.remove(scheme_key);
+            if state.active_scheme.as_deref() == Some(scheme_key) {
+                state.active_scheme = None;
+            }
+        })
+        .map_err(|error| error.to_string())
+    })
+    .map_err(CoreError::Other)?;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    crate::runtime_materialize::isolated_packages(core, &root)?;
+    let retained = keytao_core::RuntimeDirs::isolated_user_data_dir(&root, scheme_key)
+        .filter(|path| path.is_dir())
+        .and_then(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf))
+        .map(|path| vec![path.to_string_lossy().into_owned()])
+        .unwrap_or_default();
     Ok(retained)
+}
+
+pub(crate) fn clear_active_package(root: &Path, key: &str) -> Result<(), CoreError> {
+    use keytao_core::RuntimeDirs;
+    keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
+        if RuntimeDirs::active_package_key(root).as_deref() != Some(key) {
+            return Ok(());
+        }
+        let path = safe_path(root, "scheme-packages/active-manifest.json")?;
+        let previous = match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut manifest: serde_json::Map<String, serde_json::Value> = previous
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        manifest.insert("active_package".into(), serde_json::Value::Null);
+        if RuntimeDirs::migration_complete(root) {
+            manifest.insert("runtime_migration_version".into(), 1.into());
+        }
+        fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
+        crate::scheme_files::write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
+        if let Err(error) = keytao_core::ReloadStamp::write(root) {
+            let rollback = match previous {
+                Some(bytes) => crate::scheme_files::write_file_atomic(&path, &bytes),
+                None => fs::remove_file(&path),
+            };
+            return Err(match rollback {
+                Ok(()) => error,
+                Err(rollback) => format!("{error}; restore active package manifest: {rollback}"),
+            });
+        }
+        Ok(())
+    })
+    .map_err(CoreError::Other)
 }
 
 pub(crate) fn validate_relative(relative: &str) -> Result<(), String> {
@@ -528,40 +607,21 @@ pub(crate) fn staging_relative(root: &Path, dirs: &keytao_core::RuntimeDirs) -> 
         .replace('\\', "/")
 }
 
-pub async fn activate_scheme(
-    core: &Core,
-    scheme_key: &str,
-    root: &Path,
-    #[cfg(target_os = "windows")] finish_windows: crate::install::WindowsInstallFinish,
-) -> Result<crate::InstallResult, crate::CoreError> {
-    if keytao_core::RuntimeDirs::isolation_enabled(root) {
-        return Err(CoreError::Other("方案包隔离已启用".into()));
-    }
-    crate::legacy_flat::activate_scheme(
-        core,
-        scheme_key,
-        root,
-        #[cfg(target_os = "windows")]
-        finish_windows,
-    )
-    .await
-}
-
-pub(crate) fn archive_paths(zip_bytes: &[u8], root: &Path) -> Result<BTreeSet<String>, String> {
-    let mut archive =
-        zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|e| e.to_string())?;
-    checked_archive_paths(&mut archive, root)
-}
-
 pub(super) fn checked_archive_paths<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     root: &Path,
 ) -> Result<BTreeSet<String>, String> {
     let mut paths = BTreeSet::new();
+    let mut names = BTreeSet::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(|e| e.to_string())?;
         let relative = file.name().trim_end_matches('/');
         safe_path(root, relative)?;
+        if !names.insert(relative.to_lowercase()) {
+            return Err(format!(
+                "Package contains a case-insensitive duplicate path: {relative}"
+            ));
+        }
         if file
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
@@ -582,7 +642,6 @@ mod removal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::legacy_flat::prepare_active_rime_lua;
     use crate::{AppEnv, CoreEvent, EventSink, Platform};
     use std::{io::Write, sync::Arc};
 
@@ -606,35 +665,45 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn package_selection_rejects_invalid_user_yaml_without_changes() {
+    fn legacy_active_state(core: &Core, key: &str, version: &str) {
+        core.update_state(|state| {
+            state.active_scheme = Some(key.into());
+            state.installed_packages.insert(key.into(), crate::state::InstalledPackage {
+                version: Some(version.into()),
+            });
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_install_stores_fresh_package_without_flat_activation() {
         let dir = tempfile::tempdir().unwrap();
         let core = open_core(dir.path());
         let root = dir.path().join("rime");
-        fs::create_dir_all(&root).unwrap();
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file(
-            "default.custom.yaml",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
-        zip.write_all(b"patch:\n  schema_list:\n    - schema: keytao\n")
-            .unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-        stage_install(
+        fs::create_dir(&root).unwrap();
+        let files = vec![(
+            "alpha.schema.yaml".into(),
+            b"schema: {schema_id: alpha}\n".to_vec(),
+        )];
+        let archive = dir.path().join("download.zip");
+        fs::write(&archive, archive_from_files(&files).unwrap()).unwrap();
+
+        crate::install::install_live_scheme(
             &core,
-            &bytes,
-            BTreeMap::new(),
-            root.to_string_lossy().into_owned(),
+            archive.to_string_lossy().into_owned(),
+            &root,
+            "xmjd",
+            Some("v1"),
         )
+        .await
         .unwrap();
-        for user in ["var: [\n", "- keep\n", "var: keep\n", "var: {}\nvar: {}\n"] {
-            fs::write(root.join("user.yaml"), user).unwrap();
-            assert!(record_package(&core, "keytao", Some("v1"), true).is_err());
-            assert_eq!(fs::read_to_string(root.join("user.yaml")).unwrap(), user);
-            assert!(core.state().active_scheme.is_none());
-            assert!(core.pending_package.lock().unwrap().is_some());
-        }
+
+        assert!(!root.join("alpha.schema.yaml").exists());
+        assert!(!root.join(keytao_core::ACTIVE_SCHEME_MANIFEST).exists());
+        assert!(!root.join("build").exists());
+        assert!(keytao_core::RuntimeDirs::active_package_key(&root).is_none());
+        let (stored, meta) = PackageStore::new(&core).read_files("xmjd").unwrap();
+        assert_eq!(stored, files);
+        assert_eq!(meta.version.as_deref(), Some("v1"));
     }
 
     #[test]
@@ -645,256 +714,9 @@ mod tests {
             .collect();
         fs::write(file.path(), &bytes).unwrap();
         assert_eq!(
-            sha256_file(file.path()).unwrap(),
+            sha256_reader(fs::File::open(file.path()).unwrap()).unwrap(),
             format!("{:x}", Sha256::digest(fs::read(file.path()).unwrap()))
         );
-    }
-
-    #[test]
-    fn deploy_preparation_preserves_lua_snapshots_and_checks_stored_lua_hashes() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = open_core(dir.path());
-        let root = dir.path().join("rime");
-        fs::create_dir_all(&root).unwrap();
-        let files = vec![
-            ("rime.lua".into(), b"helper = require('helper')\n".to_vec()),
-            ("lua/helper.lua".into(), b"return 1\n".to_vec()),
-            ("keytao.schema.yaml".into(), b"schema: {schema_id: keytao}\n".to_vec()),
-            ("default.custom.yaml".into(), b"patch: {schema_list: [{schema: keytao}]}\n".to_vec()),
-            ("large.dict.yaml".into(), vec![b'x'; 1024 * 1024]),
-        ];
-        let archive = archive_from_files(&files).unwrap();
-        store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &archive, &root).unwrap();
-        record_package(&core, "keytao", Some("v1"), true).unwrap();
-        fs::write(root.join("default.custom.yaml"), &files[3].1).unwrap();
-        prepare_active_rime_lua(&core, &root).unwrap();
-        let snapshot = root.join(".keytao-package-lua/keytao/lua/helper.lua");
-        fs::remove_file(PackageStore::new(&core).package_path("keytao").join("files/large.dict.yaml")).unwrap();
-        fs::remove_file(&snapshot).unwrap();
-        prepare_active_rime_lua(&core, &root).unwrap();
-        assert_eq!(fs::read(&snapshot).unwrap(), b"return 1\n");
-        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
-        fs::File::options().write(true).open(&snapshot).unwrap().set_modified(modified).unwrap();
-        prepare_active_rime_lua(&core, &root).unwrap();
-        assert_eq!(fs::metadata(&snapshot).unwrap().modified().unwrap(), modified);
-        let manifest_path = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
-        let manifest = fs::read(&manifest_path).unwrap();
-        for relative in ["rime.lua", "lua/helper.lua"] {
-            let stored = PackageStore::new(&core).package_path("keytao").join("files").join(relative);
-            let original = fs::read(&stored).unwrap();
-            fs::write(&stored, vec![b'x'; original.len()]).unwrap();
-            prepare_active_rime_lua(&core, &root).unwrap();
-            assert_eq!(fs::read(&snapshot).unwrap(), b"return 1\n");
-            assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
-            fs::write(stored, original).unwrap();
-        }
-    }
-
-    #[test]
-    fn deploy_preparation_migrates_legacy_lua_from_the_verified_package() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = open_core(dir.path());
-        let root = dir.path().join("rime");
-        fs::create_dir_all(&root).unwrap();
-        let package_lua = "number_translator = require('xnumber')\r\n";
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("rime.lua", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(package_lua.as_bytes()).unwrap();
-        zip.start_file("keytao.schema.yaml", zip::write::SimpleFileOptions::default()).unwrap();
-        zip.write_all(b"schema: {schema_id: keytao}\n").unwrap();
-        zip.start_file("default.custom.yaml", zip::write::SimpleFileOptions::default()).unwrap();
-        zip.write_all(b"patch: {schema_list: [{schema: keytao}]}\n").unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-        store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &bytes, &root).unwrap();
-        record_package(&core, "keytao", Some("v1"), true).unwrap();
-        fs::write(root.join("default.custom.yaml"), b"patch: {schema_list: [{schema: keytao}]}\n").unwrap();
-        fs::write(root.join("user.yaml"), b"var: {previously_selected_schema: keytao}\n").unwrap();
-        fs::write(
-            root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
-            serde_json::json!({
-                "root": root.canonicalize().unwrap(),
-                "scheme_key": "keytao", "manifest": {},
-            })
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            root.join("rime.lua"),
-            "number_translator = require('translators.xnumber')\n",
-        )
-        .unwrap();
-
-        for _ in 0..2 {
-            crate::deploy::record_result(&core, &root, false).unwrap();
-            assert_eq!(
-                fs::read_to_string(root.join("rime.lua")).unwrap(),
-                package_lua
-            );
-        }
-        let active: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(active["rime_lua"], package_lua);
-
-        let manifest_path = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
-        let manifest_before = fs::read(&manifest_path).unwrap();
-        let archive_path = PackageStore::new(&core)
-            .package_path("keytao")
-            .join("files/rime.lua");
-        for archive_exists in [true, false] {
-            if archive_exists {
-                fs::write(&archive_path, b"corrupt archive").unwrap();
-            } else {
-                fs::remove_file(&archive_path).unwrap();
-            }
-            crate::deploy::record_result(&core, &root, true).unwrap();
-            crate::deploy::record_result(&core, &root, false).unwrap();
-            assert!(!core.state().last_deploy.unwrap().success);
-            assert_eq!(
-                fs::read_to_string(root.join("rime.lua")).unwrap(),
-                package_lua
-            );
-            assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
-        }
-    }
-
-    #[tokio::test]
-    async fn active_package_selects_main_schema_only_after_standalone_addon() {
-        for (previous, existing_user) in [
-            ("easy_en", true),
-            ("wanxiang", false),
-            ("rime_ice", true),
-            ("rime_ice", false),
-            ("rime_mint", true),
-            ("rime_mint", false),
-            ("rime_frost", true),
-            ("rime_frost", false),
-            ("triple_pinyin_lssp", true),
-            ("triple_pinyin_lssp", false),
-            ("keytao", true),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let core = open_core(dir.path());
-            let root = dir.path().join("rime");
-            fs::create_dir_all(&root).unwrap();
-            fs::write(
-                root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
-                serde_json::json!({"scheme_key": previous}).to_string(),
-            )
-            .unwrap();
-            let addon = if previous == "keytao" {
-                "easy_en"
-            } else {
-                previous
-            };
-            let existing_schemas = if previous == "keytao" {
-                "    - schema: keytao\n    - schema: easy_en\n".into()
-            } else {
-                format!("    - schema: {addon}\n")
-            };
-            fs::write(
-                root.join("default.custom.yaml"),
-                format!("patch:\n  schema_list:\n{existing_schemas}"),
-            )
-            .unwrap();
-            fs::write(root.join(format!("{addon}.schema.yaml")), "schema: {}\n").unwrap();
-            let defaults = if previous == "keytao" {
-                "config_version: user\n"
-            } else {
-                include_str!("addon-default.yaml")
-            };
-            fs::write(root.join("default.yaml"), defaults).unwrap();
-            let user =
-                "custom_key: keep\nvar:\n  previously_selected_schema: easy_en\n  option: true\n";
-            if existing_user {
-                fs::write(root.join("user.yaml"), user).unwrap();
-            }
-            let archive = dir.path().join("main.zip");
-            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-            for (name, content) in [
-                (
-                    "default.custom.yaml",
-                    "patch:\n  schema_list:\n    - schema: txjx\n",
-                ),
-                ("txjx.schema.yaml", "schema:\n  schema_id: txjx\n"),
-            ] {
-                zip.start_file(name, zip::write::SimpleFileOptions::default())
-                    .unwrap();
-                zip.write_all(content.as_bytes()).unwrap();
-            }
-            zip.finish().unwrap();
-            crate::install::smart_install(
-                &core,
-                archive.to_string_lossy().into_owned(),
-                root.to_string_lossy().into_owned(),
-                Some("txjx"),
-                #[cfg(target_os = "windows")]
-                |_, _, _, _| Ok(Vec::new()),
-            )
-            .await
-            .unwrap();
-            record_package(&core, "txjx", Some("v1"), true).unwrap();
-            let content = fs::read_to_string(root.join("user.yaml")).unwrap();
-            let value: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
-            assert_eq!(
-                value["var"]["previously_selected_schema"].as_str(),
-                // Switching packages selects the new package's primary schema.
-                Some("txjx")
-            );
-            if existing_user {
-                assert_eq!(value["custom_key"].as_str(), Some("keep"));
-                assert_eq!(value["var"]["option"].as_bool(), Some(true));
-            }
-            assert_eq!(
-                crate::scheme_files::parse_schema_list(
-                    &fs::read_to_string(root.join("default.custom.yaml")).unwrap()
-                ),
-                if previous == "keytao" { vec!["keytao", addon, "txjx"] } else { vec!["txjx", addon] }
-            );
-            assert!(root.join(format!("{addon}.schema.yaml")).is_file());
-            assert_eq!(core.state().active_scheme.as_deref(), Some("txjx"));
-            if previous == "keytao" {
-                assert_eq!(
-                    fs::read_to_string(root.join("default.yaml")).unwrap(),
-                    defaults
-                );
-            } else {
-                assert!(!root.join("default.yaml").exists());
-            }
-        }
-    }
-
-    #[test]
-    fn standalone_transition_preserves_invalid_user_settings_and_pending_receipt() {
-        for content in ["[invalid", "scalar", "var: scalar\n"] {
-            let dir = tempfile::tempdir().unwrap();
-            let core = open_core(dir.path());
-            let root = dir.path().join("rime");
-            fs::create_dir_all(&root).unwrap();
-            let manifest = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
-            let previous = "{\"scheme_key\":\"easy_en\"}";
-            fs::write(&manifest, previous).unwrap();
-            fs::write(
-                root.join("default.custom.yaml"),
-                "patch:\n  schema_list:\n    - schema: txjx\n    - schema: easy_en\n",
-            )
-            .unwrap();
-            fs::write(root.join("user.yaml"), content).unwrap();
-            stage_install(
-                &core,
-                &user_words_package(),
-                BTreeMap::new(),
-                root.to_string_lossy().into_owned(),
-            )
-            .unwrap();
-            assert!(record_package(&core, "txjx", Some("v1"), true).is_err());
-            assert_eq!(fs::read_to_string(root.join("user.yaml")).unwrap(), content);
-            assert_eq!(fs::read_to_string(manifest).unwrap(), previous);
-            assert!(core.pending_package.lock().unwrap().is_some());
-            assert!(core.state().active_scheme.is_none());
-        }
     }
 
     #[test]
@@ -987,7 +809,7 @@ mod tests {
     async fn download_scheme_package_allows_active_key_without_mutating_user_files() {
         let dir = tempfile::tempdir().unwrap();
         let core = open_core(dir.path());
-        crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+        legacy_active_state(&core, "keytao", "v1");
         let root = dir.path().join("rime");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("user.yaml"), "var: {previously_selected_schema: keytao}").unwrap();
@@ -1018,9 +840,9 @@ mod tests {
         fs::create_dir_all(&rime).unwrap();
         fs::write(rime.join("keytao.schema.yaml"), "active schema").unwrap();
         fs::write(rime.join("version.txt"), "v1").unwrap();
-        crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
-        crate::scheme::record_installed_scheme(&core, "xmjd", Some("20261104")).unwrap();
-        crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+        legacy_active_state(&core, "keytao", "v1");
+        legacy_active_state(&core, "xmjd", "20261104");
+        legacy_active_state(&core, "keytao", "v1");
         assert!(!list_installed_packages(&core).unwrap()[1].has_package_zip);
 
         let archive = dir.path().join("local-source.zip");
@@ -1072,47 +894,6 @@ mod tests {
         assert_eq!(meta.version.as_deref(), Some("20261105"));
         assert_eq!(meta.manifest.len(), 1);
         assert!(!PackageStore::new(&core).active_manifest_path().exists());
-    }
-
-    #[tokio::test]
-    async fn download_scheme_package_preserves_pending_receipt() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = open_core(dir.path());
-        let root = dir.path().join("rime");
-        fs::create_dir_all(&root).unwrap();
-        let pending_bytes = user_words_package();
-        let manifest = BTreeMap::from([("txjx.schema.yaml".into(), "pending hash".into())]);
-        stage_install(
-            &core,
-            &pending_bytes,
-            manifest.clone(),
-            root.to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let archive = dir.path().join("download.zip");
-        fs::write(&archive, &pending_bytes).unwrap();
-
-        download_scheme_package_with(
-            &core,
-            "xmjd",
-            &root,
-            || std::future::ready(Ok(("v2".into(), "local".into()))),
-            |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
-        )
-        .await
-        .unwrap();
-
-        assert!(core.pending_package.lock().unwrap().is_some());
-        record_package(&core, "txjx", Some("v1"), true).unwrap();
-        let (stored, metadata) = stored_archive(&core, "txjx").unwrap();
-        assert_eq!(archive_contents(&stored), archive_contents(&pending_bytes));
-        assert_eq!(metadata.manifest, manifest);
-        let active: ActiveManifest = serde_json::from_slice(
-            &fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(active.scheme_key, "txjx");
-        assert_eq!(active.manifest, manifest);
     }
 
     #[tokio::test]
@@ -1265,41 +1046,11 @@ mod tests {
         .unwrap();
     }
 
-    fn assert_reconciliation_report(core: &Core, root: &Path) {
-        assert_eq!(
-            fs::read_to_string(root.join("txjx.user.dict.yaml")).unwrap(),
-            "---\nname: txjx.user\n...\n# Keep this comment\nCustom\tbb\nMine\tcc\n"
-        );
-        let report = crate::user_words::take_user_words_report(core, "txjx").unwrap();
-        assert_eq!(report.removed.len(), 1);
-        assert_eq!(report.removed[0].word, "Official");
-        assert_eq!(report.conflicts.len(), 1);
-        assert_eq!(report.conflicts[0].entry.word, "Custom");
-    }
-
-    #[test]
-    fn active_package_record_reconciles_once_and_retains_report() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = open_core(dir.path());
-        let root = dir.path().join("rime");
-        write_reconciliation_words(&root);
-        stage_install(
-            &core,
-            &user_words_package(),
-            BTreeMap::new(),
-            root.to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        record_package(&core, "txjx", Some("v2"), true).unwrap();
-        record_package(&core, "txjx", Some("v2"), true).unwrap();
-        assert_reconciliation_report(&core, &root);
-    }
-
     #[tokio::test]
     async fn inactive_package_download_reconciles_without_changing_active_scheme() {
         let dir = tempfile::tempdir().unwrap();
         let core = open_core(dir.path());
-        record_package(&core, "keytao", Some("v1"), true).unwrap();
+        legacy_active_state(&core, "keytao", "v1");
         let root = dir.path().join("rime");
         write_reconciliation_words(&root);
         let original = fs::read(root.join("txjx.user.dict.yaml")).unwrap();
@@ -1334,7 +1085,7 @@ mod tests {
             ("txjx", "20261104"),
             ("xmjd", "20261104"),
         ] {
-            crate::scheme::record_installed_scheme(&core, scheme_key, Some(version)).unwrap();
+            legacy_active_state(&core, scheme_key, version);
         }
         let mut fetched = Vec::new();
         let updates = check_scheme_updates_with(&core, |scheme_key| {

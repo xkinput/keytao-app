@@ -67,13 +67,8 @@ pub(crate) mod tests {
                 fail_deploys: AtomicUsize::new(0),
             }
         }
-    }
 
-    impl SchemeHost for AddonHost {
-        fn user_root(&self) -> Result<PathBuf, String> {
-            Ok(self.root.clone())
-        }
-        async fn deploy(&self) -> Result<(), String> {
+        fn start_deployment(&self) -> Result<(), String> {
             self.deploys.fetch_add(1, Ordering::SeqCst);
             if self
                 .fail_deploys
@@ -82,8 +77,16 @@ pub(crate) mod tests {
             {
                 return Err("fixture deploy failure".into());
             }
-            crate::legacy_flat::prepare_active_rime_lua(&self.core, &self.root)
-                .map_err(|e| e.to_string())?;
+            Ok(())
+        }
+    }
+
+    impl SchemeHost for AddonHost {
+        fn user_root(&self) -> Result<PathBuf, String> {
+            Ok(self.root.clone())
+        }
+        async fn deploy(&self) -> Result<(), String> {
+            self.start_deployment()?;
             let config =
                 std::fs::read(self.root.join("default.custom.yaml")).map_err(|e| e.to_string())?;
             let schemas =
@@ -112,7 +115,13 @@ pub(crate) mod tests {
         }
         #[cfg(target_os = "macos")]
         async fn deploy_package(&self, key: &str) -> Result<(), String> {
+            self.start_deployment()?;
             crate::deploy::deploy_package(&self.core, &self.root, key).await
+        }
+        #[cfg(target_os = "macos")]
+        async fn switch_package(&self, key: &str) -> Result<(), String> {
+            self.start_deployment()?;
+            crate::deploy::switch_package(&self.core, &self.root, key).await
         }
         fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
             self.reloads.fetch_add(1, Ordering::SeqCst);

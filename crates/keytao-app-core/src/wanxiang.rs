@@ -295,7 +295,7 @@ pub fn grammar_status(root: &Path) -> Result<GrammarStatus, CoreError> {
 }
 
 pub fn grammar_status_for(core: &Core, root: &Path) -> Result<GrammarStatus, CoreError> {
-    let relative = if RuntimeDirs::isolation_enabled(root) {
+    let relative = if !RuntimeDirs::needs_migration(root) {
         ISOLATED_GRAMMAR_FILE
     } else {
         GRAMMAR_FILE
@@ -744,6 +744,7 @@ pub struct InstallReceipt {
 }
 
 impl InstallReceipt {
+    #[cfg(test)]
     pub(crate) fn schema_selection(&self, id: &str) -> Result<(Vec<String>, Vec<String>), String> {
         match &self.store {
             Some(store) => store.schema_selection(&self.work.join("files")),
@@ -786,38 +787,8 @@ impl InstallReceipt {
     }
 
     pub(crate) fn attach_store(&mut self, core: &Core, id: &str) -> Result<(), String> {
-        if RuntimeDirs::isolation_enabled(&self.root) {
-            self.store = Some(crate::addon_store::AddonStore::new(core, &self.root, id)?);
-            self.isolated = true;
-            return Ok(());
-        }
-        crate::addon_store::migrate(core, &self.root).map_err(|e| e.to_string())?;
-        let addons = crate::package_activation::addon_ownership(core, &self.root)
-            .map_err(|e| e.to_string())?;
-        let own: BTreeSet<_> = addons
-            .iter()
-            .filter(|(_, owner)| *owner == id)
-            .map(|(path, _)| path.clone())
-            .collect();
-        self.other_owners = addons
-            .into_iter()
-            .filter(|(_, owner)| owner != id)
-            .collect();
-        for active in crate::package_activation::read_all(core, &self.root).map_err(|e| e.to_string())?.into_values() {
-            for file in active.owned {
-                self.other_owners
-                    .entry(file.path)
-                    .or_insert_with(|| active.key.clone());
-            }
-            for file in active.generated {
-                if !own.contains(&file.path) {
-                    self.other_owners
-                        .entry(file.path)
-                        .or_insert_with(|| active.key.clone());
-                }
-            }
-        }
         self.store = Some(crate::addon_store::AddonStore::new(core, &self.root, id)?);
+        self.isolated = true;
         Ok(())
     }
 
@@ -912,9 +883,14 @@ impl InstallReceipt {
                 .map_err(|error| error.to_string())?;
             let fallback = packages
                 .iter()
-                .find(|package| package.package_key != id && package.ready)
-                .map_or("builtin/keytao", |package| package.package_key.as_str());
-            host.switch_package(fallback).await?;
+                .find(|package| package.package_key != id);
+            if let Some(package) = fallback {
+                host.switch_package(&package.package_key).await?;
+            } else if crate::deploy::deploy_shared_data_dir(core, &root).join("default.yaml").is_file() {
+                host.switch_package("builtin/keytao").await?;
+            } else {
+                crate::packages::clear_active_package(&root, id).map_err(|error| error.to_string())?;
+            }
         }
         keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
             if active() {
@@ -1710,10 +1686,7 @@ fn uninstall_receipt(mut receipt: InstallReceipt) -> Result<InstallReceipt, Stri
 #[path = "wanxiang_tests.rs"]
 mod tests;
 
-use crate::{
-    Core, CoreError, CoreEvent, addon::write_schema_list_transaction, events::InstallProgress,
-    scheme_host::SchemeHost,
-};
+use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme_host::SchemeHost};
 
 pub async fn manage_grammar(
     core: &std::sync::Arc<Core>,
@@ -1725,6 +1698,7 @@ pub async fn manage_grammar(
             return Err("当前平台未加载语法模型插件".into());
         }
         let root = host.user_root()?;
+        crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         if !wanxiang_status(core, &root)
             .map_err(|e| e.to_string())?
             .installed
@@ -1772,57 +1746,7 @@ pub async fn manage_grammar(
             installed,
             grammar_supported(),
         )?;
-        if receipt.is_isolated() {
-            receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
-            return finish_grammar(core, &root, installed);
-        }
-        #[cfg(windows)]
-        let mut public_update = None;
-        let deployment = async {
-            #[cfg(windows)]
-            let public_source_warning = {
-                match crate::windows_public_schemas::update_public_schemas(|| {
-                    host.publish_wanxiang_sources(&receipt.public_source_files())
-                }) {
-                    Ok(update) => {
-                        public_update = Some(update);
-                        None
-                    }
-                    Err(error) => Some(crate::windows_public_schemas::public_warning(
-                        "wanxiang-grammar-public-sources",
-                        &error,
-                    )),
-                }
-            };
-            host.deploy().await?;
-            #[cfg(windows)]
-            if let Some(warning) = public_source_warning {
-                crate::deploy::emit_legacy_progress(
-                    core,
-                    keytao_core::DeployStep::Done,
-                    format!("系统搜索框方案未更新：{warning}"),
-                );
-            }
-            if !status_from_manifest(&root, receipt_manifest(&receipt)?).deployed {
-                return Err("万象拼音部署产物缺失".to_string());
-            }
-            receipt.commit_store(true)?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = deployment {
-            let rollback = receipt.rollback();
-            #[cfg(windows)]
-            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
-            rollback.map_err(|restore| format!("{error}；恢复语法模型失败：{restore}"))?;
-            #[cfg(windows)]
-            public_rollback.map_err(|restore| format!("{error}；恢复公共方案失败：{restore}"))?;
-            host.deploy()
-                .await
-                .map_err(|restore| format!("{error}；已恢复文件，请重新部署：{restore}"))?;
-            return Err(error);
-        }
-        receipt.finish()?;
+        receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
         finish_grammar(core, &root, installed)
     }
     .await;
@@ -1883,109 +1807,16 @@ where
     let result: Result<_, String> = async {
         variant_source(&variant)?;
         let root = host.user_root()?;
+        crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, SCHEMA_ID)?;
-        if receipt.is_isolated() {
-            if installed {
-                let receipt = install_package(receipt, variant).await?;
-                receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
-            } else {
-                receipt.uninstall_isolated(core, SCHEMA_ID, host).await?;
-                receipt.finish()?;
-            }
-            return finish_wanxiang(core, &root, installed);
-        }
-        let removed_sources = if installed {
-            Vec::new()
+        if installed {
+            let receipt = install_package(receipt, variant).await?;
+            receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
         } else {
-            crate::addon_store::public_files(core, SCHEMA_ID)?
-                .into_iter()
-                .map(|(source, relative)| {
-                    fs::read(source)
-                        .map(|bytes| (relative.to_string_lossy().replace('\\', "/"), bytes))
-                        .map_err(|e| e.to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut receipt = if installed {
-            install_package(receipt, variant).await?
-        } else {
-            uninstall_receipt(receipt)?
-        };
-        #[cfg(target_os = "windows")]
-        let mut public_update = None;
-        let deploy_result = async {
-            write_schema_list_transaction(
-                &mut receipt,
-                SCHEMA_ID,
-                installed,
-                &crate::addon::shared_data_dir(core, &root),
-            )?;
-            #[cfg(target_os = "windows")]
-            let public_source_warning = {
-                match crate::windows_public_schemas::update_public_schemas(|| {
-                    if installed {
-                        host.publish_wanxiang_sources(&receipt.public_source_files())?;
-                        crate::windows_public_schemas::publish_schema_selection(&root)
-                    } else {
-                        host.remove_public_schema(SCHEMA_ID, &[])
-                    }
-                }) {
-                    Ok(update) => {
-                        public_update = Some(update);
-                        None
-                    }
-                    Err(error) => Some(crate::windows_public_schemas::public_warning(
-                        "wanxiang-public-sources",
-                        &error,
-                    )),
-                }
-            };
-            if installed || keytao_core::schema_install_state(&root).installed {
-                host.deploy().await?;
-            } else {
-                let _ = host.write_reload_stamp(&root)?;
-            }
-            #[cfg(target_os = "windows")]
-            if let Some(warning) = public_source_warning {
-                crate::deploy::emit_legacy_progress(
-                    core,
-                    keytao_core::DeployStep::Done,
-                    format!("系统搜索框方案未更新：{warning}"),
-                );
-            }
-            if installed && !status_from_manifest(&root, receipt_manifest(&receipt)?).deployed {
-                return Err("万象拼音部署产物缺失".to_string());
-            }
-            if !installed {
-                let remaining = crate::managed_custom::active_schema_ids_from_default(&root)?;
-                crate::package_artifacts::cleanup(&root, &removed_sources, &remaining)
-                    .map_err(|e| e.to_string())?;
-            }
-            receipt.commit_store(installed)?;
-            Ok(())
+            receipt.uninstall_isolated(core, SCHEMA_ID, host).await?;
+            receipt.finish()?;
         }
-        .await;
-        if let Err(error) = deploy_result {
-            let rollback = receipt.rollback();
-            #[cfg(target_os = "windows")]
-            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
-            #[cfg(target_os = "windows")]
-            let error = match &public_rollback {
-                Ok(()) => error,
-                Err(restore) => format!("{error}；恢复公共方案失败：{restore}"),
-            };
-            if let Err(rollback_error) = rollback {
-                return Err(format!("{error}；恢复词库失败：{rollback_error}"));
-            }
-            #[cfg(target_os = "windows")]
-            public_rollback.map_err(|_| error.clone())?;
-            if let Err(restore_error) = host.deploy().await {
-                return Err(format!("{error}；已恢复文件，请重新部署：{restore_error}"));
-            }
-            return Err(error);
-        }
-        receipt.finish()?;
         finish_wanxiang(core, &root, installed)
     }
     .await;
@@ -2008,7 +1839,7 @@ fn finish_wanxiang(core: &Core, root: &Path, installed: bool) -> Result<Status, 
 
 pub fn wanxiang_status(core: &Core, root: &Path) -> Result<Status, CoreError> {
     let manifest = stored_manifest(core, root).map_err(CoreError::Other)?;
-    if RuntimeDirs::isolation_enabled(root) {
+    if !RuntimeDirs::needs_migration(root) {
         let source =
             crate::addon_store::isolated_files(core, SCHEMA_ID).map_err(CoreError::Other)?;
         let installed = files_installed(&source, manifest.as_ref());

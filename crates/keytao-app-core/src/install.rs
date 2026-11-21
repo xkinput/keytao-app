@@ -1,18 +1,11 @@
-#[cfg(any(target_os = "android", test))]
 use crate::scheme_types::VerifyEntry;
-use crate::{
-    Core, CoreError, legacy_flat::install::smart_install_archive, scheme_types::InstallResult,
-};
+use crate::{Core, CoreError, scheme_types::InstallResult};
 use serde::Deserialize;
-#[cfg(target_os = "android")]
-use std::path::Path;
-
-#[cfg(test)]
-pub(crate) use crate::legacy_flat::install::{
-    collect_rime_package_build_id, smart_install_files, write_package_file,
+use std::{
+    fs::{self, File},
+    io::{BufReader, Read},
+    path::Path,
 };
-#[cfg(target_os = "windows")]
-pub use crate::legacy_flat::install::{WindowsInstallFinish, finish_windows_scheme_install};
 
 pub(crate) fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
@@ -136,21 +129,166 @@ pub(crate) fn merge_local_default_custom(
     Ok(merge_default_custom(Some(existing), &incoming))
 }
 
-pub async fn smart_install(
+pub async fn install_live_scheme(
     core: &Core,
     zip_path: String,
-    dest_path: String,
-    scheme_key: Option<&str>,
-    #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
+    root: &Path,
+    scheme_key: &str,
+    version: Option<&str>,
 ) -> Result<InstallResult, CoreError> {
-    smart_install_archive(
+    crate::package_migration::ensure_before_write(core, root).await?;
+    crate::packages::store_cloud_archive_reader(
         core,
-        zip_path,
-        dest_path,
         scheme_key,
-        #[cfg(target_os = "windows")]
-        finish_windows,
-    )
+        version,
+        "official",
+        None,
+        BufReader::new(File::open(&zip_path)?),
+        root,
+        None,
+    )?;
+    emit_progress(core, "done", 100, "安装完成！".into());
+    Ok(InstallResult {
+        merged_schemas: Vec::new(),
+        logs: Vec::new(),
+        verify: Vec::new(),
+    })
+}
+
+fn emit_progress(core: &Core, stage: &str, percent: u32, message: String) {
+    core.emit(crate::CoreEvent::InstallProgress(
+        crate::events::InstallProgress {
+            stage: stage.into(),
+            percent,
+            message,
+        },
+    ));
+}
+
+/// Export for another Rime installation without changing the KeyTao package store.
+pub fn export_scheme(
+    core: &Core,
+    zip_path: String,
+    root: &Path,
+) -> Result<InstallResult, CoreError> {
+    let mut archive = zip::ZipArchive::new(BufReader::new(File::open(zip_path)?))
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    if archive.len() > 10_000 {
+        return Err(CoreError::Other("方案包文件过多".into()));
+    }
+    let entries =
+        crate::packages::checked_archive_paths(&mut archive, root).map_err(CoreError::Other)?;
+    let mut files = Vec::new();
+    let mut remaining = 512 * 1024 * 1024u64;
+    let mut merged_schemas = Vec::new();
+    for relative in entries {
+        let mut entry = archive
+            .by_name(&relative)
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        let expected = entry.size();
+        if expected > remaining {
+            return Err(CoreError::Other("方案包解压后过大".into()));
+        }
+        let mut content = Vec::new();
+        entry
+            .by_ref()
+            .take(expected + 1)
+            .read_to_end(&mut content)?;
+        if content.len() as u64 != expected {
+            return Err(CoreError::Other("方案包文件大小不符".into()));
+        }
+        remaining -= expected;
+        if is_default_custom(&relative) {
+            let existing = ["default.custom.yaml", "default-custom.yaml"]
+                .into_iter()
+                .map(|name| crate::packages::safe_path(root, name).map_err(CoreError::Other))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .find(|path| path.is_file())
+                .map(fs::read_to_string)
+                .transpose()?;
+            let text = std::str::from_utf8(&content)
+                .map_err(|error| CoreError::Other(error.to_string()))?;
+            let (merged, schemas) = merge_default_custom(existing.as_deref(), text);
+            content = merged.into_bytes();
+            merged_schemas = schemas;
+        } else if crate::package_activation::user_file(&relative)
+            && !is_protected_user_file(&relative)
+        {
+            continue;
+        }
+        files.push((relative, content));
+    }
+    let mut logs = Vec::new();
+    let mut verify = Vec::new();
+    let total = files.len();
+    for (index, (relative, content)) in files.into_iter().enumerate() {
+        write_export_file(root, &relative, &content, &mut logs).map_err(CoreError::Other)?;
+        if is_default_custom(&relative) || relative.ends_with(".yaml") || relative.ends_with(".lua")
+        {
+            let path = crate::packages::safe_path(root, &relative).map_err(CoreError::Other)?;
+            let ok = path.is_file();
+            verify.push(VerifyEntry {
+                path: relative.clone(),
+                ok,
+                note: if ok {
+                    "文件存在"
+                } else {
+                    "文件不存在"
+                }
+                .into(),
+            });
+        }
+        emit_progress(
+            core,
+            "extracting",
+            61 + ((index + 1) * 39 / total) as u32,
+            format!("正在导出 {relative}"),
+        );
+    }
+    emit_progress(core, "done", 100, "导出完成".into());
+    Ok(InstallResult {
+        merged_schemas,
+        logs,
+        verify,
+    })
+}
+
+pub(crate) fn write_export_file(
+    root: &Path,
+    relative: &str,
+    content: &[u8],
+    logs: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = crate::packages::safe_path(root, relative)?;
+    let existing = match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(crate::package_fs::context("读取文件", &path, error).to_string()),
+    };
+    let decision = prepare_protected_file_install(relative, existing.as_deref());
+    if let Some(backup_name) = &decision.backup_name {
+        use std::io::Write;
+        let backup = root.join(backup_name);
+        let result = File::create_new(backup).and_then(|mut file| {
+            file.write_all(existing.as_deref().unwrap_or_default())?;
+            file.sync_all()
+        });
+        if let Err(error) = result {
+            logs.push(format!(
+                "{}; backup failed: {error}; left untouched",
+                decision.log.as_deref().unwrap_or_default()
+            ));
+            return Ok(());
+        }
+    }
+    logs.extend(decision.log);
+    if decision.write && existing.as_deref() != Some(content) {
+        fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+        crate::scheme_files::write_file_atomic(&path, content)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
@@ -164,37 +302,8 @@ pub async fn prepare_android_install(
     crate::download::download_to_temp(core, url).await
 }
 
-#[cfg(any(target_os = "android", test))]
-pub fn finish_android_install(
-    core: &Core,
-    result: &serde_json::Value,
-    scheme_key: Option<&str>,
-) -> Result<InstallResult, CoreError> {
-    if result["coreInstall"].as_bool() == Some(true) {
-        let archive = result["packageZipPath"]
-            .as_str()
-            .ok_or_else(|| CoreError::Other("Android installation is missing its archive".into()))?;
-        let root = result["packageRoot"]
-            .as_str()
-            .ok_or_else(|| CoreError::Other("Android installation is missing its root".into()))?;
-        if !std::path::Path::new(root).is_absolute() {
-            return Err(CoreError::Other("Android installation requires an absolute root".into()));
-        }
-        return smart_install_archive(
-            core,
-            archive.into(),
-            root.into(),
-            scheme_key,
-            #[cfg(target_os = "windows")]
-            finish_windows_scheme_install,
-        );
-    }
-    // SAF exports are outside the live root and do not create an activation.
-    Ok(install_result_from_value(result))
-}
-
-#[cfg(any(target_os = "android", test))]
-fn install_result_from_value(result: &serde_json::Value) -> InstallResult {
+#[cfg(target_os = "android")]
+pub fn finish_android_export(result: &serde_json::Value) -> InstallResult {
     let merged_schemas = result["mergedSchemas"]
         .as_array()
         .map(|arr| {

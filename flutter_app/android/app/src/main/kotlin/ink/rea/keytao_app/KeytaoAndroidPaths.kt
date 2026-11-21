@@ -240,6 +240,7 @@ object KeytaoAndroidPaths {
     }
 
     private fun restoreLegacyLocalManifest(dataDir: File, root: File) {
+        if (File(root, "runtime/.keytao-migration.json").isFile) return
         val marker = File(root, ".keytao-active-scheme.json")
         if (marker.exists()) return
         runCatching {

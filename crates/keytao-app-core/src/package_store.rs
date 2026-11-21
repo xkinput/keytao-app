@@ -14,6 +14,7 @@ use std::{
 
 pub(crate) enum Staging {
     Metadata,
+    #[cfg(test)]
     Pending,
     #[cfg(test)]
     ActiveManifest,
@@ -235,11 +236,6 @@ impl<'a> PackageStore<'a> {
         safe_path(&self.checked_root()?, "activation.json").map_err(CoreError::Other)
     }
 
-    pub(crate) fn checked_active_manifest_path(&self) -> Result<PathBuf, CoreError> {
-        self.checked_root()?;
-        safe_path(&self.root(), "active-manifest.json").map_err(CoreError::Other)
-    }
-
     fn staging_root(&self) -> Result<PathBuf, CoreError> {
         self.checked_root()?;
         let path = safe_path(&self.root(), ".staging").map_err(CoreError::Other)?;
@@ -250,6 +246,7 @@ impl<'a> PackageStore<'a> {
     pub(crate) fn staging_file(&self, staging: Staging) -> std::io::Result<StagingFile> {
         let prefix = match staging {
             Staging::Metadata => ".meta-",
+            #[cfg(test)]
             Staging::Pending => ".pending-",
             #[cfg(test)]
             Staging::ActiveManifest => ".active-",
@@ -356,6 +353,7 @@ impl<'a> PackageStore<'a> {
         Self::read_files_at_inner(path, key, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_lua_files_at(
         path: &Path,
         key: &str,
@@ -420,6 +418,7 @@ impl<'a> PackageStore<'a> {
         Self::read_files_at(&self.checked_package_path(key)?, key)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_lua_files(
         &self,
         key: &str,
@@ -856,23 +855,6 @@ impl<'a> PackageStore<'a> {
         self.checked_root()?;
         let core = self.core;
         let state = core.state();
-        let (activated, current_schema) = match fs::read(self.checked_activation_path()?) {
-            Ok(bytes) => {
-                let mut record: crate::package_activation::Activation = serde_json::from_slice(&bytes)?;
-                let current_schema = keytao_core::current_schema_id_from_dir(Path::new(&record.root));
-                let mut records = record.activations.take().unwrap_or_default();
-                if !record.key.is_empty() { records.entry(record.key.clone()).or_insert(record); }
-                (records, current_schema)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Default::default(), None),
-            Err(error) => return Err(error.into()),
-        };
-        let current_package = match current_schema.as_deref() {
-            Some(schema) => activated.iter()
-                .find(|(_, record)| record.manifest.contains_key(&format!("{schema}.schema.yaml")))
-                .map(|(key, _)| key),
-            None => state.active_scheme.as_ref(),
-        };
         Ok(state.installed_packages.into_iter().filter_map(|(scheme_key, package)| {
             let has_package_zip = self.checked_package_path(&scheme_key).is_ok_and(|path| path.is_dir());
             let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
@@ -884,14 +866,14 @@ impl<'a> PackageStore<'a> {
                     }
                 }
             } else { None };
-            let active = activated.contains_key(&scheme_key) || state.active_scheme.as_deref() == Some(&scheme_key);
+            let active = state.active_scheme.as_deref() == Some(&scheme_key);
             let engine = meta.as_ref().map_or(PackageEngine::Rime, |meta| meta.engine);
             Some(InstalledPackageInfo {
                 logo_path: if has_package_zip {
                     crate::packages::package_logos::package_logo_path(core, &scheme_key).map(|path| path.to_string_lossy().into_owned())
                 } else { None },
                 active,
-                in_use: active && current_package == Some(&scheme_key),
+                in_use: active,
                 supports_user_words: engine.is_rime() && crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false

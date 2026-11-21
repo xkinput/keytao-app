@@ -117,10 +117,7 @@ impl AddonStore {
 
     pub(crate) fn read_manifest(&self) -> Result<Option<Vec<u8>>, String> {
         let _guard = operation();
-        if RuntimeDirs::isolation_enabled(&self.root) {
-            return self.read_isolated_manifest();
-        }
-        self.read_manifest_inner()
+        self.read_isolated_manifest()
     }
 
     pub(crate) fn source_dir(&self) -> Result<PathBuf, String> {
@@ -137,6 +134,10 @@ impl AddonStore {
         }
         let stored = read_stored(&self.destination, &self.id).map_err(|error| error.to_string())?;
         let mut manifest = stored.addon_manifest.ok_or("Add-on manifest is missing")?;
+        if self.id == "wanxiang" && stored.grammar.is_none() {
+            manifest["grammar"] = serde_json::Value::Null;
+            manifest["includes_grammar"] = false.into();
+        }
         let names: BTreeSet<_> = parse_manifest(&manifest, &self.id)?
             .into_iter()
             .map(|file| file.path)
@@ -259,8 +260,12 @@ impl AddonStore {
         modified: &[String],
         isolated: bool,
     ) -> Result<(), CoreError> {
-        let value: serde_json::Value = serde_json::from_slice(manifest)?;
+        let mut value: serde_json::Value = serde_json::from_slice(manifest)?;
         let manifest_files = parse_manifest(&value, &self.id).map_err(CoreError::Other)?;
+        if modified.iter().any(|path| path == GRAMMAR) {
+            value["grammar"] = serde_json::Value::Null;
+            value["includes_grammar"] = false.into();
+        }
         fs::create_dir_all(&self.staging)?;
         let stage = tempfile::tempdir_in(&self.staging)?;
         let files_root = stage.path().join("files");
@@ -590,35 +595,18 @@ pub(crate) fn manifest(core: &Core, root: &Path, id: &str) -> Result<Option<Vec<
     if !root.try_exists().map_err(|e| e.to_string())? {
         return Ok(None);
     }
-    let isolated = RuntimeDirs::isolation_enabled(root);
-    let migrated = root.join(RuntimeDirs::MIGRATION_MARKER).is_file();
-    if isolated || migrated {
-        let addon = AddonStore::read_only(core, root, id)?;
-        let legacy = || {
-            let name = IDS
-                .iter()
-                .zip(LEGACY_RECEIPTS)
-                .find_map(|(&key, &name)| (key == id).then_some(name))
-                .ok_or("Unknown add-on package")?;
-            legacy_receipt(root, id, name).map_err(|error| error.to_string())
-        };
-        if !isolated && let Some(receipt) = legacy()? {
-            return Ok(Some(receipt));
-        }
-        let stored = if isolated {
-            addon.read_isolated_manifest()?
-        } else {
-            addon.read_manifest_inner()?
-        };
-        if stored.is_none() && !migrated {
-            return legacy();
-        }
+    let addon = AddonStore::read_only(core, root, id)?;
+    let stored = addon.read_isolated_manifest()?;
+    if stored.is_some() || !RuntimeDirs::needs_migration(root) {
         return Ok(stored);
     }
-    migrate_inner(core, root).map_err(|e| e.to_string())?;
-    AddonStore::new_inner(core, root, id)?.read_manifest_inner()
+    let name = IDS.iter().zip(LEGACY_RECEIPTS)
+        .find_map(|(&key, &name)| (key == id).then_some(name))
+        .ok_or("Unknown add-on package")?;
+    legacy_receipt(root, id, name).map_err(|error| error.to_string())
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
     let _guard = operation();
     if !root.try_exists()? {
@@ -640,17 +628,6 @@ pub(crate) fn ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, Str
         }
     }
     Ok(owned)
-}
-
-pub(crate) fn report_paths(core: &Core, root: &Path) -> Result<BTreeSet<String>, CoreError> {
-    let _guard = operation();
-    if !root.try_exists()? {
-        return Ok(BTreeSet::new());
-    }
-    if !RuntimeDirs::isolation_enabled(root) && !root.join(RuntimeDirs::MIGRATION_MARKER).is_file() {
-        migrate_inner(core, root)?;
-    }
-    read_report_paths(core, root)
 }
 
 pub(crate) fn read_report_paths(core: &Core, root: &Path) -> Result<BTreeSet<String>, CoreError> {
@@ -714,6 +691,7 @@ pub(crate) fn isolated_ready(core: &Core, root: &Path, id: &str) -> bool {
         .is_some_and(|dirs| keytao_core::package_build_ready(root, &dirs))
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn public_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     Ok(source_files(core, id)?.into_iter().filter(|(_, relative)| !matches!(relative.to_str(), Some("default.yaml" | "default.custom.yaml" | "default-custom.yaml"))).collect())
 }
@@ -729,6 +707,7 @@ pub(crate) fn source_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBu
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn migrate(core: &Core, root: &Path) -> Result<(), CoreError> {
     let _guard = operation();
     migrate_inner(core, root)?;
@@ -800,6 +779,7 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn snow_activation(core: &Core, root: &Path) -> Result<Option<Activation>, CoreError> {
     let _guard = operation();
     let store = PackageStore::new(core);
@@ -815,6 +795,7 @@ pub(crate) fn snow_activation(core: &Core, root: &Path) -> Result<Option<Activat
     addon.activation().map_err(CoreError::Other)
 }
 
+#[cfg(test)]
 pub(crate) fn take_over_snow(core: &Core, root: &Path) -> Result<Vec<String>, CoreError> {
     let Some(mut active) = snow_activation(core, root)? else {
         return Ok(Vec::new());
@@ -839,30 +820,17 @@ pub(crate) fn take_over_snow(core: &Core, root: &Path) -> Result<Vec<String>, Co
     Ok(logs)
 }
 
-pub(crate) fn finish_snow_takeover(core: &Core, root: &Path) -> Result<(), CoreError> {
-    if snow_activation(core, root)?
-        .is_some_and(|active| active.owned.is_empty() && active.generated.is_empty())
-    {
-        AddonStore::new(core, root, crate::rime_snow::SCHEMA_ID)
-            .map_err(CoreError::Other)?
-            .remove()
-            .map_err(CoreError::Other)?;
+#[cfg(any(target_os = "windows", test))]
+fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
+    if RuntimeDirs::needs_migration(root) {
+        migrate_legacy(core, root)?;
     }
     Ok(())
 }
 
-fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
-    let isolated = keytao_core::RuntimeDirs::isolation_enabled(root)
-        && root.join(keytao_core::RuntimeDirs::MIGRATION_MARKER).is_file();
-    if isolated {
-        return Ok(());
-    }
-    migrate_legacy(core, root, false)
-}
-
 pub(crate) fn project_legacy_for_isolation(core: &Core, root: &Path) -> Result<(), CoreError> {
     let _guard = operation();
-    migrate_legacy(core, root, true)
+    migrate_legacy(core, root)
 }
 
 fn legacy_receipt(root: &Path, id: &str, name: &str) -> Result<Option<Vec<u8>>, CoreError> {
@@ -900,21 +868,13 @@ pub(crate) fn unprojected_legacy_addons(
     Ok(addons)
 }
 
-fn migrate_legacy(core: &Core, root: &Path, preserve_legacy: bool) -> Result<(), CoreError> {
+fn migrate_legacy(core: &Core, root: &Path) -> Result<(), CoreError> {
     if !root.try_exists()? {
         return Ok(());
     }
     let store = PackageStore::new(core);
-    let addons = safe_path(&store.checked_root()?, "addons").map_err(CoreError::Other)?;
-    let marker = safe_path(&addons, ".layout-v1").map_err(CoreError::Other)?;
     for id in IDS {
         store.recover_addon(id)?;
-    }
-    if !preserve_legacy && marker.try_exists()? && !root.join(".keytao-rime-snow.json").try_exists()? {
-        return Ok(());
-    }
-    if !preserve_legacy {
-        fs::create_dir_all(&addons)?;
     }
     let mut claimed = BTreeSet::new();
     for active in crate::package_activation::read_all(core, root)?.into_values() {
@@ -941,17 +901,8 @@ fn migrate_legacy(core: &Core, root: &Path, preserve_legacy: bool) -> Result<(),
             );
         }
     }
-    let mut complete = true;
     for (id, name) in IDS.iter().zip(LEGACY_RECEIPTS) {
-        let bytes = match legacy_receipt(root, id, name) {
-            Ok(bytes) => bytes,
-            Err(error @ CoreError::Other(_)) if !preserve_legacy => {
-                tracing::warn!(addon = *id, %error, "Legacy add-on manifest retained for retry");
-                complete = false;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
+        let bytes = legacy_receipt(root, id, name)?;
         let Some(bytes) = bytes else { continue };
         let addon = AddonStore::new_inner(core, root, id).map_err(CoreError::Other)?;
         if addon
@@ -962,17 +913,7 @@ fn migrate_legacy(core: &Core, root: &Path, preserve_legacy: bool) -> Result<(),
             let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|value| parse_manifest(&value, id).map(|files| (value, files)));
-            let (value, mut files) = match parsed {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    if preserve_legacy {
-                        return Err(CoreError::Other(error));
-                    }
-                    tracing::warn!(addon = *id, %error, "Invalid legacy add-on manifest retained for retry");
-                    complete = false;
-                    continue;
-                }
-            };
+            let (value, mut files) = parsed.map_err(CoreError::Other)?;
             if *id == "wanxiang"
                 && value["includes_grammar"].as_bool() == Some(true)
                 && value["grammar"].is_object()
@@ -1038,32 +979,6 @@ fn migrate_legacy(core: &Core, root: &Path, preserve_legacy: bool) -> Result<(),
             }
         }
         validate_directory(&addon.destination, id)?;
-        if preserve_legacy {
-            continue;
-        }
-        let legacy = safe_path(root, name).map_err(CoreError::Other)?;
-        match fs::remove_file(&legacy) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    if preserve_legacy {
-        return Ok(());
-    }
-    if AddonStore::new_inner(core, root, "easy_en")
-        .map_err(CoreError::Other)?
-        .activation()
-        .map_err(CoreError::Other)?
-        .is_some()
-    {
-        let cache = safe_path(&core.env().data_dir, "easy-en-public").map_err(CoreError::Other)?;
-        if cache.try_exists()? {
-            fs::remove_dir_all(cache)?;
-        }
-    }
-    if complete {
-        crate::scheme_files::write_file_atomic(&marker, b"1\n")?;
     }
     Ok(())
 }

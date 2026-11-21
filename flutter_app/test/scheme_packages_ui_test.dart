@@ -75,6 +75,15 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> switchPackage(String key) => activateSchemePackage(key);
+
+  @override
+  Future<bool> setPackageEasyEnglish(String key, bool enabled) async {
+    actions.add('overlay:$key:$enabled');
+    return true;
+  }
+
+  @override
   Future<bool> updateSchemePackage(String key) async {
     actions.add('update:$key');
     return true;
@@ -336,13 +345,6 @@ void main() {
         ),
       );
       await _pumpSchemePage(tester, c);
-      await select(
-        'easy_en',
-        find.descendant(
-          of: find.byKey(const ValueKey('addon-easy-en')),
-          matching: find.byIcon(FLucideIcons.ellipsis),
-        ),
-      );
       await _openAddons(tester);
       for (final (card, key) in [
         ('addon-wanxiang', 'wanxiang'),
@@ -407,7 +409,7 @@ void main() {
   for (final (installed, deployed, latest, label) in [
     (false, false, '2', '下载'),
     (true, true, '1', null),
-    (true, false, '1', AppStrings.deploy),
+    (true, false, '1', null),
     (true, true, '2', AppStrings.update),
     (true, false, '2', AppStrings.update),
   ]) {
@@ -438,7 +440,9 @@ void main() {
           buttons
               .where((button) => button.primary)
               .map((button) => button.label),
-          !installed || label == null ? isEmpty : List.filled(4, label),
+          !installed
+              ? isEmpty
+              : [for (var i = 0; i < 4; i++) ...[?label, '使用']],
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
@@ -659,7 +663,7 @@ void main() {
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, '下载'),
     );
-    expect(installs, hasLength(6));
+    expect(installs, hasLength(5));
     expect(installs.every((button) => button.onPress != null), isTrue);
     expect(tester.takeException(), isNull);
   });
@@ -1432,7 +1436,7 @@ void main() {
               findsOneWidget,
             );
           }
-          for (final key in ['rime-ice', 'easy-en']) {
+          for (final key in ['rime-ice']) {
             expect(
               find.descendant(
                 of: find.byKey(ValueKey('addon-$key')),
@@ -1541,21 +1545,32 @@ void main() {
           c.rimeIce = info;
           c.rimeIceLatestVersion = latest;
         }
-        c.currentAddonKey = active ? scheme : null;
+        final overlay = key == 'easy-en';
+        c.isolatedPackages = [
+          if (installed && !overlay)
+            IsolatedPackageDto(
+              packageKey: scheme,
+              displayName: scheme,
+              active: active,
+              ready: deployed,
+            ),
+        ];
         c.local = LocalSchemaDto(
           installed: true,
           deployed: true,
           schemas: [active ? scheme : 'keytao'],
+          installedScheme: overlay ? 'keytao' : null,
+          easyEnglishEnabled: overlay ? active : null,
         );
         await _pumpSchemePage(tester, c);
         expect(
           find.descendant(
             of: card,
-            matching: find.text(active && deployed ? '在用' : '云端'),
+            matching: find.text(!overlay && active && deployed ? '在用' : '云端'),
           ),
           findsOneWidget,
         );
-        final inUse = active && deployed;
+        final inUse = !overlay && active && deployed;
         expect(
           find.descendant(of: card, matching: find.byType(AppBadge)),
           findsNothing,
@@ -1568,11 +1583,26 @@ void main() {
           expect(badge, findsNothing);
         } else {
           expect(
-            find.descendant(of: badge, matching: find.text(status)),
+            find.descendant(
+              of: badge,
+              matching: find.text(overlay && status == '使用中' ? '可更新' : status),
+            ),
             findsOneWidget,
           );
         }
-        if (installed) {
+        if (overlay) {
+          final button = tester.widget<ActionButton>(
+            find.descendant(
+              of: card,
+              matching: find.widgetWithText(
+                ActionButton,
+                active ? '从当前方案移除' : '加入当前方案',
+              ),
+            ),
+          );
+          button.onPress!();
+          expect(c.actions.last, 'overlay:keytao:${!active}');
+        } else if (installed) {
           final button = tester.widget<ActionButton>(
             find.descendant(
               of: card,
@@ -1613,10 +1643,16 @@ void main() {
       await tester.tap(
         find.descendant(
           of: card,
-          matching: find.widgetWithText(ActionButton, '卸载'),
+          matching: find.widgetWithText(
+            ActionButton,
+            key == 'easy-en' ? '从当前方案移除' : '卸载',
+          ),
         ),
       );
-      expect(c.actions, ['$action:true', '$action:false']);
+      expect(c.actions, [
+        '$action:true',
+        key == 'easy-en' ? 'overlay:keytao:false' : '$action:false',
+      ]);
       c
         ..busy = true
         ..operation = operation;

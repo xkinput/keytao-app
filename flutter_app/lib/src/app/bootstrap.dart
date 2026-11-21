@@ -30,6 +30,7 @@ BridgePlatform hostPlatform() => switch (Platform.operatingSystem) {
 
 Future<({AppController controller, OnboardingDto onboarding})> bootstrap({
   List<String> args = const [],
+  void Function()? onMigratingPackages,
 }) async {
   await RustLib.init();
   const android = AndroidHost();
@@ -40,6 +41,7 @@ Future<({AppController controller, OnboardingDto onboarding})> bootstrap({
   final controller = AppController(info: info, android: android);
   try {
     await controller.connectEvents(args: args);
+    await controller.startPackageMigration(onPending: onMigratingPackages);
     final onboarding = await core.onboarding();
     await controller.refreshState();
     return (controller: controller, onboarding: onboarding);

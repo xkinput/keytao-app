@@ -63,7 +63,7 @@ impl ImeRuntime {
         if engine_choice::read(&dirs.user, key.as_deref()) != PackageEngine::Libjd {
             return Ok(false);
         }
-        if RuntimeDirs::isolation_enabled(&dirs.user)
+        if !RuntimeDirs::needs_migration(&dirs.user)
             && ReloadStamp::package_key(&ReloadStamp::path(&dirs.user))
                 .is_some_and(|requested| Some(requested.as_str()) != key.as_deref())
         {

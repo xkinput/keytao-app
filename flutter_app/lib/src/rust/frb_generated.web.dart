@@ -44,12 +44,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  FutureOr<String> Function(String)
-  dco_decode_DartFn_Inputs_String_Output_String_AnyhowException(dynamic raw);
-
-  @protected
-  FutureOr<String> Function(bool)
-  dco_decode_DartFn_Inputs_bool_Output_String_AnyhowException(dynamic raw);
+  FutureOr<String> Function()
+  dco_decode_DartFn_Inputs__Output_String_AnyhowException(dynamic raw);
 
   @protected
   Object dco_decode_DartOpaque(dynamic raw);
@@ -355,11 +351,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PackageKeptBackupDto dco_decode_package_kept_backup_dto(dynamic raw);
-
-  @protected
-  PackageMigrationReportDto dco_decode_package_migration_report_dto(
-    dynamic raw,
-  );
 
   @protected
   PackageOrphanFileDto dco_decode_package_orphan_file_dto(dynamic raw);
@@ -868,11 +859,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  PackageMigrationReportDto sse_decode_package_migration_report_dto(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   PackageOrphanFileDto sse_decode_package_orphan_file_dto(
     SseDeserializer deserializer,
   );
@@ -1053,14 +1039,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_DartFn_Inputs_String_Output_String_AnyhowException(
-    FutureOr<String> Function(String) self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_DartFn_Inputs_bool_Output_String_AnyhowException(
-    FutureOr<String> Function(bool) self,
+  void sse_encode_DartFn_Inputs__Output_String_AnyhowException(
+    FutureOr<String> Function() self,
     SseSerializer serializer,
   );
 
@@ -1527,12 +1507,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_package_kept_backup_dto(
     PackageKeptBackupDto self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_package_migration_report_dto(
-    PackageMigrationReportDto self,
     SseSerializer serializer,
   );
 

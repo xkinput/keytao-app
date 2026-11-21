@@ -73,7 +73,8 @@ class KeytaoAndroidChannel(
                 "readLocalSchemas" -> readLocalSchemas(call, reply)
                 "smartExtractZip" -> smartExtractZip(call, reply)
                 "smartExtractZipToPrivate" -> smartExtractZipToPrivate(call, reply)
-                "deployImeData" -> deployImeData(call.argument<Boolean>("isolated") == true, reply)
+                "prepareRimeData" -> prepareRimeData(reply)
+                "deployImeData" -> deployImeData(reply)
                 "adoptAppLogger" -> adoptAppLogger(reply)
                 "openUrl" -> openUrl(call, reply)
                 "shareRuntimeLog" -> shareRuntimeLog(reply)
@@ -651,6 +652,7 @@ class KeytaoAndroidChannel(
         Thread {
             try {
                 val uri = Uri.parse(treeUriString)
+                validateExportDirectory(uri)
                 val root = DocumentFile.fromTreeUri(activity, uri)
                     ?: return@Thread reply.error("Invalid directory URI")
                 val zipFile = File(zipPath)
@@ -982,6 +984,25 @@ class KeytaoAndroidChannel(
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun validateExportDirectory(uri: Uri) {
+        val id = DocumentsContract.getTreeDocumentId(uri)
+        val directory = when {
+            id.startsWith("raw:/") -> File(id.removePrefix("raw:"))
+            uri.authority == "com.android.externalstorage.documents" &&
+                id.substringBefore(':').equals("primary", ignoreCase = true) ->
+                File(android.os.Environment.getExternalStorageDirectory(), id.substringAfter(':', ""))
+            else -> return
+        }.canonicalFile
+        val managed = KeytaoAndroidPaths.sharedRoot().canonicalFile
+        val exportPath = "${directory.path.trimEnd('/')}/"
+        val managedPath = "${managed.path.trimEnd('/')}/"
+        check(!exportPath.startsWith(managedPath, ignoreCase = true) &&
+            !managedPath.startsWith(exportPath, ignoreCase = true)) {
+            "请选择其他导出目录"
+        }
+    }
+
     private fun smartExtractZipToPrivate(call: MethodCall, reply: Reply) {
         val zipPath = call.argument<String>("zipPath") ?: return reply.error("Missing zipPath")
         val root = KeytaoAndroidPaths.requireRoot(activity)
@@ -996,23 +1017,24 @@ class KeytaoAndroidChannel(
         ))
     }
 
-    private fun deployImeData(isolated: Boolean, reply: Reply) {
+    private fun prepareRimeData(reply: Reply) {
         Thread {
             try {
                 val root = KeytaoAndroidPaths.requireRoot(activity)
-                if (!isolated && !KeytaoAndroidPaths.hasInstalledSchema(root)) {
-                    return@Thread reply.error("请先安装键道方案")
-                }
-                val configuredSchemas = runCatching {
-                    val content = readPrivateText(root, "default.custom.yaml")
-                        ?: readPrivateText(root, "default-custom.yaml")
-                    content?.let(::parseSchemas).orEmpty()
-                }.getOrDefault(emptyList())
-                KeytaoRimeDeployClient.deploy(
-                    activity,
-                    timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(configuredSchemas, isolated),
-                    isolated = isolated,
-                ) { result ->
+                KeytaoImeEngine.prepareBundledSharedData(activity, root)
+                reply.success()
+            } catch (ex: Exception) {
+                reply.error(ex.message ?: "Android RIME 资源准备失败")
+            }
+        }.start()
+    }
+
+    private fun deployImeData(reply: Reply) {
+        Thread {
+            try {
+                val root = KeytaoAndroidPaths.requireRoot(activity)
+                KeytaoImeEngine.prepareBundledSharedData(activity, root)
+                KeytaoRimeDeployClient.deploy(activity) { result ->
                     try {
                         if (result.success) {
                             reply.success(mutableMapOf<String, Any?>().apply {

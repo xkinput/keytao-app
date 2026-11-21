@@ -4,12 +4,8 @@
 #[cfg(target_os = "windows")]
 use crate::{
     addon::EASY_EN_ADDON_ID,
-    events::InstallProgress,
-    scheme::{build_client, fetch_scheme_release},
-    Core, CoreEvent,
+    Core,
 };
-#[cfg(target_os = "windows")]
-use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -111,9 +107,8 @@ pub(crate) struct PublicSchemaCheckpoint {
     previous: GenerationPointers,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", test))]
 pub(crate) fn checkpoint(backup: &Path) -> Result<PublicSchemaCheckpoint, String> {
-    #[cfg(target_os = "windows")]
     let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
     let _guard = PUBLISH_LOCK
         .lock()
@@ -121,6 +116,7 @@ pub(crate) fn checkpoint(backup: &Path) -> Result<PublicSchemaCheckpoint, String
     checkpoint_at(public_root()?, backup)
 }
 
+#[cfg(test)]
 pub(crate) fn checkpoint_at(
     root: PathBuf,
     backup: &Path,
@@ -258,51 +254,6 @@ fn pin_legacy_layout(root: &Path, previous: &GenerationPointers) -> Result<(), S
         .map_err(|error| error.to_string())
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn with_legacy_layout_restored(
-    action: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-    let _guard = PUBLISH_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    with_legacy_layout_restored_at(&public_root()?, action)
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn with_legacy_layout_restored_at(
-    root: &Path,
-    action: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    let previous = GenerationPointers::read(root)?;
-    let pinned = read_legacy_layout(root)?;
-    let legacy = match &pinned {
-        Some(pointers) => {
-            let legacy = pointers.only_legacy(root)?;
-            if &legacy != pointers {
-                return Err("pinned public schema snapshot is not legacy".into());
-            }
-            legacy
-        }
-        // Older isolated publications did not pin their prior pointers.
-        None => previous.only_legacy(root)?,
-    };
-    if let Err(error) = legacy.write(root).and_then(|()| action()) {
-        previous
-            .write(root)
-            .map_err(|rollback| format!("{error}; restore public schema pointers: {rollback}"))?;
-        return Err(error);
-    }
-    if pinned.is_some() {
-        if let Err(error) = std::fs::remove_file(root.join(LEGACY_LAYOUT_FILE)) {
-            tracing::warn!(%error, "could not remove the legacy public schema pointer file");
-        }
-    }
-    if pinned.is_some() || previous != legacy {
-        prune_snapshots(root);
-    }
-    Ok(())
-}
 
 impl PublicSchemaUpdate {
     pub fn rollback(self) -> Result<(), String> {
@@ -542,9 +493,7 @@ pub(crate) fn activate_cached_isolated_package(key: &str) -> Result<(), String> 
 fn activate_isolated_snapshot(root: &Path, control_root: &Path, key: &str) -> Result<(), String> {
     use keytao_core::RuntimeDirs;
 
-    if !RuntimeDirs::isolation_enabled(control_root)
-        || RuntimeDirs::active_package_key(control_root).as_deref() != Some(key)
-    {
+    if RuntimeDirs::active_package_key(control_root).as_deref() != Some(key) {
         return Ok(());
     }
     let cache = isolated_public_cache(root, key);
@@ -567,9 +516,7 @@ fn activate_isolated_snapshot(root: &Path, control_root: &Path, key: &str) -> Re
         current: Some(generation),
         pending: None,
     };
-    if !RuntimeDirs::isolation_enabled(control_root)
-        || RuntimeDirs::active_package_key(control_root).as_deref() != Some(key)
-    {
+    if RuntimeDirs::active_package_key(control_root).as_deref() != Some(key) {
         return Ok(());
     }
     pin_legacy_layout(root, &previous)?;
@@ -789,90 +736,41 @@ fn trim_missing_dependencies(stage: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
+pub async fn prepare_search_schemas(_core: &Core) -> Result<(), String> {
     static PREPARING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = PREPARING.lock().await;
-    if has_schemas() {
-        return Ok(());
-    }
     let root =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
-    let installed = keytao_core::schema_install_state(&root);
-    if !installed.installed
-        || installed
-            .schemas
-            .iter()
-            .all(|id| keytao_core::is_addon_schema(id))
-    {
+    tokio::task::spawn_blocking(move || publish_active_if_needed(&root))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_os = "windows")]
+pub fn publish_active_if_needed(root: &Path) -> Result<(), String> {
+    if keytao_core::RuntimeDirs::needs_migration(root) {
         return Ok(());
     }
-    // Infer the public distribution from schema IDs only. Personal source and
-    // learned dictionaries must never be copied into the sandbox-readable seed.
-    let scheme = installed
-        .schemas
-        .iter()
-        .find_map(|id| {
-            if id.starts_with("xmjd6") {
-                Some("xmjd")
-            } else if id.starts_with("txjx") {
-                Some("txjx")
-            } else if id.starts_with("keydo") {
-                Some("keydo")
-            } else if id == crate::rime_snow::SCHEMA_ID {
-                Some(crate::rime_snow::SCHEMA_ID)
-            } else if id.starts_with("keytao") {
-                Some("keytao")
-            } else {
-                None
-            }
-        })
-        .ok_or("无法识别公共方案来源，请在方案页重新安装主方案以启用系统搜索框输入")?;
-    core.emit(CoreEvent::InstallProgress(InstallProgress {
-        stage: "windows-search".into(),
-        percent: 0,
-        message: "正在准备 Windows 系统搜索框使用的公共方案…".into(),
-    }));
-    let release = fetch_scheme_release(core, scheme.into())
-        .await
-        .map_err(|e| e.to_string())?;
-    let response = build_client(core)?
-        .get(&release.download_url)
-        .timeout(std::time::Duration::from_secs(180))
-        .send()
-        .await
-        .map_err(|e| format!("下载搜索框公共方案失败：{e}"))?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        if bytes.len().saturating_add(chunk.len()) > 128 * 1024 * 1024 {
-            return Err("搜索框公共方案压缩包过大".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let bytes = if scheme == crate::rime_snow::SCHEMA_ID {
-        crate::rime_snow::prepare_archive(core, bytes).map_err(|error| error.to_string())?
-    } else {
-        bytes
+    let Some(key) = keytao_core::RuntimeDirs::active_package_key(root) else {
+        return Ok(());
     };
-    publish_package(&bytes)?;
-    if crate::addon::addon_schema_status(core, || Ok(root.clone()), EASY_EN_ADDON_ID.into())
-        .map_err(|error| error.to_string())?.installed {
-        publish_english_addon(core)?;
+    if has_compiled_package_at(&public_root()?, &key)? {
+        return Ok(());
     }
-    publish_english_settings(
-        &root,
-        keytao_core::english_mode::read_english_mode(&root)
-            == keytao_core::english_mode::EnglishMode::Schema,
-    )?;
-    core.emit(CoreEvent::InstallProgress(InstallProgress {
-        stage: "done".into(),
-        percent: 100,
-        message: "公共方案已准备，请重新部署以启用系统搜索框输入".into(),
-    }));
-    Ok(())
+    publish_isolated_package(&key, true)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn has_compiled_package_at(root: &Path, key: &str) -> Result<bool, String> {
+    let Some(generation) = read_generation_pointer(root, "current.txt")? else {
+        return Ok(false);
+    };
+    if !compiled_generation(root, &generation)? {
+        return Ok(false);
+    }
+    let marker = root.join(generation).join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE);
+    Ok(std::fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.is_file())
+        && std::fs::read_to_string(marker).is_ok_and(|published| published == key))
 }
 
 #[cfg(target_os = "windows")]
@@ -1051,29 +949,6 @@ fn source_selected_schema(root: &Path) -> Option<String> {
         .map(|id| id.trim().to_owned());
     saved.into_iter().chain(current).find(|id| schemas.contains(id))
         .or_else(|| keytao_core::deployed_schema_id_from_dir(root))
-}
-
-/// Both directories must be package-store sources, never the private Rime root.
-pub fn publish_activation(
-    core: &crate::Core,
-    incoming: &Path,
-    previous: Option<&Path>,
-    private_root: &Path,
-) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-    let _guard = PUBLISH_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    publish_activation_with_selection_at(
-        &public_root()?,
-        Some(incoming),
-        previous,
-        &crate::package_activation::addon_ownership(core, private_root)
-            .map_err(|error| error.to_string())?,
-        true,
-        source_selected_schema(private_root).as_deref(),
-    )
 }
 
 pub fn remove_package(
@@ -1966,7 +1841,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_layout_preserves_public_generations_and_restores_exact_pointers() {
+    fn compiled_public_generation_must_match_the_active_package() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut files = BTreeMap::from([(LIBRIME_VERSION_FILE.into(), b"1.0".to_vec())]);
+        store_snapshot(root, &files, false).unwrap();
+        assert!(!has_compiled_package_at(root, "keytao").unwrap());
+
+        files.insert(
+            keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE.into(),
+            b"local-other".to_vec(),
+        );
+        store_snapshot(root, &files, false).unwrap();
+        assert!(!has_compiled_package_at(root, "keytao").unwrap());
+        assert!(has_compiled_package_at(root, "local-other").unwrap());
+    }
+
+    #[test]
+    fn legacy_layout_preserves_public_generations() {
         for (current, pending, pin) in [
             (Some('a'), Some('b'), true),
             (None, None, true),
@@ -1985,7 +1877,6 @@ mod tests {
             if pin {
                 pin_legacy_layout(root, &legacy).unwrap();
             }
-
             let generation = "c".repeat(64);
             let snapshot = root.join(&generation);
             std::fs::create_dir(&snapshot).unwrap();
@@ -2006,20 +1897,8 @@ mod tests {
             assert!(legacy
                 .generations()
                 .all(|generation| root.join(generation).is_dir()));
-
-            assert_eq!(
-                with_legacy_layout_restored_at(root, || {
-                    assert!(GenerationPointers::read(root).unwrap() == legacy);
-                    Err("private layout change failed".into())
-                }),
-                Err("private layout change failed".into()),
-            );
             assert!(GenerationPointers::read(root).unwrap() == isolated);
             assert!(snapshot.is_dir());
-            with_legacy_layout_restored_at(root, || Ok(())).unwrap();
-            assert!(GenerationPointers::read(root).unwrap() == legacy);
-            assert!(!root.join(LEGACY_LAYOUT_FILE).exists());
-            assert!(!snapshot.exists());
         }
     }
 

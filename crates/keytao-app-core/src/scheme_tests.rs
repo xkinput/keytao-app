@@ -1,5 +1,4 @@
 use crate::{install::*, addon::*, scheme_files::*};
-use std::collections::HashSet;
 
     const KEYTAO_RIME_LUA: &str = concat!(
         "--[[\n",
@@ -66,31 +65,6 @@ use std::collections::HashSet;
         std::fs::write(root.join("build/custom_english.schema.yaml"), "schema: {schema_id: custom_english, name: Easy English}\n").unwrap();
         assert!(deployed_english_schema_available(&root));
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn test_collect_rime_package_build_ids() {
-        let mut schemas = HashSet::new();
-        let mut dictionaries = HashSet::new();
-        for path in [
-            "keydo.schema.yaml",
-            "nested/pinyin_simp.schema.yaml",
-            "keydo.dict.yaml",
-            "keydo.phrases.dict.yaml",
-            "default.custom.yaml",
-            "lua/keydo.lua",
-        ] {
-            collect_rime_package_build_id(path, &mut schemas, &mut dictionaries);
-        }
-
-        assert_eq!(
-            schemas,
-            HashSet::from(["keydo".to_string(), "pinyin_simp".to_string()])
-        );
-        assert_eq!(
-            dictionaries,
-            HashSet::from(["keydo".to_string(), "keydo.phrases".to_string()])
-        );
     }
 
     #[test]

@@ -274,6 +274,11 @@ mod tests {
 
     #[test]
     fn userdb_snapshots_use_private_sync_and_only_matching_runtimes() {
+        if crate::run_librime_test_in_child(
+            "migration_userdb::tests::userdb_snapshots_use_private_sync_and_only_matching_runtimes",
+        ) {
+            return;
+        }
         let fixture = tempfile::tempdir().unwrap();
         let legacy = fixture.path().join("legacy");
         let sync = fixture.path().join("external-sync");

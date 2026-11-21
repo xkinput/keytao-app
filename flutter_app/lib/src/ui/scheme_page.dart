@@ -151,7 +151,6 @@ class _SchemePageState extends State<SchemePage> {
   @override
   Widget build(BuildContext context) {
     final c = widget.controller;
-    final runtimeIsolation = c.local?.runtimeIsolation == true;
     final xmjdScheme = c.schemeFamily == 'xmjd'
         ? c.scheme
         : c.activeSchemeKey == 'xmjd-feiding'
@@ -189,11 +188,6 @@ class _SchemePageState extends State<SchemePage> {
           ),
         if (c.userWordsReport != null || c.userWordsReportError != null)
           UserWordsNotice(controller: c),
-        if (runtimeIsolation && c.local?.runtimeMigrationComplete != true)
-          _PackageMigrationPrompt(
-            key: const ValueKey('package-migration-prompt'),
-            controller: c,
-          ),
         Padding(
           padding: EdgeInsets.fromLTRB(
             desktop ? 24 : 0,
@@ -326,28 +320,6 @@ class _SchemePageState extends State<SchemePage> {
             HairlineGridCell(
               child: Section(
                 title: AppStrings.deploy,
-                trailing: runtimeIsolation
-                    ? FPopoverMenu(
-                        menuAnchor: Alignment.topRight,
-                        childAnchor: Alignment.bottomRight,
-                        menuBuilder: (_, popover, _) => [
-                          FItemGroup(
-                            enabled: !c.busy,
-                            children: [
-                              FItem(
-                                title: const Text('切回旧布局'),
-                                onPress: () {
-                                  popover.hide();
-                                  c.useLegacyLayout();
-                                },
-                              ),
-                            ],
-                          ),
-                        ],
-                        builder: (_, popover, _) =>
-                            _SchemeMoreButton(onPress: popover.toggle),
-                      )
-                    : null,
                 children: [
                   if (c.packageError case final error?) ErrorMessage(error),
                   if (c.schemeSyncError case final error?) ErrorMessage(error),
@@ -431,80 +403,6 @@ class _SchemePageState extends State<SchemePage> {
       ],
     );
   }
-}
-
-class _PackageMigrationPrompt extends StatefulWidget {
-  const _PackageMigrationPrompt({super.key, required this.controller});
-
-  final AppController controller;
-
-  @override
-  State<_PackageMigrationPrompt> createState() =>
-      _PackageMigrationPromptState();
-}
-
-class _PackageMigrationPromptState extends State<_PackageMigrationPrompt> {
-  late Future<PackageMigrationReportDto> _preview = widget.controller
-      .previewPackageMigration();
-  bool _migrating = false;
-
-  void _reload() => setState(() {
-    _preview = widget.controller.previewPackageMigration();
-  });
-
-  Future<void> _migrate() async {
-    setState(() => _migrating = true);
-    try {
-      await widget.controller.migrateToIsolated();
-    } finally {
-      if (mounted) {
-        setState(() {
-          _migrating = false;
-          _preview = widget.controller.previewPackageMigration();
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) => FutureBuilder<PackageMigrationReportDto>(
-    future: _preview,
-    builder: (context, snapshot) {
-      if (snapshot.connectionState != ConnectionState.done) {
-        return const SizedBox.shrink();
-      }
-      final busy = widget.controller.busy || _migrating;
-      if (snapshot.hasError) {
-        return HairlineGridCell(
-          child: ActionRow(
-            children: [
-              ErrorMessage(errorText(snapshot.error!)),
-              ActionButton('重试', onPress: busy ? null : _reload),
-            ],
-          ),
-        );
-      }
-      final report = snapshot.requireData;
-      if (report.completed) return const SizedBox.shrink();
-      return HairlineGridCell(
-        child: ActionRow(
-          children: [
-            const Text('迁移到独立方案目录'),
-            Text(
-              '${report.packages.length} 个方案包 · ${report.orphans.files.length} 个残留文件',
-            ),
-            ActionButton(
-              _migrating ? '迁移中' : '确认迁移',
-              primary: true,
-              onPress: busy ? null : _migrate,
-            ),
-          ],
-        ),
-      );
-    },
-  );
 }
 
 class _SchemeCardMenu extends StatefulWidget {
@@ -1383,25 +1281,19 @@ Map<String, Widget> _addonCells(
     Widget? variant,
     Widget? extra,
   }) {
-    final isolated = c.local?.runtimeIsolation == true;
-    final overlay = isolated && packageKey == 'easy_en';
+    final overlay = packageKey == 'easy_en';
     final currentPackage = c.local?.installedScheme;
     final englishEnabled = c.local?.easyEnglishEnabled;
-    final isolatedPackage = isolated
-        ? c.isolatedPackages
-              .where((package) => package.packageKey == packageKey)
-              .firstOrNull
-        : null;
+    final isolatedPackage = c.isolatedPackages
+        .where((package) => package.packageKey == packageKey)
+        .firstOrNull;
     final cloudCard = !compact && _homeAddonKeys.contains(packageKey);
     final info = packageKey == 'easy_en' ? c.addon : c.rimeIce;
     final hasUpdate = packageKey == 'easy_en'
         ? c.addonHasUpdate
         : c.rimeIceHasUpdate;
-    final inUse = isolated
-        ? isolatedPackage?.active == true && isolatedPackage?.ready == true
-        : installed &&
-              info?.deployed == true &&
-              c.currentAddonKey == packageKey;
+    final inUse =
+        isolatedPackage?.active == true && isolatedPackage?.ready == true;
     final deployKey = overlay && active
         ? currentPackage ?? packageKey
         : packageKey;
@@ -1522,9 +1414,8 @@ Map<String, Widget> _addonCells(
                             !englishEnabled,
                           ),
                   ),
-                if ((!overlay || hasUpdate) &&
-                    showInstall &&
-                    (!cloudCard || !installed || hasUpdate))
+                if (showInstall &&
+                    (overlay ? hasUpdate : label != AppStrings.deploy))
                   ActionButton(
                     cloudCard ? (installed ? '更新' : '下载') : label,
                     primary: installed,
@@ -1532,9 +1423,7 @@ Map<String, Widget> _addonCells(
                     tooltip: overlay ? null : tooltip,
                     onPress: install,
                   ),
-                if (!overlay &&
-                    (cloudCard || isolated) &&
-                    (installed || deployLabel != null))
+                if (!overlay && (installed || deployLabel != null))
                   ActionButton(
                     deployLabel ?? (inUse ? '使用中' : '使用'),
                     primary: !inUse,
@@ -1542,9 +1431,7 @@ Map<String, Widget> _addonCells(
                     icon: inUse ? FLucideIcons.check : FLucideIcons.play,
                     onPress: c.busy || inUse || deployLabel != null
                         ? null
-                        : isolated
-                        ? () => c.switchPackage(packageKey)
-                        : () => c.activateSchemePackage(packageKey),
+                        : () => c.switchPackage(packageKey),
                   ),
                 if (!overlay && installed)
                   ActionButton(AppStrings.uninstall, onPress: uninstall),

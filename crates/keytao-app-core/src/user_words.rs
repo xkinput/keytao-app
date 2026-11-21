@@ -1142,8 +1142,7 @@ mod tests {
             archive.write_all(text.as_bytes()).unwrap();
         }
         let bytes = archive.finish().unwrap().into_inner();
-        crate::packages::stage_install(core, &bytes, Default::default(), String::new()).unwrap();
-        crate::packages::finalize_pending(core, scheme, Some("v1"), false).unwrap();
+        crate::packages::store_cloud_archive(core, scheme, Some("v1"), "official", None, &bytes, &core.env().data_dir).unwrap();
     }
 
     #[test]

@@ -66,8 +66,9 @@ class AndroidHost {
   ) => _map('smartExtractZip', {'zipPath': zipPath, 'treeUri': treeUri});
   Future<Map<String, dynamic>> smartExtractZipToPrivate(String zipPath) =>
       _map('smartExtractZipToPrivate', {'zipPath': zipPath});
-  Future<Map<String, dynamic>> deployImeData({bool isolated = false}) =>
-      _map('deployImeData', isolated ? {'isolated': true} : null);
+  Future<Map<String, dynamic>> deployImeData() => _map('deployImeData');
+  Future<void> prepareRimeData() =>
+      _channel.invokeMethod<void>('prepareRimeData');
   Future<void> adoptAppLogger() =>
       _channel.invokeMethod<void>('adoptAppLogger');
   Future<void> openUrl(String url) =>

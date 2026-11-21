@@ -731,7 +731,7 @@ fn patch_import_table(content: &str, import_name: &str) -> Option<String> {
 }
 
 pub(crate) fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
-    if keytao_core::RuntimeDirs::isolation_enabled(root)
+    if !keytao_core::RuntimeDirs::needs_migration(root)
         && keytao_core::RuntimeDirs::active_package_key(root).is_some()
     {
         // Isolated deployment generates the import overrides in each package's runtime.

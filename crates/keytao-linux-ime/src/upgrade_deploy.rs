@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -64,17 +63,14 @@ fn record_version(user_dir: &Path, version: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot write librime version stamp: {error}"))
 }
 
-pub struct UpgradeDeploy {
-    lock: File,
-}
+pub struct UpgradeDeploy;
 
-/// Hold the lock through startup so concurrent backend processes launch one child.
 pub fn prepare() -> Result<Option<UpgradeDeploy>, String> {
     let (user_dir, version) = upgrade_context()?;
-    if keytao_core::RuntimeDirs::isolation_enabled(&user_dir) {
-        return Ok(None);
+    if keytao_core::RuntimeDirs::needs_migration(&user_dir) {
+        return Ok(Some(UpgradeDeploy));
     }
-    let Some(lock) = keytao_core::linux_deploy_lock(&user_dir, std::time::Duration::ZERO)? else {
+    let Some(_lock) = keytao_core::linux_deploy_lock(&user_dir, std::time::Duration::ZERO)? else {
         return Ok(None);
     };
     match decision_for(&user_dir, &version)? {
@@ -83,7 +79,7 @@ pub fn prepare() -> Result<Option<UpgradeDeploy>, String> {
             record_version(&user_dir, &version)?;
             Ok(None)
         }
-        UpgradeDecision::Deploy => Ok(Some(UpgradeDeploy { lock })),
+        UpgradeDecision::Deploy => Ok(Some(UpgradeDeploy)),
     }
 }
 
@@ -100,7 +96,7 @@ impl UpgradeDeploy {
                         .arg(SUBCOMMAND)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null());
-                    keytao_core::deploy_child::inherit_linux_deploy_lock(&mut command, &self.lock);
+                    keytao_core::deploy_child::close_linux_wayland_socket(&mut command, None);
                     let mut child = command.spawn().map_err(|error| error.to_string())?;
                     tracing::info!(pid = child.id(), "librime upgrade deployment started");
                     let status = child.wait().map_err(|error| error.to_string())?;
@@ -116,7 +112,6 @@ impl UpgradeDeploy {
                         "librime upgrade deployment failed: {error}; will retry on next start"
                     );
                 }
-                drop(self.lock);
             })
         {
             tracing::warn!("cannot start librime upgrade deployment: {error}");
@@ -125,17 +120,28 @@ impl UpgradeDeploy {
 }
 
 pub fn run_child() -> Result<(), String> {
-    let _lock = keytao_core::deploy_child::inherited_linux_deploy_lock()?;
     let (user_dir, version) = upgrade_context()?;
-    if keytao_core::RuntimeDirs::isolation_enabled(&user_dir) {
+    let shared = PathBuf::from(keytao_core::default_shared_data_dir());
+    let migrated = keytao_app_core::package_migration::migrate_default_if_needed(&user_dir, &shared)
+        .map_err(|error| error.to_string())?;
+    let Some(_lock) = keytao_core::linux_deploy_lock(&user_dir, std::time::Duration::ZERO)? else {
         return Ok(());
+    };
+    if migrated {
+        return record_version(&user_dir, &version);
     }
     if decision_for(&user_dir, &version)? == UpgradeDecision::Deploy {
-        keytao_core::deploy_for_upgrade(
-            user_dir.to_string_lossy().into_owned(),
-            keytao_core::default_shared_data_dir(),
-        )?;
-        keytao_core::ReloadStamp::write(&user_dir)?;
+        use keytao_core::isolated_deploy::{deploy_packages, PackageDeployTarget};
+        let package_key = keytao_core::RuntimeDirs::active_package_key(&user_dir)
+            .ok_or("cannot determine active package for upgrade")?;
+        let target = PackageDeployTarget {
+            package_name: package_key.clone(),
+            package_key,
+            materialize_error: None,
+            staged_inputs: None,
+        };
+        deploy_packages(&user_dir, &shared, None, std::slice::from_ref(&target), |_| {})?;
+        keytao_core::ReloadStamp::write_package(&user_dir, &target.package_key)?;
     }
     record_version(&user_dir, &version)
 }

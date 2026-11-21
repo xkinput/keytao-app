@@ -123,13 +123,6 @@ class PlatformCore extends FakeCore {
     return result;
   }
 
-  @override
-  Future<void> crateApiCoreRecordInstalledScheme({
-    required String scheme,
-    String? version,
-  }) async {
-    calls.add('record:$scheme');
-  }
 }
 
 Future<Object?> appArgs(Object args) async {

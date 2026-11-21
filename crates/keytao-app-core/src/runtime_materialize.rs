@@ -149,9 +149,6 @@ pub fn isolated_packages(
     core: &Core,
     root: &Path,
 ) -> Result<Vec<keytao_core::switcher_model::Package>, CoreError> {
-    if !RuntimeDirs::isolation_enabled(root) {
-        return Ok(Vec::new());
-    }
     let shared = crate::deploy::deploy_shared_data_dir(core, root);
     let installed: BTreeMap<_, _> = isolated_package_keys(core, root, &shared)?
         .into_iter()
@@ -171,8 +168,7 @@ fn isolated_package_keys(
     shared: &Path,
 ) -> Result<BTreeSet<String>, CoreError> {
     let store = PackageStore::new(core);
-    let activations = crate::package_activation::read_all(core, root)?;
-    let mut keys = installed_main_packages(core, &activations);
+    let mut keys: BTreeSet<_> = core.lock_state().installed_packages.keys().cloned().collect();
     keys.extend(
         installed_addons(&store)?
             .into_iter()
@@ -200,57 +196,14 @@ fn publish_ime_package_catalog(root: &Path, packages: &BTreeMap<String, String>)
     Ok(())
 }
 
-pub fn use_legacy_layout(root: &Path) -> Result<(), String> {
-    if !RuntimeDirs::isolation_enabled(root) {
-        return Ok(());
-    }
-    #[cfg(target_os = "windows")]
-    if crate::windows_public_schemas::is_default_user_root(root) {
-        return crate::windows_public_schemas::with_legacy_layout_restored(|| {
-            disable_isolation(root)
-        });
-    }
-    disable_isolation(root)
-}
-
-fn disable_isolation(root: &Path) -> Result<(), String> {
-    keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
-        let path = safe_path(root, RuntimeDirs::SETTINGS_FILE)?;
-        safe_path(root, keytao_core::RELOAD_STAMP_FILE_NAME)?;
-        let previous = read_optional(&path).map_err(|error| error.to_string())?;
-        let mut settings: serde_json::Map<String, serde_json::Value> = previous
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default();
-        settings.insert("runtime_isolation".into(), false.into());
-        let bytes = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
-        crate::scheme_files::write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
-        if let Err(error) = keytao_core::ReloadStamp::write(root) {
-            let restore = match previous {
-                Some(previous) => crate::scheme_files::write_file_atomic(&path, &previous),
-                None => fs::remove_file(&path),
-            };
-            return Err(match restore {
-                Ok(()) => error,
-                Err(restore) => format!("{error}; restore runtime settings: {restore}"),
-            });
-        }
-        Ok(())
-    })
-}
-
 pub fn materialize_all_installed_packages(
     core: &Core,
     control_root: &Path,
     bundled: &Path,
 ) -> Result<(), CoreError> {
-    if RuntimeDirs::isolation_enabled(control_root) {
-        for target in prepare_targets(core, control_root, bundled, false, None, None)?.0 {
-            if let Some(error) = target.materialize_error {
-                return Err(CoreError::Other(error));
-            }
+    for target in prepare_targets(core, control_root, bundled, false, None, None)?.0 {
+        if let Some(error) = target.materialize_error {
+            return Err(CoreError::Other(error));
         }
     }
     Ok(())
@@ -297,7 +250,11 @@ fn prepare_targets(
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
     let settings = read_settings(control_root)?;
     let store = PackageStore::new(core);
-    let activations = crate::package_activation::read_all(core, control_root)?;
+    let activations = if migration.is_some() {
+        crate::package_activation::read_all(core, control_root)?
+    } else {
+        BTreeMap::new()
+    };
     let addons: BTreeSet<_> = installed_addons(&store)?
         .into_iter()
         .filter(|id| *id != EASY_EN_ADDON_ID)
@@ -325,20 +282,13 @@ fn prepare_targets(
     let inputs = if let Some((_, legacy)) = migration {
         legacy
     } else {
-        legacy = if safe(control_root, RuntimeDirs::MIGRATION_MARKER)?.try_exists()? {
-            Files::new()
-        } else {
-            legacy_user_files(core, control_root)?
-        };
+        legacy = Files::new();
         &legacy
     };
     let installed = installed_main_packages(core, &activations);
-    let active = migration.map(|(active, _)| active.to_owned()).or_else(|| {
-        RuntimeDirs::active_package_key(control_root)
-            .or_else(|| RuntimeDirs::active_package_key(&core.env().data_dir))
-            .or_else(|| in_use_package(control_root, &activations))
-            .or_else(|| core.lock_state().active_scheme.clone())
-    }).filter(|key| key != EASY_EN_ADDON_ID);
+    let active = migration.map(|(active, _)| active.to_owned())
+        .or_else(|| RuntimeDirs::active_package_key(control_root))
+        .filter(|key| key != EASY_EN_ADDON_ID);
     let mut keys = installed
         .union(&addons)
         .filter(|key| key.as_str() != EASY_EN_ADDON_ID)
@@ -1337,34 +1287,6 @@ pub(crate) use tests::hashes as test_hashes;
 mod tests {
     use super::*;
 
-    #[test]
-    fn returning_to_legacy_preserves_data_and_can_retry_a_failed_reload() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let settings = root.join(RuntimeDirs::SETTINGS_FILE);
-        let original = br#"{"runtime_isolation":true,"easy_english_packages":["first"]}"#;
-        fs::write(&settings, original).unwrap();
-        let legacy = root.join("user.yaml");
-        fs::write(&legacy, b"legacy schema selection").unwrap();
-        let runtime = root.join("runtime/first/user.yaml");
-        write_file(&runtime, b"isolated schema selection").unwrap();
-        let stamp = keytao_core::ReloadStamp::path(root);
-        fs::create_dir(&stamp).unwrap();
-
-        assert!(use_legacy_layout(root).is_err());
-        assert_eq!(fs::read(&settings).unwrap(), original);
-        fs::remove_dir(&stamp).unwrap();
-
-        use_legacy_layout(root).unwrap();
-        assert!(!RuntimeDirs::isolation_enabled(root));
-        let settings: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
-        assert_eq!(settings["easy_english_packages"], serde_json::json!(["first"]));
-        assert_eq!(fs::read(legacy).unwrap(), b"legacy schema selection");
-        assert_eq!(fs::read(runtime).unwrap(), b"isolated schema selection");
-        assert!(keytao_core::ReloadStamp::current_signature(root).is_some());
-        assert_eq!(keytao_core::ReloadStamp::package_key(&stamp), None);
-    }
-
     fn materialize(
         control_root: &Path,
         bundled: &Path,
@@ -1443,11 +1365,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let bundled = root.join("rime-data");
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            r#"{"runtime_isolation":true}"#,
-        );
         put(&bundled, "default.yaml", "schema_list: []\n");
         put(&bundled, "symbols.yaml", "not used");
         put(&bundled, "opencc/owned.json", "not used");

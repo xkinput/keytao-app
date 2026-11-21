@@ -1,20 +1,24 @@
 use crate::{
     Core, CoreError, migration_userdb, package_activation,
-    package_orphans::{self, OrphanReport},
     package_store::{PackageStore, StoredPackage},
     packages::safe_path,
     runtime_materialize,
 };
-use keytao_core::{ReloadStamp, RuntimeDirs};
+use keytao_core::{DeployStep, ReloadStamp, RuntimeDirs, isolated_deploy};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
 };
 
 const VERSION: u32 = 1;
+pub(crate) const BACKUP_DIR: &str = "legacy-backup";
+const BACKUP_PENDING: &str = "runtime/.keytao-backup-pending";
+const BACKUP_COMPLETE: &str = "runtime/.keytao-backup-complete";
+static MIGRATED_HERE: LazyLock<Mutex<BTreeSet<PathBuf>>> = LazyLock::new(Mutex::default);
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Migration {
@@ -24,93 +28,198 @@ struct Migration {
     packages: Vec<String>,
     user_files: Vec<String>,
     legacy_user_databases: Vec<String>,
+    #[serde(default)]
+    build_verified: bool,
+    #[serde(default)]
+    sync_paths: Vec<PathBuf>,
 }
 
-#[derive(Serialize)]
-pub struct MigrationReport {
-    completed: bool,
-    #[serde(flatten)]
-    migration: Migration,
-    orphans: OrphanReport,
+#[derive(Deserialize, Serialize)]
+struct BackupJournal {
+    timestamp: String,
+    sync_paths: Vec<PathBuf>,
 }
 
-pub fn preview(core: &Core, root: &Path) -> Result<MigrationReport, CoreError> {
-    let root = checked_root(root)?;
-    let sync_dir = checked_sync_dir(core, &root)?;
-    let previous = read_marker(&marker_path(&root)?)?;
-    let completed = previous.is_some();
-    let migration = match previous {
-        Some(migration) => migration,
-        None => plan(
-            core,
-            &root,
-            &runtime_materialize::legacy_user_files(core, &root)?,
-        )?,
-    };
-    report(core, &root, &sync_dir, migration, completed)
+pub async fn ensure_before_write(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    migrate_if_needed(core, root, &shared).map(|_| ())
 }
 
-pub fn migrate_to_isolated(core: &Core, root: &Path) -> Result<MigrationReport, CoreError> {
-    let root = checked_root(root)?;
-    if !RuntimeDirs::isolation_enabled(&root) {
-        return Err(CoreError::Other("方案包隔离未启用".into()));
+pub fn start_app(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    if !RuntimeDirs::migration_complete(root) {
+        let result = migrate_if_needed(core, root, &shared);
+        #[cfg(target_os = "windows")]
+        if matches!(result, Ok(true))
+            && crate::windows_public_schemas::is_default_user_root(root)
+            && let Err(error) = crate::windows_public_schemas::publish_active_if_needed(root)
+        {
+            crate::windows_public_schemas::public_warning("migration", &error);
+        }
+        return result.map(|_| ());
     }
-    checked_sync_dir(core, &root)?;
-    keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
-        migrate_locked(core, &root).map_err(|error| error.to_string())
-    })
-    .map_err(CoreError::Other)
+    let root = checked_root(root)?;
+    let result = isolated_deploy::with_migration_lock(&root, || {
+        if MIGRATED_HERE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&root)
+        {
+            return Ok(());
+        }
+        // Older markers were published before the first isolated build.
+        let marker: Migration = serde_json::from_slice(
+            &fs::read(marker_path(&root).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let active = RuntimeDirs::for_package(&root, &shared, &marker.runtime_package);
+        if marker.build_verified
+            || active.is_some_and(|dirs| isolated_deploy::package_build_ready(&root, &dirs))
+        {
+            let sync_dir = checked_sync_dir(core, &root).map_err(|error| error.to_string())?;
+            let mut sync_paths = marker.sync_paths;
+            sync_paths.extend([
+                sync_dir,
+                lexical_sync_path(&root).map_err(|error| error.to_string())?,
+            ]);
+            backup_legacy(&root, sync_paths).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        tracing::warn!(%error, "Legacy directory backup will retry on startup");
+    }
+    Ok(())
 }
 
-fn migrate_locked(core: &Core, root: &Path) -> Result<MigrationReport, CoreError> {
+pub fn migrate_if_needed(core: &Core, root: &Path, bundled: &Path) -> Result<bool, CoreError> {
+    migrate_with(core, root, bundled, |root, bundled, key| {
+        isolated_deploy::deploy_packages(
+            root,
+            bundled,
+            Some(&core.env().data_dir),
+            &[isolated_deploy::PackageDeployTarget {
+                package_key: key.to_owned(),
+                package_name: runtime_materialize::package_name(core, key),
+                materialize_error: None,
+                staged_inputs: None,
+            }],
+            |_| {},
+        )
+    })
+}
+
+fn migrate_with(
+    core: &Core,
+    root: &Path,
+    bundled: &Path,
+    deploy: impl FnOnce(&Path, &Path, &str) -> Result<(), String>,
+) -> Result<bool, CoreError> {
+    if !RuntimeDirs::needs_migration(root) {
+        return Ok(false);
+    }
+    let result = (|| {
+        let root = checked_root(root)?;
+        isolated_deploy::with_migration_lock(&root, || {
+            if !RuntimeDirs::needs_migration(&root) {
+                return Ok(false);
+            }
+            crate::deploy::emit_legacy_progress(core, DeployStep::Compile, "正在迁移方案目录…");
+            let result = migrate_to_isolated(core, &root, bundled, deploy);
+            crate::deploy::emit_legacy_progress(
+                core,
+                if result.is_ok() {
+                    DeployStep::Done
+                } else {
+                    DeployStep::Failed
+                },
+                if result.is_ok() {
+                    ""
+                } else {
+                    "迁移失败，重试"
+                },
+            );
+            result.map_err(|error| error.to_string())?;
+            MIGRATED_HERE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(root.clone());
+            Ok(true)
+        })
+        .map_err(CoreError::Other)
+    })();
+    result.map_err(|error: CoreError| {
+        tracing::error!(%error, "Package directory migration failed");
+        CoreError::Other("迁移失败，重试".into())
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn migrate_default_if_needed(root: &Path, bundled: &Path) -> Result<bool, CoreError> {
+    if !RuntimeDirs::needs_migration(root) {
+        return Ok(false);
+    }
+    struct Sink;
+    impl crate::EventSink for Sink {
+        fn emit(&self, _: crate::CoreEvent) {}
+    }
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| CoreError::Other("Cannot determine app data directory".into()))?
+        .join("ink.rea.keytao-app");
+    let core = Core::new(
+        crate::AppEnv {
+            cache_dir: data_dir.join("cache"),
+            data_dir,
+            resource_dir: bundled.to_owned(),
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            #[cfg(target_os = "linux")]
+            platform: crate::Platform::Linux,
+            #[cfg(target_os = "macos")]
+            platform: crate::Platform::MacOs,
+            #[cfg(target_os = "windows")]
+            platform: crate::Platform::Windows,
+        },
+        std::sync::Arc::new(Sink),
+    )?;
+    migrate_if_needed(&core, root, bundled)
+}
+
+fn migrate_to_isolated(
+    core: &Core,
+    root: &Path,
+    bundled: &Path,
+    deploy: impl FnOnce(&Path, &Path, &str) -> Result<(), String>,
+) -> Result<(), CoreError> {
     package_activation::recover(core)?;
     let sync_dir = checked_sync_dir(core, root)?;
     let path = marker_path(root)?;
-    if let Some(migration) = read_marker(&path)? {
-        return report(core, root, &sync_dir, migration, true);
+    if path.try_exists()? {
+        return Err(CoreError::Other("Invalid package migration marker".into()));
     }
     crate::addon_store::project_legacy_for_isolation(core, root)?;
     let legacy = runtime_materialize::legacy_user_files(core, root)?;
-    let migration = plan(core, root, &legacy)?;
-    let report = report(core, root, &sync_dir, migration, true)?;
-    let bundled = crate::deploy::deploy_shared_data_dir(core, root);
-    let runtimes = runtime_materialize::materialize_migration(
-        core,
-        root,
-        &bundled,
-        &report.migration.runtime_package,
-        &legacy,
-    )?;
-    migration_userdb::migrate(root, &runtimes, &sync_dir)?;
-    crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec(&report.migration)?)?;
-    if let Err(error) = ReloadStamp::write_package(root, &report.migration.runtime_package) {
-        let error = match crate::package_fs::remove_file(&path) {
-            Ok(()) => error,
-            Err(rollback) => format!("{error}; remove incomplete migration marker: {rollback}"),
-        };
-        return Err(CoreError::Other(error));
+    let mut migration = plan(core, root, &legacy)?;
+    let key = &migration.runtime_package;
+    let runtimes = runtime_materialize::materialize_migration(core, root, bundled, key, &legacy)?;
+    let active = runtimes
+        .iter()
+        .find(|dirs| dirs.active_package_key.as_ref() == Some(key))
+        .ok_or_else(|| CoreError::Other("Missing active package runtime".into()))?;
+    let legacy_user = safe_path(root, "user.yaml").map_err(CoreError::Other)?;
+    if legacy_user.is_file() {
+        let user = safe_path(&active.user_data_dir, "user.yaml").map_err(CoreError::Other)?;
+        crate::scheme_files::write_file_atomic(&user, &fs::read(legacy_user)?)?;
     }
-    Ok(report)
-}
-
-fn report(
-    core: &Core,
-    root: &Path,
-    sync_dir: &Path,
-    migration: Migration,
-    completed: bool,
-) -> Result<MigrationReport, CoreError> {
-    let orphans = package_orphans::report_migration(
-        core,
-        root,
-        sync_dir,
-        migration.user_files.iter().cloned().collect(),
-    )?;
-    Ok(MigrationReport {
-        completed,
-        migration,
-        orphans,
-    })
+    migration_userdb::migrate(root, &runtimes, &sync_dir)?;
+    deploy(root, bundled, key).map_err(CoreError::Other)?;
+    migration.build_verified = true;
+    migration.sync_paths = vec![sync_dir, lexical_sync_path(root)?];
+    safe_path(root, keytao_core::RELOAD_STAMP_FILE_NAME).map_err(CoreError::Other)?;
+    ReloadStamp::write_package(root, key).map_err(CoreError::Other)?;
+    // Changing the marker also changes the reload signature.
+    crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec(&migration)?)?;
+    Ok(())
 }
 
 fn checked_sync_dir(core: &Core, root: &Path) -> Result<PathBuf, CoreError> {
@@ -125,6 +234,7 @@ fn checked_sync_dir(core: &Core, root: &Path) -> Result<PathBuf, CoreError> {
     for protected in [
         root.join("runtime"),
         root.join("scheme-packages"),
+        root.join(BACKUP_DIR),
         ReloadStamp::path(root),
         store,
     ]
@@ -136,6 +246,197 @@ fn checked_sync_dir(core: &Core, root: &Path) -> Result<PathBuf, CoreError> {
         }
     }
     Ok(sync_dir)
+}
+
+fn backup_legacy(root: &Path, mut sync_paths: Vec<PathBuf>) -> Result<(), CoreError> {
+    let pending = safe_path(root, BACKUP_PENDING).map_err(CoreError::Other)?;
+    let complete = safe_path(root, BACKUP_COMPLETE).map_err(CoreError::Other)?;
+    if complete.is_file() {
+        return Ok(());
+    }
+    let timestamp = match fs::read(&pending) {
+        Ok(bytes) => {
+            let journal: BackupJournal = serde_json::from_slice(&bytes)?;
+            sync_paths.extend(journal.sync_paths);
+            journal.timestamp
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => backup_timestamp(),
+        Err(error) => return Err(error.into()),
+    };
+    sync_paths.sort();
+    sync_paths.dedup();
+    let backup = backup_path(root, &timestamp)?;
+    let journal = BackupJournal {
+        timestamp,
+        sync_paths,
+    };
+    crate::scheme_files::write_file_atomic(&pending, &serde_json::to_vec(&journal)?)?;
+    fs::create_dir_all(&backup)?;
+    move_legacy_entries(root, root, &backup, &journal.sync_paths)?;
+    fs::rename(pending, complete)?;
+    Ok(())
+}
+
+fn backup_timestamp() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}.{:09}Z",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        now.nanosecond(),
+    )
+}
+
+fn lexical_sync_path(root: &Path) -> Result<PathBuf, CoreError> {
+    let configured = crate::rime_sync::read_settings(root).map_err(CoreError::Other)?;
+    let configured_path = if configured.sync_dir.is_empty() {
+        root.join("sync")
+    } else {
+        root.join(configured.sync_dir)
+    };
+    Ok(std::path::absolute(configured_path)?
+        .components()
+        .fold(PathBuf::new(), |mut path, part| {
+            if part == std::path::Component::ParentDir {
+                path.pop();
+            } else {
+                path.push(part);
+            }
+            path
+        }))
+}
+
+fn backup_path(root: &Path, timestamp: &str) -> Result<PathBuf, CoreError> {
+    if !is_backup_timestamp(timestamp) {
+        return Err(CoreError::Other("Invalid legacy backup timestamp".into()));
+    }
+    safe_path(root, &format!("{BACKUP_DIR}/{timestamp}")).map_err(CoreError::Other)
+}
+
+fn is_backup_timestamp(timestamp: &str) -> bool {
+    timestamp.len() == 26
+        && timestamp
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                8 => byte == b'T',
+                15 => byte == b'.',
+                25 => byte == b'Z',
+                _ => byte.is_ascii_digit(),
+            })
+}
+
+pub(crate) fn completed_backups(root: &Path) -> Result<Vec<PathBuf>, CoreError> {
+    let complete = safe_path(root, BACKUP_COMPLETE).map_err(CoreError::Other)?;
+    if !complete.is_file() {
+        return Ok(Vec::new());
+    }
+    let parent = safe_path(root, BACKUP_DIR).map_err(CoreError::Other)?;
+    let mut backups = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(backups),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry.file_name().to_str().is_some_and(is_backup_timestamp)
+        {
+            backups.push(entry.path());
+        }
+    }
+    backups.sort();
+    Ok(backups)
+}
+
+fn move_legacy_entries(
+    root: &Path,
+    source: &Path,
+    destination: &Path,
+    sync_dirs: &[PathBuf],
+) -> Result<(), CoreError> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let name = entry.file_name();
+        if sync_dirs.iter().any(|dir| from.starts_with(dir))
+            || (root == source && control_entry(&name.to_string_lossy()))
+        {
+            continue;
+        }
+        let to = destination.join(name);
+        if sync_dirs.iter().any(|dir| dir.starts_with(&from)) {
+            if entry.file_type()?.is_dir() {
+                match fs::create_dir(&to) {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.kind() == ErrorKind::AlreadyExists
+                            && fs::symlink_metadata(&to)?.is_dir() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                move_legacy_entries(root, &from, &to, sync_dirs)?;
+            }
+            continue;
+        }
+        let to = match fs::symlink_metadata(&to) {
+            Err(error) if error.kind() == ErrorKind::NotFound => to,
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                // A delayed legacy writer may have recreated an already archived path.
+                let retry = backup_path(root, &backup_timestamp())?;
+                fs::create_dir(&retry)?;
+                let to = retry.join(from.strip_prefix(root).unwrap());
+                fs::create_dir_all(to.parent().unwrap())?;
+                to
+            }
+        };
+        crate::package_fs::rename(&from, &to)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn control_entry(name: &str) -> bool {
+    matches!(
+        name,
+        "runtime"
+            | "scheme-packages"
+            | BACKUP_DIR
+            | "log"
+            | "logs"
+            | "sync"
+            | "rime-data"
+            | "shared"
+            | "trash"
+            | "cache"
+            | "installation.yaml"
+            | "theme.yaml"
+            | "keyboard.yaml"
+            | "keyboard-layout.yaml"
+            | "libjd"
+            | "runtime-log.json"
+            | "android_ime.json"
+            | "ios_ime.json"
+            | "keytao-librime-upgrade.lock"
+            | "keytao-librime.version"
+            | "keytao-ime-engine.json"
+            | ".rime-data.lock"
+            | ".rime-data.staging"
+            | ".rime-data.previous"
+            | "auth-tokens.json"
+            | keytao_core::RELOAD_STAMP_FILE_NAME
+            | keytao_core::english_mode::SETTINGS_FILE
+            | RuntimeDirs::SETTINGS_FILE
+            | crate::account::USER_DICTIONARY
+            | "keytao.user.remove.txt"
+    ) || name.starts_with("app-state.json")
+        || (name.starts_with(".keytao-")
+            && name != ".keytao-package-lua"
+            && !name.starts_with(".keytao-rime-user-"))
 }
 
 fn plan(
@@ -211,6 +512,8 @@ fn plan(
         legacy_user_databases: migration_userdb::legacy_dictionary_names(root)?
             .into_iter()
             .collect(),
+        build_verified: false,
+        sync_paths: Vec::new(),
     })
 }
 
@@ -240,27 +543,13 @@ fn marker_path(root: &Path) -> Result<PathBuf, CoreError> {
     safe_path(root, RuntimeDirs::MIGRATION_MARKER).map_err(CoreError::Other)
 }
 
-fn read_marker(path: &Path) -> Result<Option<Migration>, CoreError> {
-    match fs::read(path) {
-        Ok(bytes) => {
-            let migration: Migration = serde_json::from_slice(&bytes)?;
-            if migration.version != VERSION {
-                return Err(CoreError::Other(format!(
-                    "Unsupported migration version: {}",
-                    migration.version,
-                )));
-            }
-            Ok(Some(migration))
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
+#[cfg(test)]
+#[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
+mod smoke_fixture;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keytao_core::RELOAD_STAMP_FILE_NAME;
     use crate::{
         AppEnv, AppState, CoreEvent, EventSink, Platform,
         package_activation::Activation,
@@ -289,7 +578,7 @@ mod tests {
             state: Mutex::new(AppState::default()),
             download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file: None,
-            pending_package: Mutex::new(None),
+            pending_package: Mutex::new(()),
             user_words: Mutex::new(crate::user_words::UserWordsState::default()),
         }
     }
@@ -359,56 +648,24 @@ mod tests {
     }
 
     #[test]
-    fn migration_preserves_legacy_and_is_idempotent() {
+    fn migration_is_idempotent_and_archives_on_the_next_start() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let core = fixture(root);
         let a = package(&core, "local-a", "alpha", "alpha");
-        let mut z = package(&core, "local-z", "zulu", "keytao");
-        package(&core, "local-inactive", "inactive", "inactive");
-        put(root, "default.custom.yaml", b"patch: {menu/page_size: 7}\n");
-        z.backups.push(
-            package_activation::backup(&core, root, "default.custom.yaml")
-                .unwrap()
-                .unwrap(),
-        );
-        let applied = b"patch: {menu/page_size: 7, recognizer/patterns: generated}\n";
-        put(root, "default.custom.yaml", applied);
-        z.generated.push(
-            package_activation::fingerprint(root, "default.custom.yaml")
-                .unwrap()
-                .unwrap(),
-        );
-        z.default_applied.insert(
-            "default.custom.yaml".into(),
-            serde_yaml::from_slice(applied).unwrap(),
-        );
+        let z = package(&core, "local-z", "zulu", "keytao");
         package_activation::write(&core, &a).unwrap();
         package_activation::write(&core, &z).unwrap();
-        put(
-            root,
-            "scheme-packages/active-manifest.json",
-            br#"{"active_package":"local-a"}"#,
-        );
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            br#"{"runtime_isolation":true}"#,
-        );
         put(
             root,
             "user.yaml",
             b"var: {previously_selected_schema: zulu}\n",
         );
+        put(root, "default.custom.yaml", b"patch: {menu/page_size: 7}\n");
         put(
             root,
             "squirrel.custom.yaml",
             b"patch: {style/color_scheme: custom}\n",
-        );
-        put(
-            root,
-            "weasel.custom.yaml",
-            b"patch: {style/horizontal: true}\n",
         );
         put(root, "custom_phrase.txt", b"phrase\tcode\n");
         put(root, "personal.dict.yaml", b"---\nname: personal\n...\n");
@@ -417,217 +674,221 @@ mod tests {
             "keytao.user.dict.yaml",
             b"---\nname: keytao.user\n...\n",
         );
-        put(root, "keytao.user.remove.txt", b"removed\n");
-        put(root, "orphan.yaml", b"leave me here\n");
         put(root, "build/legacy.bin", b"legacy build");
-        put(
-            root,
-            "cloud-backup/private.custom.yaml",
-            b"patch: {sync_only: true}\n",
-        );
+        put(root, "nested/sync/private.yaml", b"keep sync");
+        put(root, "nested/old.yaml", b"archive sibling");
+        put(root, "log/rime.log", b"keep log");
         put(
             root,
             "installation.yaml",
-            format!(
-                "sync_dir: {:?}\n",
-                root.join("cloud-backup/../cloud-backup")
-            )
-            .as_bytes(),
+            format!("sync_dir: {:?}\n", root.join("nested/sync")).as_bytes(),
         );
-        let user_custom = crate::managed_custom::set_patch(
-            "patch: {user: true}\n",
-            "fixture",
-            Some("{migration_generated: true}"),
-        )
-        .unwrap();
-        put(root, "another.custom.yaml", user_custom.as_bytes());
-
-        let legacy = test_hashes(root);
-        let planned = preview(&core, root).unwrap();
-        assert!(!planned.completed);
-        assert_eq!(planned.migration.active_package, "local-z");
-        assert_eq!(test_hashes(root), legacy);
-        assert_eq!(
-            planned
-                .orphans
-                .files
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<Vec<_>>(),
-            ["orphan.yaml"]
-        );
-
-        let stamp = ReloadStamp::write_package(root, "local-a").unwrap();
-        let result = migrate_to_isolated(&core, root).unwrap();
-        assert!(result.completed);
-        assert_eq!(result.migration, planned.migration);
-        assert_eq!(
-            RuntimeDirs::active_package_key(root).as_deref(),
-            Some("local-z")
-        );
-        assert_eq!(
-            ReloadStamp::package_key(&stamp).as_deref(),
-            Some("local-z")
-        );
-        for key in &result.migration.packages {
-            let run = root.join("runtime").join(key);
-            let marker: serde_json::Value =
-                serde_json::from_slice(&fs::read(run.join(RuntimeDirs::MANIFEST_FILE)).unwrap())
-                    .unwrap();
-            for name in &result.migration.user_files {
-                assert!(run.join(name).is_file(), "{key}/{name}");
-                assert!(marker["user_owned"][name].is_string(), "{key}/{name}");
-            }
-            let default = fs::read_to_string(run.join("default.custom.yaml")).unwrap();
-            assert!(default.contains("menu/page_size: 7"));
-            assert!(!default.contains("recognizer/patterns"));
-            assert_eq!(
-                fs::read(run.join("another.custom.yaml")).unwrap(),
-                b"patch: {user: true}\n"
-            );
-            assert_eq!(
-                run.join("keytao.user.dict.yaml").is_file(),
-                key == "local-z"
-            );
-            assert_eq!(
-                run.join("keytao.user.remove.txt").is_file(),
-                key == "local-z"
-            );
-            assert!(!run.join("cloud-backup").exists());
-        }
-        let migrated = test_hashes(root);
-        assert_eq!(
-            migrated
-                .iter()
-                .filter(|(path, _)| {
-                    !path.starts_with("runtime/") && path.as_str() != RELOAD_STAMP_FILE_NAME
-                })
-                .map(|(path, hash)| (path.clone(), hash.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            legacy,
-        );
-        assert!(migrate_to_isolated(&core, root).unwrap().completed);
-        assert_eq!(test_hashes(root), migrated);
-        put(
-            root,
-            "scheme-packages/active-manifest.json",
-            br#"{"active_package":"local-a","runtime_migration_version":1}"#,
-        );
-        assert_eq!(
-            RuntimeDirs::active_package_key(root).as_deref(),
-            Some("local-a")
-        );
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            br#"{"runtime_isolation":false}"#,
-        );
+        let before = test_hashes(root);
         assert_eq!(
             RuntimeDirs::resolve(root, root).unwrap(),
             RuntimeDirs::flat(root, root)
         );
-    }
-
-    #[test]
-    fn active_choice_falls_back_to_first_activated_main_then_keytao() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let core = fixture(root);
-        let a = package(&core, "local-a", "alpha", "alpha");
-        let z = package(&core, "local-z", "zulu", "zulu");
-        put(
-            root,
-            "user.yaml",
-            b"var: {previously_selected_schema: unknown}\n",
-        );
-        let fallback = preview(&core, root).unwrap();
-        assert_eq!(fallback.migration.active_package, "keytao");
-        assert_eq!(fallback.migration.runtime_package, "builtin/keytao");
-        package_activation::write(&core, &z).unwrap();
-        package_activation::write(&core, &a).unwrap();
-        assert_eq!(
-            preview(&core, root).unwrap().migration.active_package,
-            "local-a"
-        );
-    }
-
-    #[test]
-    fn legacy_addon_can_own_the_current_schema_without_changing_legacy_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let core = fixture(root);
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            br#"{"runtime_isolation":true}"#,
-        );
-        put(
-            root,
-            "user.yaml",
-            b"var: {previously_selected_schema: rime_ice}\n",
-        );
-        let source = b"schema: {schema_id: rime_ice, name: Rime Ice}\n";
-        put(root, "rime_ice.schema.yaml", source);
-        put(root, "legacy/nested/untouched.yaml", b"untouched\n");
-        let receipt = serde_json::to_vec(&serde_json::json!({
-            "format": 1, "version": "1", "source": "fixture", "archive_sha256": "0".repeat(64),
-            "files": [{
-                "path": "rime_ice.schema.yaml", "size": source.len(),
-                "sha256": sha256_reader(source.as_slice()).unwrap(),
-            }],
-        }))
-        .unwrap();
-        put(root, ".keytao-rime-ice.json", &receipt);
-        let before = test_hashes(root);
-        assert_eq!(
-            crate::addon_store::manifest(&core, root, "rime_ice").unwrap(),
-            Some(receipt.clone())
-        );
-        package_orphans::report(&core, root).unwrap();
-        assert_eq!(test_hashes(root), before);
-        assert_eq!(
-            preview(&core, root).unwrap().migration.active_package,
-            "rime_ice"
-        );
-        assert_eq!(test_hashes(root), before);
-        assert_eq!(
-            migrate_to_isolated(&core, root)
-                .unwrap()
-                .migration
-                .active_package,
-            "rime_ice"
-        );
-        assert!(root.join("runtime/rime_ice").is_dir());
-        let mut after = test_hashes(root);
-        after.retain(|path, _| {
-            !path.starts_with("runtime/")
-                && !path.starts_with("scheme-packages/")
-                && path != RELOAD_STAMP_FILE_NAME
-        });
-        assert_eq!(after, before);
-
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            br#"{"runtime_isolation":false}"#,
-        );
-        let rolled_back = test_hashes(root);
-        assert_eq!(
-            crate::addon_store::manifest(&core, root, "rime_ice").unwrap(),
-            Some(receipt)
-        );
-        package_orphans::report(&core, root).unwrap();
-        assert_eq!(test_hashes(root), rolled_back);
-
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            br#"{"runtime_isolation":true}"#,
-        );
-        fs::remove_dir_all(root.join("scheme-packages/addons/rime_ice")).unwrap();
-        assert!(crate::addon_store::manifest(&core, root, "rime_ice")
+        assert!(
+            migrate_with(&core, root, root, |_, _, key| {
+                assert_eq!(key, "local-z");
+                Ok(())
+            })
             .unwrap()
-            .is_none());
+        );
+        assert!(!migrate_with(&core, root, root, |_, _, _| panic!("already migrated")).unwrap());
+        assert_eq!(
+            ReloadStamp::package_key(&ReloadStamp::path(root)).as_deref(),
+            Some("local-z")
+        );
+        assert_eq!(
+            RuntimeDirs::resolve(root, root).unwrap().user_data_dir,
+            root.join("runtime/local-z")
+        );
+        for key in ["local-a", "local-z"] {
+            let runtime = root.join("runtime").join(key);
+            for name in [
+                "squirrel.custom.yaml",
+                "custom_phrase.txt",
+                "personal.dict.yaml",
+            ] {
+                assert_eq!(
+                    fs::read(runtime.join(name)).unwrap(),
+                    fs::read(root.join(name)).unwrap()
+                );
+            }
+            assert_eq!(
+                runtime.join("keytao.user.dict.yaml").is_file(),
+                key == "local-z"
+            );
+        }
+        start_app(&core, root).unwrap();
+        assert!(root.join("build/legacy.bin").is_file());
+        MIGRATED_HERE.lock().unwrap().remove(root);
+        start_app(&core, root).unwrap();
+        let [backup] = completed_backups(root).unwrap().try_into().unwrap();
+        let archived = test_hashes(&backup);
+        let after = test_hashes(root);
+        for (path, digest) in before {
+            if control_entry(path.split('/').next().unwrap()) || path.starts_with("nested/sync/") {
+                assert_eq!(after[&path], digest, "{path}");
+            } else {
+                assert!(!root.join(&path).exists(), "{path}");
+                assert_eq!(archived[&path], digest, "{path}");
+            }
+        }
+        assert!(fs::read_dir(root).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name();
+            control_entry(&name.to_string_lossy()) || name == "nested"
+        }));
+        let report = crate::package_orphans::report(&core, root).unwrap();
+        let entry = report
+            .files
+            .iter()
+            .find(|entry| entry.path.starts_with(BACKUP_DIR))
+            .unwrap();
+        assert_eq!(root.join(&entry.path), backup);
+        assert!(!entry.path.ends_with("legacy.bin"));
+    }
+
+    #[test]
+    fn migration_builds_the_active_package_before_publishing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bundled = root.join("rime-data");
+        smoke_fixture::write(&bundled).unwrap();
+        let core = fixture(root);
+        put(root, "build/legacy.bin", b"legacy build");
+        assert!(migrate_if_needed(&core, root, &bundled).unwrap());
+        let dirs = RuntimeDirs::resolve(root, &bundled).unwrap();
+        assert!(isolated_deploy::package_build_ready(root, &dirs));
+        assert_eq!(
+            fs::read(root.join("build/legacy.bin")).unwrap(),
+            b"legacy build"
+        );
+    }
+
+    #[test]
+    fn interrupted_backup_resumes_without_replacing_moved_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let stamp = "20261121T010203.000000000Z";
+        put(
+            root,
+            BACKUP_PENDING,
+            &serde_json::to_vec(&BackupJournal {
+                timestamp: stamp.into(),
+                sync_paths: vec![root.join("original-sync")],
+            })
+            .unwrap(),
+        );
+        let backup = backup_path(root, stamp).unwrap();
+        put(&backup, "build/legacy.bin", b"already moved");
+        put(root, "build/legacy.bin", b"recreated by old IME");
+        put(root, "nested/custom.yaml", b"still pending");
+        put(root, "sync/data.txt", b"keep sync");
+        put(root, "original-sync/data.txt", b"keep original sync");
+        backup_legacy(root, vec![root.join("sync")]).unwrap();
+        let backups = completed_backups(root).unwrap();
+        assert_eq!(backups.len(), 2);
+        let recreated = backups.iter().find(|path| **path != backup).unwrap();
+        assert_eq!(
+            fs::read(recreated.join("build/legacy.bin")).unwrap(),
+            b"recreated by old IME"
+        );
+        assert_eq!(
+            fs::read(backup.join("build/legacy.bin")).unwrap(),
+            b"already moved"
+        );
+        assert_eq!(
+            fs::read(backup.join("nested/custom.yaml")).unwrap(),
+            b"still pending"
+        );
+        assert_eq!(fs::read(root.join("sync/data.txt")).unwrap(), b"keep sync");
+        assert_eq!(
+            fs::read(root.join("original-sync/data.txt")).unwrap(),
+            b"keep original sync"
+        );
+        assert!(!root.join("nested").exists());
+        assert!(!root.join(BACKUP_PENDING).exists());
+    }
+
+    #[test]
+    fn migration_stays_flat_until_deploy_and_reload_succeed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let core = fixture(root);
+        let activation = package(&core, "local-a", "alpha", "alpha");
+        package_activation::write(&core, &activation).unwrap();
+        put(root, "build/legacy.bin", b"still usable");
+        let stamp = ReloadStamp::path(root);
+        let failure = migrate_with(&core, root, root, |root, _, key| {
+            assert_eq!(key, "local-a");
+            assert!(RuntimeDirs::needs_migration(root));
+            assert!(!stamp.exists());
+            Err("fixture deployment failed".into())
+        });
+        assert_eq!(failure.unwrap_err().to_string(), "迁移失败，重试");
+        assert!(RuntimeDirs::needs_migration(root));
+        assert!(!stamp.exists());
+
+        fs::create_dir(&stamp).unwrap();
+        assert!(migrate_with(&core, root, root, |_, _, _| Ok(())).is_err());
+        assert!(!RuntimeDirs::migration_complete(root));
+        assert_eq!(
+            RuntimeDirs::resolve(root, root).unwrap(),
+            RuntimeDirs::flat(root, root)
+        );
+        assert_eq!(
+            fs::read(root.join("build/legacy.bin")).unwrap(),
+            b"still usable"
+        );
+
+        fs::remove_dir(&stamp).unwrap();
+        assert!(migrate_with(&core, root, root, |_, _, _| Ok(())).unwrap());
+        assert!(!RuntimeDirs::needs_migration(root));
+        assert_eq!(ReloadStamp::package_key(&stamp).as_deref(), Some("local-a"));
+    }
+
+    #[test]
+    fn failed_migration_keeps_live_flat_files_out_of_orphan_report() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let core = fixture(root);
+        let activation = package(&core, "local-a", "alpha", "alpha");
+        package_activation::write(&core, &activation).unwrap();
+        let legacy = [
+            "legacy.schema.yaml",
+            "legacy.dict.yaml",
+            "legacy.custom.yaml",
+            "default.yaml",
+            "nested/legacy_include.yaml",
+            "alternate.txt",
+            "rime.lua",
+            "lua/live.lua",
+            "build/legacy.table.bin",
+            "prebuilt/legacy.prism.bin",
+            "opencc/legacy.json",
+            "legacy.ocd2",
+        ];
+        for path in legacy.into_iter().chain(["orphan.bak"]) {
+            put(root, path, b"# legacy contents\n");
+        }
+        let mut deploy_called = false;
+        let failure = migrate_with(&core, root, root, |_, _, _| {
+            deploy_called = true;
+            Err("fixture deployment failed".into())
+        });
+        assert!(deploy_called);
+        assert!(failure.is_err());
+        assert!(RuntimeDirs::needs_migration(root));
+
+        let report = crate::package_orphans::report(&core, root).unwrap();
+        let paths: Vec<_> = report.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["orphan.bak"]);
+
+        assert!(migrate_with(&core, root, root, |_, _, _| Ok(())).unwrap());
+        let report = crate::package_orphans::report(&core, root).unwrap();
+        assert!(report.files.iter().any(|file| file.path == "legacy.schema.yaml"));
     }
 
     #[test]
@@ -641,32 +902,6 @@ mod tests {
             "installation.yaml",
             format!("sync_dir: {:?}\n", store.join("addons")).as_bytes(),
         );
-
-        assert!(preview(&core, &root).is_err());
-    }
-
-    #[test]
-    fn migration_can_retry_after_a_reload_stamp_write_fails() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let core = fixture(root);
-        let activation = package(&core, "local-a", "alpha", "alpha");
-        package_activation::write(&core, &activation).unwrap();
-        put(
-            root,
-            RuntimeDirs::SETTINGS_FILE,
-            br#"{"runtime_isolation":true}"#,
-        );
-        let stamp = ReloadStamp::path(root);
-        fs::create_dir(&stamp).unwrap();
-        assert!(migrate_to_isolated(&core, root).is_err());
-        assert!(!preview(&core, root).unwrap().completed);
-
-        fs::remove_dir(&stamp).unwrap();
-        assert!(migrate_to_isolated(&core, root).unwrap().completed);
-        assert_eq!(
-            ReloadStamp::package_key(&stamp).as_deref(),
-            Some("local-a")
-        );
+        assert!(checked_sync_dir(&core, &root).is_err());
     }
 }

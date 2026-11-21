@@ -570,7 +570,7 @@ pub fn utf16_offset_from_chars(text: &str, char_offset: usize) -> usize {
 
 #[cfg(test)]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
-    let dirs = RuntimeDirs::resolve(user_data_dir, shared_data_dir).unwrap();
+    let dirs = RuntimeDirs::flat(user_data_dir, shared_data_dir);
     (dirs.staging_dir, dirs.prebuilt_data_dir)
 }
 
@@ -1585,120 +1585,6 @@ mod desktop {
             })
         })();
         result.and(finalize_rime())
-    }
-
-    /// Deploy in a fresh upgrade child without opening user dictionaries.
-    #[cfg(target_os = "linux")]
-    pub fn deploy_for_upgrade(
-        user_data_dir: String,
-        shared_data_dir: String,
-    ) -> Result<(), String> {
-        let control_root = Path::new(&user_data_dir);
-        runtime_log::init_for_engine(control_root);
-        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir))?;
-        let user_dir = dirs.user_data_dir.as_path();
-        let shared_dir = dirs.shared_data_dir.as_path();
-        let package_shared = dirs.package_shared();
-        let deploy_log = capture_deployment_log(control_root);
-        begin_desktop_deployment(user_dir, shared_dir, None)?;
-        {
-            let _rime = rime_api_lock();
-            if *lock_ignore_poison(&RIME_SETUP_COMPLETE) || *lock_ignore_poison(&RIME_INITIALIZED) {
-                return Err("upgrade deployment requires a fresh librime process".into());
-            }
-            unsafe {
-                let api = rime_get_api();
-                if api.is_null()
-                    || (*api).setup.is_none()
-                    || (*api).deployer_initialize.is_none()
-                    || (*api).set_notification_handler.is_none()
-                    || (*api).start_maintenance.is_none()
-                    || (*api).join_maintenance_thread.is_none()
-                {
-                    return Err("librime maintenance API is unavailable".into());
-                }
-            }
-            // setup_only exports user dictionaries; Lua initialization can run user code.
-            initialize_rime(control_root, &dirs, true);
-        }
-        prepare_missing_desktop_schemas(user_dir, shared_dir)?;
-        if !full_deploy_and_wait(user_dir)
-            .map_err(|error| deploy_log.failure_message(Some(&error)))?
-        {
-            return Err(deploy_log.failure_message(None));
-        }
-        deploy_desktop_schema_dependencies(user_dir, None, package_shared)
-            .map_err(|error| deploy_log.failure_message(Some(&format!("依赖部署失败：{error}"))))?;
-        validate_deployed_schema_files(user_dir)
-            .map_err(|error| deploy_log.failure_message(Some(&format!("部署验证失败：{error}"))))?;
-        complete_resolved_deployment(user_dir, package_shared, || {
-            prune_rime_build_artifacts(user_dir, Some(shared_dir)).map(|_| ())
-        })
-        .inspect_err(|_| {
-            let _ = mark_deployment_failed(user_dir);
-        })
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn deploy_android_config(
-        user_data_dir: String,
-        shared_data_dir: String,
-    ) -> Result<Vec<String>, String> {
-        let control_root = Path::new(&user_data_dir);
-        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir))?;
-        let user_dir = dirs.user_data_dir.as_path();
-        runtime_log::init(control_root, "android-deploy");
-        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let deploy_log = capture_deployment_log(control_root);
-        begin_deployment(user_dir)?;
-        setup_resolved_runtime(control_root, &dirs, DeployProcess::AndroidDeployer)?;
-        deploy_config_file("default.yaml", "config_version")
-            .map_err(|error| deploy_log.failure_message(Some(&error)))?;
-        let schemas = parse_schema_list_from_dir(user_dir);
-        if schemas.is_empty() {
-            Err("no schema selected in default.custom.yaml".into())
-        } else {
-            Ok(schemas)
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn deploy_android_schema(
-        user_data_dir: String,
-        shared_data_dir: String,
-        schema_id: String,
-    ) -> Result<Vec<String>, String> {
-        let control_root = Path::new(&user_data_dir);
-        let dirs = RuntimeDirs::resolve(control_root, Path::new(&shared_data_dir))?;
-        let user_dir = dirs.user_data_dir.as_path();
-        let package_shared = dirs.package_shared();
-        runtime_log::init(control_root, "android-deploy");
-        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let deploy_log = capture_deployment_log(control_root);
-        regenerate_active_rime_lua(user_dir)?;
-        setup_resolved_runtime(control_root, &dirs, DeployProcess::AndroidDeployer)?;
-        if parse_schema_list_from_dir(user_dir).contains(&schema_id) {
-            if !deploy_listed_schema_from(user_dir, &schema_id, package_shared)? {
-                return Ok(Vec::new());
-            }
-            return Ok(schema_dependencies_from_file(&compiled_schema_path(
-                user_dir, &schema_id,
-            )?));
-        }
-        let source = schema_source_path(user_dir, package_shared, &schema_id);
-        if !source.is_file() {
-            return Err(format!("missing schema source: {}", source.display()));
-        }
-        let _dictionary_override =
-            if package_shared.is_none() || user_dir.join("liangfen.dict.yaml").is_file() {
-                prepare_android_auxiliary_dictionary(user_dir, &schema_id)?
-            } else {
-                None
-            };
-        deploy_schema_file(&source).map_err(|error| deploy_log.failure_message(Some(&error)))?;
-        let compiled = compiled_schema_path(user_dir, &schema_id)?;
-        Ok(schema_dependencies_from_file(&compiled))
     }
 
     #[cfg(target_os = "android")]
@@ -4654,8 +4540,6 @@ mod desktop {
 ))]
 pub use desktop::userdb_migration::with_userdb_migration;
 
-#[cfg(target_os = "linux")]
-pub use desktop::deploy_for_upgrade;
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -4756,9 +4640,6 @@ pub fn set_schema_switch(
         desktop::set_switch_setting(schema_root, schema_id, switch_name, value)
     })
 }
-
-#[cfg(target_os = "android")]
-pub use desktop::{deploy_android_config, deploy_android_schema};
 
 /// What the linked librime can do natively, see [`EngineCapabilities`].
 ///
@@ -6765,7 +6646,7 @@ impl ImeRuntimeSession {
     pub fn should_forward_consumed_shortcut(&self, key: u32, mask: u32) -> bool {
         key_policy::should_forward_consumed_shortcut(key, mask)
             && !(switcher_model::is_hotkey(key, mask)
-                && RuntimeDirs::isolation_enabled(&self.dirs.user))
+                && !RuntimeDirs::needs_migration(&self.dirs.user))
     }
 
     /// Called on the prewarm worker, without engine locks. Frontends can post
@@ -6856,7 +6737,7 @@ impl ImeRuntimeSession {
         {
             return self.process_native_keys(keys);
         }
-        if !RuntimeDirs::isolation_enabled(&self.dirs.user) {
+        if RuntimeDirs::needs_migration(&self.dirs.user) {
             self.close_package_menu();
             if keys.iter().all(|&(key, _)| key != switcher_model::OPEN_PACKAGE_MENU) {
                 return self.process_native_keys(keys);
@@ -8628,8 +8509,8 @@ pub fn schema_build_is_available(user_data_dir: &Path) -> bool {
 pub fn isolated_ime_schema_state(control_root: &Path, shared: &Path) -> Option<SchemaInstallState> {
     match RuntimeDirs::resolve(control_root, shared) {
         Ok(dirs) if dirs.active_package_key.is_some() => Some(resolved_schema_install_state(&dirs)),
-        Ok(_) => None,
-        Err(_) => Some(SchemaInstallState::default()),
+        Ok(dirs) if dirs.user_data_dir == control_root => None,
+        _ => Some(SchemaInstallState::default()),
     }
 }
 
@@ -9812,9 +9693,7 @@ pub const RELOAD_STAMP_FILE_NAME: &str = "keytao-ime.reload";
 /// change detection. Frontends must not invent their own signature, otherwise
 /// the same deployment reloads on some platforms and not on others.
 ///
-/// The signature is `<len>:<mtime_nanos>:<content_hash>`, so a rewrite is
-/// detected even when the timestamp resolution is coarse or the content is
-/// stable.
+/// The signature detects both rewrites and publication of a migration marker.
 pub struct ReloadStamp;
 
 /// The package manifest has been published but its reload stamp is still pending.
@@ -9831,7 +9710,7 @@ impl ReloadStamp {
 
     /// Request a reload from every running frontend watching `user_data_dir`.
     pub fn write(user_data_dir: &Path) -> Result<PathBuf, String> {
-        if RuntimeDirs::isolation_enabled(user_data_dir) {
+        if !RuntimeDirs::needs_migration(user_data_dir) {
             if let Some(key) = RuntimeDirs::active_package_key(user_data_dir) {
                 return Self::write_package(user_data_dir, &key);
             }
@@ -9897,6 +9776,9 @@ impl ReloadStamp {
     }
 
     pub fn signature_at(path: &Path) -> Option<String> {
+        // A migration publishes its stamp before committing the marker.
+        // Observe both so even a reader that sees the early stamp reloads again.
+        let migrated = path.parent().is_some_and(RuntimeDirs::migration_complete);
         let metadata = std::fs::metadata(path).ok()?;
         if !metadata.is_file() {
             return None;
@@ -9910,7 +9792,12 @@ impl ReloadStamp {
         let content_hash = std::fs::read(path)
             .map(|bytes| fnv1a64(&bytes))
             .unwrap_or(0);
-        Some(format!("{}:{modified}:{content_hash:016x}", metadata.len()))
+        Some(Self::format_signature(metadata.len(), modified, content_hash, migrated))
+    }
+
+    fn format_signature(len: u64, modified: u128, content_hash: u64, migrated: bool) -> String {
+        let migration = if migrated { ":migrated" } else { "" };
+        format!("{len}:{modified}:{content_hash:016x}{migration}")
     }
 }
 

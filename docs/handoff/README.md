@@ -2,7 +2,7 @@
 
 Work in progress handed from the Claude session to Codex. Read this file first, then the two design files next to it.
 
-- `package-isolation-design.md`: per-package isolation design, the adversarial critique, the owner's decisions and the notes added after each merged batch. **This is the contract for batches B3–B6.**
+- `package-isolation-design.md` records the per-package model and migration contract.
 - `ime-jd-research.md`: research and design for the optional libjd (hronro/ime-jd) engine. Blocked on owner answers (see below).
 
 ## Ground rules
@@ -54,8 +54,8 @@ Known noise:
   - Cross-system font family resolution (`crates/keytao-theme/src/font_resolution.rs`).
 - Unpushed, no user-visible change:
   - Isolation B0 (`crates/keytao-core/src/runtime_dirs.rs`).
-  - Isolation B1 (`crates/keytao-app-core/src/runtime_materialize.rs`, flag `KEYTAO_RUNTIME_ISOLATION` / `runtime_isolation`, default off).
-  - Isolation B2 (per-package deploy, structured progress), merged. With the flag off, deploy behaves as before.
+  - Isolation B1 (`crates/keytao-app-core/src/runtime_materialize.rs`) introduced per-package materialization.
+  - Isolation B2 introduced per-package deploy and structured progress.
 - No worktrees are in flight.
 - Release procedure, run only when the owner says so:
   1. Bump `Cargo.toml` line 18 and the `flutter_app/pubspec.yaml` version (keep the `+1002015` build number).
@@ -69,44 +69,18 @@ Known noise:
 
 ### 1. Isolation B2: per-package deploy (done, merged; for reference)
 
-- With the flag on:
-  - Deploy every stale package in order, with the active package first.
-  - Skip a package whose receipt matches, and make no maintenance call for it.
-  - Failure isolation: a failed package keeps its last good build, and other builds stay unchanged (md5).
+- Deploy stale packages in order, with the active package first.
+- Skip packages whose receipts match. A failed package retains its last usable build.
 - Structured progress `{package_key, package_name, index, total, step}` goes through the bridge to Flutter.
 - Scheme cards show 部署中 / 等待部署 in order. The deploy text reads `正在部署 <name>（i/n）`, and the IME hints use the same string.
 - iOS stays on full deploy but emits structured progress.
 
-### 2. Isolation B3–B6 (start here), per `package-isolation-design.md` section 6, as amended by the critique
+### 2. Package isolation migration
 
-- **Before the flag can ever be on**, fix the two items noted at the end of the design file:
-  1. Orphan listing must not treat legacy flat `build/*` as orphans while the flag is on (`package_orphans.rs:122`).
-  2. `RuntimeDirs::resolve` must fail closed and log when a package's files dir is missing (`runtime_dirs.rs:37`).
-- **B3, switching:**
-  - The reload stamp carries the package key.
-  - Every IME re-initializes librime with the new package's dirs.
-  - Windows staged swap applies to all packages (critique #3).
-  - The AppContainer cache is keyed per package.
-  - An IME may only switch to a package that is already built (critique #9).
-- **B4, migration** (needs the owner's OK before it runs on real data):
-  - Run `package_activation::recover` first.
-  - Pick the active package deterministically.
-  - Keep the legacy flat root untouched, so rollback is possible.
-  - Copy user-owned custom files into every package (owner decision D4).
-  - Userdb is per package (D1). Never copy a live leveldb.
-  - Never touch the user's sync dir (D5).
-  - List orphans; never auto-delete them.
-- **B5, UI:**
-  - App home: two-level selector, package then its schema_list.
-  - F4 first level inside the switcher: lists packages as display name + folder name (D2).
-    - librime's Switcher cannot inject candidates. Keep the menu state in keytao-core (a new `switcher_model.rs`) and have every frontend render it.
-    - Spike this first on macOS.
-  - Add-ons install and switch like main packages (D3). The exception is Easy English, which is a per-package overlay.
-- **B6:** remove the copy-into-shared-dir activation path and the cross-package `.keytao-package-lua` snapshots.
-- Not yet covered by any batch (critique #6):
-  - `keytao.user.dict.yaml` and account sync (`account.rs`).
-  - `rime_sync.rs`.
-  - `upload_bundle.rs` root checks.
+- The app migrates existing flat installs automatically at startup and before package install or deployment. Desktop IME deployment uses the same migration gate.
+- Migration recovers interrupted activation, materializes isolated runtimes, imports user dictionaries through private snapshots, and deploys the active package. It writes the reload stamp and publishes the migration marker last.
+- IMEs keep using the old directories until the marker exists. A failed migration leaves those directories available and can be retried.
+- A later app startup moves the legacy files into `legacy-backup/<UTC timestamp>/` using a resumable journal. The cleanup dialog lists the backup. The sync directory and global settings stay in place.
 
 ### 3. ime-jd engine (blocked on the owner)
 
@@ -124,7 +98,7 @@ Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` tr
 
 ## Known follow-ups (not blocking)
 
-- B2 review nits (all behind the isolation flag):
+- B2 follow-up checks:
   - `deploy.rs:493`: isolated paths skip `ensure_remove_filter`/`prepare_candidate_page_size`; Linux skips `launch_keytao_ime`. Confirm materialize regenerates managed patches.
   - `lib.rs:8035`: with the flag on, `deployed=true` comes from the committed marker without a fingerprint check, so source edits do not prompt a redeploy.
   - `deploy_child.rs:475`: old app + new deploy child gives `invalid deployment protocol line` on object progress lines.
@@ -147,7 +121,7 @@ Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` tr
 
 ## Status update (2026-11-21, later)
 
-- Isolation B3–B6 merged into local `main` (flag still off by default): pre-flag fixes, package switching in every IME, reversible migration, migration prompt + two-level home selector + F4 package level, add-ons as packages with the Easy English per-package overlay, legacy flat activation isolated in `legacy_flat`.
+- Isolation B3–B6 introduced package switching, a two-level home and F4 selector, independently deployable add-ons, and per-package Easy English.
 - ime-jd engine J0–J2 merged: `ImeBackend` trait (`RimeBackend`, `JdBackend`), user-initiated libjd download from GitHub latest with sha256/ABI checks, per-package engine choice (keytao only), 键道6 card actions, Linux/Windows-server/Android wiring. No libjd binary is bundled.
-- Remaining owner decisions: when to turn isolation on by default (try a real migration first), how long to keep the legacy layout, when to push/release.
+- The owner chose isolated runtime directories for all installs. The app migrates existing installs automatically and archives the old files on a later start.
 - Verify in CI after push: `keytao-linux-ime` (not compiled locally; dbus missing), Windows TSF tests.

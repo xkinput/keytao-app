@@ -31,7 +31,7 @@ fn zip_at(path: &Path, prefix: &str, entries: BTreeMap<String, String>) {
 
 #[test]
 fn snow_preparation_preserves_source_defaults_instead_of_replacing_them() {
-    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let directory = tempfile::tempdir().unwrap();
     let host = crate::scheme_host::tests::AddonHost::new(directory.path());
     fs::create_dir_all(&host.core.env().cache_dir).unwrap();
@@ -354,9 +354,7 @@ fn legacy_snow_fixture(root: &Path) -> crate::scheme_host::tests::AddonHost {
         "patch:\n  schema_list:\n    - schema: keytao\n",
     )
     .unwrap();
-    let mut receipt = InstallReceipt::new(root).unwrap();
-    receipt.attach_store(&host.core, SNOW.id).unwrap();
-    let mut receipt = stage(Package::Snow, receipt, "v1");
+    let mut receipt = stage(Package::Snow, InstallReceipt::new(root).unwrap(), "v1");
     write_schema_list_transaction(
         &mut receipt,
         SNOW.id,
@@ -364,123 +362,14 @@ fn legacy_snow_fixture(root: &Path) -> crate::scheme_host::tests::AddonHost {
         &host.core.env().resource_dir.join("rime-data"),
     )
     .unwrap();
-    receipt.commit_store(true).unwrap();
     receipt.finish().unwrap();
+    crate::addon_store::migrate(&host.core, root).unwrap();
     host
 }
 
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
 #[tokio::test]
-async fn snow_builtin_migration_activation_update_and_uninstall_preserve_other_packages() {
-    let _serial = wanxiang::TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let root = tempfile::tempdir().unwrap();
-    let host = legacy_snow_fixture(root.path());
-    let other = b"schema:\n  schema_id: keytao\n".to_vec();
-    let other_archive =
-        crate::packages::archive_from_files(&[("keytao.schema.yaml".into(), other)]).unwrap();
-    crate::packages::store_cloud_archive(
-        &host.core,
-        "keytao",
-        Some("v1"),
-        "official",
-        None,
-        &other_archive,
-        root.path(),
-    )
-    .unwrap();
-    let other_path = crate::package_store::PackageStore::new(&host.core).metadata_path("keytao");
-    let other_metadata = fs::read(&other_path).unwrap();
-    fs::write(
-        root.path().join("radical_pinyin.dict.yaml"),
-        "other package",
-    )
-    .unwrap();
-    fs::write(
-        root.path().join("snow_jiandao.custom.yaml"),
-        "patch:\n  translator/enable_user_dict: true\n",
-    )
-    .unwrap();
-    fs::create_dir(root.path().join("snow_pinyin.userdb")).unwrap();
-    crate::addon_store::migrate_snow_package(&host.core).unwrap();
-    crate::addon_store::migrate_snow_package(&host.core).unwrap();
-    let installed = crate::packages::list_installed_packages(&host.core).unwrap();
-    assert!(
-        installed.iter().any(
-            |package| package.scheme_key == SNOW.id && package.version.as_deref() == Some("v1")
-        )
-    );
-    assert!(
-        crate::addon_store::snow_activation(&host.core, root.path())
-            .unwrap()
-            .is_some()
-    );
-
-    crate::packages::activate_scheme(&host.core, SNOW.id, root.path())
-        .await
-        .unwrap();
-    let store = crate::package_store::PackageStore::new(&host.core);
-    assert!(!store.addon_path(SNOW.id).exists());
-    let active = crate::package_activation::read(&host.core, root.path())
-        .unwrap()
-        .unwrap();
-    assert_eq!(active.key, SNOW.id);
-    assert!(
-        active
-            .owned
-            .iter()
-            .any(|file| file.path == "snow_jiandao.schema.yaml")
-    );
-    let incoming = fixture(Package::Snow, &host.core.env().cache_dir);
-    let prepared =
-        crate::rime_snow::prepare_archive(&host.core, fs::read(&incoming).unwrap()).unwrap();
-    fs::write(&incoming, prepared).unwrap();
-    crate::install::smart_install(
-        &host.core,
-        incoming.to_string_lossy().into_owned(),
-        root.path().to_string_lossy().into_owned(),
-        Some(SNOW.id),
-    )
-    .await
-    .unwrap();
-    crate::scheme::record_installed_scheme(&host.core, SNOW.id, Some("v2")).unwrap();
-    let updated = crate::package_activation::read_package(&host.core, root.path(), SNOW.id)
-        .unwrap().unwrap();
-    let module = "lua/snow/snow.lua";
-    let owned = updated.owned.iter().find(|file| file.path == module).expect("Updated Snow must own its Lua module");
-    assert_eq!(crate::package_activation::fingerprint(root.path(), module).unwrap().unwrap().sha256, owned.sha256);
-    assert!(!updated.backups.iter().any(|backup| backup.path == module), "Package-owned Lua must not become a user backup");
-    crate::packages::remove_scheme_package(&host.core, SNOW.id, &host)
-        .await
-        .unwrap();
-    assert!(crate::package_activation::read_package(&host.core, root.path(), SNOW.id)
-        .unwrap().is_none(), "Deployment must not reactivate the removed package");
-    assert!(!store.package_path(SNOW.id).exists());
-    assert!(!store.addon_path(SNOW.id).exists());
-    for path in SNOW_REQUIRED
-        .iter()
-        .copied()
-        .chain(["snow_jiandao-NOTICE.txt"])
-    {
-        assert!(!root.path().join(path).exists(), "orphan: {path}");
-    }
-    assert_eq!(
-        fs::read(root.path().join("radical_pinyin.dict.yaml")).unwrap(),
-        b"other package"
-    );
-    assert!(root.path().join("snow_pinyin.userdb").is_dir());
-    assert!(
-        fs::read_to_string(root.path().join("snow_jiandao.custom.yaml"))
-            .unwrap()
-            .contains("translator/enable_user_dict: true")
-    );
-    assert_eq!(fs::read(other_path).unwrap(), other_metadata);
-}
-
-#[cfg(not(any(target_os = "android", target_os = "windows")))]
-#[tokio::test]
-async fn snow_builtin_migration_keeps_newer_package_and_inactive_uninstall_cleans_legacy() {
+async fn snow_builtin_migration_keeps_newer_package_and_prevents_reinstall_after_removal() {
     let _serial = wanxiang::TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -504,6 +393,12 @@ async fn snow_builtin_migration_keeps_newer_package_and_inactive_uninstall_clean
             .as_deref(),
         Some("v2")
     );
+    let runtime = root.path().join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::write(
+        root.path().join(keytao_core::RuntimeDirs::MIGRATION_MARKER),
+        br#"{"version":1,"runtime_package":"builtin/keytao"}"#,
+    ).unwrap();
     assert!(host.core.state().active_scheme.is_none());
     crate::packages::remove_scheme_package(&host.core, SNOW.id, &host)
         .await
@@ -516,7 +411,7 @@ async fn snow_builtin_migration_keeps_newer_package_and_inactive_uninstall_clean
         .copied()
         .chain(["snow_jiandao-NOTICE.txt"])
     {
-        assert!(!root.path().join(path).exists(), "orphan: {path}");
+        assert!(root.path().join(path).exists(), "legacy source lost before backup: {path}");
     }
     crate::addon_store::migrate_snow_package(&host.core).unwrap();
     assert!(!host.core.state().installed_packages.contains_key(SNOW.id));
@@ -564,100 +459,37 @@ fn snow_builtin_migration_recovers_legacy_ownership_after_interrupted_takeover()
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "windows")))]
 #[tokio::test]
-async fn snow_builtin_migration_failed_legacy_uninstall_restores_deployment() {
-    use crate::scheme_host::SchemeHost;
-    use std::sync::atomic::Ordering;
-    let _serial = wanxiang::TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let root = tempfile::tempdir().unwrap();
-    let host = legacy_snow_fixture(root.path());
-    crate::addon_store::migrate_snow_package(&host.core).unwrap();
-    host.deploy().await.unwrap();
-    let config = fs::read(root.path().join("default.custom.yaml")).unwrap();
-    let built = fs::read(root.path().join("build/snow_jiandao.schema.yaml")).unwrap();
-    host.fail_deploys.store(1, Ordering::SeqCst);
-    assert!(
-        crate::packages::remove_scheme_package(&host.core, SNOW.id, &host)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        fs::read(root.path().join("default.custom.yaml")).unwrap(),
-        config
-    );
-    assert_eq!(
-        fs::read(root.path().join("build/snow_jiandao.schema.yaml")).unwrap(),
-        built
-    );
-    assert!(root.path().join("snow_jiandao.schema.yaml").is_file());
-    assert!(
-        crate::addon_store::snow_activation(&host.core, root.path())
-            .unwrap()
-            .is_some()
-    );
-    assert!(host.core.state().installed_packages.contains_key(SNOW.id));
-    assert_eq!(host.deploys.load(Ordering::SeqCst), 3);
-}
-
-#[tokio::test]
-async fn addon_only_install_update_failure_and_uninstall_use_the_shared_transaction() {
+async fn isolated_addon_update_rollback_and_uninstall_preserve_package_learning() {
     use crate::scheme_host::tests::AddonHost;
-    use std::sync::atomic::Ordering;
-    let _serial = wanxiang::TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _serial = wanxiang::TEST_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     for kind in [Package::Snow, Package::Lssp] {
-        let root = tempfile::tempdir().unwrap();
-        let host = AddonHost::new(root.path());
+        let directory = tempfile::tempdir().unwrap();
+        let host = AddonHost::new(directory.path());
         let addon = kind.addon();
-        let status = addon
-            .manage(&host.core, true, &host, |receipt| async move {
-                Ok(stage(kind, receipt, "first"))
-            })
-            .await
-            .unwrap();
-        assert!(status.installed && status.deployed);
-        assert_eq!(
-            keytao_core::deployed_schema_id_from_dir(root.path()).as_deref(),
-            Some(addon.id)
-        );
-        host.fail_deploys.store(1, Ordering::SeqCst);
-        assert!(
-            addon
-                .manage(&host.core, true, &host, |receipt| async move {
-                    Ok(stage(kind, receipt, "second"))
-                })
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("fixture deploy failure")
-        );
-        assert_eq!(
-            addon.status(&host.core, root.path()).unwrap().version,
-            "first"
-        );
+        let learned = directory.path().join(format!("runtime/{}/{}.userdb", addon.id, addon.id));
+        fs::create_dir_all(learned.parent().unwrap()).unwrap();
+        fs::write(&learned, "learned").unwrap();
+        let prepare = |version| {
+            let mut receipt = InstallReceipt::new(directory.path()).unwrap();
+            receipt.attach_store(&host.core, addon.id).unwrap();
+            let mut receipt = stage(kind, receipt, version);
+            receipt.commit_store(true).unwrap();
+            receipt
+        };
+        prepare("first").finish().unwrap();
+        assert!(addon.status(&host.core, directory.path()).unwrap().installed);
+        let updated = prepare("second");
+        assert_eq!(addon.status(&host.core, directory.path()).unwrap().version, "second");
+        updated.rollback().unwrap();
+        assert_eq!(addon.status(&host.core, directory.path()).unwrap().version, "first");
+
         let public = crate::addon_store::public_files(&host.core, addon.id).unwrap();
-        assert!(
-            public
-                .iter()
-                .any(|(_, name)| name == Path::new(&format!("{}.schema.yaml", addon.id)))
-        );
-        let learned = format!("{}.userdb", addon.id);
-        fs::write(root.path().join(&learned), "learned").unwrap();
-        let status = addon
-            .manage(&host.core, false, &host, |_| async { unreachable!() })
-            .await
-            .unwrap();
-        assert!(!status.installed && !status.deployed);
-        assert_eq!(
-            fs::read_to_string(root.path().join(learned)).unwrap(),
-            "learned"
-        );
+        assert!(public.iter().any(|(_, path)| path == Path::new(&format!("{}.schema.yaml", addon.id))));
+        let status = addon.manage(&host.core, false, &host, |_| async { unreachable!() }).await.unwrap();
+        assert!(!status.installed);
+        assert_eq!(fs::read_to_string(&learned).unwrap(), "learned");
         assert!(crate::addon_store::public_files(&host.core, addon.id).is_err());
-        assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -715,99 +547,6 @@ fn prepare_official_package(kind: Package) {
 #[ignore = "requires official local archives; prepares an isolated package without running its Lua"]
 fn official_snow_package_prepares_in_isolated_scratch() {
     prepare_official_package(Package::Snow);
-}
-
-#[cfg(not(any(target_os = "android", target_os = "windows")))]
-#[tokio::test]
-#[ignore = "requires an explicitly authorized local Snow package and isolated librime runtime"]
-async fn snow_builtin_real_install_deploy_and_type() {
-    let _serial = wanxiang::TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let scratch = PathBuf::from(std::env::var("KEYTAO_SNOW_E2E_SCRATCH").unwrap())
-        .canonicalize()
-        .unwrap();
-    assert!(scratch.starts_with("/private/tmp"));
-    let source = PathBuf::from(std::env::var("KEYTAO_SNOW_E2E_SOURCE").unwrap())
-        .canonicalize()
-        .unwrap();
-    let shared = PathBuf::from(std::env::var("KEYTAO_SNOW_E2E_SHARED").unwrap())
-        .canonicalize()
-        .unwrap();
-    assert!(shared.starts_with(&scratch));
-    let directory = tempfile::Builder::new()
-        .prefix("snow-builtin-e2e-")
-        .tempdir_in(&scratch)
-        .unwrap();
-    let root = directory.path().join("rime");
-    fs::create_dir(&root).unwrap();
-    let host = crate::scheme_host::tests::AddonHost::new(&root);
-    fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, Vec<u8>)>) {
-        for entry in fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let kind = entry.file_type().unwrap();
-            if kind.is_dir() {
-                collect(root, &entry.path(), files);
-            } else {
-                assert!(kind.is_file(), "package contains a symlink or special file");
-                files.push((
-                    entry
-                        .path()
-                        .strip_prefix(root)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .replace('\\', "/"),
-                    fs::read(entry.path()).unwrap(),
-                ));
-            }
-        }
-    }
-    let mut files = Vec::new();
-    collect(&source, &source, &mut files);
-    let raw = crate::packages::archive_from_files(&files).unwrap();
-    let archive = directory.path().join("snow.zip");
-    fs::write(
-        &archive,
-        crate::rime_snow::prepare_archive(&host.core, raw).unwrap(),
-    )
-    .unwrap();
-    let installed = crate::install::smart_install(
-        &host.core,
-        archive.to_string_lossy().into_owned(),
-        root.to_string_lossy().into_owned(),
-        Some(SNOW.id),
-    )
-    .await
-    .unwrap();
-    assert!(installed.verify.iter().all(|entry| entry.ok));
-    crate::scheme::record_installed_scheme(&host.core, SNOW.id, Some("local-e2e")).unwrap();
-    // Keep downloaded Lua as data while exercising librime's native input path.
-    fs::rename(root.join("lua"), directory.path().join("untrusted-lua")).unwrap();
-    keytao_core::deploy(
-        root.to_string_lossy().into_owned(),
-        shared.to_string_lossy().into_owned(),
-    )
-    .unwrap();
-    assert!(root.join("build/snow_jiandao.schema.yaml").is_file());
-    let runtime = keytao_core::ImeRuntime::with_dirs(&root, shared.to_string_lossy().into_owned());
-    runtime.init_without_deploy().unwrap();
-    let session = runtime.create_session().unwrap();
-    session.select_schema(SNOW.id).unwrap();
-    for code in ["jd", "w"] {
-        session.clear_composition().unwrap();
-        for key in code.chars() {
-            session.process_key_result(key as u32, 0).unwrap();
-        }
-        let candidates = session.all_candidates_limited(7).unwrap();
-        let words: Vec<_> = candidates
-            .iter()
-            .map(|candidate| candidate.text.as_str())
-            .collect();
-        println!("snow_builtin_e2e {code}={words:?}");
-        assert!(!words.is_empty(), "{code} produced no candidates");
-    }
-    println!("snow_builtin_e2e_root={}", directory.keep().display());
 }
 
 #[test]

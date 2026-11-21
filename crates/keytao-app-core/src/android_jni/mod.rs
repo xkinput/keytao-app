@@ -854,7 +854,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeIsolate
         let Some(root) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
-        if keytao_core::RuntimeDirs::isolation_enabled(&root) && keytao_core::android_libjd_ready(&root) {
+        if !keytao_core::RuntimeDirs::needs_migration(&root) && keytao_core::android_libjd_ready(&root) {
             return 2;
         }
         match keytao_core::isolated_ime_schema_state(&root, &root.join("rime-data")) {
@@ -916,19 +916,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploym
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeRuntimeIsolationEnabled(
-    mut env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    user_dir: JString<'_>,
-) -> jboolean {
-    android_jni_guard("nativeRuntimeIsolationEnabled", 0, || {
-        optional_jni_path(&mut env, user_dir)
-            .is_some_and(|root| keytao_core::RuntimeDirs::isolation_enabled(&root)) as jboolean
-    })
-}
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentBlocksInput(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -977,20 +964,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResetDe
             state.reset_input();
         }
     });
-}
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMarkDeploymentFailed(
-    mut env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    user_dir: JString<'_>,
-) -> jboolean {
-    android_jni_guard("nativeMarkDeploymentFailed", 0, || {
-        optional_jni_path(&mut env, user_dir)
-            .is_some_and(|root| keytao_core::mark_deployment_failed(&root).is_ok())
-            as jboolean
-    })
 }
 
 #[cfg(target_os = "android")]
@@ -1051,6 +1024,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeComplet
     user_dir: JString<'_>,
 ) -> jboolean {
     android_jni_guard("nativeCompleteDeployment", 0, || {
+        if !cfg!(debug_assertions) {
+            return 0;
+        }
         let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
@@ -1073,45 +1049,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeComplet
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployStep(
-    mut env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    user_dir: JString<'_>,
-    _shared_dir: JString<'_>,
-    schema_id: JString<'_>,
-) -> jstring {
-    android_jni_guard("nativeDeployStep", std::ptr::null_mut(), || {
-        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
-            return jni_string(
-                &mut env,
-                r#"{"success":false,"error":"missing user directory"}"#,
-            );
-        };
-        let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
-        let schema_id = optional_jni_text(&mut env, schema_id);
-        let result = match schema_id {
-            Some(schema_id) => keytao_core::deploy_android_schema(
-                user_dir.to_string_lossy().into_owned(),
-                shared_dir,
-                schema_id,
-            ),
-            None => crate::ime_settings::prepare_candidate_page_size(&user_dir).and_then(|_| {
-                keytao_core::deploy_android_config(
-                    user_dir.to_string_lossy().into_owned(),
-                    shared_dir,
-                )
-            }),
-        };
-        let payload = match result {
-            Ok(schemas) => serde_json::json!({ "success": true, "schemas": schemas }),
-            Err(error) => serde_json::json!({ "success": false, "error": error }),
-        };
-        jni_string(&mut env, &payload.to_string())
-    })
-}
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployPackages(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -1124,8 +1061,8 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployP
 
         let result = (|| {
             let root = optional_jni_path(&mut env, user_dir).ok_or("missing user directory")?;
-            if !keytao_core::RuntimeDirs::isolation_enabled(&root) {
-                return Err("package isolation is disabled".to_string());
+            if keytao_core::RuntimeDirs::needs_migration(&root) {
+                return Err("scheme directory migration is required before deployment".to_string());
             }
             let plan = root.join(ANDROID_DEPLOY_PLAN_FILE);
             let journal = root.join(ANDROID_DEPLOY_PROGRESS_FILE);
@@ -1204,8 +1141,10 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
         let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
 
         let runtime = android_new_runtime(&user_dir, &shared_dir);
-        let init_result = if deploy != 0 {
+        let init_result = if deploy != 0 && cfg!(debug_assertions) {
             runtime.init()
+        } else if deploy != 0 {
+            return 0;
         } else {
             runtime.init_without_deploy()
         };
@@ -1232,7 +1171,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
         };
         let user_theme_path = user_dir.join("theme.yaml");
         let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
-        let isolated = keytao_core::RuntimeDirs::isolation_enabled(&user_dir);
+        let legacy = keytao_core::RuntimeDirs::needs_migration(&user_dir);
 
         // The runtime knows every session it handed out, so reloading through it
         // drops their engines before librime is finalized. Going around it would
@@ -1242,12 +1181,12 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
                 android_set_user_theme_path(user_theme_path);
                 return 1;
             }
-            if isolated || keytao_core::deployment_in_progress(&user_dir) {
+            if !legacy || keytao_core::deployment_in_progress(&user_dir) {
                 return 0;
             }
         }
 
-        if !isolated {
+        if legacy {
             if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
                 *slot = None;
             }

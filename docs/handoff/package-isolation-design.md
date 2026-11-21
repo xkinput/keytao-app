@@ -61,16 +61,13 @@
 - Windows 分阶段部署：复制范围改成 `runtime/<key>/`，交换 `runtime/<key>/build` 和 `previous-build`（staged_deploy.rs:35-56,137-200）。只有 active 包需要走这条路（它的 bin 被 server 锁着），非 active 包直接部署进自己的 build。
 - Android：`:rime_deployer` 的 deploy_android_staged/schema（lib.rs:1526,1955）接收目标包的目录。`:ime` 只在 active 包的 build 完成后才认 stamp。
 
-## 3. 迁移（一次性，可回退）
+## 3. 自动迁移
 
-- 旧的扁平 root 原样保留，作为 legacy，不移动也不删除。回退方式：把 `layout=flat` 写回 manifest。
-- 对每个已激活包：
-  - 建 `runtime/<key>`。
-  - 生成 custom、rime.lua，把它的 `.keytao-package-lua/<key>` 挪进 runtime 的 `lua/`（packages.rs:360-420）。
-  - 用户自己写的、属于本包 schema 的 `<schema>.custom.yaml` 复制进来，按 schema_id 归属判断。
-- userdb 不复制正在运行的 leveldb。做法是先在 legacy root 上跑 sync_user_data，导出 `sync/<id>/*.userdb.txt`；各包 runtime 用相同的 id 和 sync_dir，第一次同步时合并进来 [U]。
-- 孤儿文件：legacy root 里既不属于任何包、也不在保护名单（install.rs:13-25）里的文件，用 package_orphans（package_orphans.rs:172）列给用户看，不自动删除。
-- 迁移在 app 进程执行，执行前写 stamp 让 IME 暂停。这是数据布局变更，需要人工确认（human gate）。
+- 新安装直接使用分包布局。发现旧平铺数据且迁移标记缺失时，应用在启动、安装或部署前自动迁移。能自行部署的桌面输入法使用同一个带文件锁的迁移入口。
+- 先恢复未完成的旧激活事务，再按上次使用的方案选择活动包，并将用户自定义文件复制到各包 runtime。用户词库通过私有快照导入各包，保留用户原来的同步目录。
+- 活动包部署通过后先写重载信号，再原子发布迁移标记。重载签名包含标记状态。Android 和 iOS 键盘在标记发布前继续读取平铺目录。
+- 迁移进度显示「正在迁移方案目录…」。失败保留旧目录，记录错误并显示「迁移失败，重试」。
+- 后续应用启动将旧文件移动到 `legacy-backup/<UTC timestamp>/`，保留相对路径。归档用日志记录目标，移动中断后继续使用同一目录。方案包仓库、runtime、同步目录、日志与全局设置保留在原处，残留文件页面显示已归档的目录。
 
 ## 4. 冲突
 
@@ -110,9 +107,9 @@
 - **B3 切换**（持有 lib.rs）
   - 内容：resolver 读 active_package；stamp 带 key；Windows 按包分阶段交换；Android 部署器接收目标包。
   - 测试：stamp 变化后目录随之变化；对已缓存的包调切换，不触发编译。
-- **B4 迁移**：在主动启用隔离时迁移，保留旧布局，列出孤儿，通过快照迁移 userdb。测试：迁移可重复执行（幂等）；回退后 legacy 文件 md5 不变。实机迁移需要人工确认。
+- **B4 迁移**：确定活动包、复制用户配置并通过私有快照迁移词库。
 - **B5 UI（展示层）**：switcher_model.rs，Flutter 首页两级选择，F4 第一级（D2）。每个平台的菜单单独一个批次，只做重新渲染检查。
-- **B6 模块边界**：旗标关闭时，已存储方案包的激活走 `legacy_flat`，由它负责共享目录复制、跨包 Lua 快照及共享 `default.custom.yaml` 合并。隔离切包、物化和分包部署走各自的 runtime。旗标仍默认关闭。
+- **B6 模块边界**：切包、物化和部署使用各自的 runtime。旧激活记录和事务恢复继续支持迁移。
 
 ---
 # Critique
@@ -152,11 +149,8 @@
 
 - B0 merged. B1 must address: relative 'build/...' literals (staged_deploy.rs:76-77,194-198; desktop_inputs.rs:11-12; schema_inputs.rs:10; deploy_child.rs:20; build_prune.rs; package_artifacts.rs; upload_bundle.rs; package_orphans.rs:128-134,203; windows_public_schemas.rs:23,669; appcontainer.rs:125) once staging leaves root/build; golden test per-cfg.
 
-- B1 merged. MUST FIX before the flag can be on (B4): package_orphans.rs:122 with flag on lists legacy flat build/* as orphans (cleanup would delete them); runtime_dirs.rs:37 falls back silently to flat root when package files dir missing (fail closed + log).
+- B4 保护待迁移的旧构建目录。活动包源文件缺失时，目录解析记录错误并停止。
 
-## B6 交接与默认开启
+## 强制分包布局
 
-- B4 已保护旧版 `build/` 免于孤儿清理，并在已选隔离包缺少源文件目录时报错。
-- 保留平铺事务恢复和迁移所需的激活记录、备份读取。旧版首装、显式目录导出、包移除继续使用现有流程。Windows 隔离公共缓存仍按单包生成 Lua 快照。
-- 默认开启前需把应用内首装接到方案包仓库及分包部署，明确隔离包移除和回退的处理方式，并验证迁移、旧布局回退和各平台运行时切包。迁移实机用户数据仍需负责人确认。
-- 负责人决定何时默认启用隔离，以及旧版平铺激活和回退入口保留多久。移除旧版实现前，先确认支持期内的旧布局能迁移及回退。
+负责人决定「旧布局强制搬目录 不支持开关 只支持新方式」。迁移、切换与备份流程以第 3 节为准。Windows 公共缓存仍按活动包构建。

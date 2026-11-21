@@ -32,7 +32,7 @@ pub fn packages(
     shared: &Path,
     installed: impl IntoIterator<Item = (String, String)>,
 ) -> Vec<Package> {
-    if !RuntimeDirs::isolation_enabled(root) {
+    if RuntimeDirs::needs_migration(root) {
         return Vec::new();
     }
     let active = RuntimeDirs::active_package_key(root);
@@ -146,7 +146,7 @@ pub(crate) struct Menu {
 
 impl Menu {
     pub(crate) fn load(root: &Path, shared: &Path) -> Option<Self> {
-        Self::open(RuntimeDirs::isolation_enabled(root), || {
+        Self::open(!RuntimeDirs::needs_migration(root), || {
             packages(root, shared, installed_packages(root))
         })
     }

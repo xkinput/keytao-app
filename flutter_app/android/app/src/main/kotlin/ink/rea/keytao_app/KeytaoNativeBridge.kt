@@ -167,13 +167,6 @@ object KeytaoNativeBridge {
         return runCatching { nativeEngineAvailable() }.getOrDefault(false)
     }
 
-    fun deployStep(userDir: String, sharedDir: String?, schemaId: String?): KeytaoRimeDeployStepResult {
-        if (!loaded) return KeytaoRimeDeployStepResult(error = "KeyTao native bridge is unavailable")
-        val json = runCatching { nativeDeployStep(userDir, sharedDir, schemaId) }.getOrNull()
-        KeytaoRuntimeLog.nativeInitialized()
-        return KeytaoRimeDeployStepResult.fromJson(json)
-    }
-
     fun hasDeployedSchema(userDir: String): Boolean {
         if (!loaded) return false
         return runCatching { nativeHasDeployedSchema(userDir) }.getOrDefault(false)
@@ -201,9 +194,6 @@ object KeytaoNativeBridge {
     fun deploymentProgressMessage(userDir: String): String? =
         if (loaded) runCatching { nativeDeploymentProgressMessage(userDir) }.getOrNull() else null
 
-    fun runtimeIsolationEnabled(userDir: String): Boolean =
-        loaded && runCatching { nativeRuntimeIsolationEnabled(userDir) }.getOrDefault(false)
-
     fun deploymentKeyPressed(userDir: String): String? =
         if (loaded) runCatching { nativeDeploymentKeyPressed(userDir) }.getOrNull() else null
 
@@ -211,16 +201,16 @@ object KeytaoNativeBridge {
         if (loaded) runCatching { nativeResetDeploymentInput() }
     }
 
-    fun markDeploymentFailed(userDir: String): Boolean =
-        loaded && runCatching { nativeMarkDeploymentFailed(userDir) }.getOrDefault(false)
-
     fun retainSession(session: Long): Long =
         if (loaded && session != 0L) runCatching { nativeRetainSession(session) }.getOrDefault(0L) else 0L
 
     fun prewarm(session: Long): Boolean =
         loaded && runCatching { nativePrewarm(session) }.getOrDefault(false)
 
-    fun completeDeployment(userDir: String): Boolean {
+    internal fun completeDeployment(userDir: String): Boolean {
+        check(KeytaoAndroidPaths.testRootOverride?.absolutePath == userDir) {
+            "Complete deployment fixture requires a test root"
+        }
         if (!loaded) return false
         return runCatching { nativeCompleteDeployment(userDir) }.getOrDefault(false)
     }
@@ -485,8 +475,6 @@ object KeytaoNativeBridge {
 
     external fun nativeEngineAvailable(): Boolean
 
-    external fun nativeDeployStep(userDir: String, sharedDir: String?, schemaId: String?): String
-
     external fun nativeDeployPackages(userDir: String): String?
 
     external fun nativeHasDeployedSchema(userDir: String): Boolean
@@ -501,13 +489,9 @@ object KeytaoNativeBridge {
 
     external fun nativeDeploymentProgressMessage(userDir: String): String?
 
-    external fun nativeRuntimeIsolationEnabled(userDir: String): Boolean
-
     external fun nativeDeploymentKeyPressed(userDir: String): String?
 
     external fun nativeResetDeploymentInput()
-
-    external fun nativeMarkDeploymentFailed(userDir: String): Boolean
 
     external fun nativeRetainSession(session: Long): Long
 
@@ -614,7 +598,6 @@ data class KeytaoRimeSchema(
         }
     }
 }
-
 data class KeytaoRimeSchemaSwitch(
     val name: String?,
     val options: List<String>,
@@ -662,40 +645,6 @@ data class KeytaoRimeSchemaSwitch(
                 for (index in 0 until values.length()) {
                     values.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
                 }
-            }
-        }
-    }
-}
-
-data class KeytaoRimeDeployStepResult(
-    val success: Boolean = false,
-    val schemas: List<String> = emptyList(),
-    val error: String = "",
-) {
-    companion object {
-        fun fromJson(json: String?): KeytaoRimeDeployStepResult {
-            if (json.isNullOrBlank()) {
-                return KeytaoRimeDeployStepResult(error = "Android RIME deployment returned no result")
-            }
-            return runCatching {
-                val root = JSONObject(json)
-                val values = root.optJSONArray("schemas")
-                val schemas = buildList {
-                    if (values != null) {
-                        for (index in 0 until values.length()) {
-                            values.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
-                        }
-                    }
-                }
-                KeytaoRimeDeployStepResult(
-                    success = root.optBoolean("success", false),
-                    schemas = schemas,
-                    error = root.optString("error"),
-                )
-            }.getOrElse { error ->
-                KeytaoRimeDeployStepResult(
-                    error = error.message ?: "Invalid Android RIME deployment result",
-                )
             }
         }
     }

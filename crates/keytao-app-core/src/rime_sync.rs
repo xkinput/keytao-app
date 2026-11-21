@@ -242,7 +242,11 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
 fn prepare_sync_root(root: &Path, settings: &RimeSyncSettings) -> Result<PathBuf, String> {
     let runtime = keytao_core::RuntimeDirs::resolve(root, root)?;
     let Some(key) = runtime.active_package_key else {
-        return Ok(runtime.user_data_dir);
+        return if keytao_core::RuntimeDirs::needs_migration(root) {
+            Ok(runtime.user_data_dir)
+        } else {
+            Err("没有使用中的方案包".into())
+        };
     };
     if !runtime.user_data_dir.is_dir() {
         return Err(format!("Rime runtime is not available for {key}"));
@@ -389,13 +393,13 @@ mod tests {
         let settings = save_settings(root, "device", "").unwrap();
         let legacy = std::fs::read(root.join("installation.yaml")).unwrap();
         let store = root.join("scheme-packages");
-        std::fs::write(root.join(keytao_core::RuntimeDirs::SETTINGS_FILE), r#"{"runtime_isolation":true}"#).unwrap();
         for key in ["one", "two"] {
             std::fs::create_dir_all(store.join("cloud").join(key).join("files")).unwrap();
             std::fs::create_dir_all(root.join("runtime").join(key)).unwrap();
         }
+        std::fs::write(root.join(keytao_core::RuntimeDirs::MIGRATION_MARKER), r#"{"version":1,"runtime_package":"one"}"#).unwrap();
         for key in ["one", "two"] {
-            std::fs::write(store.join("active-manifest.json"), format!(r#"{{"active_package":"{key}"}}"#)).unwrap();
+            std::fs::write(store.join("active-manifest.json"), format!(r#"{{"active_package":"{key}","runtime_migration_version":1}}"#)).unwrap();
             let runtime = prepare_sync_root(root, &settings).unwrap();
             assert_eq!(runtime, root.join("runtime").join(key));
             let prepared = read_settings(&runtime).unwrap();
@@ -484,6 +488,7 @@ mod tests {
         #[tokio::test]
         async fn sync_waits_for_a_live_ime_past_the_offline_deadline() {
             let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("build")).unwrap();
             save_settings(root.path(), "device", "").unwrap();
             let started = Instant::now();
             sync_user_data(MockHost {
@@ -503,6 +508,7 @@ mod tests {
         #[tokio::test]
         async fn sync_reports_a_dead_owner_without_waiting_for_the_offline_deadline() {
             let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("build")).unwrap();
             save_settings(root.path(), "device", "").unwrap();
             let started = Instant::now();
             let error = sync_user_data(MockHost {
@@ -520,6 +526,7 @@ mod tests {
         #[tokio::test]
         async fn sync_expires_an_unclaimed_request_when_no_ime_responds() {
             let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("build")).unwrap();
             save_settings(root.path(), "device", "").unwrap();
             let started = Instant::now();
             let error = sync_user_data(MockHost {

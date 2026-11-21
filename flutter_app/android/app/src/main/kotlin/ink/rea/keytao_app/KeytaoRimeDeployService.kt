@@ -19,7 +19,6 @@ class KeytaoRimeDeployService : Service() {
         val receiver: ResultReceiver,
         val timeoutMs: Long,
         val testRoot: String?,
-        val isolated: Boolean,
     )
 
     private val deployments = KeytaoRimeDeploymentQueue<Request>()
@@ -39,7 +38,6 @@ class KeytaoRimeDeployService : Service() {
             receiver,
             intent.getLongExtra(KeytaoRimeDeployContract.keyTimeoutMs, 180_000L).coerceAtLeast(1_000L),
             intent.getStringExtra(KeytaoRimeDeployContract.extraTestRoot),
-            intent.getBooleanExtra(KeytaoRimeDeployContract.extraIsolated, false),
         )
         if (deployments.enqueue(request)) {
             startDeploymentForeground()
@@ -61,7 +59,7 @@ class KeytaoRimeDeployService : Service() {
                 KeytaoAndroidPaths.setUserRootForTests(this, File(it))
             }
             KeytaoRimeDeployClient.runDeployment(
-                applicationContext, timeoutMs, requests.any { it.isolated }, ::completeBatch,
+                applicationContext, timeoutMs, ::completeBatch,
             )
         } catch (error: Throwable) {
             completeBatch(KeytaoRimeDeployClient.Result(

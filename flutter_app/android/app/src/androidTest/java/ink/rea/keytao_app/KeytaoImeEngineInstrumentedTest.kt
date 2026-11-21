@@ -15,6 +15,8 @@ import org.junit.AfterClass
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.MethodSorters
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -198,10 +200,30 @@ class KeytaoImeEngineInstrumentedTest {
         )
 
         val context = ApplicationProvider.getApplicationContext<Context>()
+        KeytaoImeEngine.prepareBundledSharedData(context, userRoot)
         val engine = KeytaoImeEngine(context)
         try {
             for ((index, case) in cases.withIndex()) {
-                overlayDirectory(File(fixtureRoot, case.fixture), userRoot)
+                val sources = File(fixtureRoot, case.fixture)
+                val shared = File(userRoot, "scheme-packages/cloud/${case.fixture}/files").apply { mkdirs() }
+                val runtime = File(userRoot, "runtime/${case.fixture}").apply { mkdirs() }
+                overlayDirectory(File(userRoot, "rime-data"), shared)
+                overlayDirectory(sources, shared)
+                sources.listFiles().orEmpty().filter {
+                    it.name.endsWith(".custom.yaml") || it.name in setOf("rime.lua", "lua")
+                }.forEach { source ->
+                    assertTrue(source.copyRecursively(File(runtime, source.name), overwrite = true))
+                }
+                File(userRoot, "scheme-packages/active-manifest.json").writeText(
+                    JSONObject().put("active_package", case.fixture).toString(),
+                )
+                File(userRoot, ".keytao-android-deploy-progress.jsonl").writeText("")
+                File(userRoot, ".keytao-android-deploy-plan.json").writeText(
+                    JSONArray().put(JSONObject()
+                        .put("package_key", case.fixture)
+                        .put("package_name", case.schemaName))
+                        .toString(),
+                )
 
                 val result = deployInRemoteProcess(context)
                 assertTrue(
@@ -212,7 +234,7 @@ class KeytaoImeEngineInstrumentedTest {
                 for (schema in case.deployedSchemas) {
                     assertTrue(
                         "${case.fixture} compiled schema should exist: $schema",
-                        File(userRoot, "build/$schema.schema.yaml").isFile,
+                        File(runtime, "build/$schema.schema.yaml").isFile,
                     )
                 }
                 val ready = if (index == 0) engine.ensureReady() else engine.reload()

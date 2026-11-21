@@ -55,19 +55,7 @@ class KeytaoRimeDeployWorkerService : Service() {
                 {
                     try {
                         val result = try {
-                            if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraIsolated, false)) {
-                                runIsolatedDeployment()
-                            } else if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraRenderLogos, false)) {
-                                runCatching {
-                                    val root = KeytaoAndroidPaths.userRoot(applicationContext)
-                                    KeytaoNativeBridge.nativeRenderSchemaLogos(root.absolutePath)
-                                }.onFailure { error ->
-                                    runCatching { Log.w(tag, "Failed to render schema logos", error) }
-                                }
-                                DeploymentResult(success = true)
-                            } else {
-                                runDeployment(intent.getStringExtra(KeytaoRimeDeployContract.extraSchemaId))
-                            }
+                            runDeployment()
                         } catch (error: Throwable) {
                             failureResult(error)
                         }
@@ -163,7 +151,7 @@ class KeytaoRimeDeployWorkerService : Service() {
             .build()
     }
 
-    private fun runIsolatedDeployment(): DeploymentResult {
+    private fun runDeployment(): DeploymentResult {
         val root = KeytaoAndroidPaths.userRoot(applicationContext).absolutePath
         val handler = Handler(Looper.getMainLooper())
         val notificationManager = getSystemService(NotificationManager::class.java)
@@ -198,49 +186,8 @@ class KeytaoRimeDeployWorkerService : Service() {
         }
     }
 
-    private fun runDeployment(schemaId: String?): DeploymentResult {
-        val started = System.nanoTime()
-        var success = false
-        var schemaCount = 0
-        val configStep = schemaId == null
-        var engine: KeytaoImeEngine? = null
-        return try {
-            Log.i(tag, "Starting deployment step: ${schemaId ?: "default"}")
-            KeytaoAndroidPaths.userRoot(applicationContext)
-            engine = KeytaoImeEngine(applicationContext)
-            if (!engine.hasInstalledSchema()) {
-                return DeploymentResult(error = "请先安装键道方案")
-            }
-            val step = engine.deployStep(schemaId)
-            if (!step.success) {
-                return DeploymentResult(error = step.error.ifBlank { "Android RIME 部署失败" })
-            }
-            Log.i(tag, "Completed deployment step: ${schemaId ?: "default"}")
-            success = true
-            schemaCount = step.schemas.size
-            DeploymentResult(success = true, schemas = step.schemas)
-        } catch (error: Throwable) {
-            failureResult(error)
-        } finally {
-            try {
-                engine?.close()
-            } finally {
-                val ok = success
-                val count = schemaCount
-                KeytaoRuntimeLog.event("rime", "deploy_step", KeytaoRuntimeLog.elapsedMs(started)) {
-                    put("success", ok)
-                    put("schema_count", count)
-                    put("config_step", configStep)
-                    put("source", "service")
-                }
-            }
-        }
-    }
-
     private fun sendResult(receiver: ResultReceiver, result: DeploymentResult) {
         val data = Bundle().apply {
-            putBoolean(KeytaoRimeDeployContract.keySuccess, result.success)
-            putStringArrayList(KeytaoRimeDeployContract.keySchemas, ArrayList(result.schemas))
             putString(KeytaoRimeDeployContract.keyError, result.error)
         }
         receiver.send(
@@ -260,7 +207,6 @@ class KeytaoRimeDeployWorkerService : Service() {
 
     private data class DeploymentResult(
         val success: Boolean = false,
-        val schemas: List<String> = emptyList(),
         val error: String = "",
     )
 

@@ -36,10 +36,10 @@ pub fn read(root: &Path, package: Option<&str>) -> PackageEngine {
 
 pub fn active_package(root: &Path) -> Option<String> {
     use crate::RuntimeDirs;
-    if RuntimeDirs::isolation_enabled(root) {
-        RuntimeDirs::active_package_key(root)
-    } else {
+    if RuntimeDirs::needs_migration(root) {
         RuntimeDirs::flat_active_package_key(root)
+    } else {
+        RuntimeDirs::active_package_key(root)
     }
 }
 
