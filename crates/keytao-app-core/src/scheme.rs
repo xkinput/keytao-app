@@ -271,6 +271,7 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
             deployed: false,
             version: None,
             schemas: vec![],
+            deploy_warning: None,
         });
     };
 
@@ -299,6 +300,7 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
         deployed: state.deployed,
         version,
         schemas: state.schemas,
+        deploy_warning: keytao_core::deployment_warning_with_shared(&dir, &shared),
     })
 }
 

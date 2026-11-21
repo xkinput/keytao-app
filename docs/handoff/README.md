@@ -32,7 +32,7 @@ nix shell nixpkgs#zig nixpkgs#cargo-zigbuild -c cargo-zigbuild check -p keytao-w
 cargo test -q -p keytao-windows-ime --test composition_rules --test latency_rules --test engine_host
 crates/keytao-macos-ime/build.sh --debug --skip-pkg   # if Swift changed
 (cd flutter_app && flutter analyze --no-pub lib test && flutter test --no-pub)
-(cd flutter_app && JAVA_HOME=/nix/store/al24k44gwd1rk08p1x2p4r88ba9xw132-zulu-ca-jdk-17.0.19/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home \
+(cd flutter_app && JAVA_HOME=/nix/store/5w339fr3rq9brk323ab35kjihsxd4nkc-zulu-ca-jdk-17.0.19/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home \
   flutter build apk --debug --no-pub --target-platform android-arm64 && rm -rf build)   # if Kotlin changed
 ```
 
@@ -105,13 +105,6 @@ Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` tr
   - `controller.dart:2155`: `_packageDeployProgress` clears only on the next deploy.
   - B1 pre-materialized Lua sources are not rolled back when a build fails.
 
-- Windows (from review):
-  - The first candidate render scans system fonts once per process, twice when a theme font is set (`font_resolution.rs:107`, Windows `panel.rs`).
-  - An extra 25–50 ms key hold when QQ refuses a sync session.
-  - A capped end retry may leave one raw letter after 5 refusals.
-- macOS: a custom family with bold may render Regular (`ImeTheme.swift:379`; this predates the change).
-- Font equivalence only maps the first family in a comma list (`font_resolution.rs:85`).
-- Skipped-schema warning is in memory only (`controller.dart`). Conflict errors name the other package by key, not display name.
 - Android `KeytaoTheme.kt:40` uses `@RestrictTo` font APIs, wrapped in `runCatching`.
 - Owner to verify on real devices:
   - Windows QQ: 顶功, focus switch, left/right Shift, Shift+letter, font list.
@@ -123,5 +116,13 @@ Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` tr
 
 - Isolation B3–B6 introduced package switching, a two-level home and F4 selector, independently deployable add-ons, and per-package Easy English.
 - ime-jd engine J0–J2 merged: `ImeBackend` trait (`RimeBackend`, `JdBackend`), user-initiated libjd download from GitHub latest with sha256/ABI checks, per-package engine choice (keytao only), 键道6 card actions, Linux/Windows-server/Android wiring. No libjd binary is bundled.
-- The owner chose isolated runtime directories for all installs. The app migrates existing installs automatically and archives the old files on a later start.
-- Verify in CI after push: `keytao-linux-ime` (not compiled locally; dbus missing), Windows TSF tests.
+- Forced isolation migration (`896b839`..`f26febf` + follow-ups): isolated per-package layout is the only layout; existing flat installs migrate automatically and archive legacy files under `legacy-backup/<UTC timestamp>/` on a later start.
+- Resolved CI and follow-up items:
+  - Linux host package deploy, Windows no-learning/AppContainer cache paths, Windows public schema publishing after migration, child-process librime test isolation, and `write_current_schema`/`persist_selected_schema` directory creation for unmaterialized/unselected runtimes.
+  - `JdBackend` arrow-key candidate highlight navigation + Android horizontal candidate bar arrow routing.
+  - Android hardware keyboard reload signaling switched from 500 ms idle polling to `FileObserver` + throttled `onKeyDown` check; Android release dead-code warnings gated on `debug_assertions`.
+  - Accurate `ime-jd` release query failure messages (rate limit, 404, timeout/connect, JSON decode) without rolling back an existing valid `libjd` installation.
+  - Case-insensitive pre-migration Rime/userdb exclusions in `package_orphans` and `RuntimeDirs::has_legacy_data`.
+  - Windows TSF immediate async fallback when QQ refuses `TF_ES_SYNC` on composition end, immediate `deferred_keys` drain on `PENDING_IME_UI_MESSAGE`, and dormant `exhausted` preedit cleanup after 5 failed end retries.
+  - Shared process-wide `fontdb::Database` (`keytao_theme::font_resolution::system_font_database`) + background font warmup on Windows; comma-list equivalence mapping across all entries in `font_resolution.rs`; macOS `ThemeFont.swift` `NSFontDescriptor` weight resolution.
+  - Persisted skipped-schema `deployWarning` surfaced through `LocalSchemaInfo`/`LocalSchemaDto` across app restarts, and human-readable package display names in conflict/status prompts.

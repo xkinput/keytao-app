@@ -160,6 +160,7 @@ impl BridgeHost {
         let shared = keytao_app_core::deploy::deploy_shared_data_dir(&self.core, &self.root);
         (self.root.clone(), shared)
     }
+    #[cfg(not(target_os = "android"))]
     pub(crate) async fn deploy_default(
         &self,
     ) -> Result<keytao_app_core::deploy::DeployResult, String> {

@@ -868,6 +868,7 @@ class LocalSchemaDto {
   final String? installedScheme;
   final String? installedSchemeVersion;
   final bool? easyEnglishEnabled;
+  final String? deployWarning;
 
   const LocalSchemaDto({
     required this.installed,
@@ -877,6 +878,7 @@ class LocalSchemaDto {
     this.installedScheme,
     this.installedSchemeVersion,
     this.easyEnglishEnabled,
+    this.deployWarning,
   });
 
   @override
@@ -887,7 +889,8 @@ class LocalSchemaDto {
       schemas.hashCode ^
       installedScheme.hashCode ^
       installedSchemeVersion.hashCode ^
-      easyEnglishEnabled.hashCode;
+      easyEnglishEnabled.hashCode ^
+      deployWarning.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -900,7 +903,8 @@ class LocalSchemaDto {
           schemas == other.schemas &&
           installedScheme == other.installedScheme &&
           installedSchemeVersion == other.installedSchemeVersion &&
-          easyEnglishEnabled == other.easyEnglishEnabled;
+          easyEnglishEnabled == other.easyEnglishEnabled &&
+          deployWarning == other.deployWarning;
 }
 
 class LocalSchemasDto {

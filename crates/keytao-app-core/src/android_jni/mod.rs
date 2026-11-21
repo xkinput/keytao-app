@@ -1019,29 +1019,37 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrewarm
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCompleteDeployment(
-    mut env: JNIEnv<'_>,
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))] mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
 ) -> jboolean {
     android_jni_guard("nativeCompleteDeployment", 0, || {
-        if !cfg!(debug_assertions) {
-            return 0;
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = (&env, &user_dir);
+            0
         }
-        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
-            return 0;
-        };
-        let result = keytao_core::complete_deployment_with_cleanup(&user_dir, || {
-            crate::deploy::verify_android_deployment(&user_dir)
-                .map_err(|error| error.to_string())?;
-            keytao_core::prune_rime_build_artifacts(&user_dir, Some(&user_dir.join("rime-data")))
+        #[cfg(debug_assertions)]
+        {
+            let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+                return 0;
+            };
+            let result = keytao_core::complete_deployment_with_cleanup(&user_dir, || {
+                crate::deploy::verify_android_deployment(&user_dir)
+                    .map_err(|error| error.to_string())?;
+                keytao_core::prune_rime_build_artifacts(
+                    &user_dir,
+                    Some(&user_dir.join("rime-data")),
+                )
                 .map(|_| ())
-        });
-        match result {
-            Ok(()) => 1,
-            Err(error) => {
-                let _ = keytao_core::mark_deployment_failed(&user_dir);
-                android_log::error(&format!("complete deployment: {error}"));
-                0
+            });
+            match result {
+                Ok(()) => 1,
+                Err(error) => {
+                    let _ = keytao_core::mark_deployment_failed(&user_dir);
+                    android_log::error(&format!("complete deployment: {error}"));
+                    0
+                }
             }
         }
     })

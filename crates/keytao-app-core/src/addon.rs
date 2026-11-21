@@ -804,7 +804,8 @@ where
                 let mut message = error;
                 for key in &packages[..=index] {
                     if let Err(restore) = host.deploy_package(key).await {
-                        message.push_str(&format!("；恢复 {key} 部署失败：{restore}"));
+                        let name = crate::runtime_materialize::package_name(core, key);
+                        message.push_str(&format!("；恢复 {name} 部署失败：{restore}"));
                     }
                 }
                 return Err(message);

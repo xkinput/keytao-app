@@ -851,7 +851,7 @@ async fn inactive_or_failed_deploy_refuses_before_any_cloud_request() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("xmjd") && error.contains("不是当前"),
+        error.contains("星猫键道") && error.contains("不是当前"),
         "{error}"
     );
     core.update_state(|state| state.active_scheme = Some("xmjd".into()))
@@ -862,7 +862,7 @@ async fn inactive_or_failed_deploy_refuses_before_any_cloud_request() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("xmjd") && error.contains("部署未成功"),
+        error.contains("星猫键道") && error.contains("部署未成功"),
         "{error}"
     );
     assert!(mock.finish().await.is_empty());

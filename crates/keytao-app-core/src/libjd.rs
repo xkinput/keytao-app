@@ -90,23 +90,60 @@ fn allowed_asset_redirect(from: &Url, to: &Url) -> bool {
 }
 
 async fn latest_release(client: &reqwest::Client) -> Result<Release, CoreError> {
+    latest_release_at(client, RELEASE_API).await
+}
+
+fn format_release_request_error(error: reqwest::Error) -> CoreError {
+    let reason = if error.is_timeout() {
+        "连接 GitHub 超时".to_owned()
+    } else if error.is_connect() {
+        "无法连接 GitHub，请检查网络".to_owned()
+    } else if error.is_redirect() {
+        "GitHub 重定向异常".to_owned()
+    } else {
+        error.without_url().to_string()
+    };
+    CoreError::Other(format!("查询 ime-jd 版本失败：{reason}"))
+}
+
+async fn latest_release_at(client: &reqwest::Client, url: &str) -> Result<Release, CoreError> {
     let response = client
-        .get(RELEASE_API)
+        .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
-        .map_err(|error| CoreError::Network(error.without_url().to_string()))?;
-    if !response.status().is_success() {
-        return Err(CoreError::Other(format!(
-            "查询 ime-jd 版本失败，HTTP {}",
-            response.status()
-        )));
+        .map_err(format_release_request_error)?;
+    let status = response.status();
+    if !status.is_success() {
+        let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || (status == reqwest::StatusCode::FORBIDDEN
+                && response
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("0"));
+        let detail = if rate_limited {
+            format!("GitHub API 请求过于频繁（HTTP {}），请稍后再试", status.as_u16())
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            "未找到已发布的版本（HTTP 404）".to_owned()
+        } else if status.is_server_error() {
+            format!("GitHub 服务异常（HTTP {}）", status.as_u16())
+        } else {
+            format!("HTTP {status}")
+        };
+        return Err(CoreError::Other(format!("查询 ime-jd 版本失败：{detail}")));
     }
-    response
-        .json()
-        .await
-        .map_err(|error| CoreError::Network(error.without_url().to_string()))
+    response.json().await.map_err(|error| {
+        let detail = if error.is_decode() {
+            "返回的版本信息格式无效".to_owned()
+        } else if error.is_timeout() {
+            "读取版本信息超时".to_owned()
+        } else {
+            format!("读取响应失败（{}）", error.without_url())
+        };
+        CoreError::Other(format!("查询 ime-jd 版本失败：{detail}"))
+    })
 }
 
 fn select_asset(release: Release, platform: LibjdPlatform) -> Result<LibjdRelease, CoreError> {
@@ -428,6 +465,58 @@ mod tests {
             &Url::parse(RELEASE_API).unwrap(),
             &cdn
         ));
+    }
+
+    #[tokio::test]
+    async fn release_query_reports_accurate_http_parse_and_network_reasons() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn serve_once(status: &str, headers: &str, body: &str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+                body.len()
+            );
+            tokio::spawn(async move {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            });
+            format!("http://{addr}/releases/latest")
+        }
+
+        let client = reqwest::Client::new();
+
+        let rate_url = serve_once(
+            "403 Forbidden",
+            "x-ratelimit-remaining: 0\r\n",
+            r#"{"message":"API rate limit exceeded"}"#,
+        )
+        .await;
+        let rate_err = latest_release_at(&client, &rate_url).await.err().unwrap().to_string();
+        assert!(rate_err.contains("请求过于频繁"), "{rate_err}");
+
+        let missing_url = serve_once("404 Not Found", "", "{}").await;
+        let missing_err = latest_release_at(&client, &missing_url).await.err().unwrap().to_string();
+        assert!(missing_err.contains("未找到已发布的版本"), "{missing_err}");
+
+        let html_url = serve_once("200 OK", "Content-Type: text/html\r\n", "<html>portal</html>").await;
+        let html_err = latest_release_at(&client, &html_url).await.err().unwrap().to_string();
+        assert!(html_err.contains("格式无效"), "{html_err}");
+
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+        let conn_err = latest_release_at(&client, &format!("http://{closed_addr}/releases/latest"))
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(conn_err.contains("无法连接"), "{conn_err}");
     }
 
     #[cfg(target_os = "macos")]

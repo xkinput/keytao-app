@@ -157,9 +157,10 @@ fn collect(
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if matches!(name.as_ref(), "app-state.json" | "sync")
-            || name.contains(".userdb")
-            || name.ends_with(".leveldb")
+        let name_lower = name.to_ascii_lowercase();
+        if matches!(name_lower.as_str(), "app-state.json" | "sync")
+            || name_lower.contains(".userdb")
+            || name_lower.ends_with(".leveldb")
             || path.starts_with(sync_dir)
         {
             continue;
@@ -174,12 +175,14 @@ fn collect(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
+        let relative_lower = relative.to_ascii_lowercase();
         if (directory == root
-            && (relative == "build" || crate::package_migration::control_entry(&relative)))
-            || (flat_live && flat_rime_input(&relative))
-            || package_activation::user_file(&relative)
+            && (relative_lower == "build"
+                || crate::package_migration::control_entry(&relative_lower)))
+            || (flat_live && flat_rime_input(&relative_lower))
+            || package_activation::user_file(&relative_lower)
             || matches!(
-                relative.as_str(),
+                relative_lower.as_str(),
                 "installation.yaml"
                     | "rime.lua"
                     | "keytao-ime.reload"
@@ -197,7 +200,7 @@ fn collect(
             collect(root, &path, sync_dir, owned, flat_live, files)?;
         } else if metadata.is_file()
             && !owned.contains(&relative)
-            && !generated(&relative, &path)?
+            && !generated(&relative_lower, &path)?
         {
             files.push(OrphanFile {
                 path: relative,
@@ -209,26 +212,26 @@ fn collect(
     Ok(())
 }
 
-fn flat_rime_input(relative: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    let relative: &str = &relative.to_ascii_lowercase();
+fn flat_rime_input(relative_lower: &str) -> bool {
     // Schemas can reference config and vocabulary files with arbitrary names.
-    matches!(relative, "build" | "lua" | "opencc" | "prebuilt")
+    matches!(relative_lower, "build" | "lua" | "opencc" | "prebuilt")
         || matches!(
-            Path::new(relative).extension().and_then(|ext| ext.to_str()),
+            Path::new(relative_lower)
+                .extension()
+                .and_then(|ext| ext.to_str()),
             Some("yaml" | "lua" | "txt" | "bin" | "ocd2" | "gram")
         )
 }
 
-fn generated(relative: &str, path: &Path) -> Result<bool, CoreError> {
-    if matches!(relative, "default.custom.yaml" | "default-custom.yaml") {
+fn generated(relative_lower: &str, path: &Path) -> Result<bool, CoreError> {
+    if matches!(relative_lower, "default.custom.yaml" | "default-custom.yaml") {
         return Ok(true);
     }
-    if !relative.ends_with(".yaml") && !relative.ends_with(".lua") {
+    if !relative_lower.ends_with(".yaml") && !relative_lower.ends_with(".lua") {
         return Ok(false);
     }
     let bytes = fs::read(path)?;
-    Ok(crate::managed_custom::is_generated(relative, &bytes))
+    Ok(crate::managed_custom::is_generated(relative_lower, &bytes))
 }
 
 /// Moves only selections still present in a fresh report with the displayed fingerprint.
@@ -513,6 +516,30 @@ mod tests {
         };
         assert!(trash_with(&core, &root, &[selected], Some(&temp.path().join("trash"))).is_err());
         assert_eq!(fs::read(root.join(path)).unwrap(), b"legacy contents");
+    }
+
+    #[test]
+    fn pre_migration_mixed_case_rime_files_are_excluded_from_orphans() {
+        let (_temp, core, root) = setup();
+        for path in [
+            "Legacy.Schema.YAML",
+            "Foo.YAML",
+            "Words.TXT",
+            "Rime.LUA",
+            "OpenCC/s2t.json",
+            "Dict.Userdb/CURRENT",
+            "orphan.bak",
+        ] {
+            let full = root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, b"legacy").unwrap();
+        }
+
+        let orphans = report(&core, &root).unwrap().files;
+        assert_eq!(
+            orphans.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            ["orphan.bak"]
+        );
     }
 
     #[test]

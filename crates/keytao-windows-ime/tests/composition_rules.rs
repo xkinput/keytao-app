@@ -4,6 +4,7 @@ mod composition_rules;
 use composition_rules::{
     composition_end_retry_delay_ms, composition_end_to_finish_first,
     leftover_to_delete_on_host_termination, may_process_key, may_terminate_composition,
+    retain_exhausted_composition_end_for_cleanup, should_backoff_composition_end_failure,
     should_clear_terminated_composition, should_drop_pending_context, should_retry_commit,
 };
 use std::collections::VecDeque;
@@ -283,4 +284,48 @@ fn five_failed_composition_ends_release_keys_without_rewriting_the_commit() {
     assert_eq!(host.commit_writes, vec!["词"]);
     assert_eq!(host.document, "词yun");
     assert_eq!(host.max_live, 1);
+}
+
+#[test]
+fn refused_sync_end_switches_to_async_immediately_and_exhausted_end_cleans_up_raw_letter() {
+    assert!(!should_backoff_composition_end_failure(true, false));
+    assert!(should_backoff_composition_end_failure(false, false));
+
+    let mut host = FakeHost::new();
+    // Simulate a cancelled 1-letter preedit ('x') whose composition end is refused 5 times.
+    host.pending_ends.push((1, true));
+    host.key('u');
+    host.key('n');
+    assert_eq!(host.engine_keys, vec!['x']);
+
+    let mut dormant_cleanup = false;
+    let mut failures = 0;
+    while composition_end_retry_delay_ms(failures).is_some() {
+        failures += 1;
+        if composition_end_retry_delay_ms(failures).is_none() {
+            host.pending_ends.clear();
+            if retain_exhausted_composition_end_for_cleanup() {
+                dormant_cleanup = true;
+            } else {
+                host.compositions.clear();
+            }
+        }
+    }
+    assert_eq!(failures, 5);
+    assert!(host.pending_ends.is_empty());
+
+    // When the host unlocks on the next edit session, dormant cleanup erases uncommitted 'x'
+    // before replaying 'u' and 'n'.
+    if dormant_cleanup {
+        let stale = host.compositions.remove(0);
+        if leftover_to_delete_on_host_termination(
+            &host.document[stale.start..],
+            &stale.text,
+            stale.committed,
+        ) {
+            host.document.truncate(stale.start);
+        }
+    }
+    host.run_edit_session();
+    assert_eq!(host.document, "un");
 }

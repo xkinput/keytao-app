@@ -807,8 +807,9 @@ impl InstallReceipt {
 
     pub(crate) fn preflight_owner(&self, relative: &str) -> Result<(), String> {
         if let Some(owner) = self.other_owners.get(relative) {
+            let name = keytao_core::switcher_model::package_display_name(&self.root, owner);
             return Err(format!(
-                "文件 {relative} 已由方案 {owner} 管理，已保留原文件"
+                "文件 {relative} 已由方案 {name} 管理，已保留原文件"
             ));
         }
         Ok(())

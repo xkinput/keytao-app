@@ -120,6 +120,7 @@ fn pending(root: &Path) -> Result<bool, String> {
     Ok(request.generation > applied_generation(root)? && request.expires_at > now_ms())
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 pub(crate) fn claim(root: &Path) -> Result<Option<u64>, String> {
     let _guard = lock_request(root)?;
     let Some(request) = read_json::<UserDataSyncRequest>(&root.join(USER_DATA_SYNC_REQUEST_FILE))?
@@ -148,6 +149,7 @@ pub(crate) fn claim(root: &Path) -> Result<Option<u64>, String> {
     Ok(Some(request.generation))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 pub(crate) fn finish(
     root: &Path,
     generation: u64,

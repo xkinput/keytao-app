@@ -52,6 +52,7 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         installed_scheme,
         installed_scheme_version,
         easy_english_enabled,
+        deploy_warning: local.deploy_warning,
     })
 }
 
@@ -546,10 +547,9 @@ pub fn libjd_status() -> Result<LibjdStatusDto, String> {
 pub async fn libjd_release() -> Result<LibjdReleaseDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    let root = state.host.user_root()?;
     let release = keytao_app_core::libjd::libjd_release(&state.core)
         .await
-        .map_err(|error| libjd_failure(&state.core, &root, error))?;
+        .map_err(format_libjd_error)?;
     Ok(LibjdReleaseDto(release))
 }
 
@@ -571,22 +571,28 @@ pub async fn install_or_update_libjd(release: LibjdReleaseDto) -> Result<LibjdSt
     })
 }
 
-fn libjd_failure(core: &keytao_app_core::Core, root: &std::path::Path, error: keytao_app_core::CoreError) -> String {
+fn format_libjd_error(error: keytao_app_core::CoreError) -> String {
     use keytao_app_core::CoreError;
-    use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine, read};
     eprintln!("ime-jd operation failed: {error}");
-    if read(root, Some(PACKAGE_KEY)) == PackageEngine::Libjd {
+    match error {
+        CoreError::Network(reason) => format!("网络连接失败：{reason}"),
+        CoreError::Io(_) | CoreError::Parse(_) => "无法保存 ime-jd 设置或文件".into(),
+        CoreError::Other(message) | CoreError::Unsupported(message) => message,
+        _ => "ime-jd 操作失败".into(),
+    }
+}
+
+fn libjd_failure(core: &keytao_app_core::Core, root: &std::path::Path, error: keytao_app_core::CoreError) -> String {
+    use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine, read};
+    if read(root, Some(PACKAGE_KEY)) == PackageEngine::Libjd
+        && keytao_app_core::libjd::libjd_status(core).installed_version.is_none()
+    {
         if let Err(rollback) = keytao_app_core::packages::set_package_engine(core, root, PACKAGE_KEY, "rime") {
             eprintln!("ime-jd rollback failed: {rollback}");
             return "ime-jd 操作失败，无法切回 Rime".into();
         }
     }
-    match error {
-        CoreError::Network(_) => "查询 ime-jd 版本失败".into(),
-        CoreError::Io(_) | CoreError::Parse(_) => "无法保存 ime-jd 设置或文件".into(),
-        CoreError::Other(message) | CoreError::Unsupported(message) => message,
-        _ => "ime-jd 操作失败".into(),
-    }
+    format_libjd_error(error)
 }
 
 pub async fn set_package_engine(key: String, engine: String) -> Result<(), String> {

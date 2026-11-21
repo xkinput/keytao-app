@@ -6062,6 +6062,7 @@ impl SseDecode for crate::api::types::LocalSchemaDto {
         let mut var_installedScheme = <Option<String>>::sse_decode(deserializer);
         let mut var_installedSchemeVersion = <Option<String>>::sse_decode(deserializer);
         let mut var_easyEnglishEnabled = <Option<bool>>::sse_decode(deserializer);
+        let mut var_deployWarning = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::LocalSchemaDto {
             installed: var_installed,
             deployed: var_deployed,
@@ -6070,6 +6071,7 @@ impl SseDecode for crate::api::types::LocalSchemaDto {
             installed_scheme: var_installedScheme,
             installed_scheme_version: var_installedSchemeVersion,
             easy_english_enabled: var_easyEnglishEnabled,
+            deploy_warning: var_deployWarning,
         };
     }
 }
@@ -7893,6 +7895,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::LocalSchemaDto {
             self.installed_scheme.into_into_dart().into_dart(),
             self.installed_scheme_version.into_into_dart().into_dart(),
             self.easy_english_enabled.into_into_dart().into_dart(),
+            self.deploy_warning.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9390,6 +9393,7 @@ impl SseEncode for crate::api::types::LocalSchemaDto {
         <Option<String>>::sse_encode(self.installed_scheme, serializer);
         <Option<String>>::sse_encode(self.installed_scheme_version, serializer);
         <Option<bool>>::sse_encode(self.easy_english_enabled, serializer);
+        <Option<String>>::sse_encode(self.deploy_warning, serializer);
     }
 }
 

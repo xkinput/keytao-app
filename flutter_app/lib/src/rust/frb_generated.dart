@@ -5751,8 +5751,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LocalSchemaDto dco_decode_local_schema_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return LocalSchemaDto(
       installed: dco_decode_bool(arr[0]),
       deployed: dco_decode_bool(arr[1]),
@@ -5761,6 +5761,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       installedScheme: dco_decode_opt_String(arr[4]),
       installedSchemeVersion: dco_decode_opt_String(arr[5]),
       easyEnglishEnabled: dco_decode_opt_box_autoadd_bool(arr[6]),
+      deployWarning: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -7365,6 +7366,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_installedScheme = sse_decode_opt_String(deserializer);
     var var_installedSchemeVersion = sse_decode_opt_String(deserializer);
     var var_easyEnglishEnabled = sse_decode_opt_box_autoadd_bool(deserializer);
+    var var_deployWarning = sse_decode_opt_String(deserializer);
     return LocalSchemaDto(
       installed: var_installed,
       deployed: var_deployed,
@@ -7373,6 +7375,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       installedScheme: var_installedScheme,
       installedSchemeVersion: var_installedSchemeVersion,
       easyEnglishEnabled: var_easyEnglishEnabled,
+      deployWarning: var_deployWarning,
     );
   }
 
@@ -8991,6 +8994,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.installedScheme, serializer);
     sse_encode_opt_String(self.installedSchemeVersion, serializer);
     sse_encode_opt_box_autoadd_bool(self.easyEnglishEnabled, serializer);
+    sse_encode_opt_String(self.deployWarning, serializer);
   }
 
   @protected

@@ -16,6 +16,7 @@ import android.icu.text.BreakIterator
 import android.os.Build
 import android.os.Bundle
 import android.os.Debug
+import android.os.FileObserver
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
@@ -227,6 +228,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var readinessRetryCount = 0
     private var readinessRetryDelayMs = 500L
     private var lastReloadStampSignature: String? = null
+    private var lastHardwareStampCheckMs = 0L
+    private var reloadStampObserver: FileObserver? = null
+    private var reloadStampObservedDir: String? = null
     private val readinessRetry = Runnable {
         scheduleAvailabilityRefresh(pollReloadStamp = true)
     }
@@ -268,6 +272,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         discardPendingHostBackspace(resetOutstanding = true)
         serviceDestroyed = true
         inputViewShown = false
+        stopReloadStampObserver()
         mainHandler.removeCallbacks(readinessRetry)
         editorUpdateGeneration++
         rimeOptionsGeneration++
@@ -404,6 +409,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         lastCommittedText = null
         keyboardView?.updateState(currentState)
         refreshVoiceInput()
+        updateReloadStampObserver()
         scheduleAvailabilityRefresh()
         logStartInput("input", attribute, restarting, started)
     }
@@ -412,6 +418,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val started = System.nanoTime()
         super.onStartInputView(info, restarting)
         inputViewShown = true
+        stopReloadStampObserver()
         readinessRetryCount = 0
         readinessRetryDelayMs = 500L
         mainHandler.removeCallbacks(readinessRetry)
@@ -463,7 +470,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             put("phase", "input_view")
             put("finishing_input", finishingInput)
         }
-        if (!finishingInput) scheduleReadinessRetry()
+        if (!finishingInput) {
+            updateReloadStampObserver()
+            scheduleReadinessRetry()
+        }
     }
 
     override fun onWindowShown() {
@@ -913,6 +923,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
+        stopReloadStampObserver()
         mainHandler.removeCallbacks(readinessRetry)
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
@@ -1017,6 +1028,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (deferDeploymentKey {
                 if (!onKeyDown(keyCode, deferredEvent)) currentInputConnection?.sendKeyEvent(deferredEvent)
             }) return true
+        if (!inputViewShown) {
+            val nowMs = SystemClock.uptimeMillis()
+            if (nowMs - lastHardwareStampCheckMs >= 1_000L) {
+                lastHardwareStampCheckMs = nowMs
+                scheduleAvailabilityRefresh()
+            }
+        }
         // ascii_mode deliberately plays no part here: English mode still needs
         // librime's ascii_composer to see the key. keytao-core owns the rule.
         if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
@@ -1029,7 +1047,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ) {
                 engine.processEnter()
             } else {
-                engine.processKey(key.keyCode, key.modifiers)
+                val routedKeyCode = AndroidKeyMapper.candidateArrowKey(
+                    key.keyCode,
+                    key.modifiers,
+                    panelVisible = inputViewShown,
+                    hasCandidates = currentState.candidates.isNotEmpty(),
+                )
+                engine.processKey(routedKeyCode, key.modifiers)
             }
             hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
             if (!result.accepted) {
@@ -2968,7 +2992,58 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
         keyboardView?.updateDeploymentHint(engine.deploymentHint)
         if (inputAvailable) refreshRimeOptions(inBackground = true)
+        updateReloadStampObserver()
         scheduleReadinessRetry()
+    }
+
+    private fun hardwareKeyboardActive(): Boolean =
+        !BuildConfig.GOOGLE_PLAY_DISTRIBUTION &&
+            Process.is64Bit() &&
+            currentInputStarted &&
+            resources.configuration.keyboard > Configuration.KEYBOARD_NOKEYS
+
+    private fun updateReloadStampObserver() {
+        if (serviceDestroyed || inputViewShown || !hardwareKeyboardActive()) {
+            stopReloadStampObserver()
+            return
+        }
+        val dir = KeytaoAndroidPaths.userRootOrNull(this) ?: run {
+            stopReloadStampObserver()
+            return
+        }
+        if (reloadStampObservedDir == dir.absolutePath && reloadStampObserver != null) return
+        stopReloadStampObserver()
+        val mask = FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.CREATE or FileObserver.DELETE
+        val onEvent: (Int, String?) -> Unit = { _, path ->
+            if (path == null || path == "keytao-ime.reload") {
+                mainHandler.post {
+                    if (!serviceDestroyed && hardwareKeyboardActive() && !inputViewShown) {
+                        scheduleAvailabilityRefresh()
+                    }
+                }
+            }
+        }
+        val observer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            object : FileObserver(dir, mask) {
+                override fun onEvent(event: Int, path: String?) = onEvent(event, path)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            object : FileObserver(dir.absolutePath, mask) {
+                override fun onEvent(event: Int, path: String?) = onEvent(event, path)
+            }
+        }
+        runCatching {
+            observer.startWatching()
+            reloadStampObserver = observer
+            reloadStampObservedDir = dir.absolutePath
+        }
+    }
+
+    private fun stopReloadStampObserver() {
+        runCatching { reloadStampObserver?.stopWatching() }
+        reloadStampObserver = null
+        reloadStampObservedDir = null
     }
 
     private fun scheduleReadinessRetry() {
@@ -2983,9 +3058,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
-    private fun shouldPollReloadStamp(): Boolean = !serviceDestroyed &&
-        (inputViewShown || (!BuildConfig.GOOGLE_PLAY_DISTRIBUTION && Process.is64Bit() &&
-            currentInputStarted && resources.configuration.keyboard > Configuration.KEYBOARD_NOKEYS))
+    private fun shouldPollReloadStamp(): Boolean = AndroidKeyMapper.shouldScheduleReloadStampTimer(
+        serviceDestroyed = serviceDestroyed,
+        inputViewShown = inputViewShown,
+        hardwareKeyboardActive = hardwareKeyboardActive(),
+        readiness = lastReadiness,
+        retryCount = readinessRetryCount,
+    )
 
     private fun configuredEnglishMode(): String {
         return baseKeyboardConfig?.englishMode ?: keyboardView?.currentConfig()?.englishMode ?: "ascii"

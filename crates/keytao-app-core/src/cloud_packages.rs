@@ -94,6 +94,7 @@ struct PreparedUpload {
 }
 
 fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError> {
+    let name = crate::runtime_materialize::package_name(core, scheme_key);
     if !keytao_core::RuntimeDirs::needs_migration(root) {
         let shared = crate::deploy::deploy_shared_data_dir(core, root);
         let ready = keytao_core::RuntimeDirs::for_package(root, &shared, scheme_key)
@@ -101,40 +102,40 @@ fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError>
         return if ready {
             Ok(())
         } else {
-            Err(CoreError::Other(format!("方案 {scheme_key} 没有本地部署成功记录")))
+            Err(CoreError::Other(format!("方案 {name} 没有本地部署成功记录")))
         };
     }
     let state = core.state();
     let activated = crate::package_activation::read_package(core, root, scheme_key)?.is_some();
     if !activated && state.active_scheme.as_deref() != Some(scheme_key) {
         return Err(CoreError::Other(format!(
-            "方案 {scheme_key} 不是当前使用中的方案"
+            "方案 {name} 不是当前使用中的方案"
         )));
     }
     let Some(last) = state.last_deploy.as_ref() else {
         return Err(CoreError::Other(format!(
-            "方案 {scheme_key} 没有本地部署成功记录"
+            "方案 {name} 没有本地部署成功记录"
         )));
     };
     if !last.success {
         return Err(CoreError::Other(format!(
-            "方案 {scheme_key} 的最后一次本地部署未成功"
+            "方案 {name} 的最后一次本地部署未成功"
         )));
     }
     if !activated && last.scheme_key.as_deref() != Some(scheme_key) {
         return Err(CoreError::Other(format!(
-            "方案 {scheme_key} 的最近部署记录属于其他方案"
+            "方案 {name} 的最近部署记录属于其他方案"
         )));
     }
     let root = root.canonicalize().map_err(|e| {
         CoreError::Other(format!(
-            "方案 {scheme_key}：Rime 目录 {}: {e}",
+            "方案 {name}：Rime 目录 {}: {e}",
             root.display()
         ))
     })?;
     if root != last.root {
         return Err(CoreError::Other(format!(
-            "方案 {scheme_key} 的最近部署记录不属于 Rime 目录 {}",
+            "方案 {name} 的最近部署记录不属于 Rime 目录 {}",
             root.display()
         )));
     }
@@ -317,8 +318,9 @@ pub async fn upload(
 ) -> Result<CloudPackage, CoreError> {
     let prepared = prepare(core, scheme_key, root)?;
     if expected_sha256.is_some_and(|expected| expected != prepared.bundle.sha256) {
+        let name = crate::runtime_materialize::package_name(core, scheme_key);
         return Err(CoreError::Other(format!(
-            "方案 {scheme_key} 的依赖文件已更改，请重新确认上传清单"
+            "方案 {name} 的依赖文件已更改，请重新确认上传清单"
         )));
     }
     upload_prepared_at(core, scheme_key, root, prepared, API_BASE).await
@@ -369,8 +371,9 @@ async fn upload_prepared_at(
         if crate::upload_bundle::verified_package(root, shared.as_deref(), scheme_key, &ids, None)?
             .sha256 != sha256
         {
+            let name = crate::runtime_materialize::package_name(core, scheme_key);
             return Err(CoreError::Other(format!(
-                "方案 {scheme_key} 的依赖文件已更改，请重新确认上传清单"
+                "方案 {name} 的依赖文件已更改，请重新确认上传清单"
             )));
         }
         Ok(())

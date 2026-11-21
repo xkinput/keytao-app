@@ -93,4 +93,56 @@ class AndroidKeyMapperTest {
             AndroidKeyMapper.modifiers(shift = false, capsLock = false, control = true, alt = true, meta = true),
         )
     }
+
+    @Test
+    fun `visible horizontal candidate bar maps arrow keys and hardware ready state stops idle polling`() {
+        assertEquals(
+            AndroidKeyMapper.PREVIOUS_CANDIDATE,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_LEFT, 0, panelVisible = true, hasCandidates = true),
+        )
+        assertEquals(
+            AndroidKeyMapper.NEXT_CANDIDATE,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_RIGHT, AndroidKeyMapper.RIME_MOD_LOCK, panelVisible = true, hasCandidates = true),
+        )
+        assertEquals(
+            AndroidKeyMapper.PREVIOUS_PAGE,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_UP, 0, panelVisible = true, hasCandidates = true),
+        )
+        assertEquals(
+            AndroidKeyMapper.NEXT_PAGE,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_DOWN, 0, panelVisible = true, hasCandidates = true),
+        )
+        assertEquals(
+            AndroidKeyMapper.XK_LEFT,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_LEFT, 0, panelVisible = false, hasCandidates = true),
+        )
+
+        assertFalse(
+            AndroidKeyMapper.shouldScheduleReloadStampTimer(
+                serviceDestroyed = false,
+                inputViewShown = false,
+                hardwareKeyboardActive = true,
+                readiness = Readiness.READY,
+                retryCount = 0,
+            ),
+        )
+        assertTrue(
+            AndroidKeyMapper.shouldScheduleReloadStampTimer(
+                serviceDestroyed = false,
+                inputViewShown = false,
+                hardwareKeyboardActive = true,
+                readiness = Readiness.DEPLOYING,
+                retryCount = 0,
+            ),
+        )
+        assertTrue(
+            AndroidKeyMapper.shouldScheduleReloadStampTimer(
+                serviceDestroyed = false,
+                inputViewShown = true,
+                hardwareKeyboardActive = false,
+                readiness = Readiness.READY,
+                retryCount = 0,
+            ),
+        )
+    }
 }

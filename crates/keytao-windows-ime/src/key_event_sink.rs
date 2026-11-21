@@ -42,6 +42,7 @@ use crate::{
     composition_rules::{
         composition_end_retry_delay_ms, composition_end_to_finish_first,
         leftover_to_delete_on_host_termination, may_process_key, may_terminate_composition,
+        retain_exhausted_composition_end_for_cleanup, should_backoff_composition_end_failure,
         should_drop_pending_context, should_retry_commit,
     },
     deferred_keys::{DeferredKey, KeyEventSource},
@@ -379,7 +380,7 @@ fn request_pending_ime_apply(state: &SharedState, asynchronous: bool) -> Result<
         if st.pending_ime_apply.as_ref().is_some_and(|apply| {
             st.pending_composition_ends
                 .iter()
-                .any(|end| end.context.as_raw() == apply.context.as_raw())
+                .any(|end| !end.exhausted && end.context.as_raw() == apply.context.as_raw())
         }) {
             return Ok(());
         }
@@ -492,7 +493,20 @@ pub(crate) struct PendingCompositionEnd {
     terminated_range: Option<(Option<ITfRange>, String)>,
     panel_anchor: Option<PanelAnchor>,
     failures: u8,
-    retry_after: Option<Instant>,
+    pub(crate) retry_after: Option<Instant>,
+    pub(crate) exhausted: bool,
+}
+
+impl PendingCompositionEnd {
+    pub(crate) fn has_terminated_range(&self) -> bool {
+        self.terminated_range.is_some()
+    }
+}
+
+pub(crate) fn has_active_composition_ends(st: &TsfState) -> bool {
+    st.pending_composition_ends
+        .iter()
+        .any(|pending| !pending.exhausted)
 }
 
 fn forget_written_preedit(state: &SharedState, identity: usize) {
@@ -570,6 +584,9 @@ pub(crate) fn defer_failed_composition_end(
     {
         pending.queued = false;
         pending.clear_text = clear_text;
+        pending.failures = 0;
+        pending.retry_after = None;
+        pending.exhausted = false;
     } else {
         st.pending_composition_ends.push(PendingCompositionEnd {
             context: context.clone(),
@@ -580,6 +597,7 @@ pub(crate) fn defer_failed_composition_end(
             panel_anchor: None,
             failures: 0,
             retry_after: None,
+            exhausted: false,
         });
     }
 }
@@ -620,16 +638,52 @@ fn record_composition_end_failure(state: &SharedState, identity: usize) -> bool 
         return false;
     }
     let context = pending.context.as_raw();
-    let identities: Vec<_> = st
-        .pending_composition_ends
-        .iter()
-        .filter(|pending| pending.context.as_raw() == context)
-        .map(|pending| pending.composition.as_raw() as usize)
-        .collect();
-    st.pending_composition_ends
-        .retain(|pending| pending.context.as_raw() != context);
-    st.written_preedits
-        .retain(|(written, _, _)| !identities.contains(written));
+    if retain_exhausted_composition_end_for_cleanup() {
+        st.pending_composition_ends.retain(|entry| {
+            entry.context.as_raw() != context
+                || !entry
+                    .panel_anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.composition().is_none())
+        });
+        for entry in &mut st.pending_composition_ends {
+            if entry.context.as_raw() == context {
+                entry.exhausted = true;
+                entry.queued = false;
+                entry.retry_after = None;
+            }
+        }
+        const MAX_EXHAUSTED_PER_CONTEXT: usize = 8;
+        while st
+            .pending_composition_ends
+            .iter()
+            .filter(|entry| entry.context.as_raw() == context && entry.exhausted)
+            .count()
+            > MAX_EXHAUSTED_PER_CONTEXT
+        {
+            if let Some(evict) = st
+                .pending_composition_ends
+                .iter()
+                .position(|entry| entry.context.as_raw() == context && entry.exhausted)
+            {
+                let removed = st.pending_composition_ends.remove(evict);
+                let removed_id = removed.composition.as_raw() as usize;
+                st.written_preedits
+                    .retain(|(written, _, _)| *written != removed_id);
+            }
+        }
+    } else {
+        let identities: Vec<_> = st
+            .pending_composition_ends
+            .iter()
+            .filter(|pending| pending.context.as_raw() == context)
+            .map(|pending| pending.composition.as_raw() as usize)
+            .collect();
+        st.pending_composition_ends
+            .retain(|pending| pending.context.as_raw() != context);
+        st.written_preedits
+            .retain(|(written, _, _)| !identities.contains(written));
+    }
     drop(st);
     append_diagnostic(format!(
         "composition end retries exhausted attempts=5 context={context:p}; releasing queued keys"
@@ -706,18 +760,94 @@ fn finish_pending_composition_end(ec: u32, state: &SharedState, identity: usize)
     result
 }
 
+fn finish_exhausted_composition_end(ec: u32, state: &SharedState, pending: PendingCompositionEnd) {
+    let identity = pending.composition.as_raw() as usize;
+    if pending
+        .panel_anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.composition().is_none())
+    {
+        forget_written_preedit(state, identity);
+        return;
+    }
+    let written_preedit = state
+        .borrow()
+        .written_preedits
+        .iter()
+        .find(|(written, _, _)| *written == identity)
+        .map(|(_, _, text)| text.clone());
+    track_composition_in_flight(state, Some(&pending.composition));
+    unsafe {
+        if let Some((range, last_preedit)) = &pending.terminated_range {
+            if let Ok(range) = range
+                .clone()
+                .ok_or_else(|| E_FAIL.into())
+                .or_else(|_: windows::core::Error| pending.composition.GetRange())
+            {
+                let mut text = vec![0u16; last_preedit.encode_utf16().count() + 1];
+                let mut fetched = 0;
+                if range.GetText(ec, 0, &mut text, &mut fetched).is_ok()
+                    && String::from_utf16(&text[..fetched as usize]).is_ok_and(|text| {
+                        leftover_to_delete_on_host_termination(&text, last_preedit, false)
+                    })
+                {
+                    let _ = range.SetText(ec, 0, &[]);
+                }
+            }
+        } else {
+            if pending.clear_text {
+                if let (Some(last_preedit), Ok(range)) =
+                    (written_preedit.as_deref(), pending.composition.GetRange())
+                {
+                    let mut text = vec![0u16; last_preedit.encode_utf16().count() + 1];
+                    let mut fetched = 0;
+                    if range.GetText(ec, 0, &mut text, &mut fetched).is_ok()
+                        && String::from_utf16(&text[..fetched as usize]).is_ok_and(|text| {
+                            leftover_to_delete_on_host_termination(&text, last_preedit, false)
+                        })
+                    {
+                        clear_composition_display_attribute(ec, &pending.context, &range);
+                        let _ = range.SetText(ec, 0, &[]);
+                    }
+                }
+            }
+            let _ = pending.composition.EndComposition(ec);
+        }
+    }
+    track_composition_in_flight(state, None);
+    forget_written_preedit(state, identity);
+}
+
 fn finish_pending_composition_ends_first(
     ec: u32,
     context: &ITfContext,
     state: &SharedState,
 ) -> Result<()> {
     loop {
+        let exhausted = {
+            let mut st = state.borrow_mut();
+            st.pending_composition_ends
+                .iter()
+                .position(|pending| {
+                    pending.exhausted && pending.context.as_raw() == context.as_raw()
+                })
+                .map(|index| st.pending_composition_ends.remove(index))
+        };
+        let Some(pending) = exhausted else {
+            break;
+        };
+        finish_exhausted_composition_end(ec, state, pending);
+    }
+    loop {
         let pending = {
             let st = state.borrow();
             composition_end_to_finish_first(
-                st.pending_composition_ends
-                    .iter()
-                    .map(|pending| (pending.context.as_raw() as usize, pending.queued)),
+                st.pending_composition_ends.iter().map(|pending| {
+                    (
+                        pending.context.as_raw() as usize,
+                        !pending.exhausted && pending.queued,
+                    )
+                }),
                 context.as_raw() as usize,
             )
             .map(|index| st.pending_composition_ends[index].composition.as_raw() as usize)
@@ -731,7 +861,7 @@ fn finish_pending_composition_ends_first(
         .borrow()
         .pending_composition_ends
         .iter()
-        .any(|pending| pending.context.as_raw() == context.as_raw())
+        .any(|pending| !pending.exhausted && pending.context.as_raw() == context.as_raw())
     {
         return Err(E_FAIL.into());
     }
@@ -764,6 +894,7 @@ pub(crate) fn queue_terminated_preedit_cleanup(state: &SharedState, composition:
                 panel_anchor: None,
                 failures: 0,
                 retry_after: None,
+                exhausted: false,
             });
     }
 }
@@ -782,6 +913,31 @@ pub(crate) fn queue_panel_anchor_end(state: &SharedState, anchor: PanelAnchor) {
     {
         pending.panel_anchor = Some(anchor);
     }
+}
+
+fn try_terminate_pending_composition(shared_state: &SharedState, identity: usize) -> bool {
+    let current = shared_state
+        .borrow()
+        .pending_composition_ends
+        .iter()
+        .find(|entry| entry.composition.as_raw() as usize == identity)
+        .cloned();
+    let Some(current) = current else {
+        return true;
+    };
+    if current.terminated_range.is_none() && may_terminate_composition(current.clear_text, false) {
+        if let (Ok(services), Ok(view)) = (
+            current.context.cast::<ITfContextOwnerCompositionServices>(),
+            current.composition.cast::<ITfCompositionView>(),
+        ) {
+            if unsafe { services.TerminateComposition(&view) }.is_ok() {
+                drop(take_pending_composition_end(shared_state, identity));
+                forget_written_preedit(shared_state, identity);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Clear owned preedit under a write lock before any lock-free termination.
@@ -805,7 +961,8 @@ pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
         if discard_disconnected_context(shared_state, &pending.context, false) {
             continue;
         }
-        if pending.queued
+        if pending.exhausted
+            || pending.queued
             || pending
                 .retry_after
                 .is_some_and(|deadline| Instant::now() < deadline)
@@ -813,8 +970,7 @@ pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
             continue;
         }
         let identity = pending.composition.as_raw() as usize;
-        let state = shared_state.clone();
-        let client_id = state.borrow().client_id;
+        let client_id = shared_state.borrow().client_id;
         if client_id == 0 {
             continue;
         }
@@ -826,68 +982,75 @@ pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
         {
             entry.queued = true;
         }
+        let make_apply = |entered_session: Rc<Cell<bool>>| {
+            let state = shared_state.clone();
+            move |ec, ctx: &ITfContext| {
+                entered_session.set(true);
+                let result = {
+                    let _guard = ImeWriteSessionGuard::enter(&state);
+                    finish_pending_composition_end(ec, &state, identity)
+                };
+                if result.as_ref().is_err_and(|error| {
+                    discard_disconnected_context(&state, ctx, error.code() == TF_E_DISCONNECTED)
+                }) {
+                    return result;
+                }
+                if result.is_ok() {
+                    post_pending_ime_ui(&state);
+                }
+                result
+            }
+        };
         let entered = Rc::new(Cell::new(false));
-        let entered_session = entered.clone();
-        let apply = move |ec, ctx: &ITfContext| {
-            entered_session.set(true);
-            let result = {
-                let _guard = ImeWriteSessionGuard::enter(&state);
-                finish_pending_composition_end(ec, &state, identity)
-            };
-            if result.as_ref().is_err_and(|error| {
-                discard_disconnected_context(&state, ctx, error.code() == TF_E_DISCONNECTED)
-            }) {
-                return result;
-            }
-            if result.is_ok() {
-                post_pending_ime_ui(&state);
-            }
-            result
-        };
-        let result = if pending.failures == 0 {
-            with_write_session(&pending.context, client_id, apply)
+        let sync_attempt = pending.failures == 0;
+        let result = if sync_attempt {
+            with_write_session(&pending.context, client_id, make_apply(entered.clone()))
         } else {
-            with_async_write_session(&pending.context, client_id, apply)
+            with_async_write_session(&pending.context, client_id, make_apply(entered.clone()))
         };
-        if result.is_err() {
+        if let Err(error) = result {
             if discard_disconnected_context(
                 shared_state,
                 &pending.context,
-                result
-                    .as_ref()
-                    .is_err_and(|error| error.code() == TF_E_DISCONNECTED),
+                error.code() == TF_E_DISCONNECTED,
             ) {
+                continue;
+            }
+            if !should_backoff_composition_end_failure(sync_attempt, entered.get()) {
+                if try_terminate_pending_composition(shared_state, identity) {
+                    continue;
+                }
+                let entered_async = Rc::new(Cell::new(false));
+                if let Err(async_error) = with_async_write_session(
+                    &pending.context,
+                    client_id,
+                    make_apply(entered_async.clone()),
+                ) {
+                    if discard_disconnected_context(
+                        shared_state,
+                        &pending.context,
+                        async_error.code() == TF_E_DISCONNECTED,
+                    ) {
+                        continue;
+                    }
+                    if !entered_async.get()
+                        && record_composition_end_failure(shared_state, identity)
+                    {
+                        continue;
+                    }
+                    let _ = try_terminate_pending_composition(shared_state, identity);
+                }
                 continue;
             }
             if !entered.get() && record_composition_end_failure(shared_state, identity) {
                 continue;
             }
-            let current = shared_state
-                .borrow()
-                .pending_composition_ends
-                .iter()
-                .find(|entry| entry.composition.as_raw() as usize == identity)
-                .cloned();
-            if let Some(current) = current {
-                if current.terminated_range.is_none()
-                    && may_terminate_composition(current.clear_text, false)
-                {
-                    if let (Ok(services), Ok(view)) = (
-                        current.context.cast::<ITfContextOwnerCompositionServices>(),
-                        current.composition.cast::<ITfCompositionView>(),
-                    ) {
-                        if unsafe { services.TerminateComposition(&view) }.is_ok() {
-                            drop(take_pending_composition_end(shared_state, identity));
-                            forget_written_preedit(shared_state, identity);
-                        }
-                    }
-                }
-            }
+            let _ = try_terminate_pending_composition(shared_state, identity);
         }
     }
     if {
         let st = shared_state.borrow();
-        !st.pending_composition_ends.is_empty()
+        has_active_composition_ends(&st)
             || st.pending_ime_apply.is_some()
             || st.pending_commit_retry.is_some()
     } {
@@ -1621,7 +1784,7 @@ pub(crate) fn flush_pending_commit_retry(shared_state: &SharedState) {
         .borrow()
         .pending_composition_ends
         .iter()
-        .any(|pending| pending.context.as_raw() == retry.context.as_raw())
+        .any(|pending| !pending.exhausted && pending.context.as_raw() == retry.context.as_raw())
     {
         shared_state.borrow_mut().pending_commit_retry = Some(retry);
         return;
@@ -2587,6 +2750,7 @@ fn may_process_context_key(st: &TsfState, context: &ITfContext) -> bool {
         st.pending_ime_apply.is_some(),
         st.pending_composition_ends
             .iter()
+            .filter(|pending| !pending.exhausted)
             .map(|pending| pending.context.as_raw() as usize),
         context.as_raw() as usize,
     )

@@ -62,10 +62,22 @@ impl RuntimeDirs {
                 Ok(mut entries) => entries.any(|entry| {
                     entry.map_or(true, |entry| {
                         entry.file_name().to_str().is_some_and(|name| {
-                            name.ends_with(".schema.yaml")
-                                || name.ends_with(".custom.yaml")
-                                || name.ends_with(".userdb")
-                                || name.ends_with(".userdb.txt")
+                            let lower = name.to_ascii_lowercase();
+                            matches!(
+                                lower.as_str(),
+                                "build"
+                                    | "prebuilt"
+                                    | "default.yaml"
+                                    | "default.custom.yaml"
+                                    | "default-custom.yaml"
+                                    | "user.yaml"
+                                    | "rime.lua"
+                                    | "lua"
+                                    | "custom_phrase.txt"
+                            ) || lower.ends_with(".schema.yaml")
+                                || lower.ends_with(".custom.yaml")
+                                || lower.ends_with(".userdb")
+                                || lower.ends_with(".userdb.txt")
                         })
                     })
                 }),

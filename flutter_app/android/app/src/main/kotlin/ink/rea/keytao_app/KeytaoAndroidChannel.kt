@@ -18,9 +18,6 @@ import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.Settings
-import android.system.ErrnoException
-import android.system.Os
-import android.system.OsConstants
 import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
 import androidx.core.app.ActivityCompat
@@ -1061,14 +1058,6 @@ class KeytaoAndroidChannel(
         private const val directoryPickRequestCode = 0x4B55
     }
 
-    private fun readPrivateText(root: File, relativePath: String): String? {
-        return try {
-            File(root, relativePath).takeIf { it.isFile }?.readText()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     private fun preparePackageFileWrite(
         relative: String,
         logs: MutableList<String>,
@@ -1091,14 +1080,6 @@ class KeytaoAndroidChannel(
         }
         decision.log?.let { logs.add(it) }
         return decision
-    }
-
-    private fun backupPathExists(backup: File): Boolean = try {
-        Os.lstat(backup.path)
-        true
-    } catch (error: ErrnoException) {
-        if (error.errno != OsConstants.ENOENT) throw error
-        false
     }
 
     private fun safePrivateFile(root: File, relativePath: String): File {

@@ -82,13 +82,14 @@ pub fn resolve_font_family(
             return Some(family);
         }
     }
-    if let Some(class) = choices.first().and_then(|preferred| {
-        EQUIVALENT_FAMILIES.iter().find(|class| {
+    for choice in &choices {
+        let Some(class) = EQUIVALENT_FAMILIES.iter().find(|class| {
             class
                 .iter()
-                .any(|family| family.eq_ignore_ascii_case(preferred))
-        })
-    }) {
+                .any(|family| family.eq_ignore_ascii_case(choice))
+        }) else {
+            continue;
+        };
         for equivalent in *class {
             if let Some(family) = find(equivalent) {
                 return Some(family);
@@ -100,8 +101,11 @@ pub fn resolve_font_family(
 
 struct InstalledFonts {
     families: Vec<String>,
-    #[cfg(target_os = "android")]
     database: fontdb::Database,
+}
+
+pub fn system_font_database() -> &'static fontdb::Database {
+    &installed_fonts().database
 }
 
 fn installed_fonts() -> &'static InstalledFonts {
@@ -131,7 +135,6 @@ fn installed_fonts() -> &'static InstalledFonts {
             .collect();
         InstalledFonts {
             families,
-            #[cfg(target_os = "android")]
             database,
         }
     })
@@ -213,6 +216,21 @@ mod tests {
             ("PingFang SC, Custom Font, KaiTi", "Custom Font"),
             ("PingFang SC, KaiTi, Custom Font", "KaiTi"),
             ("Microsoft YaHei, KaiTi", "Microsoft YaHei"),
+        ] {
+            assert_eq!(
+                resolve_font_family(Some(choice), &installed, None).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn later_comma_choices_map_to_installed_equivalents() {
+        let installed = ["Noto Sans CJK SC", "SimSun"].map(str::to_owned);
+        for (choice, expected) in [
+            ("SF Pro, PingFang SC, Microsoft YaHei", "Noto Sans CJK SC"),
+            ("LXGW WenKai, Songti SC", "SimSun"),
+            ("Kaiti SC, PingFang SC", "Noto Sans CJK SC"),
         ] {
             assert_eq!(
                 resolve_font_family(Some(choice), &installed, None).as_deref(),

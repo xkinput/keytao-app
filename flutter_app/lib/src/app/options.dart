@@ -31,14 +31,22 @@ const xmjdVariantSchemes = {
   'xmjd': 'xmjd6.zip',
   'xmjd-feiding': 'feiding-xmjd6.zip',
 };
-String schemeDisplayName(String key) => switch (key) {
-  'xmjd' => '星猫键道 · 顶功',
-  'xmjd-feiding' => '星猫键道 · 非顶',
-  'easy_en' => 'Easy English',
-  'wanxiang' => AppStrings.wanxiang,
-  'triple_pinyin_lssp' => AppStrings.rimeLssp,
-  _ => schemes[key] ?? key,
-};
+String schemeDisplayName(String key) {
+  final normalized = key.startsWith('builtin/')
+      ? key.substring('builtin/'.length)
+      : key;
+  return switch (normalized) {
+    'xmjd' => '星猫键道 · 顶功',
+    'xmjd-feiding' => '星猫键道 · 非顶',
+    'easy_en' => 'Easy English',
+    'wanxiang' => AppStrings.wanxiang,
+    'rime_ice' => AppStrings.rimeIce,
+    'rime_mint' => AppStrings.rimeMint,
+    'rime_frost' => AppStrings.rimeFrost,
+    'triple_pinyin_lssp' => AppStrings.rimeLssp,
+    _ => schemes[normalized] ?? normalized,
+  };
+}
 const logoAsset = 'assets/logo.png';
 const schemeAssets = {
   'keytao': '键道6',

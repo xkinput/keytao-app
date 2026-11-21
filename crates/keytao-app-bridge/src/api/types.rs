@@ -44,6 +44,7 @@ pub struct LocalSchemaDto {
     pub installed_scheme: Option<String>,
     pub installed_scheme_version: Option<String>,
     pub easy_english_enabled: Option<bool>,
+    pub deploy_warning: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

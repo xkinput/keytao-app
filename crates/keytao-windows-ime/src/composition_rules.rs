@@ -52,3 +52,14 @@ pub(crate) fn should_clear_terminated_composition(
 ) -> bool {
     active == Some(terminated)
 }
+
+pub(crate) fn should_backoff_composition_end_failure(
+    sync_attempt: bool,
+    entered_session: bool,
+) -> bool {
+    entered_session || !sync_attempt
+}
+
+pub(crate) fn retain_exhausted_composition_end_for_cleanup() -> bool {
+    true
+}

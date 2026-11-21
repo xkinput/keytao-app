@@ -80,4 +80,5 @@ pub struct LocalSchemaInfo {
     pub deployed: bool,
     pub version: Option<String>,
     pub schemas: Vec<String>,
+    pub deploy_warning: Option<String>,
 }

@@ -223,7 +223,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     finish_isolated_target(core, root, &shared, mode, &targets[0].package_key).await
 }
 
-#[cfg(any(target_os = "android", test))]
+#[cfg(any(all(target_os = "android", debug_assertions), test))]
 pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), CoreError> {
     let dirs = keytao_core::RuntimeDirs::resolve(root, &root.join("rime-data"))
         .map_err(CoreError::Other)?;
@@ -416,7 +416,7 @@ async fn switch_cached_package(
     }
     let key = &target.package_key;
     let dirs = RuntimeDirs::for_package(root, shared, key)
-        .ok_or_else(|| format!("无法读取方案包：{key}"))?;
+        .ok_or_else(|| format!("无法读取方案包：{}", target.package_name))?;
     if !keytao_core::package_build_ready(root, &dirs) {
         return Ok(false);
     }
@@ -487,12 +487,25 @@ async fn finish_package_refresh(root: &Path, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn package_switch_result() -> DeployResult {
+#[cfg(not(target_os = "android"))]
+fn package_switch_result(root: &Path, shared: &Path) -> DeployResult {
     DeployResult {
         success: true,
         message: "已切换方案包".into(),
-        warning: None,
+        warning: keytao_core::deployment_warning_with_shared(root, shared),
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn merge_warnings(warnings: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let joined = warnings
+        .into_iter()
+        .flatten()
+        .map(|w| w.trim().to_owned())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!joined.is_empty()).then_some(joined)
 }
 
 #[cfg(target_os = "macos")]
@@ -697,7 +710,7 @@ async fn deploy_isolated_desktop(
     if matches!(mode, IsolatedDeploy::Switch(_))
         && switch_cached_package(root, shared_dir, &targets[0]).await?
     {
-        return Ok(package_switch_result());
+        return Ok(package_switch_result(root, shared_dir));
     }
     #[cfg(target_os = "linux")]
     let linux_lock = {
@@ -759,9 +772,13 @@ async fn deploy_isolated_desktop(
         drop(linux_lock);
         (result.map(|()| None), plan_lock)
     });
-    let (result, _plan_lock) =
+    let (mut result, _plan_lock) =
         finish_isolated_deploy(core, root, expected, events, worker, publish_deploy).await?;
     finish_isolated_target(core, root, shared_dir, mode, &targets[0].package_key).await?;
+    result.warning = merge_warnings([
+        keytao_core::deployment_warning_with_shared(root, shared_dir),
+        result.warning,
+    ]);
     Ok(result)
 }
 
@@ -792,7 +809,7 @@ async fn deploy_isolated_in_process_target(
     if matches!(mode, IsolatedDeploy::Switch(_))
         && switch_cached_package(root, &shared, &targets[0]).await?
     {
-        return Ok(package_switch_result());
+        return Ok(package_switch_result(root, &shared));
     }
     let expected = targets.len();
     let first = targets[0].package_key.clone();
@@ -813,9 +830,13 @@ async fn deploy_isolated_in_process_target(
         (result.map(|()| None), plan_lock)
     });
     let publish_deploy = mode.publishes_all() && RuntimeDirs::active_package_key(root).is_some();
-    let (result, _plan_lock) =
+    let (mut result, _plan_lock) =
         finish_isolated_deploy(core, root, expected, events, worker, publish_deploy).await?;
     finish_isolated_target(core, root, &shared, mode, &first).await?;
+    result.warning = merge_warnings([
+        keytao_core::deployment_warning_with_shared(root, &shared),
+        result.warning,
+    ]);
     Ok(result)
 }
 
@@ -873,7 +894,7 @@ async fn finish_isolated_deploy(
         DeployResult {
             success: true,
             message: "部署成功".into(),
-            warning: reload_warning.or(worker_warning),
+            warning: merge_warnings([reload_warning, worker_warning]),
         },
         plan_lock,
     ))

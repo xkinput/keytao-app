@@ -80,15 +80,7 @@ fn load_font_with_samples(path: &str, samples: &[char]) -> Option<fontdue::Font>
 }
 
 fn font_database() -> &'static fontdb::Database {
-    static DATABASE: OnceLock<fontdb::Database> = OnceLock::new();
-    DATABASE.get_or_init(|| {
-        let mut database = fontdb::Database::new();
-        database.load_system_fonts();
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            database.load_fonts_dir(PathBuf::from(local_app_data).join("Microsoft/Windows/Fonts"));
-        }
-        database
-    })
+    keytao_theme::font_resolution::system_font_database()
 }
 
 /// Share the active theme's faces and the default CJK/emoji fallbacks process-wide.

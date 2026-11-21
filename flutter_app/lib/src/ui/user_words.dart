@@ -48,7 +48,7 @@ class UserWordsNotice extends StatelessWidget {
       child: Section(
         title: c.userWordsReportScheme == null
             ? '自造词'
-            : '${schemeDisplayName(c.userWordsReportScheme!)} · 自造词',
+            : '${c.packageDisplayName(c.userWordsReportScheme!)} · 自造词',
         icon: FLucideIcons.bookOpen,
         trailing: FButton.icon(
           variant: FButtonVariant.ghost,
@@ -878,7 +878,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                           });
                                           unawaited(_openScheme());
                                         },
-                                  child: Text(schemeDisplayName(key)),
+                                  child: Text(c.packageDisplayName(key)),
                                 ),
                             ],
                           ),

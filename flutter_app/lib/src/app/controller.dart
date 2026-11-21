@@ -18,6 +18,7 @@ import 'options.dart'
         AppPage,
         defaultDownloadSource,
         schemeAssets,
+        schemeDisplayName,
         schemes,
         xmjdVariantSchemes;
 import 'strings.dart';
@@ -356,6 +357,28 @@ class AppController extends ChangeNotifier {
       if (package.schemeKey == key) return package;
     }
     return null;
+  }
+
+  String packageDisplayName(String key) {
+    final normalized = key.startsWith('builtin/')
+        ? key.substring('builtin/'.length)
+        : key;
+    final installedName = installedPackageFor(normalized)?.displayName?.trim();
+    if (installedName != null && installedName.isNotEmpty) return installedName;
+    final isolatedName = isolatedPackages
+        .where((p) => p.packageKey == key || p.packageKey == normalized)
+        .map((p) => p.displayName.trim())
+        .where((name) => name.isNotEmpty && name != key && name != normalized)
+        .firstOrNull;
+    if (isolatedName != null) return isolatedName;
+    final cloudName = cloudPackages
+        .where((p) => p['schemeKey'] == normalized)
+        .map((p) => (p['name'] as String?)?.trim())
+        .whereType<String>()
+        .where((name) => name.isNotEmpty)
+        .firstOrNull;
+    if (cloudName != null) return cloudName;
+    return schemeDisplayName(normalized);
   }
 
   bool isLocalScheme(String key) => installedPackageFor(key)?.source == 'local';
@@ -1125,6 +1148,7 @@ class AppController extends ChangeNotifier {
     activeSchemaLogoPath = null;
     try {
       local = await core.checkLocalSchema();
+      deployWarning = local?.deployWarning;
     } catch (failure) {
       _localSchemaError = errorText(failure);
       rethrow;
@@ -1216,6 +1240,7 @@ class AppController extends ChangeNotifier {
     }
     try {
       local = await core.checkLocalSchema();
+      deployWarning = local?.deployWarning;
       await _readSchemas();
       await _readInstalledPackages();
       await refreshIsolatedPackages(notify: false);
@@ -2311,13 +2336,15 @@ class AppController extends ChangeNotifier {
       if (!hasPackageDeployProgress && local?.deployed != true) {
         throw StateError(AppStrings.deployCheckFailed);
       }
-      deployWarning = warning?.isNotEmpty == true ? warning : null;
+      final effectiveWarning =
+          warning?.isNotEmpty == true ? warning : local?.deployWarning;
+      deployWarning = effectiveWarning;
       _deployStep(message, DeployStepState.ok);
-      if (warning != null && warning.isNotEmpty) {
-        if (!deploySteps.any((step) => step.message == warning)) {
-          _deployStep(warning, DeployStepState.neutral);
+      if (effectiveWarning != null && effectiveWarning.isNotEmpty) {
+        if (!deploySteps.any((step) => step.message == effectiveWarning)) {
+          _deployStep(effectiveWarning, DeployStepState.neutral);
         }
-        addOperationLogs(['[WARN] $warning']);
+        addOperationLogs(['[WARN] $effectiveWarning']);
       }
       userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
@@ -3067,8 +3094,8 @@ class AppController extends ChangeNotifier {
       final result = await android.deployImeData();
       if (result['deployed'] == true) {
         final warning = result['warning'] as String?;
-        deployWarning = warning?.isNotEmpty == true ? warning : null;
         if (warning != null && warning.isNotEmpty) {
+          deployWarning = warning;
           _deployStep(warning, DeployStepState.neutral);
           addOperationLogs(['[WARN] $warning']);
         }

@@ -252,9 +252,15 @@ unsafe extern "system" fn wnd_proc(
 unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         PENDING_IME_UI_MESSAGE => {
-            if let Some(target) = click_target(hwnd) {
-                if let Some(state) = target.state.upgrade() {
-                    crate::state::flush_pending_ime_ui(&state);
+            if let Some(state) = click_target(hwnd).and_then(|target| target.state.upgrade()) {
+                crate::key_event_sink::flush_deferred_keys(&state);
+                if state.try_borrow().is_ok_and(|st| {
+                    st.deferred_keys.front().is_none()
+                        && !crate::key_event_sink::has_active_composition_ends(&st)
+                        && st.pending_ime_apply.is_none()
+                        && st.pending_commit_retry.is_none()
+                }) {
+                    let _ = KillTimer(hwnd, DEFERRED_KEY_TIMER_ID);
                 }
             }
             return LRESULT(0);
@@ -294,7 +300,7 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 crate::key_event_sink::flush_deferred_keys(&state);
                 if state.try_borrow().is_ok_and(|st| {
                     st.deferred_keys.front().is_none()
-                        && st.pending_composition_ends.is_empty()
+                        && !crate::key_event_sink::has_active_composition_ends(&st)
                         && st.pending_ime_apply.is_none()
                         && st.pending_commit_retry.is_none()
                 }) {

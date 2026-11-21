@@ -356,7 +356,7 @@ fn prepare_targets(
                     if RuntimeDirs::for_package(control_root, bundled, &key)
                         .is_none_or(|dirs| dirs.shared_data_dir != source)
                     {
-                        publish_package_sources(control_root, namespace, &key, &files)?;
+                        publish_package_sources(control_root, namespace, &key, &name, &files)?;
                     }
                 }
                 let prepared = prepare_runtime(
@@ -422,6 +422,7 @@ fn publish_package_sources(
     root: &Path,
     namespace: &str,
     key: &str,
+    display_name: &str,
     files: &Files,
 ) -> Result<(), CoreError> {
     let destination = safe(root, &format!("scheme-packages/{namespace}/{key}/files"))?;
@@ -431,7 +432,9 @@ fn publish_package_sources(
     if (destination.try_exists()? || previous.try_exists()?)
         && read_optional(&owner)?.as_deref() != Some(b"1\n")
     {
-        return Err(CoreError::Other(format!("方案包来源目录已存在：{key}")));
+        return Err(CoreError::Other(format!(
+            "方案包来源目录已存在：{display_name}"
+        )));
     }
     write_file(&owner, b"1\n")?;
     if previous.try_exists()? {
@@ -480,6 +483,7 @@ pub(crate) fn package_name(core: &Core, key: &str) -> String {
         .ok()
         .flatten()
         .and_then(|meta| meta.display_name)
+        .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| keytao_core::switcher_model::default_package_name(key).into())
 }
 
@@ -811,7 +815,7 @@ fn prepare_runtime(
                 Some(own) if own == bytes => continue,
                 Some(_) => {
                     return Err(CoreError::Other(format!(
-                        "Easy English file conflict: {path}"
+                        "文件 {path} 与 Easy English 冲突"
                     )));
                 }
                 None => {

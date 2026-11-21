@@ -634,6 +634,9 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
         .name("keytao-ime-warmup".into())
         .spawn(move || {
             let result = TsfState::build_engine();
+            with_current_theme(|theme| {
+                let _ = crate::panel::load_font(theme.font.effective_family.as_deref());
+            });
             match &result {
                 Ok(_) => {
                     tracing::info!("KeyTao Windows IME engine warmed up");
@@ -699,6 +702,9 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
         .name("keytao-ime-reload".into())
         .spawn(move || {
             let bundle = TsfState::build_engine();
+            with_current_theme(|theme| {
+                let _ = crate::panel::load_font(theme.font.effective_family.as_deref());
+            });
             match &bundle {
                 Ok(_) => {
                     tracing::info!("librime session refreshed after reload stamp change");
@@ -1769,7 +1775,10 @@ pub(crate) fn terminate_input_now(shared_state: &SharedState) {
     }
     // The thread may stop pumping the committed compositions' queued ends too.
     for pending in &mut shared_state.borrow_mut().pending_composition_ends {
-        pending.queued = false;
+        if !pending.exhausted {
+            pending.queued = false;
+            pending.retry_after = None;
+        }
     }
     crate::key_event_sink::flush_pending_composition_ends(shared_state);
     hide_ime_windows(shared_state);
@@ -1844,9 +1853,12 @@ pub(crate) fn clear_input_after_composition_terminated(
     {
         // A failed old EndComposition can finish after a different input frame
         // became active. Release only that old handle, not the new Rime state.
+        let needs_terminated_cleanup = !pending.has_terminated_range();
         drop(pending);
-        crate::key_event_sink::queue_terminated_preedit_cleanup(shared_state, terminated);
-        post_pending_ime_ui(shared_state);
+        if needs_terminated_cleanup {
+            crate::key_event_sink::queue_terminated_preedit_cleanup(shared_state, terminated);
+            post_pending_ime_ui(shared_state);
+        }
         append_diagnostic("composition terminated pending_cleanup=1 cleared=0");
         return;
     }

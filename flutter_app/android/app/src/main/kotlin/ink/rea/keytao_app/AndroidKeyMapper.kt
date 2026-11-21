@@ -32,6 +32,10 @@ object AndroidKeyMapper {
     const val XK_DELETE = 0xffff
     const val XK_SHIFT_L = 0xffe1
     const val XK_SHIFT_R = 0xffe2
+    const val PREVIOUS_CANDIDATE = 0x02000000
+    const val NEXT_CANDIDATE = 0x02000001
+    const val PREVIOUS_PAGE = 0x02000002
+    const val NEXT_PAGE = 0x02000003
     const val OPEN_PACKAGE_MENU = 0x02000004
 
     fun fromAndroidKeyEvent(event: KeyEvent): RimeKey? {
@@ -126,5 +130,40 @@ object AndroidKeyMapper {
         if (alt) mask = mask or RIME_MOD_ALT
         if (meta) mask = mask or RIME_MOD_SUPER
         return mask
+    }
+
+    internal fun candidateArrowKey(
+        keyCode: Int,
+        modifiers: Int,
+        panelVisible: Boolean,
+        hasCandidates: Boolean,
+    ): Int {
+        if (!panelVisible || !hasCandidates || modifiers and RIME_MOD_LOCK.inv() != 0) {
+            return keyCode
+        }
+        return when (keyCode) {
+            XK_LEFT -> PREVIOUS_CANDIDATE
+            XK_RIGHT -> NEXT_CANDIDATE
+            XK_UP -> PREVIOUS_PAGE
+            XK_DOWN -> NEXT_PAGE
+            else -> keyCode
+        }
+    }
+
+    internal fun shouldScheduleReloadStampTimer(
+        serviceDestroyed: Boolean,
+        inputViewShown: Boolean,
+        hardwareKeyboardActive: Boolean,
+        readiness: Readiness?,
+        retryCount: Int,
+    ): Boolean {
+        if (serviceDestroyed) return false
+        if (inputViewShown) return true
+        if (!hardwareKeyboardActive) return false
+        return when (readiness) {
+            Readiness.DEPLOYING -> true
+            Readiness.READY, Readiness.PERMISSION_MISSING, Readiness.UNWRITABLE, Readiness.NOT_INSTALLED -> false
+            else -> retryCount < 30
+        }
     }
 }

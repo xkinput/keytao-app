@@ -6,41 +6,6 @@ enum CandidatePanelOrientation: String, Codable {
     case vertical
 }
 
-enum ThemeFontWeight: String, Codable {
-    case ultraLight = "ultralight"
-    case thin
-    case light
-    case regular
-    case medium
-    case semiBold = "semibold"
-    case bold
-    case heavy
-    case black
-
-    var nsWeight: NSFont.Weight {
-        switch self {
-        case .ultraLight:
-            return .ultraLight
-        case .thin:
-            return .thin
-        case .light:
-            return .light
-        case .regular:
-            return .regular
-        case .medium:
-            return .medium
-        case .semiBold:
-            return .semibold
-        case .bold:
-            return .bold
-        case .heavy:
-            return .heavy
-        case .black:
-            return .black
-        }
-    }
-}
-
 enum ThemeColorScheme: String, Codable {
     case auto
     case light
@@ -370,35 +335,6 @@ final class ImeThemeManager {
         }
         let appearance = NSApp.effectiveAppearance
         return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
-    }
-}
-
-extension NSFont {
-    static func keytaoThemeFont(family: String?, size: CGFloat, weight: ThemeFontWeight) -> NSFont {
-        if let font = keytaoThemeFontFromFamily(family, size: size) {
-            let descriptor = font.fontDescriptor.addingAttributes([
-                .traits: [NSFontDescriptor.TraitKey.weight: weight.nsWeight.rawValue],
-            ])
-            return NSFont(descriptor: descriptor, size: size) ?? font
-        }
-        return .systemFont(ofSize: size, weight: weight.nsWeight)
-    }
-
-    static func keytaoThemeFont(family: String?, size: CGFloat) -> NSFont {
-        keytaoThemeFontFromFamily(family, size: size) ?? .systemFont(ofSize: size)
-    }
-
-    private static func keytaoThemeFontFromFamily(_ family: String?, size: CGFloat) -> NSFont? {
-        guard let family else {
-            return nil
-        }
-        for candidate in family.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
-            if let font = NSFontManager.shared.font(withFamily: candidate, traits: [], weight: 5, size: size)
-                ?? NSFont(name: candidate, size: size) {
-                return font
-            }
-        }
-        return nil
     }
 }
 

@@ -110,7 +110,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       final confirmed = await showFDialog<bool>(
         context: context,
         builder: (context, _, animation) => AppDialog(
-          title: profile != null ? '从云端下载' : '启用${schemeDisplayName(active!)}？',
+          title: profile != null
+              ? '从云端下载'
+              : '启用${c.packageDisplayName(active!)}？',
           animation: animation,
           actions: [
             ActionButton(

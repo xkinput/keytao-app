@@ -1052,7 +1052,7 @@ class SchemeUpdateBanner extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    schemeDisplayName(update.schemeKey),
+                    controller.packageDisplayName(update.schemeKey),
                     style: context.theme.typography.body.sm.copyWith(
                       fontWeight: FontWeight.w500,
                     ),

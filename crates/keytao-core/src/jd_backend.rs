@@ -357,6 +357,17 @@ impl Session {
         self.snapshot(None)
     }
 
+    fn move_highlight(&mut self, backward: bool) -> ImeState {
+        let anchor = self.anchor();
+        let next = if backward {
+            anchor.saturating_sub(1)
+        } else {
+            anchor.saturating_add(1).min(self.candidate_count().saturating_sub(1))
+        };
+        self.set_anchor(next);
+        self.snapshot(None)
+    }
+
     fn index_on_page(&self, index: usize) -> Option<usize> {
         (index < self.page_size).then(|| self.anchor() / self.page_size * self.page_size + index)
     }
@@ -520,9 +531,9 @@ impl ImeBackend for JdBackend {
                 }
                 XK_RETURN | XK_KP_ENTER => session.commit_raw_input(),
                 XK_PAGE_UP | XK_PAGE_DOWN => session.change_page(keycode == XK_PAGE_UP),
-                XK_HOME | XK_END | XK_LEFT | XK_RIGHT | XK_UP | XK_DOWN | XK_DELETE | XK_INSERT => {
-                    session.snapshot(None)
-                }
+                XK_UP | XK_LEFT => session.move_highlight(true),
+                XK_DOWN | XK_RIGHT => session.move_highlight(false),
+                XK_HOME | XK_END | XK_DELETE | XK_INSERT => session.snapshot(None),
                 _ => {
                     if let Some(index) = session
                         .select_keys()
@@ -869,6 +880,32 @@ mod tests {
         let shifted = backend.process_key_result(XK_SHIFT_R, RIME_RELEASE_MASK);
         assert!(shifted.state.ascii_mode);
         assert_eq!(shifted.state.committed.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn arrow_keys_move_candidate_highlight_and_commit_selected_option() {
+        let backend = JdBackend::from_api(fake_api(), None, 2).unwrap();
+        let initial = backend.process_key_result(b'a'.into(), 0).state;
+        assert_eq!(initial.highlighted_candidate_index, 0);
+        assert_eq!(initial.commit_preview, "甲");
+
+        let right = backend.process_key_result(XK_RIGHT, 0).state;
+        assert_eq!(right.page, 0);
+        assert_eq!(right.highlighted_candidate_index, 1);
+        assert_eq!(right.commit_preview, "乙");
+
+        let down_next_page = backend.process_key_result(XK_DOWN, 0).state;
+        assert_eq!(down_next_page.page, 1);
+        assert_eq!(down_next_page.highlighted_candidate_index, 0);
+        assert_eq!(down_next_page.commit_preview, "丙");
+
+        let up_prev = backend.process_key_result(XK_UP, 0).state;
+        assert_eq!(up_prev.page, 0);
+        assert_eq!(up_prev.highlighted_candidate_index, 1);
+        assert_eq!(up_prev.commit_preview, "乙");
+
+        let committed = backend.process_key_result(b' '.into(), 0).state;
+        assert_eq!(committed.committed.as_deref(), Some("乙"));
     }
 
     #[cfg(target_os = "macos")]

@@ -813,4 +813,45 @@ void main() {
       expect(controller.visibleSchemeUpdates.single.latestVersion, '20261105');
     },
   );
+
+  test(
+    'persisted skipped-schema warning loads on startup and packageDisplayName resolves names',
+    () async {
+      const warningText = '方案 broken 编译失败，已跳过：missing dict\n已从切换列表移除';
+      core
+        ..packages = [
+          const InstalledPackageDto(
+            schemeKey: 'local-custom',
+            version: '1.0',
+            active: true,
+            source: 'local',
+            displayName: '我的本地双拼',
+            hasPackageZip: true,
+          ),
+        ]
+        ..local = const LocalSchemaDto(
+          installed: true,
+          deployed: true,
+          schemas: ['keytao'],
+          installedScheme: 'local-custom',
+          deployWarning: warningText,
+        );
+      controller.dispose();
+      controller = create();
+      await controller.refreshState();
+
+      expect(controller.deployWarning, warningText);
+      expect(controller.packageDisplayName('local-custom'), '我的本地双拼');
+      expect(controller.packageDisplayName('rime_ice'), '雾凇拼音');
+
+      core.local = const LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        schemas: ['keytao'],
+        installedScheme: 'local-custom',
+      );
+      await controller.refreshSchemas();
+      expect(controller.deployWarning, isNull);
+    },
+  );
 }

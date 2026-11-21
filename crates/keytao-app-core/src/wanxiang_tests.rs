@@ -759,6 +759,34 @@ fn identical_main_owned_sources_are_rejected_before_addon_changes() {
 }
 
 #[test]
+fn preflight_owner_formats_package_display_name_instead_of_key() {
+    let root = TestRoot::new();
+    let store = keytao_core::package_store::root(&root.path);
+    fs::create_dir_all(store.join("local/local-custom")).unwrap();
+    fs::write(
+        store.join("local/local-custom/package.json"),
+        r#"{"scheme_key":"local-custom","version":"1","source":"local","display_name":"我的自制方案","manifest":{}}"#,
+    )
+    .unwrap();
+
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    receipt
+        .other_owners
+        .insert("a.yaml".into(), "keytao".into());
+    receipt
+        .other_owners
+        .insert("b.yaml".into(), "local-custom".into());
+
+    let err_builtin = receipt.preflight_owner("a.yaml").unwrap_err();
+    assert!(err_builtin.contains("键道6"), "{err_builtin}");
+    assert!(!err_builtin.contains("keytao"), "{err_builtin}");
+
+    let err_local = receipt.preflight_owner("b.yaml").unwrap_err();
+    assert!(err_local.contains("我的自制方案"), "{err_local}");
+    assert!(!err_local.contains("local-custom"), "{err_local}");
+}
+
+#[test]
 fn flypy_installs_own_double_pinyin_patch_transactionally() {
     let root = TestRoot::new();
     let custom_path = root.path.join("keytao_wanxiang_flypy.yaml");

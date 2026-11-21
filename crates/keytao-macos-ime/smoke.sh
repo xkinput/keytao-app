@@ -59,6 +59,7 @@ echo "==> Building macOS FFI smoke checks..."
 swiftc \
     "$SCRIPT_DIR/Smoke/main.swift" \
     "$SCRIPT_DIR/Sources/KeyTaoIME/ImeState.swift" \
+    "$SCRIPT_DIR/Sources/KeyTaoIME/ThemeFont.swift" \
     "$SCRIPT_DIR/Sources/KeyTaoIME/ImeTheme.swift" \
     -module-name KeyTaoSmoke \
     -disable-bridging-pch \

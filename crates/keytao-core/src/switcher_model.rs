@@ -70,6 +70,13 @@ pub fn default_package_name(key: &str) -> &str {
     }
 }
 
+pub fn package_display_name(root: &Path, key: &str) -> String {
+    let normalized = key.strip_prefix("builtin/").unwrap_or(key);
+    installed_packages(root)
+        .remove(normalized)
+        .unwrap_or_else(|| default_package_name(normalized).into())
+}
+
 fn installed_packages(root: &Path) -> BTreeMap<String, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Some(mut catalog) = read_regular_file(&root.join(MOBILE_PACKAGE_CATALOG))

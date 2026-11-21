@@ -7754,6 +7754,8 @@ pub fn write_current_schema(root: &Path, id: &str) -> Result<(), String> {
         return Err(format!("invalid current schema id: {id}"));
     }
     let dirs = RuntimeDirs::resolve(root, root)?;
+    std::fs::create_dir_all(&dirs.user_data_dir)
+        .map_err(|error| format!("save current schema: {error}"))?;
     write_file_atomic(
         &dirs.user_data_dir.join(".keytao-current-schema"),
         id.as_bytes(),
@@ -7762,9 +7764,8 @@ pub fn write_current_schema(root: &Path, id: &str) -> Result<(), String> {
 }
 
 fn persist_selected_schema(root: &Path, id: &str) -> Result<(), String> {
-    let path = RuntimeDirs::resolve(root, root)?
-        .user_data_dir
-        .join("user.yaml");
+    let dirs = RuntimeDirs::resolve(root, root)?;
+    let path = dirs.user_data_dir.join("user.yaml");
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(format!("refuse symbolic link: {}", path.display()));
@@ -7800,6 +7801,8 @@ fn persist_selected_schema(root: &Path, id: &str) -> Result<(), String> {
         Value::String(id.into()),
     );
     let content = serde_yaml::to_string(&value).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&dirs.user_data_dir)
+        .map_err(|error| format!("save {}: {error}", path.display()))?;
     write_file_atomic(&path, content.as_bytes())
         .map_err(|error| format!("save {}: {error}", path.display()))
 }
@@ -8196,7 +8199,14 @@ const DEPLOYED_FILE: &str = ".keytao-deployed";
 const SKIPPED_SCHEMAS_FILE: &str = ".keytao-skipped-schemas.json";
 
 fn skipped_schemas(user_data_dir: &Path) -> std::collections::BTreeMap<String, String> {
-    let Ok(dirs) = RuntimeDirs::resolve(user_data_dir, user_data_dir) else {
+    skipped_schemas_with_shared(user_data_dir, user_data_dir)
+}
+
+fn skipped_schemas_with_shared(
+    user_data_dir: &Path,
+    shared_dir: &Path,
+) -> std::collections::BTreeMap<String, String> {
+    let Ok(dirs) = RuntimeDirs::resolve(user_data_dir, shared_dir) else {
         return std::collections::BTreeMap::new();
     };
     std::fs::read(dirs.staging_dir.join(SKIPPED_SCHEMAS_FILE))
@@ -8207,7 +8217,11 @@ fn skipped_schemas(user_data_dir: &Path) -> std::collections::BTreeMap<String, S
 
 /// Non-blocking warnings from the latest deployment, including deploy children.
 pub fn deployment_warning(user_data_dir: &Path) -> Option<String> {
-    let warnings = skipped_schemas(user_data_dir);
+    deployment_warning_with_shared(user_data_dir, user_data_dir)
+}
+
+pub fn deployment_warning_with_shared(user_data_dir: &Path, shared_dir: &Path) -> Option<String> {
+    let warnings = skipped_schemas_with_shared(user_data_dir, shared_dir);
     (!warnings.is_empty()).then(|| warnings.into_values().collect::<Vec<_>>().join("\n"))
 }
 
