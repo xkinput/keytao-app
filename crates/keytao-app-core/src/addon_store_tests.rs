@@ -77,7 +77,9 @@ fn isolated_addon_publication_preserves_flat_sources_and_restores_failed_update(
 
 #[test]
 fn addon_multi_schema_defaults_selection_update_and_migration() {
-    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let _serial = crate::wanxiang::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = tempfile::tempdir().unwrap();
     let core = core(directory.path());
     let root = directory.path().join("rime");

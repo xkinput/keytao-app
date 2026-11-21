@@ -37,7 +37,7 @@ where
     Fut: Future<Output = String> + Send,
 {
     fn user_root(&self) -> Result<PathBuf, String> {
-        SchemeHost::user_root(&self.host)
+        ImeHost::user_root(&self.host)
     }
 
     async fn deploy(&self) -> Result<(), String> {
@@ -53,7 +53,7 @@ where
         #[cfg(not(target_os = "android"))]
         {
             let _ = &self.android_deploy;
-            SchemeHost::deploy(&self.host).await
+            self.host.deploy_default().await.map(|_| ())
         }
     }
 
@@ -84,7 +84,7 @@ where
     }
 
     fn write_reload_stamp(&self, root: &Path) -> Result<Option<PathBuf>, String> {
-        SchemeHost::write_reload_stamp(&self.host, root)
+        ImeHost::write_reload_stamp(&self.host, root)
     }
 
     /// Dart copies bundled assets through copyAddonSchemaAssets before calling
@@ -96,19 +96,19 @@ where
 
     #[cfg(target_os = "windows")]
     fn publish_english_addon(&self) -> Result<(), String> {
-        self.host.publish_english_addon()
+        keytao_app_core::windows_public_schemas::publish_english_addon(&self.host.core)
     }
     #[cfg(target_os = "windows")]
     fn remove_public_schema(&self, id: &str, files: &[PathBuf]) -> Result<(), String> {
-        self.host.remove_public_schema(id, files)
+        keytao_app_core::windows_public_schemas::remove_schema(id, files)
     }
     #[cfg(target_os = "windows")]
     fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
-        SchemeHost::publish_english_settings(&self.host, enabled)
+        ImeHost::publish_english_settings(&self.host, enabled)
     }
     #[cfg(target_os = "windows")]
     fn publish_wanxiang_sources(&self, files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
-        self.host.publish_wanxiang_sources(files)
+        keytao_app_core::windows_public_schemas::publish_source_files(files)
     }
 }
 
@@ -211,41 +211,6 @@ impl BridgeHost {
     }
 }
 
-impl SchemeHost for BridgeHost {
-    fn user_root(&self) -> Result<PathBuf, String> {
-        Ok(self.root.clone())
-    }
-
-    async fn deploy(&self) -> Result<(), String> {
-        self.deploy_default().await.map(|_| ())
-    }
-
-    fn write_reload_stamp(&self, _root: &Path) -> Result<Option<PathBuf>, String> {
-        self.stamp()
-    }
-
-    #[cfg(target_os = "android")]
-    fn copy_addon_assets(&self, _id: &str) -> Result<(), String> {
-        Err("Android asset plugin calls are unsupported in bridge".into())
-    }
-    #[cfg(target_os = "windows")]
-    fn publish_english_addon(&self) -> Result<(), String> {
-        keytao_app_core::windows_public_schemas::publish_english_addon(&self.core)
-    }
-    #[cfg(target_os = "windows")]
-    fn remove_public_schema(&self, id: &str, files: &[PathBuf]) -> Result<(), String> {
-        keytao_app_core::windows_public_schemas::remove_schema(id, files)
-    }
-    #[cfg(target_os = "windows")]
-    fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
-        keytao_app_core::windows_public_schemas::publish_english_settings(&self.root, enabled)
-    }
-    #[cfg(target_os = "windows")]
-    fn publish_wanxiang_sources(&self, files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
-        keytao_app_core::windows_public_schemas::publish_source_files(files)
-    }
-}
-
 impl ImeHost for BridgeHost {
     fn user_root(&self) -> Result<PathBuf, String> {
         Ok(self.root.clone())
@@ -257,7 +222,7 @@ impl ImeHost for BridgeHost {
 
     #[cfg(target_os = "windows")]
     fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
-        SchemeHost::publish_english_settings(self, enabled)
+        keytao_app_core::windows_public_schemas::publish_english_settings(&self.root, enabled)
     }
     #[cfg(target_os = "windows")]
     fn publish_schema_switches(&self) -> Result<(), String> {
@@ -304,14 +269,15 @@ mod tests {
         )
         .unwrap();
         let host = BridgeHost::new(core, resolved);
-        assert_eq!(SchemeHost::user_root(&host).unwrap(), root);
+        let install = InstallHost::new(host.clone(), || async { String::new() });
+        assert_eq!(SchemeHost::user_root(&install).unwrap(), root);
         assert_eq!(ImeHost::user_root(&host).unwrap(), root);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(host.deploy_paths().0, root);
         let unrelated = temp.path().join("must-not-be-used");
         let expected = Some(keytao_core::ReloadStamp::path(&root));
         assert_eq!(
-            SchemeHost::write_reload_stamp(&host, &unrelated).unwrap(),
+            SchemeHost::write_reload_stamp(&install, &unrelated).unwrap(),
             expected
         );
         assert_eq!(

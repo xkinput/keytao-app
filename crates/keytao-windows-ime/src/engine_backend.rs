@@ -389,9 +389,7 @@ impl InProcEngine {
 }
 
 fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
-    let source = keytao_core::RuntimeDirs::resolve(source, source)?.user_data_dir;
-    let target = keytao_core::RuntimeDirs::resolve(target, target)?.user_data_dir;
-    copy_fallback_assets(&source, &source, &target)
+    copy_fallback_assets(source, source, target)
 }
 
 fn copy_fallback_assets(base: &Path, source: &Path, target: &Path) -> Result<(), String> {

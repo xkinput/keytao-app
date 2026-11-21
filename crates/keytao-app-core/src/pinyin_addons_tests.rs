@@ -526,17 +526,7 @@ async fn addon_only_install_update_failure_and_uninstall_use_deploy_transactions
         let root = TestRoot::new();
         let host = AddonHost::new(root.path());
         let addon = kind.addon();
-        let bundled = host.core.env().resource_dir.join("rime-data");
-        fs::create_dir_all(&bundled).unwrap();
-        fs::write(bundled.join("default.yaml"), "schema_list:\n  - schema: keytao\n").unwrap();
-        fs::write(
-            bundled.join("keytao.schema.yaml"),
-            "schema: {schema_id: keytao, name: Fixture fallback}\n\
-             engine: {translators: [table_translator]}\n\
-             translator: {dictionary: keytao, enable_user_dict: false}\n",
-        )
-        .unwrap();
-        fs::write(bundled.join("keytao.dict.yaml"), "---\nname: keytao\nversion: '1'\n...\n词\tci\n").unwrap();
+        host.write_bundled_keytao();
         let status = addon
             .manage(&host.core, true, &host, |receipt| async move {
                 Ok(stage_deployable(kind, receipt, "first"))

@@ -1,5 +1,5 @@
 use crate::{api::types::*, frb_generated::StreamSink, host::BridgeHost};
-use keytao_app_core::scheme_host::SchemeHost;
+use keytao_app_core::ime_host::ImeHost;
 use keytao_app_core::{AppEnv, Core, CoreEvent, EventSink, Platform};
 use keytao_core::DeployStep;
 use std::{

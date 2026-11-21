@@ -1155,13 +1155,10 @@ mod tests {
     async fn main_scheme_keeps_priority_when_installing_english() {
         use crate::scheme_host::tests::AddonHost;
         let root = TestRoot::new();
-        std::fs::write(
-            root.path().join("keytao.schema.yaml"),
-            "schema: {schema_id: keytao}\n",
-        )
-        .unwrap();
-        std::fs::write(root.path().join("rime.lua"), "main lua").unwrap();
+        let main_lua = "-- Main scheme Lua\n";
+        std::fs::write(root.path().join("rime.lua"), main_lua).unwrap();
         let host = AddonHost::new(root.path());
+        host.write_bundled_keytao();
         addon_schema_install_with(
             &host.core,
             EASY_EN_ADDON_ID.into(),
@@ -1178,7 +1175,11 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(root.path().join("rime.lua")).unwrap(),
-            "main lua"
+            main_lua
+        );
+        assert_eq!(
+            keytao_core::RuntimeDirs::active_package_key(root.path()).as_deref(),
+            Some("builtin/keytao")
         );
         assert!(
             !root

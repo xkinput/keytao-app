@@ -551,6 +551,7 @@ async fn standalone_wanxiang_installs_deploys_and_uninstalls_without_a_main_sche
     use std::sync::atomic::Ordering;
     let root = TestRoot::new();
     let host = AddonHost::new(&root.path);
+    host.write_bundled_keytao();
     let status = manage_wanxiang_with(
         &host.core,
         true,
@@ -581,13 +582,10 @@ async fn main_scheme_keeps_priority_when_installing_wanxiang() {
         "patch:\n  schema_list:\n    - schema: keytao\n",
     )
     .unwrap();
-    fs::write(
-        root.path.join("keytao.schema.yaml"),
-        "schema: {schema_id: keytao}\n",
-    )
-    .unwrap();
-    fs::write(root.path.join("rime.lua"), "main lua").unwrap();
+    let main_lua = "-- Main scheme Lua\n";
+    fs::write(root.path.join("rime.lua"), main_lua).unwrap();
     let host = AddonHost::new(&root.path);
+    host.write_bundled_keytao();
     manage_wanxiang_with(
         &host.core,
         true,
@@ -605,7 +603,11 @@ async fn main_scheme_keeps_priority_when_installing_wanxiang() {
     );
     assert_eq!(
         fs::read_to_string(root.path.join("rime.lua")).unwrap(),
-        "main lua"
+        main_lua
+    );
+    assert_eq!(
+        RuntimeDirs::active_package_key(&root.path).as_deref(),
+        Some("builtin/keytao")
     );
 }
 
@@ -614,6 +616,7 @@ async fn stored_wanxiang_updates_and_rolls_back_grammar_without_copying_the_mode
     use crate::scheme_host::tests::AddonHost;
     let root = TestRoot::new();
     let host = AddonHost::new(&root.path);
+    host.write_bundled_keytao();
     for variant in ["flypy", "zrm"] {
         manage_wanxiang_with(
             &host.core,

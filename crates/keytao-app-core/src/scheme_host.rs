@@ -8,12 +8,8 @@ use std::{
 pub trait SchemeHost: Sync {
     fn user_root(&self) -> Result<PathBuf, String>;
     fn deploy(&self) -> impl Future<Output = Result<(), String>> + Send;
-    fn deploy_package(&self, _key: &str) -> impl Future<Output = Result<(), String>> + Send {
-        async { Err("Package deployment is unavailable".into()) }
-    }
-    fn switch_package(&self, _key: &str) -> impl Future<Output = Result<(), String>> + Send {
-        async { Err("Package switching is unavailable".into()) }
-    }
+    fn deploy_package(&self, key: &str) -> impl Future<Output = Result<(), String>> + Send;
+    fn switch_package(&self, key: &str) -> impl Future<Output = Result<(), String>> + Send;
     fn write_reload_stamp(&self, root: &Path) -> Result<Option<PathBuf>, String>;
     #[cfg(target_os = "android")]
     fn copy_addon_assets(&self, id: &str) -> Result<(), String>;
@@ -68,6 +64,37 @@ pub(crate) mod tests {
             }
         }
 
+        pub(crate) fn write_bundled_keytao(&self) {
+            let resources = &self.core.env().resource_dir;
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            let bundled = resources.join("runtime/rime-data");
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let bundled = resources.join("rime-data");
+            std::fs::create_dir_all(&bundled).unwrap();
+            std::fs::write(
+                bundled.join("default.yaml"),
+                concat!(
+                    "config_version: '1'\nschema_list:\n  - schema: keytao\n",
+                    "key_binder: {bindings: []}\n",
+                    "punctuator: {full_shape: {'.': '。'}, half_shape: {'.': '.'}}\n",
+                    "recognizer: {patterns: {email: '^[A-Za-z]+@'}}\n",
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                bundled.join("keytao.schema.yaml"),
+                "schema: {schema_id: keytao, name: Fixture fallback}\n\
+                 engine: {translators: [table_translator]}\n\
+                 translator: {dictionary: keytao, enable_user_dict: false}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                bundled.join("keytao.dict.yaml"),
+                "---\nname: keytao\nversion: '1'\n...\n词\tci\n",
+            )
+            .unwrap();
+        }
+
         fn start_deployment(&self) -> Result<(), String> {
             self.deploys.fetch_add(1, Ordering::SeqCst);
             if self
@@ -113,15 +140,19 @@ pub(crate) mod tests {
             }
             Ok(())
         }
-        #[cfg(target_os = "macos")]
         async fn deploy_package(&self, key: &str) -> Result<(), String> {
             self.start_deployment()?;
-            crate::deploy::deploy_package(&self.core, &self.root, key).await
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+            return crate::deploy::deploy_package(&self.core, &self.root, key).await;
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+            Err(format!("No scratch-root deployment backend for {key}"))
         }
-        #[cfg(target_os = "macos")]
         async fn switch_package(&self, key: &str) -> Result<(), String> {
             self.start_deployment()?;
-            crate::deploy::switch_package(&self.core, &self.root, key).await
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+            return crate::deploy::switch_package(&self.core, &self.root, key).await;
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+            Err(format!("No scratch-root deployment backend for {key}"))
         }
         fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
             self.reloads.fetch_add(1, Ordering::SeqCst);

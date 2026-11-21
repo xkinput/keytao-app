@@ -1921,7 +1921,9 @@ mod tests {
 
     #[test]
     fn public_lua_selects_new_package_before_rebuilding_old_default() {
-        let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+        let _serial = crate::wanxiang::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let sources = tempfile::tempdir().unwrap();
         for (id, owner) in [("public_a", "A"), ("public_b", "B")] {
@@ -1954,7 +1956,9 @@ mod tests {
 
     #[test]
     fn public_lua_packages_survive_publication_and_rebase_without_private_data() {
-        let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+        let _serial = crate::wanxiang::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let sources = tempfile::tempdir().unwrap();
         for (id, lua) in [
@@ -2034,7 +2038,9 @@ mod tests {
 
     #[test]
     fn stored_selection_filters_public_registration_without_removing_dependencies() {
-        let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+        let _serial = crate::wanxiang::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let package = tempfile::tempdir().unwrap();
         let sources = package.path().join("files");
@@ -2092,7 +2098,9 @@ mod tests {
 
     #[test]
     fn main_package_overlap_preserves_installed_addon_sources_and_generated_customs() {
-        let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+        let _serial = crate::wanxiang::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let package = tempfile::tempdir().unwrap();
         let addon = [
@@ -2204,7 +2212,9 @@ mod tests {
 
     #[test]
     fn directory_switch_and_delete_remove_all_package_sources_and_generated_customs() {
-        let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+        let _serial = crate::wanxiang::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
@@ -2306,7 +2316,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn directory_publication_rejects_symbolic_links_without_changing_pointers() {
-        let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+        let _serial = crate::wanxiang::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let package = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();

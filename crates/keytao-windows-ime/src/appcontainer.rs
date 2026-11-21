@@ -65,6 +65,7 @@ fn local_app_data(flags: KNOWN_FOLDER_FLAG) -> Result<PathBuf> {
 
 pub(crate) struct SandboxData {
     pub(crate) user_dir: PathBuf,
+    cache_dir: PathBuf,
     pub(crate) reload_stamp_path: PathBuf,
     pub(crate) reload_stamp_signature: Option<String>,
     generation: String,
@@ -75,7 +76,7 @@ pub(crate) struct SandboxData {
 impl SandboxData {
     pub(crate) fn mark_loaded(&self) -> std::result::Result<(), String> {
         if self.active_package_key.is_some() {
-            let path = self.user_dir.with_file_name(PACKAGE_CACHE_POINTER);
+            let path = self.cache_dir.with_file_name(PACKAGE_CACHE_POINTER);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(self.generation.as_str()) {
                 keytao_core::write_file_atomic(&path, self.generation.as_bytes())
                     .map_err(|error| format!("record package schema cache: {error}"))?;
@@ -83,7 +84,7 @@ impl SandboxData {
         }
         if self.changed {
             std::fs::write(
-                self.user_dir.join(SEED_MARKER),
+                self.cache_dir.join(SEED_MARKER),
                 seed_generation(&self.generation, self.active_package_key.as_deref()),
             )
             .map_err(|error| format!("record sandbox schema deployment: {error}"))?;
@@ -205,7 +206,7 @@ pub(crate) fn validate_prebuilt(
     root: &Path,
     librime_version: &str,
 ) -> std::result::Result<(), String> {
-    let dirs = keytao_core::RuntimeDirs::resolve(root, root)?;
+    let dirs = keytao_core::RuntimeDirs::flat(root, root);
     let version_file = dirs.staging_dir.join("keytao-librime-version.txt");
     for path in [
         dirs.user_data_dir.clone(),
@@ -442,7 +443,6 @@ fn prepare_at_with(
         return Err("invalid public schema generation".into());
     }
     let source_root = public_root.join(&generation);
-    let source_dirs = keytao_core::RuntimeDirs::resolve(&source_root, &source_root)?;
     let active_package_key = public_package_key(&source_root)?;
     let cache = active_package_key.as_ref().map(|key| {
         cache_directory_for_package(
@@ -453,21 +453,22 @@ fn prepare_at_with(
         )
     });
     let private = cache.as_deref().unwrap_or(private);
-    let dirs = keytao_core::RuntimeDirs::resolve(private, private)?;
+    let user_dir = sandbox_user_dir(private)?;
     validate_prebuilt(&source_root, librime_version)?;
     let seed_generation = seed_generation(&generation, active_package_key.as_deref());
     let changed = std::fs::read_to_string(private.join(SEED_MARKER))
         .ok()
         .as_deref()
         != Some(seed_generation.as_str())
-        || validate_prebuilt(private, librime_version).is_err()
-        || !keytao_core::schema_build_is_available(private)
-        || keytao_core::windows_rime_build_repair_required(private);
+        || validate_prebuilt(&user_dir, librime_version).is_err()
+        || !keytao_core::schema_build_is_available(&user_dir)
+        || keytao_core::windows_rime_build_repair_required(&user_dir);
     if active_package_key.is_none() || changed {
-        before_copy(private, active_package_key.is_some())?;
+        before_copy(&user_dir, active_package_key.is_some())?;
     }
     let result = SandboxData {
-        user_dir: private.to_owned(),
+        user_dir,
+        cache_dir: private.to_owned(),
         reload_stamp_path,
         reload_stamp_signature,
         generation,
@@ -479,10 +480,12 @@ fn prepare_at_with(
         return Ok(result);
     }
     // First deployments write only into the package's own private directory.
-    std::fs::create_dir_all(&dirs.user_data_dir)
+    let user_dir = &result.user_dir;
+    std::fs::create_dir_all(user_dir)
         .map_err(|error| format!("create sandbox schema cache: {error}"))?;
-    if result.active_package_key.is_some() && !private.join("user.yaml").exists() {
-        restore_cached_schema_selection(private)?;
+    let selection = user_dir.join("user.yaml");
+    if result.active_package_key.is_some() && !selection.exists() {
+        restore_cached_schema_selection(private, &selection)?;
     }
     let mut copied = Vec::new();
     fn copy_assets(
@@ -520,13 +523,9 @@ fn prepare_at_with(
         }
         Ok(())
     }
-    copy_assets(
-        &source_dirs.user_data_dir,
-        &source_dirs.user_data_dir,
-        &dirs.user_data_dir,
-        &mut copied,
-    )?;
-    keytao_core::rebase_active_scheme_manifest(private)?;
+    copy_assets(&source_root, &source_root, user_dir, &mut copied)?;
+    keytao_core::rebase_active_scheme_manifest(user_dir)?;
+    let dirs = keytao_core::RuntimeDirs::flat(user_dir, user_dir);
     if let Ok(previous) = std::fs::read_to_string(private.join(SEED_FILES)) {
         for name in previous
             .lines()
@@ -534,7 +533,7 @@ fn prepare_at_with(
         {
             let relative = checked_relative(name)?;
             if public_asset(&relative) {
-                let path = private.join(&relative);
+                let path = user_dir.join(&relative);
                 if path.is_file() {
                     std::fs::remove_file(path).map_err(|error| error.to_string())?;
                 }
@@ -552,13 +551,33 @@ fn prepare_at_with(
     }
     keytao_core::write_file_atomic(&private.join(SEED_FILES), copied.join("\n").as_bytes())
         .map_err(|error| error.to_string())?;
-    keytao_core::complete_deployment(private).map_err(|error| format!("需要重新部署: {error}"))?;
-    keytao_core::mark_windows_rime_build_repair_complete(private)?;
+    keytao_core::complete_deployment(user_dir).map_err(|error| format!("需要重新部署: {error}"))?;
+    keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
     prune_legacy_caches(private);
     Ok(result)
 }
 
-fn restore_cached_schema_selection(cache: &Path) -> std::result::Result<(), String> {
+fn sandbox_user_dir(cache: &Path) -> std::result::Result<PathBuf, String> {
+    match std::fs::symlink_metadata(cache) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(cache.to_owned()),
+        _ => return Err("invalid sandbox schema cache directory".into()),
+    }
+    // Keep any previously used runtime in place, including its live user dictionaries.
+    let dirs = keytao_core::RuntimeDirs::resolve(cache, cache)?;
+    if dirs.user_data_dir.is_dir() {
+        Ok(dirs.user_data_dir)
+    } else {
+        Ok(cache.to_owned())
+    }
+}
+
+fn restore_cached_schema_selection(
+    cache: &Path,
+    selection: &Path,
+) -> std::result::Result<(), String> {
+    use std::io::{ErrorKind, Write};
+
     let previous = cache.with_file_name(PACKAGE_CACHE_POINTER);
     let Ok(previous) = std::fs::read_to_string(previous) else {
         return Ok(());
@@ -566,12 +585,23 @@ fn restore_cached_schema_selection(cache: &Path) -> std::result::Result<(), Stri
     if previous.len() != 64 || !previous.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid package schema cache generation".into());
     }
-    let previous = cache.with_file_name(previous).join("user.yaml");
-    match std::fs::read(previous) {
-        Ok(selection) => keytao_core::write_file_atomic(&cache.join("user.yaml"), &selection)
-            .map_err(|error| format!("preserve sandbox schema selection: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
+    let previous = sandbox_user_dir(&cache.with_file_name(previous))?.join("user.yaml");
+    let content = match std::fs::read(previous) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let result =
+        tempfile::NamedTempFile::new_in(selection.parent().unwrap()).and_then(|mut file| {
+            file.write_all(&content)?;
+            file.as_file().sync_all()?;
+            file.persist_noclobber(selection)
+                .map_err(|error| error.error)
+        });
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!("preserve sandbox schema selection: {error}")),
     }
 }
 
@@ -596,12 +626,16 @@ mod tests {
         ] {
             let source = public.join(generation);
             seed(&source);
-            std::fs::write(source.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE), key)
-                .unwrap();
+            std::fs::write(
+                source.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE),
+                key,
+            )
+            .unwrap();
         }
         let pointer = public.join("current.txt");
         std::fs::write(&pointer, &first).unwrap();
         let first_cache = prepare_at(&public, &private, VERSION).unwrap();
+        assert!(first_cache.user_dir.join(LIBRIME_VERSION_FILE).is_file());
         first_cache.mark_loaded().unwrap();
         let selection = first_cache.user_dir.join("user.yaml");
         std::fs::write(&selection, "var: {previously_selected_schema: first}").unwrap();
@@ -627,6 +661,67 @@ mod tests {
             std::fs::read_to_string(rebuilt.user_dir.join("user.yaml")).unwrap(),
             "var: {previously_selected_schema: first}"
         );
+    }
+
+    #[test]
+    fn nested_cache_keeps_learning_and_passes_selection_to_the_next_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let public = root.path().join("public");
+        let private = root.path().join("private");
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        for generation in [&first, &second] {
+            let source = public.join(generation);
+            seed(&source);
+            std::fs::write(
+                source.join(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE),
+                "keytao",
+            )
+            .unwrap();
+        }
+
+        let cache = cache_directory_for_package(
+            &private.join("tsf-cache"),
+            &first,
+            VERSION,
+            Some("keytao"),
+        );
+        let nested = cache.join("runtime/.unselected");
+        seed(&nested);
+        let selection = "var: {previously_selected_schema: keytao}";
+        std::fs::write(nested.join("user.yaml"), selection).unwrap();
+        std::fs::write(nested.join("installation.yaml"), "installation_id: sandbox").unwrap();
+        std::fs::create_dir(nested.join("keytao.userdb")).unwrap();
+        let learning = nested.join("keytao.userdb/LOG");
+        std::fs::write(&learning, b"learned words").unwrap();
+        keytao_core::complete_deployment(&nested).unwrap();
+        keytao_core::mark_windows_rime_build_repair_complete(&cache).unwrap();
+        std::fs::write(
+            cache.join(SEED_MARKER),
+            seed_generation(&first, Some("keytao")),
+        )
+        .unwrap();
+
+        let pointer = public.join("current.txt");
+        std::fs::write(&pointer, &first).unwrap();
+        let prepared = prepare_at(&public, &private, VERSION).unwrap();
+        assert_eq!(prepared.user_dir, nested);
+        assert!(prepared.changed);
+        prepared.mark_loaded().unwrap();
+        assert!(!prepare_at(&public, &private, VERSION).unwrap().changed);
+        assert_eq!(std::fs::read(&learning).unwrap(), b"learned words");
+        assert_eq!(
+            std::fs::read_to_string(nested.join("installation.yaml")).unwrap(),
+            "installation_id: sandbox"
+        );
+
+        std::fs::write(pointer, &second).unwrap();
+        let updated = prepare_at(&public, &private, VERSION).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(updated.user_dir.join("user.yaml")).unwrap(),
+            selection
+        );
+        assert!(!updated.user_dir.join("keytao.userdb").exists());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::{api::types::*, frb_generated::StreamSink, host::InstallHost, runtime};
 use flutter_rust_bridge::DartFnFuture;
-use keytao_app_core::scheme_host::SchemeHost;
+use keytao_app_core::ime_host::ImeHost;
 #[cfg(not(target_os = "android"))]
 use keytao_app_core::{events::InstallProgress, CoreEvent};
 
