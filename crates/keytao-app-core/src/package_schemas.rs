@@ -33,14 +33,17 @@ pub(crate) fn default_schemas(files: &[(String, Vec<u8>)]) -> Result<Vec<String>
                     .get("patch")
                     .and_then(|patch| patch.get("schema_list"))
             };
-            if let Some(list) = list {
-                ids = list
+            if let Some(list) = list.filter(|value| !value.is_null()) {
+                let parsed: Vec<_> = list
                     .as_sequence()
                     .ok_or_else(|| CoreError::Other("schema_list must be a list".into()))?
                     .iter()
                     .filter_map(|entry| entry.get("schema").and_then(Value::as_str))
                     .map(str::to_owned)
                     .collect();
+                if !parsed.is_empty() {
+                    ids = parsed;
+                }
             }
         }
     }
@@ -304,6 +307,10 @@ pub fn package_schemas(core: &Core, key: &str) -> Result<Vec<PackageSchema>, Cor
         &files,
         read_selection(&metadata_path(core, key)?)?.as_deref(),
     )
+}
+
+pub fn is_addon_package_key(key: &str) -> bool {
+    crate::addon_store::IDS.contains(&key) && key != "snow_jiandao"
 }
 
 pub fn set_package_schemas(core: &Core, key: &str, ids: &[String]) -> Result<(), CoreError> {

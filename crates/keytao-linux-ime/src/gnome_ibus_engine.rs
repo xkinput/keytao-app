@@ -324,7 +324,8 @@ impl IBusEngine {
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
         let ascii_mode = ime_state.is_english_mode();
         let has_candidates = !ime_state.candidates.is_empty();
-        let hide_candidate_panel = self.theme_resolver.current().ui.hide_candidate_panel;
+        let hide_candidate_panel =
+            self.theme_resolver.current().ui.hide_candidate_panel && !ime_state.is_package_switcher();
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus Engine CommitText: {} chars", text.chars().count());

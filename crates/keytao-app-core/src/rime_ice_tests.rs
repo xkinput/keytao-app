@@ -1,5 +1,6 @@
 use super::*;
 use std::{
+    fs,
     io::{Cursor, Write},
     path::PathBuf,
     sync::MutexGuard,
@@ -70,7 +71,7 @@ fn archive_at(path: &Path, extra: &[(&str, &str)]) {
     let entries = [
         (
             "rime_ice.schema.yaml",
-            "schema:\n  schema_id: rime_ice\nengine:\n  processors:\n    - lua_processor@*select_character\n  translators:\n    - lua_translator@*date_translator\n  filters:\n    - lua_filter@*reduce_english_filter\n    - lua_filter@*search@radical_pinyin\nemoji:\n  opencc_config: emoji.json\ncustom_phrase:\n  user_dict: custom_phrase\ncn_en:\n  user_dict: en_dicts/cn_en\n",
+            "schema:\n  schema_id: rime_ice\nengine:\n  processors:\n    - lua_processor@*select_character\n  translators:\n    - lua_translator@*date_translator\n  filters:\n    - lua_filter@*reduce_english_filter\n    - lua_filter@*search@radical_pinyin\nemoji:\n  opencc_config: emoji.json\ncustom_phrase:\n  user_dict: custom_phrase\ncn_en:\n  user_dict: en_dicts/cn_en\npunctuator:\n  full_shape:\n    __include: default:/punctuator/full_shape\n",
         ),
         (
             "rime_ice.dict.yaml",
@@ -100,10 +101,12 @@ fn archive_at(path: &Path, extra: &[(&str, &str)]) {
         ("LICENSE", "GPL-3.0-only fixture"),
         (
             "lua/date_translator.lua",
-            "return require(\"convert_ar_num_to_zh\")",
+            "local _ = require(\"convert_ar_num_to_zh\")\nreturn function() end",
         ),
         ("lua/convert_ar_num_to_zh.lua", "return {}"),
-        ("lua/search.lua", "return {}"),
+        ("lua/select_character.lua", "return function() return 2 end"),
+        ("lua/reduce_english_filter.lua", "return function(input) for cand in input:iter() do yield(cand) end end"),
+        ("lua/search.lua", "return function(input) for cand in input:iter() do yield(cand) end end"),
         ("lua/lunar.lua", "return ReverseDb('lua/lunar.db')"),
         ("lua/lunar.db", "fixture database"),
         (
@@ -117,10 +120,16 @@ fn archive_at(path: &Path, extra: &[(&str, &str)]) {
         ("cn_dicts/41448.dict.yaml", "optional dictionary"),
         ("en_dicts/en.dict.yaml", "english dictionary"),
         ("en_dicts/cn_en.txt", "fixture\tfix\t1\n"),
-        ("default.yaml", "forbidden host settings"),
+        (
+            "default.yaml",
+            "schema_list:\n  - schema: rime_ice\n  - schema: double_pinyin_flypy\nmenu:\n  page_size: 9\n",
+        ),
         ("squirrel.yaml", "forbidden host settings"),
         ("weasel.yaml", "forbidden host settings"),
-        ("double_pinyin_flypy.schema.yaml", "optional layout"),
+        (
+            "double_pinyin_flypy.schema.yaml",
+            "schema:\n  schema_id: double_pinyin_flypy\n  name: 小鹤双拼\n",
+        ),
     ];
     for (name, content) in entries.into_iter().chain(extra.iter().copied()) {
         zip.start_file(name, SimpleFileOptions::default()).unwrap();
@@ -254,80 +263,59 @@ fn discovers_newest_dated_full_release_without_the_mutable_nightly_tag() {
 }
 
 #[test]
-fn installed_sources_namespace_dependencies_and_skip_host_files_and_large_tables() {
+fn installed_sources_keep_generic_rime_layout_and_skip_host_files() {
     let root = TestRoot::new();
-    fs::create_dir(root.path().join("opencc")).unwrap();
-    fs::write(
-        root.path().join("opencc/emoji.json"),
-        "existing KeyTao emoji",
-    )
-    .unwrap();
     fs::write(root.path().join("default.yaml"), "existing default").unwrap();
     install_fixture(root.path(), "2026.06.30");
     assert!(status_at(root.path()).installed);
     assert!(!status_at(root.path()).deployed);
     let schema = fs::read_to_string(root.path().join("rime_ice.schema.yaml")).unwrap();
     for expected in [
-        "lua_translator@*rime_ice/date_translator@date_translator",
-        "lua_processor@*rime_ice/select_character@select_character",
-        "lua_filter@*rime_ice/reduce_english_filter@reduce_english_filter",
-        "lua_filter@*rime_ice/search@radical_pinyin",
-        "opencc_config: rime_ice_emoji.json",
-        "user_dict: rime_ice_custom_phrase",
-        "rime_ice-dicts/en_dicts/cn_en",
+        "lua_translator@*date_translator",
+        "lua_processor@*select_character",
+        "lua_filter@*reduce_english_filter",
+        "lua_filter@*search@radical_pinyin",
+        "opencc_config: emoji.json",
+        "user_dict: custom_phrase",
+        "en_dicts/cn_en",
     ] {
         assert!(schema.contains(expected), "{expected}");
     }
     assert!(
         fs::read_to_string(root.path().join("rime_ice.dict.yaml"))
             .unwrap()
-            .contains("  - rime_ice-dicts/cn_dicts/base")
+            .contains("  - cn_dicts/base")
     );
-    assert!(
-        !fs::read_to_string(root.path().join("rime_ice.dict.yaml"))
-            .unwrap()
-            .contains("  - rime_ice-dicts/cn_dicts/tencent")
-    );
-    for excluded in [
-        "squirrel.yaml",
-        "weasel.yaml",
-        "double_pinyin_flypy.schema.yaml",
-        "rime_ice-dicts/cn_dicts/tencent.dict.yaml",
-        "rime_ice-dicts/cn_dicts/41448.dict.yaml",
-    ] {
+    assert!(root.path().join("double_pinyin_flypy.schema.yaml").is_file());
+    assert!(root.path().join("cn_dicts/tencent.dict.yaml").is_file());
+    assert!(root.path().join("cn_dicts/41448.dict.yaml").is_file());
+    for excluded in ["squirrel.yaml", "weasel.yaml"] {
         assert!(!root.path().join(excluded).exists(), "{excluded}");
     }
     for (name, expected) in [
         (
-            "lua/rime_ice/date_translator.lua",
-            "require(\"rime_ice/convert_ar_num_to_zh\")",
+            "lua/date_translator.lua",
+            "require(\"convert_ar_num_to_zh\")",
         ),
-        ("lua/rime_ice/lunar.lua", "lua/rime_ice/lunar.db"),
+        ("lua/lunar.lua", "lua/lunar.db"),
         (
-            "lua/rime_ice/cold_word_drop/processor.lua",
-            "rime_ice/cold_word_drop/string",
-        ),
-        (
-            "lua/rime_ice/cold_word_drop/processor.lua",
-            "rime_ice/cold_word_drop/drop_words",
+            "lua/cold_word_drop/processor.lua",
+            "cold_word_drop.string",
         ),
         (
-            "lua/rime_ice/cold_word_drop/processor.lua",
-            "lua/rime_ice/cold_word_drop/drop_words.lua",
+            "lua/cold_word_drop/processor.lua",
+            "cold_word_drop/drop_words",
         ),
-        ("opencc/rime_ice_emoji.json", "rime_ice_emoji.txt"),
+        ("opencc/emoji.json", "emoji.txt"),
         (NOTICE, "GPL-3.0-only"),
     ] {
         assert!(
             fs::read_to_string(root.path().join(name))
                 .unwrap()
-                .contains(expected)
+                .contains(expected),
+            "{name}: {expected}"
         );
     }
-    assert_eq!(
-        fs::read_to_string(root.path().join("opencc/emoji.json")).unwrap(),
-        "existing KeyTao emoji"
-    );
     assert_eq!(
         fs::read_to_string(root.path().join("default.yaml")).unwrap(),
         "existing default"
@@ -466,6 +454,11 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
     let root = TestRoot::new();
     let host = AddonHost::new(root.path());
     smoke_fixture::write(&host.core.env().resource_dir.join("rime-data")).unwrap();
+    fs::write(
+        host.core.env().resource_dir.join("rime-data/default.yaml"),
+        include_str!("addon-default.yaml"),
+    )
+    .unwrap();
     let runtime = root.path().join("runtime").join(SCHEMA_ID);
     let status = manage_rime_ice_with(&host.core, true, &host, |mut receipt| async move {
         let package = package("2026.06.30");
@@ -475,13 +468,31 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
     })
     .await
     .unwrap();
+    assert!(status.installed && !status.deployed);
+    assert_eq!(host.deploys.load(Ordering::SeqCst), 0);
+    crate::package_schemas::set_package_schemas(
+        &host.core,
+        SCHEMA_ID,
+        &[SCHEMA_ID.into(), "double_pinyin_flypy".into()],
+    )
+    .unwrap();
+    host.deploy_package(SCHEMA_ID).await.unwrap();
+    keytao_core::isolated_deploy::switch_ready_package_in_store(
+        root.path(),
+        &host.core.env().resource_dir.join("rime-data"),
+        Some(&host.core.env().data_dir),
+        SCHEMA_ID,
+        None,
+    )
+    .unwrap();
+    let status = rime_ice_status(&host.core, root.path()).unwrap();
     assert!(status.installed && status.deployed);
     assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
     assert_eq!(
         crate::scheme_files::parse_schema_list(
             &fs::read_to_string(runtime.join("default.custom.yaml")).unwrap()
         ),
-        [SCHEMA_ID]
+        [SCHEMA_ID, "double_pinyin_flypy"]
     );
     assert_eq!(
         keytao_core::deployed_schema_id_from_dir(root.path()).as_deref(),
@@ -533,11 +544,10 @@ fn unsafe_archive_paths_and_expansion_limit_leave_live_sources_untouched() {
     let archive = root.path().join("limit.zip");
     archive_at(&archive, &[]);
     assert!(
-        wanxiang::extract_package_with_limit(
+        crate::generic_rime::extract_archive(
             &archive,
             &root.path().join("small"),
-            package_destination,
-            adapt_source,
+            Some(SCHEMA_ID),
             1
         )
         .is_err()

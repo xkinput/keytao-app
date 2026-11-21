@@ -108,6 +108,46 @@ class SchemePage extends StatefulWidget {
 class _SchemePageState extends State<SchemePage> {
   bool _schemesExpanded = false;
 
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onControllerChanged);
+    _onControllerChanged();
+  }
+
+  @override
+  void didUpdateWidget(covariant SchemePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerChanged);
+      widget.controller.addListener(_onControllerChanged);
+      _onControllerChanged();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  void _onControllerChanged() {
+    if (!widget.controller.hasPendingSchemaSelectionPrompt) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final prompt = widget.controller.takePendingSchemaSelectionPrompt();
+      if (prompt == null) return;
+      unawaited(
+        showPackageSchemaSelection(
+          context,
+          widget.controller,
+          prompt.packageKey,
+          activateOnConfirm: prompt.activateOnConfirm,
+        ),
+      );
+    });
+  }
+
   Future<void> _activate(String key) async {
     FocusManager.instance.primaryFocus?.unfocus();
     await widget.controller.activateSchemePackage(key);
@@ -339,7 +379,7 @@ class _SchemePageState extends State<SchemePage> {
                 children: [
                   if (c.packageError case final error?) ErrorMessage(error),
                   if (c.schemeSyncError case final error?) ErrorMessage(error),
-                  ValueRow(AppStrings.directory, c.defaultDir),
+                  ValueRow(AppStrings.directory, c.activeSchemeDir),
                   if (c.localStatusLine case final status?)
                     StatusMessage(
                       '$status${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
@@ -379,7 +419,7 @@ class _SchemePageState extends State<SchemePage> {
                         icon: FLucideIcons.folderOpen,
                         onPress: c.isAndroid || c.busy
                             ? null
-                            : c.openDefaultDirectory,
+                            : c.openActiveSchemeDirectory,
                       ),
                       if (!c.isMobile)
                         ActionButton(
@@ -755,6 +795,17 @@ class SchemePackageRow extends StatelessWidget {
                               showPackageSchemaSelection(context, c, schemeKey);
                             },
                     ),
+                    if (!c.isMobile)
+                      FItem(
+                        title: const Text('打开方案目录'),
+                        prefix: const Icon(FLucideIcons.folderOpen),
+                        onPress: c.busy
+                            ? null
+                            : () {
+                                popover.hide();
+                                c.openSchemeDirectory(schemeKey);
+                              },
+                      ),
                     if (package.supportsUserWords)
                       FItem(
                         title: const Text('自造词'),
@@ -1557,6 +1608,18 @@ Map<String, Widget> _addonCells(
                                       c,
                                       packageKey,
                                     );
+                                  },
+                          ),
+                        if (!overlay && installed && !c.isMobile)
+                          FItem(
+                            title: const Text('打开方案目录'),
+                            prefix: const Icon(FLucideIcons.folderOpen),
+                            enabled: !c.busy,
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    c.openSchemeDirectory(packageKey);
                                   },
                           ),
                         FItem(

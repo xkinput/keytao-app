@@ -138,6 +138,11 @@ String errorText(Object error) => error is PlatformException
 String formatWindowTitle(String pageTitle, Locale locale) =>
     '$pageTitle · KeyTao ${locale.languageCode.startsWith('zh') ? '输入法' : 'Input Method'}';
 
+typedef PendingSchemaSelectionPrompt = ({
+  String packageKey,
+  bool activateOnConfirm,
+});
+
 class AppController extends ChangeNotifier {
   AppController({
     required this.info,
@@ -199,6 +204,39 @@ class AppController extends ChangeNotifier {
   void showToast(String message) {
     _pendingToast = message;
     _changed();
+  }
+
+  PendingSchemaSelectionPrompt? _pendingSchemaSelectionPrompt;
+  bool get hasPendingSchemaSelectionPrompt =>
+      _pendingSchemaSelectionPrompt != null;
+  PendingSchemaSelectionPrompt? takePendingSchemaSelectionPrompt() {
+    final prompt = _pendingSchemaSelectionPrompt;
+    _pendingSchemaSelectionPrompt = null;
+    return prompt;
+  }
+
+  void requestSchemaSelectionPrompt(
+    String packageKey, {
+    bool activateOnConfirm = false,
+  }) {
+    _pendingSchemaSelectionPrompt = (
+      packageKey: packageKey,
+      activateOnConfirm: activateOnConfirm,
+    );
+    _changed();
+  }
+
+  Future<bool> _deferDeployForSchemaSelection(
+    String key, {
+    required bool activateOnConfirm,
+  }) async {
+    final schemas = await packageSchemas(key);
+    if (schemas.length <= 3) return false;
+    _pendingSchemaSelectionPrompt = (
+      packageKey: key,
+      activateOnConfirm: activateOnConfirm,
+    );
+    return true;
   }
 
   void _recordMigrationFailure(String message) {
@@ -909,10 +947,45 @@ class AppController extends ChangeNotifier {
   }
 
   String get defaultDir => info.userRoot;
+
+  String? get activeIsolatedPackageKey {
+    final activeIsolated = isolatedPackages.where((pkg) => pkg.active).firstOrNull;
+    if (activeIsolated != null && activeIsolated.packageKey.isNotEmpty) {
+      return activeIsolated.packageKey;
+    }
+    final installed = local?.installedScheme;
+    if (installed != null && installed.isNotEmpty) return installed;
+    for (final package in installedPackages) {
+      if (package.active && package.schemeKey.isNotEmpty) {
+        return package.schemeKey;
+      }
+    }
+    return null;
+  }
+
+  String schemeDirectoryFor(String packageKey) {
+    final root = defaultDir;
+    if (root.isEmpty || packageKey.isEmpty) return root;
+    final sep = isWindows ? r'\' : '/';
+    final normalizedKey = isWindows
+        ? packageKey.replaceAll('/', r'\')
+        : packageKey;
+    final trimmedRoot = root.endsWith(sep)
+        ? root.substring(0, root.length - 1)
+        : root;
+    return '$trimmedRoot${sep}runtime$sep$normalizedKey';
+  }
+
+  String get activeSchemeDir {
+    final key = activeIsolatedPackageKey;
+    if (key == null) return defaultDir;
+    return schemeDirectoryFor(key);
+  }
+
   String get dictionaryManagerUrl => Uri(
     scheme: 'rime-dict',
     host: 'open',
-    queryParameters: {'dir': defaultDir},
+    queryParameters: {'dir': activeSchemeDir},
   ).toString();
   bool get canOpenDictionaryManager =>
       !isMobile && !busy && defaultDir.isNotEmpty;
@@ -2046,15 +2119,22 @@ class AppController extends ChangeNotifier {
 
   Future<bool> installAndDeploy() async {
     if (!canInstall || !requireRimeEngine()) return false;
+    var deferred = false;
     final result = await run(() async {
       final installing = scheme;
       await _install();
       // Deploying clears the verification list, so keep failures on screen.
       if (verification.every((entry) => entry.ok)) {
-        await _switchSchemePackage(installing);
+        deferred = await _deferDeployForSchemaSelection(
+          installing,
+          activateOnConfirm: true,
+        );
+        if (!deferred) {
+          await _switchSchemePackage(installing);
+        }
       }
     });
-    return result && verification.every((entry) => entry.ok);
+    return result && (deferred || verification.every((entry) => entry.ok));
   }
 
   Future<bool> install() {
@@ -2160,7 +2240,12 @@ class AppController extends ChangeNotifier {
         }
         await _install();
         if (verification.every((entry) => entry.ok)) {
-          await _switchSchemePackage(key);
+          if (!await _deferDeployForSchemaSelection(
+            key,
+            activateOnConfirm: true,
+          )) {
+            await _switchSchemePackage(key);
+          }
         }
       } finally {
         installingSchemeKey = null;
@@ -2184,9 +2269,16 @@ class AppController extends ChangeNotifier {
       try {
         if (isAndroid) await _requireStorage(redirect: true);
         await core.downloadSchemePackage(schemeKey: key, source: source);
-        await _switchSchemePackage(key);
+        final defer = await _deferDeployForSchemaSelection(
+          key,
+          activateOnConfirm: true,
+        );
+        if (!defer) {
+          await _switchSchemePackage(key);
+        }
         _invalidateSchemeUpdates();
         await _readInstalledPackages();
+        if (defer) await _readLocal();
         await _readUserWordsReport(key);
         scheduleSchemeProfileSync(packageKey: key);
         progress = AppStrings.installDone;
@@ -2210,6 +2302,7 @@ class AppController extends ChangeNotifier {
     if (!requireRimeEngine()) return false;
     final wasActive = installedPackageFor(schemeKey ?? '')?.active == true;
     String? importedKey;
+    var deferred = false;
     final result = await run(() async {
       packageError = null;
       String? temporaryDirectory;
@@ -2249,7 +2342,11 @@ class AppController extends ChangeNotifier {
         scheme = key;
         await refreshRelease();
         await _persistSchemeSettings(schedule: false);
-        if (wasActive) {
+        deferred = await _deferDeployForSchemaSelection(
+          key,
+          activateOnConfirm: true,
+        );
+        if (!deferred && wasActive) {
           await _switchSchemePackage(key);
         } else {
           scheduleSchemeProfileSync();
@@ -2269,7 +2366,7 @@ class AppController extends ChangeNotifier {
     });
     return result &&
         importedKey != null &&
-        (!wasActive || verification.every((entry) => entry.ok));
+        (!wasActive || deferred || verification.every((entry) => entry.ok));
   }
 
   Future<bool> importGitScheme({
@@ -2285,6 +2382,7 @@ class AppController extends ChangeNotifier {
     final existingActive = installedPackageFor(schemeKey ?? '')?.active == true;
     final shouldActivate = schemeKey == null ? activate : existingActive;
     String? importedKey;
+    var deferred = false;
     final result = await run(() async {
       packageError = null;
       if (schemeKey != null) installingSchemeKey = schemeKey;
@@ -2308,7 +2406,11 @@ class AppController extends ChangeNotifier {
         scheme = key;
         await refreshRelease();
         await _persistSchemeSettings(schedule: false);
-        if (shouldActivate) {
+        deferred = await _deferDeployForSchemaSelection(
+          key,
+          activateOnConfirm: shouldActivate,
+        );
+        if (!deferred && shouldActivate) {
           await _switchSchemePackage(key);
         } else {
           scheduleSchemeProfileSync();
@@ -2330,7 +2432,9 @@ class AppController extends ChangeNotifier {
     });
     return result &&
         importedKey != null &&
-        (!shouldActivate || verification.every((entry) => entry.ok));
+        (!shouldActivate ||
+            deferred ||
+            verification.every((entry) => entry.ok));
   }
 
   Future<bool> activateSchemePackage(String key) async {
@@ -2347,7 +2451,7 @@ class AppController extends ChangeNotifier {
       if (!await downloadSchemePackage(key)) return false;
       package = installedPackageFor(key);
       if (package?.hasPackageZip != true) return false;
-      if (package!.inUse) return true;
+      if (package!.inUse || hasPendingSchemaSelectionPrompt) return true;
     }
     return switchPackage(key);
   }
@@ -2355,11 +2459,16 @@ class AppController extends ChangeNotifier {
   Future<List<PackageSchemaDto>> packageSchemas(String key) =>
       core.packageSchemas(schemeKey: key);
 
-  Future<bool> setPackageSchemas(String key, List<String> ids) => run(() async {
+  Future<bool> setPackageSchemas(
+    String key,
+    List<String> ids, {
+    bool activate = false,
+  }) => run(() async {
     packageError = null;
     _startOperation(OperationKind.install, AppStrings.installing);
     try {
-      if (isAndroid && (installedPackageFor(key)?.active ?? true)) {
+      if (isAndroid &&
+          (activate || (installedPackageFor(key)?.active ?? true))) {
         await _requireStorage(redirect: true);
       }
       final shouldDeploy = await core.setPackageSchemas(
@@ -2367,9 +2476,15 @@ class AppController extends ChangeNotifier {
         ids: ids,
       );
       await _readInstalledPackages();
-      if (shouldDeploy) {
+      if (activate) {
+        await _switchSchemePackage(key);
+      } else if (shouldDeploy) {
         await _readLocal();
-        await _deploy(schemeKey: key);
+        if (local?.installed != true) {
+          await _switchSchemePackage(key);
+        } else {
+          await _deploy(schemeKey: key);
+        }
       }
     } catch (failure) {
       packageError = errorText(failure);
@@ -2435,6 +2550,19 @@ class AppController extends ChangeNotifier {
     _invalidateSchemeUpdates();
     await _readInstalledPackages();
     await _readLocal();
+    switch (key) {
+      case 'wanxiang':
+        wanxiang = await core.wanxiangStatus();
+        await _readWanxiangGrammar();
+      case 'rime_ice':
+        rimeIce = await core.rimeIceStatus();
+      case 'rime_mint':
+        rimeMint = await core.rimeMintStatus();
+      case 'rime_frost':
+        rimeFrost = await core.rimeFrostStatus();
+      case 'triple_pinyin_lssp':
+        rimeLssp = await core.rimeLsspStatus();
+    }
     await _readSchemas();
     await refreshIsolatedPackages(notify: false);
     scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
@@ -3262,7 +3390,9 @@ class AppController extends ChangeNotifier {
             .firstOrNull
             ?.schemeKey ??
         package['schemeKey'] as String;
-    await _switchSchemePackage(key);
+    if (!await _deferDeployForSchemaSelection(key, activateOnConfirm: true)) {
+      await _switchSchemePackage(key);
+    }
     scheduleSchemeProfileSync();
   }, modal: true);
   }
@@ -3648,7 +3778,15 @@ class AppController extends ChangeNotifier {
         installed: installed,
         androidDeploy: _androidDeploy,
       );
-      if (installed) rimeMintLatestVersion = rimeMint!.version;
+      if (installed) {
+        rimeMintLatestVersion = rimeMint!.version;
+        if (rimeMint!.installed && !rimeMint!.deployed) {
+          await _deferDeployForSchemaSelection(
+            'rime_mint',
+            activateOnConfirm: false,
+          );
+        }
+      }
       await _readLocal();
       addOperationLogs([
         installed ? AppStrings.rimeMintInstalled : AppStrings.rimeMintRemoved,
@@ -3684,7 +3822,15 @@ class AppController extends ChangeNotifier {
         installed: installed,
         androidDeploy: _androidDeploy,
       );
-      if (installed) rimeFrostLatestVersion = rimeFrost!.version;
+      if (installed) {
+        rimeFrostLatestVersion = rimeFrost!.version;
+        if (rimeFrost!.installed && !rimeFrost!.deployed) {
+          await _deferDeployForSchemaSelection(
+            'rime_frost',
+            activateOnConfirm: false,
+          );
+        }
+      }
       await _readLocal();
       addOperationLogs([
         installed ? AppStrings.rimeFrostInstalled : AppStrings.rimeFrostRemoved,
@@ -4071,6 +4217,21 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> openDefaultDirectory() => open(defaultDir);
+
+  Future<bool> openSchemeDirectory(String packageKey) async {
+    final target = schemeDirectoryFor(packageKey);
+    if (target.isEmpty) return false;
+    if (!isMobile && !Directory(target).existsSync()) {
+      return open(defaultDir);
+    }
+    return open(target);
+  }
+
+  Future<bool> openActiveSchemeDirectory() async {
+    final key = activeIsolatedPackageKey;
+    if (key == null) return openDefaultDirectory();
+    return openSchemeDirectory(key);
+  }
   Future<bool> openTheme() => uiSettings?.themePath == null
       ? Future.value(false)
       : open(uiSettings!.themePath!);

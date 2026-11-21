@@ -1052,6 +1052,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     key.modifiers,
                     panelVisible = inputViewShown,
                     hasCandidates = currentState.candidates.isNotEmpty(),
+                    isPackageSwitcher = currentState.isPackageSwitcher,
                 )
                 engine.processKey(routedKeyCode, key.modifiers)
             }

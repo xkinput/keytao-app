@@ -905,8 +905,11 @@ fn is_public_asset(path: &Path) -> bool {
         return false;
     }
     matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("yaml" | "lua" | "txt" | "json" | "bin" | "ocd2")
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("yaml" | "lua" | "txt" | "tsv" | "csv" | "json" | "bin" | "ocd2" | "db")
     )
 }
 
@@ -1059,7 +1062,12 @@ fn package_directory_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>
                 && is_public_asset(&relative)
                 && !is_public_lua_metadata(&relative)
                 && relative != Path::new(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE)
-                && !relative.starts_with("build")
+                && (!relative.starts_with("build")
+                    || crate::generic_rime::is_orphan_prebuilt_bin(
+                        &relative.to_string_lossy().replace('\\', "/"),
+                        |candidate| base.join(candidate).is_file(),
+                        None::<&str>,
+                    ))
             {
                 *total = total
                     .checked_add(metadata.len())

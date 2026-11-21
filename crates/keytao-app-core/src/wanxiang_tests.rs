@@ -36,7 +36,35 @@ fn extraction_retains_adapted_defaults_only_in_package_sources() {
         |_, _| Ok(()),
     ).unwrap();
     assert!(files.iter().all(|file| !file.path.starts_with("default")));
+    assert!(!stage.join("default.yaml").exists());
+    assert!(stage.join("default.custom.yaml").is_file());
     assert_eq!(crate::package_schemas::default_schemas(&crate::package_schemas::directory_schemas(&stage).unwrap()).unwrap(), ["adapted_beta"]);
+
+    // Even when upstream only ships `default.yaml`, extraction must write
+    // `default.custom.yaml` and never a stripped `default.yaml` that shadows
+    // Rime's preset `default:/punctuator/full_shape`.
+    let default_only = root.path.join("default-only.zip");
+    archive_at(&default_only, &[
+        ("default.yaml", "schema_list: [{schema: alpha}, {schema: omitted}]"),
+        ("alpha.schema.yaml", "schema: {schema_id: alpha}"),
+    ]);
+    let stage_only = root.path.join("stage-only");
+    extract_package(
+        &default_only,
+        &stage_only,
+        |name| name.ends_with(".schema.yaml").then(|| name.to_owned()),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert!(!stage_only.join("default.yaml").exists());
+    assert!(stage_only.join("default.custom.yaml").is_file());
+    assert_eq!(
+        crate::package_schemas::default_schemas(
+            &crate::package_schemas::directory_schemas(&stage_only).unwrap()
+        )
+        .unwrap(),
+        ["alpha"]
+    );
 }
 
 fn grammar_fixture(receipt: &InstallReceipt) -> (PathBuf, RemotePackage) {

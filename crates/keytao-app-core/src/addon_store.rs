@@ -246,9 +246,15 @@ impl AddonStore {
         let result = if previous.is_dir() {
             PackageStore::publish_addon_at(&self.destination, &self.id, &previous)
                 .map_err(|error| error.to_string())
-        } else {
+        } else if self
+            .destination
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
             fs::rename(&self.destination, rollback.path().join("removed"))
                 .map_err(|error| error.to_string())
+        } else {
+            Ok(())
         };
         result.map_err(|error| format!("{error}；备份保留在 {}", rollback.keep().display()))
     }
@@ -453,7 +459,7 @@ fn generated(path: &str) -> bool {
 fn validate_path(id: &str, path: &str) -> Result<(), String> {
     crate::packages::validate_relative(path)?;
     if matches!(path, "default.yaml" | "default.custom.yaml" | "default-custom.yaml") { return Ok(()); }
-    if crate::package_activation::user_file(path) {
+    if !crate::generic_rime::ships_with_scheme(path) && crate::package_activation::user_file(path) {
         return Err("Add-on manifest contains protected user data".into());
     }
     let allowed = match id {

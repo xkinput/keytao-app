@@ -106,7 +106,8 @@ pub async fn set_package_schemas(scheme_key: String, ids: Vec<String>) -> Result
     let root = state.host.user_root()?;
     keytao_app_core::package_schemas::set_package_schemas(&state.core, &scheme_key, &ids)
         .map_err(|error| error.to_string())?;
-    Ok(keytao_core::RuntimeDirs::active_package_key(&root).as_deref() == Some(&scheme_key))
+    let is_addon = keytao_app_core::package_schemas::is_addon_package_key(&scheme_key);
+    Ok(is_addon || keytao_core::RuntimeDirs::active_package_key(&root).as_deref() == Some(&scheme_key))
 }
 
 pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {

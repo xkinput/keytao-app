@@ -367,7 +367,11 @@ impl App {
         let hide_candidates = self
             .renderer
             .as_ref()
-            .is_some_and(PanelRenderer::hide_candidate_panel);
+            .is_some_and(PanelRenderer::hide_candidate_panel)
+            && !self
+                .ime_state
+                .as_ref()
+                .is_some_and(ImeState::is_package_switcher);
         if hide_candidates
             && !deadline_active(self.mode_hint_until)
             && self.deployment_text.is_none()
@@ -472,10 +476,11 @@ impl App {
         // select what is drawn now.
         self.pressed_click = None;
         let has_content = !state.candidates.is_empty()
-            && self
-                .renderer
-                .as_ref()
-                .is_some_and(|renderer| !renderer.hide_candidate_panel());
+            && (state.is_package_switcher()
+                || self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|renderer| !renderer.hide_candidate_panel()));
         if !state.candidates.is_empty() {
             // A hint's timeout must never hide candidates typed after it.
             self.mode_hint_until = None;

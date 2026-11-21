@@ -1475,6 +1475,7 @@ pub(crate) fn update_ime_windows(
             allow
         }
     }) && (!current_theme().ui.hide_candidate_panel
+        || ime_state.is_package_switcher()
         || deployment_hint.is_some());
     {
         let st = shared_state.borrow();

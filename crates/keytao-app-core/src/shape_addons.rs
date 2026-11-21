@@ -2,6 +2,7 @@
 
 use crate::{
     downloaded_addon::Addon,
+    generic_rime::{self, DEFAULT_MAX_EXPANDED_BYTES},
     wanxiang::{self, InstalledFile, RemotePackage},
 };
 use serde::Deserialize;
@@ -10,27 +11,7 @@ use std::{
     path::Path,
 };
 
-const SNOW_REQUIRED: &[&str] = &[
-    "snow_jiandao.schema.yaml",
-    "snow_pinyin.schema.yaml",
-    "snow_bihua.schema.yaml",
-    "snow_jiandao_bihua.schema.yaml",
-    "snow_jiandao_jianpin.schema.yaml",
-    "snow_jiandao_chaifen.schema.yaml",
-    "snow_sanpin.schema.yaml",
-    "snow_radical_pinyin.schema.yaml",
-    "snow_radical_pinyin.dict.yaml",
-    "snow_pinyin.dict.yaml",
-    "snow_pinyin.base.dict.yaml",
-    "snow_pinyin.ext.dict.yaml",
-    "snow_pinyin.tencent.dict.yaml",
-    "snow_pinyin.user_pack.dict.yaml",
-    "snow_bihua.dict.yaml",
-    "snow_jiandao_chaifen.dict.yaml",
-    "snow_jiandao.fixed.txt",
-    "lua/snow/snow.lua",
-    "lua/snow/radical_jiandao.txt",
-];
+const SNOW_REQUIRED: &[&str] = &["snow_jiandao.schema.yaml"];
 const LSSP_REQUIRED: &[&str] = &[
     "triple_pinyin_lssp.schema.yaml",
     "triple_pinyin.yaml",
@@ -137,63 +118,35 @@ impl Package {
             Self::Lssp => "https://github.com/arsenali/rime-triple-pinyin-lssp",
         }
     }
-    fn destination(self, name: &str) -> Option<String> {
-        match self {
-            Self::Snow => {
-                let renamed = name
-                    .replace("radical_pinyin", "snow_radical_pinyin")
-                    .replace("snow_pinyin.user", "snow_pinyin.user_pack");
-                if SNOW_REQUIRED.contains(&renamed.as_str())
-                    || (!renamed.contains('/')
-                        && renamed.starts_with("snow_")
-                        && !renamed.ends_with(".custom.yaml")
-                        && (renamed.ends_with(".schema.yaml")
-                            || renamed.ends_with(".dict.yaml")
-                            || renamed.ends_with(".fixed.txt")
-                            || renamed.ends_with(".yaml")))
-                    || name.starts_with("lua/snow/")
-                        && (name.ends_with(".lua") || name.ends_with(".txt"))
-                    || name.starts_with("opencc/")
-                        && (name.ends_with(".json")
-                            || name.ends_with(".txt")
-                            || name.ends_with(".ocd2"))
-                {
-                    Some(renamed)
-                } else {
-                    None
-                }
-            }
-            Self::Lssp => {
-                let name = name.strip_prefix("rime-triple-pinyin-lssp-main/")?;
-                if name == "LICENSE" {
-                    return Some("triple_pinyin_lssp-LICENSE.txt".into());
-                }
-                if matches!(
-                    name,
-                    "triple_pinyin_lssp.schema.yaml"
-                        | "triple_pinyin.yaml"
-                        | "triple_pinyin.dict.yaml"
-                        | "triple_pinyin.additional.dict.yaml"
-                        | "triple_pinyin.ddpy.dict.yaml"
-                ) {
-                    return Some(name.into());
-                }
-                let module = name.strip_prefix("lua/")?.strip_suffix(".lua")?;
-                LSSP_LUA
-                    .contains(&module)
-                    .then(|| format!("lua/lssp/{module}.lua"))
-            }
+    fn lssp_destination(name: &str) -> Option<String> {
+        let name = name.strip_prefix("rime-triple-pinyin-lssp-main/")?;
+        if name == "LICENSE" {
+            return Some("triple_pinyin_lssp-LICENSE.txt".into());
         }
+        if matches!(
+            name,
+            "triple_pinyin_lssp.schema.yaml"
+                | "triple_pinyin.yaml"
+                | "triple_pinyin.dict.yaml"
+                | "triple_pinyin.additional.dict.yaml"
+                | "triple_pinyin.ddpy.dict.yaml"
+        ) {
+            return Some(name.into());
+        }
+        let module = name.strip_prefix("lua/")?.strip_suffix(".lua")?;
+        LSSP_LUA
+            .contains(&module)
+            .then(|| format!("lua/lssp/{module}.lua"))
     }
     fn installable(self, name: &str) -> bool {
-        if name == format!("{}-NOTICE.txt", self.addon().id)
-            || self.addon().required.contains(&name)
-        {
-            return true;
-        }
         match self {
-            Self::Snow => self.destination(name).as_deref() == Some(name),
+            Self::Snow => generic_rime::is_installable_path(name),
             Self::Lssp => {
+                if name == format!("{}-NOTICE.txt", self.addon().id)
+                    || self.addon().required.contains(&name)
+                {
+                    return true;
+                }
                 if let Some(table) = name
                     .strip_prefix("lssp-dicts/")
                     .and_then(|n| n.strip_suffix(".dict.yaml"))
@@ -206,75 +159,64 @@ impl Package {
             }
         }
     }
-    fn adapt(self, name: &str, path: &Path) -> Result<(), String> {
+    fn adapt_lssp(name: &str, path: &Path) -> Result<(), String> {
         if !name.ends_with(".yaml") && !name.ends_with(".lua") {
             return Ok(());
         }
         let mut text = fs::read_to_string(path)
             .map_err(|e| e.to_string())?
             .replace("\r\n", "\n");
-        match self {
-            Self::Snow => {
-                text = text
-                    .replace("radical_pinyin", "snow_radical_pinyin")
-                    .replace("/rime_snow_radical_pinyin", "/rime_radical_pinyin")
-                    // The upstream seed is package data, not a user's protected dictionary.
-                    .replace("snow_pinyin.user", "snow_pinyin.user_pack");
+        if name.ends_with(".schema.yaml") {
+            for module in LSSP_LUA {
+                text = text.replace(&format!("@*{module}"), &format!("@*lssp.{module}"));
             }
-            Self::Lssp => {
-                if name.ends_with(".schema.yaml") {
-                    for module in LSSP_LUA {
-                        text = text.replace(&format!("@*{module}"), &format!("@*lssp.{module}"));
-                    }
-                    text = text
-                        .replace("    - pinyin_simp\n", "")
-                        .replace("    - reverse_lookup_translator@pinyin_lookup\n", "")
-                        .replace("    - stroke\n", "    - lssp_stroke\n")
-                        .replace("dictionary: stroke", "dictionary: lssp_stroke")
-                        // Keep the unused lookup block because stroke shares its YAML anchor.
-                        .replace("dictionary: pinyin_simp", "dictionary: lssp_stroke")
-                        .replace("schema_id: stroke", "schema_id: lssp_stroke")
-                        .replace("  import_preset: symbols", "  import_preset: default");
-                    text = text
-                        .lines()
-                        .filter(|line| !line.starts_with("    pinyin_lookup:"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                        + "\n";
-                    if name == "triple_pinyin_lssp.schema.yaml" {
-                        if let Some((without_grammar, _)) = text.rsplit_once("\n__patch:") {
-                            text = without_grammar.to_owned() + "\n";
-                        }
-                    }
-                } else if name == "triple_pinyin.dict.yaml" {
-                    text = text.replace("vocabulary: essay-zh-hans", "vocabulary: essay");
-                    text = text
-                        .lines()
-                        .filter(|line| !line.trim_start().starts_with("- triple_pinyin.zianyin"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                        + "\n";
-                    text = text.replace("- dicts/", "- lssp-dicts/");
-                } else if name == "lssp_stroke.dict.yaml" {
-                    text = text.replace("name: stroke", "name: lssp_stroke");
-                } else if name.ends_with("aux_code_stroke.lua") {
-                    text = text.replace("/stroke.dict.yaml", "/lssp_stroke.dict.yaml");
-                }
-                if name == "lssp_stroke.schema.yaml" {
-                    let mut schema: serde_yaml::Value =
-                        serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
-                    schema["schema"]["dependencies"] = serde_yaml::Value::Sequence(vec![]);
-                    if let Some(translators) = schema
-                        .get_mut("engine")
-                        .and_then(|e| e.get_mut("translators"))
-                        .and_then(serde_yaml::Value::as_sequence_mut)
-                    {
-                        translators.retain(|v| v.as_str() != Some("reverse_lookup_translator"));
-                    }
-                    schema.as_mapping_mut().unwrap().remove("reverse_lookup");
-                    text = serde_yaml::to_string(&schema).map_err(|e| e.to_string())?;
+            text = text
+                .replace("    - pinyin_simp\n", "")
+                .replace("    - reverse_lookup_translator@pinyin_lookup\n", "")
+                .replace("    - stroke\n", "    - lssp_stroke\n")
+                .replace("dictionary: stroke", "dictionary: lssp_stroke")
+                // Keep the unused lookup block because stroke shares its YAML anchor.
+                .replace("dictionary: pinyin_simp", "dictionary: lssp_stroke")
+                .replace("schema_id: stroke", "schema_id: lssp_stroke")
+                .replace("  import_preset: symbols", "  import_preset: default");
+            text = text
+                .lines()
+                .filter(|line| !line.starts_with("    pinyin_lookup:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            if name == "triple_pinyin_lssp.schema.yaml" {
+                if let Some((without_grammar, _)) = text.rsplit_once("\n__patch:") {
+                    text = without_grammar.to_owned() + "\n";
                 }
             }
+        } else if name == "triple_pinyin.dict.yaml" {
+            text = text.replace("vocabulary: essay-zh-hans", "vocabulary: essay");
+            text = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("- triple_pinyin.zianyin"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            text = text.replace("- dicts/", "- lssp-dicts/");
+        } else if name == "lssp_stroke.dict.yaml" {
+            text = text.replace("name: stroke", "name: lssp_stroke");
+        } else if name.ends_with("aux_code_stroke.lua") {
+            text = text.replace("/stroke.dict.yaml", "/lssp_stroke.dict.yaml");
+        }
+        if name == "lssp_stroke.schema.yaml" {
+            let mut schema: serde_yaml::Value =
+                serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
+            schema["schema"]["dependencies"] = serde_yaml::Value::Sequence(vec![]);
+            if let Some(translators) = schema
+                .get_mut("engine")
+                .and_then(|e| e.get_mut("translators"))
+                .and_then(serde_yaml::Value::as_sequence_mut)
+            {
+                translators.retain(|v| v.as_str() != Some("reverse_lookup_translator"));
+            }
+            schema.as_mapping_mut().unwrap().remove("reverse_lookup");
+            text = serde_yaml::to_string(&schema).map_err(|e| e.to_string())?;
         }
         fs::write(path, text).map_err(|e| e.to_string())
     }
@@ -284,63 +226,78 @@ impl Package {
         stage: &Path,
         package: &RemotePackage,
     ) -> Result<Vec<InstalledFile>, String> {
-        if matches!(self, Self::Lssp) {
-            let sha = package
-                .source
-                .strip_prefix(&format!("{}/commit/", self.source()))
-                .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
-                .ok_or("李氏三拼安装来源缺少有效提交号")?;
-            let zip = zip::ZipArchive::new(File::open(archive).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-            if zip.comment() != sha.as_bytes() {
-                return Err("李氏三拼 main 分支在下载期间发生变化，请重新安装".into());
-            }
+        if matches!(self, Self::Snow) {
+            let mut files = generic_rime::extract_archive(
+                archive,
+                stage,
+                Some(SNOW.id),
+                DEFAULT_MAX_EXPANDED_BYTES,
+            )?;
+            let notice = format!(
+                "{} {}\nLicense: GPL-3.0\nSource: {}\nUpstream: {}\nCopyright: upstream authors and contributors\nDownloaded at runtime into its own isolated Rime directory; not bundled with KeyTao.\nUser customizations and learned dictionaries are preserved during uninstall.\n",
+                SNOW.name,
+                package.version,
+                package.source,
+                self.source()
+            );
+            let name = format!("{}-NOTICE.txt", SNOW.id);
+            generic_rime::append_notice(stage, &mut files, &name, &notice)?;
+            return Ok(files);
+        }
+
+        let sha = package
+            .source
+            .strip_prefix(&format!("{}/commit/", self.source()))
+            .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or("李氏三拼安装来源缺少有效提交号")?;
+        let zip = zip::ZipArchive::new(File::open(archive).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        if zip.comment() != sha.as_bytes() {
+            return Err("李氏三拼 main 分支在下载期间发生变化，请重新安装".into());
         }
         let mut files = wanxiang::extract_package_with_limit(
             archive,
             stage,
-            |name| self.destination(name),
-            |name, path| self.adapt(name, path),
+            Self::lssp_destination,
+            Self::adapt_lssp,
             128 * 1024 * 1024,
         )?;
-        if matches!(self, Self::Lssp) {
-            let work = archive.parent().ok_or("附加方案归档目录缺失")?;
-            files.extend(wanxiang::extract_package_with_limit(
-                &work.join("wanxiang.zip"),
-                stage,
-                |name| {
-                    let table = name.strip_prefix("dicts/")?.strip_suffix(".dict.yaml")?;
-                    LSSP_TABLES
-                        .contains(&table)
-                        .then(|| format!("lssp-dicts/{table}.dict.yaml"))
-                },
-                |_, _| Ok(()),
-                256 * 1024 * 1024,
-            )?);
-            files.extend(wanxiang::extract_package_with_limit(
-                &work.join("stroke.zip"),
-                stage,
-                |name| match name.strip_prefix("rime-stroke-master/")? {
-                    "stroke.schema.yaml" => Some("lssp_stroke.schema.yaml".into()),
-                    "stroke.dict.yaml" => Some("lssp_stroke.dict.yaml".into()),
-                    "LICENSE" => Some("lssp-stroke-LICENSE.txt".into()),
-                    _ => None,
-                },
-                |name, path| self.adapt(name, path),
-                16 * 1024 * 1024,
-            )?);
-            for table in LSSP_TABLES {
-                if !stage
-                    .join(format!("lssp-dicts/{table}.dict.yaml"))
-                    .is_file()
-                {
-                    return Err(format!("李氏三拼依赖包缺少词库：{table}"));
-                }
+        let work = archive.parent().ok_or("附加方案归档目录缺失")?;
+        files.extend(wanxiang::extract_package_with_limit(
+            &work.join("wanxiang.zip"),
+            stage,
+            |name| {
+                let table = name.strip_prefix("dicts/")?.strip_suffix(".dict.yaml")?;
+                LSSP_TABLES
+                    .contains(&table)
+                    .then(|| format!("lssp-dicts/{table}.dict.yaml"))
+            },
+            |_, _| Ok(()),
+            256 * 1024 * 1024,
+        )?);
+        files.extend(wanxiang::extract_package_with_limit(
+            &work.join("stroke.zip"),
+            stage,
+            |name| match name.strip_prefix("rime-stroke-master/")? {
+                "stroke.schema.yaml" => Some("lssp_stroke.schema.yaml".into()),
+                "stroke.dict.yaml" => Some("lssp_stroke.dict.yaml".into()),
+                "LICENSE" => Some("lssp-stroke-LICENSE.txt".into()),
+                _ => None,
+            },
+            Self::adapt_lssp,
+            16 * 1024 * 1024,
+        )?);
+        for table in LSSP_TABLES {
+            if !stage
+                .join(format!("lssp-dicts/{table}.dict.yaml"))
+                .is_file()
+            {
+                return Err(format!("李氏三拼依赖包缺少词库：{table}"));
             }
-            for module in LSSP_LUA {
-                if !stage.join(format!("lua/lssp/{module}.lua")).is_file() {
-                    return Err(format!("李氏三拼缺少 Lua 模块：{module}"));
-                }
+        }
+        for module in LSSP_LUA {
+            if !stage.join(format!("lua/lssp/{module}.lua")).is_file() {
+                return Err(format!("李氏三拼缺少 Lua 模块：{module}"));
             }
         }
         for name in self.addon().required {
@@ -377,11 +334,7 @@ impl Package {
                     if let Some((kind, module)) = component.split_once("@*") {
                         if kind.starts_with("lua_") {
                             let module = module.split(['*', '@']).next().unwrap().replace('.', "/");
-                            let namespace = match self {
-                                Self::Snow => "snow/",
-                                Self::Lssp => "lssp/",
-                            };
-                            if !module.starts_with(namespace)
+                            if !module.starts_with("lssp/")
                                 || !wanxiang::safe_target(stage, &format!("lua/{module}.lua"))?
                                     .is_file()
                             {
@@ -416,27 +369,14 @@ impl Package {
             }
         }
         let name = format!("{}-NOTICE.txt", self.addon().id);
-        let license = match self {
-            Self::Snow => "GPL-3.0",
-            Self::Lssp => "LGPL-3.0",
-        };
-        let mut notice = format!(
-            "{} {}\nLicense: {license}\nSource: {}\nUpstream: {}\nCopyright: upstream authors and contributors\nKeyTao integration: package-owned dependencies; host settings and alternative layouts omitted.\nDownloaded at runtime; not bundled with KeyTao.\nUser customizations and learned dictionaries are preserved during uninstall.\n",
+        let notice = format!(
+            "{} {}\nLicense: LGPL-3.0\nSource: {}\nUpstream: {}\nCopyright: upstream authors and contributors\nKeyTao integration: package-owned dependencies; host settings and alternative layouts omitted.\nDownloaded at runtime; not bundled with KeyTao.\nUser customizations and learned dictionaries are preserved during uninstall.\nDictionary source: https://github.com/amzxyz/rime-wanxiang/releases/tag/v17.0.0 (CC-BY-4.0)\nDictionary license: https://github.com/amzxyz/rime-wanxiang/blob/v17.0.0/LICENSE\nStroke source: https://github.com/rime/rime-stroke (LGPL-3.0)\nKeyTao integration: dictionaries copied into lssp-dicts; Lua modules into lua/lssp; stroke renamed lssp_stroke; optional zianyin, language model and pinyin reverse lookup omitted; punctuation uses default.\n",
             self.addon().name,
             package.version,
             package.source,
             self.source()
         );
-        if matches!(self, Self::Lssp) {
-            notice.push_str("Dictionary source: https://github.com/amzxyz/rime-wanxiang/releases/tag/v17.0.0 (CC-BY-4.0)\nDictionary license: https://github.com/amzxyz/rime-wanxiang/blob/v17.0.0/LICENSE\nStroke source: https://github.com/rime/rime-stroke (LGPL-3.0)\nKeyTao integration: dictionaries copied into lssp-dicts; Lua modules into lua/lssp; stroke renamed lssp_stroke; optional zianyin, language model and pinyin reverse lookup omitted; punctuation uses default.\n");
-        }
-        fs::write(stage.join(&name), notice).map_err(|e| e.to_string())?;
-        let (sha256, size) = wanxiang::fingerprint(&stage.join(&name))?;
-        files.push(InstalledFile {
-            path: name,
-            sha256,
-            size,
-        });
+        generic_rime::append_notice(stage, &mut files, &name, &notice)?;
         Ok(files)
     }
 }

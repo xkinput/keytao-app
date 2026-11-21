@@ -65,11 +65,8 @@ impl Manifest {
                 .owned
                 .keys()
                 .chain(self.generated.keys())
+                .chain(self.user_owned.keys())
                 .any(|path| !materialized_path(path))
-            || self
-                .user_owned
-                .keys()
-                .any(|path| !materialized_path(path) || (!user_path(path) && path != crate::account::USER_DICTIONARY))
             || self
                 .runtime_overrides
                 .iter()
@@ -822,12 +819,6 @@ fn lua_path(path: &str) -> bool {
 
 fn materialized_path(path: &str) -> bool {
     !private_path(path)
-        && (user_path(path)
-            || lua_path(path)
-            || matches!(path, crate::account::USER_DICTIONARY | crate::account::USER_WORD_REMOVALS)
-            || COMMON.contains(&path)
-            || path.starts_with("opencc/")
-            || crate::addon::is_package_file(path))
 }
 
 fn prepare_runtime(
@@ -852,16 +843,16 @@ fn prepare_runtime(
     lock.lock()?;
     let previous = current_manifest(&runtime, key)?;
 
-    let available: BTreeSet<_> = sources.keys().cloned().collect();
     let mut selected = selected_schemas(key, &sources, selection)?;
     let mut generated = Files::new();
     let mut owned = Files::new();
     let mut schema_sources = Files::new();
     let mut dictionaries = Files::new();
+    add_common_files(bundled, &sources, &mut generated)?;
     if let Some(overlay) = overlay {
         for (path, bytes) in overlay
             .iter()
-            .filter(|(path, _)| crate::addon::is_package_file(path))
+            .filter(|(path, _)| materialized_path(path) && crate::addon::is_package_file(path))
         {
             match sources.get(path) {
                 Some(own) if own == bytes => continue,
@@ -883,15 +874,19 @@ fn prepare_runtime(
         }
     }
     for (path, bytes) in sources {
-        if path.ends_with(".schema.yaml") && !path.contains('/') {
-            schema_sources.insert(path, bytes);
-        } else if path.ends_with(".dict.yaml") {
-            dictionaries.insert(path, bytes);
-        } else if materialized_path(&path)
-            && (lua_path(&path) || path.ends_with(".custom.yaml") || path == DEFAULT_CUSTOM[1])
-        {
-            owned.insert(path, bytes);
+        if !materialized_path(&path) {
+            continue;
         }
+        if path == "default.yaml" && !has_preset_default(&bytes) {
+            continue;
+        }
+        if path.ends_with(".schema.yaml") && !path.contains('/') {
+            schema_sources.insert(path.clone(), bytes.clone());
+        }
+        if path.ends_with(".dict.yaml") {
+            dictionaries.insert(path.clone(), bytes.clone());
+        }
+        owned.insert(path, bytes);
     }
     if overlay.is_some() {
         if !schema_sources.contains_key("easy_en.schema.yaml") {
@@ -906,7 +901,6 @@ fn prepare_runtime(
             generated.insert("rime.lua".into(), lua.into_bytes());
         }
     }
-    add_common_files(bundled, &available, &mut generated)?;
 
     let is_local = crate::scheme::is_local_scheme_key(key);
     let mut user = if is_local {
@@ -919,30 +913,37 @@ fn prepare_runtime(
     } else {
         previous.runtime_overrides.clone()
     };
+    let mut disk_hashes = BTreeMap::new();
     if !is_local {
         walk_files(&runtime, "", private_path, &mut |path, relative| {
-            if user_path(relative) {
-                let bytes = fs::read(path)?;
-                let changed =
-                    previous.fingerprint(relative) != Some(&sha256_reader(bytes.as_slice())?);
-                if changed {
-                    runtime_overrides.insert(relative.to_owned());
-                }
-                if relative == DEFAULT_CUSTOM[0]
-                    && !runtime_overrides.contains(relative)
-                    && let Some(default) = &previous.user_default
-                {
-                    user.entry(relative.to_owned())
-                        .or_insert_with(|| default.as_bytes().to_vec());
-                    return Ok(());
-                }
-                if runtime_overrides.contains(relative)
-                    || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
-                {
-                    let bytes = strip_generated(relative, bytes)?;
-                    if !bytes.is_empty() {
-                        user.insert(relative.to_owned(), bytes);
-                    }
+            let tracked = previous.fingerprint(relative);
+            if relative == crate::account::USER_WORD_REMOVALS
+                || relative == keytao_core::english_mode::SETTINGS_FILE
+                || relative == crate::account::USER_DICTIONARY
+                || (tracked.is_none() && !user_path(relative))
+            {
+                return Ok(());
+            }
+            let digest = sha256_reader(fs::File::open(path)?)?;
+            let changed = tracked != Some(&digest);
+            disk_hashes.insert(relative.to_owned(), digest);
+            if changed {
+                runtime_overrides.insert(relative.to_owned());
+            }
+            if relative == DEFAULT_CUSTOM[0]
+                && !runtime_overrides.contains(relative)
+                && let Some(default) = &previous.user_default
+            {
+                user.entry(relative.to_owned())
+                    .or_insert_with(|| default.as_bytes().to_vec());
+                return Ok(());
+            }
+            if runtime_overrides.contains(relative)
+                || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
+            {
+                let bytes = strip_generated(relative, fs::read(path)?)?;
+                if !bytes.is_empty() {
+                    user.insert(relative.to_owned(), bytes);
                 }
             }
             Ok(())
@@ -959,8 +960,14 @@ fn prepare_runtime(
         user.insert(DEFAULT_CUSTOM[0].into(), existing);
     }
     generated.insert(DEFAULT_CUSTOM[0].into(), default);
-    for path in user.keys() {
+    for (path, bytes) in &user {
         owned.remove(path);
+        if path == "rime.lua" {
+            generated.remove("rime.lua");
+        }
+        if path.ends_with(".schema.yaml") && !path.contains('/') {
+            schema_sources.insert(path.clone(), bytes.clone());
+        }
     }
 
     regenerate_custom(
@@ -995,6 +1002,7 @@ fn prepare_runtime(
         generated,
         user,
         runtime_overrides,
+        &disk_hashes,
         stage,
     )
 }
@@ -1036,28 +1044,51 @@ fn selected_schemas(
     Ok(schemas)
 }
 
+fn has_preset_default(bytes: &[u8]) -> bool {
+    serde_yaml::from_slice::<serde_yaml::Value>(bytes)
+        .ok()
+        .and_then(|value| value.as_mapping().cloned())
+        .is_some_and(|map| map.contains_key(serde_yaml::Value::String("punctuator".into())))
+}
+
 fn add_common_files(
     bundled: &Path,
-    available: &BTreeSet<String>,
+    sources: &Files,
     generated: &mut Files,
 ) -> Result<(), CoreError> {
-    if bundled.as_os_str().is_empty() {
+    if bundled.as_os_str().is_empty() && !sources.contains_key("default.yaml") {
         return Ok(());
     }
     for path in COMMON {
         if path == "opencc" {
+            if bundled.as_os_str().is_empty() {
+                continue;
+            }
             walk_files(
                 &bundled.join(path),
                 path,
                 private_path,
                 &mut |source, relative| {
-                    if !available.contains(relative) {
+                    if !sources.contains_key(relative) {
                         generated.insert(relative.to_owned(), fs::read(source)?);
                     }
                     Ok(())
                 },
             )?;
-        } else if !available.contains(path) {
+        } else if path == "default.yaml" {
+            if !sources
+                .get("default.yaml")
+                .is_some_and(|bytes| has_preset_default(bytes))
+            {
+                if !bundled.as_os_str().is_empty()
+                    && let Some(bytes) = read_optional(&bundled.join(path))?
+                {
+                    generated.insert(path.to_owned(), bytes);
+                } else if sources.contains_key("default.yaml") {
+                    generated.insert(path.to_owned(), include_bytes!("addon-default.yaml").to_vec());
+                }
+            }
+        } else if !sources.contains_key(path) && !bundled.as_os_str().is_empty() {
             if let Some(bytes) = read_optional(&bundled.join(path))? {
                 generated.insert(path.to_owned(), bytes);
             }
@@ -1160,6 +1191,14 @@ fn regenerate_custom(
     Ok(())
 }
 
+fn optional_sha256(path: &Path) -> Result<Option<String>, CoreError> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(sha256_reader(file)?)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn write_runtime(
     runtime: &Path,
     key: &str,
@@ -1168,6 +1207,7 @@ fn write_runtime(
     generated: Files,
     user: Files,
     runtime_overrides: BTreeSet<String>,
+    disk_hashes: &BTreeMap<String, String>,
     stage: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
     let fingerprint = |files: &Files| -> Result<BTreeMap<_, _>, CoreError> {
@@ -1194,11 +1234,15 @@ fn write_runtime(
         if let Some(digest) = manifest.user_owned.get_mut(&relative) {
             *digest = sha256_reader(bytes.as_slice())?;
         }
-        let previous_sha256 = if let Some(existing) = read_optional(&path)? {
-            if existing == bytes {
+        let target_sha256 = manifest.fingerprint(&relative).cloned();
+        let existing_sha256 = match disk_hashes.get(&relative) {
+            Some(digest) => Some(digest.clone()),
+            None => optional_sha256(&path)?,
+        };
+        let previous_sha256 = if let Some(digest) = existing_sha256 {
+            if target_sha256.as_deref() == Some(digest.as_str()) {
                 continue;
             }
-            let digest = sha256_reader(existing.as_slice())?;
             if !is_local
                 && !manifest.user_owned.contains_key(&relative)
                 && previous.fingerprint(&relative) != Some(&digest)
@@ -1224,8 +1268,7 @@ fn write_runtime(
                 || !previous.user_owned.contains_key(relative))
         {
             let path = safe(runtime, relative)?;
-            if let Some(bytes) = read_optional(&path)? {
-                let actual = sha256_reader(bytes.as_slice())?;
+            if let Some(actual) = optional_sha256(&path)? {
                 if is_local || actual == *hash {
                     scheduled_removals.insert(relative.clone());
                     removals.push((path, actual));
@@ -1240,9 +1283,9 @@ fn write_runtime(
                 && manifest.fingerprint(relative).is_none()
                 && !scheduled_removals.contains(relative)
             {
-                let bytes = fs::read(path)?;
+                let digest = sha256_reader(fs::File::open(path)?)?;
                 scheduled_removals.insert(relative.to_owned());
-                removals.push((safe(runtime, relative)?, sha256_reader(bytes.as_slice())?));
+                removals.push((safe(runtime, relative)?, digest));
             }
             Ok(())
         })?;
@@ -1511,8 +1554,12 @@ mod tests {
                 fs::read_to_string(dirs.shared_data_dir.join("symbols.yaml")).unwrap(),
                 key
             );
-            assert!(!run.join("symbols.yaml").exists());
-            assert!(!run.join("opencc/owned.json").exists());
+            assert_eq!(fs::read_to_string(run.join("symbols.yaml")).unwrap(), key);
+            assert_eq!(
+                fs::read_to_string(run.join("opencc/owned.json")).unwrap(),
+                key
+            );
+            assert!(run.join(format!("{key}.schema.yaml")).is_file());
             assert_eq!(
                 fs::read_to_string(run.join("opencc/missing.json")).unwrap(),
                 "common"

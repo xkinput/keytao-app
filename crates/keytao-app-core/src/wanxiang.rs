@@ -1350,19 +1350,51 @@ pub(crate) fn extract_package_with_limit(
             size,
         });
     }
-    for (path, bytes) in defaults {
-        let (prefix, name) = path.rsplit_once('/').map_or((String::new(), path.as_str()), |(prefix, name)| (format!("{prefix}/"), name));
-        let ids = crate::package_schemas::default_schemas(&[(name.into(), bytes)]).map_err(|error| error.to_string())?;
-        let ids: Vec<_> = ids.into_iter().filter_map(|id| {
-            destination(&format!("{prefix}{id}.schema.yaml"))
-                .or_else(|| stage.join(format!("{id}.schema.yaml")).is_file().then(|| format!("{id}.schema.yaml")))
-                .filter(|path| stage.join(path).is_file())
-                .and_then(|path| path.strip_suffix(".schema.yaml").map(str::to_owned))
-        }).collect();
-        if ids.is_empty() { continue; }
-        let list = serde_json::json!(ids.iter().map(|id| serde_json::json!({"schema": id})).collect::<Vec<_>>());
-        let config = if name == "default.yaml" { serde_json::json!({"schema_list": list}) } else { serde_json::json!({"patch": {"schema_list": list}}) };
-        fs::write(stage.join(name), serde_yaml::to_string(&config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    let mut selected_ids = Vec::new();
+    for expected in ["default.yaml", "default-custom.yaml", "default.custom.yaml"] {
+        for (path, bytes) in &defaults {
+            let (prefix, name) = path
+                .rsplit_once('/')
+                .map_or((String::new(), path.as_str()), |(prefix, name)| {
+                    (format!("{prefix}/"), name)
+                });
+            if name != expected {
+                continue;
+            }
+            let ids = crate::package_schemas::default_schemas(&[(name.into(), bytes.clone())])
+                .map_err(|error| error.to_string())?;
+            let ids: Vec<_> = ids
+                .into_iter()
+                .filter_map(|id| {
+                    destination(&format!("{prefix}{id}.schema.yaml"))
+                        .or_else(|| {
+                            stage
+                                .join(format!("{id}.schema.yaml"))
+                                .is_file()
+                                .then(|| format!("{id}.schema.yaml"))
+                        })
+                        .filter(|path| stage.join(path).is_file())
+                        .and_then(|path| path.strip_suffix(".schema.yaml").map(str::to_owned))
+                })
+                .collect();
+            if !ids.is_empty() {
+                selected_ids = ids;
+            }
+        }
+    }
+    if !selected_ids.is_empty() {
+        let list = serde_json::json!(
+            selected_ids
+                .iter()
+                .map(|id| serde_json::json!({"schema": id}))
+                .collect::<Vec<_>>()
+        );
+        let config = serde_json::json!({"patch": {"schema_list": list}});
+        fs::write(
+            stage.join("default.custom.yaml"),
+            serde_yaml::to_string(&config).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
     }
     Ok(files)
 }

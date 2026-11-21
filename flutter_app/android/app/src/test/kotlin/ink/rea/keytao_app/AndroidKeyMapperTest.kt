@@ -116,6 +116,14 @@ class AndroidKeyMapperTest {
             AndroidKeyMapper.XK_LEFT,
             AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_LEFT, 0, panelVisible = false, hasCandidates = true),
         )
+        assertEquals(
+            AndroidKeyMapper.PREVIOUS_CANDIDATE,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_UP, 0, panelVisible = true, hasCandidates = true, isPackageSwitcher = true),
+        )
+        assertEquals(
+            AndroidKeyMapper.NEXT_CANDIDATE,
+            AndroidKeyMapper.candidateArrowKey(AndroidKeyMapper.XK_DOWN, 0, panelVisible = true, hasCandidates = true, isPackageSwitcher = true),
+        )
 
         assertFalse(
             AndroidKeyMapper.shouldScheduleReloadStampTimer(

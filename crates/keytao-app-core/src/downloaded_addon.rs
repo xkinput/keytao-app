@@ -153,6 +153,15 @@ impl Addon {
         if receipt.is_isolated() {
             return self.record_manifest(receipt, files, package, archive_sha256);
         }
+        let files: Vec<InstalledFile> = files
+            .into_iter()
+            .filter(|file| {
+                !matches!(
+                    file.path.as_str(),
+                    "default.yaml" | "default.custom.yaml" | "default-custom.yaml"
+                )
+            })
+            .collect();
         #[cfg(windows)]
         {
             receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
@@ -312,10 +321,42 @@ impl Addon {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn manage<Install, InstallFuture>(
         &self,
         core: &Core,
         installed: bool,
+        host: &impl SchemeHost,
+        install_package: Install,
+    ) -> Result<Status, CoreError>
+    where
+        Install: FnOnce(InstallReceipt) -> InstallFuture,
+        InstallFuture: std::future::Future<Output = Result<InstallReceipt, String>>,
+    {
+        self.manage_inner(core, installed, false, host, install_package)
+            .await
+    }
+
+    pub(crate) async fn manage_interactive<Install, InstallFuture>(
+        &self,
+        core: &Core,
+        installed: bool,
+        host: &impl SchemeHost,
+        install_package: Install,
+    ) -> Result<Status, CoreError>
+    where
+        Install: FnOnce(InstallReceipt) -> InstallFuture,
+        InstallFuture: std::future::Future<Output = Result<InstallReceipt, String>>,
+    {
+        self.manage_inner(core, installed, true, host, install_package)
+            .await
+    }
+
+    async fn manage_inner<Install, InstallFuture>(
+        &self,
+        core: &Core,
+        installed: bool,
+        defer_multi_schema: bool,
         host: &impl SchemeHost,
         install_package: Install,
     ) -> Result<Status, CoreError>
@@ -330,10 +371,31 @@ impl Addon {
                     .map_err(|error| error.to_string())?;
             }
             crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
+            let already_installed = self
+                .status(core, &root)
+                .map(|status| status.installed)
+                .unwrap_or(false);
             let mut receipt = InstallReceipt::new(&root)?;
             receipt.attach_store(core, self.id)?;
             if installed {
-                let receipt = install_package(receipt).await?;
+                let mut receipt = install_package(receipt).await?;
+                if defer_multi_schema && !already_installed {
+                    let schema_count =
+                        crate::package_schemas::directory_schemas(&receipt.work.join("files"))
+                            .and_then(|files| crate::package_schemas::enumerate(self.id, &files, None))
+                            .map(|schemas| schemas.len())
+                            .unwrap_or(0);
+                    if schema_count > 3 {
+                        receipt.commit_store(true)?;
+                        receipt.finish()?;
+                        core.emit(CoreEvent::InstallProgress(InstallProgress {
+                            stage: "done".into(),
+                            percent: 100,
+                            message: format!("{}已下载，请选择需要部署的方案", self.name),
+                        }));
+                        return self.status(core, &root).map_err(|error| error.to_string());
+                    }
+                }
                 receipt.deploy_isolated(core, self.id, host).await?;
             } else {
                 receipt.uninstall_isolated(core, self.id, host).await?;

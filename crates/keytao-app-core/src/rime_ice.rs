@@ -1,4 +1,4 @@
-//! Runtime-downloaded Rime Ice sources, isolated from other installed schemes.
+//! Runtime-downloaded Rime Ice sources, isolated in its own Rime directory.
 
 #[cfg(test)]
 use crate::addon::write_schema_list_transaction;
@@ -6,39 +6,18 @@ use crate::{
     Core, CoreError, CoreEvent,
     downloaded_addon::Addon,
     events::InstallProgress,
+    generic_rime::{self, DEFAULT_MAX_EXPANDED_BYTES},
     scheme_host::SchemeHost,
     wanxiang::{self, InstallReceipt, InstalledFile, RemotePackage, Status},
 };
-use serde::Deserialize;
-use std::{
-    fs::{self, File},
-    path::Path,
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 pub const SCHEMA_ID: &str = "rime_ice";
 const RELEASES_ATOM: &str = "https://github.com/iDvel/rime-ice/releases.atom";
 const RELEASES: &str = "https://api.github.com/repos/iDvel/rime-ice/releases?per_page=20";
 const MANIFEST: &str = ".keytao-rime-ice.json";
 const NOTICE: &str = "rime_ice-NOTICE.txt";
-const LICENSE: &str = "rime_ice-LICENSE.txt";
-const MAX_EXPANDED_BYTES: u64 = 128 * 1024 * 1024;
-const REQUIRED: &[&str] = &[
-    "rime_ice.schema.yaml",
-    "rime_ice.dict.yaml",
-    "melt_eng.schema.yaml",
-    "melt_eng.dict.yaml",
-    "radical_pinyin.schema.yaml",
-    "radical_pinyin.dict.yaml",
-    "symbols_v.yaml",
-    "rime_ice_custom_phrase.txt",
-    "opencc/rime_ice_emoji.json",
-    "opencc/rime_ice_emoji.txt",
-    "opencc/rime_ice_others.txt",
-    "lua/rime_ice/lunar.db",
-    "rime_ice-dicts/en_dicts/cn_en.txt",
-    LICENSE,
-];
+const REQUIRED: &[&str] = &["rime_ice.schema.yaml"];
 
 static ADDON: Addon = Addon {
     id: SCHEMA_ID,
@@ -145,139 +124,12 @@ pub async fn latest_version() -> Result<String, String> {
     Ok(latest_package().await?.version)
 }
 
-fn dictionary_file(name: &str) -> bool {
-    !name.contains('/')
-        && name.ends_with(".dict.yaml")
-        && !matches!(name, "41448.dict.yaml" | "tencent.dict.yaml")
-}
-
-fn package_destination(name: &str) -> Option<String> {
-    if matches!(
-        name,
-        "rime_ice.schema.yaml"
-            | "rime_ice.dict.yaml"
-            | "melt_eng.schema.yaml"
-            | "melt_eng.dict.yaml"
-            | "radical_pinyin.schema.yaml"
-            | "radical_pinyin.dict.yaml"
-            | "symbols_v.yaml"
-    ) {
-        return Some(name.into());
-    }
-    match name {
-        "LICENSE" => return Some(LICENSE.into()),
-        "custom_phrase.txt" => return Some("rime_ice_custom_phrase.txt".into()),
-        "opencc/emoji.json" => return Some("opencc/rime_ice_emoji.json".into()),
-        "opencc/emoji.txt" => return Some("opencc/rime_ice_emoji.txt".into()),
-        "opencc/others.txt" => return Some("opencc/rime_ice_others.txt".into()),
-        _ => {}
-    }
-    if let Some(name) = name.strip_prefix("cn_dicts/") {
-        return dictionary_file(name).then(|| format!("rime_ice-dicts/cn_dicts/{name}"));
-    }
-    if let Some(name) = name.strip_prefix("en_dicts/") {
-        return (!name.contains('/') && (name.ends_with(".dict.yaml") || name.ends_with(".txt")))
-            .then(|| format!("rime_ice-dicts/en_dicts/{name}"));
-    }
-    let name = name.strip_prefix("lua/")?;
-    (name.ends_with(".lua") || name == "lunar.db").then(|| format!("lua/rime_ice/{name}"))
-}
-
 pub(crate) fn installable(name: &str) -> bool {
-    REQUIRED.contains(&name)
-        || name == NOTICE
-        || name.strip_prefix("rime_ice-dicts/").is_some_and(|name| {
-            package_destination(name)
-                .is_some_and(|destination| destination == format!("rime_ice-dicts/{name}"))
-        })
-        || name
-            .strip_prefix("lua/rime_ice/")
-            .is_some_and(|name| package_destination(&format!("lua/{name}")).is_some())
+    generic_rime::is_installable_path(name)
 }
 
 pub fn status_at(root: &Path) -> Status {
     ADDON.status_at(root)
-}
-
-fn adapt_source(name: &str, path: &Path) -> Result<(), String> {
-    if !(name.ends_with(".schema.yaml")
-        || name.ends_with(".lua")
-        || name == "rime_ice.dict.yaml"
-        || name == "melt_eng.dict.yaml"
-        || name == "opencc/rime_ice_emoji.json")
-    {
-        return Ok(());
-    }
-    let mut content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if name.ends_with(".schema.yaml") {
-        let schema: serde_yaml::Value =
-            serde_yaml::from_str(&content).map_err(|e| e.to_string())?;
-        for group in ["processors", "translators", "filters"] {
-            for component in schema
-                .get("engine")
-                .and_then(|engine| engine.get(group))
-                .and_then(serde_yaml::Value::as_sequence)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_yaml::Value::as_str)
-            {
-                if let Some((kind, name)) = component.split_once("@*") {
-                    if kind.starts_with("lua_") {
-                        let (module, namespace) = name.split_once('@').unwrap_or((name, name));
-                        // Keep the configuration namespace while relocating the module.
-                        content = content
-                            .replace(component, &format!("{kind}@*rime_ice/{module}@{namespace}"));
-                    }
-                }
-            }
-        }
-        content = content
-            .replace(
-                "opencc_config: emoji.json",
-                "opencc_config: rime_ice_emoji.json",
-            )
-            .replace(
-                "user_dict: custom_phrase",
-                "user_dict: rime_ice_custom_phrase",
-            )
-            .replace("en_dicts/", "rime_ice-dicts/en_dicts/");
-    } else if name.ends_with(".dict.yaml") {
-        // The optional Tencent table dominates deployment time on mobile.
-        content = content
-            .lines()
-            .filter(|line| {
-                let table = line
-                    .trim()
-                    .strip_prefix('-')
-                    .map(str::trim_start)
-                    .and_then(|line| line.split([' ', '\t', '#']).next());
-                !matches!(table, Some("cn_dicts/tencent" | "cn_dicts/41448"))
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        content = content
-            .replace("cn_dicts/", "rime_ice-dicts/cn_dicts/")
-            .replace("en_dicts/", "rime_ice-dicts/en_dicts/");
-    } else if name.ends_with(".lua") {
-        content = content
-            .replace(
-                "\"convert_ar_num_to_zh\"",
-                "\"rime_ice/convert_ar_num_to_zh\"",
-            )
-            .replace("'convert_ar_num_to_zh'", "'rime_ice/convert_ar_num_to_zh'")
-            .replace("\"cold_word_drop.", "\"rime_ice/cold_word_drop/")
-            .replace("'cold_word_drop.", "'rime_ice/cold_word_drop/")
-            .replace("\"cold_word_drop/", "\"rime_ice/cold_word_drop/")
-            .replace("'cold_word_drop/", "'rime_ice/cold_word_drop/")
-            .replace("lua/cold_word_drop/", "lua/rime_ice/cold_word_drop/")
-            .replace("lua/lunar.db", "lua/rime_ice/lunar.db");
-    } else {
-        content = content
-            .replace("\"emoji.txt\"", "\"rime_ice_emoji.txt\"")
-            .replace("\"others.txt\"", "\"rime_ice_others.txt\"");
-    }
-    fs::write(path, content).map_err(|e| e.to_string())
 }
 
 fn extract(
@@ -285,56 +137,22 @@ fn extract(
     stage: &Path,
     package: &RemotePackage,
 ) -> Result<Vec<InstalledFile>, String> {
-    let mut files = wanxiang::extract_package_with_limit(
+    let mut files = generic_rime::extract_archive(
         archive,
         stage,
-        package_destination,
-        adapt_source,
-        MAX_EXPANDED_BYTES,
+        Some(SCHEMA_ID),
+        DEFAULT_MAX_EXPANDED_BYTES,
     )?;
-    for name in REQUIRED {
-        if !wanxiang::safe_target(stage, name)?.is_file() {
-            return Err(format!("雾凇拼音发布包缺少必要文件：{name}"));
-        }
-    }
-    for name in ["rime_ice.dict.yaml", "melt_eng.dict.yaml"] {
-        let file = File::open(stage.join(name)).map_err(|e| e.to_string())?;
-        let header = serde_yaml::Deserializer::from_reader(file)
-            .next()
-            .ok_or("词库为空")?;
-        let header = serde_yaml::Value::deserialize(header).map_err(|e| e.to_string())?;
-        for table in header
-            .get("import_tables")
-            .and_then(serde_yaml::Value::as_sequence)
-            .into_iter()
-            .flatten()
-        {
-            let table = table.as_str().ok_or("雾凇拼音词库引用无效")?;
-            let path = wanxiang::safe_target(stage, &format!("{table}.dict.yaml"))?;
-            if !path.is_file() {
-                return Err(format!("雾凇拼音发布包缺少词库：{table}"));
-            }
-        }
-    }
     let version = &package.version;
     let notice = format!(
         "Rime Ice / 雾凇拼音 {version}\nCopyright: iDvel and upstream contributors\n\
          License: GPL-3.0-only\nSource: {}\n\
          License text: https://github.com/iDvel/rime-ice/blob/{version}/LICENSE\n\
-         KeyTao integration changes: Lua modules and their internal references,\n\
-         dictionary tables, emoji data and custom phrases are namespaced.\n\
-         Host settings, other input layouts, Tencent and 41448 tables are omitted.\n\
-         Downloaded at runtime; not bundled with KeyTao.\n\
+         Downloaded at runtime into its own isolated Rime directory; not bundled with KeyTao.\n\
          User customizations and learned dictionaries are preserved during uninstall.\n",
         package.source,
     );
-    fs::write(stage.join(NOTICE), notice).map_err(|e| e.to_string())?;
-    let (sha256, size) = wanxiang::fingerprint(&stage.join(NOTICE))?;
-    files.push(InstalledFile {
-        path: NOTICE.into(),
-        sha256,
-        size,
-    });
+    generic_rime::append_notice(stage, &mut files, NOTICE, &notice)?;
     Ok(files)
 }
 
@@ -389,7 +207,9 @@ where
     Install: FnOnce(InstallReceipt) -> InstallFuture,
     InstallFuture: std::future::Future<Output = Result<InstallReceipt, String>>,
 {
-    ADDON.manage(core, installed, host, install_package).await
+    ADDON
+        .manage_interactive(core, installed, host, install_package)
+        .await
 }
 
 pub(crate) async fn reinstall_store_only(core: &Core, root: &Path) -> Result<(), String> {

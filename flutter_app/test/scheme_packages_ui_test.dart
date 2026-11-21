@@ -36,15 +36,26 @@ class _PackageController extends ViewController {
 
   final actions = <String>[];
 
-  @override
-  Future<List<PackageSchemaDto>> packageSchemas(String key) async => const [
+  List<PackageSchemaDto> schemasResult = const [
     PackageSchemaDto(id: 'alpha', name: 'Alpha Name', selected: true),
     PackageSchemaDto(id: 'beta', name: 'Beta Name', selected: false),
   ];
 
   @override
-  Future<bool> setPackageSchemas(String key, List<String> ids) async {
-    actions.add('schemas:$key:${ids.join(',')}');
+  Future<List<PackageSchemaDto>> packageSchemas(String key) async =>
+      schemasResult;
+
+  @override
+  Future<bool> setPackageSchemas(
+    String key,
+    List<String> ids, {
+    bool activate = false,
+  }) async {
+    actions.add(
+      activate
+          ? 'schemas:$key:${ids.join(',')}:activate'
+          : 'schemas:$key:${ids.join(',')}',
+    );
     return true;
   }
 
@@ -1334,7 +1345,8 @@ void main() {
       await tester.pump();
       await gesture.up();
       await tester.pumpAndSettle();
-      expect(find.byType(FItem), findsNWidgets(4));
+      expect(find.byType(FItem), findsNWidgets(5));
+      expect(find.text('打开方案目录'), findsOneWidget);
       expect(
         tester.widgetList<FItem>(find.byType(FItem)),
         everyElement(
@@ -2392,4 +2404,70 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   }
+
+  testWidgets(
+    'pending post-download schema selection prompt opens dialog and activates on confirm',
+    (tester) async {
+      final c = _PackageController()
+        ..schemasResult = const [
+          PackageSchemaDto(id: 's1', name: '冰雪键道', selected: true),
+          PackageSchemaDto(id: 's2', name: '冰雪双拼', selected: true),
+          PackageSchemaDto(id: 's3', name: '冰雪三拼', selected: false),
+          PackageSchemaDto(id: 's4', name: '冰雪四拼', selected: false),
+        ];
+      addTearDown(c.dispose);
+      _size(tester, const Size(1000, 760));
+      await _pumpSchemePage(tester, c);
+
+      c.requestSchemaSelectionPrompt('snow_jiandao', activateOnConfirm: true);
+      await tester.pumpAndSettle();
+
+      expect(find.text('选择方案'), findsOneWidget);
+      expect(find.text('冰雪键道'), findsWidgets);
+      expect(find.text('冰雪四拼'), findsOneWidget);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AppDialog),
+          matching: find.widgetWithText(ActionButton, '部署'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(c.actions, ['schemas:snow_jiandao:s1,s2:activate']);
+      expect(find.text('选择方案'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
+  testWidgets(
+    'scheme page displays active isolated scheme directory instead of flat root',
+    (tester) async {
+      final c = _PackageController()
+        ..installedPackages = const [
+          InstalledPackageDto(
+            schemeKey: 'rime_ice',
+            version: '2026.06.30',
+            active: true,
+            inUse: true,
+            hasPackageZip: true,
+          ),
+        ]
+        ..local = const LocalSchemaDto(
+          installed: true,
+          deployed: true,
+          schemas: ['rime_ice'],
+          installedScheme: 'rime_ice',
+        );
+      addTearDown(c.dispose);
+      _size(tester, const Size(1000, 760));
+      await _pumpSchemePage(tester, c);
+
+      expect(c.activeSchemeDir, '${c.defaultDir}/runtime/rime_ice');
+      expect(find.text('${c.defaultDir}/runtime/rime_ice'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
 }

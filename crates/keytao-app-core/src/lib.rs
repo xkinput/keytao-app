@@ -25,6 +25,7 @@ mod package_store;
 mod package_fs;
 mod addon_store;
 mod downloaded_addon;
+mod generic_rime;
 mod pinyin_addons;
 mod shape_addons;
 mod package_activation;

@@ -170,7 +170,8 @@ impl KimpanelHandle {
             state.candidates.len()
         );
         let theme = self.theme_resolver.current();
-        let (preedit, cursor) = inline_preedit(state, theme.ui.hide_candidate_panel);
+        let hide_candidate_panel = theme.ui.hide_candidate_panel && !state.is_package_switcher();
+        let (preedit, cursor) = inline_preedit(state, hide_candidate_panel);
         if preedit.is_empty() {
             if let Err(e) = Kimpanel::show_preedit(&self.ctxt, false).await {
                 tracing::warn!("Kimpanel: show_preedit(false) failed: {e}");
@@ -179,7 +180,7 @@ impl KimpanelHandle {
             if let Err(e) = Kimpanel::update_preedit_text(&self.ctxt, preedit, "").await {
                 tracing::warn!("Kimpanel: update_preedit_text failed: {e}");
             }
-            let caret = if theme.ui.hide_candidate_panel {
+            let caret = if hide_candidate_panel {
                 cursor as i32
             } else {
                 preedit.chars().count() as i32
@@ -192,7 +193,7 @@ impl KimpanelHandle {
             }
         }
 
-        if state.candidates.is_empty() || theme.ui.hide_candidate_panel {
+        if state.candidates.is_empty() || hide_candidate_panel {
             if let Err(e) = self.set_lookup_table(&[], &[], &[], false, false, -1).await {
                 tracing::warn!("Kimpanel: set_lookup_table(empty) failed: {e}");
             }

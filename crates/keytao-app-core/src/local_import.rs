@@ -146,6 +146,119 @@ fn collect(
     Ok(())
 }
 
+fn collect_orphan_prebuilt_bins(
+    directory: &Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    size: &mut u64,
+) -> Result<(), CoreError> {
+    let build_dir = directory.join("build");
+    let metadata = match fs::symlink_metadata(&build_dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(context("读取文件属性", &build_dir, error).into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if excluded_attributes(metadata.file_attributes()) {
+            return Ok(());
+        }
+    }
+    let existing: std::collections::BTreeSet<String> = files.keys().cloned().collect();
+    for entry in import_io(fs::read_dir(&build_dir), "读取目录", &build_dir)? {
+        let entry = import_io(entry, "读取目录项", &build_dir)?;
+        let path = entry.path();
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') || !name.ends_with(".bin") {
+            continue;
+        }
+        let relative = format!("build/{name}");
+        if validate_relative(&relative).is_err()
+            || !crate::generic_rime::is_orphan_prebuilt_bin(
+                &relative,
+                |candidate| existing.contains(candidate),
+                None::<&str>,
+            )
+        {
+            continue;
+        }
+        let entry_meta = import_io(fs::symlink_metadata(&path), "读取文件属性", &path)?;
+        if entry_meta.file_type().is_symlink() || !entry_meta.is_file() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if excluded_attributes(entry_meta.file_attributes()) {
+                continue;
+            }
+        }
+        if files.len() >= 10_000 {
+            return Err(CoreError::Other("方案包文件过多".into()));
+        }
+        let next_size = size.saturating_add(entry_meta.len());
+        if next_size > 512 * 1024 * 1024 {
+            return Err(CoreError::Other("方案包解压后过大".into()));
+        }
+        let bytes = import_io(fs::read(&path), "读取文件", &path)?;
+        *size = next_size;
+        files.insert(relative, bytes);
+    }
+    Ok(())
+}
+
+fn build_default_custom(
+    defaults: &[(String, Vec<u8>)],
+    schemas: &[String],
+) -> Result<Vec<u8>, CoreError> {
+    let existing = defaults
+        .iter()
+        .find(|(name, _)| name == "default.custom.yaml")
+        .or_else(|| defaults.iter().find(|(name, _)| name == "default-custom.yaml"));
+    if let Some((_, raw)) = existing
+        && let Ok(text) = std::str::from_utf8(raw)
+        && let Ok(stripped) = crate::managed_custom::strip(text)
+        && let Ok(serde_yaml::Value::Mapping(mut root)) = serde_yaml::from_str(&stripped)
+        && root
+            .get(serde_yaml::Value::String("patch".into()))
+            .is_some_and(serde_yaml::Value::is_mapping)
+    {
+        if let Some(patch) = root
+            .get_mut(serde_yaml::Value::String("patch".into()))
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        {
+            patch.retain(|key, _| {
+                !key.as_str()
+                    .is_some_and(|k| k == "schema_list" || k.starts_with("schema_list/"))
+            });
+            let list: Vec<_> = schemas
+                .iter()
+                .map(|id| BTreeMap::from([("schema", id.as_str())]))
+                .collect();
+            patch.insert(
+                "schema_list".into(),
+                serde_yaml::to_value(list).map_err(|e| CoreError::Other(e.to_string()))?,
+            );
+            return serde_yaml::to_string(&root)
+                .map(String::into_bytes)
+                .map_err(|e| CoreError::Other(e.to_string()));
+        }
+    }
+    let mut config = String::from("patch:\n  schema_list:\n");
+    for schema in schemas {
+        config.push_str(&format!(
+            "    - schema: {}\n",
+            serde_json::to_string(schema)?
+        ));
+    }
+    Ok(config.into_bytes())
+}
+
 fn slug_from_str(name: &str) -> String {
     let mut slug = String::new();
     for character in name.chars() {
@@ -238,7 +351,9 @@ pub(super) fn import_local_scheme_with(
         ));
     }
     let mut files = BTreeMap::new();
-    collect(&directory, "", &mut files, &mut 0)?;
+    let mut total_size = 0;
+    collect(&directory, "", &mut files, &mut total_size)?;
+    collect_orphan_prebuilt_bins(&directory, &mut files, &mut total_size)?;
     let mut schemas: Vec<_> = files
         .keys()
         .filter(|name| !name.contains('/'))
@@ -262,7 +377,10 @@ pub(super) fn import_local_scheme_with(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => Some(Err(context("读取方案配置", &directory.join(name), error))),
         }).collect::<Result<Vec<_>, _>>()?;
-    let schema_order = crate::package_schemas::default_schemas(&defaults)?;
+    let schema_order: Vec<_> = crate::package_schemas::default_schemas(&defaults)?
+        .into_iter()
+        .filter(|id| schemas.contains(id))
+        .collect();
     if !schema_order.is_empty() {
         schemas.retain(|schema| schema_order.contains(schema));
     } else {
@@ -282,14 +400,8 @@ pub(super) fn import_local_scheme_with(
     } else {
         None
     };
-    let mut config = String::from("patch:\n  schema_list:\n");
-    for schema in schemas {
-        config.push_str(&format!(
-            "    - schema: {}\n",
-            serde_json::to_string(&schema)?
-        ));
-    }
-    files.insert("default.custom.yaml".into(), config.into_bytes());
+    let config = build_default_custom(&defaults, &schemas)?;
+    files.insert("default.custom.yaml".into(), config);
     let manifest = files
         .iter()
         .filter(|(name, _)| !excluded_from_manifest(name))

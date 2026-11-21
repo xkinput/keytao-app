@@ -226,7 +226,8 @@ final class KeyTaoInputController: IMKInputController {
             ? keytao_session_process_enter_json(session)
             : keytao_session_process_key_with_panel_json(
                 session, keyval, modifiers,
-                candidatePanel?.isVisible == true && !theme.ui.hideCandidatePanel,
+                candidatePanel?.isVisible == true
+                    && (!theme.ui.hideCandidatePanel || normalCandidateModel?.isPackageSwitcher == true),
                 theme.panel.orientation == .vertical
             )
         guard let state = KeyTaoImeState.consuming(json) else { return false }
@@ -394,77 +395,82 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func updateMarkedText(_ state: KeyTaoImeState, client: IMKTextInput?, theme: ImeTheme) {
-        guard theme.ui.effectiveEmbeddedComposition else {
+        let selectedRange = !hasMarkedText && state.hasComposition && state.preedit.isEmpty
+            ? (client?.selectedRange() ?? NSRange(location: NSNotFound, length: 0))
+            : NSRange(location: NSNotFound, length: 0)
+        let decision = KeyTaoMarkedTextPolicy.decide(
+            preedit: state.preedit,
+            commitPreview: state.commitPreview,
+            hasComposition: state.hasComposition,
+            isPackageSwitcher: state.isPackageSwitcher,
+            embeddedComposition: theme.ui.effectiveEmbeddedComposition,
+            hideCandidatePanel: theme.ui.hideCandidatePanel,
+            hadMarkedText: hasMarkedText,
+            selectedRange: selectedRange
+        )
+        switch decision {
+        case .none:
             lastPreeditCursor = 0
-            if state.preedit.isEmpty {
-                if hasMarkedText { clearMarkedText(client: client) }
-                return
-            }
+        case .clear:
+            clearMarkedText(client: client)
+        case let .placeholder(replacementRange):
+            lastPreeditCursor = 0
             guard let client else { return }
             // Keep a non-empty marked range so clients suppress default key actions.
             hasMarkedText = true
             client.setMarkedText(
-                "\u{200B}",
+                KeyTaoMarkedTextPolicy.placeholderText,
                 selectionRange: NSRange(location: 0, length: 0),
+                replacementRange: replacementRange
+            )
+        case let .inline(preedit, hidden):
+            let length = preedit.utf16.count
+            // ImeState counts in Unicode scalars, IMKit's NSRange counts UTF-16.
+            lastPreeditCursor = hidden ? length : preedit.keytaoUtf16Offset(fromCharacterOffset: state.cursor)
+            guard let client else { return }
+
+            let selectionStart = min(
+                preedit.keytaoUtf16Offset(fromCharacterOffset: state.selStart),
+                length
+            )
+            let selectionEnd = min(
+                max(preedit.keytaoUtf16Offset(fromCharacterOffset: state.selEnd), selectionStart),
+                length
+            )
+
+            let marked = NSMutableAttributedString(string: preedit)
+            // What Rime already converted, what it is converting now, and what is
+            // still raw input each get the style macOS input methods use for it.
+            if hidden {
+                mark(marked, NSRange(location: 0, length: length), style: kTSMHiliteConvertedText)
+            } else if selectionEnd > selectionStart {
+                mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
+                mark(
+                    marked,
+                    NSRange(location: selectionStart, length: selectionEnd - selectionStart),
+                    style: kTSMHiliteSelectedRawText
+                )
+                mark(
+                    marked,
+                    NSRange(location: selectionEnd, length: length - selectionEnd),
+                    style: kTSMHiliteRawText
+                )
+            } else {
+                mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
+                mark(
+                    marked,
+                    NSRange(location: selectionStart, length: length - selectionStart),
+                    style: kTSMHiliteSelectedRawText
+                )
+            }
+
+            hasMarkedText = true
+            client.setMarkedText(
+                marked,
+                selectionRange: NSRange(location: min(lastPreeditCursor, length), length: 0),
                 replacementRange: NSRange(location: NSNotFound, length: 0)
             )
-            return
         }
-        let hidden = theme.ui.hideCandidatePanel
-        let preedit = hidden && !state.commitPreview.isEmpty ? state.commitPreview : state.preedit
-        let length = preedit.utf16.count
-        // ImeState counts in Unicode scalars, IMKit's NSRange counts UTF-16.
-        lastPreeditCursor = hidden ? length : preedit.keytaoUtf16Offset(fromCharacterOffset: state.cursor)
-        guard let client else { return }
-
-        if preedit.isEmpty {
-            if hasMarkedText {
-                clearMarkedText(client: client)
-            }
-            return
-        }
-
-        let selectionStart = min(
-            preedit.keytaoUtf16Offset(fromCharacterOffset: state.selStart),
-            length
-        )
-        let selectionEnd = min(
-            max(preedit.keytaoUtf16Offset(fromCharacterOffset: state.selEnd), selectionStart),
-            length
-        )
-
-        let marked = NSMutableAttributedString(string: preedit)
-        // What Rime already converted, what it is converting now, and what is
-        // still raw input each get the style macOS input methods use for it.
-        if hidden {
-            mark(marked, NSRange(location: 0, length: length), style: kTSMHiliteConvertedText)
-        } else if selectionEnd > selectionStart {
-            mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
-            mark(
-                marked,
-                NSRange(location: selectionStart, length: selectionEnd - selectionStart),
-                style: kTSMHiliteSelectedRawText
-            )
-            mark(
-                marked,
-                NSRange(location: selectionEnd, length: length - selectionEnd),
-                style: kTSMHiliteRawText
-            )
-        } else {
-            mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
-            mark(
-                marked,
-                NSRange(location: selectionStart, length: length - selectionStart),
-                style: kTSMHiliteSelectedRawText
-            )
-        }
-
-        hasMarkedText = true
-        client.setMarkedText(
-            marked,
-            selectionRange: NSRange(location: min(lastPreeditCursor, length), length: 0),
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
     }
 
     private func mark(_ text: NSMutableAttributedString, _ range: NSRange, style: Int) {
@@ -479,6 +485,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func panelModel(for state: KeyTaoImeState, theme: ImeTheme) -> KeyTaoPanelModel {
         var model = state.candidatePanel
+        model.isPackageSwitcher = state.isPackageSwitcher
         if theme.ui.effectiveEmbeddedComposition || state.preedit.isEmpty {
             model.preedit = nil
             model.preeditCaretRange = nil
@@ -497,7 +504,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func showCandidates(_ model: KeyTaoPanelModel, client: IMKTextInput?, theme: ImeTheme) {
         let generation = inputContextGeneration.current
-        guard isActive, !theme.ui.hideCandidatePanel || showingDeploymentHint else {
+        guard isActive, !theme.ui.hideCandidatePanel || model.isPackageSwitcher || showingDeploymentHint else {
             hideCandidates()
             return
         }

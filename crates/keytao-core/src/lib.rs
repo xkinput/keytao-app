@@ -524,6 +524,10 @@ impl ImeState {
         self.ascii_mode || english_mode::is_english_schema(&self.schema_id, &self.schema_name)
     }
 
+    pub fn is_package_switcher(&self) -> bool {
+        self.schema_id == switcher_model::SCHEMA_ID
+    }
+
     pub fn empty() -> Self {
         Self {
             preedit: String::new(),
@@ -1517,9 +1521,10 @@ mod desktop {
                         .ok_or("full deployment did not finish")?
                 };
                 patch_neutral_grammar(user_dir);
-                validate_deployed_schemas(user_dir, &deployed).map_err(|error| {
-                    deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
-                })?;
+                validate_deployed_schemas(user_dir, &deployed, dirs.active_package_key.is_some())
+                    .map_err(|error| {
+                        deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
+                    })?;
             }
             complete_resolved_deployment(user_dir, package_shared, || {
                 #[cfg(not(target_os = "android"))]
@@ -1578,7 +1583,7 @@ mod desktop {
                 .map_err(|error| deploy_log.failure_message(Some(&error)))?
                 .ok_or("full deployment did not finish")?;
             progress(DeployStep::Validate);
-            validate_deployed_schemas(user_dir, &deployed)
+            validate_deployed_schemas(user_dir, &deployed, dirs.active_package_key.is_some())
                 .map_err(|error| deploy_log.failure_message(Some(&error)))?;
             complete_resolved_deployment(user_dir, package_shared, || {
                 progress(DeployStep::Prune);
@@ -1974,10 +1979,18 @@ mod desktop {
         Ok(schemas)
     }
 
-    fn validate_deployed_schemas(user_dir: &Path, deployed: &[String]) -> Result<(), String> {
+    fn validate_deployed_schemas(
+        user_dir: &Path,
+        deployed: &[String],
+        isolated: bool,
+    ) -> Result<(), String> {
         let schemas = validate_deployed_schema_files(user_dir)?;
         // Validation selections persist in user.yaml, even when validation fails.
-        let schema_to_keep = if schemas.iter().all(|schema| is_addon_schema(schema)) {
+        let schema_to_keep = if isolated {
+            deployed_schema_id_from_dir(user_dir)
+                .filter(|schema| schemas.contains(schema))
+                .or_else(|| preferred_isolated_schema_from_list(schemas.clone()))
+        } else if schemas.iter().all(|schema| is_addon_schema(schema)) {
             schemas.first().cloned()
         } else {
             deployed_schema_id_from_dir(user_dir)
@@ -4758,6 +4771,13 @@ pub mod key_policy {
         if state.candidates.is_empty() || super::rime_modifier_mask(mods) != 0 {
             return None;
         }
+        if state.is_package_switcher() && panel != Hidden {
+            return match sym {
+                XK_UP | XK_LEFT => Some(PreviousCandidate),
+                XK_DOWN | XK_RIGHT => Some(NextCandidate),
+                _ => None,
+            };
+        }
         match (panel, sym) {
             (Vertical, XK_UP) | (Horizontal, XK_LEFT) => Some(PreviousCandidate),
             (Vertical, XK_DOWN) | (Horizontal, XK_RIGHT) => Some(NextCandidate),
@@ -5104,6 +5124,31 @@ mod ime_runtime_tests {
                     Some(action)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn package_switcher_arrows_navigate_items_in_both_panel_orientations() {
+        use key_policy::{CandidateArrowAction::*, CandidatePanelLayout::*, *};
+        let mut state = state_with_candidates(Some("12345"));
+        state.preedit.clear();
+        state.schema_id = super::switcher_model::SCHEMA_ID.to_owned();
+        for panel in [Horizontal, Vertical] {
+            for (key, action) in [
+                (XK_UP, PreviousCandidate),
+                (XK_LEFT, PreviousCandidate),
+                (XK_DOWN, NextCandidate),
+                (XK_RIGHT, NextCandidate),
+            ] {
+                assert_eq!(candidate_arrow_action(key, 0, &state, panel), Some(action));
+                assert_eq!(
+                    CandidateArrowAction::from_keycode(candidate_arrow_key(key, 0, &state, panel)),
+                    Some(action)
+                );
+            }
+        }
+        for key in [XK_LEFT, XK_RIGHT, XK_UP, XK_DOWN] {
+            assert_eq!(candidate_arrow_key(key, 0, &state, Hidden), key);
         }
     }
 
@@ -8111,15 +8156,37 @@ fn resolved_deployed_schema_id(dirs: &RuntimeDirs) -> Option<String> {
     if !skipped_schemas(dir).is_empty() {
         return schemas.into_iter().next();
     }
+    let pick = if dirs.active_package_key.is_some() {
+        preferred_isolated_schema_from_list
+    } else {
+        preferred_schema_from_list
+    };
     match deployed {
-        Some(_) => preferred_schema_from_list(schemas),
-        None => preferred_schema_from_list(resolved_configured_schema_list(dirs)),
+        Some(_) => pick(schemas),
+        None => pick(resolved_configured_schema_list(dirs)),
     }
 }
 
 #[cfg(test)]
 fn preferred_schema_id_from_dir(dir: &Path) -> Option<String> {
     preferred_schema_from_list(configured_schema_list_from_dir(dir))
+}
+
+fn preferred_isolated_schema_from_list(schemas: Vec<String>) -> Option<String> {
+    let mut first_easy_en = None;
+    for schema in schemas {
+        if schema.trim().is_empty() {
+            continue;
+        }
+        if schema == "easy_en" {
+            if first_easy_en.is_none() {
+                first_easy_en = Some(schema);
+            }
+            continue;
+        }
+        return Some(schema);
+    }
+    first_easy_en
 }
 
 fn preferred_schema_from_list(schemas: Vec<String>) -> Option<String> {

@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 import '../rust/api/types.dart';
 import '../ui/menus.dart';
 import '../ui/onboarding.dart';
+import '../ui/package_schema_selection.dart';
 import '../ui/shell.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
@@ -122,6 +123,7 @@ class _MigrationNoticePresenterState extends State<_MigrationNoticePresenter> {
     final c = widget.controller;
     if (!c.hasPendingMigrationFailureToast &&
         !c.hasPendingToast &&
+        !c.hasPendingSchemaSelectionPrompt &&
         c.migrationBackupDir == null) {
       return;
     }
@@ -144,6 +146,15 @@ class _MigrationNoticePresenterState extends State<_MigrationNoticePresenter> {
             builder: (_, _) => FToast(title: Text(message)),
           );
         }
+      }
+      if (c.takePendingSchemaSelectionPrompt() case final prompt?) {
+        await showPackageSchemaSelection(
+          context,
+          c,
+          prompt.packageKey,
+          activateOnConfirm: prompt.activateOnConfirm,
+        );
+        if (!mounted) return;
       }
       final backupDir = c.migrationBackupDir;
       if (backupDir == null || _dialogOpen) return;

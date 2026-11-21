@@ -240,3 +240,214 @@ async fn cloud_update_keeps_saved_and_manual_schema_selection() {
         ["keytao", "keytao-dz"]
     );
 }
+
+#[tokio::test]
+async fn lua_user_data_dir_auxiliary_files_and_preset_default_compile_and_render() {
+    let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let source = fixture.dir.path().join("lua-aux-source");
+    smoke_fixture::write(&source).unwrap();
+    // Write a preset default.yaml with punctuator/full_shape into bundled rime-data.
+    fs::write(
+        fixture.core.env().resource_dir.join("rime-data/default.yaml"),
+        "config_version: '1.0'\nschema_list: []\nmenu:\n  page_size: 6\npunctuator:\n  full_shape:\n    ',': '，'\n    '.': '。'\n  half_shape:\n    ',': '，'\n    '.': '。'\n",
+    )
+    .unwrap();
+    fs::create_dir_all(source.join("lua/aux_demo")).unwrap();
+    fs::write(
+        source.join("lua/aux_demo/ss.lua"),
+        r#"local M = {}
+function M.init(env)
+  env.words = {}
+  local f = io.open(rime_api.get_user_data_dir() .. "/aux_demo_ss.txt", "r")
+  if f then
+    for line in f:lines() do
+      local code, word = line:match("([^\t]+)\t([^\t]+)")
+      if code and word then
+        env.words[code] = word
+      end
+    end
+    f:close()
+  end
+end
+function M.func(translation, env)
+  local input = env.engine.context.input
+  local word = env.words[input]
+  local first = true
+  for cand in translation:iter() do
+    if word and first then
+      cand:get_genuine().comment = "aoo " .. word .. "'"
+      first = false
+    end
+    yield(cand)
+  end
+end
+return M
+"#,
+    )
+    .unwrap();
+    fs::write(source.join("aux_demo_ss.txt"), "mwt\t没问题\n").unwrap();
+    fs::write(source.join("aux_demo.fixed.txt"), "mwt\t没问题\n").unwrap();
+    fs::write(
+        source.join("aux_demo.dict.yaml"),
+        "---\nname: aux_demo\nversion: '1'\nsort: by_weight\n...\n没问题\tmwt\t100\n莫扎特\tmwt\t80\n",
+    )
+    .unwrap();
+    fs::write(
+        source.join("aux_demo.schema.yaml"),
+        r#"schema:
+  schema_id: aux_demo
+  name: AuxDemo
+  version: '1'
+engine:
+  processors:
+    - ascii_composer
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - table_translator
+  filters:
+    - lua_filter@*aux_demo.ss
+    - uniquifier
+speller:
+  alphabet: abcdefghijklmnopqrstuvwxyz
+translator:
+  dictionary: aux_demo
+punctuator:
+  full_shape:
+    __include: default:/punctuator/full_shape
+  half_shape:
+    __include: default:/punctuator/half_shape
+"#,
+    )
+    .unwrap();
+    // Simulate a stub default.yaml (only schema_list) to verify preset default.yaml still materializes.
+    fs::write(
+        source.join("default.yaml"),
+        "schema_list:\n  - schema: aux_demo\n",
+    )
+    .unwrap();
+    fs::remove_file(source.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID))).unwrap();
+
+    let key = packages::import_local_scheme(&fixture.core, &source, "AuxDemo", None).unwrap();
+    fixture.activate(&key).await;
+
+    let rt_dir = fixture.runtime_dir(&key);
+    assert!(rt_dir.join("aux_demo_ss.txt").is_file());
+    assert!(rt_dir.join("aux_demo.fixed.txt").is_file());
+    assert!(
+        fs::read_to_string(rt_dir.join("default.yaml"))
+            .unwrap()
+            .contains("punctuator:")
+    );
+
+    let runtime = fixture.runtime();
+    runtime.init_without_deploy().unwrap();
+    let session = runtime.create_session().unwrap();
+    for ch in ['m', 'w', 't'] {
+        session.process_key_result(ch as u32, 0).unwrap();
+    }
+    let state = session.state();
+    assert_eq!(state.candidates[0].text, "没问题");
+    assert_eq!(state.candidates[0].comment.as_deref(), Some("aoo 没问题'"));
+}
+
+#[tokio::test]
+async fn snow_pinyin_zip_renders_shape_and_ss_comment_when_present() {
+    let zip_path = std::path::Path::new("/Users/rea/Downloads/snow-pinyin (1).zip");
+    if !zip_path.is_file() {
+        return;
+    }
+    let _serialized = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    // Copy full preset files from vendored/bundled rime-data if available, or write complete preset default.yaml.
+    fs::write(
+        fixture.core.env().resource_dir.join("rime-data/default.yaml"),
+        "config_version: '1.0'\nschema_list: []\nmenu:\n  page_size: 6\nswitcher:\n  hotkeys: [F4]\npunctuator:\n  full_shape:\n    ',': '，'\n    '.': '。'\n  half_shape:\n    ',': '，'\n    '.': '。'\nkey_binder:\n  bindings: []\nrecognizer:\n  patterns: {}\n",
+    )
+    .unwrap();
+    let unpacked = fixture.dir.path().join("snow-pinyin-unpacked");
+    let mut archive = zip::ZipArchive::new(fs::File::open(zip_path).unwrap()).unwrap();
+    for idx in 0..archive.len() {
+        let mut entry = archive.by_index(idx).unwrap();
+        if entry.is_dir() {
+            continue;
+        }
+        let target = unpacked.join(entry.name());
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let mut out = fs::File::create(&target).unwrap();
+        std::io::copy(&mut entry, &mut out).unwrap();
+    }
+
+    let key = packages::import_local_scheme(&fixture.core, &unpacked, "冰雪拼音", None).unwrap();
+    let schemas = keytao_app_core::package_schemas::package_schemas(&fixture.core, &key).unwrap();
+    assert!(schemas.len() > 3, "expected > 3 schemas, got {}", schemas.len());
+
+    keytao_app_core::package_schemas::set_package_schemas(
+        &fixture.core,
+        &key,
+        &["snow_flyjd".into(), "snow_jiandao".into()],
+    )
+    .unwrap();
+    fixture.activate(&key).await;
+
+    let rt_dir = fixture.runtime_dir(&key);
+    assert!(rt_dir.join("snow_flyjd.schema.yaml").is_file());
+    assert!(rt_dir.join("snow_jiandao.schema.yaml").is_file());
+    assert!(rt_dir.join("snow_bihua.dict.yaml").is_file());
+    assert!(rt_dir.join("frost_dicts/cn_dicts/ext.dict.yaml").is_file());
+    assert!(rt_dir.join("lua").is_dir());
+    assert!(rt_dir.join("default.yaml").is_file());
+    assert!(rt_dir.join("default.custom.yaml").is_file());
+    assert!(rt_dir.join("snow_flyjd_ss.txt").is_file());
+    assert!(rt_dir.join("snow_jiandao_ss.txt").is_file());
+    assert!(rt_dir.join("snow_flyjd.fixed.txt").is_file());
+    assert!(rt_dir.join("snow_jiandao.fixed.txt").is_file());
+    assert!(
+        fixture
+            .core
+            .env()
+            .data_dir
+            .join(format!("scheme-packages/local/{key}/files/build/kMandarin17.reverse.bin"))
+            .is_file()
+    );
+
+    let runtime = fixture.runtime();
+    runtime.init_without_deploy().unwrap();
+    for schema_id in ["snow_flyjd", "snow_jiandao"] {
+        let session = runtime.create_session().unwrap();
+        session.select_schema(schema_id).unwrap();
+        for ch in ['m', 'w', 't'] {
+            session.process_key_result(ch as u32, 0).unwrap();
+        }
+        let state = session.state();
+        assert!(
+            !state.candidates.is_empty(),
+            "expected candidates for mwt in {schema_id}"
+        );
+        assert_eq!(state.candidates[0].text, "没问题", "schema={schema_id}");
+        assert_eq!(
+            state.candidates[0].comment.as_deref(),
+            Some("aoo 没问题'"),
+            "schema={schema_id}, candidates={:?}",
+            state.candidates
+        );
+        if schema_id == "snow_flyjd" {
+            assert_eq!(state.candidates[1].text, "莫扎特", "schema={schema_id}");
+            assert_eq!(
+                state.candidates[1].comment.as_deref(),
+                Some("iiu"),
+                "schema={schema_id}"
+            );
+        }
+    }
+}

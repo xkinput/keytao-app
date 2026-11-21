@@ -591,6 +591,32 @@ fn unique_migration_dir(root: &Path, prefix: &str) -> Result<PathBuf, String> {
 }
 
 fn strip_ephemeral_runtime_artifacts(dir: &Path) {
+    #[derive(serde::Deserialize)]
+    struct RuntimeManifest {
+        #[serde(default)]
+        owned: BTreeMap<String, String>,
+        #[serde(default)]
+        generated: BTreeMap<String, String>,
+        #[serde(default)]
+        user_owned: BTreeMap<String, String>,
+    }
+
+    let manifest_path = dir.join(keytao_core::RuntimeDirs::MANIFEST_FILE);
+    if let Ok(bytes) = fs::read(&manifest_path)
+        && let Ok(manifest) = serde_json::from_slice::<RuntimeManifest>(&bytes)
+    {
+        for (relative, expected) in manifest.owned.into_iter().chain(manifest.generated) {
+            if manifest.user_owned.contains_key(&relative) {
+                continue;
+            }
+            if let Ok(path) = safe_path(dir, &relative)
+                && let Ok(file) = fs::File::open(&path)
+                && sha256_reader(file).is_ok_and(|actual| actual == expected)
+            {
+                let _ = crate::package_fs::remove_file(&path);
+            }
+        }
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -600,8 +626,11 @@ fn strip_ephemeral_runtime_artifacts(dir: &Path) {
         let path = entry.path();
         if name_str == "build"
             || name_str == ".keytao-materialize.lock"
+            || name_str == keytao_core::RuntimeDirs::MANIFEST_FILE
+            || name_str == ".keytao-runtime.pending.json"
             || name_str == ".keytao-runtime-manifest.json"
             || name_str == ".keytao-runtime-pending.json"
+            || name_str.starts_with(".keytao-inputs-")
             || name_str.starts_with(".keytao-staged-inputs-")
             || name_str.starts_with(".keytao-materialize-")
         {
@@ -610,6 +639,8 @@ fn strip_ephemeral_runtime_artifacts(dir: &Path) {
             } else {
                 let _ = crate::package_fs::remove_file(&path);
             }
+        } else if path.is_dir() && !dir_has_any_file(&path) {
+            let _ = crate::package_fs::remove_dir_all(&path);
         }
     }
 }

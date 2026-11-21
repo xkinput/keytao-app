@@ -383,7 +383,9 @@ fn deploy_package(
     walk_files(user, false, &mut |relative, path| {
         let copy = stage.0.join(relative);
         fs::create_dir_all(copy.parent().unwrap())?;
-        fs::copy(path, copy)?;
+        if fs::hard_link(path, &copy).is_err() {
+            fs::copy(path, copy)?;
+        }
         Ok(())
     })
     .map_err(|error| format!("stage deployment inputs: {error}"))?;
@@ -393,7 +395,7 @@ fn deploy_package(
         ..dirs.clone()
     };
     for edit in &edits {
-        edit.write(&stage.0, edit.next.as_deref())?;
+        edit.apply_staged(&stage.0)?;
     }
     let inputs = if edits.is_empty() {
         live_inputs
@@ -409,7 +411,7 @@ fn deploy_package(
         return Err("package inputs changed during deployment".into());
     }
     for edit in &edits {
-        if optional_file(&edit_path(user, &edit.relative)?)? != edit.previous {
+        if optional_file_sha256(&edit_path(user, &edit.relative)?)? != edit.previous_sha256 {
             return Err(format!(
                 "package input changed during deployment: {}",
                 edit.relative.display()
@@ -419,7 +421,7 @@ fn deploy_package(
     let mut applied = 0;
     let publish: Result<_, String> = (|| {
         for edit in &edits {
-            edit.write(user, edit.next.as_deref())?;
+            edit.apply_staged(user)?;
             applied += 1;
         }
         if !skip {
@@ -437,7 +439,7 @@ fn deploy_package(
     })();
     if let Err(mut failure) = publish {
         for edit in edits[..applied].iter().rev() {
-            if let Err(error) = edit.write(user, edit.previous.as_deref()) {
+            if let Err(error) = edit.write_bytes(user, edit.previous.as_deref()) {
                 failure.push_str(&format!(
                     "; restoring package input {}: {error}",
                     edit.relative.display()
@@ -451,12 +453,25 @@ fn deploy_package(
 
 struct InputEdit {
     relative: PathBuf,
+    previous_sha256: Option<String>,
     previous: Option<Vec<u8>>,
-    next: Option<Vec<u8>>,
+    staged_source: Option<PathBuf>,
 }
 
 impl InputEdit {
-    fn write(&self, root: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
+    fn apply_staged(&self, root: &Path) -> Result<(), String> {
+        let path = edit_path(root, &self.relative)?;
+        let result = if let Some(source) = &self.staged_source {
+            link_or_copy_atomic(source, &path)
+        } else if path.exists() {
+            fs::remove_file(&path)
+        } else {
+            Ok(())
+        };
+        result.map_err(|error| format!("write package input {}: {error}", path.display()))
+    }
+
+    fn write_bytes(&self, root: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
         let path = edit_path(root, &self.relative)?;
         let result = if let Some(bytes) = bytes {
             fs::create_dir_all(path.parent().unwrap())
@@ -467,6 +482,46 @@ impl InputEdit {
             Ok(())
         };
         result.map_err(|error| format!("write package input {}: {error}", path.display()))
+    }
+}
+
+fn link_or_copy_atomic(source: &Path, destination: &Path) -> io::Result<()> {
+    let parent = destination.parent().unwrap();
+    fs::create_dir_all(parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = parent.join(format!(
+        ".keytao-link-{}-{nonce}",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&temp);
+    if fs::hard_link(source, &temp).is_ok() {
+        if let Err(error) = fs::rename(&temp, destination) {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    let bytes = fs::read(source)?;
+    crate::write_file_atomic(destination, &bytes)
+}
+
+fn optional_file_sha256(path: &Path) -> Result<Option<String>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => file_hash(path)
+            .map(|bytes| {
+                let mut hex = String::with_capacity(64);
+                for byte in bytes {
+                    use std::fmt::Write;
+                    let _ = write!(&mut hex, "{byte:02x}");
+                }
+                Some(hex)
+            })
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        _ => Err(format!("invalid package input: {}", path.display())),
     }
 }
 
@@ -500,30 +555,33 @@ fn read_input_edits(runtime: &Path, name: &str) -> Result<Vec<InputEdit>, String
     let mut edits: Vec<_> = plan
         .into_iter()
         .map(|(relative, edit)| {
-            let previous = optional_file(&edit_path(runtime, &relative)?)?;
-            if previous
-                .as_ref()
-                .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
-                != edit.previous_sha256
-            {
+            let existing_path = edit_path(runtime, &relative)?;
+            let actual_sha256 = optional_file_sha256(&existing_path)?;
+            if actual_sha256 != edit.previous_sha256 {
                 return Err(format!(
                     "package input changed before deployment: {}",
                     relative.display()
                 ));
             }
-            let next = if edit.replace {
-                Some(
-                    optional_file(&edit_path(&stage, &relative)?)?.ok_or_else(|| {
-                        format!("missing staged package input: {}", relative.display())
-                    })?,
-                )
+            let previous = if actual_sha256.is_some() {
+                optional_file(&existing_path)?
+            } else {
+                None
+            };
+            let staged_source = if edit.replace {
+                let staged = edit_path(&stage, &relative)?;
+                if !fs::symlink_metadata(&staged).is_ok_and(|meta| meta.is_file()) {
+                    return Err(format!("missing staged package input: {}", relative.display()));
+                }
+                Some(staged)
             } else {
                 None
             };
             Ok(InputEdit {
                 relative,
+                previous_sha256: edit.previous_sha256,
                 previous,
-                next,
+                staged_source,
             })
         })
         .collect::<Result<_, String>>()?;
@@ -834,16 +892,7 @@ fn walk_files(
             let kind = entry.file_type()?;
             if kind.is_dir() {
                 visit(root, &path, shared, action)?;
-            } else if shared
-                || matches!(
-                    relative
-                        .extension()
-                        .and_then(|extension| extension.to_str()),
-                    Some("yaml" | "lua" | "txt" | "bin" | "ocd2" | "gram")
-                )
-                || relative.starts_with("opencc")
-                || relative.starts_with("lua")
-            {
+            } else {
                 if !kind.is_file() {
                     return Err(io::Error::other(format!(
                         "unsafe deployment input: {}",

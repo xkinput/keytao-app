@@ -88,7 +88,7 @@ pub async fn manage_rime_mint(
     installed: bool,
     host: &impl SchemeHost,
 ) -> Result<Status, CoreError> {
-    MINT.manage(core, installed, host, |receipt| async move {
+    MINT.manage_interactive(core, installed, host, |receipt| async move {
         let core = core.clone();
         MINT.install_receipt(receipt, latest_package(), move |percent, message| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {

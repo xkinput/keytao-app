@@ -137,9 +137,17 @@ object AndroidKeyMapper {
         modifiers: Int,
         panelVisible: Boolean,
         hasCandidates: Boolean,
+        isPackageSwitcher: Boolean = false,
     ): Int {
         if (!panelVisible || !hasCandidates || modifiers and RIME_MOD_LOCK.inv() != 0) {
             return keyCode
+        }
+        if (isPackageSwitcher) {
+            return when (keyCode) {
+                XK_UP, XK_LEFT -> PREVIOUS_CANDIDATE
+                XK_DOWN, XK_RIGHT -> NEXT_CANDIDATE
+                else -> keyCode
+            }
         }
         return when (keyCode) {
             XK_LEFT -> PREVIOUS_CANDIDATE

@@ -108,7 +108,7 @@ fn snow_preparation_lists_every_schema_yaml_for_selection() {
         "snow_jiandao_jianpin",
         "snow_jiandao_chaifen",
         "snow_sanpin",
-        "snow_radical_pinyin",
+        "radical_pinyin",
         "snow_bushou",
         "snow_lingpin",
         "snow_qingyun",
@@ -127,10 +127,8 @@ fn snow_preparation_lists_every_schema_yaml_for_selection() {
 fn fixture(kind: Package, work: &Path) -> PathBuf {
     let mut entries = BTreeMap::new();
     for name in kind.addon().required {
-        let source = match kind {
-            Package::Snow => name
-                .replace("snow_radical_pinyin", "radical_pinyin")
-                .replace("snow_pinyin.user_pack", "snow_pinyin.user"),
+        let source: String = match kind {
+            Package::Snow => (*name).into(),
             Package::Lssp if *name == "triple_pinyin_lssp-LICENSE.txt" => "LICENSE".into(),
             Package::Lssp if name.starts_with("lssp_") || name.starts_with("lssp-") => continue,
             Package::Lssp => (*name).into(),
@@ -154,6 +152,37 @@ fn fixture(kind: Package, work: &Path) -> PathBuf {
     );
     let prefix = match kind {
         Package::Snow => {
+            for stem in [
+                "snow_pinyin",
+                "snow_bihua",
+                "snow_jiandao_bihua",
+                "snow_jiandao_jianpin",
+                "snow_jiandao_chaifen",
+                "snow_sanpin",
+            ] {
+                entries.insert(
+                    format!("{stem}.schema.yaml"),
+                    format!("schema:\n  schema_id: {stem}\ntranslator:\n  dictionary: snow_pinyin\n"),
+                );
+            }
+            for dict in [
+                "snow_pinyin",
+                "snow_pinyin.base",
+                "snow_pinyin.ext",
+                "snow_pinyin.tencent",
+                "snow_pinyin.user",
+                "snow_bihua",
+                "snow_jiandao_chaifen",
+                "radical_pinyin",
+            ] {
+                entries.insert(
+                    format!("{dict}.dict.yaml"),
+                    format!("---\nname: {dict}\n...\n字\tzi4\t1\n"),
+                );
+            }
+            entries.insert("lua/snow/snow.lua".into(), "return {}".into());
+            entries.insert("lua/snow/radical_jiandao.txt".into(), "fixture".into());
+            entries.insert("snow_jiandao.fixed.txt".into(), "字\tj\n".into());
             entries.insert("radical_pinyin.schema.yaml".into(), "schema:\n  schema_id: radical_pinyin\n  description: https://github.com/mirtlecn/rime_radical_pinyin\ntranslator:\n  dictionary: radical_pinyin\n".into());
             entries.insert("snow_jiandao.schema.yaml".into(), "schema:\n  schema_id: snow_jiandao\n  dependencies: [snow_pinyin, radical_pinyin]\nengine:\n  filters: [lua_filter@*snow.snow]\ntranslator:\n  dictionary: snow_pinyin\nradical:\n  dictionary: radical_pinyin\n  prism: radical_pinyin\n".into());
             entries.insert("snow_sipin.schema.yaml".into(), "schema:\n  schema_id: snow_sipin\n  name: 冰雪四拼\ntranslator:\n  dictionary: snow_pinyin\n".into());
@@ -161,10 +190,7 @@ fn fixture(kind: Package, work: &Path) -> PathBuf {
                 "snow_sanpin.fixed.txt".into(),
                 "字\tsan\n".into(),
             );
-            entries.insert(
-                "unrelated_layout.schema.yaml".into(),
-                "omit non-snow layouts".into(),
-            );
+            entries.insert("squirrel.yaml".into(), "never install host config".into());
             ""
         }
         Package::Lssp => {
@@ -253,20 +279,18 @@ fn packages_are_isolated_and_uninstall_preserves_customizations_and_learning() {
     let _serial = wanxiang::TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let root = tempfile::tempdir().unwrap();
-    let preserved = [
-        "radical_pinyin.dict.yaml",
-        "snow_pinyin.user.dict.yaml",
-        "stroke.dict.yaml",
-        "wanxiang-dicts/zi.dict.yaml",
-        "lua/limited.lua",
-    ];
-    for name in preserved {
-        let path = root.path().join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "another package").unwrap();
-    }
     for kind in [Package::Snow, Package::Lssp] {
+        let root = tempfile::tempdir().unwrap();
+        let preserved = [
+            "stroke.dict.yaml",
+            "wanxiang-dicts/zi.dict.yaml",
+            "lua/limited.lua",
+        ];
+        for name in preserved {
+            let path = root.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "another package").unwrap();
+        }
         stage(kind, InstallReceipt::new(root.path()).unwrap(), "first")
             .finish()
             .unwrap();
@@ -279,7 +303,7 @@ fn packages_are_isolated_and_uninstall_preserves_customizations_and_learning() {
         for omitted in [
             "default.custom.yaml",
             "grammar.custom.yaml",
-            "unrelated_layout.schema.yaml",
+            "squirrel.yaml",
             "triple_pinyin_lsspaeo.schema.yaml",
             "lua/unrelated.lua",
         ] {
@@ -288,8 +312,18 @@ fn packages_are_isolated_and_uninstall_preserves_customizations_and_learning() {
         if matches!(kind, Package::Snow) {
             assert!(root.path().join("snow_sipin.schema.yaml").is_file());
             assert!(root.path().join("snow_sanpin.fixed.txt").is_file());
-        }
-        if matches!(kind, Package::Lssp) {
+            assert!(root.path().join("snow_pinyin.user.dict.yaml").is_file());
+            let schema = fs::read_to_string(root.path().join("snow_jiandao.schema.yaml")).unwrap();
+            assert!(
+                schema.contains("dictionary: radical_pinyin")
+                    && schema.contains("prism: radical_pinyin")
+            );
+            assert!(
+                fs::read_to_string(root.path().join("radical_pinyin.schema.yaml"))
+                    .unwrap()
+                    .contains("https://github.com/mirtlecn/rime_radical_pinyin")
+            );
+        } else {
             let schema =
                 fs::read_to_string(root.path().join("triple_pinyin_lssp.schema.yaml")).unwrap();
             assert!(schema.contains("lua_processor@*lssp.limited"));
@@ -321,17 +355,6 @@ fn packages_are_isolated_and_uninstall_preserves_customizations_and_learning() {
                     .unwrap()
                     .contains("/lssp_stroke.dict.yaml")
             );
-        } else {
-            let schema = fs::read_to_string(root.path().join("snow_jiandao.schema.yaml")).unwrap();
-            assert!(
-                schema.contains("dictionary: snow_radical_pinyin")
-                    && schema.contains("prism: snow_radical_pinyin")
-            );
-            assert!(
-                fs::read_to_string(root.path().join("snow_radical_pinyin.schema.yaml"))
-                    .unwrap()
-                    .contains("https://github.com/mirtlecn/rime_radical_pinyin")
-            );
         }
         addon.uninstall(root.path()).unwrap().finish().unwrap();
         assert!(!addon.status_at(root.path()).installed);
@@ -340,12 +363,12 @@ fn packages_are_isolated_and_uninstall_preserves_customizations_and_learning() {
             "private settings"
         );
         assert!(root.path().join(learned).is_dir());
-    }
-    for name in preserved {
-        assert_eq!(
-            fs::read_to_string(root.path().join(name)).unwrap(),
-            "another package"
-        );
+        for name in preserved {
+            assert_eq!(
+                fs::read_to_string(root.path().join(name)).unwrap(),
+                "another package"
+            );
+        }
     }
 }
 

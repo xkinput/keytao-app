@@ -1,7 +1,11 @@
 use super::*;
-use crate::{addon::write_schema_list_transaction, wanxiang::InstallReceipt};
+use crate::{
+    addon::write_schema_list_transaction,
+    wanxiang::{self, InstallReceipt},
+};
 use std::{
     collections::BTreeMap,
+    fs,
     io::{Cursor, Write},
     path::PathBuf,
     sync::MutexGuard,
@@ -44,60 +48,59 @@ fn package(kind: Package, version: &str) -> RemotePackage {
 fn archive_at(kind: Package, path: &Path, extra: &[(&str, &str)]) {
     let id = kind.addon().id;
     let mut entries = BTreeMap::<String, String>::new();
-    for name in kind.addon().required {
-        let source = if name == &format!("{id}-LICENSE.txt") {
-            "LICENSE".into()
-        } else if let Some(table) = name.strip_prefix(&format!("{id}-dicts/")) {
-            match kind {
-                Package::Mint => format!("dicts/{table}"),
-                Package::Frost => table.into(),
-            }
-        } else if let Some(module) = name.strip_prefix(&format!("lua/{id}/")) {
-            format!("lua/{module}")
-        } else if let Some(file) = name.strip_prefix(&format!("opencc/{id}_")) {
-            format!("opencc/{file}")
-        } else if name.starts_with(&format!("{id}_")) && !name.starts_with("rime_frost_aux.") {
-            name.strip_prefix(&format!("{id}_")).unwrap().into()
-        } else {
-            (*name).into()
-        };
-        let content = if let Some(stem) = source.strip_suffix(".schema.yaml") {
-            format!("schema:\n  schema_id: {stem}\ntranslator:\n  dictionary: {stem}\n")
-        } else if let Some(stem) = source.strip_suffix(".dict.yaml") {
-            format!("---\nname: {stem}\n...\nfixture\tfix\t1\n")
-        } else if source.ends_with(".json") {
-            let file = source
-                .trim_start_matches("opencc/")
-                .replace(".json", ".txt");
-            format!("{{\"dict\":{{\"file\":\"{file}\"}}}}")
-        } else {
-            "fixture data".into()
-        };
-        entries.insert(source, content);
+    for stem in [id, "melt_eng", "radical_pinyin"] {
+        entries.insert(
+            format!("{stem}.schema.yaml"),
+            format!("schema:\n  schema_id: {stem}\ntranslator:\n  dictionary: {stem}\n"),
+        );
+        entries.insert(
+            format!("{stem}.dict.yaml"),
+            format!("---\nname: {stem}\n...\nfixture\tfix\t1\n"),
+        );
     }
+    entries.insert("LICENSE".into(), "GPL-3.0-only fixture".into());
+    entries.insert("opencc/emoji.txt".into(), "fixture".into());
+    entries.insert("opencc/others.txt".into(), "fixture".into());
     let tables: &[(&str, &str)] = match kind {
         Package::Mint => &[
+            ("wubi98_mint.schema.yaml", "schema:\n  schema_id: wubi98_mint\n"),
+            ("wubi98_mint.dict.yaml", "---\nname: wubi98_mint\nimport_tables:\n  - dicts/wubi98_base\n...\n"),
+            ("stroke.schema.yaml", "schema:\n  schema_id: stroke\n  dependencies: [luna_pinyin]\ntranslator:\n  dictionary: stroke\n"),
+            ("stroke.dict.yaml", "---\nname: stroke\n...\n"),
+            ("symbols.yaml", "symbols: {}\n"),
+            ("opencc/spoken.txt", "fixture"),
             ("dicts/rime_mint.base.dict.yaml", "base"),
             ("dicts/rime_ice.en.dict.yaml", "english"),
+            ("dicts/rime_ice.cn_en.txt", "fixture"),
             ("dicts/wubi98_base.dict.yaml", "wubi"),
-            ("dicts/wubi86_core.dict.yaml", "omit"),
+            ("dicts/wubi86_core.dict.yaml", "wubi86"),
         ],
         Package::Frost => &[
+            ("rime_frost_aux.schema.yaml", "schema:\n  schema_id: rime_frost_aux\n"),
+            ("rime_frost_aux.dict.yaml", "---\nname: rime_frost_aux\n...\n"),
+            ("symbols_v.yaml", "symbols: {}\n"),
+            ("zh-moqi.gram", "grammar"),
+            ("lua/aux_code/moqi_aux_code.txt", "aux"),
             ("cn_dicts/base.dict.yaml", "base"),
-            ("cn_dicts/41448.dict.yaml", "omit"),
-            ("cn_dicts/tencent.dict.yaml", "omit"),
-            ("cn_dicts_cell/cell.dict.yaml", "omit"),
+            ("cn_dicts/corrections.dict.yaml", "corrections"),
+            ("cn_dicts/41448.dict.yaml", "41448"),
+            ("cn_dicts/tencent.dict.yaml", "tencent"),
+            ("cn_dicts_cell/cell.dict.yaml", "cell"),
             ("en_dicts/en.dict.yaml", "english"),
-            ("en_dicts/cn_en_flypy.txt", "omit"),
+            ("en_dicts/cn_en.txt", "cn_en"),
         ],
     };
     for (name, content) in tables {
         entries.insert((*name).into(), (*content).into());
     }
-    entries.insert(format!("{id}.dict.yaml"), match kind {
-        Package::Mint => "---\nname: rime_mint\nimport_tables:\n  - dicts/rime_mint.base\n...\n",
-        Package::Frost => "---\nname: rime_frost\nimport_tables:\n  - cn_dicts/base\n  - cn_dicts/41448\n  - cn_dicts/tencent\n  - cn_dicts_cell/cell\n...\n",
-    }.into());
+    entries.insert(
+        format!("{id}.dict.yaml"),
+        match kind {
+            Package::Mint => "---\nname: rime_mint\nimport_tables:\n  - dicts/rime_mint.base\n...\n",
+            Package::Frost => "---\nname: rime_frost\nimport_tables:\n  - cn_dicts/base\n  - cn_dicts/41448\n  - cn_dicts/tencent\n  - cn_dicts_cell/cell\n...\n",
+        }
+        .into(),
+    );
     entries.insert(
         "melt_eng.dict.yaml".into(),
         match kind {
@@ -106,13 +109,6 @@ fn archive_at(kind: Package, path: &Path, extra: &[(&str, &str)]) {
         }
         .into(),
     );
-    if matches!(kind, Package::Mint) {
-        entries.insert(
-            "wubi98_mint.dict.yaml".into(),
-            "---\nname: wubi98_mint\nimport_tables:\n  - dicts/wubi98_base\n...\n".into(),
-        );
-        entries.insert("stroke.schema.yaml".into(), "schema:\n  schema_id: stroke\n  dependencies: [luna_pinyin]\ntranslator:\n  dictionary: stroke\n".into());
-    }
     let mut schema = format!(
         "schema:\n  schema_id: {id}\n  dependencies:\n    - melt_eng\n    - radical_pinyin\n"
     );
@@ -134,10 +130,10 @@ fn archive_at(kind: Package, path: &Path, extra: &[(&str, &str)]) {
         Package::Frost => "  __include: default:/punctuator/half_shape\n  symbols:\n    __include: symbols_v:/symbols\ngrammar:\n  language: zh-moqi\n",
     });
     entries.insert(format!("{id}.schema.yaml"), schema);
-    for module in kind.lua() {
+    for module in ["select_character", "reduce_english_filter", "corrector", "aux_lookup_filter"] {
         entries.insert(
             format!("lua/{module}.lua"),
-            match *module {
+            match module {
                 "corrector" => "return '/cn_dicts/corrections.dict.yaml'".into(),
                 "aux_lookup_filter" => "return '/lua/aux_code/moqi_aux_code.txt'".into(),
                 _ => "return {}".into(),
@@ -154,17 +150,9 @@ fn archive_at(kind: Package, path: &Path, extra: &[(&str, &str)]) {
         }
         .into(),
     );
-    entries.insert("default.yaml".into(), "never install host config".into());
+    entries.insert("default.yaml".into(), "schema_list:\n  - schema: rime_mint\n".into());
     entries.insert("squirrel.yaml".into(), "never install host config".into());
-    entries.insert("lua/log.lua".into(), "never install debugging".into());
-    entries.insert(
-        "lua/cold_word_drop/drop_words.lua".into(),
-        "never install optional modules".into(),
-    );
-    entries.insert(
-        "opencc/s2t.json".into(),
-        "use vendored standard OpenCC".into(),
-    );
+    entries.insert("weasel.yaml".into(), "never install host config".into());
     for (name, content) in extra {
         entries.insert((*name).into(), (*content).into());
     }
@@ -268,24 +256,9 @@ fn mint_branch_archive_must_match_the_advertised_commit() {
 }
 
 #[test]
-fn both_packages_namespace_every_dependency_and_coexist_with_rime_ice() {
-    let root = TestRoot::new();
-    let preserved = [
-        "melt_eng.schema.yaml",
-        "radical_pinyin.dict.yaml",
-        "stroke.dict.yaml",
-        "symbols.yaml",
-        "opencc/emoji.json",
-        "opencc/rime_ice_emoji.json",
-        "lua/rime_ice/select_character.lua",
-        "rime_ice-dicts/cn_dicts/base.dict.yaml",
-    ];
-    for name in preserved {
-        let path = root.path().join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "other installed scheme").unwrap();
-    }
+fn both_packages_preserve_generic_rime_layout_in_isolated_roots() {
     for kind in [Package::Mint, Package::Frost] {
+        let root = TestRoot::new();
         stage(kind, root.path(), "first").finish().unwrap();
         let addon = kind.addon();
         assert!(addon.status_at(root.path()).installed);
@@ -293,74 +266,48 @@ fn both_packages_namespace_every_dependency_and_coexist_with_rime_ice() {
             fs::read_to_string(root.path().join(format!("{}.schema.yaml", addon.id))).unwrap();
         for expected in [
             format!("schema_id: {}", addon.id),
-            format!("dictionary: {}_melt_eng", addon.id),
-            format!("- {}_radical_pinyin", addon.id),
-            format!(
-                "lua_processor@*{}/select_character@select_character",
-                addon.id
-            ),
-            format!(
-                "lua_filter@*{}/reduce_english_filter@reduce_english_filter",
-                addon.id
-            ),
-            format!("opencc_config: {}_emoji.json", addon.id),
+            "dictionary: melt_eng".into(),
+            "- radical_pinyin".into(),
+            "lua_processor@*select_character".into(),
+            "lua_filter@*reduce_english_filter".into(),
+            "opencc_config: emoji.json".into(),
         ] {
             assert!(schema.contains(&expected), "missing {expected}: {schema}");
         }
-        for name in [
-            "default.yaml",
-            "squirrel.yaml",
-            "lua/log.lua",
-            "opencc/s2t.json",
-        ] {
+        for name in ["default.yaml", "squirrel.yaml", "weasel.yaml"] {
             assert!(!root.path().join(name).exists(), "{name}");
         }
-        let dictionary =
-            fs::read_to_string(root.path().join(format!("{}.dict.yaml", addon.id))).unwrap();
-        assert!(
-            !dictionary.contains("cn_dicts_cell")
-                && !dictionary.contains("41448")
-                && !dictionary.contains("tencent")
-        );
         assert!(
             fs::read_to_string(root.path().join(format!("{}-NOTICE.txt", addon.id)))
                 .unwrap()
                 .contains("GPL-3.0-only")
         );
+        if matches!(kind, Package::Mint) {
+            assert!(schema.contains("import_preset: symbols"));
+            assert!(schema.contains("dictionary: stroke"));
+            assert!(root.path().join("dicts/rime_mint.base.dict.yaml").is_file());
+            assert!(
+                fs::read_to_string(root.path().join("opencc/emoji.json"))
+                    .unwrap()
+                    .contains("spoken.txt")
+            );
+        } else {
+            assert!(schema.contains("symbols_v:/symbols") && schema.contains("custom_phrase"));
+            assert!(root.path().join("zh-moqi.gram").is_file());
+            assert!(
+                fs::read_to_string(root.path().join("lua/corrector.lua"))
+                    .unwrap()
+                    .contains("/cn_dicts/corrections.dict.yaml")
+            );
+            assert!(
+                fs::read_to_string(root.path().join("lua/aux_lookup_filter.lua"))
+                    .unwrap()
+                    .contains("/lua/aux_code/moqi_aux_code.txt")
+            );
+        }
+        addon.uninstall(root.path()).unwrap().finish().unwrap();
+        assert!(!addon.status_at(root.path()).installed);
     }
-    let mint = fs::read_to_string(root.path().join("rime_mint.schema.yaml")).unwrap();
-    assert!(mint.contains("import_preset: rime_mint_symbols"));
-    assert!(mint.contains("dictionary: rime_mint_stroke"));
-    let stroke = fs::read_to_string(root.path().join("rime_mint_stroke.schema.yaml")).unwrap();
-    assert!(!stroke.contains("luna_pinyin"));
-    assert!(
-        fs::read_to_string(root.path().join("opencc/rime_mint_emoji.json"))
-            .unwrap()
-            .contains("rime_mint_spoken.txt")
-    );
-    let frost = fs::read_to_string(root.path().join("rime_frost.schema.yaml")).unwrap();
-    assert!(
-        frost.contains("rime_frost_symbols_v:/symbols")
-            && frost.contains("rime_frost_custom_phrase")
-    );
-    assert!(
-        fs::read_to_string(root.path().join("lua/rime_frost/corrector.lua"))
-            .unwrap()
-            .contains("/rime_frost-dicts/cn_dicts/corrections.dict.yaml")
-    );
-    assert!(
-        fs::read_to_string(root.path().join("lua/rime_frost/aux_lookup_filter.lua"))
-            .unwrap()
-            .contains("/lua/rime_frost/aux_code/moqi_aux_code.txt")
-    );
-    for name in preserved {
-        assert_eq!(
-            fs::read_to_string(root.path().join(name)).unwrap(),
-            "other installed scheme"
-        );
-    }
-    MINT.uninstall(root.path()).unwrap().finish().unwrap();
-    assert!(FROST.status_at(root.path()).installed);
 }
 
 #[test]
@@ -476,10 +423,53 @@ fn unowned_source_conflicts_leave_every_existing_file_untouched() {
         assert!(
             !root
                 .path()
-                .join(format!("{}-LICENSE.txt", kind.addon().id))
+                .join(format!("{}-NOTICE.txt", kind.addon().id))
                 .exists()
         );
     }
+}
+
+fn stage_deployable(kind: Package, mut receipt: InstallReceipt, version: &str) -> InstallReceipt {
+    let addon = kind.addon();
+    let names = [
+        format!("{}.schema.yaml", addon.id),
+        format!("{}.dict.yaml", addon.id),
+        "melt_eng.schema.yaml".into(),
+        "melt_eng.dict.yaml".into(),
+        "radical_pinyin.schema.yaml".into(),
+        "radical_pinyin.dict.yaml".into(),
+        "stroke.schema.yaml".into(),
+        "stroke.dict.yaml".into(),
+    ];
+    let files = names
+        .iter()
+        .map(|name| {
+            let content = if let Some(id) = name.strip_suffix(".schema.yaml") {
+                format!(
+                    "schema: {{schema_id: {id}, name: Fixture {version}}}\n\
+                     engine: {{translators: [table_translator]}}\n\
+                     translator: {{dictionary: {id}, enable_user_dict: false}}\n"
+                )
+            } else if let Some(id) = name.strip_suffix(".dict.yaml") {
+                format!("---\nname: {id}\nversion: {version}\n...\n词\tci\n")
+            } else {
+                "fixture".into()
+            };
+            let path = receipt.work.join("files").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, content).unwrap();
+            let (sha256, size) = wanxiang::fingerprint(&path).unwrap();
+            InstalledFile {
+                path: name.clone(),
+                sha256,
+                size,
+            }
+        })
+        .collect();
+    addon
+        .commit_files(&mut receipt, files, &package(kind, version), "a".repeat(64))
+        .unwrap();
+    receipt
 }
 
 #[tokio::test]
@@ -487,40 +477,6 @@ async fn addon_only_install_update_failure_and_uninstall_use_deploy_transactions
     use crate::scheme_host::tests::AddonHost;
     use keytao_core::{ReloadStamp, RuntimeDirs};
     use std::sync::atomic::Ordering;
-
-    fn stage_deployable(kind: Package, mut receipt: InstallReceipt, version: &str) -> InstallReceipt {
-        let addon = kind.addon();
-        let files = addon
-            .required
-            .iter()
-            .map(|&name| {
-                let content = if let Some(id) = name.strip_suffix(".schema.yaml") {
-                    format!(
-                        "schema: {{schema_id: {id}, name: Fixture {version}}}\n\
-                         engine: {{translators: [table_translator]}}\n\
-                         translator: {{dictionary: {id}, enable_user_dict: false}}\n"
-                    )
-                } else if let Some(id) = name.strip_suffix(".dict.yaml") {
-                    format!("---\nname: {id}\nversion: {version}\n...\n词\tci\n")
-                } else {
-                    "fixture".into()
-                };
-                let path = receipt.work.join("files").join(name);
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(&path, content).unwrap();
-                let (sha256, size) = wanxiang::fingerprint(&path).unwrap();
-                InstalledFile {
-                    path: name.into(),
-                    sha256,
-                    size,
-                }
-            })
-            .collect();
-        addon
-            .commit_files(&mut receipt, files, &package(kind, version), "a".repeat(64))
-            .unwrap();
-        receipt
-    }
 
     for kind in [Package::Mint, Package::Frost] {
         let root = TestRoot::new();
@@ -608,25 +564,13 @@ async fn addon_only_install_update_failure_and_uninstall_use_deploy_transactions
 }
 
 #[test]
-fn missing_imports_lua_opencc_and_unsafe_archives_are_rejected() {
+fn unsafe_archives_and_expansion_limits_are_rejected() {
     for kind in [Package::Mint, Package::Frost] {
         let root = TestRoot::new();
-        let schema = format!("{}.schema.yaml", kind.addon().id);
         for (name, content) in [
             ("../escape.txt", "unsafe"),
-            ("opencc/emoji.json", r#"{"dict":{"file":"missing.txt"}}"#),
-            (
-                "melt_eng.dict.yaml",
-                "---\nname: melt_eng\nimport_tables:\n  - missing\n...\n",
-            ),
-            (
-                schema.as_str(),
-                "schema: {}\nengine:\n  filters:\n    - lua_filter@*missing_module\n",
-            ),
-            (
-                schema.as_str(),
-                "schema: {}\nemoji:\n  opencc_config: missing.json\n",
-            ),
+            ("lua/CON.lua", "unsafe"),
+            ("lua/evil.lua:stream", "unsafe"),
         ] {
             let work = tempfile::tempdir_in(root.path()).unwrap();
             let archive = work.path().join("fixture.zip");
@@ -644,11 +588,10 @@ fn missing_imports_lua_opencc_and_unsafe_archives_are_rejected() {
         let archive = root.path().join("fixture.zip");
         archive_at(kind, &archive, &[]);
         assert!(
-            wanxiang::extract_package_with_limit(
+            crate::generic_rime::extract_archive(
                 &archive,
                 &root.path().join("small"),
-                |name| kind.destination(name),
-                |name, path| kind.adapt(name, path),
+                Some(kind.addon().id),
                 1
             )
             .is_err()
@@ -720,4 +663,29 @@ fn official_mint_package_deploys_in_isolated_scratch() {
 #[ignore = "requires the official local archive and vendored librime SDK; deploy only"]
 fn official_frost_package_deploys_in_isolated_scratch() {
     official_deploy(Package::Frost);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn interactive_manage_defers_deploy_only_when_schema_count_exceeds_three() {
+    use crate::scheme_host::tests::AddonHost;
+    use std::sync::atomic::Ordering;
+
+    for kind in [Package::Mint, Package::Frost] {
+        let root = TestRoot::new();
+        let host = AddonHost::new(root.path());
+        let addon = kind.addon();
+        host.write_bundled_keytao();
+        let status = addon
+            .manage_interactive(&host.core, true, &host, |receipt| async move {
+                Ok(stage_deployable(kind, receipt, "deferred"))
+            })
+            .await
+            .unwrap();
+        let schemas = crate::package_schemas::package_schemas(&host.core, addon.id).unwrap();
+        assert!(schemas.len() > 3, "{} schemas: {}", addon.id, schemas.len());
+        assert!(status.installed);
+        assert!(!status.deployed);
+        assert_eq!(host.deploys.load(Ordering::SeqCst), 0);
+    }
 }

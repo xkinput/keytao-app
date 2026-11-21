@@ -21,6 +21,7 @@ struct KeyTaoPanelNavigation: Decodable {
 struct KeyTaoPanelModel: Decodable {
     var preedit: String?
     var preeditCaretRange: NSRange? = nil
+    var isPackageSwitcher: Bool = false
     var orientation: CandidatePanelOrientation
     var candidates: [KeyTaoPanelCandidate]
     var navigation: KeyTaoPanelNavigation
@@ -62,12 +63,17 @@ struct KeyTaoImeState: Decodable {
     var asciiMode: Bool
     var englishMode: Bool
     var chordComposer: Bool
+    var schemaId: String
     var accepted: Bool
     var candidatePanel: KeyTaoPanelModel
     var modeHint: KeyTaoModeHintModel
 
     var hasComposition: Bool {
         !preedit.isEmpty || !candidatePanel.candidates.isEmpty
+    }
+
+    var isPackageSwitcher: Bool {
+        schemaId == ".keytao_packages"
     }
 
     static let empty = KeyTaoImeState(
@@ -80,6 +86,7 @@ struct KeyTaoImeState: Decodable {
         asciiMode: false,
         englishMode: false,
         chordComposer: false,
+        schemaId: "",
         accepted: false,
         candidatePanel: .empty,
         modeHint: .empty
@@ -95,6 +102,7 @@ struct KeyTaoImeState: Decodable {
         case asciiMode
         case englishMode
         case chordComposer
+        case schemaId
         case accepted
         case candidatePanel
         case modeHint
@@ -115,6 +123,7 @@ struct KeyTaoImeState: Decodable {
         asciiMode = Self.decode(container, .asciiMode, empty.asciiMode)
         englishMode = Self.decode(container, .englishMode, asciiMode)
         chordComposer = Self.decode(container, .chordComposer, empty.chordComposer)
+        schemaId = Self.decode(container, .schemaId, empty.schemaId)
         accepted = Self.decode(container, .accepted, empty.accepted)
         candidatePanel = Self.decode(container, .candidatePanel, empty.candidatePanel)
         modeHint = Self.decode(container, .modeHint, empty.modeHint)
@@ -130,6 +139,7 @@ struct KeyTaoImeState: Decodable {
         asciiMode: Bool,
         englishMode: Bool,
         chordComposer: Bool,
+        schemaId: String = "",
         accepted: Bool,
         candidatePanel: KeyTaoPanelModel,
         modeHint: KeyTaoModeHintModel
@@ -143,6 +153,7 @@ struct KeyTaoImeState: Decodable {
         self.asciiMode = asciiMode
         self.englishMode = englishMode
         self.chordComposer = chordComposer
+        self.schemaId = schemaId
         self.accepted = accepted
         self.candidatePanel = candidatePanel
         self.modeHint = modeHint

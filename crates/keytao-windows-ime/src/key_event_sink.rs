@@ -2067,7 +2067,10 @@ fn apply_ime_state(
         }
         // Anchors own no text. End them before the original selection-based
         // commit/inline path, and never run the preedit range-clearing helper.
-        if embedded || committed.is_some() || !has_visible_state(&ime_state_clone) {
+        if plan.target != CompositionTarget::None
+            || committed.is_some()
+            || !has_visible_state(&ime_state_clone)
+        {
             finish_panel_anchor(ec, panel_anchor.take(), client_id, &state_arc_for_session);
         }
         panel_anchor = panel_anchor.filter(|anchor| anchor.composition().is_some());
@@ -2236,18 +2239,18 @@ fn apply_ime_state(
             &ime_state_clone,
             embedded,
         );
-        if !embedded
-            && has_visible_state(&ime_state_clone)
-            && caret.position.is_none()
+        if should_hold_panel_anchor(plan.target, &ime_state_clone, caret.position.is_some())
             && panel_anchor
                 .as_ref()
                 .and_then(PanelAnchor::composition)
                 .is_none()
             && state_arc_for_session.borrow().input_generation == input_generation
         {
-            // Some TSF/IMM hosts supply geometry only after WM_IME_STARTCOMPOSITION.
-            // A native empty range activates that protocol without writing the
-            // panel preedit into the document or moving the original selection.
+            // Some TSF/IMM hosts supply geometry only after WM_IME_STARTCOMPOSITION,
+            // and Chromium/Electron/IMM hosts also gate `isComposing` on an active
+            // TSF composition when candidate-only menus (such as F4) are open.
+            // A native empty range activates that protocol without writing into the
+            // document or moving the original selection.
             panel_anchor = match start_panel_anchor(ec, ctx) {
                 Ok(anchor) => anchor,
                 Err(error) => {
@@ -2255,7 +2258,9 @@ fn apply_ime_state(
                     None
                 }
             };
-            if state_arc_for_session.borrow().input_generation == input_generation {
+            if caret.position.is_none()
+                && state_arc_for_session.borrow().input_generation == input_generation
+            {
                 caret = probe_caret(
                     ec,
                     ctx,
@@ -2612,7 +2617,10 @@ fn plan_composition(
     hide_candidate_panel: bool,
 ) -> CompositionPlan {
     let target = if embedded {
-        if composition_text(state, hide_candidate_panel).0.is_empty() {
+        if composition_text(state, hide_candidate_panel && !state.is_package_switcher())
+            .0
+            .is_empty()
+        {
             CompositionTarget::None
         } else {
             CompositionTarget::Preedit
@@ -2624,6 +2632,16 @@ fn plan_composition(
         commit: has_commit(state),
         target,
     }
+}
+
+fn should_hold_panel_anchor(
+    target: CompositionTarget,
+    state: &ImeState,
+    has_caret: bool,
+) -> bool {
+    target == CompositionTarget::None
+        && has_visible_state(state)
+        && (state.is_package_switcher() || !has_caret)
 }
 
 fn visible_state_changed(before: &ImeState, after: &ImeState) -> bool {
@@ -2699,7 +2717,7 @@ fn process_deferred_key(
         return runtime_session(state)?.process_enter();
     }
     let theme = current_theme();
-    let panel_layout = if theme.ui.hide_candidate_panel {
+    let panel_layout = if theme.ui.hide_candidate_panel && !before.is_package_switcher() {
         key_policy::CandidatePanelLayout::Hidden
     } else {
         match theme.panel.orientation {
@@ -3517,8 +3535,9 @@ mod tests {
     use super::{
         caret_is_inside_monitor, caret_probe_extent_is_usable, composition_text, plan_composition,
         should_apply_processed_state, should_arm_caret_reprobe, should_consume_processed_state,
-        should_schedule_layout_reposition, system_caret_extent_is_usable, AdjacentChar,
-        CaretSource, CompositionPlan, CompositionTarget, ImeWriteSessionGuard,
+        should_hold_panel_anchor, should_schedule_layout_reposition,
+        system_caret_extent_is_usable, AdjacentChar, CaretSource, CompositionPlan,
+        CompositionTarget, ImeWriteSessionGuard,
     };
 
     fn empty_state() -> ImeState {
@@ -3808,6 +3827,26 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn package_switcher_holds_panel_anchor_even_with_embedded_mode_and_resolved_caret() {
+        let mut switcher = state_with_candidate("键道6");
+        switcher.schema_id = keytao_core::switcher_model::SCHEMA_ID.to_owned();
+        let plan = plan_composition(&switcher, true, true);
+        assert_eq!(plan.target, CompositionTarget::None);
+        assert!(should_hold_panel_anchor(plan.target, &switcher, true));
+        assert!(should_hold_panel_anchor(plan.target, &switcher, false));
+
+        let inline = state_with_preedit("ni");
+        let inline_plan = plan_composition(&inline, true, false);
+        assert_eq!(inline_plan.target, CompositionTarget::Preedit);
+        assert!(!should_hold_panel_anchor(inline_plan.target, &inline, false));
+        assert!(!should_hold_panel_anchor(
+            CompositionTarget::None,
+            &empty_state(),
+            false
+        ));
     }
 
     #[test]

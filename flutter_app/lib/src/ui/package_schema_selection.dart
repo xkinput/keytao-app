@@ -6,32 +6,34 @@ import '../app/strings.dart';
 import '../rust/api/types.dart';
 import 'widgets.dart';
 
-void showPackageSchemaSelection(
+Future<void> showPackageSchemaSelection(
   BuildContext context,
   AppController controller,
-  String packageKey,
-) {
-  showFDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_, _, animation) => _SchemaSelectionDialog(
-      controller: controller,
-      packageKey: packageKey,
-      animation: animation,
-    ),
-  );
-}
+  String packageKey, {
+  bool activateOnConfirm = false,
+}) => showFDialog<void>(
+  context: context,
+  barrierDismissible: false,
+  builder: (_, _, animation) => _SchemaSelectionDialog(
+    controller: controller,
+    packageKey: packageKey,
+    animation: animation,
+    activateOnConfirm: activateOnConfirm,
+  ),
+);
 
 class _SchemaSelectionDialog extends StatefulWidget {
   const _SchemaSelectionDialog({
     required this.controller,
     required this.packageKey,
     required this.animation,
+    this.activateOnConfirm = false,
   });
 
   final AppController controller;
   final String packageKey;
   final Animation<double> animation;
+  final bool activateOnConfirm;
 
   @override
   State<_SchemaSelectionDialog> createState() => _SchemaSelectionDialogState();
@@ -78,6 +80,7 @@ class _SchemaSelectionDialogState extends State<_SchemaSelectionDialog> {
           .where((schema) => _selected.contains(schema.id))
           .map((schema) => schema.id)
           .toList(),
+      activate: widget.activateOnConfirm,
     );
     if (!mounted) return;
     if (ok) {

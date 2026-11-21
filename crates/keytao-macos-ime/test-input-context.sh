@@ -14,6 +14,7 @@ fi
 $SWIFTC \
     -o "$BUILD_DIR/input-context-tests" \
     "$IME_DIR/Sources/KeyTaoIME/InputContextGeneration.swift" \
+    "$IME_DIR/Sources/KeyTaoIME/MarkedTextPolicy.swift" \
     "$IME_DIR/Tests/InputContextTests/main.swift"
 
 "$BUILD_DIR/input-context-tests"

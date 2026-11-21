@@ -437,7 +437,7 @@ impl KeyTaoHandler {
         };
         // XIM clients cannot embed preedit, so keep it visible without candidates.
         let mut preedit_only;
-        let state = if renderer.hide_candidate_panel() {
+        let state = if renderer.hide_candidate_panel() && !state.is_package_switcher() {
             preedit_only = state.clone();
             let (text, cursor) = inline_preedit(state, true);
             preedit_only.preedit = text.to_owned();

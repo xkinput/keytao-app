@@ -296,6 +296,13 @@ class FakeCore implements RustLibApi {
   }) async => profileJson;
 
   @override
+  Future<List<PackageSchemaDto>> crateApiCorePackageSchemas({
+    required String schemeKey,
+  }) async => const [
+    PackageSchemaDto(id: 'default', name: 'Default', selected: true),
+  ];
+
+  @override
   Future<String> crateApiCoreDownloadSchemeArchive({
     required String url,
   }) async {

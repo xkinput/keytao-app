@@ -54,7 +54,7 @@ pub async fn manage_rime_lssp(
     installed: bool,
     host: &impl SchemeHost,
 ) -> Result<Status, CoreError> {
-    LSSP.manage(core, installed, host, |receipt| async move {
+    LSSP.manage_interactive(core, installed, host, |receipt| async move {
         let core = core.clone();
         LSSP.install_receipt(receipt, latest_package(), move |percent, message| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {

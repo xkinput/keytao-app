@@ -218,11 +218,18 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     runtime.reload_without_deploy().unwrap();
     assert_eq!(session.current_schema().unwrap().id, "keytao_b");
 
-    use crate::key_policy::XK_F4;
+    use crate::key_policy::{
+        candidate_arrow_key, should_bypass_empty_composition, CandidatePanelLayout, XK_DOWN, XK_F4,
+        XK_RETURN, XK_UP,
+    };
     let menu = session.process_key_result(XK_F4, 0).unwrap();
     assert!(menu.accepted);
     assert_eq!(menu.state.schema_id, switcher_model::SCHEMA_ID);
+    assert!(menu.state.is_package_switcher());
     assert_eq!(menu.state.highlighted_candidate_index, 1);
+    assert!(!should_bypass_empty_composition(XK_UP, 0, &menu.state));
+    assert!(!should_bypass_empty_composition(XK_DOWN, 0, &menu.state));
+    assert!(!should_bypass_empty_composition(XK_RETURN, 0, &menu.state));
     assert!(
         session
             .peek_state()
@@ -230,7 +237,35 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
             .iter()
             .all(|c| !c.text.ends_with(" 未部署"))
     );
-    assert_eq!(session.process_enter().unwrap().state.schema_id, "keytao_b");
+    let moved_up = session
+        .process_key_result(
+            candidate_arrow_key(
+                XK_UP,
+                0,
+                &session.state(),
+                CandidatePanelLayout::Horizontal,
+            ),
+            0,
+        )
+        .unwrap();
+    assert!(moved_up.accepted);
+    assert_eq!(moved_up.state.highlighted_candidate_index, 0);
+    let moved_down = session
+        .process_key_result(
+            candidate_arrow_key(
+                XK_DOWN,
+                0,
+                &session.state(),
+                CandidatePanelLayout::Horizontal,
+            ),
+            0,
+        )
+        .unwrap();
+    assert!(moved_down.accepted);
+    assert_eq!(moved_down.state.highlighted_candidate_index, 1);
+    let closed_on_active = session.process_enter().unwrap();
+    assert!(closed_on_active.accepted);
+    assert_eq!(closed_on_active.state.schema_id, "keytao_b");
     let ctrl_grave = [(0xffe3, 0), (0x60, RIME_MOD_CONTROL)];
     for expected in [switcher_model::SCHEMA_ID, "keytao_b"] {
         let result = session.process_keys_result(&ctrl_grave).unwrap();

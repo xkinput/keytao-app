@@ -793,16 +793,27 @@ mod tests {
 
     #[test]
     fn editing_keys_are_left_to_the_application_without_a_composition() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_ESCAPE, VK_UP};
         let empty = ImeState::empty();
         for vk in [VK_BACK, VK_RETURN, VK_SPACE] {
             assert!(!should_eat_key(vk.0, false, 0));
             assert!(should_bypass_empty_composition(vk.0, 0, &empty));
         }
-        // With a composition the same keys belong to librime.
+        // With a composition (including the candidate-only F4 switcher menu,
+        // even when ascii_mode is true) navigation and Return belong to the IME.
         let composing = composing_state();
-        for vk in [VK_BACK, VK_RETURN, VK_SPACE] {
-            assert!(should_eat_key(vk.0, true, 0));
-            assert!(!should_bypass_empty_composition(vk.0, 0, &composing));
+        let mut switcher = ImeState::empty();
+        switcher.ascii_mode = true;
+        switcher.schema_id = keytao_core::switcher_model::SCHEMA_ID.to_owned();
+        switcher.candidates.push(keytao_core::Candidate {
+            text: "键道6".to_owned(),
+            comment: None,
+        });
+        for state in [&composing, &switcher] {
+            for vk in [VK_BACK, VK_RETURN, VK_SPACE, VK_UP, VK_DOWN, VK_ESCAPE, VK_1] {
+                assert!(should_eat_key(vk.0, true, 0));
+                assert!(!should_bypass_empty_composition(vk.0, 0, state));
+            }
         }
     }
 

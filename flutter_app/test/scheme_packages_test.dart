@@ -80,13 +80,17 @@ class PackageCore extends FakeCore {
     await addonDeployGate?.future;
   }
 
+  Map<String, List<PackageSchemaDto>> schemasByPackage = {};
+
   @override
   Future<List<PackageSchemaDto>> crateApiCorePackageSchemas({
     required String schemeKey,
-  }) async => const [
-    PackageSchemaDto(id: 'alpha', name: 'Alpha Name', selected: true),
-    PackageSchemaDto(id: 'beta', name: 'Beta Name', selected: false),
-  ];
+  }) async =>
+      schemasByPackage[schemeKey] ??
+      const [
+        PackageSchemaDto(id: 'alpha', name: 'Alpha Name', selected: true),
+        PackageSchemaDto(id: 'beta', name: 'Beta Name', selected: false),
+      ];
 
   @override
   Future<bool> crateApiCoreSetPackageSchemas({
@@ -853,6 +857,74 @@ void main() {
       );
       await controller.refreshSchemas();
       expect(controller.deployWarning, isNull);
+    },
+  );
+
+  test(
+    'packages with up to 3 schemas auto-deploy while >3 schemas prompt before deploying',
+    () async {
+      core.packages[1] = const InstalledPackageDto(
+        schemeKey: 'xmjd',
+        version: '20261101',
+        active: false,
+        hasPackageZip: false,
+      );
+      core.schemasByPackage['xmjd'] = const [
+        PackageSchemaDto(id: 's1', name: 'S1', selected: true),
+        PackageSchemaDto(id: 's2', name: 'S2', selected: true),
+        PackageSchemaDto(id: 's3', name: 'S3', selected: false),
+      ];
+      await controller.refreshSchemeUpdates();
+      core.calls.clear();
+
+      // Exactly 3 schemas (not > 3) deploys immediately without prompting.
+      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
+      expect(controller.hasPendingSchemaSelectionPrompt, isFalse);
+      expect(
+        core.calls,
+        containsAllInOrder(['packageDownload:xmjd', 'switch:xmjd']),
+      );
+
+      // Reset xmjd to active: false and configure 4 schemas (> 3).
+      core.packages = [
+        keytaoPackage,
+        const InstalledPackageDto(
+          schemeKey: 'xmjd',
+          version: '20261101',
+          active: false,
+          hasPackageZip: false,
+        ),
+      ];
+      core.schemasByPackage['xmjd'] = const [
+        PackageSchemaDto(id: 's1', name: 'S1', selected: true),
+        PackageSchemaDto(id: 's2', name: 'S2', selected: true),
+        PackageSchemaDto(id: 's3', name: 'S3', selected: false),
+        PackageSchemaDto(id: 's4', name: 'S4', selected: false),
+      ];
+      await controller.refreshSchemeUpdates();
+      core.calls.clear();
+
+      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
+      expect(core.calls, ['packageDownload:xmjd']);
+      expect(core.calls.any((call) => call.startsWith('switch:')), isFalse);
+      final prompt = controller.takePendingSchemaSelectionPrompt();
+      expect(prompt, (packageKey: 'xmjd', activateOnConfirm: true));
+
+      // Confirming schema selection deploys and switches to xmjd.
+      core.calls.clear();
+      expect(
+        await controller.setPackageSchemas(
+          'xmjd',
+          ['s1', 's3'],
+          activate: prompt!.activateOnConfirm,
+        ),
+        isTrue,
+      );
+      expect(
+        core.calls,
+        containsAllInOrder(['schemas:xmjd:s1,s3', 'switch:xmjd']),
+      );
+      expect(controller.activeSchemeKey, 'xmjd');
     },
   );
 }

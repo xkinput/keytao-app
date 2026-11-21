@@ -120,7 +120,7 @@ pub async fn manage_rime_frost(
     host: &impl SchemeHost,
 ) -> Result<Status, CoreError> {
     FROST
-        .manage(core, installed, host, |receipt| async move {
+        .manage_interactive(core, installed, host, |receipt| async move {
             let core = core.clone();
             FROST
                 .install_receipt(receipt, latest_package(), move |percent, message| {
