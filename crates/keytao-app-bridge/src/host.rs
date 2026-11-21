@@ -19,21 +19,21 @@ pub(crate) struct BridgeHost {
 /// A per-operation host; Core retains ownership of installation and rollback.
 pub(crate) struct InstallHost<F> {
     host: BridgeHost,
-    android_deploy: Option<F>,
+    android_deploy: F,
 }
 
 impl<F> InstallHost<F> {
     pub(crate) fn new(host: BridgeHost, android_deploy: F) -> Self {
         Self {
             host,
-            android_deploy: cfg!(target_os = "android").then_some(android_deploy),
+            android_deploy,
         }
     }
 }
 
 impl<F, Fut> SchemeHost for InstallHost<F>
 where
-    F: Fn(bool) -> Fut + Send + Sync,
+    F: Fn() -> Fut + Send + Sync,
     Fut: Future<Output = String> + Send,
 {
     fn user_root(&self) -> Result<PathBuf, String> {
@@ -41,15 +41,18 @@ where
     }
 
     async fn deploy(&self) -> Result<(), String> {
-        if let Some(deploy) = &self.android_deploy {
+        #[cfg(target_os = "android")]
+        {
             keytao_app_core::deploy::deploy_with_android_host(
                 &self.host.core,
                 &self.host.root,
-                true,
-                deploy,
+                &self.android_deploy,
             )
             .await
-        } else {
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = &self.android_deploy;
             SchemeHost::deploy(&self.host).await
         }
     }
@@ -62,7 +65,7 @@ where
             &self.host.root,
             key,
             #[cfg(target_os = "android")]
-            self.android_deploy.as_ref().ok_or("Android deploy callback missing")?,
+            &self.android_deploy,
         )
         .await
     }
@@ -75,7 +78,7 @@ where
             &self.host.root,
             key,
             #[cfg(target_os = "android")]
-            self.android_deploy.as_ref().ok_or("Android deploy callback missing")?,
+            &self.android_deploy,
         )
         .await
     }
@@ -184,45 +187,10 @@ impl BridgeHost {
                     .await
                     .map_err(|error| error.to_string());
             }
-            if keytao_core::RuntimeDirs::isolation_enabled(&self.root) {
-                let (_, shared) = self.deploy_paths();
-                return keytao_app_core::deploy::deploy_isolated_in_process(
-                    &self.core, &self.root, shared,
-                ).await;
-            }
-            keytao_app_core::deploy::record_result(&self.core, &self.root, false)
-                .map_err(|error| error.to_string())?;
-            keytao_app_core::ime_settings::prepare_candidate_page_size(&self.root)?;
-            let (user, shared) = self.deploy_paths();
-            keytao_app_core::deploy::emit_legacy_progress(
-                &self.core,
-                keytao_core::DeployStep::Compile,
-                "正在部署 librime...",
-            );
-            tokio::task::spawn_blocking(move || {
-                keytao_core::ImeRuntime::with_dirs(
-                    user.clone(),
-                    shared.to_string_lossy().into_owned(),
-                )
-                .reload()?;
-                keytao_app_core::deploy::render_user_schema_logos(&user);
-                Ok::<(), String>(())
-            })
-            .await
-            .map_err(|error| error.to_string())??;
-            self.stamp()?;
-            keytao_app_core::deploy::emit_legacy_progress(
-                &self.core,
-                keytao_core::DeployStep::Done,
-                "部署完成",
-            );
-            keytao_app_core::deploy::record_result(&self.core, &self.root, true)
-                .map_err(|error| error.to_string())?;
-            Ok(keytao_app_core::deploy::DeployResult {
-                success: true,
-                message: "部署成功".into(),
-                warning: None,
-            })
+            let (_, shared) = self.deploy_paths();
+            keytao_app_core::deploy::deploy_isolated_in_process(
+                &self.core, &self.root, shared,
+            ).await
         }
         #[cfg(not(any(
             target_os = "macos",
@@ -318,62 +286,6 @@ impl ImeHost for BridgeHost {
 mod tests {
     use super::*;
     use keytao_app_core::{AppEnv, Platform};
-
-    #[tokio::test]
-    async fn install_host_android_deploy_verifies_every_schema_artifact() {
-        let temp = tempfile::tempdir().unwrap();
-        let core = Core::new(
-            AppEnv {
-                data_dir: temp.path().join("state"),
-                cache_dir: temp.path().join("cache"),
-                resource_dir: temp.path().join("resources"),
-                app_version: "test".into(),
-                platform: Platform::Android,
-            },
-            Arc::new(crate::runtime::BridgeEvents::default()),
-        )
-        .unwrap();
-        let root = temp.path().join("user");
-        std::fs::create_dir_all(root.join("build")).unwrap();
-        for (name, content) in [
-            (
-                "default.custom.yaml",
-                "patch:\n  schema_list:\n    - schema: primary\n    - schema: easy_en\n",
-            ),
-            (
-                "build/primary.schema.yaml",
-                "schema:\n  schema_id: primary\n",
-            ),
-            (
-                "build/easy_en.schema.yaml",
-                "schema:\n  schema_id: easy_en\ntranslator:\n  dictionary: easy_en\n",
-            ),
-            ("build/easy_en.table.bin", "compiled"),
-            ("build/easy_en.reverse.bin", "compiled"),
-        ] {
-            std::fs::write(root.join(name), content).unwrap();
-        }
-        let host = BridgeHost::new(core.clone(), root.clone());
-        // Select the Android delegate on host builds without invoking an IME.
-        let failed = InstallHost {
-            host: host.clone(),
-            android_deploy: Some(|_| std::future::ready("platform deploy failed".to_string())),
-        };
-        assert_eq!(failed.deploy().await, Err("platform deploy failed".into()));
-        assert!(!core.state().last_deploy.unwrap().success);
-
-        let successful = InstallHost {
-            host,
-            android_deploy: Some(|_| std::future::ready(String::new())),
-        };
-        let error = successful.deploy().await.unwrap_err();
-        assert!(error.contains("build/easy_en.prism.bin"), "{error}");
-        assert!(!core.state().last_deploy.unwrap().success);
-
-        std::fs::write(root.join("build/easy_en.prism.bin"), "compiled").unwrap();
-        assert_eq!(successful.deploy().await, Ok(()));
-        assert!(core.state().last_deploy.unwrap().success);
-    }
 
     #[test]
     fn every_host_root_and_reload_stamp_uses_override() {

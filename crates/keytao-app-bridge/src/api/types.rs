@@ -43,8 +43,6 @@ pub struct LocalSchemaDto {
     pub schemas: Vec<String>,
     pub installed_scheme: Option<String>,
     pub installed_scheme_version: Option<String>,
-    pub runtime_isolation: Option<bool>,
-    pub runtime_migration_complete: Option<bool>,
     pub easy_english_enabled: Option<bool>,
 }
 
@@ -123,18 +121,6 @@ pub struct PackageKeptBackupDto {
 pub struct PackageOrphanReportDto {
     pub files: Vec<PackageOrphanFileDto>,
     pub kept_backups: Vec<PackageKeptBackupDto>,
-}
-
-#[derive(serde::Deserialize)]
-pub struct PackageMigrationReportDto {
-    pub version: u32,
-    pub completed: bool,
-    pub active_package: String,
-    pub runtime_package: String,
-    pub packages: Vec<String>,
-    pub user_files: Vec<String>,
-    pub legacy_user_databases: Vec<String>,
-    pub orphans: PackageOrphanReportDto,
 }
 
 #[derive(serde::Deserialize)]

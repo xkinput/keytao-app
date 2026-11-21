@@ -5,26 +5,6 @@ import org.junit.Test
 
 class RimeMergeUtilsTest {
     @Test
-    fun `add-on schema extends the staged deployment budget`() {
-        assertEquals(
-            180_000L,
-            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "keytao-dz")),
-        )
-        assertEquals(
-            300_000L,
-            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "easy_en")),
-        )
-        assertEquals(
-            300_000L,
-            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "wanxiang")),
-        )
-        assertEquals(
-            300_000L,
-            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "easy_en", "wanxiang")),
-        )
-    }
-
-    @Test
     fun `addon recognition does not claim similarly named user schemas`() {
         assertTrue(isAddonSchema("wanxiang"))
         assertTrue(isAddonSchema("easy_en"))

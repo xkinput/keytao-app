@@ -121,7 +121,7 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
     final ok = await widget.controller.trashPackageOrphans(files);
     if (!mounted) return;
     setState(() {
-      _notice = ok ? '已将 ${files.length} 个文件移到废纸篓，可从废纸篓移回原目录。' : null;
+      _notice = ok ? '已移到废纸篓（${files.length} 项）' : null;
       _error = ok ? null : widget.controller.error ?? '移动失败，请刷新后重试。';
     });
     await _load();
@@ -135,6 +135,7 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
   ]) sync* {
     for (final entry in parent.directories.entries) {
       final directory = entry.value;
+      final legacyBackups = directory.path == 'legacy-backup';
       final selected = directory.selectionState(_selected);
       final expanded = _expanded.contains(directory.path);
       yield Padding(
@@ -191,11 +192,13 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
               ),
             ),
             const SizedBox(width: 8),
-            Expanded(child: Text(entry.key)),
+            Expanded(child: Text(legacyBackups ? '旧布局备份' : entry.key)),
             const SizedBox(width: 12),
             Text(
-              '${directory.descendantFiles.length} 个文件 · '
-              '${formatLogBytes(directory.totalSize)}',
+              legacyBackups
+                  ? '${directory.descendantFiles.length} 份'
+                  : '${directory.descendantFiles.length} 个文件 · '
+                        '${formatLogBytes(directory.totalSize)}',
             ),
           ],
         ),
@@ -221,7 +224,7 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
             ),
             const SizedBox(width: 12),
             Expanded(child: Text(file.path.split('/').last)),
-            Text(formatLogBytes(file.size)),
+            if (parent.path != 'legacy-backup') Text(formatLogBytes(file.size)),
           ],
         ),
       );
@@ -254,8 +257,6 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('以下文件不属于已安装的方案或扩展。请先核对文件名，只勾选不再需要的文件；用户词库与同步数据不会列出。'),
-              const SizedBox(height: 16),
               if (_loading || _moving) const FProgress(),
               if (_error case final error?) ErrorMessage(error),
               if (_notice case final notice?) Text(notice),
@@ -264,7 +265,7 @@ class _PackageOrphanDialogState extends State<_PackageOrphanDialog> {
                 ..._treeRows(context, buildPackageOrphanTree(report.files)),
                 if (report.keptBackups.isNotEmpty) ...[
                   const SizedBox(height: 16),
-                  const Text('以下原文件的备份仍被保留，当前文件有修改，未自动还原：'),
+                  const Text('已保留的文件备份'),
                   for (final backup in report.keptBackups)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),

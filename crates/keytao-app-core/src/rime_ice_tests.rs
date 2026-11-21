@@ -6,6 +6,10 @@ use std::{
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 
+#[cfg(target_os = "macos")]
+#[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
+mod smoke_fixture;
+
 const ARCHIVE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RELEASES_ATOM_FIXTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -454,13 +458,15 @@ fn dropping_receipt_restores_schema_list_and_sources_together() {
     assert!(!root.path().join(MANIFEST).exists());
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_scheme() {
     use crate::scheme_host::tests::AddonHost;
     use std::sync::atomic::Ordering;
     let root = TestRoot::new();
     let host = AddonHost::new(root.path());
-    fs::write(root.path().join("rime.lua"), "stale main lua").unwrap();
+    smoke_fixture::write(&host.core.env().resource_dir.join("rime-data")).unwrap();
+    let runtime = root.path().join("runtime").join(SCHEMA_ID);
     let status = manage_rime_ice_with(&host.core, true, &host, |mut receipt| async move {
         let package = package("2026.06.30");
         let files = stage(&receipt, &package);
@@ -473,7 +479,7 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
     assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
     assert_eq!(
         crate::scheme_files::parse_schema_list(
-            &fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
+            &fs::read_to_string(runtime.join("default.custom.yaml")).unwrap()
         ),
         [SCHEMA_ID]
     );
@@ -481,7 +487,7 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
         keytao_core::deployed_schema_id_from_dir(root.path()).as_deref(),
         Some(SCHEMA_ID)
     );
-    assert!(!root.path().join("rime.lua").exists());
+    assert!(!root.path().join("default.custom.yaml").exists());
     assert!(!root.path().join(MANIFEST).exists());
     let status = manage_rime_ice_with(&host.core, true, &host, |mut receipt| async move {
         let package = package("2026.07.01");
@@ -492,22 +498,22 @@ async fn standalone_rime_ice_installs_deploys_and_uninstalls_without_a_main_sche
     .await
     .unwrap();
     assert_eq!(status.version, "2026.07.01");
-    fs::write(root.path().join("rime_ice.dict.yaml"), "private dictionary").unwrap();
-    fs::write(root.path().join("rime_ice.userdb"), "learned").unwrap();
+    fs::write(runtime.join("rime_ice.user.dict.yaml"), "private dictionary").unwrap();
+    fs::write(runtime.join("rime_ice.userdb"), "learned").unwrap();
     let status = manage_rime_ice(&host.core, false, &host).await.unwrap();
     assert!(!status.installed && !status.deployed);
-    assert_eq!(host.deploys.load(Ordering::SeqCst), 2);
+    assert_eq!(host.deploys.load(Ordering::SeqCst), 3);
     assert_eq!(
-        fs::read_to_string(root.path().join("rime_ice.dict.yaml")).unwrap(),
+        fs::read_to_string(runtime.join("rime_ice.user.dict.yaml")).unwrap(),
         "private dictionary"
     );
     assert_eq!(
-        fs::read_to_string(root.path().join("rime_ice.userdb")).unwrap(),
+        fs::read_to_string(runtime.join("rime_ice.userdb")).unwrap(),
         "learned"
     );
     assert!(crate::addon_store::public_files(&host.core, SCHEMA_ID).is_err());
-    assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
-    assert_eq!(keytao_core::deployed_schema_id_from_dir(root.path()), None);
+    assert!(keytao_core::ReloadStamp::path(root.path()).is_file());
+    assert_eq!(keytao_core::RuntimeDirs::active_package_key(root.path()).as_deref(), Some("builtin/keytao"));
     assert!(!root.path().join("default.yaml").exists());
 }
 

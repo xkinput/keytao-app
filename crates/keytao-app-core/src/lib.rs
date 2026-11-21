@@ -28,7 +28,6 @@ mod downloaded_addon;
 mod pinyin_addons;
 mod shape_addons;
 mod package_activation;
-mod legacy_flat;
 mod package_artifacts;
 pub mod package_orphans;
 pub mod package_migration;
@@ -96,7 +95,7 @@ pub struct Core {
     state: Mutex<AppState>,
     download_cancel: tokio::sync::watch::Sender<u64>,
     recovered_state_file: Option<PathBuf>,
-    pub(crate) pending_package: Mutex<Option<packages::PendingPackage>>,
+    pub(crate) pending_package: Mutex<()>,
     pub(crate) user_words: Mutex<user_words::UserWordsState>,
 }
 
@@ -130,7 +129,7 @@ impl Core {
             state: Mutex::new(state),
             download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file,
-            pending_package: Mutex::new(None),
+            pending_package: Mutex::new(()),
             user_words: Mutex::new(user_words::UserWordsState::default()),
         });
         package_activation::recover(&core)?;

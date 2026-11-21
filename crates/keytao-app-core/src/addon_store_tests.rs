@@ -47,11 +47,6 @@ fn isolated_addon_publication_preserves_flat_sources_and_restores_failed_update(
     let schema = "rime_ice.schema.yaml";
     let original = b"schema: {schema_id: rime_ice, name: Original}";
     let updated = b"schema: {schema_id: rime_ice, name: Updated}";
-    put(
-        &root,
-        RuntimeDirs::SETTINGS_FILE,
-        br#"{"runtime_isolation":true}"#,
-    );
     put(&root, schema, b"private flat source");
     put(&source, schema, original);
     let store = AddonStore::new(&core, &root, "rime_ice").unwrap();
@@ -101,9 +96,6 @@ fn addon_multi_schema_defaults_selection_update_and_migration() {
     assert_eq!(schemas.iter().map(|schema| (schema.id.as_str(), schema.selected)).collect::<Vec<_>>(), [("wubi98_mint", true), ("rime_mint", false)]);
     assert!(public_files(&core, "rime_mint").unwrap().iter().all(|(_, path)| path != Path::new("default.yaml")));
     crate::package_schemas::set_package_schemas(&core, "rime_mint", &["wubi98_mint".into()]).unwrap();
-    put(&root, "default.custom.yaml", b"patch: {schema_list: [{schema: keytao}, {schema: rime_mint}]}");
-    crate::package_schemas::register_addon_selection(&core, "rime_mint", &root).unwrap();
-    assert_eq!(keytao_core::parse_schema_list(&fs::read_to_string(root.join("default.custom.yaml")).unwrap()), ["keytao", "wubi98_mint"]);
     store.commit(&source, &manifest_bytes(entries)).unwrap();
     migrate(&core, &root).unwrap();
     let schemas = crate::package_schemas::package_schemas(&core, "rime_mint").unwrap();
@@ -194,32 +186,22 @@ fn invalid_wanxiang_metadata_is_isolated_and_retained_for_retry() {
             ".keytao-rime-ice.json",
             &manifest_bytes(&[("rime_ice.schema.yaml", b"official")]),
         );
-        assert_eq!(
-            ownership(&core, &root).unwrap()["rime_ice.schema.yaml"],
-            "rime_ice"
-        );
-        assert!(manifest(&core, &root, "rime_ice").unwrap().is_some());
-        assert!(manifest(&core, &root, "wanxiang").unwrap().is_none());
-        assert!(
-            report_paths(&core, &root)
-                .unwrap()
-                .contains("rime_ice.schema.yaml")
-        );
-        crate::package_orphans::report(&core, &root).unwrap();
-        migrate(&core, &root).unwrap();
+        assert!(migrate(&core, &root).is_err());
         assert_eq!(fs::read(root.join(".keytao-wanxiang.json")).unwrap(), bytes);
         assert_eq!(fs::read(root.join(GRAMMAR)).unwrap(), b"fake model");
+        assert_eq!(fs::read(root.join("rime_ice.schema.yaml")).unwrap(), b"official");
         let store = PackageStore::new(&core);
         assert!(!store.addon_path("wanxiang").exists());
-        assert!(!store.root().join("addons/.layout-v1").exists());
         put(
             &root,
             ".keytao-wanxiang.json",
             &manifest_bytes(&[("wanxiang.schema.yaml", b"official")]),
         );
         migrate(&core, &root).unwrap();
-        assert!(manifest(&core, &root, "wanxiang").unwrap().is_some());
-        assert!(store.root().join("addons/.layout-v1").is_file());
+        assert!(store.addon_path("wanxiang").is_dir());
+        assert!(store.addon_path("rime_ice").is_dir());
+        assert_eq!(ownership(&core, &root).unwrap()["rime_ice.schema.yaml"], "rime_ice");
+        assert!(read_report_paths(&core, &root).unwrap().contains("rime_ice.schema.yaml"));
         assert_eq!(fs::read(root.join(GRAMMAR)).unwrap(), b"fake model");
     }
 }
@@ -290,7 +272,7 @@ fn legacy_migration_is_idempotent_and_adopts_only_matching_sources() {
     migrate(&core, &root).unwrap();
     let addon = AddonStore::new(&core, &root, "rime_ice").unwrap();
     let before = fs::read(addon.destination.join("package.json")).unwrap();
-    assert!(!root.join(".keytao-rime-ice.json").exists());
+    assert!(root.join(".keytao-rime-ice.json").is_file());
     assert_eq!(addon.activation().unwrap().unwrap().owned.len(), 1);
     assert!(!addon.destination.join("files/rime_ice.dict.yaml").exists());
     assert_eq!(
@@ -304,7 +286,7 @@ fn legacy_migration_is_idempotent_and_adopts_only_matching_sources() {
             .contains_key("rime_ice.dict.yaml")
     );
     assert!(
-        report_paths(&core, &root)
+        read_report_paths(&core, &root)
             .unwrap()
             .contains("rime_ice.dict.yaml")
     );
@@ -357,14 +339,9 @@ fn grammar_is_owned_in_place_on_migration() {
         b"language: \"\"\n"
     );
     let manifest_before = addon.read_manifest().unwrap().unwrap();
-    put(
-        &root,
-        ".keytao-wanxiang.json",
-        &serde_json::to_vec(&value).unwrap(),
-    );
-    fs::remove_file(PackageStore::new(&core).root().join("addons/.layout-v1")).unwrap();
     migrate(&core, &root).unwrap();
     assert_eq!(addon.read_manifest().unwrap().unwrap(), manifest_before);
+    assert_eq!(fs::read(root.join(".keytao-wanxiang.json")).unwrap(), serde_json::to_vec(&value).unwrap());
 }
 
 #[test]
@@ -426,7 +403,7 @@ fn stale_legacy_grammar_does_not_block_other_packages() {
         assert!(current["grammar"].is_null(), "{scenario}");
         assert_eq!(current["includes_grammar"], false);
         assert!(manifest(&core, &root, "rime_ice").unwrap().is_some());
-        assert!(report_paths(&core, &root).unwrap().contains(GRAMMAR));
+        assert!(read_report_paths(&core, &root).unwrap().contains(GRAMMAR));
         let addon = AddonStore::new(&core, &root, "wanxiang").unwrap();
         let modified: Vec<String> = serde_json::from_slice(
             &fs::read(addon.destination.join("migration-modified.json")).unwrap(),
@@ -434,13 +411,7 @@ fn stale_legacy_grammar_does_not_block_other_packages() {
         .unwrap();
         assert_eq!(modified, [GRAMMAR]);
         assert!(!addon.destination.join("files").join(GRAMMAR).exists());
-        assert!(!root.join(".keytao-wanxiang.json").exists());
-        assert!(
-            PackageStore::new(&core)
-                .root()
-                .join("addons/.layout-v1")
-                .is_file()
-        );
+        assert_eq!(fs::read(root.join(".keytao-wanxiang.json")).unwrap(), bytes);
         crate::package_orphans::report(&core, &root).unwrap();
         let before = fs::read(addon.destination.join("activation.json")).unwrap();
         migrate(&core, &root).unwrap();
@@ -641,7 +612,7 @@ fn easy_migration_generates_public_defaults_without_adopting_private_custom() {
         official
     );
     assert!(addon.activation().unwrap().unwrap().generated.is_empty());
-    assert!(!directory.path().join("easy-en-public").exists());
+    assert_eq!(fs::read(directory.path().join("easy-en-public/old/current.txt")).unwrap(), b"old cache");
 }
 
 #[test]

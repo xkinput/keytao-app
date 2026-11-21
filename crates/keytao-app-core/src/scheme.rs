@@ -192,14 +192,6 @@ pub fn validate_scheme_key(scheme: &str) -> Result<&str, String> {
     }
 }
 
-pub fn record_installed_scheme(
-    core: &Core,
-    scheme: &str,
-    version: Option<&str>,
-) -> Result<(), CoreError> {
-    crate::packages::record_package(core, scheme, version, true)
-}
-
 pub async fn fetch_scheme_release(
     core: &Core,
     scheme: String,
@@ -282,26 +274,21 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
         });
     };
 
-    let isolated = keytao_core::RuntimeDirs::isolation_enabled(&dir);
-    let state = if isolated {
-        let shared = crate::deploy::deploy_shared_data_dir(core, &dir);
-        keytao_core::schema_install_state_with_shared(&dir, &shared)
-    } else {
-        keytao_core::schema_install_state(&dir)
-    };
+    let shared = crate::deploy::deploy_shared_data_dir(core, &dir);
+    let state = keytao_core::schema_install_state_with_shared(&dir, &shared);
     let installed = state.installed
-        || (isolated
-            && (!core.lock_state().installed_packages.is_empty()
-                || crate::addon_store::IDS.iter().any(|id| {
+        || !core.lock_state().installed_packages.is_empty()
+        || crate::addon_store::IDS.iter().any(|id| {
                     crate::package_store::PackageStore::new(core)
                         .checked_addon_path(id)
                         .is_ok_and(|path| path.is_dir())
-                })));
+                });
     let version = state
         .installed
         .then(|| {
-            std::fs::read_to_string(dir.join("version.txt"))
-                .ok()
+            keytao_core::RuntimeDirs::resolve(&dir, &shared).ok()
+                .and_then(|dirs| std::fs::read_to_string(dirs.user_data_dir.join("version.txt"))
+                    .or_else(|_| std::fs::read_to_string(dirs.shared_data_dir.join("version.txt"))).ok())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         })
@@ -322,44 +309,6 @@ mod tests {
     struct NullSink;
     impl crate::EventSink for NullSink {
         fn emit(&self, _: crate::CoreEvent) {}
-    }
-
-    #[test]
-    fn record_installed_scheme_rejects_unknown_and_persists_variant() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = Core::new(
-            crate::AppEnv {
-                data_dir: dir.path().join("state"),
-                cache_dir: dir.path().to_owned(),
-                resource_dir: dir.path().join("resources"),
-                app_version: "test".into(),
-                platform: crate::Platform::MacOs,
-            },
-            std::sync::Arc::new(NullSink),
-        )
-        .unwrap();
-
-        assert!(record_installed_scheme(&core, "unknown", Some("v1")).is_err());
-        assert!(core.state().installed_packages.is_empty());
-        assert!(core.state().active_scheme.is_none());
-        assert!(!core.env().data_dir.join("app-state.json").exists());
-
-        record_installed_scheme(&core, "xmjd-feiding", Some("v1")).unwrap();
-        assert_eq!(core.state().active_scheme.as_deref(), Some("xmjd-feiding"));
-        assert_eq!(
-            core.state().installed_packages["xmjd-feiding"]
-                .version
-                .as_deref(),
-            Some("v1")
-        );
-        let persisted = crate::AppState::load(&core.env().data_dir).unwrap();
-        assert_eq!(persisted.active_scheme.as_deref(), Some("xmjd-feiding"));
-        assert_eq!(
-            persisted.installed_packages["xmjd-feiding"]
-                .version
-                .as_deref(),
-            Some("v1")
-        );
     }
 
     #[tokio::test]

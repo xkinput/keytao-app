@@ -168,11 +168,6 @@ fn fresh_onboarding_initialization_persists_false_without_shared_state() {
         let ime = dir.path().join("ime");
         if isolated {
             fs::create_dir(&ime).unwrap();
-            fs::write(
-                ime.join(keytao_core::RuntimeDirs::SETTINGS_FILE),
-                br#"{"runtime_isolation":true}"#,
-            )
-            .unwrap();
         }
         let core = open_core(&data_dir).unwrap();
         core.initialize_onboarding(Some(ime.clone())).unwrap();

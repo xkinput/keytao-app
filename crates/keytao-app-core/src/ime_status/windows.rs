@@ -1083,10 +1083,16 @@ fn windows_repair_ime_data_blocking(core: &Core) -> Result<WindowsImeStatus, Str
         ));
     }
 
-    let warning = windows_deploy_rime_blocking(
-        user_dir,
-        windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir),
-    )?;
+    let shared = crate::deploy::deploy_shared_data_dir(core, &user_dir);
+    crate::package_migration::migrate_if_needed(core, &user_dir, &shared)
+        .map_err(|error| error.to_string())?;
+    let key = keytao_core::RuntimeDirs::active_package_key(&user_dir)
+        .ok_or("没有使用中的方案包")?;
+    let (targets, _staged) = crate::runtime_materialize::prepare_deploy_targets(
+        core, &user_dir, &shared, Some(&key),
+    ).map_err(|error| error.to_string())?;
+    let plan = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
+    let warning = windows_deploy_packages_blocking(&user_dir, &plan, true, |_| {})?;
 
     let mut message = "Windows 输入法词典修复完成，已重建旧构建产物".to_owned();
     if let Some(warning) = warning {
@@ -1482,26 +1488,6 @@ pub(crate) fn preview_candidates_blocking(
     )
 }
 
-#[cfg(target_os = "windows")]
-pub fn windows_deploy_rime_blocking(
-    user_dir: PathBuf,
-    _shared_data_dir: String,
-) -> Result<Option<String>, String> {
-    crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
-    // The child reads the previous repair gate before clearing it, after hosts release their maps.
-    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
-    let deployed_by_server = server::deploy_if_available(None, |_| {})?;
-    if !deployed_by_server {
-        let exe = server::installed_server_exe()?;
-        keytao_core::deploy_child::run_deploy_child(&exe, std::time::Duration::from_secs(600))?;
-    }
-    crate::deploy::render_user_schema_logos(&user_dir);
-    if !deployed_by_server {
-        write_keytao_ime_reload_stamp()
-            .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
-    }
-    finish_windows_deploy(&user_dir, profile_guard)
-}
 
 #[cfg(target_os = "windows")]
 pub(crate) fn windows_server_executable() -> Result<PathBuf, String> {
@@ -1584,12 +1570,8 @@ pub(crate) fn windows_deploy_packages_blocking(
     let mut public_warning = None;
     if let Some(profile_guard) = profile_guard {
         let active = keytao_core::RuntimeDirs::active_package_key(user_dir);
-        if active.is_none() {
-            public_warning = finish_windows_deploy(user_dir, profile_guard)?;
-        } else {
-            keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
-            profile_guard.resume()?;
-        }
+        keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
+        profile_guard.resume()?;
         for key in ready {
             if let Err(error) = crate::windows_public_schemas::publish_isolated_package(
                 &key,
@@ -1603,43 +1585,5 @@ pub(crate) fn windows_deploy_packages_blocking(
     Ok(match (reload_warning, public_warning) {
         (Some(reload), Some(public)) => Some(format!("{reload}\n{public}")),
         (reload, public) => reload.or(public),
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn finish_windows_deploy(
-    user_dir: &Path,
-    profile_guard: WindowsImeProfileDeploymentGuard,
-) -> Result<Option<String>, String> {
-    keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
-    profile_guard.resume()?;
-    keytao_core::runtime_log::init_for_engine(user_dir);
-    crate::windows_public_schemas::after_private_deploy(Ok(()), || {
-        let update = crate::windows_public_schemas::update_public_schemas(|| {
-            crate::windows_public_schemas::publish_english_settings(
-                user_dir,
-                keytao_core::english_mode::read_english_mode(user_dir)
-                    == keytao_core::english_mode::EnglishMode::Schema,
-            )
-            .map_err(|error| format!("publish-settings: {error}"))?;
-            Ok(())
-        })?;
-        // Release the engine-init mutex before starting another guarded process.
-        let result = (|| {
-            let exe = server::installed_server_exe()
-                .map_err(|error| format!("resolve-public-child: {error}"))?;
-            keytao_core::deploy_child::run_deploy_child_with_subcommand(
-                &exe,
-                "--deploy-public",
-                std::time::Duration::from_secs(600),
-            )
-        })();
-        if let Err(error) = result {
-            update
-                .rollback()
-                .map_err(|rollback| format!("{error}；恢复公共方案失败：{rollback}"))?;
-            return Err(error);
-        }
-        Ok(())
     })
 }

@@ -161,8 +161,7 @@ mod tests {
             ("keytao.schema.yaml", b"schema:\n  schema_id: keytao\n"),
             ("keytao.svg", RED),
         ]);
-        crate::packages::stage_install(&core, &bytes, Default::default(), String::new()).unwrap();
-        crate::packages::finalize_pending(&core, "keytao", Some("v1"), false).unwrap();
+        crate::packages::store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &bytes, dir.path()).unwrap();
         let store = PackageStore::new(&core);
         assert!(store.package_path("keytao").join("files/keytao.svg").is_file());
         let path = package_logo_path(&core, "keytao").unwrap();

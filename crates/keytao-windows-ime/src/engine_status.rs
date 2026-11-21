@@ -68,6 +68,14 @@ mod tests {
             std::process::id(),
             NEXT_STATUS_WRITE.fetch_add(1, Ordering::Relaxed)
         ));
+        let runtime = dir.join("runtime/keytao");
+        fs::create_dir_all(&runtime).unwrap();
+        let store = dir.join("scheme-packages");
+        fs::create_dir_all(store.join("cloud/keytao/files")).unwrap();
+        fs::write(
+            store.join("active-manifest.json"),
+            br#"{"active_package":"keytao"}"#,
+        ).unwrap();
         write_status(&dir, None, Some("keytao")).unwrap();
         let read = || -> json::Value {
             json::from_slice(&fs::read(dir.join("keytao-ime-engine.json")).unwrap()).unwrap()
@@ -79,7 +87,7 @@ mod tests {
         assert_eq!(ready["pid"], std::process::id());
         assert!(ready["ts"].as_u64().unwrap() > 0);
         assert_eq!(
-            fs::read_to_string(dir.join(".keytao-current-schema")).unwrap(),
+            fs::read_to_string(runtime.join(".keytao-current-schema")).unwrap(),
             "keytao"
         );
 
@@ -90,7 +98,7 @@ mod tests {
         assert_eq!(failed["error"], error);
         assert!(failed["schema"].is_null());
         assert_eq!(
-            fs::read_to_string(dir.join(".keytao-current-schema")).unwrap(),
+            fs::read_to_string(runtime.join(".keytao-current-schema")).unwrap(),
             "keytao"
         );
 
@@ -98,10 +106,11 @@ mod tests {
         assert_eq!(read()["ok"], true);
         assert_eq!(read()["schema"], "pinyin_simp");
         assert_eq!(
-            fs::read_to_string(dir.join(".keytao-current-schema")).unwrap(),
+            fs::read_to_string(runtime.join(".keytao-current-schema")).unwrap(),
             "pinyin_simp"
         );
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 3);
+        assert_eq!(fs::read_dir(runtime).unwrap().count(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 

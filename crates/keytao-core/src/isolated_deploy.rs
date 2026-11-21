@@ -20,6 +20,7 @@ pub const STAGED_INPUTS_MANIFEST: &str = ".edits.json";
 const RECEIPT: &str = ".keytao-desktop-inputs.json";
 const SCHEMA_RECEIPT: &str = ".keytao-schema-inputs.json";
 const DEPLOY_LOCK: &str = ".keytao-package-deploy.lock";
+const MIGRATION_LOCK: &str = ".keytao-migration.lock";
 const MATERIALIZE_LOCK: &str = ".keytao-materialize.lock";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,9 +46,6 @@ pub fn deploy_packages(
     targets: &[PackageDeployTarget],
     progress: impl FnMut(DeployProgress),
 ) -> Result<(), String> {
-    if !RuntimeDirs::isolation_enabled(control_root) {
-        return Err("package isolation is disabled".into());
-    }
     let _deploy = deploy_lock(control_root, true)?;
     crate::with_rime_finalized(|| {
         deploy_packages_with(
@@ -69,9 +67,6 @@ fn deploy_packages_with(
     mut progress: impl FnMut(DeployProgress),
     mut compile: impl FnMut(&RuntimeDirs, &mut dyn FnMut(DeployStep)) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !RuntimeDirs::isolation_enabled(control_root) {
-        return Err("package isolation is disabled".into());
-    }
     let unique: HashSet<_> = targets.iter().map(|target| &target.package_key).collect();
     if targets.is_empty() || unique.len() != targets.len() {
         return Err("invalid package deployment targets".into());
@@ -188,13 +183,23 @@ pub fn with_isolated_package_lock<T>(
     control_root: &Path,
     action: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let _deploy = RuntimeDirs::isolation_enabled(control_root)
-        .then(|| deploy_lock(control_root, true))
-        .transpose()?;
+    let _deploy = deploy_lock(control_root, true)?;
+    action()
+}
+
+pub fn with_migration_lock<T>(
+    control_root: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _migration = lock(&runtime_lock_directory(control_root)?.join(MIGRATION_LOCK), true)?;
     action()
 }
 
 fn deploy_lock(control_root: &Path, wait: bool) -> Result<fs::File, String> {
+    lock(&runtime_lock_directory(control_root)?.join(DEPLOY_LOCK), wait)
+}
+
+fn runtime_lock_directory(control_root: &Path) -> Result<PathBuf, String> {
     let runtime = control_root.join("runtime");
     match fs::create_dir(&runtime) {
         Ok(()) => {}
@@ -204,7 +209,7 @@ fn deploy_lock(control_root: &Path, wait: bool) -> Result<fs::File, String> {
     if !fs::symlink_metadata(&runtime).is_ok_and(|metadata| metadata.is_dir()) {
         return Err("invalid isolated runtime directory".into());
     }
-    lock(&runtime.join(DEPLOY_LOCK), wait)
+    Ok(runtime)
 }
 
 pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
@@ -228,6 +233,9 @@ pub(crate) fn try_switch_ready_package(
 
 fn switch_package(control_root: &Path, shared: &Path, key: &str, wait: bool) -> Result<(), String> {
     let not_ready = || "请在键道 App 部署此方案包".to_owned();
+    if RuntimeDirs::needs_migration(control_root) {
+        return Err(not_ready());
+    }
     let dirs = RuntimeDirs::for_package(control_root, shared, key).ok_or_else(not_ready)?;
     if !dirs.user_data_dir.is_dir() {
         return Err(not_ready());
@@ -914,11 +922,6 @@ mod tests {
         fs::write(&source, original).unwrap();
         fs::write(root.join("default.yaml"), "schema_list: [{schema: legacy}]\n").unwrap();
         fs::write(
-            root.join(RuntimeDirs::SETTINGS_FILE),
-            br#"{"runtime_isolation":true}"#,
-        )
-        .unwrap();
-        fs::write(
             store.join("active-manifest.json"),
             serde_json::to_vec(&serde_json::json!({"active_package": key})).unwrap(),
         )
@@ -927,6 +930,11 @@ mod tests {
         let patch = dirs.user_data_dir.join("default.custom.yaml");
         let selection = b"patch: {schema_list: [{schema: keytao_fixture}]}\n";
         fs::create_dir_all(&dirs.user_data_dir).unwrap();
+        fs::write(
+            root.join(RuntimeDirs::MIGRATION_MARKER),
+            serde_json::to_vec(&serde_json::json!({"version": 1, "runtime_package": key})).unwrap(),
+        )
+        .unwrap();
         fs::write(&patch, selection).unwrap();
 
         let target = PackageDeployTarget {
@@ -995,11 +1003,6 @@ mod tests {
         let bundled = root.join("bundled");
         fs::create_dir(&bundled).unwrap();
         fs::write(bundled.join("default.yaml"), "schema_list: []\n").unwrap();
-        fs::write(
-            root.join(RuntimeDirs::SETTINGS_FILE),
-            br#"{"runtime_isolation":true}"#,
-        )
-        .unwrap();
         let targets = ["ready", "broken", "pending"].map(|name| PackageDeployTarget {
             package_key: format!("builtin/{name}"),
             package_name: name.into(),

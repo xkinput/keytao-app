@@ -1045,7 +1045,7 @@ fn checked(
     schema_ids: &[String],
     mut smoke: Option<&mut dyn FnMut(&Path, &str, u32) -> Result<(), String>>,
 ) -> Result<UploadBundle, CoreError> {
-    let dirs = if let Some(key) = target.filter(|_| RuntimeDirs::isolation_enabled(root)) {
+    let dirs = if let Some(key) = target.filter(|_| !RuntimeDirs::needs_migration(root)) {
         RuntimeDirs::for_package(root, shared.unwrap_or(root), key)
             .ok_or_else(|| failure(format!("无法读取方案包：{key}")))?
     } else {
@@ -1209,8 +1209,7 @@ mod streaming_tests {
         let root = root.path();
         let store = root.join("scheme-packages");
         fs::create_dir_all(&store).unwrap();
-        fs::write(root.join(RuntimeDirs::SETTINGS_FILE), r#"{"runtime_isolation":true}"#).unwrap();
-        fs::write(store.join("active-manifest.json"), r#"{"active_package":"one"}"#).unwrap();
+        fs::write(store.join("active-manifest.json"), r#"{"active_package":"one","runtime_migration_version":1}"#).unwrap();
         fs::write(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST), "not the isolated manifest").unwrap();
         let id = "main".to_owned();
         for key in ["one", "two"] {
@@ -1223,6 +1222,7 @@ mod streaming_tests {
         }
         let build = root.join("runtime/two/build");
         fs::create_dir_all(&build).unwrap();
+        fs::write(root.join(RuntimeDirs::MIGRATION_MARKER), r#"{"version":1,"runtime_package":"one"}"#).unwrap();
         fs::write(build.join("main.schema.yaml"), "schema: { schema_id: main, name: two }\n").unwrap();
         let bundle = verified_package(root, None, "two", &[id], None).unwrap();
         let mut archive = zip::ZipArchive::new(Cursor::new(bundle.bytes)).unwrap();

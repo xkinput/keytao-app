@@ -94,6 +94,16 @@ struct PreparedUpload {
 }
 
 fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError> {
+    if !keytao_core::RuntimeDirs::needs_migration(root) {
+        let shared = crate::deploy::deploy_shared_data_dir(core, root);
+        let ready = keytao_core::RuntimeDirs::for_package(root, &shared, scheme_key)
+            .is_some_and(|dirs| keytao_core::package_build_ready(root, &dirs));
+        return if ready {
+            Ok(())
+        } else {
+            Err(CoreError::Other(format!("方案 {scheme_key} 没有本地部署成功记录")))
+        };
+    }
     let state = core.state();
     let activated = crate::package_activation::read_package(core, root, scheme_key)?.is_some();
     if !activated && state.active_scheme.as_deref() != Some(scheme_key) {
@@ -582,6 +592,7 @@ pub(crate) async fn download_at(
 }
 
 pub async fn download(core: &Core, id: &str, user_root: &Path) -> Result<(), CoreError> {
+    crate::package_migration::ensure_before_write(core, user_root).await?;
     download_at(core, id, user_root, API_BASE).await
 }
 

@@ -320,78 +320,6 @@ pub fn set_package_schemas(core: &Core, key: &str, ids: &[String]) -> Result<(),
     Ok(())
 }
 
-pub fn register_addon_selection(core: &Core, key: &str, root: &Path) -> Result<(), CoreError> {
-    if !crate::addon_store::IDS.contains(&key) || key == "snow_jiandao" {
-        return Err(CoreError::Other("Unknown add-on package".into()));
-    }
-    let mut receipt = crate::wanxiang::InstallReceipt::new(root).map_err(CoreError::Other)?;
-    receipt.attach_store(core, key).map_err(CoreError::Other)?;
-    crate::addon::write_schema_list_transaction(
-        &mut receipt,
-        key,
-        true,
-        &crate::addon::shared_data_dir(core, root),
-    )
-    .map_err(CoreError::Other)?;
-    let selected: Vec<_> = package_schemas(core, key)?
-        .into_iter()
-        .filter(|schema| schema.selected)
-        .map(|schema| schema.id)
-        .collect();
-    let (_, config) = crate::addon::addon_default_custom(root).map_err(CoreError::Other)?;
-    let mut enabled = selected;
-    for id in keytao_core::parse_schema_list(&config) {
-        if !enabled.contains(&id) {
-            enabled.push(id);
-        }
-    }
-    ensure_active_schema(root, &enabled, true)?;
-    #[cfg(target_os = "windows")]
-    if crate::windows_public_schemas::is_default_user_root(root) {
-        crate::windows_public_schemas::publish_schema_selection(root).map_err(CoreError::Other)?;
-    }
-    receipt.finish().map_err(CoreError::Other)
-}
-
-pub(crate) fn ensure_active_schema(
-    root: &Path,
-    ids: &[String],
-    preserve: bool,
-) -> Result<(), CoreError> {
-    let Some(first) = ids.first() else {
-        return Ok(());
-    };
-    let path = crate::packages::safe_path(root, "user.yaml").map_err(CoreError::Other)?;
-    let mut user: Value = match fs::read(&path) {
-        Ok(bytes) => serde_yaml::from_slice(&bytes).map_err(yaml_error)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Value::Mapping(Default::default())
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let vars = user
-        .as_mapping_mut()
-        .ok_or_else(|| CoreError::Other("user.yaml must be a mapping".into()))?
-        .entry("var".into())
-        .or_insert_with(|| Value::Mapping(Default::default()))
-        .as_mapping_mut()
-        .ok_or_else(|| CoreError::Other("user.yaml var must be a mapping".into()))?;
-    if preserve
-        && vars
-            .get("previously_selected_schema")
-            .and_then(Value::as_str)
-            .is_some_and(|id| ids.iter().any(|selected| selected == id))
-    {
-        return Ok(());
-    }
-    vars.insert("previously_selected_schema".into(), first.clone().into());
-    crate::scheme_files::write_file_atomic(
-        &path,
-        serde_yaml::to_string(&user).map_err(yaml_error)?.as_bytes(),
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,27 +430,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn active_selection_is_preserved_only_while_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("user.yaml"),
-            "custom: {keep: true}\nvar: {previously_selected_schema: beta, keep: true}",
-        )
-        .unwrap();
-        ensure_active_schema(dir.path(), &["alpha".into(), "beta".into()], true).unwrap();
-        assert!(
-            fs::read_to_string(dir.path().join("user.yaml"))
-                .unwrap()
-                .contains("previously_selected_schema: beta")
-        );
-        ensure_active_schema(dir.path(), &["alpha".into()], true).unwrap();
-        let value: Value =
-            serde_yaml::from_slice(&fs::read(dir.path().join("user.yaml")).unwrap()).unwrap();
-        assert_eq!(
-            value["var"]["previously_selected_schema"].as_str(),
-            Some("alpha")
-        );
-        assert_eq!(value["custom"]["keep"].as_bool(), Some(true));
-    }
 }

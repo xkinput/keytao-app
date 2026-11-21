@@ -70,9 +70,10 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
         return;
     };
     runtime.shutdown().unwrap();
+    std::fs::create_dir(root.join("runtime")).unwrap();
     std::fs::write(
-        root.join(RuntimeDirs::SETTINGS_FILE),
-        br#"{"runtime_isolation":true}"#,
+        root.join(RuntimeDirs::MIGRATION_MARKER),
+        br#"{"version":1,"runtime_package":"first"}"#,
     )
     .unwrap();
     let first = crate::package_store::root(&root).join("cloud/first/files");
@@ -130,6 +131,11 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
         |_| {},
     )
     .unwrap();
+    std::fs::write(
+        root.join(RuntimeDirs::MIGRATION_MARKER),
+        br#"{"version":1,"runtime_package":"first"}"#,
+    )
+    .unwrap();
     runtime.switch_package("first").unwrap();
     runtime.init_without_deploy().unwrap();
     let session = runtime.create_session().unwrap();
@@ -161,7 +167,7 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     let stale = ReloadStamp::write_package(&root, "first").unwrap();
     write_file_atomic(
         &crate::package_store::active_manifest(&root),
-        br#"{"active_package":"rime_ice"}"#,
+        br#"{"active_package":"rime_ice","runtime_migration_version":1}"#,
     )
     .unwrap();
     assert_eq!(ReloadStamp::package_key(&stale).as_deref(), Some("first"));
@@ -245,14 +251,6 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     runtime.switch_package("first").unwrap();
     runtime.reload_without_deploy().unwrap();
 
-    std::fs::write(
-        root.join(RuntimeDirs::SETTINGS_FILE),
-        br#"{"runtime_isolation":false}"#,
-    )
-    .unwrap();
-    let baseline = session.process_key_result(XK_F4, 0).unwrap();
-    assert!(baseline.accepted);
-    assert_eq!(baseline.state.schema_id, ".default");
     drop(session);
     runtime.shutdown().unwrap();
     runtime_log::flush_blocking(Duration::from_secs(1));

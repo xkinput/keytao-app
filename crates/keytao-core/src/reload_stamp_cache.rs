@@ -7,6 +7,7 @@ use std::{
 struct StampMetadata {
     len: u64,
     modified: Option<SystemTime>,
+    migrated: bool,
     #[cfg(windows)]
     identity: (u32, u64),
     #[cfg(unix)]
@@ -55,6 +56,7 @@ impl StampMetadata {
         Some(Self {
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            migrated: path.parent().is_some_and(crate::RuntimeDirs::migration_complete),
             #[cfg(any(windows, unix))]
             identity,
         })
@@ -66,7 +68,7 @@ impl StampMetadata {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0);
-        format!("{}:{modified}:{hash:016x}", self.len)
+        crate::ReloadStamp::format_signature(self.len, modified, hash, self.migrated)
     }
 }
 

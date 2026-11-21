@@ -8,8 +8,14 @@ import 'menus.dart';
 import 'theme.dart';
 
 class AppStartup extends StatelessWidget {
-  const AppStartup({super.key, required this.platform, this.error});
+  const AppStartup({
+    super.key,
+    required this.platform,
+    this.message = AppStrings.boot,
+    this.error,
+  });
   final BridgePlatform platform;
+  final String message;
   final String? error;
   @override
   Widget build(BuildContext context) => KeyTaoTheme(
@@ -29,7 +35,7 @@ class AppStartup extends StatelessWidget {
                 if (error == null) ...[
                   const SizedBox(width: 180, child: FProgress()),
                   const SizedBox(height: 16),
-                  const Text(AppStrings.boot),
+                  Semantics(liveRegion: true, child: Text(message)),
                 ] else ...[
                   FAlert(
                     title: const Text('启动失败'),

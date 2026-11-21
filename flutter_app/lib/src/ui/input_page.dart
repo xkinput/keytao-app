@@ -175,13 +175,10 @@ class _CurrentSchemeHero extends StatelessWidget {
       _ => null,
     };
     final local = c.local;
-    final isolated = local?.runtimeIsolation == true;
-    final isolatedPackage = isolated
-        ? c.isolatedPackages.where((package) => package.active).firstOrNull
-        : null;
-    final schemas = isolated && isolatedPackage == null
-        ? const <SchemaDto>[]
-        : c.schemas;
+    final isolatedPackage = c.isolatedPackages
+        .where((package) => package.active)
+        .firstOrNull;
+    final schemas = c.schemas;
     final needsScheme = !c.isMobile && local?.installed == false;
     final version =
         package?.version ??
@@ -231,7 +228,7 @@ class _CurrentSchemeHero extends StatelessWidget {
           EyebrowLabel(
             desktop ? '当前方案 · ${c.aboutValues['平台']} 系统输入法' : '当前方案',
           ),
-          if (isolated && c.isolatedPackages.isNotEmpty)
+          if (c.isolatedPackages.isNotEmpty)
             Align(
               alignment: AlignmentDirectional.centerStart,
               child: _packageSelector(isolatedPackage),
@@ -268,7 +265,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                   builder: (_, popover, _) => FButton.raw(
                     key: const ValueKey('current-schema-selector'),
                     variant: FButtonVariant.ghost,
-                    semanticsLabel: isolated ? '方案，$title' : null,
+                    semanticsLabel: '方案，$title',
                     onPress: c.busy || schemas.isEmpty
                         ? null
                         : () {
@@ -324,7 +321,7 @@ class _CurrentSchemeHero extends StatelessWidget {
             ],
           ),
           if (needsScheme) const Text('请先安装输入方案。'),
-          if (isolated && c.packageError != null) ErrorMessage(c.packageError),
+          if (c.packageError != null) ErrorMessage(c.packageError),
           ActionRow(
             children: [
               if (!needsScheme)

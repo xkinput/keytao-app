@@ -31,24 +31,7 @@ pub struct OrphanReport {
 }
 
 pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
-    report_with_exclusions(core, root, None, BTreeSet::new())
-}
-
-pub(crate) fn report_migration(
-    core: &Core,
-    root: &Path,
-    sync_dir: &Path,
-    migrated: BTreeSet<String>,
-) -> Result<OrphanReport, CoreError> {
-    report_with_exclusions(core, root, Some(sync_dir), migrated)
-}
-
-fn report_with_exclusions(
-    core: &Core,
-    root: &Path,
-    sync_dir: Option<&Path>,
-    mut owned: BTreeSet<String>,
-) -> Result<OrphanReport, CoreError> {
+    let mut owned = BTreeSet::new();
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
@@ -64,11 +47,7 @@ fn report_with_exclusions(
         }
         Err(error) => return Err(error.into()),
     }
-    owned.extend(if sync_dir.is_some() {
-        crate::addon_store::read_report_paths(core, root)?
-    } else {
-        crate::addon_store::report_paths(core, root)?
-    });
+    owned.extend(crate::addon_store::read_report_paths(core, root)?);
     let store = PackageStore::new(core);
     for key in core.state().installed_packages.keys() {
         if let Some(meta) = store.read_meta(key)? {
@@ -138,32 +117,16 @@ fn report_with_exclusions(
             }
         }
     }
-    let isolated = sync_dir.is_some() || keytao_core::RuntimeDirs::isolation_enabled(root);
-    // The entire legacy build is retained for rollback when isolation is enabled.
-    if !isolated {
-        let dirs = keytao_core::RuntimeDirs::flat(root, root);
-        let build = staging_relative(root, &dirs);
-        let mut artifacts = BTreeSet::from([format!("{build}/default.yaml")]);
-        let schemas = crate::managed_custom::active_schema_ids(root).map_err(CoreError::Other)?;
-        artifacts.extend(crate::package_artifacts::owned_artifact_paths(root, &schemas)?);
-        for path in &owned {
-            if let Some(id) = path.strip_suffix(".schema.yaml") {
-                artifacts.insert(format!("{build}/{id}.schema.yaml"));
-            }
-            if let Some(id) = path.strip_suffix(".dict.yaml") {
-                for extension in ["table", "prism", "reverse"] {
-                    artifacts.insert(format!("{build}/{id}.{extension}.bin"));
-                    artifacts.insert(format!(
-                        "{build}/{}.{extension}.bin",
-                        id.rsplit('/').next().unwrap()
-                    ));
-                }
-            }
-        }
-        owned.extend(artifacts);
-    }
+    let sync_dir = crate::runtime_materialize::legacy_sync_dir(root)?;
     let mut files = Vec::new();
-    collect(root, root, isolated, sync_dir, &owned, &mut files)?;
+    collect(root, root, &sync_dir, &owned, &mut files)?;
+    for backup in crate::package_migration::completed_backups(root)? {
+        files.push(OrphanFile {
+            path: backup.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"),
+            sha256: backup_fingerprint(&backup)?,
+            size: 0,
+        });
+    }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(OrphanReport {
         files,
@@ -171,11 +134,19 @@ fn report_with_exclusions(
     })
 }
 
+fn backup_fingerprint(path: &Path) -> Result<String, CoreError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(CoreError::Other("Legacy backup is no longer a directory".into()));
+    }
+    let identity = format!("{:?}:{:?}", metadata.created().ok(), metadata.modified()?);
+    Ok(sha256_reader(identity.as_bytes())?)
+}
+
 fn collect(
     root: &Path,
     directory: &Path,
-    isolated: bool,
-    sync_dir: Option<&Path>,
+    sync_dir: &Path,
     owned: &BTreeSet<String>,
     files: &mut Vec<OrphanFile>,
 ) -> Result<(), CoreError> {
@@ -187,7 +158,7 @@ fn collect(
         if matches!(name.as_ref(), "app-state.json" | "sync")
             || name.contains(".userdb")
             || name.ends_with(".leveldb")
-            || sync_dir.is_some_and(|dir| path.starts_with(dir))
+            || path.starts_with(sync_dir)
         {
             continue;
         }
@@ -201,11 +172,7 @@ fn collect(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if (isolated
-            && matches!(
-                relative.as_str(),
-                "build" | "runtime" | "scheme-packages" | keytao_core::RuntimeDirs::SETTINGS_FILE
-            ))
+        if (directory == root && (relative == "build" || crate::package_migration::control_entry(&relative)))
             || package_activation::user_file(&relative)
             || matches!(
                 relative.as_str(),
@@ -223,7 +190,7 @@ fn collect(
             continue;
         }
         if metadata.is_dir() {
-            collect(root, &path, isolated, sync_dir, owned, files)?;
+            collect(root, &path, sync_dir, owned, files)?;
         } else if metadata.is_file()
             && !owned.contains(&relative)
             && !generated(&relative, &path)?
@@ -276,9 +243,15 @@ fn trash_with(
         }
     }
     let mut moved = Vec::new();
+    let backups = crate::package_migration::completed_backups(root)?;
     for file in selected {
         let path = safe_path(root, &file.path).map_err(CoreError::Other)?;
-        if sha256_reader(fs::File::open(&path)?)? != file.sha256 {
+        let sha256 = if backups.contains(&path) {
+            backup_fingerprint(&path)?
+        } else {
+            sha256_reader(fs::File::open(&path)?)?
+        };
+        if sha256 != file.sha256 {
             return Err(CoreError::Other(format!(
                 "File changed before moving: {}",
                 file.path
@@ -483,15 +456,10 @@ mod tests {
         let root = temp.path();
         fs::create_dir_all(root.join("runtime/package")).unwrap();
         fs::write(root.join("runtime/package/symbols.yaml"), "package").unwrap();
-        fs::write(
-            root.join(keytao_core::RuntimeDirs::SETTINGS_FILE),
-            r#"{"runtime_isolation":true}"#,
-        )
-        .unwrap();
         fs::write(root.join("orphan.yaml"), "legacy").unwrap();
 
         let mut files = Vec::new();
-        collect(root, root, true, None, &BTreeSet::new(), &mut files).unwrap();
+        collect(root, root, &root.join("sync"), &BTreeSet::new(), &mut files).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "orphan.yaml");
     }
@@ -504,11 +472,6 @@ mod tests {
         fs::write(
             store.join("active-manifest.json"),
             br#"{"active_package":"package"}"#,
-        )
-        .unwrap();
-        fs::write(
-            root.join(keytao_core::RuntimeDirs::SETTINGS_FILE),
-            br#"{"runtime_isolation":true}"#,
         )
         .unwrap();
         fs::create_dir(root.join("build")).unwrap();

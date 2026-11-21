@@ -403,7 +403,14 @@ pub extern "C" fn keytao_log_flush(timeout_ms: u32) {
 #[no_mangle]
 pub extern "C" fn keytao_run_deploy_child_main() -> ! {
     let code = guard("keytao_run_deploy_child_main", 1, || {
-        keytao_core::deploy_child::run_deploy_child_main()
+        keytao_core::deploy_child::run_deploy_child_main_with_prepare(|root| {
+            keytao_app_core::package_migration::migrate_default_if_needed(
+                root,
+                Path::new(&keytao_core::default_shared_data_dir()),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        })
     });
     keytao_core::deploy_child::exit_deploy_child(code)
 }
@@ -432,7 +439,8 @@ pub extern "C" fn keytao_run_deploy_child() -> bool {
                     &exe,
                     std::time::Duration::from_secs(600),
                 )
-            });
+            })
+            .and_then(|()| keytao_core::ReloadStamp::write_default().map(|_| ()));
         match result {
             Ok(()) => true,
             Err(error) => {
@@ -481,7 +489,6 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
             user: PathBuf::from(&user),
             shared: shared.clone(),
         };
-        let isolated = keytao_core::RuntimeDirs::isolation_enabled(&dirs.user);
         update_deployment_status(&dirs.user, |_| {});
         let (previous, previous_runtime, same_ready_runtime) = {
             let g = lock_ignore_poison(&GLOBAL);
@@ -496,7 +503,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
                 .as_ref()
                 .is_some_and(ImeRuntime::is_initialized)
         {
-            if isolated && stamp_changed_peek().is_some() {
+            if stamp_changed_peek().is_some() {
                 return reload_now(false)
                     || previous_runtime
                         .as_ref()
@@ -511,7 +518,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         // `GLOBAL` was released above: it is only ever taken below this lock.
         let mut epoch = write_ignore_poison(&SESSION_EPOCH);
         // A package switch during startup has to remain pending.
-        let signal_at_start = isolated.then(|| ReloadSignal::new(&dirs.user));
+        let signal_at_start = ReloadSignal::new(&dirs.user);
         let runtime = ImeRuntime::with_dirs(user, shared).with_ime_host();
         if let Err(e) = runtime.init_without_deploy() {
             log_error(format_args!("keytao_init: runtime init failed: {e}"));
@@ -537,8 +544,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         drop(epoch);
 
         // Reads the stamp, so it is built before the lock is taken.
-        let signal = signal_at_start.unwrap_or_else(|| ReloadSignal::new(&dirs.user));
-        *lock_ignore_poison(&RELOAD_SIGNAL) = Some(signal);
+        *lock_ignore_poison(&RELOAD_SIGNAL) = Some(signal_at_start);
         update_deployment_status(&dirs.user, |_| {});
         let mut g = lock_ignore_poison(&GLOBAL);
         g.initialized = true;

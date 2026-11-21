@@ -5,6 +5,8 @@ abstract final class AppStrings {
   static const title = 'KeyTao 键道';
   static const tagline = '键道，基于 librime 的跨平台原生输入法';
   static const boot = '键道正在启动…';
+  static const migratingPackageDirs = '正在迁移方案目录…';
+  static const retryPackageMigration = '迁移失败，重试';
   static const appUpdate = 'KeyTao 有新版本可用';
   static const ime = '输入法';
   static const scheme = '方案';

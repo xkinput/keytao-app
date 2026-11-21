@@ -57,17 +57,7 @@ fn fixture_with_sink(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Arc<Core>,
         .unwrap();
     archive.write_all(b"schema: xmjd6\n").unwrap();
     let bytes = archive.finish().unwrap().into_inner();
-    crate::packages::stage_install(&core, &bytes, Default::default(), String::new()).unwrap();
-    crate::packages::finalize_pending(&core, "xmjd", Some("v1"), false).unwrap();
-    core.update_state(|state| {
-        state.installed_packages.insert(
-            "xmjd".into(),
-            crate::state::InstalledPackage {
-                version: Some("v1".into()),
-            },
-        );
-    })
-    .unwrap();
+    crate::packages::store_cloud_archive(&core, "xmjd", Some("v1"), "official", None, &bytes, dir.path()).unwrap();
     (dir, core, bytes)
 }
 
@@ -459,11 +449,12 @@ async fn downloading_identical_local_package_reuses_key() {
 async fn cloud_redownload_of_activated_builtin_package_is_allowed() {
     let (dir, core, bytes) = fixture();
     let root = dir.path().join("rime");
-    crate::packages::activate_scheme(&core, "xmjd", &root,
-        #[cfg(target_os = "windows")]
-        |_, _, _, _| Ok(Vec::new()),
-    ).await.unwrap();
-    let user = std::fs::read(root.join("user.yaml")).unwrap();
+    let runtime = root.join("runtime/xmjd");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::create_dir_all(root.join("scheme-packages")).unwrap();
+    std::fs::write(keytao_core::package_store::active_manifest(&root), br#"{"active_package":"xmjd"}"#).unwrap();
+    let user = b"var: {previously_selected_schema: xmjd6}";
+    std::fs::write(runtime.join("user.yaml"), user).unwrap();
     let mock = server(|url| vec![
         response("200 OK", json!({"packages":[package(&bytes)]})),
         Response { status: "302 Found", headers: vec![("Location".into(), format!("{url}/storage"))], body: vec![] },
@@ -471,13 +462,13 @@ async fn cloud_redownload_of_activated_builtin_package_is_allowed() {
     ]).await;
     download_at(&core, "21", &root, &mock.url).await.unwrap();
     assert_eq!(mock.finish().await.len(), 3);
-    assert_eq!(std::fs::read(root.join("user.yaml")).unwrap(), user);
-    assert_eq!(core.state().active_scheme.as_deref(), Some("xmjd"));
+    assert_eq!(std::fs::read(runtime.join("user.yaml")).unwrap(), user);
+    assert_eq!(keytao_core::RuntimeDirs::active_package_key(&root).as_deref(), Some("xmjd"));
     assert_eq!(core.state().scheme_cloud_ids["xmjd"], "21");
 }
 
 #[tokio::test]
-async fn downloaded_cloud_package_can_activate_without_losing_cloud_source_or_id() {
+async fn downloaded_cloud_package_keeps_cloud_source_or_id_on_identical_reinstall() {
     let (dir, core, bytes) = fixture();
     let mock = server(|url| {
         vec![
@@ -499,19 +490,13 @@ async fn downloaded_cloud_package_can_activate_without_losing_cloud_source_or_id
     download_at(&core, "21", &root, &mock.url).await.unwrap();
     mock.finish().await;
     assert!(core.state().active_scheme.is_none());
-    crate::packages::activate_scheme(
-        &core,
-        "xmjd",
-        &root,
-        #[cfg(target_os = "windows")]
-        |_, _, _, _| Ok(Vec::new()),
-    )
-    .await
-    .unwrap();
+    let archive = dir.path().join("download.zip");
+    std::fs::write(&archive, &bytes).unwrap();
+    crate::install::install_live_scheme(&core, archive.to_string_lossy().into_owned(), &root, "xmjd", Some("v1")).await.unwrap();
     let meta = crate::packages::stored_archive(&core, "xmjd").unwrap().1;
     assert_eq!(meta.source, "cloud");
     assert_eq!(core.state().scheme_cloud_ids["xmjd"], "21");
-    assert_eq!(core.state().active_scheme.as_deref(), Some("xmjd"));
+    assert!(keytao_core::RuntimeDirs::active_package_key(&root).is_none());
 }
 
 #[tokio::test]
@@ -610,14 +595,13 @@ async fn android_prepare_resolves_bundled_shared_data() {
     )
     .unwrap();
     zip.write_all(schema.as_bytes()).unwrap();
-    crate::packages::stage_install(
+    crate::packages::store_cloud_archive(
         &core,
+        "xmjd", Some("v1"), "official", None,
         &zip.finish().unwrap().into_inner(),
-        Default::default(),
-        String::new(),
+        &root,
     )
     .unwrap();
-    crate::packages::finalize_pending(&core, "xmjd", Some("v1"), false).unwrap();
     core.update_state(|state| state.active_scheme = Some("xmjd".into()))
         .unwrap();
     crate::deploy::record_result(&core, &root, true).unwrap();
@@ -893,15 +877,11 @@ async fn installing_into_another_directory_preserves_active_deploy_receipt() {
     let dest = dir.path().join("other-rime");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(&zip, bytes).unwrap();
-    crate::install::smart_install(
+    crate::install::export_scheme(
         &core,
         zip.to_string_lossy().into_owned(),
-        dest.to_string_lossy().into_owned(),
-        Some("xmjd"),
-        #[cfg(target_os = "windows")]
-        |_, _, _, _| Ok(Vec::new()),
+        &dest,
     )
-    .await
     .unwrap();
     assert_eq!(
         serde_json::to_value(core.state()).unwrap()["last_deploy"],
@@ -958,8 +938,7 @@ fn oversized_distribution_can_prepare_a_small_dependency_closure() {
     zip.write_all(&vec![0; 31 * 1024 * 1024]).unwrap();
     let bytes = zip.finish().unwrap().into_inner();
     assert!(bytes.len() as u64 > MAX_PACKAGE_SIZE);
-    crate::packages::stage_install(&core, &bytes, Default::default(), String::new()).unwrap();
-    crate::packages::finalize_pending(&core, "xmjd", Some("v1"), false).unwrap();
+    crate::packages::store_cloud_archive(&core, "xmjd", Some("v1"), "official", None, &bytes, dir.path()).unwrap();
     let prepared =
         prepare_with_smoke(&core, "xmjd", &dir.path().join("rime"), None, |_, _, _| Ok(())).unwrap();
     assert!(prepared.bundle.bytes.len() < 1024);

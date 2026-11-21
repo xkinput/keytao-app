@@ -456,7 +456,7 @@ mod tests {
             state: Mutex::new(AppState::default()),
             download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file: None,
-            pending_package: Mutex::new(None),
+            pending_package: Mutex::new(()),
             user_words: Mutex::new(crate::user_words::UserWordsState::default()),
         };
         assert!(libjd_status(&core).installed_version.is_none());

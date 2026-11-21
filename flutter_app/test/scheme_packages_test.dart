@@ -7,7 +7,7 @@ import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
 import 'controller_parity_test.dart'
-    show FakeAndroid, FakeCore, missingAddon, settle;
+    show FakeAndroid, FakeCore, settle;
 
 const successfulInstall = InstallResultDto(
   mergedSchemas: [],
@@ -67,7 +67,6 @@ class PackageCore extends FakeCore {
   bool androidRemoval = false;
   String? removalFailure;
   List<String> keptFiles = [];
-  InstallResultDto activationResult = successfulInstall;
   SchemaListDto schemaList = const SchemaListDto(current: null, schemas: []);
   LocalSchemaDto localAfterRemoval = const LocalSchemaDto(
     installed: false,
@@ -144,9 +143,6 @@ class PackageCore extends FakeCore {
   }
 
   void replacePackage(String key, {String? version, bool? active}) {
-    final wasActive = packages.any(
-      (package) => package.schemeKey == key && package.active,
-    );
     packages = [
       for (final package in packages)
         InstalledPackageDto(
@@ -154,14 +150,13 @@ class PackageCore extends FakeCore {
           version: package.schemeKey == key
               ? version ?? package.version
               : package.version,
-          active:
-              package.active || (active == true && package.schemeKey == key),
-          inUse: package.inUse,
+          active: active == true ? package.schemeKey == key : package.active,
+          inUse: active == true ? package.schemeKey == key : package.inUse,
           hasPackageZip: package.schemeKey == key || package.hasPackageZip,
         ),
     ];
     if (active == true) {
-      if (!wasActive) currentPackage = key;
+      currentPackage = key;
       readActiveLocal(deployed: false);
     }
   }
@@ -175,16 +170,7 @@ class PackageCore extends FakeCore {
       installed: true,
       deployed: deployed,
       version: active.version,
-      schemas: [
-        for (final package in [
-          active,
-          ...packages.where(
-            (package) =>
-                package.active && package.schemeKey != active.schemeKey,
-          ),
-        ])
-          package.schemeKey == 'xmjd' ? 'xmjd6' : package.schemeKey,
-      ],
+      schemas: [active.schemeKey == 'xmjd' ? 'xmjd6' : active.schemeKey],
       installedScheme: active.schemeKey,
       installedSchemeVersion: active.version,
     );
@@ -207,20 +193,30 @@ class PackageCore extends FakeCore {
   }
 
   @override
-  Future<InstallResultDto> crateApiCoreActivateScheme({
-    required String schemeKey,
-    required FutureOr<String> Function(String) androidExtract,
+  Future<void> crateApiCoreSwitchPackage({
+    required String packageKey,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
-    calls.add('activate:$schemeKey');
+    calls.add('switch:$packageKey');
     await activationGate?.future;
-    replacePackage(schemeKey, active: true);
-    return activationResult;
+    await deployGate?.future;
+    if (packages.any((package) => package.schemeKey == packageKey)) {
+      replacePackage(packageKey, active: true);
+      readActiveLocal(deployed: true);
+    } else {
+      local = LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        schemas: [packageKey],
+        installedScheme: packageKey,
+      );
+    }
   }
 
   @override
   Future<List<String>> crateApiCoreRemoveSchemePackage({
     required String schemeKey,
-    required FutureOr<String> Function(bool) androidDeploy,
+    required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('packageRemove:$schemeKey');
     final active = packages.any(
@@ -228,7 +224,7 @@ class PackageCore extends FakeCore {
     );
     packages.removeWhere((package) => package.schemeKey == schemeKey);
     if (active) {
-      if (androidRemoval) expect(await androidDeploy(false), isEmpty);
+      if (androidRemoval) expect(await androidDeploy(), isEmpty);
       local = localAfterRemoval;
     }
     if (removalFailure case final failure?) throw StateError(failure);
@@ -242,16 +238,8 @@ class PackageCore extends FakeCore {
     String? version,
   }) async {
     calls.add('install:$url');
+    replacePackage(schemeKey, version: version);
     return successfulInstall;
-  }
-
-  @override
-  Future<void> crateApiCoreRecordInstalledScheme({
-    required String scheme,
-    String? version,
-  }) async {
-    calls.add('record:$scheme:$version');
-    replacePackage(scheme, version: version, active: true);
   }
 
   @override
@@ -341,74 +329,64 @@ void main() {
     expect(controller.busy, isFalse);
   });
 
-  test(
-    'using a deployed package selects its enabled schema without deployment',
-    () async {
-      core.packages[1] = const InstalledPackageDto(
-        schemeKey: 'xmjd',
-        active: true,
-        inUse: false,
-        hasPackageZip: true,
-      );
-      core.schemaList = const SchemaListDto(
-        current: 'keytao',
-        schemas: [
-          SchemaDto(id: 'keytao', name: 'KeyTao'),
-          SchemaDto(id: 'alpha', name: 'Alpha'),
-          SchemaDto(id: 'beta', name: 'Beta'),
-        ],
-      );
-      controller.local = core.local;
-      await controller.refreshSchemeUpdates();
-      await controller.refreshSchemas();
-      core.calls.clear();
+  test('using a deployed package switches its runtime', () async {
+    core.packages[1] = const InstalledPackageDto(
+      schemeKey: 'xmjd',
+      active: true,
+      inUse: false,
+      hasPackageZip: true,
+    );
+    core.schemaList = const SchemaListDto(
+      current: 'keytao',
+      schemas: [
+        SchemaDto(id: 'keytao', name: 'KeyTao'),
+        SchemaDto(id: 'alpha', name: 'Alpha'),
+        SchemaDto(id: 'beta', name: 'Beta'),
+      ],
+    );
+    controller.local = core.local;
+    await controller.refreshSchemeUpdates();
+    await controller.refreshSchemas();
+    core.calls.clear();
 
-      expect(await controller.activateSchemePackage('xmjd'), isTrue);
-      expect(core.calls, ['select:alpha']);
-      expect(controller.busy, isFalse);
-      expect(controller.deployingSchemeKey, isNull);
-      expect(await controller.activateSchemePackage('keytao'), isFalse);
-      expect(core.calls, ['select:alpha']);
+    expect(await controller.activateSchemePackage('xmjd'), isTrue);
+    expect(core.calls, ['switch:xmjd']);
+    expect(controller.busy, isFalse);
+    expect(controller.deployingSchemeKey, isNull);
+    expect(await controller.activateSchemePackage('xmjd'), isFalse);
+    expect(core.calls, ['switch:xmjd']);
+  });
+
+  test(
+    'using an independently installed add-on switches its runtime',
+    () async {
+      for (final deployed in [true, false]) {
+        const key = 'rime_ice';
+        final status = AddonStatusDto(
+          installed: true,
+          deployed: deployed,
+          version: '1',
+          englishAvailable: false,
+        );
+        core.rimeIceStatus = status;
+        controller.rimeIce = core.rimeIceStatus;
+        controller.local = core.local;
+        core.schemaList = const SchemaListDto(
+          current: 'keytao',
+          schemas: [
+            SchemaDto(id: 'keytao', name: 'KeyTao'),
+            SchemaDto(id: 'alpha', name: 'Alpha'),
+          ],
+        );
+        await controller.refreshSchemeUpdates();
+        core.calls.clear();
+
+        expect(await controller.activateSchemePackage(key), isTrue);
+        expect(core.calls, ['switch:rime_ice']);
+        expect(controller.activeSchemeKey, key);
+      }
     },
   );
-
-  test('using an installed addon selects its owned schema', () async {
-    for (final (key, deployed) in [
-      ('easy_en', true),
-      ('rime_ice', true),
-      ('easy_en', false),
-      ('rime_ice', false),
-    ]) {
-      final status = AddonStatusDto(
-        installed: true,
-        deployed: deployed,
-        version: '1',
-        englishAvailable: false,
-      );
-      core.addonStatus = key == 'easy_en' ? status : missingAddon;
-      core.rimeIceStatus = key == 'rime_ice' ? status : missingAddon;
-      controller.addon = core.addonStatus;
-      controller.rimeIce = core.rimeIceStatus;
-      controller.local = core.local;
-      core.schemaList = const SchemaListDto(
-        current: 'keytao',
-        schemas: [
-          SchemaDto(id: 'keytao', name: 'KeyTao'),
-          SchemaDto(id: 'alpha', name: 'Alpha'),
-        ],
-      );
-      await controller.refreshSchemeUpdates();
-      core.calls.clear();
-
-      expect(await controller.activateSchemePackage(key), isTrue);
-      expect(core.calls, [
-        if (!deployed) ...['deployDefault', 'englishMode'],
-        'select:alpha',
-      ]);
-      expect(controller.currentSchemaId, 'alpha');
-      expect(controller.currentAddonKey, key);
-    }
-  });
 
   test('implicit addon deployments track only the managed package', () async {
     controller.local = core.local;
@@ -421,7 +399,7 @@ void main() {
           ? controller.installAddon()
           : controller.manageRimeIce(true);
       await settle();
-      expect(controller.deployingSchemeKey, key);
+      expect(controller.deployingSchemeKey, key == 'easy_en' ? isNull : key);
       core.addonDeployGate!.complete();
       expect(await managing, isTrue);
       expect(controller.deployingSchemeKey, isNull);
@@ -454,68 +432,36 @@ void main() {
       expect(controller.installedPackageFor('xmjd')!.hasPackageZip, isTrue);
       expect(
         core.calls,
-        containsAllInOrder(['activate:xmjd', 'deployDefault', 'select:alpha']),
+        containsAllInOrder(['packageDownload:xmjd', 'switch:xmjd']),
       );
     },
   );
 
-  test('using a package requires an enabled deployed schema', () async {
+  test('redownload switches to the restored package runtime', () async {
     core.packages[1] = const InstalledPackageDto(
       schemeKey: 'xmjd',
-      active: true,
-      inUse: false,
-      hasPackageZip: true,
+      version: '20261101',
+      active: false,
+      hasPackageZip: false,
     );
-    core.schemaList = const SchemaListDto(
-      current: 'keytao',
-      schemas: [SchemaDto(id: 'beta', name: 'Beta')],
-    );
-    controller.local = core.local;
+    controller.dispose();
+    controller = create();
+    controller.selectSource('github');
     await controller.refreshSchemeUpdates();
-    await controller.refreshSchemas();
-    core.calls.clear();
+      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
 
-    expect(await controller.activateSchemePackage('xmjd'), isFalse);
-    expect(core.calls, isEmpty);
-    expect(controller.busy, isFalse);
+    expect(
+      core.calls,
+      containsAllInOrder(['packageDownload:xmjd', 'switch:xmjd']),
+    );
+    expect(core.downloadedSources, ['github']);
+    expect(controller.installedPackageFor('xmjd')!.hasPackageZip, isTrue);
+    expect(controller.installedPackageFor('xmjd')!.active, isTrue);
+    expect(controller.installedPackageFor('keytao')!.active, isFalse);
+    expect(controller.activeSchemeKey, 'xmjd');
   });
 
-  test(
-    'legacy redownload installs and deploys alongside active packages',
-    () async {
-      core.packages[1] = const InstalledPackageDto(
-        schemeKey: 'xmjd',
-        version: '20261101',
-        active: false,
-        hasPackageZip: false,
-      );
-      controller.dispose();
-      controller = create();
-      controller.selectSource('github');
-      await controller.refreshSchemeUpdates();
-      final downloading = controller.downloadSchemePackage('xmjd');
-      await settle();
-      core.schemeRequests['xmjd']!.complete(xmjdRelease);
-      expect(await downloading, isTrue);
-
-      expect(
-        core.calls,
-        containsAllInOrder([
-          'packageDownload:xmjd',
-          'activate:xmjd',
-          'release:xmjd',
-          'deployDefault',
-        ]),
-      );
-      expect(core.downloadedSources, ['github']);
-      expect(controller.installedPackageFor('xmjd')!.hasPackageZip, isTrue);
-      expect(controller.installedPackageFor('xmjd')!.active, isTrue);
-      expect(controller.installedPackageFor('keytao')!.active, isTrue);
-      expect(controller.activeSchemeKey, 'xmjd');
-    },
-  );
-
-  test('updating a co-active package retains selection and reactivates before deploy', () async {
+  test('updating a stored package switches to its updated runtime', () async {
     core.packages[1] = const InstalledPackageDto(
       schemeKey: 'xmjd',
       version: '20261101',
@@ -529,14 +475,10 @@ void main() {
     expect(await updating, isTrue);
     expect(
       core.calls,
-      containsAllInOrder([
-        'packageDownload:xmjd',
-        'activate:xmjd',
-        'deployDefault',
-      ]),
+      containsAllInOrder(['packageDownload:xmjd', 'switch:xmjd']),
     );
-    expect(controller.scheme, 'keytao');
-    expect(controller.activeSchemeKey, 'keytao');
+    expect(controller.scheme, 'xmjd');
+    expect(controller.activeSchemeKey, 'xmjd');
   });
 
   test(
@@ -552,42 +494,29 @@ void main() {
       expect(await downloading, isTrue);
       expect(
         core.calls,
-        containsAllInOrder([
-          'cloudDownload:21',
-          'activate:xmjd',
-          'deployDefault',
-        ]),
+        containsAllInOrder(['cloudDownload:21', 'switch:xmjd']),
       );
     },
   );
 
   test(
-    'active updates download and reactivate then deploy while staying busy',
+    'active updates download and deploy the same package while staying busy',
     () async {
       await controller.refreshSchemeUpdates();
-      core.delayReleases = true;
+      core.deployGate = Completer<void>();
       final updating = controller.updateSchemePackage('keytao');
       await settle();
 
       expect(controller.busy, isTrue);
       expect(await controller.updateSchemePackage('xmjd'), isFalse);
       expect(await controller.removeSchemePackage('xmjd'), isFalse);
-      expect(core.calls, [
-        'packageDownload:keytao',
-        'activate:keytao',
-        'latest',
-      ]);
+      expect(core.calls, ['packageDownload:keytao', 'switch:keytao']);
 
-      core.latestRequests.single.complete(packageRelease);
+      core.deployGate!.complete();
       expect(await updating, isTrue);
       expect(
         core.calls,
-        containsAllInOrder([
-          'packageDownload:keytao',
-          'activate:keytao',
-          'latest',
-          'deployDefault',
-        ]),
+        containsAllInOrder(['packageDownload:keytao', 'switch:keytao']),
       );
       expect(
         core.calls.any((call) => call.startsWith('packageDownload:')),
@@ -607,39 +536,24 @@ void main() {
     await settle();
 
     expect(controller.busy, isTrue);
-    expect(controller.deployingSchemeKey, isNull);
+    expect(controller.deployingSchemeKey, 'xmjd');
     expect(await controller.downloadSchemePackage('keytao'), isFalse);
     expect(await controller.removeSchemePackage('xmjd'), isFalse);
-    expect(core.calls, ['activate:xmjd']);
+    expect(core.calls, ['switch:xmjd']);
 
     core.activationGate!.complete();
     await settle();
-    expect(core.calls, ['activate:xmjd', 'release:xmjd']);
+    expect(core.calls, ['switch:xmjd']);
     expect(controller.busy, isTrue);
-    core.schemeRequests['xmjd']!.complete(
-      const SchemeReleaseDto(
-        scheme: 'xmjd',
-        label: 'xmjd',
-        version: '20261104',
-        name: '',
-        downloadUrl: 'offline-xmjd',
-        assetName: 'xmjd6.zip',
-      ),
-    );
-    await settle();
-    expect(core.calls, ['activate:xmjd', 'release:xmjd', 'deployDefault']);
-    expect(controller.releaseVersion, '20261104');
-    expect(controller.busy, isTrue);
-    expect(controller.deployingSchemeKey, 'xmjd');
     expect(await controller.updateSchemePackage('keytao'), isFalse);
 
     core.deployGate!.complete();
     expect(await activating, isTrue);
     expect(controller.installedPackageFor('xmjd')!.active, isTrue);
-    expect(controller.installedPackageFor('keytao')!.active, isTrue);
+    expect(controller.installedPackageFor('keytao')!.active, isFalse);
     expect(controller.local!.deployed, isTrue);
     expect(controller.activeSchemaLogoPath, '/isolated/logos/xmjd6.png');
-    expect(controller.activeSchemaLogoRevision, 2);
+    expect(controller.activeSchemaLogoRevision, 1);
     expect(controller.busy, isFalse);
     expect(controller.deployingSchemeKey, isNull);
   });
@@ -728,30 +642,6 @@ void main() {
         endsWith('[KEPT] User-modified file: keytao.custom.yaml'),
         endsWith('[KEPT] User-modified file: lua/user.lua'),
       ]),
-    );
-  });
-
-  test('activation reports preserved user changes from install logs', () async {
-    core.packages = [
-      const InstalledPackageDto(
-        schemeKey: 'keytao',
-        active: false,
-        hasPackageZip: true,
-      ),
-    ];
-    core.activationResult = const InstallResultDto(
-      mergedSchemas: [],
-      logs: ['[KEPT] User-modified file: lua/user.lua'],
-      verify: [],
-    );
-    await controller.refreshSchemeUpdates();
-
-    expect(await controller.activateSchemePackage('keytao'), isTrue);
-
-    expect(controller.packageError, '已保留您修改过的文件：\nlua/user.lua');
-    expect(
-      controller.operationLogs,
-      contains(endsWith('[KEPT] User-modified file: lua/user.lua')),
     );
   });
 
@@ -881,10 +771,7 @@ void main() {
       core.updateGate = Completer<List<SchemeUpdateDto>>();
       final beforeDownload = controller.refreshSchemeUpdates();
       await settle();
-      final downloading = controller.downloadSchemePackage('xmjd');
-      await settle();
-      core.schemeRequests['xmjd']!.complete(xmjdRelease);
-      expect(await downloading, isTrue);
+      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
       core.updateGate!.complete([xmjdUpdate]);
       expect(await beforeDownload, isFalse);
       expect(controller.schemeUpdateFor('xmjd'), isNull);

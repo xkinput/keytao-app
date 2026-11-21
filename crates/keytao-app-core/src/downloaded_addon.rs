@@ -86,7 +86,7 @@ impl Addon {
     }
 
     pub(crate) fn status(&self, core: &Core, root: &Path) -> Result<Status, CoreError> {
-        let isolated = keytao_core::RuntimeDirs::isolation_enabled(root);
+        let isolated = !keytao_core::RuntimeDirs::needs_migration(root);
         let source = if isolated {
             crate::addon_store::isolated_files(core, self.id).map_err(CoreError::Other)?
         } else {
@@ -326,119 +326,16 @@ impl Addon {
     {
         let result: Result<_, String> = async {
             let root = host.user_root()?;
+            crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
             let mut receipt = InstallReceipt::new(&root)?;
             receipt.attach_store(core, self.id)?;
-            if receipt.is_isolated() {
-                if installed {
-                    let receipt = install_package(receipt).await?;
-                    receipt.deploy_isolated(core, self.id, host).await?;
-                } else {
-                    receipt.uninstall_isolated(core, self.id, host).await?;
-                    receipt.finish()?;
-                }
-                self.emit_completed(core, installed);
-                return self.status(core, &root).map_err(|error| error.to_string());
-            }
-            let previous = receipt
-                .manifest_bytes(self.manifest)?
-                .map(|bytes| self.parse_manifest(&root, &bytes))
-                .transpose()?;
-            let removed_sources = crate::addon::removed_sources(
-                &root,
-                previous
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|manifest| &manifest.files),
-            )?;
-            #[cfg(target_os = "windows")]
-            let package_paths = previous
-                .as_ref()
-                .into_iter()
-                .flat_map(|manifest| &manifest.files)
-                .map(|file| std::path::PathBuf::from(&file.path))
-                .collect::<Vec<_>>();
-            let mut receipt = if installed {
-                install_package(receipt).await?
+            if installed {
+                let receipt = install_package(receipt).await?;
+                receipt.deploy_isolated(core, self.id, host).await?;
             } else {
-                self.uninstall_receipt(&mut receipt)?;
-                receipt
-            };
-            #[cfg(target_os = "windows")]
-            let mut public_update = PublicRollback::default();
-            let deployed = async {
-                write_schema_list_transaction(
-                    &mut receipt,
-                    self.id,
-                    installed,
-                    &crate::addon::shared_data_dir(core, &root),
-                )?;
-                #[cfg(target_os = "windows")]
-                let public_source_warning = {
-                    match crate::windows_public_schemas::update_public_schemas(|| {
-                        if installed {
-                            host.publish_wanxiang_sources(&receipt.public_source_files())?;
-                            crate::windows_public_schemas::publish_schema_selection(&root)
-                        } else {
-                            host.remove_public_schema(self.id, &package_paths)
-                        }
-                    }) {
-                        Ok(update) => {
-                            public_update.0 = Some(update);
-                            None
-                        }
-                        Err(error) => Some(crate::windows_public_schemas::public_warning(
-                            &format!("{}-public-sources", self.id.replace('_', "-")),
-                            &error,
-                        )),
-                    }
-                };
-                if installed || keytao_core::schema_install_state(&root).installed {
-                    host.deploy().await?;
-                } else {
-                    let _ = host.write_reload_stamp(&root)?;
-                }
-                #[cfg(target_os = "windows")]
-                if let Some(warning) = public_source_warning {
-                    crate::deploy::emit_legacy_progress(
-                        core,
-                        keytao_core::DeployStep::Done,
-                        format!("系统搜索框方案未更新：{warning}"),
-                    );
-                }
-                let pending = receipt
-                    .manifest_bytes(self.manifest)?
-                    .map(|bytes| self.parse_manifest(&root, &bytes))
-                    .transpose()?;
-                if installed && !self.status_with_manifest(&root, pending).deployed {
-                    return Err(format!("{}部署产物缺失", self.name));
-                }
-                if !installed {
-                    crate::addon::cleanup_removed(&root, &removed_sources)?;
-                }
-                receipt.commit_store(installed)?;
-                Ok(())
+                receipt.uninstall_isolated(core, self.id, host).await?;
+                receipt.finish()?;
             }
-            .await;
-            if let Err(error) = deployed {
-                let rollback = receipt.rollback();
-                #[cfg(target_os = "windows")]
-                let public_rollback = public_update
-                    .0
-                    .take()
-                    .map_or(Ok(()), |update| update.rollback());
-                rollback.map_err(|restore| format!("{error}；恢复词库失败：{restore}"))?;
-                #[cfg(target_os = "windows")]
-                public_rollback
-                    .map_err(|restore| format!("{error}；恢复公共方案失败：{restore}"))?;
-                host.deploy()
-                    .await
-                    .map_err(|restore| format!("{error}；已恢复文件，请重新部署：{restore}"))?;
-                return Err(error);
-            }
-            #[cfg(target_os = "windows")]
-            public_update.0.take();
-            receipt.finish()?;
-            crate::packages::sync_generated(core, &root).map_err(|error| error.to_string())?;
             self.emit_completed(core, installed);
             self.status(core, &root).map_err(|error| error.to_string())
         }

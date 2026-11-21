@@ -555,7 +555,7 @@ pub fn ascii_mode_rejects_key(vk: u16, mods: u32) -> bool {
     if vk == VK_F4.0
         && keytao_core::switcher_model::is_hotkey(key_policy::XK_F4, mods)
         && keytao_core::default_user_data_dir()
-            .is_some_and(|root| keytao_core::RuntimeDirs::isolation_enabled(&root))
+            .is_some_and(|root| !keytao_core::RuntimeDirs::needs_migration(&root))
     {
         return false;
     }

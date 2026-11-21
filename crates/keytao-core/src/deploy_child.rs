@@ -16,123 +16,10 @@ use std::{
 
 pub const DEPLOY_SUBCOMMAND: &str = "--deploy";
 pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
-pub const FLAT_TARGET_ENV: &str = "KEYTAO_DEPLOY_FLAT_TARGET";
 const PACKAGE_DEPLOY_ARG: &str = "--packages";
 const PROGRESS_VERSION_ENV: &str = "KEYTAO_DEPLOY_PROGRESS_VERSION";
 const STRUCTURED_PROGRESS_VERSION: &str = "2";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
-
-#[cfg(any(target_os = "windows", test))]
-const WINDOWS_BUILD_SIGNATURE_FILE: &str = ".keytao-windows-build-signature.json";
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_build_signature(user_dir: &Path, librime_version: &str) -> Result<Vec<u8>, String> {
-    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir)?;
-    let user_dir = dirs.user_data_dir.as_path();
-    let mut schemas = crate::configured_schema_list_from_dir(user_dir);
-    schemas.sort();
-    schemas.dedup();
-    serde_json::to_vec(&(
-        crate::deployment_fingerprint(user_dir)?,
-        librime_version,
-        schemas,
-    ))
-    .map_err(|error| error.to_string())
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_build_cleanup(user_dir: &Path, signature: &[u8]) -> Option<Vec<String>> {
-    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir).ok()?;
-    // None retains the old full repair path; Some lists only proven obsolete outputs.
-    if std::fs::read_to_string(user_dir.join(crate::WINDOWS_RIME_BUILD_REPAIR_MARKER)).ok()?
-        != crate::WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT
-        || dirs.staging_dir.join(crate::DEPLOYING_FILE).exists()
-    {
-        return None;
-    }
-    let previous = std::fs::read(dirs.staging_dir.join(WINDOWS_BUILD_SIGNATURE_FILE)).ok()?;
-    let previous: (String, String, Vec<String>) = serde_json::from_slice(&previous).ok()?;
-    let current: (String, String, Vec<String>) = serde_json::from_slice(signature).ok()?;
-    if previous.0 != current.0
-        || previous.1 != current.1
-        || previous
-            .2
-            .iter()
-            .chain(&current.2)
-            .any(|id| !crate::valid_rime_build_id(id))
-    {
-        return None;
-    }
-    if previous.2 == current.2 {
-        return crate::schema_install_state(user_dir)
-            .deployed
-            .then(Vec::new);
-    }
-
-    // A newly selected schema has no build yet: validate the *previous* deployment.
-    let marker = std::fs::read(dirs.staging_dir.join(crate::DEPLOYED_FILE)).ok()?;
-    let marker: crate::DeploymentMarker = serde_json::from_slice(&marker).ok()?;
-    let deployed = crate::effective_schema_list(user_dir, previous.2.clone());
-    if marker.fingerprint != previous.0
-        || deployed.is_empty()
-        || marker.schemas.is_empty()
-        || crate::managed_primary_schemas_from_list(user_dir, deployed.clone())
-            .iter()
-            .any(|id| !marker.schemas.contains(id))
-        || deployed
-            .iter()
-            .any(|id| !dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file())
-        || marker.schemas.iter().any(|id| {
-            !previous.2.contains(id)
-                || !dirs.staging_dir.join(format!("{id}.schema.yaml")).is_file()
-        })
-    {
-        return None;
-    }
-    if previous.2.iter().all(|id| current.2.contains(id)) {
-        return Some(Vec::new());
-    }
-
-    let before = windows_schema_build_outputs(user_dir, &deployed, false)?;
-    let after = windows_schema_build_outputs(user_dir, &current.2, true)?;
-    Some(before.difference(&after).cloned().collect())
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_schema_build_outputs(
-    user_dir: &Path,
-    schemas: &[String],
-    require_current_inputs: bool,
-) -> Option<std::collections::BTreeSet<String>> {
-    crate::build_prune::reachable_rime_build_outputs(
-        user_dir,
-        None,
-        schemas,
-        require_current_inputs,
-        false,
-    )
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn prepare_windows_deploy(user_dir: &Path, signature: &[u8]) -> Result<(), String> {
-    // Decide before closing the runtime gate; failures must leave the next deploy in repair mode.
-    let dirs = crate::RuntimeDirs::resolve(user_dir, user_dir)?;
-    let cleanup = windows_build_cleanup(user_dir, signature);
-    crate::clear_windows_rime_build_repair_marker(user_dir)?;
-    crate::ReloadStamp::write(user_dir)?;
-    match cleanup {
-        // Obsolete outputs are pruned only after the deployment succeeds.
-        Some(_) => {}
-        None => {
-            crate::remove_rime_build_artifact(
-                &dirs.staging_dir.join(".keytao-desktop-inputs.json"),
-            )?;
-            crate::invalidate_active_windows_rime_build(&dirs.user_data_dir)?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
 const LOCK_FD_ENV: &str = "KEYTAO_LIBRIME_UPGRADE_LOCK_FD";
 
@@ -142,24 +29,35 @@ pub fn inherit_linux_deploy_lock(command: &mut Command, lock: &std::fs::File) {
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
     let lock_fd = lock.as_raw_fd();
-    let wayland_fd = std::env::var("WAYLAND_SOCKET")
-        .ok()
-        .and_then(|value| value.parse::<i32>().ok());
-    command
-        .env(LOCK_FD_ENV, lock_fd.to_string())
-        .env_remove("WAYLAND_SOCKET");
+    close_linux_wayland_socket(command, Some(lock_fd));
+    command.env(LOCK_FD_ENV, lock_fd.to_string());
     unsafe {
         command.pre_exec(move || {
             let flags = libc::fcntl(lock_fd, libc::F_GETFD);
             if flags == -1 || libc::fcntl(lock_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            // The deploy child must not keep KWin's private socket alive.
-            if let Some(fd) = wayland_fd.filter(|fd| *fd > 2 && *fd != lock_fd) {
-                libc::close(fd);
-            }
             Ok(())
         });
+    }
+}
+
+/// The deployment child must not keep KWin's private socket alive.
+#[cfg(target_os = "linux")]
+pub fn close_linux_wayland_socket(command: &mut Command, reserved_fd: Option<i32>) {
+    use std::os::unix::process::CommandExt;
+
+    command.env_remove("WAYLAND_SOCKET");
+    let fd = std::env::var("WAYLAND_SOCKET")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok());
+    if let Some(fd) = fd.filter(|fd| *fd > 2 && Some(*fd) != reserved_fd) {
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(fd);
+                Ok(())
+            });
+        }
     }
 }
 
@@ -210,6 +108,12 @@ fn write_message(output: &mut impl Write, message: &Message) -> Result<(), Strin
 /// Handle `--deploy` or `--deploy --packages`; pass the code to [`exit_deploy_child`].
 /// No engine session or caller-supplied data paths are accepted.
 pub fn run_deploy_child_main() -> i32 {
+    run_deploy_child_main_with_prepare(|_| Ok(()))
+}
+
+pub fn run_deploy_child_main_with_prepare(
+    prepare: impl FnOnce(&Path) -> Result<(), String>,
+) -> i32 {
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
     let package_plan =
         args.len() == 2 && args[0] == DEPLOY_SUBCOMMAND && args[1] == PACKAGE_DEPLOY_ARG;
@@ -225,83 +129,40 @@ pub fn run_deploy_child_main() -> i32 {
             let _lock = inherited_linux_deploy_lock()?;
             let user_dir = crate::default_user_data_dir()
                 .ok_or("cannot determine the librime user data directory")?;
-            if RuntimeDirs::isolation_enabled(&user_dir) {
-                let targets = if package_plan {
-                    let plan = std::env::var(PACKAGE_TARGETS_ENV)
-                        .map_err(|error| format!("read package deployment plan: {error}"))?;
-                    serde_json::from_str(&plan)
-                        .map_err(|error| format!("invalid package deployment plan: {error}"))?
-                } else {
-                    let package_key = RuntimeDirs::active_package_key(&user_dir)
-                        .ok_or("cannot determine active package for deployment")?;
-                    vec![PackageDeployTarget {
-                        package_name: package_key.clone(),
-                        package_key,
-                        materialize_error: None,
-                        staged_inputs: None,
-                    }]
-                };
-                crate::isolated_deploy::deploy_packages(
-                    &user_dir,
-                    Path::new(&crate::default_shared_data_dir()),
-                    None,
-                    &targets,
-                    emit,
-                )
-            } else if package_plan {
-                Err("package isolation is disabled".into())
-            } else {
-                emit(flat_compile_progress(Some(&user_dir)));
-                deploy_directory(&user_dir)
+            prepare(&user_dir)?;
+            if RuntimeDirs::needs_migration(&user_dir) {
+                return Err("scheme directory migration is required before deployment".into());
             }
+            let targets = if package_plan {
+                let plan = std::env::var(PACKAGE_TARGETS_ENV)
+                    .map_err(|error| format!("read package deployment plan: {error}"))?;
+                serde_json::from_str(&plan)
+                    .map_err(|error| format!("invalid package deployment plan: {error}"))?
+            } else {
+                let package_key = RuntimeDirs::active_package_key(&user_dir)
+                    .ok_or("cannot determine active package for deployment")?;
+                vec![PackageDeployTarget {
+                    package_name: package_key.clone(),
+                    package_key,
+                    materialize_error: None,
+                    staged_inputs: None,
+                }]
+            };
+            crate::isolated_deploy::deploy_packages(
+                &user_dir,
+                Path::new(&crate::default_shared_data_dir()),
+                None,
+                &targets,
+                emit,
+            )
         },
     )
 }
 
-fn flat_compile_progress(user_dir: Option<&Path>) -> DeployProgress {
-    if let Some(target) = std::env::var(FLAT_TARGET_ENV)
-        .ok()
-        .and_then(|target| serde_json::from_str::<PackageDeployTarget>(&target).ok())
-    {
-        return DeployProgress::flat(
-            &target.package_key,
-            &target.package_name,
-            DeployStep::Compile,
-            "Deploying librime...",
-        );
-    }
-    let key = user_dir.and_then(RuntimeDirs::flat_active_package_key);
+fn compile_progress(user_dir: Option<&Path>) -> DeployProgress {
+    let key = user_dir.and_then(RuntimeDirs::active_package_key);
     let key = key.as_deref().unwrap_or("librime");
     DeployProgress::flat(key, key, DeployStep::Compile, "Deploying librime...")
-}
-
-/// Compile a host-owned isolated deployment directory in a short-lived process.
-pub fn deploy_directory(user_dir: &Path) -> Result<(), String> {
-    let shared_dir = crate::default_shared_data_dir();
-    #[cfg(target_os = "windows")]
-    let signature = windows_build_signature(
-        user_dir,
-        &crate::librime_runtime_version().ok_or("cannot determine the librime version")?,
-    )?;
-    #[cfg(target_os = "windows")]
-    prepare_windows_deploy(user_dir, &signature)?;
-    crate::deploy_for_process(
-        user_dir.to_string_lossy().into_owned(),
-        shared_dir,
-        crate::DeployProcess::DeployChild,
-    )?;
-    #[cfg(target_os = "windows")]
-    {
-        crate::write_file_atomic(
-            &crate::RuntimeDirs::resolve(user_dir, user_dir)?
-                .staging_dir
-                .join(WINDOWS_BUILD_SIGNATURE_FILE),
-            &signature,
-        )
-        .map_err(|error| format!("write Windows build signature: {error}"))?;
-        crate::mark_windows_rime_build_repair_complete(user_dir)?;
-    }
-    Ok(())
 }
 
 /// Inspect deployed data in an isolated user directory, never running deployment.
@@ -375,7 +236,7 @@ pub fn run_deploy_child_main_with_action(
         subcommand,
         |emit| {
             let user_dir = crate::default_user_data_dir();
-            emit(flat_compile_progress(user_dir.as_deref()));
+            emit(compile_progress(user_dir.as_deref()));
             action()
         },
     )
@@ -418,7 +279,7 @@ fn child_main(
     action: impl FnOnce() -> Result<(), String>,
 ) -> i32 {
     child_main_with_progress(args, output, subcommand, |emit| {
-        emit(flat_compile_progress(None));
+        emit(compile_progress(None));
         action()
     })
 }
@@ -733,338 +594,6 @@ fn wait_for_child_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const WINDOWS_BUILD_SIGNATURE: &str = "build/.keytao-windows-build-signature.json";
-
-    #[test]
-    fn windows_deploy_reuses_only_trusted_builds() {
-        let root =
-            std::env::temp_dir().join(format!("keytao-windows-incremental-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("build")).unwrap();
-        let preserved = [
-            (
-                "default.custom.yaml",
-                "patch:\n  schema_list: [{schema: keydo}]\n",
-            ),
-            (
-                "keydo.schema.yaml",
-                "schema: {schema_id: keydo}\ntranslator: {dictionary: keydo}\n",
-            ),
-            ("keydo.custom.yaml", "patch: {menu/page_size: 7}\n"),
-            ("keydo.user.dict.yaml", "user words"),
-            ("keydo.userdb/data", "learned words"),
-        ];
-        std::fs::create_dir_all(root.join("keydo.userdb")).unwrap();
-        for (path, content) in preserved {
-            std::fs::write(root.join(path), content).unwrap();
-        }
-        std::fs::write(
-            root.join("build/keydo.schema.yaml"),
-            "schema: {schema_id: keydo}\n",
-        )
-        .unwrap();
-        let signature = windows_build_signature(&root, "1.17.0").unwrap();
-        let trust = || {
-            crate::write_deployed_marker(&root, &["keydo".into()]).unwrap();
-            crate::mark_windows_rime_build_repair_complete(&root).unwrap();
-            std::fs::write(root.join(WINDOWS_BUILD_SIGNATURE), &signature).unwrap();
-        };
-        trust();
-        assert_eq!(windows_build_cleanup(&root, &signature), Some(vec![]));
-        assert_eq!(
-            windows_build_cleanup(&root, &windows_build_signature(&root, "1.18.0").unwrap()),
-            None
-        );
-        for path in [
-            crate::WINDOWS_RIME_BUILD_REPAIR_MARKER,
-            "build/.keytao-deployed",
-            WINDOWS_BUILD_SIGNATURE,
-        ] {
-            std::fs::remove_file(root.join(path)).unwrap();
-            assert!(
-                windows_build_cleanup(&root, &signature).is_none(),
-                "missing {path}"
-            );
-            std::fs::write(root.join(path), b"invalid marker").unwrap();
-            assert!(
-                windows_build_cleanup(&root, &signature).is_none(),
-                "invalid {path}"
-            );
-            trust();
-        }
-        std::fs::write(root.join("build/.keytao-deploying"), "interrupted").unwrap();
-        assert!(windows_build_cleanup(&root, &signature).is_none());
-        std::fs::remove_file(root.join("build/.keytao-deploying")).unwrap();
-        std::fs::write(
-            root.join("default.custom.yaml"),
-            "patch:\n  schema_list: [{schema: keydo}, {schema: keytao}]\n",
-        )
-        .unwrap();
-        let changed = windows_build_signature(&root, "1.17.0").unwrap();
-        assert_ne!(signature, changed);
-        assert_eq!(windows_build_cleanup(&root, &changed), Some(vec![]));
-        std::fs::write(root.join("default.custom.yaml"), preserved[0].1).unwrap();
-
-        for suffix in ["prism", "table", "reverse"] {
-            std::fs::write(root.join(format!("build/keydo.{suffix}.bin")), suffix).unwrap();
-        }
-        prepare_windows_deploy(&root, &signature).unwrap();
-        for suffix in ["prism", "table", "reverse"] {
-            assert_eq!(
-                std::fs::read(root.join(format!("build/keydo.{suffix}.bin"))).unwrap(),
-                suffix.as_bytes()
-            );
-        }
-        // A failed/interrupted deploy leaves the gate closed and forces the next repair.
-        assert!(windows_build_cleanup(&root, &signature).is_none());
-        prepare_windows_deploy(&root, &signature).unwrap();
-        for suffix in ["prism", "table", "reverse"] {
-            assert!(!root.join(format!("build/keydo.{suffix}.bin")).exists());
-        }
-        for (path, content) in preserved {
-            assert_eq!(
-                std::fs::read(root.join(path)).unwrap(),
-                content.as_bytes(),
-                "{path}"
-            );
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn windows_schema_removal_keeps_referenced_outputs_and_user_data() {
-        for mode in [
-            "exclusive",
-            "shared",
-            "shared_prism",
-            "dependency",
-            "packs",
-            "removed_pack",
-            "custom",
-        ] {
-            let root = std::env::temp_dir().join(format!(
-                "keytao-windows-removal-{mode}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(root.join("build")).unwrap();
-            let selection = |schemas: &[&str]| {
-                let schemas: Vec<_> = schemas
-                    .iter()
-                    .map(|id| serde_json::json!({"schema": id}))
-                    .collect();
-                std::fs::write(
-                    root.join("default.custom.yaml"),
-                    serde_json::json!({"patch": {"schema_list": schemas}}).to_string(),
-                )
-                .unwrap();
-            };
-            selection(&["keydo", "keytao"]);
-            let dictionary = if matches!(mode, "shared" | "shared_prism") {
-                "keydo"
-            } else {
-                "keytao"
-            };
-            let extra = match mode {
-                "dependency" => "  dependencies: [keydo]\n",
-                _ => "",
-            };
-            for (id, dictionary, extra) in [("keydo", "keydo", ""), ("keytao", dictionary, extra)] {
-                let source = format!("schema:\n  schema_id: {id}\n{extra}translator:\n  dictionary: {dictionary}\n  prism: {id}\n");
-                std::fs::write(root.join(format!("{id}.schema.yaml")), &source).unwrap();
-                let mut compiled = source;
-                if mode == "shared_prism" {
-                    compiled = compiled.replace(&format!("  prism: {id}\n"), "");
-                }
-                if id == "keytao" && mode == "packs" {
-                    compiled.push_str("  packs: [keydo]\n");
-                }
-                if id == "keydo" && mode == "removed_pack" {
-                    compiled.push_str("  packs: [extra]\n");
-                    for suffix in ["table", "reverse"] {
-                        std::fs::write(root.join(format!("build/extra.{suffix}.bin")), suffix)
-                            .unwrap();
-                    }
-                }
-                if id == "keytao" && mode == "custom" {
-                    compiled = compiled.replace("dictionary: keytao", "dictionary: keydo");
-                    std::fs::write(
-                        root.join("keytao.custom.yaml"),
-                        "patch: {translator/dictionary: keydo}\n",
-                    )
-                    .unwrap();
-                }
-                compiled.push_str(&format!(
-                    "__build_info:\n  timestamps:\n    {id}.schema: 1\n    {id}.custom: 0\n"
-                ));
-                std::fs::write(root.join(format!("build/{id}.schema.yaml")), compiled).unwrap();
-                for suffix in ["prism", "table", "reverse"] {
-                    std::fs::write(root.join(format!("build/{id}.{suffix}.bin")), suffix).unwrap();
-                }
-            }
-            let preserved = [
-                ("keydo.custom.yaml", "patch: {menu/page_size: 7}\n"),
-                ("keydo.user.dict.yaml", "user words"),
-                ("keydo.userdb/data", "learned words"),
-                ("sync/device/words", "synced words"),
-            ];
-            for (path, content) in preserved {
-                std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
-                std::fs::write(root.join(path), content).unwrap();
-            }
-            crate::record_schema_input_fingerprints(&root, &["keydo".into(), "keytao".into()])
-                .unwrap();
-            crate::write_deployed_marker(&root, &["keydo".into(), "keytao".into()]).unwrap();
-            crate::mark_windows_rime_build_repair_complete(&root).unwrap();
-            let signature = windows_build_signature(&root, "1.17.0").unwrap();
-            std::fs::write(root.join(WINDOWS_BUILD_SIGNATURE), &signature).unwrap();
-            selection(&["keytao"]);
-            let signature = windows_build_signature(&root, "1.17.0").unwrap();
-            let expected = match mode {
-                "dependency" => vec![],
-                "shared_prism" => vec!["keydo.schema.yaml"],
-                "exclusive" => vec![
-                    "keydo.prism.bin",
-                    "keydo.reverse.bin",
-                    "keydo.schema.yaml",
-                    "keydo.table.bin",
-                ],
-                "removed_pack" => vec![
-                    "extra.table.bin",
-                    "keydo.prism.bin",
-                    "keydo.reverse.bin",
-                    "keydo.schema.yaml",
-                    "keydo.table.bin",
-                ],
-                _ => vec!["keydo.prism.bin", "keydo.schema.yaml"],
-            };
-            let outputs = windows_build_cleanup(&root, &signature).unwrap();
-            assert_eq!(outputs, expected, "{mode}");
-            if mode == "exclusive" {
-                let custom = root.join("keytao.custom.yaml");
-                std::fs::write(&custom, "patch: {translator/dictionary: keydo}\n").unwrap();
-                assert!(windows_build_cleanup(&root, &signature).is_none());
-                std::fs::remove_file(custom).unwrap();
-                let receipt = root.join("build/.keytao-schema-inputs.json");
-                let saved = std::fs::read(&receipt).unwrap();
-                std::fs::remove_file(&receipt).unwrap();
-                assert!(windows_build_cleanup(&root, &signature).is_none());
-                std::fs::write(receipt, saved).unwrap();
-                selection(&["keytao", "keytao_new"]);
-                assert!(windows_build_cleanup(
-                    &root,
-                    &windows_build_signature(&root, "1.17.0").unwrap()
-                )
-                .is_none());
-                selection(&["keytao"]);
-                assert_eq!(windows_build_cleanup(&root, &signature).unwrap(), outputs);
-            }
-            let retained: Vec<_> = std::fs::read_dir(root.join("build"))
-                .unwrap()
-                .map(|entry| {
-                    let path = entry.unwrap().path();
-                    let bytes = std::fs::read(&path).unwrap();
-                    (path, bytes)
-                })
-                .filter(|(path, _)| !outputs.iter().any(|name| path.ends_with(name)))
-                .collect();
-            prepare_windows_deploy(&root, &signature).unwrap();
-            for name in outputs {
-                assert!(root.join("build").join(name).exists());
-            }
-            for (path, bytes) in retained {
-                assert_eq!(std::fs::read(path).unwrap(), bytes);
-            }
-            std::fs::write(
-                root.join("build/default.yaml"),
-                "schema_list: [{schema: keytao}]\n",
-            )
-            .unwrap();
-            std::fs::write(root.join("rime.lua"), "require('keytao_filter')\n").unwrap();
-            std::fs::create_dir_all(root.join("lua")).unwrap();
-            std::fs::write(root.join("lua/keytao_filter.lua"), "local dict = env.engine.schema.config:get_string('translator/dictionary')\nlocal db = ReverseDb('build/' .. dict .. '.reverse.bin')\nlocal arithmetic = load('return 1 + 1')\n").unwrap();
-            crate::begin_deployment(&root).unwrap();
-            crate::complete_deployment_with_cleanup(&root, || {
-                crate::prune_rime_build_artifacts(&root, None).map(|_| ())
-            })
-            .unwrap();
-            let removed = matches!(mode, "exclusive" | "removed_pack");
-            for suffix in ["schema.yaml", "table.bin", "reverse.bin", "prism.bin"] {
-                assert_eq!(
-                    root.join(format!("build/keydo.{suffix}")).exists(),
-                    !removed,
-                    "{mode}: {suffix}"
-                );
-            }
-            assert!(root.join("build/keytao.schema.yaml").is_file());
-            assert!(root.join(format!("build/{dictionary}.table.bin")).is_file());
-            if mode == "removed_pack" {
-                assert!(!root.join("build/extra.table.bin").exists());
-                assert!(!root.join("build/extra.reverse.bin").exists());
-            }
-            assert!(crate::schema_install_state(&root).deployed);
-            assert!(!root.join("build/.keytao-deploying").exists());
-            assert!(crate::ReloadStamp::path(&root).is_file());
-            for (path, content) in preserved {
-                assert_eq!(std::fs::read(root.join(path)).unwrap(), content.as_bytes());
-            }
-            std::fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn windows_schema_selection_accepts_primary_only_deployment_marker() {
-        let root =
-            std::env::temp_dir().join(format!("keytao-windows-addon-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("build")).unwrap();
-        let selection = |ids: &[&str]| {
-            let schemas: Vec<_> = ids
-                .iter()
-                .map(|id| serde_json::json!({"schema": id}))
-                .collect();
-            std::fs::write(
-                root.join("default.custom.yaml"),
-                serde_json::json!({"patch": {"schema_list": schemas}}).to_string(),
-            )
-            .unwrap();
-        };
-        selection(&["keydo", "easy_en"]);
-        for id in ["keydo", "easy_en"] {
-            let source = format!("schema: {{schema_id: {id}}}\ntranslator: {{dictionary: {id}}}\n");
-            std::fs::write(root.join(format!("{id}.schema.yaml")), &source).unwrap();
-            std::fs::write(
-                root.join(format!("build/{id}.schema.yaml")),
-                format!("{source}__build_info:\n  timestamps: {{{id}.schema: 1}}\n"),
-            )
-            .unwrap();
-        }
-        crate::complete_deployment(&root).unwrap();
-        let marker = std::fs::read(root.join("build").join(crate::DEPLOYED_FILE)).unwrap();
-        let marker: crate::DeploymentMarker = serde_json::from_slice(&marker).unwrap();
-        assert_eq!(marker.schemas, ["keydo"]);
-        crate::mark_windows_rime_build_repair_complete(&root).unwrap();
-        std::fs::write(
-            root.join(WINDOWS_BUILD_SIGNATURE),
-            windows_build_signature(&root, "1.17.0").unwrap(),
-        )
-        .unwrap();
-        selection(&["keydo", "easy_en", "keytao_new"]);
-        assert_eq!(
-            windows_build_cleanup(&root, &windows_build_signature(&root, "1.17.0").unwrap()),
-            Some(vec![])
-        );
-        selection(&["keydo"]);
-        assert_eq!(
-            windows_build_cleanup(&root, &windows_build_signature(&root, "1.17.0").unwrap())
-                .unwrap(),
-            [
-                "easy_en.prism.bin",
-                "easy_en.reverse.bin",
-                "easy_en.schema.yaml",
-                "easy_en.table.bin"
-            ]
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn protocol_golden_cases() {
@@ -1444,11 +973,6 @@ mod tests {
             fs::create_dir_all(dir).unwrap();
         }
         fs::write(
-            root.join(crate::RuntimeDirs::SETTINGS_FILE),
-            r#"{"runtime_isolation":true}"#,
-        )
-        .unwrap();
-        fs::write(
             root.join("scheme-packages/active-manifest.json"),
             r#"{"active_package":"local-fixture"}"#,
         )
@@ -1521,7 +1045,6 @@ mod tests {
                 .env(FIXTURE, &root)
                 .env(PROGRESS_VERSION_ENV, STRUCTURED_PROGRESS_VERSION)
                 .env("KEYTAO_RIME_SHARED_DATA_DIR", &bundled)
-                .env_remove("KEYTAO_RUNTIME_ISOLATION")
                 .output()
                 .unwrap();
             let messages = std::str::from_utf8(&output.stdout)
@@ -1688,8 +1211,7 @@ mod tests {
                     "deploy_child::tests::child_progress_defaults_to_text_and_supports_version_two",
                     "--nocapture",
                 ])
-                .env(CHILD, "1")
-                .env_remove(FLAT_TARGET_ENV);
+                .env(CHILD, "1");
             match version {
                 Some(version) => command.env(PROGRESS_VERSION_ENV, version),
                 None => command.env_remove(PROGRESS_VERSION_ENV),

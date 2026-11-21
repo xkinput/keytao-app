@@ -119,10 +119,12 @@ pub(crate) fn user_file(path: &str) -> bool {
         || matches!(path, "squirrel.custom.yaml" | "weasel.custom.yaml")
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn addon_ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
     crate::addon_store::ownership(core, root)
 }
 
+#[cfg(test)]
 pub(crate) fn backup(
     core: &Core,
     root: &Path,
@@ -162,173 +164,7 @@ pub(crate) fn fingerprint(root: &Path, relative: &str) -> Result<Option<OwnedFil
     }
 }
 
-pub(crate) fn same_file_path(root: &Path, left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(left), Ok(right)) = (fs::metadata(root.join(left)), fs::metadata(root.join(right))) {
-            return left.dev() == right.dev() && left.ino() == right.ino();
-        }
-    }
-    #[cfg(windows)]
-    if let (Ok(left), Ok(right)) = (root.join(left).canonicalize(), root.join(right).canonicalize()) {
-        return left == right;
-    }
-    false
-}
-
-pub(crate) fn retained(logs: &[String]) -> Vec<String> {
-    logs.iter()
-        .filter_map(|line| {
-            line.strip_prefix("[KEPT] User-modified file: ")
-                .map(str::to_owned)
-        })
-        .collect()
-}
-
-pub(crate) fn deactivate(
-    core: &Core,
-    root: &Path,
-    active: &mut Activation,
-) -> Result<Vec<String>, CoreError> {
-    let mut logs = Vec::new();
-    let mut modified = BTreeSet::new();
-    let addons = addon_ownership(core, root)?;
-    let others = read_all(core, root)?.into_iter()
-        .filter(|(key, _)| key != &active.key)
-        .flat_map(|(_, record)| record.owned.into_iter().map(|file| file.path))
-        .collect::<BTreeSet<_>>();
-    let package_files = PackageStore::new(core).read_files(&active.key)?.0;
-    let mut custom_hashes = BTreeMap::new();
-    for (path, bytes) in &package_files {
-        if path.ends_with(".custom.yaml") {
-            let content =
-                std::str::from_utf8(bytes).map_err(|e| CoreError::Other(e.to_string()))?;
-            let original = crate::managed_custom::strip(content).map_err(CoreError::Other)?;
-            custom_hashes.insert(path.clone(), sha256_reader(original.as_bytes())?);
-        }
-    }
-    let managed = crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?;
-    for relative in &managed {
-        crate::managed_custom::strip_file(root, relative).map_err(CoreError::Other)?;
-    }
-    let mut checked = BTreeSet::new();
-    for file in active.owned.iter().chain(&active.generated) {
-        if !checked.insert(&file.path)
-            || user_file(&file.path)
-            || addons.contains_key(&file.path)
-            || others.iter().any(|path| same_file_path(root, path, &file.path))
-            || matches!(
-                file.path.as_str(),
-                "default.custom.yaml" | "default-custom.yaml" | "rime.lua"
-            )
-        {
-            continue;
-        }
-        if managed.contains(&file.path) && !active.owned.iter().any(|f| f.path == file.path) {
-            continue;
-        }
-        if let Some(current) = fingerprint(root, &file.path)? {
-            let expected = if file.path.ends_with(".custom.yaml") {
-                custom_hashes.get(&file.path).unwrap_or(&file.sha256)
-            } else {
-                &file.sha256
-            };
-            if &current.sha256 == expected {
-                crate::package_fs::remove_file(
-                    &safe_path(root, &file.path).map_err(CoreError::Other)?,
-                )?;
-                logs.push(format!("[REMOVED] {}", file.path));
-            } else {
-                logs.push(format!("[KEPT] User-modified file: {}", file.path));
-                modified.insert(file.path.clone());
-            }
-        }
-    }
-    for item in &active.backups {
-        if matches!(
-            item.path.as_str(),
-            "default.custom.yaml" | "default-custom.yaml" | "rime.lua"
-        ) {
-            continue;
-        }
-        let target = safe_path(root, &item.path).map_err(CoreError::Other)?;
-        // A newly authored file must never be overwritten during restoration.
-        if modified.contains(&item.path) || target.try_exists()? || others.contains(&item.path) {
-            if !active.kept_backups.iter().any(|b| b.backup == item.backup) {
-                active.kept_backups.push(item.clone());
-            }
-            logs.push(format!("[KEPT BACKUP] {}: {}", item.path, item.backup));
-            continue;
-        }
-        restore_backup(core, root, item)?;
-        logs.push(format!("[RESTORED] {}", item.path));
-    }
-    regenerate_default(core, root, active)?;
-    if others.is_empty() {
-    let package_lua = package_files
-        .into_iter()
-        .find(|(path, _)| path == "rime.lua")
-        .map(|(_, bytes)| String::from_utf8(bytes).map_err(|e| CoreError::Other(e.to_string())))
-        .transpose()?;
-    let expected_lua = crate::install::prepare_rime_lua_install(
-        package_lua.as_deref(),
-        keytao_core::installed_addon_rime_lua_lines(root),
-    );
-    let expected_hash = expected_lua
-        .as_deref()
-        .map(|s| sha256_reader(s.as_bytes()))
-        .transpose()?;
-    let current_lua = fingerprint(root, "rime.lua")?;
-    let user_modified_lua = current_lua.is_some() && current_lua.as_ref().map(|f| &f.sha256) != expected_hash.as_ref();
-    if user_modified_lua {
-        if let Some(backup) = backup(core, root, "rime.lua")? {
-            if !active
-                .kept_backups
-                .iter()
-                .any(|b| b.backup == backup.backup)
-            {
-                logs.push(format!("[KEPT BACKUP] rime.lua: {}", backup.backup));
-                active.kept_backups.push(backup);
-            }
-        }
-    }
-    {
-        let original = active
-            .backups
-            .iter()
-            .find(|b| b.path == "rime.lua")
-            .map(|b| backup_bytes(core, b))
-            .transpose()?;
-        let original = original
-            .as_deref()
-            .map(std::str::from_utf8)
-            .transpose()
-            .map_err(|e| CoreError::Other(e.to_string()))?;
-        let content = crate::install::prepare_rime_lua_install(
-            original,
-            keytao_core::installed_addon_rime_lua_lines(root),
-        );
-        let path = safe_path(root, "rime.lua").map_err(CoreError::Other)?;
-        if let Some(content) = content {
-            crate::scheme_files::write_file_atomic(&path, content.as_bytes())?;
-        } else if path.try_exists()? {
-            crate::package_fs::remove_file(&path)?;
-        }
-    }
-    }
-    let remaining = crate::managed_custom::active_schema_ids_from_default(root)
-        .map_err(CoreError::Other)?
-        .into_iter()
-        .filter(|id| keytao_core::is_addon_schema(id) || others.contains(&format!("{id}.schema.yaml")))
-        .collect();
-    crate::managed_custom::regenerate(root, &remaining).map_err(CoreError::Other)?;
-    Ok(logs)
-}
-
+#[cfg(test)]
 pub(crate) fn write(core: &Core, active: &Activation) -> Result<(), CoreError> {
     let store = PackageStore::new(core).checked_root()?;
     fs::create_dir_all(&store)
@@ -340,18 +176,6 @@ pub(crate) fn write(core: &Core, active: &Activation) -> Result<(), CoreError> {
         record.activations = None;
         records.insert(active.key.clone(), record);
     }
-    combined.activations = Some(records);
-    crate::scheme_files::write_file_atomic(
-        &PackageStore::new(core).checked_activation_path()?,
-        &serde_json::to_vec_pretty(&combined)?,
-    )?;
-    Ok(())
-}
-
-pub(crate) fn remove(core: &Core, root: &Path, key: &str, inactive: &Activation) -> Result<(), CoreError> {
-    let mut records = read_all(core, root)?;
-    records.remove(key);
-    let mut combined = records.values().next().cloned().unwrap_or_else(|| inactive.clone());
     combined.activations = Some(records);
     crate::scheme_files::write_file_atomic(
         &PackageStore::new(core).checked_activation_path()?,
@@ -373,92 +197,13 @@ pub(crate) fn backup_bytes(core: &Core, backup: &Backup) -> Result<Vec<u8>, Core
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn restore_backup(core: &Core, root: &Path, backup: &Backup) -> Result<(), CoreError> {
     let path = safe_path(root, &backup.path).map_err(CoreError::Other)?;
     let parent = path.parent().unwrap();
     fs::create_dir_all(parent)
         .map_err(|error| crate::package_fs::context("创建目录", parent, error))?;
     crate::scheme_files::write_file_atomic(&path, &backup_bytes(core, backup)?)?;
-    Ok(())
-}
-
-fn regenerate_default(core: &Core, root: &Path, active: &Activation) -> Result<(), CoreError> {
-    let removed: BTreeSet<_> = active
-        .manifest
-        .keys()
-        .filter_map(|p| p.strip_suffix(".schema.yaml"))
-        .collect();
-    for name in ["default.custom.yaml", "default-custom.yaml"] {
-        let path = safe_path(root, name).map_err(CoreError::Other)?;
-        let current = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(crate::package_fs::context("读取文件", &path, e).into()),
-        };
-        let remaining: Vec<_> = crate::scheme_files::parse_schema_list(&current)
-            .into_iter()
-            .filter(|id| {
-                !removed.contains(id.as_str())
-                    || keytao_core::is_addon_schema(id)
-                    || root.join(format!("{id}.schema.yaml")).is_file()
-            })
-            .collect();
-        let original = active
-            .backups
-            .iter()
-            .find(|b| b.path == name)
-            .map(|b| backup_bytes(core, b))
-            .transpose()?;
-        let mut base: serde_yaml::Value = original
-            .as_deref()
-            .map(serde_yaml::from_slice)
-            .transpose()
-            .map_err(|e| CoreError::Other(e.to_string()))?
-            .unwrap_or_else(|| serde_yaml::from_str("patch: {}\n").unwrap());
-        let patch = base
-            .as_mapping_mut()
-            .ok_or_else(|| CoreError::Other("Default config must be a mapping".into()))?
-            .entry("patch".into())
-            .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()))
-            .as_mapping_mut()
-            .ok_or_else(|| CoreError::Other("Default patch must be a mapping".into()))?;
-        if let Some(applied) = active
-            .default_applied
-            .get(name)
-            .and_then(|v| v.get("patch"))
-            .and_then(serde_yaml::Value::as_mapping)
-        {
-            let value: serde_yaml::Value =
-                serde_yaml::from_str(&current).map_err(|e| CoreError::Other(e.to_string()))?;
-            if let Some(current) = value.get("patch").and_then(serde_yaml::Value::as_mapping) {
-                for (key, value) in current {
-                    if key.as_str() != Some("schema_list") && applied.get(key) != Some(value) {
-                        patch.insert(key.clone(), value.clone());
-                    }
-                }
-                for key in applied.keys() {
-                    if !current.contains_key(key) {
-                        patch.remove(key);
-                    }
-                }
-            }
-        }
-        patch.insert(
-            "schema_list".into(),
-            serde_yaml::Value::Sequence(
-                remaining
-                    .into_iter()
-                    .map(|id| {
-                        let mut m = serde_yaml::Mapping::new();
-                        m.insert("schema".into(), id.into());
-                        serde_yaml::Value::Mapping(m)
-                    })
-                    .collect(),
-            ),
-        );
-        let content = serde_yaml::to_string(&base).map_err(|e| CoreError::Other(e.to_string()))?;
-        crate::scheme_files::write_file_atomic(&path, content.as_bytes())?;
-    }
     Ok(())
 }
 
@@ -489,6 +234,7 @@ pub(crate) struct Transaction {
 }
 
 impl Transaction {
+    #[cfg(test)]
     pub(crate) fn begin(
         core: &Core,
         root: &Path,
@@ -547,6 +293,7 @@ impl Transaction {
         Ok(transaction)
     }
 
+    #[cfg(test)]
     fn snapshot(&mut self, relative: &str, store: bool) -> Result<(), CoreError> {
         let root = if store {
             &self.store
@@ -579,16 +326,13 @@ impl Transaction {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_store_file(&mut self, relative: &str) -> Result<(), CoreError> {
         self.snapshot(relative, true)?;
         self.persist()
     }
 
-    pub(crate) fn snapshot_user_file(&mut self, relative: &str) -> Result<(), CoreError> {
-        self.snapshot(relative, false)?;
-        self.persist()
-    }
-
+    #[cfg(test)]
     pub(crate) fn snapshot_package(
         &mut self,
         key: &str,
@@ -644,6 +388,7 @@ impl Transaction {
         self.persist()
     }
 
+    #[cfg(test)]
     fn persist(&self) -> Result<(), CoreError> {
         crate::scheme_files::write_file_atomic(
             &self.directory.join("journal.json"),
@@ -652,6 +397,7 @@ impl Transaction {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn commit(mut self) -> Result<(), CoreError> {
         self.journal.committed = true;
         if let Err(error) = self.persist() {
@@ -819,61 +565,6 @@ pub(crate) fn recover(core: &Core) -> Result<(), CoreError> {
     transaction.rollback()?;
     transaction.finished = true;
     Ok(())
-}
-
-pub(crate) fn transaction_paths(
-    root: &Path,
-    files: &[(String, Vec<u8>)],
-    active: Option<&Activation>,
-) -> Result<BTreeSet<String>, CoreError> {
-    let mut paths: BTreeSet<_> = files
-        .iter()
-        .filter(|(p, _)| !user_file(p) || crate::install::is_protected_user_file(p))
-        .map(|(p, _)| p.clone())
-        .collect();
-    paths.extend(crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?);
-    for schema in
-        crate::managed_custom::active_schema_ids_from_default(root).map_err(CoreError::Other)?
-    {
-        paths.insert(format!("{schema}.custom.yaml"));
-    }
-    for (path, _) in files {
-        if let Some(schema) = path.strip_suffix(".schema.yaml") {
-            paths.insert(format!("{schema}.custom.yaml"));
-        }
-    }
-    if let Some(active) = active {
-        paths.extend(
-            active
-                .owned
-                .iter()
-                .chain(&active.generated)
-                .map(|f| f.path.clone()),
-        );
-        paths.extend(active.backups.iter().map(|f| f.path.clone()));
-    }
-    if let Ok(bytes) = fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)) {
-        let marker: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if let Some(manifest) = marker["manifest"].as_object() {
-            paths.extend(manifest.keys().cloned());
-        }
-    }
-    paths.extend(
-        [
-            "default.custom.yaml",
-            "default-custom.yaml",
-            "rime.lua",
-            "user.yaml",
-            keytao_core::ACTIVE_SCHEME_MANIFEST,
-            "keytao.custom.yaml",
-            "keytao-dz.custom.yaml",
-            "keytao-bj.custom.yaml",
-            "lua/keytao_remove_filter.lua",
-        ]
-        .into_iter()
-        .map(str::to_owned),
-    );
-    Ok(paths)
 }
 
 fn build_files(root: &Path) -> Result<BTreeSet<String>, CoreError> {

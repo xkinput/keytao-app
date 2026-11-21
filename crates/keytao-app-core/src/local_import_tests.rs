@@ -376,118 +376,42 @@ fn local_import_only_keeps_root_customs_for_package_schemas() {
     }
 }
 
-#[tokio::test]
-async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
+#[cfg(target_os = "macos")]
+#[test]
+fn local_reimport_replaces_sources_and_preserves_runtime_user_files() {
     let directory = tempfile::tempdir().unwrap();
     let core = open_core(directory.path());
     let path = source(directory.path(), "source");
     fs::write(path.join("obsolete.yaml"), "obsolete: true\n").unwrap();
     let key = import_local_scheme(&core, &path, "Original", None).unwrap();
     let root = directory.path().join("rime");
+    let runtime = root.join("runtime").join(&key);
     fs::create_dir_all(&root).unwrap();
-    crate::packages::activate_scheme(
-        &core,
-        &key,
-        &root,
-        #[cfg(target_os = "windows")]
-        crate::install::finish_windows_scheme_install,
-    )
-    .await
-    .unwrap();
-    let installed = crate::scheme::check_local_schema(&core, Some(root.clone())).unwrap();
-    assert!(installed.installed);
-    assert!(!installed.deployed);
-    assert_eq!(installed.schemas, ["example"]);
-    let engine_state = keytao_core::schema_install_state(&root);
-    assert!(engine_state.installed);
-    assert_eq!(engine_state.schemas, ["example"]);
-    fs::create_dir_all(root.join("build")).unwrap();
-    fs::write(root.join("build/example.schema.yaml"), "schema: {}\n").unwrap();
-    keytao_core::complete_deployment(&root).unwrap();
-    assert!(
-        crate::scheme::check_local_schema(&core, Some(root.clone()))
-            .unwrap()
-            .deployed
-    );
-    let protected = [
-        "example.user.yaml",
-        "example.user.dict.yaml",
-        "user_dict.txt",
-        "example_user.txt",
-    ];
-    for name in protected {
-        fs::write(root.join(name), "user-owned content").unwrap();
-        fs::write(path.join(name), "incoming content").unwrap();
-    }
-    // Scheme patches belong to the imported folder and replace the installed copy.
-    fs::write(root.join("example.custom.yaml"), "patch: {old: 1}\n").unwrap();
-    fs::write(path.join("example.custom.yaml"), "patch: {new: 1}\n").unwrap();
-    let config = "patch:\n  menu/page_size: 7\n  schema_list:\n    - schema: example\n";
-    fs::write(root.join("default.custom.yaml"), config).unwrap();
-    crate::deploy::record_result(&core, &root, true).unwrap();
-    let previous_manifest = fs::read(PackageStore::new(&core).active_manifest_path()).unwrap();
+    let shared = directory.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    crate::runtime_materialize::materialize_all_installed_packages(&core, &root, &shared).unwrap();
+
+    let learned = runtime.join("example.userdb");
+    fs::create_dir(&learned).unwrap();
+    fs::write(learned.join("words"), "learned content").unwrap();
+    fs::write(runtime.join("example_user.txt"), "user-owned content").unwrap();
     let previous_version = core.state().installed_packages[&key].version.clone();
-    fs::write(
-        path.join("example.schema.yaml"),
-        "schema:\n  schema_id: example\n  name: Updated\n",
-    )
-    .unwrap();
+
+    fs::write(path.join("example.schema.yaml"), "schema: {schema_id: example, name: Updated}\n").unwrap();
     fs::remove_file(path.join("obsolete.yaml")).unwrap();
-    assert_eq!(
-        import_local_scheme(&core, &path, "Updated", Some(&key)).unwrap(),
-        key
-    );
-    assert_ne!(
-        core.state().installed_packages[&key].version,
-        previous_version
-    );
-    assert!(core.state().last_deploy.is_none());
-    assert_eq!(
-        fs::read(PackageStore::new(&core).active_manifest_path()).unwrap(),
-        previous_manifest
-    );
-    for name in protected {
-        assert_eq!(
-            fs::read_to_string(root.join(name)).unwrap(),
-            "user-owned content"
-        );
-    }
-    crate::packages::activate_scheme(
-        &core,
-        &key,
-        &root,
-        #[cfg(target_os = "windows")]
-        crate::install::finish_windows_scheme_install,
-    )
-    .await
-    .unwrap();
-    for name in protected {
-        assert_eq!(
-            fs::read_to_string(root.join(name)).unwrap(),
-            "user-owned content"
-        );
-    }
-    assert_eq!(
-        fs::read_to_string(root.join("example.custom.yaml")).unwrap(),
-        "patch: {new: 1}\n"
-    );
-    assert!(!root.join("obsolete.yaml").exists());
-    assert!(
-        fs::read_to_string(root.join("example.schema.yaml"))
-            .unwrap()
-            .contains("Updated")
-    );
-    assert!(
-        fs::read_to_string(root.join("default.custom.yaml"))
-            .unwrap()
-            .contains("menu/page_size: 7")
-    );
+    assert_eq!(import_local_scheme(&core, &path, "Updated", Some(&key)).unwrap(), key);
+    assert_ne!(core.state().installed_packages[&key].version, previous_version);
+    crate::runtime_materialize::materialize_all_installed_packages(&core, &root, &shared).unwrap();
+
+    assert_eq!(fs::read_to_string(learned.join("words")).unwrap(), "learned content");
+    assert_eq!(fs::read_to_string(runtime.join("example_user.txt")).unwrap(), "user-owned content");
+    let files = stored_files(&core, &key);
+    assert!(!files.contains_key("obsolete.yaml"));
+    assert!(std::str::from_utf8(&files["example.schema.yaml"]).unwrap().contains("Updated"));
+    assert!(!root.join("example.schema.yaml").exists());
     let (_, meta) = PackageStore::new(&core).read_files(&key).unwrap();
-    assert_eq!(meta.source, "local");
     assert_eq!(meta.display_name.as_deref(), Some("Updated"));
     let metadata: serde_json::Value =
-        serde_json::from_slice(&fs::read(PackageStore::new(&core).metadata_path(&key)).unwrap())
-            .unwrap();
-    let origin = path.canonicalize().unwrap();
-    assert_eq!(metadata["origin"], origin.to_str().unwrap());
+        serde_json::from_slice(&fs::read(PackageStore::new(&core).metadata_path(&key)).unwrap()).unwrap();
+    assert_eq!(metadata["origin"], path.canonicalize().unwrap().to_str().unwrap());
 }

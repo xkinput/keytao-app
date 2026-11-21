@@ -406,7 +406,7 @@ pub fn addon_schema_status(
         let manifest = crate::addon_store::manifest(core, &root, id)?
             .map(|bytes| parse_manifest(&bytes))
             .transpose()?;
-        if keytao_core::RuntimeDirs::isolation_enabled(&root) {
+        if !keytao_core::RuntimeDirs::needs_migration(&root) {
             status.installed = manifest.is_some() && crate::addon_store::isolated_files(core, id)?.is_dir();
             status.deployed = keytao_core::RuntimeDirs::resolve(
                 &root,
@@ -816,6 +816,7 @@ where
     let result: Result<_, String> = async {
         let id = validate_addon_schema_id(&id)?;
         let root = host.user_root()?;
+        crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "addon-download".into(),
             percent: 5,
@@ -823,96 +824,29 @@ where
         }));
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, id)?;
-        let packages = if receipt.is_isolated() && receipt.manifest_bytes(MANIFEST)?.is_some() {
+        let packages = if receipt.manifest_bytes(MANIFEST)?.is_some() {
             crate::runtime_materialize::installed_easy_english_packages(core, &root)
                 .map_err(|error| error.to_string())?
         } else {
             Vec::new()
         };
         let mut receipt = install(receipt).await?;
-        if receipt.is_isolated() {
-            receipt.commit_store(true)?;
-            for (index, key) in packages.iter().enumerate() {
-                if let Err(error) = host.deploy_package(key).await {
-                    receipt.rollback().map_err(|restore| {
-                        format!("{error}；恢复 English 失败：{restore}")
-                    })?;
-                    let mut message = error;
-                    for key in &packages[..=index] {
-                        if let Err(restore) = host.deploy_package(key).await {
-                            message.push_str(&format!("；恢复 {key} 部署失败：{restore}"));
-                        }
+        receipt.commit_store(true)?;
+        for (index, key) in packages.iter().enumerate() {
+            if let Err(error) = host.deploy_package(key).await {
+                receipt.rollback().map_err(|restore| {
+                    format!("{error}；恢复 English 失败：{restore}")
+                })?;
+                let mut message = error;
+                for key in &packages[..=index] {
+                    if let Err(restore) = host.deploy_package(key).await {
+                        message.push_str(&format!("；恢复 {key} 部署失败：{restore}"));
                     }
-                    return Err(message);
                 }
+                return Err(message);
             }
-            receipt.finish()?;
-            return addon_schema_status(core, || Ok(root), id.into())
-                .map_err(|error| error.to_string());
-        }
-        write_schema_list_transaction(&mut receipt, id, true, &shared_data_dir(core, &root))?;
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "addon-deploy".into(),
-            percent: 55,
-            message: "正在部署键道方案与 English...".into(),
-        }));
-        #[cfg(target_os = "windows")]
-        let mut public_update = None;
-        let deployed = async {
-            #[cfg(target_os = "windows")]
-            let mut public_source_warning = None;
-            #[cfg(target_os = "windows")]
-            match crate::windows_public_schemas::update_public_schemas(|| {
-                host.publish_wanxiang_sources(&receipt.public_source_files())
-            }) {
-                Ok(update) => public_update = Some(update),
-                Err(error) => {
-                    public_source_warning = Some(crate::windows_public_schemas::public_warning(
-                        "english-public-prepare",
-                        &error,
-                    ));
-                }
-            }
-            host.deploy().await?;
-            #[cfg(target_os = "windows")]
-            if let Some(warning) = public_source_warning {
-                crate::deploy::emit_legacy_progress(
-                    core,
-                    keytao_core::DeployStep::Done,
-                    format!("系统搜索框方案未更新：{warning}"),
-                );
-            }
-            if !addon_schema_status_at(&root, id).deployed {
-                return Err("附加方案文件已安装，但部署产物缺失".to_string());
-            }
-            receipt.commit_store(true)?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = deployed {
-            let rollback = receipt.rollback();
-            #[cfg(target_os = "windows")]
-            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
-            #[cfg(target_os = "windows")]
-            let error = match &public_rollback {
-                Ok(()) => error,
-                Err(restore) => format!("{error}；恢复公共方案失败：{restore}"),
-            };
-            rollback.map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
-            #[cfg(target_os = "windows")]
-            public_rollback.map_err(|_| error.clone())?;
-            if let Err(restore) = host.deploy().await {
-                return Err(format!("{error}；已恢复文件，请重新部署：{restore}"));
-            }
-            return Err(error);
         }
         receipt.finish()?;
-        crate::packages::sync_generated(core, &root).map_err(|error| error.to_string())?;
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: "附加方案 English 已安装并部署".into(),
-        }));
         addon_schema_status(core, || Ok(root), id.into()).map_err(|error| error.to_string())
     }
     .await;
@@ -927,107 +861,11 @@ pub async fn addon_schema_uninstall(
     let result: Result<_, String> = async {
         let id = validate_addon_schema_id(&id)?;
         let root = host.user_root()?;
-        if keytao_core::RuntimeDirs::isolation_enabled(&root) {
-            let key = keytao_core::RuntimeDirs::active_package_key(&root)
-                .ok_or("没有使用中的方案包")?;
-            set_package_easy_english(core, &key, false, host).await?;
-            return addon_schema_status(core, || Ok(root), id.into())
-                .map_err(|error| error.to_string());
-        }
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "addon-uninstall".into(),
-            percent: 20,
-            message: "正在卸载附加方案 English...".into(),
-        }));
-        let mut receipt = InstallReceipt::new(&root)?;
-        receipt.attach_store(core, id)?;
-        let previous = receipt
-            .manifest_bytes(MANIFEST)?
-            .map(|bytes| parse_manifest(&bytes))
-            .transpose()?;
-        let removed = removed_sources(
-            &root,
-            previous
-                .as_ref()
-                .into_iter()
-                .flat_map(|manifest| &manifest.files),
-        )?;
-        uninstall_receipt(&mut receipt)?;
-        write_schema_list_transaction(&mut receipt, id, false, &shared_data_dir(core, &root))?;
-        let reset_english_mode = reset_english_mode_transaction(&mut receipt)?;
-        #[cfg(target_os = "windows")]
-        let mut public_update = None;
-        let deployed = async {
-            #[cfg(target_os = "windows")]
-            let public_source_warning = {
-                let files = addon_schema_source_files(id)
-                    .into_iter()
-                    .map(|(_, relative)| PathBuf::from(relative))
-                    .collect::<Vec<_>>();
-                match crate::windows_public_schemas::update_public_schemas(|| {
-                    host.remove_public_schema(id, &files)?;
-                    host.publish_english_settings(false)
-                }) {
-                    Ok(update) => {
-                        public_update = Some(update);
-                        None
-                    }
-                    Err(error) => Some(crate::windows_public_schemas::public_warning(
-                        "english-public-remove",
-                        &error,
-                    )),
-                }
-            };
-            if keytao_core::schema_install_state(&root).installed {
-                host.deploy().await?;
-            } else {
-                let _ = host.write_reload_stamp(&root)?;
-            }
-            #[cfg(target_os = "windows")]
-            if let Some(warning) = public_source_warning {
-                crate::deploy::emit_legacy_progress(
-                    core,
-                    keytao_core::DeployStep::Done,
-                    format!("系统搜索框方案未更新：{warning}"),
-                );
-            }
-            cleanup_removed(&root, &removed)?;
-            receipt.commit_store(false)?;
-            Ok::<_, String>(())
-        }
-        .await;
-        if let Err(error) = deployed {
-            let rollback = receipt.rollback();
-            #[cfg(target_os = "windows")]
-            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
-            #[cfg(target_os = "windows")]
-            let error = match &public_rollback {
-                Ok(()) => error,
-                Err(restore) => format!("{error}；恢复公共方案失败：{restore}"),
-            };
-            rollback.map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
-            #[cfg(target_os = "windows")]
-            public_rollback.map_err(|_| error.clone())?;
-            if let Err(restore) = host.deploy().await {
-                return Err(format!("{error}；已恢复文件，请重新部署：{restore}"));
-            }
-            return Err(error);
-        }
-        receipt.finish()?;
-        crate::packages::sync_generated(core, &root).map_err(|error| error.to_string())?;
-        if reset_english_mode {
-            core.emit(CoreEvent::InstallProgress(InstallProgress {
-                stage: "addon-reset-mode".into(),
-                percent: 90,
-                message: "英文模式已切回 ASCII 模式".into(),
-            }));
-        }
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: "附加方案 English 已卸载".into(),
-        }));
-        Ok(addon_schema_status_at(&root, id))
+        crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
+        let key = keytao_core::RuntimeDirs::active_package_key(&root)
+            .ok_or("没有使用中的方案包")?;
+        set_package_easy_english(core, &key, false, host).await?;
+        addon_schema_status(core, || Ok(root), id.into()).map_err(|error| error.to_string())
     }
     .await;
     result.map_err(CoreError::Other)
@@ -1042,8 +880,8 @@ pub async fn set_package_easy_english(
     use crate::runtime_materialize::{easy_english_enabled, update_easy_english};
     use keytao_core::RuntimeDirs;
     let root = host.user_root()?;
-    if !RuntimeDirs::isolation_enabled(&root)
-        || key == EASY_EN_ADDON_ID
+    crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
+    if key == EASY_EN_ADDON_ID
         || RuntimeDirs::active_package_key(&root).as_deref() != Some(key)
     {
         return Err("使用中的方案包已变更".into());
@@ -1160,7 +998,6 @@ mod tests {
         let host = AddonHost::new(root);
         let bundled = host.core.env().resource_dir.join("rime-data");
         smoke_fixture::write(&bundled).unwrap();
-        fs::write(root.join(RuntimeDirs::SETTINGS_FILE), br#"{"runtime_isolation":true}"#).unwrap();
         let active = keytao_core::package_store::active_manifest(root);
         fs::create_dir_all(active.parent().unwrap()).unwrap();
         let first = "builtin/keytao";
@@ -1176,7 +1013,7 @@ mod tests {
             }
         }
         for key in [second, first] {
-            fs::write(&active, serde_json::json!({"active_package": key}).to_string()).unwrap();
+            fs::write(&active, serde_json::json!({"active_package": key, "runtime_migration_version": 1}).to_string()).unwrap();
             host.deploy_package(key).await.unwrap();
         }
         let install = |version: char| {
@@ -1236,7 +1073,7 @@ mod tests {
         for key in [first, second, "removed"] {
             crate::runtime_materialize::update_easy_english(root, key, true).unwrap();
         }
-        fs::write(&active, serde_json::json!({"active_package": second}).to_string()).unwrap();
+        fs::write(&active, serde_json::json!({"active_package": second, "runtime_migration_version": 1}).to_string()).unwrap();
         let assert_overlays = || {
             for key in [first, second] {
                 let dirs = RuntimeDirs::for_package(root, &bundled, key).unwrap();
@@ -1268,24 +1105,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_english_installs_deploys_and_uninstalls_without_a_main_scheme() {
+    async fn easy_english_is_stored_without_flat_activation() {
         use crate::scheme_host::tests::AddonHost;
         use std::sync::atomic::Ordering;
         let root = TestRoot::new();
-        std::fs::write(
-            root.path().join("default.custom.yaml"),
-            "patch:\n  menu/page_size: 9\n  key_binder/bindings: []\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.path().join("rime.lua"),
-            "stale = require('old_main')\n",
-        )
-        .unwrap();
+        std::fs::remove_file(root.path().join("default.custom.yaml")).unwrap();
         let host = AddonHost::new(root.path());
-        let shared_default_available = shared_data_dir(&host.core, root.path())
-            .join("default.yaml")
-            .is_file();
         let status = addon_schema_install_with(
             &host.core,
             EASY_EN_ADDON_ID.into(),
@@ -1294,67 +1119,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(status.installed && status.deployed);
-        assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
-        let config = std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap();
-        assert_eq!(parse_schema_list(&config), [EASY_EN_ADDON_ID]);
-        let config: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
-        assert_eq!(config["patch"]["menu/page_size"], 9);
-        assert!(config["patch"]["key_binder/bindings"].is_sequence());
-        assert_eq!(
-            root.path().join("default.yaml").is_file(),
-            !shared_default_available
-        );
-        assert!(!root.path().join("rime.lua").exists());
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.path().join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(manifest["scheme_key"], EASY_EN_ADDON_ID);
-        assert!(manifest["rime_lua"].is_null());
-        assert_eq!(
-            std::fs::read(root.path().join(".keytao-rime-user-0.lua")).unwrap(),
-            b"stale = require('old_main')\n"
-        );
-        let report = crate::package_orphans::report(&host.core, root.path()).unwrap();
-        assert!(
-            report
-                .kept_backups
-                .iter()
-                .any(|backup| Path::new(&backup.backup)
-                    == root.path().join(".keytao-rime-user-0.lua"))
-        );
-        std::fs::write(
-            root.path().join("rime.lua"),
-            "manual = require('new_user_hook')\n",
-        )
-        .unwrap();
-        let status = addon_schema_uninstall(&host.core, EASY_EN_ADDON_ID.into(), &host)
-            .await
-            .unwrap();
-        assert!(!status.installed && !status.deployed);
-        assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
-        assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
-        assert!(
-            parse_schema_list(
-                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
-            )
-            .is_empty()
-        );
-        assert_eq!(keytao_core::deployed_schema_id_from_dir(root.path()), None);
-        assert!(!root.path().join("default.yaml").exists());
-        assert_eq!(
-            std::fs::read(root.path().join(".keytao-rime-user-1.lua")).unwrap(),
-            b"manual = require('new_user_hook')\n"
-        );
-        let report = crate::package_orphans::report(&host.core, root.path()).unwrap();
-        assert!(
-            report
-                .kept_backups
-                .iter()
-                .any(|backup| Path::new(&backup.backup)
-                    == root.path().join(".keytao-rime-user-1.lua"))
-        );
+        assert!(status.installed);
+        assert!(!status.deployed);
+        assert_eq!(host.deploys.load(Ordering::SeqCst), 0);
+        assert!(!root.path().join("easy_en.schema.yaml").exists());
+        assert!(!root.path().join("default.custom.yaml").exists());
     }
 
     #[test]
@@ -1419,40 +1188,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_setup_rolls_back_on_failed_deploy() {
-        use crate::scheme_host::tests::AddonHost;
-        use std::sync::atomic::Ordering;
-        let root = TestRoot::new();
-        std::fs::remove_file(root.path().join("default.custom.yaml")).unwrap();
-        std::fs::write(root.path().join("rime.lua"), "old lua").unwrap();
-        let host = AddonHost::new(root.path());
-        host.fail_deploys.store(1, Ordering::SeqCst);
-        assert!(
-            addon_schema_install_with(
-                &host.core,
-                EASY_EN_ADDON_ID.into(),
-                &host,
-                |receipt| async move { Ok(commit_fixture_receipt(receipt, 'a', "upstream")) }
-            )
-            .await
-            .is_err()
-        );
-        for name in [
-            "default.yaml",
-            "default.custom.yaml",
-            keytao_core::ACTIVE_SCHEME_MANIFEST,
-            "easy_en.schema.yaml",
-            MANIFEST,
-        ] {
-            assert!(!root.path().join(name).exists(), "{name}");
-        }
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("rime.lua")).unwrap(),
-            "old lua"
-        );
-    }
-
-    #[tokio::test]
     async fn main_scheme_keeps_priority_when_installing_english() {
         use crate::scheme_host::tests::AddonHost;
         let root = TestRoot::new();
@@ -1475,7 +1210,7 @@ mod tests {
             parse_schema_list(
                 &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
             ),
-            ["keytao", EASY_EN_ADDON_ID]
+            ["keytao"]
         );
         assert_eq!(
             std::fs::read_to_string(root.path().join("rime.lua")).unwrap(),
@@ -1980,59 +1715,6 @@ mod tests {
             "private vocabulary"
         );
         assert!(!root.path().join("easy_en.schema.yaml").exists());
-    }
-
-    #[tokio::test]
-    async fn stored_english_updates_and_failed_deploy_restores_the_previous_package() {
-        use crate::scheme_host::tests::AddonHost;
-        use std::sync::atomic::Ordering;
-        let root = TestRoot::new();
-        std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
-        let host = AddonHost::new(root.path());
-        addon_schema_install_with(
-            &host.core,
-            EASY_EN_ADDON_ID.into(),
-            &host,
-            |receipt| async { Ok(commit_fixture_receipt(receipt, 'a', "first source")) },
-        )
-        .await
-        .unwrap();
-        let status = addon_schema_install_with(
-            &host.core,
-            EASY_EN_ADDON_ID.into(),
-            &host,
-            |receipt| async { Ok(commit_fixture_receipt(receipt, 'b', "second source")) },
-        )
-        .await
-        .unwrap();
-        assert_eq!(status.version, "bbbbbbbbbbbb");
-        host.fail_deploys.store(1, Ordering::SeqCst);
-        assert!(
-            addon_schema_install_with(
-                &host.core,
-                EASY_EN_ADDON_ID.into(),
-                &host,
-                |receipt| async { Ok(commit_fixture_receipt(receipt, 'c', "third source")) }
-            )
-            .await
-            .is_err()
-        );
-        let status = addon_schema_status(
-            &host.core,
-            || Ok(root.path().to_path_buf()),
-            EASY_EN_ADDON_ID.into(),
-        )
-        .unwrap();
-        assert_eq!(status.version, "bbbbbbbbbbbb");
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("easy_en.schema.yaml")).unwrap(),
-            "second source"
-        );
-        assert!(!root.path().join(MANIFEST).exists());
-        addon_schema_uninstall(&host.core, EASY_EN_ADDON_ID.into(), &host)
-            .await
-            .unwrap();
-        assert!(crate::addon_store::public_files(&host.core, EASY_EN_ADDON_ID).is_err());
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

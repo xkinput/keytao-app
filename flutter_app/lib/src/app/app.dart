@@ -3,8 +3,10 @@ import 'package:flutter/widgets.dart';
 import '../rust/api/types.dart';
 import '../ui/menus.dart';
 import '../ui/onboarding.dart';
+import '../ui/progress.dart';
 import '../ui/shell.dart';
 import '../ui/theme.dart';
+import '../ui/widgets.dart';
 import 'controller.dart';
 import 'options.dart';
 
@@ -54,17 +56,44 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
       controller: widget.controller,
       child: AppErrorPresenter(
         controller: widget.controller,
-        child: Builder(
-          builder: (context) => AnimatedSwitcher(
-            duration: MediaQuery.disableAnimationsOf(context)
-                ? Duration.zero
-                : const Duration(milliseconds: 240),
-            child: _completed || !widget.controller.hasOnboarding
-                ? AppShell(controller: widget.controller)
-                : OnboardingPage(
-                    controller: widget.controller,
-                    onFinished: () => setState(() => _completed = true),
+        child: ListenableBuilder(
+          listenable: widget.controller,
+          builder: (context, child) {
+            final c = widget.controller;
+            return Column(
+              children: [
+                if (c.packageMigrationFailed || c.isMigratingPackages)
+                  SafeArea(
+                    bottom: false,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: c.isMigratingPackages
+                          ? const InstallProgressView(
+                              active: true,
+                              message: AppStrings.migratingPackageDirs,
+                            )
+                          : ActionButton(
+                              AppStrings.retryPackageMigration,
+                              onPress: c.busy ? null : c.retryPackageMigration,
+                            ),
+                    ),
                   ),
+                Expanded(child: child!),
+              ],
+            );
+          },
+          child: Builder(
+            builder: (context) => AnimatedSwitcher(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 240),
+              child: _completed || !widget.controller.hasOnboarding
+                  ? AppShell(controller: widget.controller)
+                  : OnboardingPage(
+                      controller: widget.controller,
+                      onFinished: () => setState(() => _completed = true),
+                    ),
+            ),
           ),
         ),
       ),

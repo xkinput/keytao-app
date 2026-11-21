@@ -867,8 +867,6 @@ class LocalSchemaDto {
   final List<String> schemas;
   final String? installedScheme;
   final String? installedSchemeVersion;
-  final bool? runtimeIsolation;
-  final bool? runtimeMigrationComplete;
   final bool? easyEnglishEnabled;
 
   const LocalSchemaDto({
@@ -878,8 +876,6 @@ class LocalSchemaDto {
     required this.schemas,
     this.installedScheme,
     this.installedSchemeVersion,
-    this.runtimeIsolation,
-    this.runtimeMigrationComplete,
     this.easyEnglishEnabled,
   });
 
@@ -891,8 +887,6 @@ class LocalSchemaDto {
       schemas.hashCode ^
       installedScheme.hashCode ^
       installedSchemeVersion.hashCode ^
-      runtimeIsolation.hashCode ^
-      runtimeMigrationComplete.hashCode ^
       easyEnglishEnabled.hashCode;
 
   @override
@@ -906,8 +900,6 @@ class LocalSchemaDto {
           schemas == other.schemas &&
           installedScheme == other.installedScheme &&
           installedSchemeVersion == other.installedSchemeVersion &&
-          runtimeIsolation == other.runtimeIsolation &&
-          runtimeMigrationComplete == other.runtimeMigrationComplete &&
           easyEnglishEnabled == other.easyEnglishEnabled;
 }
 
@@ -988,53 +980,6 @@ class PackageKeptBackupDto {
           runtimeType == other.runtimeType &&
           path == other.path &&
           backup == other.backup;
-}
-
-class PackageMigrationReportDto {
-  final int version;
-  final bool completed;
-  final String activePackage;
-  final String runtimePackage;
-  final List<String> packages;
-  final List<String> userFiles;
-  final List<String> legacyUserDatabases;
-  final PackageOrphanReportDto orphans;
-
-  const PackageMigrationReportDto({
-    required this.version,
-    required this.completed,
-    required this.activePackage,
-    required this.runtimePackage,
-    required this.packages,
-    required this.userFiles,
-    required this.legacyUserDatabases,
-    required this.orphans,
-  });
-
-  @override
-  int get hashCode =>
-      version.hashCode ^
-      completed.hashCode ^
-      activePackage.hashCode ^
-      runtimePackage.hashCode ^
-      packages.hashCode ^
-      userFiles.hashCode ^
-      legacyUserDatabases.hashCode ^
-      orphans.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is PackageMigrationReportDto &&
-          runtimeType == other.runtimeType &&
-          version == other.version &&
-          completed == other.completed &&
-          activePackage == other.activePackage &&
-          runtimePackage == other.runtimePackage &&
-          packages == other.packages &&
-          userFiles == other.userFiles &&
-          legacyUserDatabases == other.legacyUserDatabases &&
-          orphans == other.orphans;
 }
 
 class PackageOrphanFileDto {

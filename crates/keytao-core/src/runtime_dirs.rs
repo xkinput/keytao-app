@@ -32,42 +32,85 @@ impl RuntimeDirs {
     pub const MIGRATION_MARKER: &str = "runtime/.keytao-migration.json";
     pub const PUBLIC_PACKAGE_FILE: &str = ".keytao-public-package";
 
-    pub fn isolation_enabled(control_root: &Path) -> bool {
-        let environment_enabled = match std::env::var("KEYTAO_RUNTIME_ISOLATION").as_deref() {
-            Ok("0" | "false") => return false,
-            Ok("1" | "true") => true,
-            _ => false,
-        };
-        read_regular_file(&control_root.join(Self::SETTINGS_FILE))
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|settings| settings["runtime_isolation"].as_bool())
-            .unwrap_or(environment_enabled)
+    pub fn needs_migration(control_root: &Path) -> bool {
+        !Self::migration_complete(control_root) && Self::has_legacy_data(control_root)
+    }
+
+    fn has_legacy_data(control_root: &Path) -> bool {
+        use std::io::ErrorKind::NotFound;
+
+        [
+            "build",
+            "prebuilt",
+            "default.yaml",
+            "default.custom.yaml",
+            "default-custom.yaml",
+            "user.yaml",
+            "rime.lua",
+            "lua",
+            "custom_phrase.txt",
+            crate::ACTIVE_SCHEME_MANIFEST,
+            crate::SCHEMA_SWITCH_REQUEST_FILE,
+        ]
+        .iter()
+        .any(|name| {
+            fs::symlink_metadata(control_root.join(name))
+                .err()
+                .is_none_or(|error| error.kind() != NotFound)
+        })
+            || match fs::read_dir(control_root) {
+                Ok(mut entries) => entries.any(|entry| {
+                    entry.map_or(true, |entry| {
+                        entry.file_name().to_str().is_some_and(|name| {
+                            name.ends_with(".schema.yaml")
+                                || name.ends_with(".custom.yaml")
+                                || name.ends_with(".userdb")
+                                || name.ends_with(".userdb.txt")
+                        })
+                    })
+                }),
+                Err(error) => error.kind() != NotFound,
+            }
     }
 
     pub fn resolve(control_root: &Path, shared: &Path) -> Result<Self, String> {
-        if Self::isolation_enabled(control_root) {
-            if let Some(key) = Self::active_package_key(control_root) {
-                return Self::resolve_package(control_root, shared, &key).map_err(|reason| {
-                    let error = format!(
-                        "cannot resolve isolated runtime for active package {key:?}: {reason}"
-                    );
-                    if crate::lock_ignore_poison(&LOGGED_RESOLVE_FAILURES)
-                        .insert((control_root.to_path_buf(), key.clone()))
-                    {
-                        crate::rt_log!(
-                            crate::Level::Info,
-                            "error",
-                            "runtime_resolve_failed",
-                            root = control_root.to_string_lossy(),
-                            error = &error
-                        );
-                        eprintln!("KeyTao {}: {error}", control_root.display());
-                    }
-                    error
-                });
-            }
+        if Self::needs_migration(control_root) {
+            return Ok(Self::flat(control_root, shared));
         }
-        Ok(Self::flat(control_root, shared))
+        if let Some(key) = Self::active_package_key(control_root) {
+            return Self::resolve_package(control_root, shared, &key).map_err(|reason| {
+                let error = format!(
+                    "cannot resolve isolated runtime for active package {key:?}: {reason}"
+                );
+                if crate::lock_ignore_poison(&LOGGED_RESOLVE_FAILURES)
+                    .insert((control_root.to_path_buf(), key.clone()))
+                {
+                    crate::rt_log!(
+                        crate::Level::Info,
+                        "error",
+                        "runtime_resolve_failed",
+                        root = control_root.to_string_lossy(),
+                        error = &error
+                    );
+                    eprintln!("KeyTao {}: {error}", control_root.display());
+                }
+                error
+            });
+        }
+        let runtime = control_root.join("runtime");
+        let unselected = runtime.join(".unselected");
+        if [&runtime, &unselected]
+            .into_iter()
+            .any(|path| fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_dir()))
+        {
+            return Err("invalid unselected runtime directory".into());
+        }
+        let shared = if control_root == shared {
+            &unselected
+        } else {
+            shared
+        };
+        Ok(Self::flat(&unselected, shared))
     }
 
     pub fn active_package_key(control_root: &Path) -> Option<String> {
@@ -77,8 +120,9 @@ impl RuntimeDirs {
             .find_map(|store| manifest_package_key(&store, version))
             .or_else(|| {
                 let marker = migration?;
-                marker["runtime_package"].as_str().map(str::to_owned)
+                marker["runtime_package"].as_str().map(|key| Some(key.to_owned()))
             })
+            .flatten()
     }
 
     pub(crate) fn migration_version(control_root: &Path) -> Option<u64> {
@@ -113,9 +157,6 @@ impl RuntimeDirs {
     }
 
     pub fn for_package(control_root: &Path, shared: &Path, key: &str) -> Option<Self> {
-        if !Self::isolation_enabled(control_root) {
-            return None;
-        }
         Self::resolve_package(control_root, shared, key).ok()
     }
 
@@ -144,9 +185,6 @@ impl RuntimeDirs {
         data_root: &Path,
         key: &str,
     ) -> Option<Self> {
-        if !Self::isolation_enabled(control_root) {
-            return None;
-        }
         let store = crate::package_store::root(data_root);
         fs::symlink_metadata(&store).ok()?.is_dir().then_some(())?;
         Self::isolated(control_root, shared, Some(&store), key).ok()
@@ -206,7 +244,7 @@ impl RuntimeDirs {
             return Err("runtime build or prebuilt directory is invalid".into());
         }
         let shared_data_dir = if key.starts_with("builtin/") {
-            // The control root can still contain the legacy layout kept for rollback.
+            // An uncommitted migration still has legacy files at the control root.
             if shared == control_root || shared.as_os_str().is_empty() {
                 let bundled = control_root.join("rime-data");
                 if bundled.join("default.yaml").is_file() {
@@ -312,14 +350,17 @@ fn package_files_dir(store: &Path, key: &str) -> Result<PathBuf, String> {
     Err(invalid(&store.join(primary).join(key).join("files")))
 }
 
-fn manifest_package_key(store: &Path, migration_version: Option<u64>) -> Option<String> {
+fn manifest_package_key(store: &Path, migration_version: Option<u64>) -> Option<Option<String>> {
     let bytes = read_regular_file(&store.join("active-manifest.json"))?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     if migration_version.is_some() && manifest["runtime_migration_version"].as_u64() != migration_version {
         return None;
     }
-    let key = manifest["active_package"].as_str()?;
-    Some(key.to_owned())
+    match manifest.get("active_package")? {
+        serde_json::Value::Null => Some(None),
+        serde_json::Value::String(key) => Some(Some(key.clone())),
+        _ => None,
+    }
 }
 
 fn package_exists(store: &Path, key: &str) -> bool {
@@ -371,6 +412,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_isolation_waits_for_legacy_migration() {
+        let (fixture, files) = active_package_fixture("default-isolation");
+        let root = fixture.as_path();
+        let manifest = crate::package_store::active_manifest(root);
+        fs::remove_file(&manifest).unwrap();
+        fs::write(root.join("installation.yaml"), "sync_dir: sync\n").unwrap();
+        assert_eq!(
+            RuntimeDirs::resolve(root, root).unwrap().staging_dir,
+            root.join("runtime/.unselected/build"),
+        );
+        fs::write(&manifest, br#"{"active_package":"package"}"#).unwrap();
+        fs::create_dir(files).unwrap();
+        assert!(!RuntimeDirs::needs_migration(root));
+        assert_eq!(
+            RuntimeDirs::resolve(root, root).unwrap().user_data_dir,
+            root.join("runtime/package"),
+        );
+
+        // A legacy package without a build must still wait for a committed migration.
+        let legacy_schema = root.join("legacy.schema.yaml");
+        fs::write(&legacy_schema, "").unwrap();
+        assert!(RuntimeDirs::needs_migration(root));
+        assert_eq!(
+            RuntimeDirs::resolve(root, root).unwrap(),
+            RuntimeDirs::flat(root, root),
+        );
+        fs::remove_file(legacy_schema).unwrap();
+        fs::create_dir(root.join("build")).unwrap();
+        assert!(RuntimeDirs::needs_migration(root));
+
+        fs::create_dir(root.join("runtime")).unwrap();
+        let stamp = crate::ReloadStamp::write_package(root, "package").unwrap();
+        let gate = crate::ReloadStampGate::new(root);
+        let mut cache = crate::ReloadStampCache::default();
+        let legacy_signature = cache.signature_at(&stamp).unwrap();
+        fs::write(
+            root.join(RuntimeDirs::MIGRATION_MARKER),
+            br#"{"version":1,"runtime_package":"package"}"#,
+        )
+        .unwrap();
+        assert!(!RuntimeDirs::needs_migration(root));
+        assert!(gate.pending().is_some());
+        assert_ne!(cache.signature_at(&stamp).unwrap(), legacy_signature);
+        assert_eq!(
+            RuntimeDirs::resolve(root, root).unwrap().user_data_dir,
+            root.join("runtime/package"),
+        );
+
+        fs::write(
+            manifest,
+            br#"{"active_package":null,"runtime_migration_version":1}"#,
+        )
+        .unwrap();
+        assert_eq!(RuntimeDirs::active_package_key(root), None);
+        assert_ne!(RuntimeDirs::resolve(root, root).unwrap().user_data_dir, root);
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
     fn flat_layout_matches_platform_golden_paths() {
         #[cfg(target_os = "macos")]
         let (root, shared) = ("/sample/Library/keytao", "/sample/Resources/rime-data");
@@ -396,7 +496,7 @@ mod tests {
         let root = Path::new(root);
         for shared in [Path::new(shared), root] {
             assert_eq!(
-                RuntimeDirs::resolve(root, shared).unwrap(),
+                RuntimeDirs::flat(root, shared),
                 RuntimeDirs {
                     user_data_dir: root.into(),
                     shared_data_dir: shared.into(),
@@ -415,7 +515,7 @@ mod tests {
     #[test]
     fn shared_control_root_keeps_separate_prebuilt_directory() {
         let root = Path::new("sample/keytao");
-        let dirs = RuntimeDirs::resolve(root, root).unwrap();
+        let dirs = RuntimeDirs::flat(root, root);
         assert_eq!(dirs.user_data_dir, root);
         assert_eq!(dirs.shared_data_dir, root);
         assert_eq!(dirs.staging_dir, Path::new("sample/keytao/build"));
@@ -435,11 +535,6 @@ mod tests {
         let store = crate::package_store::root(&root);
         let package = store.join("cloud/package");
         fs::create_dir_all(&package).unwrap();
-        fs::write(
-            root.join(RuntimeDirs::SETTINGS_FILE),
-            br#"{"runtime_isolation":true}"#,
-        )
-        .unwrap();
         fs::write(
             store.join("active-manifest.json"),
             br#"{"active_package":"package"}"#,

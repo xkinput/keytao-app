@@ -35,17 +35,7 @@ data class KeytaoRimeOptionsState(
 
 class KeytaoImeEngine(context: Context) {
     private val appContext = context.applicationContext
-    private val bundledVersion by lazy {
-        @Suppress("DEPRECATION")
-        val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
-        @Suppress("DEPRECATION")
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            info.longVersionCode
-        } else {
-            info.versionCode.toLong()
-        }
-        "$versionCode/${info.versionName.orEmpty()}"
-    }
+    private val bundledVersion by lazy { bundledVersion(appContext) }
 
     /** A failed resolution is retried; only the shared external root is cached. */
     val userDir: File? get() = KeytaoAndroidPaths.userRootOrNull(appContext)
@@ -155,6 +145,10 @@ class KeytaoImeEngine(context: Context) {
         }
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
         val isolated = KeytaoNativeBridge.isolatedSchemaState(root.absolutePath)
+        if (isolated == Readiness.NOT_INSTALLED) {
+            if (session != 0L) reload()
+            return Readiness.NOT_INSTALLED
+        }
         if (isolated != null && isolated != Readiness.READY) {
             return if (nativeReady && session != 0L) Readiness.READY else isolated
         }
@@ -165,14 +159,6 @@ class KeytaoImeEngine(context: Context) {
         if (!warmupComplete) return Readiness.NOT_DEPLOYED
         if (isolated == null && !hasDeployedSchema()) {
             if (nativeReady && session != 0L) return Readiness.READY
-            val schemas = KeytaoAndroidPaths.configuredSchemas(root)
-            if (KeytaoNativeBridge.loaded && claimUpgradeDeployment(root, bundledVersion, schemas)) {
-                KeytaoRimeDeployClient.deploy(
-                    appContext,
-                    timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(schemas),
-                ) { }
-                return Readiness.DEPLOYING
-            }
             return if (deploymentBlocksInput()) {
                 Readiness.DEPLOYING
             } else Readiness.NOT_DEPLOYED
@@ -353,6 +339,9 @@ class KeytaoImeEngine(context: Context) {
             val root = userDir ?: return false
             if (closed || KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
             val isolated = KeytaoNativeBridge.isolatedSchemaState(root.absolutePath)
+            if (isolated == Readiness.NOT_INSTALLED) {
+                return initializeRuntime(deploy = false, reinitialize = true)
+            }
             if (isolated != null && isolated != Readiness.READY) return false
             if (!nativeReady || session == 0L || (isolated == null && !KeytaoAndroidPaths.hasInstalledSchema(root))) {
                 return initializeRuntime(deploy = false, reinitialize = true)
@@ -403,31 +392,10 @@ class KeytaoImeEngine(context: Context) {
     fun hasDeployedSchema(): Boolean = userDir?.let(KeytaoAndroidPaths::hasDeployedSchema) ?: false
 
     @Synchronized
-    fun deployNow(): Boolean {
+    internal fun deployNow(): Boolean {
+        check(KeytaoAndroidPaths.testRootOverride != null) { "Deploy fixture requires a test root" }
         if (!hasInstalledSchema()) return false
         return initializeRuntime(deploy = true)
-    }
-
-    fun deployStep(schemaId: String?): KeytaoRimeDeployStepResult {
-        val root = userDir
-        if (root == null || !KeytaoAndroidPaths.hasInstalledSchema(root)) {
-            return KeytaoRimeDeployStepResult(error = "No KeyTao schema is installed")
-        }
-        invalidateSchemaNameCache()
-        try {
-            ensureBundledSharedData(appContext)
-            val sharedDir = findSharedDataDir()
-                ?: return KeytaoRimeDeployStepResult(error = "Missing rime-data/default.yaml")
-            return KeytaoNativeBridge.deployStep(
-                root.absolutePath,
-                sharedDir.absolutePath,
-                schemaId,
-            )
-        } finally {
-            // Deployment does not hold the engine monitor; discard anything
-            // resolved concurrently while the compiled files were changing.
-            invalidateSchemaNameCache()
-        }
     }
 
     @Synchronized
@@ -661,29 +629,7 @@ class KeytaoImeEngine(context: Context) {
 
     private fun ensureBundledSharedData(context: Context) {
         val root = userDir ?: error("KeyTao storage is unavailable")
-        val target = File(root, "rime-data")
-        refreshBundledSharedData(target, bundledVersion) { staging ->
-            check(context.assets.list(bundledRimeDataAssetPath)?.contains("default.yaml") == true) {
-                "Missing bundled RIME shared data"
-            }
-            copyAssetTree(context, bundledRimeDataAssetPath, staging)
-        }
-    }
-
-    private fun copyAssetTree(context: Context, assetPath: String, target: File) {
-        val children = context.assets.list(assetPath).orEmpty()
-        if (children.isEmpty()) {
-            target.parentFile?.mkdirs()
-            context.assets.open(assetPath).use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
-            }
-            return
-        }
-
-        target.mkdirs()
-        for (child in children) {
-            copyAssetTree(context, "$assetPath/$child", File(target, child))
-        }
+        prepareBundledSharedData(context, root, bundledVersion)
     }
 
     /**
@@ -697,7 +643,47 @@ class KeytaoImeEngine(context: Context) {
 
     companion object {
         private const val bundledRimeDataAssetPath = "keytao-rime-data"
-        private val upgradeDeploymentAttempts = mutableSetOf<Pair<String, String>>()
+
+        private fun bundledVersion(context: Context): String {
+            @Suppress("DEPRECATION")
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            @Suppress("DEPRECATION")
+            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                info.versionCode.toLong()
+            }
+            return "$versionCode/${info.versionName.orEmpty()}"
+        }
+
+        internal fun prepareBundledSharedData(
+            context: Context,
+            root: File,
+            version: String = bundledVersion(context),
+        ) {
+            val target = File(root, "rime-data")
+            refreshBundledSharedData(target, version) { staging ->
+                check(context.assets.list(bundledRimeDataAssetPath)?.contains("default.yaml") == true) {
+                    "Missing bundled RIME shared data"
+                }
+                copyAssetTree(context, bundledRimeDataAssetPath, staging)
+            }
+        }
+
+        private fun copyAssetTree(context: Context, assetPath: String, target: File) {
+            val children = context.assets.list(assetPath).orEmpty()
+            if (children.isEmpty()) {
+                target.parentFile?.mkdirs()
+                context.assets.open(assetPath).use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+                return
+            }
+            target.mkdirs()
+            for (child in children) {
+                copyAssetTree(context, "$assetPath/$child", File(target, child))
+            }
+        }
 
         @Synchronized
         internal fun refreshBundledSharedData(target: File, version: String, copy: (File) -> Unit) {
@@ -744,14 +730,5 @@ class KeytaoImeEngine(context: Context) {
             }
         }
 
-        @Synchronized
-        internal fun claimUpgradeDeployment(root: File, version: String, schemas: List<String>): Boolean {
-            if (KeytaoNativeBridge.runtimeIsolationEnabled(root.absolutePath)) return false
-            val build = File(root, "build")
-            if (KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
-            val previouslyDeployed = File(build, ".keytao-deployed").isFile ||
-                schemas.any { File(build, "$it.schema.yaml").isFile }
-            return previouslyDeployed && upgradeDeploymentAttempts.add(root.absolutePath to version)
-        }
     }
 }

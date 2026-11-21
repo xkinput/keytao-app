@@ -266,7 +266,14 @@ fn main() {
         .any(|arg| arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND)
     {
         keytao_core::deploy_child::exit_deploy_child(
-            keytao_core::deploy_child::run_deploy_child_main(),
+            keytao_core::deploy_child::run_deploy_child_main_with_prepare(|root| {
+                keytao_app_core::package_migration::migrate_default_if_needed(
+                    root,
+                    std::path::Path::new(&keytao_core::default_shared_data_dir()),
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }),
         );
     }
 

@@ -9,7 +9,7 @@ const VERSION: &str = "fixture-version";
 const SOURCE_URL: &str = "https://github.com/amzxyz/rime-wanxiang/releases/tag/fixture-version";
 const DOWNLOAD_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ALGEBRA: &str =
-    "pro:\n  直接辅助:\n    __append:\n      - abbrev/^([a-z◯]+)(\\d?);([a-z])([a-z]).*$/$1$3$4/\n";
+    "base:\n  全拼: {__append: [derive/^a$/ab/]}\npro:\n  小鹤双拼: {__append: [derive/^a$/ab/]}\n  自然码: {__append: [derive/^a$/ab/]}\n  直接辅助:\n    __append:\n      - abbrev/^([a-z◯]+)(\\d?);([a-z])([a-z]).*$/$1$3$4/\n";
 
 fn fixture_package() -> RemotePackage {
     RemotePackage {
@@ -478,7 +478,7 @@ fn stage_variant_fixture(
         .map(|name| format!("dicts/{name}{suffix}.dict.yaml"))
         .collect();
     let dictionary = format!(
-        "---\nname: {source}\nimport_tables:\n{}...\n",
+        "---\nname: {source}\nversion: '1'\nimport_tables:\n{}...\n甲\ta\t1\n",
         DICTIONARIES
             .iter()
             .map(|name| format!("  - dicts/{name}{suffix}\n"))
@@ -486,6 +486,11 @@ fn stage_variant_fixture(
     );
     let schema_name = format!("{source}.schema.yaml");
     let dictionary_name = format!("{source}.dict.yaml");
+    let schema = format!("schema: {{schema_id: {source}, name: Fixture, version: '1'}}\nengine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\nspeller: {{alphabet: abcde}}\ngrammar: {{language: wanxiang-lts-zh-hans}}\ntranslator: {{dictionary: wanxiang, enable_user_dict: false}}\n");
+    let table_contents: Vec<_> = dictionaries.iter().map(|file| {
+        let name = file.trim_end_matches(".dict.yaml");
+        format!("---\nname: {name}\nversion: '1'\n...\n乙\tb\t1\n")
+    }).collect();
     let mut entries: Vec<_> = [
         schema_name.as_str(),
         dictionary_name.as_str(),
@@ -500,7 +505,7 @@ fn stage_variant_fixture(
             } else if name == "wanxiang_algebra.yaml" {
                 ALGEBRA
             } else {
-                "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n"
+                schema.as_str()
             },
         )
     })
@@ -508,7 +513,8 @@ fn stage_variant_fixture(
     entries.extend(
         dictionaries
             .iter()
-            .map(|name| (name.as_str(), "dictionary fixture")),
+            .zip(&table_contents)
+            .map(|(name, content)| (name.as_str(), content.as_str())),
     );
     entries.extend(extra.iter().copied());
     let archive = receipt.work.join("fixture.zip");
@@ -545,10 +551,6 @@ async fn standalone_wanxiang_installs_deploys_and_uninstalls_without_a_main_sche
     use std::sync::atomic::Ordering;
     let root = TestRoot::new();
     let host = AddonHost::new(&root.path);
-    let shared_default_available = crate::addon::shared_data_dir(&host.core, &root.path)
-        .join("default.yaml")
-        .is_file();
-    fs::write(root.path.join("rime.lua"), "stale main lua").unwrap();
     let status = manage_wanxiang_with(
         &host.core,
         true,
@@ -560,40 +562,14 @@ async fn standalone_wanxiang_installs_deploys_and_uninstalls_without_a_main_sche
     .unwrap();
     assert!(status.installed && status.deployed);
     assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        crate::scheme_files::parse_schema_list(
-            &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
-        ),
-        [SCHEMA_ID]
-    );
-    assert_eq!(
-        keytao_core::deployed_schema_id_from_dir(&root.path).as_deref(),
-        Some(SCHEMA_ID)
-    );
-    assert_eq!(
-        root.path.join("default.yaml").is_file(),
-        !shared_default_available
-    );
+    assert_eq!(RuntimeDirs::active_package_key(&root.path).as_deref(), Some(SCHEMA_ID));
+    assert!(root.path.join("runtime/wanxiang/build/wanxiang.schema.yaml").is_file());
     assert!(!root.path.join("rime.lua").exists());
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(root.path.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(manifest["scheme_key"], SCHEMA_ID);
     let status = manage_wanxiang(&host.core, false, "base".into(), &host)
         .await
         .unwrap();
     assert!(!status.installed && !status.deployed);
-    assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
-    assert_eq!(host.reloads.load(Ordering::SeqCst), 1);
-    assert!(
-        crate::scheme_files::parse_schema_list(
-            &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
-        )
-        .is_empty()
-    );
-    assert_eq!(keytao_core::deployed_schema_id_from_dir(&root.path), None);
-    assert!(!root.path.join("default.yaml").exists());
+    assert_ne!(RuntimeDirs::active_package_key(&root.path).as_deref(), Some(SCHEMA_ID));
 }
 
 #[tokio::test]
@@ -625,7 +601,7 @@ async fn main_scheme_keeps_priority_when_installing_wanxiang() {
         crate::scheme_files::parse_schema_list(
             &fs::read_to_string(root.path.join("default.custom.yaml")).unwrap()
         ),
-        ["keytao", SCHEMA_ID]
+        ["keytao"]
     );
     assert_eq!(
         fs::read_to_string(root.path.join("rime.lua")).unwrap(),
@@ -663,6 +639,7 @@ async fn stored_wanxiang_updates_and_rolls_back_grammar_without_copying_the_mode
         assert!(!root.path.join(MANIFEST).exists());
     }
     let store = crate::package_store::PackageStore::new(&host.core).addon_path(SCHEMA_ID);
+    let model_path = root.path.join(ISOLATED_GRAMMAR_FILE);
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
     receipt.attach_store(&host.core, SCHEMA_ID).unwrap();
     receipt.seed_store_sources(&host.core, SCHEMA_ID).unwrap();
@@ -671,39 +648,23 @@ async fn stored_wanxiang_updates_and_rolls_back_grammar_without_copying_the_mode
     receipt.commit_store(true).unwrap();
     receipt.finish().unwrap();
     assert_eq!(
-        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        fs::read(&model_path).unwrap(),
         b"tiny fake grammar fixture"
     );
     assert!(!store.join("files").join(GRAMMAR_FILE).exists());
-    assert!(
-        fs::read_to_string(store.join("files/wanxiang.schema.yaml"))
-            .unwrap()
-            .contains("language: \"\"")
-    );
-    let activation: crate::package_activation::Activation =
-        serde_json::from_slice(&fs::read(store.join("activation.json")).unwrap()).unwrap();
-    assert!(
-        activation
-            .owned
-            .iter()
-            .any(|file| file.path == GRAMMAR_FILE && file.move_file)
-    );
+    let schema = fs::read_to_string(store.join("files/wanxiang.schema.yaml")).unwrap();
+    assert!(grammar_schema(&schema, false).contains("language: \"\""));
     let stored_manifest = fs::read(store.join("package.json")).unwrap();
-    let live_schema = fs::read(root.path.join("wanxiang.schema.yaml")).unwrap();
     {
         let mut receipt = InstallReceipt::new(&root.path).unwrap();
         receipt.attach_store(&host.core, SCHEMA_ID).unwrap();
         receipt.seed_store_sources(&host.core, SCHEMA_ID).unwrap();
         commit_grammar(&mut receipt, None, false, true).unwrap();
-        assert!(!root.path.join(GRAMMAR_FILE).exists());
+        assert!(!model_path.exists());
     }
     assert_eq!(
-        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        fs::read(&model_path).unwrap(),
         b"tiny fake grammar fixture"
-    );
-    assert_eq!(
-        fs::read(root.path.join("wanxiang.schema.yaml")).unwrap(),
-        live_schema
     );
     assert_eq!(
         fs::read(store.join("package.json")).unwrap(),
@@ -727,11 +688,7 @@ async fn stored_wanxiang_updates_and_rolls_back_grammar_without_copying_the_mode
         stored_manifest
     );
     assert_eq!(
-        fs::read(root.path.join("wanxiang.schema.yaml")).unwrap(),
-        live_schema
-    );
-    assert_eq!(
-        fs::read(root.path.join(GRAMMAR_FILE)).unwrap(),
+        fs::read(&model_path).unwrap(),
         b"tiny fake grammar fixture"
     );
     fs::write(
@@ -747,7 +704,7 @@ async fn stored_wanxiang_updates_and_rolls_back_grammar_without_copying_the_mode
         .await
         .unwrap();
     assert!(!store.exists());
-    assert!(!root.path.join(GRAMMAR_FILE).exists());
+    assert_eq!(fs::read(&model_path).unwrap(), b"tiny fake grammar fixture");
     assert!(root.path.join("main.schema.yaml").exists());
     assert!(root.path.join("main.dict.yaml").exists());
     assert_eq!(

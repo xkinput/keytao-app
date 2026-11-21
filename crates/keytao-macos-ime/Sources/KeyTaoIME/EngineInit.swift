@@ -104,6 +104,7 @@ final class KeyTaoRuntime {
 
     private var lastInitializationAttempt: Date?
     private var watchSource: DispatchSourceFileSystemObject?
+    private var migrationWatchSource: DispatchSourceFileSystemObject?
     private var deploymentWatchSource: DispatchSourceFileSystemObject?
     private var deploymentTimer: DispatchSourceTimer?
 
@@ -307,7 +308,29 @@ final class KeyTaoRuntime {
         watchSource = source
         source.resume()
 
+        startWatchingMigrationDirectory(stampPath: stampPath)
         consumeReloadRequest()
+    }
+
+    private func startWatchingMigrationDirectory(stampPath: String) {
+        migrationWatchSource?.cancel()
+        migrationWatchSource = nil
+        // Migration commits its marker in runtime/ after publishing the stamp.
+        let root = (stampPath as NSString).deletingLastPathComponent
+        let runtime = (root as NSString).appendingPathComponent("runtime")
+        let descriptor = open(runtime, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .delete, .rename, .revoke],
+            queue: queue
+        )
+        source.setEventHandler { [weak self] in
+            self?.consumeReloadRequest()
+        }
+        source.setCancelHandler { close(descriptor) }
+        migrationWatchSource = source
+        source.resume()
     }
 
     private func postDidReload() {
