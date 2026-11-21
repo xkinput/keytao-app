@@ -48,7 +48,15 @@ pub async fn ensure_before_write(core: &Core, root: &Path) -> Result<(), CoreErr
 pub fn start_app(core: &Core, root: &Path) -> Result<(), CoreError> {
     let shared = crate::deploy::deploy_shared_data_dir(core, root);
     if !RuntimeDirs::migration_complete(root) {
-        return migrate_if_needed(core, root, &shared).map(|_| ());
+        let result = migrate_if_needed(core, root, &shared);
+        #[cfg(target_os = "windows")]
+        if matches!(result, Ok(true))
+            && crate::windows_public_schemas::is_default_user_root(root)
+            && let Err(error) = crate::windows_public_schemas::publish_active_if_needed(root)
+        {
+            crate::windows_public_schemas::public_warning("migration", &error);
+        }
+        return result.map(|_| ());
     }
     let root = checked_root(root)?;
     let result = isolated_deploy::with_migration_lock(&root, || {
@@ -839,6 +847,48 @@ mod tests {
         assert!(migrate_with(&core, root, root, |_, _, _| Ok(())).unwrap());
         assert!(!RuntimeDirs::needs_migration(root));
         assert_eq!(ReloadStamp::package_key(&stamp).as_deref(), Some("local-a"));
+    }
+
+    #[test]
+    fn failed_migration_keeps_live_flat_files_out_of_orphan_report() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let core = fixture(root);
+        let activation = package(&core, "local-a", "alpha", "alpha");
+        package_activation::write(&core, &activation).unwrap();
+        let legacy = [
+            "legacy.schema.yaml",
+            "legacy.dict.yaml",
+            "legacy.custom.yaml",
+            "default.yaml",
+            "nested/legacy_include.yaml",
+            "alternate.txt",
+            "rime.lua",
+            "lua/live.lua",
+            "build/legacy.table.bin",
+            "prebuilt/legacy.prism.bin",
+            "opencc/legacy.json",
+            "legacy.ocd2",
+        ];
+        for path in legacy.into_iter().chain(["orphan.bak"]) {
+            put(root, path, b"# legacy contents\n");
+        }
+        let mut deploy_called = false;
+        let failure = migrate_with(&core, root, root, |_, _, _| {
+            deploy_called = true;
+            Err("fixture deployment failed".into())
+        });
+        assert!(deploy_called);
+        assert!(failure.is_err());
+        assert!(RuntimeDirs::needs_migration(root));
+
+        let report = crate::package_orphans::report(&core, root).unwrap();
+        let paths: Vec<_> = report.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["orphan.bak"]);
+
+        assert!(migrate_with(&core, root, root, |_, _, _| Ok(())).unwrap());
+        let report = crate::package_orphans::report(&core, root).unwrap();
+        assert!(report.files.iter().any(|file| file.path == "legacy.schema.yaml"));
     }
 
     #[test]

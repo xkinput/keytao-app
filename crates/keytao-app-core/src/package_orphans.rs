@@ -1,7 +1,7 @@
 use crate::{
     Core, CoreError, Platform, package_activation,
     package_store::PackageStore,
-    packages::{safe_path, sha256_reader, staging_relative},
+    packages::{safe_path, sha256_reader},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -118,8 +118,9 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         }
     }
     let sync_dir = crate::runtime_materialize::legacy_sync_dir(root)?;
+    let flat_live = keytao_core::RuntimeDirs::needs_migration(root);
     let mut files = Vec::new();
-    collect(root, root, &sync_dir, &owned, &mut files)?;
+    collect(root, root, &sync_dir, &owned, flat_live, &mut files)?;
     for backup in crate::package_migration::completed_backups(root)? {
         files.push(OrphanFile {
             path: backup.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"),
@@ -148,6 +149,7 @@ fn collect(
     directory: &Path,
     sync_dir: &Path,
     owned: &BTreeSet<String>,
+    flat_live: bool,
     files: &mut Vec<OrphanFile>,
 ) -> Result<(), CoreError> {
     for entry in fs::read_dir(directory)? {
@@ -172,7 +174,9 @@ fn collect(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if (directory == root && (relative == "build" || crate::package_migration::control_entry(&relative)))
+        if (directory == root
+            && (relative == "build" || crate::package_migration::control_entry(&relative)))
+            || (flat_live && flat_rime_input(&relative))
             || package_activation::user_file(&relative)
             || matches!(
                 relative.as_str(),
@@ -190,7 +194,7 @@ fn collect(
             continue;
         }
         if metadata.is_dir() {
-            collect(root, &path, sync_dir, owned, files)?;
+            collect(root, &path, sync_dir, owned, flat_live, files)?;
         } else if metadata.is_file()
             && !owned.contains(&relative)
             && !generated(&relative, &path)?
@@ -203,6 +207,17 @@ fn collect(
         }
     }
     Ok(())
+}
+
+fn flat_rime_input(relative: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    let relative: &str = &relative.to_ascii_lowercase();
+    // Schemas can reference config and vocabulary files with arbitrary names.
+    matches!(relative, "build" | "lua" | "opencc" | "prebuilt")
+        || matches!(
+            Path::new(relative).extension().and_then(|ext| ext.to_str()),
+            Some("yaml" | "lua" | "txt" | "bin" | "ocd2" | "gram")
+        )
 }
 
 fn generated(relative: &str, path: &Path) -> Result<bool, CoreError> {
@@ -459,7 +474,7 @@ mod tests {
         fs::write(root.join("orphan.yaml"), "legacy").unwrap();
 
         let mut files = Vec::new();
-        collect(root, root, &root.join("sync"), &BTreeSet::new(), &mut files).unwrap();
+        collect(root, root, &root.join("sync"), &BTreeSet::new(), false, &mut files).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "orphan.yaml");
     }
@@ -481,12 +496,12 @@ mod tests {
             "build/legacy.table.bin",
             "build/.keytao-deployed",
         ];
-        for path in artifacts.into_iter().chain(["orphan.yaml"]) {
+        for path in artifacts.into_iter().chain(["orphan.bak"]) {
             fs::write(root.join(path), b"legacy contents").unwrap();
         }
 
         let orphans = report(&core, &root).unwrap().files;
-        assert!(orphans.iter().any(|file| file.path == "orphan.yaml"));
+        assert!(orphans.iter().any(|file| file.path == "orphan.bak"));
         assert!(orphans
             .iter()
             .all(|file| !artifacts.contains(&file.path.as_str())));
@@ -503,6 +518,12 @@ mod tests {
     #[test]
     fn excludes_owned_generated_addon_and_user_files() {
         let (_temp, core, root) = setup();
+        fs::create_dir(root.join("runtime")).unwrap();
+        fs::write(
+            root.join(keytao_core::RuntimeDirs::MIGRATION_MARKER),
+            r#"{"version":1}"#,
+        )
+        .unwrap();
         fs::create_dir_all(root.join("lua")).unwrap();
         for name in [
             "owned.schema.yaml",
@@ -600,7 +621,7 @@ mod tests {
     #[test]
     fn selected_move_is_reversible_and_rejects_changed_or_unsafe_files() {
         let (temp, core, root) = setup();
-        let source = root.join("old.custom.yaml");
+        let source = root.join("old.bak");
         fs::write(&source, b"user bytes\r\n").unwrap();
         let selected = report(&core, &root).unwrap().files;
         fs::write(&source, b"new bytes").unwrap();
@@ -609,7 +630,7 @@ mod tests {
         let trash = temp.path().join("trash");
         assert_eq!(
             trash_with(&core, &root, &selected, Some(&trash)).unwrap(),
-            ["old.custom.yaml"]
+            ["old.bak"]
         );
         assert!(!source.exists());
         let moved = fs::read_dir(&trash)

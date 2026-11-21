@@ -892,7 +892,11 @@ async fn installing_into_another_directory_preserves_active_deploy_receipt() {
 #[cfg(target_os = "macos")]
 #[test]
 fn desktop_preview_smokes_a_shared_dictionary_from_a_small_temp_scheme() {
-    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    if crate::run_librime_test_in_child(
+        "cloud_packages::tests::desktop_preview_smokes_a_shared_dictionary_from_a_small_temp_scheme",
+    ) {
+        return;
+    }
     let (dir, core, _) = fixture();
     let root = dir.path().join("rime");
     let shared = core.env().resource_dir.join("rime-data");

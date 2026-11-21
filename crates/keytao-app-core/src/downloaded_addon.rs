@@ -2,7 +2,6 @@
 
 use crate::{
     Core, CoreError, CoreEvent,
-    addon::write_schema_list_transaction,
     events::InstallProgress,
     scheme_host::SchemeHost,
     wanxiang::{self, InstallReceipt, InstalledFile, RemotePackage, Status},
@@ -353,20 +352,5 @@ impl Addon {
                 format!("{}已卸载，保留用户自定义和学习记录", self.name)
             },
         }));
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Default)]
-struct PublicRollback(Option<crate::windows_public_schemas::PublicSchemaUpdate>);
-
-#[cfg(target_os = "windows")]
-impl Drop for PublicRollback {
-    fn drop(&mut self) {
-        if let Some(update) = self.0.take() {
-            if let Err(error) = update.rollback() {
-                tracing::error!(%error, "add-on public source rollback failed");
-            }
-        }
     }
 }

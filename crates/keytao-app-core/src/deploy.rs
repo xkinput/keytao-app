@@ -223,6 +223,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     finish_isolated_target(core, root, &shared, mode, &targets[0].package_key).await
 }
 
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn verify_android_deployment(root: &std::path::Path) -> Result<(), CoreError> {
     let dirs = keytao_core::RuntimeDirs::resolve(root, &root.join("rime-data"))
         .map_err(CoreError::Other)?;

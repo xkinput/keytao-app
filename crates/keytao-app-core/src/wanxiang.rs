@@ -744,6 +744,7 @@ pub struct InstallReceipt {
 }
 
 impl InstallReceipt {
+    #[cfg(test)]
     pub(crate) fn schema_selection(&self, id: &str) -> Result<(Vec<String>, Vec<String>), String> {
         match &self.store {
             Some(store) => store.schema_selection(&self.work.join("files")),
@@ -1685,10 +1686,7 @@ fn uninstall_receipt(mut receipt: InstallReceipt) -> Result<InstallReceipt, Stri
 #[path = "wanxiang_tests.rs"]
 mod tests;
 
-use crate::{
-    Core, CoreError, CoreEvent, addon::write_schema_list_transaction, events::InstallProgress,
-    scheme_host::SchemeHost,
-};
+use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme_host::SchemeHost};
 
 pub async fn manage_grammar(
     core: &std::sync::Arc<Core>,

@@ -909,6 +909,7 @@ pub(crate) fn verified_package(
     checked(root, shared, Some(package), schema_ids, smoke)
 }
 
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn verify_deploy_artifacts(
     root: &Path,
     shared: Option<&Path>,
@@ -1008,6 +1009,7 @@ pub(crate) fn verify_deploy_artifacts(
     Ok(())
 }
 
+#[cfg(any(target_os = "android", test))]
 fn collect_deploy_dictionaries(value: &Value, reverse_only: bool, schema: &mut SchemaFiles) {
     match value {
         Value::Mapping(map) => {

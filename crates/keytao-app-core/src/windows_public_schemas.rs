@@ -107,9 +107,8 @@ pub(crate) struct PublicSchemaCheckpoint {
     previous: GenerationPointers,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", test))]
 pub(crate) fn checkpoint(backup: &Path) -> Result<PublicSchemaCheckpoint, String> {
-    #[cfg(target_os = "windows")]
     let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
     let _guard = PUBLISH_LOCK
         .lock()
@@ -117,6 +116,7 @@ pub(crate) fn checkpoint(backup: &Path) -> Result<PublicSchemaCheckpoint, String
     checkpoint_at(public_root()?, backup)
 }
 
+#[cfg(test)]
 pub(crate) fn checkpoint_at(
     root: PathBuf,
     backup: &Path,
@@ -949,29 +949,6 @@ fn source_selected_schema(root: &Path) -> Option<String> {
         .map(|id| id.trim().to_owned());
     saved.into_iter().chain(current).find(|id| schemas.contains(id))
         .or_else(|| keytao_core::deployed_schema_id_from_dir(root))
-}
-
-/// Both directories must be package-store sources, never the private Rime root.
-pub fn publish_activation(
-    core: &crate::Core,
-    incoming: &Path,
-    previous: Option<&Path>,
-    private_root: &Path,
-) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-    let _guard = PUBLISH_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    publish_activation_with_selection_at(
-        &public_root()?,
-        Some(incoming),
-        previous,
-        &crate::package_activation::addon_ownership(core, private_root)
-            .map_err(|error| error.to_string())?,
-        true,
-        source_selected_schema(private_root).as_deref(),
-    )
 }
 
 pub fn remove_package(
@@ -1862,6 +1839,23 @@ fn grant_appcontainer_read(_root: &Path, _recursive: bool) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_public_generation_must_match_the_active_package() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut files = BTreeMap::from([(LIBRIME_VERSION_FILE.into(), b"1.0".to_vec())]);
+        store_snapshot(root, &files, false).unwrap();
+        assert!(!has_compiled_package_at(root, "keytao").unwrap());
+
+        files.insert(
+            keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE.into(),
+            b"local-other".to_vec(),
+        );
+        store_snapshot(root, &files, false).unwrap();
+        assert!(!has_compiled_package_at(root, "keytao").unwrap());
+        assert!(has_compiled_package_at(root, "local-other").unwrap());
+    }
 
     #[test]
     fn legacy_layout_preserves_public_generations() {

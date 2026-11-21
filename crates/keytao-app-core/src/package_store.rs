@@ -236,11 +236,6 @@ impl<'a> PackageStore<'a> {
         safe_path(&self.checked_root()?, "activation.json").map_err(CoreError::Other)
     }
 
-    pub(crate) fn checked_active_manifest_path(&self) -> Result<PathBuf, CoreError> {
-        self.checked_root()?;
-        safe_path(&self.root(), "active-manifest.json").map_err(CoreError::Other)
-    }
-
     fn staging_root(&self) -> Result<PathBuf, CoreError> {
         self.checked_root()?;
         let path = safe_path(&self.root(), ".staging").map_err(CoreError::Other)?;

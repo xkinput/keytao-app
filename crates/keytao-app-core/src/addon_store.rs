@@ -606,6 +606,7 @@ pub(crate) fn manifest(core: &Core, root: &Path, id: &str) -> Result<Option<Vec<
     legacy_receipt(root, id, name).map_err(|error| error.to_string())
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
     let _guard = operation();
     if !root.try_exists()? {
@@ -690,6 +691,7 @@ pub(crate) fn isolated_ready(core: &Core, root: &Path, id: &str) -> bool {
         .is_some_and(|dirs| keytao_core::package_build_ready(root, &dirs))
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn public_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     Ok(source_files(core, id)?.into_iter().filter(|(_, relative)| !matches!(relative.to_str(), Some("default.yaml" | "default.custom.yaml" | "default-custom.yaml"))).collect())
 }
@@ -705,6 +707,7 @@ pub(crate) fn source_files(core: &Core, id: &str) -> Result<Vec<(PathBuf, PathBu
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn migrate(core: &Core, root: &Path) -> Result<(), CoreError> {
     let _guard = operation();
     migrate_inner(core, root)?;
@@ -776,6 +779,7 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn snow_activation(core: &Core, root: &Path) -> Result<Option<Activation>, CoreError> {
     let _guard = operation();
     let store = PackageStore::new(core);
@@ -791,6 +795,7 @@ pub(crate) fn snow_activation(core: &Core, root: &Path) -> Result<Option<Activat
     addon.activation().map_err(CoreError::Other)
 }
 
+#[cfg(test)]
 pub(crate) fn take_over_snow(core: &Core, root: &Path) -> Result<Vec<String>, CoreError> {
     let Some(mut active) = snow_activation(core, root)? else {
         return Ok(Vec::new());
@@ -815,18 +820,7 @@ pub(crate) fn take_over_snow(core: &Core, root: &Path) -> Result<Vec<String>, Co
     Ok(logs)
 }
 
-pub(crate) fn finish_snow_takeover(core: &Core, root: &Path) -> Result<(), CoreError> {
-    if snow_activation(core, root)?
-        .is_some_and(|active| active.owned.is_empty() && active.generated.is_empty())
-    {
-        AddonStore::new(core, root, crate::rime_snow::SCHEMA_ID)
-            .map_err(CoreError::Other)?
-            .remove()
-            .map_err(CoreError::Other)?;
-    }
-    Ok(())
-}
-
+#[cfg(any(target_os = "windows", test))]
 fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
     if RuntimeDirs::needs_migration(root) {
         migrate_legacy(core, root)?;

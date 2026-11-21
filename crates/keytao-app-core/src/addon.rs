@@ -140,30 +140,6 @@ pub(crate) fn official_custom() -> Result<Vec<u8>, String> {
         .map(String::into_bytes)
 }
 
-pub(crate) fn removed_sources<'a>(
-    root: &Path,
-    files: impl Iterator<Item = &'a InstalledFile>,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut sources = Vec::new();
-    for file in files.filter(|file| file.path.ends_with(".schema.yaml")) {
-        let path = wanxiang::safe_target(root, &file.path)?;
-        match std::fs::read(path) {
-            Ok(bytes) => sources.push((file.path.clone(), bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Ok(sources)
-}
-
-pub(crate) fn cleanup_removed(root: &Path, sources: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (_, content) = addon_default_custom(root)?;
-    let remaining = parse_schema_list(&content).into_iter().collect();
-    crate::package_artifacts::cleanup(root, sources, &remaining)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
 pub(crate) fn is_package_file(path: &str) -> bool {
     path == LICENSE
         || addon_schema_source_files(EASY_EN_ADDON_ID)
@@ -584,15 +560,7 @@ async fn install_package(
     .map_err(|e| format!("English 安装任务失败：{e}"))?
 }
 
-pub(crate) fn owned_addon_default(root: &Path) -> Result<Option<PathBuf>, String> {
-    let path = wanxiang::safe_target(root, "default.yaml")?;
-    match std::fs::read(&path) {
-        Ok(content) => Ok((content == include_bytes!("addon-default.yaml")).then_some(path)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("读取 {} 失败: {error}", path.display())),
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn write_schema_list_transaction(
     receipt: &mut InstallReceipt,
     id: &str,
@@ -601,27 +569,24 @@ pub(crate) fn write_schema_list_transaction(
 ) -> Result<(), String> {
     let (relative, existing) = addon_default_custom(&receipt.root)?;
     let (owned, selected) = receipt.schema_selection(id)?;
-    let updated = update_addon_schemas_content(&existing, &owned, if installed { &selected } else { &[] })?;
-    write_schema_list_content_transaction(receipt, relative, &updated, shared, None)
-}
-
-pub(crate) fn write_schema_list_content_transaction(
-    receipt: &mut InstallReceipt,
-    relative: &str,
-    updated: &str,
-    shared: &Path,
-    rime_lua: Option<&str>,
-) -> Result<(), String> {
+    let updated =
+        update_addon_schemas_content(&existing, &owned, if installed { &selected } else { &[] })?;
     let path = receipt.work.join("default.custom.yaml");
-    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
+    std::fs::write(&path, &updated).map_err(|e| e.to_string())?;
     receipt.replace(relative, &path, wanxiang::fingerprint(&path)?.0)?;
-    let schemas = parse_schema_list(updated);
+    let schemas = parse_schema_list(&updated);
     let addon_only = schemas
         .iter()
         .all(|schema| keytao_core::is_addon_schema(schema));
     if schemas.is_empty() || !addon_only {
-        if owned_addon_default(&receipt.root)?.is_some() {
-            receipt.move_original("default.yaml")?;
+        let path = wanxiang::safe_target(&receipt.root, "default.yaml")?;
+        match std::fs::read(&path) {
+            Ok(content) if content == include_bytes!("addon-default.yaml") => {
+                receipt.move_original("default.yaml")?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("读取 {} 失败: {error}", path.display())),
         }
     } else if !wanxiang::safe_target(&receipt.root, "default.yaml")?.is_file()
         && !shared.join("default.yaml").is_file()
@@ -636,7 +601,7 @@ pub(crate) fn write_schema_list_content_transaction(
             "root": receipt.root,
             "scheme_key": schemas.first().map(String::as_str).unwrap_or(""),
             "manifest": {},
-            "rime_lua": rime_lua,
+            "rime_lua": null,
         });
         std::fs::write(
             &path,
@@ -648,22 +613,20 @@ pub(crate) fn write_schema_list_content_transaction(
             &path,
             wanxiang::fingerprint(&path)?.0,
         )?;
-        if rime_lua.is_none() {
-            keytao_core::preserve_rime_lua_user_edits(&receipt.root, None)?;
-            receipt.move_original("rime.lua")?;
-        }
+        keytao_core::preserve_rime_lua_user_edits(&receipt.root, None)?;
+        receipt.move_original("rime.lua")?;
     }
     Ok(())
 }
 
 #[cfg(test)]
-
 fn uninstall_package(root: &Path) -> Result<InstallReceipt, String> {
     let mut receipt = InstallReceipt::new(root)?;
     uninstall_receipt(&mut receipt)?;
     Ok(receipt)
 }
 
+#[cfg(test)]
 fn uninstall_receipt(receipt: &mut InstallReceipt) -> Result<(), String> {
     let manifest = receipt
         .manifest_bytes(MANIFEST)?
@@ -711,7 +674,7 @@ fn uninstall_receipt(receipt: &mut InstallReceipt) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(all(test, any(target_os = "android", target_os = "ios")))]
 fn reset_mobile_english_mode(root: &Path) -> Result<bool, String> {
     let path = android_ime_config_path(root);
     let mut config = read_android_ime_config(&path);
@@ -733,7 +696,7 @@ fn reset_mobile_english_mode(root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 fn reset_mobile_english_mode(_root: &Path) -> Result<bool, String> {
     use keytao_core::english_mode::{EnglishMode, read_english_mode, write_english_mode};
     let changed = read_english_mode(_root) != EnglishMode::Ascii;
@@ -743,6 +706,7 @@ fn reset_mobile_english_mode(_root: &Path) -> Result<bool, String> {
     Ok(changed)
 }
 
+#[cfg(test)]
 fn reset_english_mode_transaction(receipt: &mut InstallReceipt) -> Result<bool, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let relative = android_ime_config_path(Path::new(""))
@@ -1226,6 +1190,11 @@ mod tests {
 
     #[test]
     fn standalone_defaults_compile_and_input_with_librime() {
+        if crate::run_librime_test_in_child(
+            "addon::tests::standalone_defaults_compile_and_input_with_librime",
+        ) {
+            return;
+        }
         for id in [
             EASY_EN_ADDON_ID,
             wanxiang::SCHEMA_ID,
@@ -1610,7 +1579,7 @@ mod tests {
             "easy_en.schema.yaml".into(),
             b"schema: {schema_id: easy_en}\ntranslator: {dictionary: easy_en}\n".to_vec(),
         )];
-        cleanup_removed(root.path(), &sources).unwrap();
+        crate::package_artifacts::cleanup(root.path(), &sources, &Default::default()).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.path().join("easy_en.userdb")).unwrap(),
             "private vocabulary"

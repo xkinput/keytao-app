@@ -80,20 +80,3 @@ pub(crate) fn prepare_archive(core: &Core, bytes: Vec<u8>) -> Result<Vec<u8>, Co
     }
     crate::packages::archive_from_files(&files)
 }
-
-pub(crate) async fn remove_legacy(
-    core: &Core,
-    host: &impl crate::scheme_host::SchemeHost,
-) -> Result<(), CoreError> {
-    let root = host.user_root().map_err(CoreError::Other)?;
-    let Some(active) = crate::addon_store::snow_activation(core, &root)? else {
-        return Ok(());
-    };
-    if active.owned.is_empty() && active.generated.is_empty() {
-        return crate::addon_store::finish_snow_takeover(core, &root);
-    }
-    crate::shape_addons::SNOW
-        .manage(core, false, host, |receipt| async move { Ok(receipt) })
-        .await?;
-    Ok(())
-}

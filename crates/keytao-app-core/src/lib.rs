@@ -28,6 +28,7 @@ mod downloaded_addon;
 mod pinyin_addons;
 mod shape_addons;
 mod package_activation;
+#[cfg(test)]
 mod package_artifacts;
 pub mod package_orphans;
 pub mod package_migration;
@@ -65,6 +66,27 @@ pub use env::{AppEnv, Platform};
 pub use error::CoreError;
 pub use events::{CoreEvent, EventSink};
 pub use state::AppState;
+
+#[cfg(test)]
+fn run_librime_test_in_child(name: &str) -> bool {
+    const CASE: &str = "KEYTAO_APP_CORE_LIBRIME_TEST";
+    if std::env::var(CASE).as_deref() == Ok(name) {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CASE, name)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed;"),
+        "{name}: {}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
 
 fn validate_libjd_library(path: &std::path::Path) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
