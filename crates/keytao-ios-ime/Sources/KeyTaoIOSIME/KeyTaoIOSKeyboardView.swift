@@ -3260,17 +3260,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         let textLeft = rect.minX + 36
         let textWidth = max(0, rect.maxX - 10 - textLeft)
         drawTruncatedText(
-            item.label,
-            in: CGRect(x: textLeft, y: rect.minY + 3, width: textWidth, height: 23),
+            item.text,
+            in: CGRect(x: textLeft, y: rect.minY, width: textWidth, height: rect.height),
             color: item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.candidateBar.foreground.uiColor,
             size: candidateTextSize(),
-            alignment: .left
-        )
-        drawTruncatedText(
-            item.text,
-            in: CGRect(x: textLeft, y: rect.midY, width: textWidth, height: 19),
-            color: theme.mobile.candidateBar.commentColor.uiColor,
-            size: candidateCommentSize(),
             alignment: .left
         )
     }
@@ -4451,14 +4444,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     }
                     width = right - left
                     itemRowHeight = 28
-                case .schema:
-                    if x > left {
-                        x = left
-                        y += 44 + gap
-                    }
-                    width = right - left
-                    itemRowHeight = 44
-                case .option:
+                case .schema, .option:
                     width = (right - left - gap) / 2
                     itemRowHeight = 44
                 case .slider:
@@ -4549,7 +4535,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             contentBottom = max(contentBottom, drawingRect.maxY + visualScrollY)
             if structuredRime {
                 switch item.style {
-                case .option:
+                case .schema, .option:
                     if x > left {
                         x = left
                         y = drawingRect.maxY + gap
@@ -5022,8 +5008,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                 CandidateDrawItem(
                     identifierIndex: -2100 - index,
                     selectIndex: -2100 - index,
-                    label: schema.name,
-                    text: schema.id,
+                    label: "",
+                    text: schema.name,
                     comment: nil,
                     selected: schema.id == rimeOptionsState.currentSchema?.id,
                     global: false,
@@ -5035,6 +5021,26 @@ final class KeyTaoIOSKeyboardView: UIView {
                     style: .schema
                 )
             })
+            for package in rimeOptionsState.packages where !package.active && package.ready {
+                for schema in package.schemas {
+                    let index = -10000 - items.count
+                    items.append(CandidateDrawItem(
+                        identifierIndex: index,
+                        selectIndex: index,
+                        label: "",
+                        text: schema.name,
+                        comment: nil,
+                        selected: false,
+                        global: false,
+                        command: KeyTaoKeyCommand(
+                            type: KeyTaoCommandType.rimeSchema,
+                            value: schema.id,
+                            fallbackValue: package.packageKey
+                        ),
+                        style: .schema
+                    ))
+                }
+            }
             items.append(
                 CandidateDrawItem(
                     identifierIndex: -3000,
@@ -5069,38 +5075,6 @@ final class KeyTaoIOSKeyboardView: UIView {
                 items.append(contentsOf: visibleSwitches.enumerated().map { index, schemaSwitch in
                     rimeSwitchItem(index: index, schemaSwitch: schemaSwitch)
                 })
-            }
-            for package in rimeOptionsState.packages where !package.active {
-                let headingIndex = -10000 - items.count
-                items.append(CandidateDrawItem(
-                    identifierIndex: headingIndex,
-                    selectIndex: headingIndex,
-                    label: package.ready ? package.displayName : "\(package.displayName)（未部署）",
-                    text: "",
-                    comment: nil,
-                    selected: false,
-                    global: false,
-                    command: nil,
-                    style: .section
-                ))
-                for schema in package.schemas {
-                    let index = -10000 - items.count
-                    items.append(CandidateDrawItem(
-                        identifierIndex: index,
-                        selectIndex: index,
-                        label: schema.name,
-                        text: schema.id,
-                        comment: nil,
-                        selected: false,
-                        global: false,
-                        command: package.ready ? KeyTaoKeyCommand(
-                            type: KeyTaoCommandType.rimeSchema,
-                            value: schema.id,
-                            fallbackValue: package.packageKey
-                        ) : nil,
-                        style: package.ready ? .schema : .empty
-                    ))
-                }
             }
             return items
         }

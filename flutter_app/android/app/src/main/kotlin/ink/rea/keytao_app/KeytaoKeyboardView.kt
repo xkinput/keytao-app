@@ -1967,15 +1967,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         chipWidth = right - left
                         itemRowHeight = dp(28f)
                     }
-                    PanelItemStyle.SCHEMA -> {
-                        if (x > left) {
-                            x = left
-                            y += dp(44f) + gap
-                        }
-                        chipWidth = right - left
-                        itemRowHeight = dp(44f)
-                    }
-                    PanelItemStyle.OPTION -> {
+                    PanelItemStyle.SCHEMA, PanelItemStyle.OPTION -> {
                         chipWidth = (right - left - gap) / 2f
                         itemRowHeight = dp(44f)
                     }
@@ -2056,7 +2048,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             contentBottom = max(contentBottom, rect.bottom + visualScrollY)
             if (structuredRime) {
                 when (item.style) {
-                    PanelItemStyle.OPTION -> {
+                    PanelItemStyle.SCHEMA, PanelItemStyle.OPTION -> {
                         if (x > left) {
                             x = left
                             y = rect.bottom + gap
@@ -2256,10 +2248,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 return emptyList()
             }
             val current = rimeOptionsState.currentSchema
-            val schemas = buildList<KeytaoRimeSchema> {
-                addAll(rimeOptionsState.schemas)
-                if (current != null && none { it.id == current.id }) add(current)
-            }
             val items = mutableListOf(
                 CandidateDrawItem(
                     index = -2000,
@@ -2268,19 +2256,28 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     style = PanelItemStyle.SECTION,
                 )
             )
-            schemas.forEachIndexed { index, schema ->
+            fun addSchema(schema: KeytaoRimeSchema, packageKey: String? = null) {
                 items.add(
                     CandidateDrawItem(
-                        index = -2100 - index,
+                        index = Int.MIN_VALUE + items.size,
                         label = schema.name,
-                        text = schema.id,
-                        selected = schema.id == current?.id,
-                        command = KeyCommand(KeyCommandTypes.RIME_SCHEMA, schema.id),
+                        text = "",
+                        selected = packageKey == null && schema.id == current?.id,
+                        command = KeyCommand(KeyCommandTypes.RIME_SCHEMA, schema.id, packageKey),
                         style = PanelItemStyle.SCHEMA,
                     )
                 )
             }
-            if (schemas.isEmpty()) {
+            rimeOptionsState.schemas.forEach { addSchema(it) }
+            if (current != null && rimeOptionsState.schemas.none { it.id == current.id }) {
+                addSchema(current)
+            }
+            for (pkg in rimeOptionsState.packages) {
+                if (!pkg.active && pkg.ready) {
+                    pkg.schemas.forEach { addSchema(it, pkg.key) }
+                }
+            }
+            if (items.size == 1) {
                 items.add(CandidateDrawItem(
                     index = -2100,
                     label = visibleDeploymentHint ?: statusMessage?.takeIf(String::isNotBlank) ?: "当前没有可用输入方案",
@@ -2311,24 +2308,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             } else {
                 visibleSwitches.forEachIndexed { index, schemaSwitch ->
                     items.add(rimeSwitchItem(index, schemaSwitch))
-                }
-            }
-            for (pkg in rimeOptionsState.packages) {
-                if (pkg.active) continue
-                items.add(CandidateDrawItem(
-                    index = Int.MIN_VALUE + items.size,
-                    label = if (pkg.ready) pkg.displayName else "${pkg.displayName}（待部署）",
-                    text = "",
-                    style = PanelItemStyle.SECTION,
-                ))
-                for (schema in pkg.schemas) {
-                    items.add(CandidateDrawItem(
-                        index = Int.MIN_VALUE + items.size,
-                        label = schema.name,
-                        text = schema.id,
-                        command = if (pkg.ready) KeyCommand(KeyCommandTypes.RIME_SCHEMA, schema.id, pkg.key) else null,
-                        style = PanelItemStyle.SCHEMA,
-                    ))
                 }
             }
             return items
@@ -3246,17 +3225,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val maxWidth = (rect.right - dp(10f) - textLeft).coerceAtLeast(0f)
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = sp(candidateTextSizeSp())
-        textPaint.color = when {
-            item.selected -> theme.candidateSelectedForeground.toArgb()
-            item.command == null -> theme.commentColor.toArgb()
-            else -> theme.candidateForeground.toArgb()
-        }
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val name = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
-        canvas.drawText(name, textLeft, rect.centerY() - dp(7f) + textBaselineOffset(textPaint), textPaint)
-        textPaint.textSize = sp(candidateCommentSizeSp())
-        textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
-        val id = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
-        canvas.drawText(id, textLeft, rect.centerY() + dp(9f) + textBaselineOffset(textPaint), textPaint)
+        canvas.drawText(name, textLeft, rect.centerY() + textBaselineOffset(textPaint), textPaint)
     }
 
     private fun drawRimeOptionPill(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
