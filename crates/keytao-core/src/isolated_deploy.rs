@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const PACKAGE_TARGETS_ENV: &str = "KEYTAO_DEPLOY_PACKAGES";
@@ -18,6 +19,7 @@ const STAGE: &str = ".keytao-deploy-stage";
 pub const STAGED_INPUTS_PREFIX: &str = ".keytao-inputs-";
 pub const STAGED_INPUTS_MANIFEST: &str = ".edits.json";
 const RECEIPT: &str = ".keytao-desktop-inputs.json";
+const INPUT_CACHE: &str = ".keytao-package-input-cache.json";
 const SCHEMA_RECEIPT: &str = ".keytao-schema-inputs.json";
 const DEPLOY_LOCK: &str = ".keytao-package-deploy.lock";
 const MIGRATION_LOCK: &str = ".keytao-migration.lock";
@@ -770,8 +772,39 @@ fn regular_file(path: &Path) -> io::Result<fs::File> {
 }
 
 pub(crate) fn package_receipt_matches(control_root: &Path, dirs: &RuntimeDirs) -> bool {
-    input_signature(control_root, dirs)
-        .is_ok_and(|inputs| receipt_matches(&dirs.staging_dir, &inputs))
+    let stats = input_stat_signature(control_root, dirs);
+    let cache_path = dirs.user_data_dir.join(INPUT_CACHE);
+    if let Ok(stats) = stats.as_ref() {
+        let cached = regular_file(&cache_path)
+            .ok()
+            .and_then(|file| serde_json::from_reader::<_, InputCache>(file).ok());
+        if cached.is_some_and(|cache| {
+            cache.stats == *stats && receipt_matches(&dirs.staging_dir, &cache.inputs)
+        }) {
+            return true;
+        }
+    }
+    let Ok(inputs) = input_signature(control_root, dirs) else {
+        return false;
+    };
+    if !receipt_matches(&dirs.staging_dir, &inputs) {
+        return false;
+    }
+    if let Ok(stats) = stats {
+        // Never pair the content digest with metadata from a concurrent edit.
+        if input_stat_signature(control_root, dirs).is_ok_and(|current| current == stats) {
+            if let Ok(bytes) = serde_json::to_vec(&InputCache { stats, inputs }) {
+                let _ = crate::write_file_atomic(&cache_path, &bytes);
+            }
+        }
+    }
+    true
+}
+
+#[derive(Deserialize, Serialize)]
+struct InputCache {
+    stats: [u8; 32],
+    inputs: [u8; 32],
 }
 
 fn receipt_matches(build: &Path, inputs: &[u8; 32]) -> bool {
@@ -829,8 +862,122 @@ fn file_hash(path: &Path) -> io::Result<[u8; 32]> {
 }
 
 fn input_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 32], String> {
+    #[cfg(test)]
+    FULL_INPUT_CHECKS.with(|checks| checks.set(checks.get() + 1));
+    input_signature_with(control_root, dirs, b"keytao-package-inputs/v1\0", file_hash)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_INPUT_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn input_stat_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 32], String> {
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|now| i64::try_from(now.as_secs()).ok())
+        .and_then(|now| now.checked_sub(2))
+        .ok_or("cannot determine input metadata cutoff")?;
+    input_signature_with(control_root, dirs, b"keytao-package-input-stats/v1\0", |path| {
+        let stat = input_stat(path)?;
+        // Coarse timestamps can hide same-tick rewrites.
+        if stat.changed[0] <= 0 || stat.changed[0] >= cutoff || stat.modified[0] >= cutoff {
+            return Err(io::Error::other("input metadata cannot be cached"));
+        }
+        Ok(stat)
+    })
+}
+
+#[derive(Serialize)]
+struct InputStat {
+    volume: u64,
+    file_id: [u8; 16],
+    length: u64,
+    modified: [i64; 2],
+    changed: [i64; 2],
+}
+
+#[cfg(unix)]
+fn input_stat(path: &Path) -> io::Result<InputStat> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("input is not a regular file"));
+    }
+    Ok(InputStat {
+        volume: metadata.dev(),
+        file_id: u128::from(metadata.ino()).to_le_bytes(),
+        length: metadata.len(),
+        modified: [metadata.mtime(), metadata.mtime_nsec()],
+        changed: [metadata.ctime(), metadata.ctime_nsec()],
+    })
+}
+
+#[cfg(windows)]
+fn input_stat(path: &Path) -> io::Result<InputStat> {
+    use std::os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    };
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_READ,
+        },
+    };
+
+    // A write handle can defer publishing the new change time until close.
+    let file = fs::File::options()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err(io::Error::other("input is not a regular file"));
+    }
+    let handle = HANDLE(file.as_raw_handle());
+    let mut identity = FILE_ID_INFO::default();
+    let mut times = FILE_BASIC_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut identity as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+        .map_err(io::Error::other)?;
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&mut times as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+        .map_err(io::Error::other)?;
+    }
+    if identity.FileId.Identifier == [0; 16] {
+        return Err(io::Error::other("input file identity is unavailable"));
+    }
+    let timestamp = |ticks| [ticks / 10_000_000 - 11_644_473_600, ticks % 10_000_000 * 100];
+    Ok(InputStat {
+        volume: identity.VolumeSerialNumber,
+        file_id: identity.FileId.Identifier,
+        length: metadata.len(),
+        modified: timestamp(times.LastWriteTime),
+        changed: timestamp(times.ChangeTime),
+    })
+}
+
+fn input_signature_with<T: Serialize>(
+    control_root: &Path,
+    dirs: &RuntimeDirs,
+    domain: &[u8],
+    mut file_value: impl FnMut(&Path) -> io::Result<T>,
+) -> Result<[u8; 32], String> {
     let mut hash = Sha256::new();
-    hash.update(b"keytao-package-inputs/v1\0");
+    hash.update(domain);
     hash.update(crate::deployment_fingerprint(control_root)?);
     hash.update([0]);
     hash.update(crate::librime_runtime_version().ok_or("librime version is unavailable")?);
@@ -842,7 +989,7 @@ fn input_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 32], 
         hash.update([index as u8]);
         let mut files = BTreeMap::new();
         walk_files(root, shared, &mut |relative, path| {
-            files.insert(relative.to_path_buf(), file_hash(path)?);
+            files.insert(relative.to_path_buf(), file_value(path)?);
             Ok(())
         })
         .map_err(|error| format!("read deployment inputs: {error}"))?;
@@ -1085,6 +1232,32 @@ mod tests {
             },
         )
         .unwrap();
+        if key == "local-fixture" {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            switch_ready_package(root, &shared, key).unwrap();
+            let full_checks = FULL_INPUT_CHECKS.get();
+            switch_ready_package(root, &shared, key).unwrap();
+            assert_eq!(FULL_INPUT_CHECKS.get(), full_checks);
+
+            let modified = fs::metadata(&source).unwrap().modified().unwrap();
+            let mut writer = fs::File::options()
+                .write(true)
+                .open(&source)
+                .unwrap();
+            io::Write::write_all(&mut writer, b"schema: {schema_id: keytao_xixture}\n").unwrap();
+            writer.set_modified(modified).unwrap();
+            #[cfg(windows)]
+            assert!(input_stat(&source).is_err());
+            assert_eq!(
+                switch_ready_package(root, &shared, key),
+                Err("请在键道 App 部署此方案包".into())
+            );
+            assert!(FULL_INPUT_CHECKS.get() > full_checks);
+            drop(writer);
+            #[cfg(windows)]
+            assert!(switch_ready_package(root, &shared, key).is_err());
+            fs::write(&source, original).unwrap();
+        }
         assert!(crate::schema_install_state(root).deployed, "{key}");
         assert!(crate::schema_install_state_with_shared(root, &shared).deployed);
 

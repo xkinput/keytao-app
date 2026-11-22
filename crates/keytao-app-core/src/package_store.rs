@@ -367,6 +367,24 @@ impl<'a> PackageStore<'a> {
         key: &str,
         lua_only: bool,
     ) -> Result<(Vec<(String, Vec<u8>)>, PackageMeta), CoreError> {
+        let (stored, paths) = Self::file_inventory_at(path, key, lua_only)?;
+        let entries = stored
+            .files
+            .into_iter()
+            .zip(paths)
+            .map(|(file, path)| {
+                let bytes = Self::read_verified_file(&path, &file)?;
+                Ok((file.path, bytes))
+            })
+            .collect::<Result<_, CoreError>>()?;
+        Ok((entries, stored.meta))
+    }
+
+    pub(crate) fn file_inventory_at(
+        path: &Path,
+        key: &str,
+        lua_only: bool,
+    ) -> Result<(StoredPackage, Vec<PathBuf>), CoreError> {
         let metadata_path = safe_path(path, "package.json").map_err(CoreError::Other)?;
         let mut stored: StoredPackage = serde_json::from_slice(
             &fs::read(&metadata_path).map_err(|error| context("读取", &metadata_path, error))?,
@@ -375,7 +393,7 @@ impl<'a> PackageStore<'a> {
         if lua_only {
             stored.files.retain(|entry| entry.path == "rime.lua" || entry.path.starts_with("lua/"));
             if stored.files.is_empty() {
-                return Ok((Vec::new(), stored.meta));
+                return Ok((stored, Vec::new()));
             }
         }
         let root = safe_path(path, "files").map_err(CoreError::Other)?;
@@ -393,18 +411,25 @@ impl<'a> PackageStore<'a> {
             if !metadata.is_file() || metadata.len() != entry.size || total > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("Package file size mismatch".into()));
             }
-            let bytes = fs::read(&path).map_err(|error| context("读取", &path, error))?;
-            if sha256_reader(bytes.as_slice())? != entry.sha256 {
-                return Err(CoreError::Other("Package file checksum mismatch".into()));
-            }
-            entries.push((entry.path.clone(), bytes));
+            entries.push(path);
         }
         let mut actual = BTreeSet::new();
         collect_files(&root, &root, &mut actual, lua_only)?;
         if actual != expected {
             return Err(CoreError::Other("Package file count mismatch".into()));
         }
-        Ok((entries, stored.meta))
+        Ok((stored, entries))
+    }
+
+    pub(crate) fn read_verified_file(path: &Path, file: &PackageFile) -> Result<Vec<u8>, CoreError> {
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .and_then(|input| input.take(file.size.saturating_add(1)).read_to_end(&mut bytes))
+            .map_err(|error| context("读取", path, error))?;
+        if bytes.len() as u64 != file.size || sha256_reader(bytes.as_slice())? != file.sha256 {
+            return Err(CoreError::Other("Package file checksum mismatch".into()));
+        }
+        Ok(bytes)
     }
 
     pub(crate) fn read_files(

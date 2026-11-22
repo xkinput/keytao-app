@@ -1215,6 +1215,8 @@ fn empty_runtime_session() -> (ImeRuntime, ImeRuntimeSession) {
         inner: Arc::new(Mutex::new(ImeRuntimeSessionInner {
             user_data_dir: runtime.data_dirs().unwrap().user,
             ime_host: false,
+            #[cfg(windows)]
+            libjd_server: false,
             engine: None,
             usable: None,
             generation: PROCESS_RIME.generation.load(Ordering::SeqCst),

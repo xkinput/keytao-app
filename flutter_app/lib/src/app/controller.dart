@@ -2574,8 +2574,6 @@ class AppController extends ChangeNotifier {
       case 'wanxiang':
         wanxiang = await core.wanxiangStatus();
         await _readWanxiangGrammar();
-      case 'rime_ice':
-        rimeIce = await core.rimeIceStatus();
       case 'rime_mint':
         rimeMint = await core.rimeMintStatus();
       case 'rime_frost':
@@ -2583,8 +2581,6 @@ class AppController extends ChangeNotifier {
       case 'triple_pinyin_lssp':
         rimeLssp = await core.rimeLsspStatus();
     }
-    await _readSchemas();
-    await refreshIsolatedPackages(notify: false);
     scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
   }
 

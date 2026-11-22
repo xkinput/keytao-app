@@ -17,8 +17,8 @@ const REMOTE_CACHE_NAMESPACE: &str = "remote-scheme-logos-v1";
 
 pub fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
     let store = PackageStore::new(core);
-    if let Ok((files, meta)) = store.read_files(scheme_key) {
-        return render_files_logo(&core.env().cache_dir, files, &meta.zip_sha256, scheme_key);
+    if let Ok(logo) = stored_package_logo(core, &store, scheme_key) {
+        return logo;
     }
     if crate::addon_store::IDS.contains(&scheme_key) {
         let package = store.checked_addon_path(scheme_key).ok()?;
@@ -43,6 +43,48 @@ pub fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
         return render_files_logo(&core.env().cache_dir, files, &digest, scheme_key);
     }
     None
+}
+
+fn stored_package_logo(
+    core: &Core,
+    store: &PackageStore<'_>,
+    scheme_key: &str,
+) -> Result<Option<PathBuf>, CoreError> {
+    let _guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let path = store.checked_package_path(scheme_key)?;
+    let (stored, _) = PackageStore::file_inventory_at(&path, scheme_key, false)?;
+    let files: BTreeMap<_, _> = stored
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    let mut read_failure = None;
+    let logo = render_logo(
+        &core.env().cache_dir,
+        files.keys().copied(),
+        |name| {
+            let Some(file) = files.get(name) else {
+                return Ok(None);
+            };
+            if file.size > MAX_SOURCE_BYTES {
+                return Ok(None);
+            }
+            safe_path(&path, &format!("files/{name}"))
+                .map_err(CoreError::Other)
+                .and_then(|path| PackageStore::read_verified_file(&path, file))
+                .map(Some)
+                .map_err(|error| read_failure = Some(error))
+        },
+        &stored.meta.zip_sha256,
+        scheme_key,
+    );
+    match read_failure {
+        Some(error) => Err(error),
+        None => Ok(logo),
+    }
 }
 
 fn has_installed_real_files(core: &Core, scheme_key: &str) -> bool {
@@ -586,12 +628,28 @@ fn render_files_logo(
         return None;
     }
     let files: BTreeMap<_, _> = files.into_iter().collect();
+    render_logo(
+        cache_root,
+        files.keys().map(String::as_str),
+        |name| Ok(read_entry(&files, name).map(<[u8]>::to_vec)),
+        archive_sha,
+        scheme_key,
+    )
+}
+
+fn render_logo<'a>(
+    cache_root: &Path,
+    paths: impl Iterator<Item = &'a str>,
+    mut read: impl FnMut(&str) -> Result<Option<Vec<u8>>, ()>,
+    archive_sha: &str,
+    scheme_key: &str,
+) -> Option<PathBuf> {
     let mut selected = None;
     for config in ["default.custom.yaml", "default-custom.yaml", "default.yaml"] {
-        let Some(content) = read_entry(&files, config) else {
+        let Some(content) = read(config).ok()? else {
             continue;
         };
-        let Ok(content) = std::str::from_utf8(content) else {
+        let Ok(content) = std::str::from_utf8(&content) else {
             continue;
         };
         selected = crate::scheme_files::parse_schema_list(content)
@@ -604,17 +662,14 @@ fn render_files_logo(
     }
     let selected = selected.or_else(|| {
         let matching = format!("{scheme_key}.schema.yaml");
-        if files.contains_key(&matching) {
+        let schemas: Vec<_> = paths.filter(|name| name.ends_with(".schema.yaml")).collect();
+        if schemas.contains(&matching.as_str()) {
             return Some(matching);
         }
-        let schemas: Vec<_> = files
-            .keys()
-            .filter(|name| name.ends_with(".schema.yaml"))
-            .collect();
-        (schemas.len() == 1).then(|| schemas[0].clone())
+        (schemas.len() == 1).then(|| schemas[0].to_owned())
     })?;
-    let schema_bytes = read_entry(&files, &selected)?;
-    let schema: serde_yaml::Value = serde_yaml::from_slice(schema_bytes).ok()?;
+    let schema_bytes = read(&selected).ok()??;
+    let schema: serde_yaml::Value = serde_yaml::from_slice(&schema_bytes).ok()?;
     let id = schema["schema"]["schema_id"]
         .as_str()
         .unwrap_or(selected.strip_suffix(".schema.yaml")?);
@@ -627,22 +682,25 @@ fn render_files_logo(
     let cache = safe_path(cache_root, &format!("scheme-logos-v2/{archive_sha}")).ok()?;
     fs::create_dir_all(&cache).ok()?;
     let output = safe_path(&cache, &format!(".keytao-logo/{id}.png")).ok()?;
-    if output.is_file() {
-        return Some(output);
-    }
-    let schema_path = safe_path(&cache, &format!("{id}.schema.yaml")).ok()?;
-    crate::scheme_files::write_file_atomic(&schema_path, schema_bytes).ok()?;
     let parent = Path::new(&selected).parent()?;
+    let mut icons = Vec::new();
     for candidate in keytao_schema_logo::schema_logo_candidates(id, name, icon) {
         let source = parent.join(&candidate);
         let Some(source) = source.to_str() else {
             continue;
         };
-        let Some(content) = read_entry(&files, source) else {
-            continue;
-        };
+        if let Some(content) = read(source).ok()? {
+            icons.push((candidate, content));
+        }
+    }
+    if output.is_file() {
+        return Some(output);
+    }
+    let schema_path = safe_path(&cache, &format!("{id}.schema.yaml")).ok()?;
+    crate::scheme_files::write_file_atomic(&schema_path, &schema_bytes).ok()?;
+    for (candidate, content) in icons {
         let path = safe_path(&cache, &candidate).ok()?;
-        crate::scheme_files::write_file_atomic(&path, content).ok()?;
+        crate::scheme_files::write_file_atomic(&path, &content).ok()?;
     }
     keytao_schema_logo::render_schema_logos(&cache, &[(id.into(), name.into())], 192);
     output.is_file().then_some(output)
@@ -716,12 +774,19 @@ mod tests {
         let bytes = archive(&[
             ("keytao.schema.yaml", b"schema:\n  schema_id: keytao\n"),
             ("keytao.svg", RED),
+            ("unused.dict.yaml", b"original"),
         ]);
         crate::packages::store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &bytes, dir.path()).unwrap();
         let store = PackageStore::new(&core);
         assert!(store.package_path("keytao").join("files/keytao.svg").is_file());
         let path = package_logo_path(&core, "keytao").unwrap();
-        assert!(fs::read(path).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(fs::read(&path).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+        fs::write(
+            store.package_path("keytao").join("files/unused.dict.yaml"),
+            b"modified",
+        )
+        .unwrap();
+        assert_eq!(package_logo_path(&core, "keytao"), Some(path));
         fs::write(store.package_path("keytao").join("files/keytao.svg"), BLUE).unwrap();
         assert!(package_logo_path(&core, "keytao").is_none());
     }
