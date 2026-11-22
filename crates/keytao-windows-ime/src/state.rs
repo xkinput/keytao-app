@@ -105,6 +105,7 @@ impl InputContextRetry {
 pub struct TsfState {
     pub runtime: Option<Arc<dyn ImeEngineBackend>>,
     pub session: Option<EngineHandle>,
+    private_engine: bool,
     pub engine_building: bool,
     pub engine_error: Option<String>,
     engine_retry_after: Option<Instant>,
@@ -176,9 +177,9 @@ pub struct TsfState {
     /// Cached `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`. A closed keyboard passes
     /// every keystroke through unaltered.
     pub keyboard_open: bool,
-    /// Whether the running session already runs with the sensitive policy;
+    /// The policy acknowledged by the running session;
     /// `None` after an engine (re)build, so the policy is pushed again.
-    input_policy_applied: Option<bool>,
+    input_policy_applied: Option<InputContextPolicy>,
     /// Last actual input-scope attempt; focus and compartment notifications
     /// cannot reset its deadline. Sync refusal counts belong to one context.
     input_context_retry: InputContextRetry,
@@ -237,12 +238,13 @@ pub(crate) struct CompartmentSinkRegistration {
 pub(crate) struct EngineBundle {
     runtime: Arc<dyn ImeEngineBackend>,
     session: EngineHandle,
+    private: bool,
     reload_stamp_path: Option<PathBuf>,
     reload_stamp_signature: Option<String>,
 }
 
 struct EngineBuildMailbox {
-    result: Mutex<Option<Result<EngineBundle, String>>>,
+    result: Mutex<Option<(bool, Result<EngineBundle, String>)>>,
 }
 
 impl EngineBuildMailbox {
@@ -252,14 +254,14 @@ impl EngineBuildMailbox {
         }
     }
 
-    fn store(&self, result: Result<EngineBundle, String>) {
+    fn store(&self, private: bool, result: Result<EngineBundle, String>) {
         *self
             .result
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((private, result));
     }
 
-    fn take(&self) -> Option<Result<EngineBundle, String>> {
+    fn take(&self) -> Option<(bool, Result<EngineBundle, String>)> {
         self.result
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -272,6 +274,7 @@ impl TsfState {
         Self {
             runtime: None,
             session: None,
+            private_engine: false,
             engine_building: false,
             engine_error: None,
             engine_retry_after: None,
@@ -358,9 +361,9 @@ impl TsfState {
         }
     }
 
-    pub(crate) fn build_engine() -> Result<EngineBundle, String> {
+    pub(crate) fn build_engine(private: bool) -> Result<EngineBundle, String> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::try_build_engine().map(|bundle| {
+            Self::try_build_engine(private).map(|bundle| {
                 let schema = bundle.session.schema_id.clone();
                 (bundle, schema)
             })
@@ -371,22 +374,26 @@ impl TsfState {
             Ok((bundle, _)) => bundle.runtime.status_error(),
             Err(error) => Some(error.as_str()),
         };
-        record_engine_status(error, schema);
+        if !private {
+            record_engine_status(error, schema);
+        }
         result.map(|(bundle, _)| bundle)
     }
 
-    fn try_build_engine() -> Result<EngineBundle, String> {
+    fn try_build_engine(private: bool) -> Result<EngineBundle, String> {
         let (runtime, session, reload_stamp_path, reload_stamp_signature) =
-            crate::engine_backend::build_backend()?;
+            crate::engine_backend::build_backend(private)?;
         Ok(EngineBundle {
             runtime,
             session,
+            private,
             reload_stamp_path,
             reload_stamp_signature,
         })
     }
 
     pub(crate) fn install_engine(&mut self, bundle: EngineBundle) {
+        self.private_engine = bundle.private;
         self.runtime = Some(bundle.runtime);
         self.session = Some(bundle.session);
         self.reload_stamp_signature = bundle.reload_stamp_signature;
@@ -418,6 +425,7 @@ impl TsfState {
 
     pub(crate) fn engine_ready(&self) -> bool {
         self.session.is_some()
+            && self.private_engine == self.input_context.uses_private_runtime()
     }
 
     pub(crate) fn begin_engine_build(&mut self) -> bool {
@@ -430,6 +438,12 @@ impl TsfState {
         {
             return false;
         }
+        // The old route cannot service the new context. Release its runtime
+        // before the build, because librime is process-global in InProc mode.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.drop_session();
+        }
+        self.session = None;
         self.engine_building = true;
         self.engine_error = None;
         self.engine_retry_after = None;
@@ -530,20 +544,34 @@ impl TsfState {
     }
 
     fn poll_engine_builds(&mut self) {
-        if let Some(result) = self.engine_build_mailbox.take() {
+        let current_private = self.input_context.uses_private_runtime();
+        if let Some((private, result)) = self.engine_build_mailbox.take() {
+            self.engine_building = false;
             match result {
-                Ok(bundle) if !self.engine_ready() => self.install_engine(bundle),
-                Ok(_) => self.engine_building = false,
-                Err(error) => self.finish_engine_build_error(error),
+                Ok(bundle) if private == current_private && !self.engine_ready() => {
+                    self.install_engine(bundle);
+                }
+                Ok(bundle) => bundle.runtime.drop_session(),
+                Err(error) if private == current_private => self.finish_engine_build_error(error),
+                Err(_) => {}
             }
         }
-        if let Some(result) = self.reload_mailbox.take() {
-            self.finish_reload(result);
+        if let Some((private, result)) = self.reload_mailbox.take() {
+            self.reload_in_progress = false;
+            if private == current_private {
+                self.finish_reload(result);
+            } else if let Ok(bundle) = result {
+                bundle.runtime.drop_session();
+            }
         }
     }
 
     pub(crate) fn session(&self) -> Option<Arc<dyn ImeEngineBackend>> {
-        self.session.as_ref()?;
+        // This guard also covers deferred keys and candidate-window clicks
+        // while a background build for the previous context finishes.
+        if !self.engine_ready() {
+            return None;
+        }
         self.runtime.clone()
     }
 }
@@ -619,12 +647,15 @@ fn record_engine_status(error: Option<&str>, schema: Option<&str>) {
 }
 
 pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
-    let mailbox = {
+    let (mailbox, private) = {
         let mut st = shared_state.borrow_mut();
         if !st.begin_engine_build() {
             return;
         }
-        Arc::clone(&st.engine_build_mailbox)
+        (
+            Arc::clone(&st.engine_build_mailbox),
+            st.input_context.uses_private_runtime(),
+        )
     };
 
     let started = Instant::now();
@@ -633,7 +664,7 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
     let spawn_result = std::thread::Builder::new()
         .name("keytao-ime-warmup".into())
         .spawn(move || {
-            let result = TsfState::build_engine();
+            let result = TsfState::build_engine(private);
             with_current_theme(|theme| {
                 let _ = crate::panel::load_font(theme.font.effective_family.as_deref());
             });
@@ -660,13 +691,15 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
                     );
                 }
             }
-            mailbox.store(result);
+            mailbox.store(private, result);
             drop(mailbox);
             drop(dll_guard);
         });
     if let Err(error) = spawn_result {
         let message = format!("start engine warmup thread: {error}");
-        record_engine_status(Some(&message), None);
+        if !private {
+            record_engine_status(Some(&message), None);
+        }
         keytao_core::rt_log!(
             Level::Info,
             "error",
@@ -691,9 +724,12 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
 
     hide_ime_windows(shared_state);
 
-    let mailbox = {
+    let (mailbox, private) = {
         let st = shared_state.borrow();
-        Arc::clone(&st.reload_mailbox)
+        (
+            Arc::clone(&st.reload_mailbox),
+            st.input_context.uses_private_runtime(),
+        )
     };
     let dll_guard = DllActivityGuard::new();
     let started = Instant::now();
@@ -701,7 +737,7 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
     let spawn_result = std::thread::Builder::new()
         .name("keytao-ime-reload".into())
         .spawn(move || {
-            let bundle = TsfState::build_engine();
+            let bundle = TsfState::build_engine(private);
             with_current_theme(|theme| {
                 let _ = crate::panel::load_font(theme.font.effective_family.as_deref());
             });
@@ -728,13 +764,15 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
                     );
                 }
             }
-            mailbox.store(bundle);
+            mailbox.store(private, bundle);
             drop(mailbox);
             drop(dll_guard);
         });
     if let Err(error) = spawn_result {
         let message = format!("start engine reload thread: {error}");
-        record_engine_status(Some(&message), None);
+        if !private {
+            record_engine_status(Some(&message), None);
+        }
         keytao_core::rt_log!(
             Level::Info,
             "error",
@@ -823,24 +861,19 @@ pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) -> bool {
 /// Runs on the key path too: the engine is built in the background and may
 /// only become ready after the focus change that decided the policy.
 pub(crate) fn sync_input_policy(shared_state: &SharedState) {
-    let (session, sensitive, applied) = {
+    let (session, policy, applied) = {
         let st = shared_state.borrow();
         (
             st.session(),
-            st.input_context.is_sensitive(),
+            st.input_context.input_policy(),
             st.input_policy_applied,
         )
     };
-    if applied == Some(sensitive) {
+    if applied == Some(policy) {
         return;
     }
     let Some(session) = session else {
         return;
-    };
-    let policy = if sensitive {
-        InputContextPolicy::sensitive()
-    } else {
-        InputContextPolicy::default()
     };
     // Turning composing off discards whatever librime was holding; the cached
     // state has to go with it so nothing is drawn for the sensitive context.
@@ -848,8 +881,8 @@ pub(crate) fn sync_input_policy(shared_state: &SharedState) {
     let acknowledged = ime_state.is_some();
     let mut st = shared_state.borrow_mut();
     // Pipe contention may skip the RPC entirely; retry until the server acknowledges it.
-    st.input_policy_applied = acknowledged.then_some(sensitive);
-    if sensitive {
+    st.input_policy_applied = acknowledged.then_some(policy);
+    if !policy.composing {
         st.ime_state = None;
     } else if let Some(ime_state) = ime_state {
         st.ascii_mode = ime_state.ascii_mode;
@@ -941,11 +974,16 @@ fn apply_input_context_state(
                 .then(|| shared_state.borrow().input_context_document_mgr.clone())
                 .flatten()
         });
-    let (input_context, thread_mgr, changed) = {
+    let (input_context, thread_mgr, changed, route_changed) = {
         let st = shared_state.borrow();
         let previous_same_context = context.filter(|_| same_context).map(|_| st.input_context);
         let merged = merge_probe_failed_state(previous_same_context, inspected);
-        (merged, st.thread_mgr.clone(), st.input_context != merged)
+        (
+            merged,
+            st.thread_mgr.clone(),
+            st.input_context != merged,
+            st.input_context.uses_private_runtime() != merged.uses_private_runtime(),
+        )
     };
     let sensitive = input_context.is_sensitive();
     let retry_due = input_context.needs_retry();
@@ -954,14 +992,24 @@ fn apply_input_context_state(
         let mut st = shared_state.borrow_mut();
         st.input_context = input_context;
         st.keyboard_open = keyboard_open;
+        if route_changed {
+            st.engine_retry_after = None;
+            st.reload_retry_after = None;
+            st.engine_failures = 0;
+        }
         (
             std::mem::replace(&mut st.input_context_source, context.cloned()),
             std::mem::replace(&mut st.input_context_document_mgr, document_mgr),
         )
     };
+    if route_changed {
+        reset_input_for_focus_change(shared_state);
+    }
     // COM Release, like QueryInterface, may reenter the text service.
     drop(previous_context_handles);
-    let password_diagnostic = if input_context.password == ContextProbe::Unavailable {
+    let password_diagnostic = if input_context.password == ContextProbe::Unavailable
+        || input_context.uses_private_runtime()
+    {
         input_context.password.diagnostic_name()
     } else if input_context.password_probe_failed {
         "probe_failed"
@@ -2145,7 +2193,7 @@ mod tests {
                 schema_id: "xmjd6".into(),
             });
             st.input_context = super::ContextInputState::unrestricted();
-            st.input_policy_applied = Some(false);
+            st.input_policy_applied = Some(super::InputContextPolicy::default());
             st.focus_state_refresh_pending = true;
             st.ascii_mode = true;
             st.english_mode = true;
@@ -2162,6 +2210,38 @@ mod tests {
         super::poll_engine_builds(&state);
         assert_eq!(engine.clear_calls.load(Ordering::SeqCst), 3);
         assert_eq!(engine.state_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_stale_normal_build_cannot_supply_a_private_context_session() {
+        let mut state = super::TsfState::new();
+        let new_bundle = |private| super::EngineBundle {
+            runtime: Arc::new(FocusStateEngine {
+                clear_calls: 0.into(),
+                state_calls: 0.into(),
+            }),
+            session: super::EngineHandle {
+                schema_id: "xmjd6".into(),
+            },
+            private,
+            reload_stamp_path: None,
+            reload_stamp_signature: None,
+        };
+        state.input_context = super::ContextInputState::unrestricted();
+        state.install_engine(new_bundle(false));
+        assert!(state.session().is_some());
+        state.input_context.password = super::ContextProbe::Private;
+        assert!(state.session().is_none());
+        assert!(state.begin_engine_build());
+        state.engine_build_mailbox.store(false, Ok(new_bundle(false)));
+        state.poll_engine_builds();
+        assert!(state.session().is_none());
+        assert!(state.begin_engine_build());
+        state.engine_build_mailbox.store(true, Ok(new_bundle(true)));
+        state.poll_engine_builds();
+        assert!(state.session().is_some());
+        state.input_context.password = super::ContextProbe::Clear;
+        assert!(state.session().is_none());
     }
 
     #[test]

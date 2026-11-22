@@ -156,12 +156,32 @@ pub fn inline_preedit(state: &ImeState, hide_candidate_panel: bool) -> (&str, us
     }
 }
 
+pub fn client_preedit<'a>(
+    state: &'a ImeState,
+    ui: &keytao_theme::UiTheme,
+    has_floating_panel: bool,
+) -> (&'a str, usize) {
+    if ui.effective_embedded_composition() || !has_floating_panel {
+        inline_preedit(
+            state,
+            ui.hide_candidate_panel && !state.is_package_switcher(),
+        )
+    } else {
+        ("", 0)
+    }
+}
+
+pub fn panel_has_composition(state: &ImeState, ui: &keytao_theme::UiTheme) -> bool {
+    (!state.candidates.is_empty() && (!ui.hide_candidate_panel || state.is_package_switcher()))
+        || (!ui.effective_embedded_composition() && !state.preedit.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ibus_content_type_policy, ibus_cursor_pos, inline_preedit, shift_key_modifiers,
-        unhandled_key_text, ImeState, IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD,
-        IBUS_INPUT_PURPOSE_PIN,
+        client_preedit, ibus_content_type_policy, ibus_cursor_pos, inline_preedit,
+        panel_has_composition, shift_key_modifiers, unhandled_key_text, ImeState,
+        IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_PURPOSE_PIN,
     };
     use keytao_core::rime_modifier_mask;
 
@@ -255,5 +275,36 @@ mod tests {
         assert_eq!(inline_preedit(&state, true), ("你好f", 3));
         state.preedit.clear();
         assert_eq!(inline_preedit(&state, true), ("", 0));
+    }
+
+    #[test]
+    fn preedit_moves_between_client_and_panel_without_losing_raw_input() {
+        let mut ui = keytao_theme::ResolvedImeTheme::default().ui;
+        let mut state = ImeState::empty();
+        state.preedit = "你好f".into();
+        state.commit_preview = "你好这".into();
+        state.cursor = 2;
+
+        ui.embedded_composition = true;
+        assert_eq!(client_preedit(&state, &ui, true), ("你好f", 2));
+        assert!(!panel_has_composition(&state, &ui));
+
+        ui.embedded_composition = false;
+        assert_eq!(client_preedit(&state, &ui, true), ("", 0));
+        assert!(panel_has_composition(&state, &ui));
+        assert_eq!(client_preedit(&state, &ui, false), ("你好f", 2));
+
+        ui.hide_candidate_panel = true;
+        assert_eq!(client_preedit(&state, &ui, true), ("你好这", 3));
+        assert!(!panel_has_composition(&state, &ui));
+
+        let mut state = ImeState::empty();
+        state.schema_id = keytao_core::switcher_model::SCHEMA_ID.into();
+        state.candidates.push(keytao_core::Candidate {
+            text: "Rime".into(),
+            comment: None,
+        });
+        assert!(panel_has_composition(&state, &ui));
+        assert_eq!(client_preedit(&state, &ui, true), ("", 0));
     }
 }

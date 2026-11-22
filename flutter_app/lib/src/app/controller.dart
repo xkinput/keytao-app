@@ -158,8 +158,7 @@ class AppController extends ChangeNotifier {
   bool get isIos => info.platform == BridgePlatform.ios;
   bool get isMobile => isAndroid || isIos;
   bool get hasOnboarding => isMobile || info.platform == BridgePlatform.macOs;
-  bool get showsEmbeddedComposition =>
-      isWindows || info.platform == BridgePlatform.macOs;
+  bool get showsEmbeddedComposition => !isMobile;
   bool _busy = false;
   bool get busy =>
       _busy || windowsRegistrationBusy || _pendingUserWordDeletes.isNotEmpty;

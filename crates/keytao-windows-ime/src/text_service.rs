@@ -243,10 +243,10 @@ fn activate_service(
     append_diagnostic(format!(
         "TSF activated client_id={client_id} activation_flags=0x{activation_flags:08x} thread_mgr_flags=0x{thread_mgr_flags:08x}"
     ));
+    refresh_input_context(state, None);
     if unsafe { thread_mgr.GetFocus() }.is_ok() {
         start_engine_warmup(state);
     }
-    refresh_input_context(state, None);
     Ok(())
 }
 
@@ -487,9 +487,9 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         guard(|| {
             if let Some(state) = self.state.upgrade() {
                 reset_input_for_focus_change(&state);
-                refresh_engine_for_focus(&state);
                 let context = pdimfocus.and_then(|manager| unsafe { manager.GetTop() }.ok());
                 refresh_input_context(&state, context.as_ref());
+                refresh_engine_for_focus(&state);
                 if pdimfocus.is_some() {
                     refresh_language_bar(&state);
                 }
@@ -512,8 +512,8 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
                     return Ok(());
                 }
                 reset_input_for_focus_change(&state);
-                refresh_engine_for_focus(&state);
                 refresh_input_context(&state, pic);
+                refresh_engine_for_focus(&state);
                 if pic.is_some() {
                     refresh_language_bar(&state);
                 }
@@ -589,8 +589,8 @@ impl ITfThreadFocusSink_Impl for ThreadFocusSink_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
         guard(|| {
             if let Some(state) = self.state.upgrade() {
-                refresh_engine_for_focus(&state);
                 refresh_input_context(&state, None);
+                refresh_engine_for_focus(&state);
                 refresh_language_bar(&state);
             }
             append_diagnostic("ThreadFocusSink OnSetThreadFocus");

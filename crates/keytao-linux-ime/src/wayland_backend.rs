@@ -62,8 +62,8 @@ use xkbcommon::xkb;
 
 use crate::{
     engine::{
-        candidate_panel_layout, inline_preedit, shift_key_modifiers, unhandled_key_text,
-        CoreEngine, ImeSession,
+        candidate_panel_layout, client_preedit, panel_has_composition, shift_key_modifiers,
+        unhandled_key_text, CoreEngine, ImeSession,
     },
     ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer, WaylandPanel},
@@ -325,21 +325,7 @@ impl App {
     }
 
     fn redraw_panel(&mut self, qh: &QueueHandle<Self>) {
-        let hide_candidates = self
-            .renderer
-            .as_ref()
-            .is_some_and(PanelRenderer::hide_candidate_panel)
-            && !self
-                .ime_state
-                .as_ref()
-                .is_some_and(ImeState::is_package_switcher);
-        if hide_candidates
-            && !deadline_active(self.mode_hint_until)
-            && self.deployment_text.is_none()
-        {
-            self.hide_panel_popup();
-            return;
-        }
+        let theme = self.theme_resolver.current();
         let (Some(renderer), Some(shm), Some(surface)) = (
             self.renderer.as_mut(),
             self.shm.as_ref(),
@@ -353,10 +339,11 @@ impl App {
         let state = self
             .ime_state
             .as_ref()
-            .filter(|state| !hide_candidates && !state.candidates.is_empty());
+            .filter(|state| panel_has_composition(state, &theme.ui));
         let deployment_hint =
             keytao_core::DeploymentState::visible_hint(self.deployment_text, state.is_some());
         if state.is_none() && !show_hint && deployment_hint.is_none() {
+            self.hide_panel_popup();
             return;
         }
         let WaylandPanel {
@@ -422,15 +409,9 @@ impl App {
         // The content changes, so a press on what was drawn before must not
         // select what is drawn now.
         self.pressed_click = None;
-        // The application already renders preedit through set_preedit_string.
-        // Keep the popup for actual candidate menus and short mode hints only.
-        let has_content = !state.candidates.is_empty()
-            && (state.is_package_switcher()
-                || self
-                    .renderer
-                    .as_ref()
-                    .is_some_and(|renderer| !renderer.hide_candidate_panel()));
-        if !state.candidates.is_empty() {
+        let has_content = self.renderer.is_some()
+            && panel_has_composition(&state, &self.theme_resolver.current().ui);
+        if has_content || !state.candidates.is_empty() {
             // A hint's timeout must never hide candidates typed after it.
             self.mode_hint_until = None;
         }
@@ -486,8 +467,10 @@ impl App {
                 im.commit_string(committed.clone());
             }
         }
-        let hidden = self.theme_resolver.current().ui.hide_candidate_panel;
-        let (preedit, caret) = inline_preedit(state, hidden);
+        let theme = self.theme_resolver.current();
+        let has_floating_panel =
+            self.renderer.is_some() && self.compositor.is_some() && self.shm.is_some();
+        let (preedit, caret) = client_preedit(state, &theme.ui, has_floating_panel);
         let cursor = preedit_cursor_bytes(preedit, caret);
         // v2 has no converted-span style; clients style preedit, so keep both caret ends together.
         im.set_preedit_string(preedit.to_owned(), cursor, cursor);

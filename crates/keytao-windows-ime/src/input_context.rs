@@ -7,9 +7,8 @@
 //! Password, PIN and private fields that leave the compartments alone are still
 //! recognised through their input scope.
 //!
-//! While any of these hold, keys are passed through unaltered and the session
-//! runs with `InputContextPolicy::sensitive()` so nothing reaches the user
-//! dictionary.
+//! Password/PIN and disabled contexts pass keys through unaltered. Private
+//! scopes keep composing in the separate no-learning runtime.
 //!
 //! Probe outcomes distinguish a declared restriction, a clear answer, an
 //! invalid/unknown answer, and unavailable optional metadata. Failed selection
@@ -23,6 +22,7 @@
 
 use std::{cell::Cell, rc::Rc};
 
+use keytao_core::InputContextPolicy;
 use windows::{
     core::{Interface, GUID, HRESULT, VARIANT},
     Win32::{
@@ -64,24 +64,25 @@ pub(crate) const CONTEXT_SENSITIVITY_COMPARTMENTS: [GUID; 2] = [
 
 /// Input scopes that mean "compose nothing here, remember nothing".
 ///
-/// `IS_PASSWORD` on its own leaves holes: lock screens and payment dialogs
-/// declare a PIN scope, and hosts that only want the input method to forget the
-/// field declare `IS_PRIVATE`. The shared contract puts all three in the same
-/// bucket — the IBus backend already treats `purpose PASSWORD/PIN` and
-/// `hint PRIVATE` alike — so TSF has to as well.
-const SENSITIVE_INPUT_SCOPES: [InputScope; 6] = [
+const SENSITIVE_INPUT_SCOPES: [InputScope; 5] = [
     IS_PASSWORD,
     IS_NUMERIC_PASSWORD,
     IS_NUMERIC_PIN,
     IS_ALPHANUMERIC_PIN,
     IS_ALPHANUMERIC_PIN_SET,
-    IS_PRIVATE,
 ];
 
-fn scopes_declare_sensitive(scopes: &[InputScope]) -> bool {
-    scopes
+fn classify_input_scopes(scopes: &[InputScope]) -> ContextProbe {
+    if scopes
         .iter()
         .any(|scope| SENSITIVE_INPUT_SCOPES.contains(scope))
+    {
+        ContextProbe::Restricted
+    } else if scopes.contains(&IS_PRIVATE) {
+        ContextProbe::Private
+    } else {
+        ContextProbe::Clear
+    }
 }
 
 /// Outcome of a single TSF probe.
@@ -89,6 +90,11 @@ fn scopes_declare_sensitive(scopes: &[InputScope]) -> bool {
 pub(crate) enum ContextProbe {
     /// The context declared the restriction.
     Restricted,
+    /// The host allows composition but requires no learning.
+    Private,
+    /// An inconclusive read after an explicit private declaration. Block
+    /// until the scope is known, including across subsequent optional reads.
+    UncertainPrivate,
     /// The context answered, and declared nothing.
     Clear,
     /// The read failed. Counts as restricted until a later probe answers.
@@ -132,12 +138,17 @@ impl ContextProbe {
     }
 
     fn blocks_input(self) -> bool {
-        matches!(self, Self::Restricted | Self::Unknown)
+        matches!(
+            self,
+            Self::Restricted | Self::Unknown | Self::UncertainPrivate
+        )
     }
 
     pub(crate) fn diagnostic_name(self) -> &'static str {
         match self {
             Self::Restricted => "restricted",
+            Self::Private => "private",
+            Self::UncertainPrivate => "unknown_private",
             Self::Clear => "clear",
             Self::Unknown => "unknown",
             Self::Unavailable => "unavailable",
@@ -146,7 +157,7 @@ impl ContextProbe {
     }
 
     fn is_known(self) -> bool {
-        matches!(self, Self::Restricted | Self::Clear)
+        matches!(self, Self::Restricted | Self::Clear | Self::Private)
     }
 }
 
@@ -157,7 +168,7 @@ pub(crate) struct ContextInputState {
     pub(crate) keyboard_disabled: ContextProbe,
     /// `GUID_COMPARTMENT_EMPTYCONTEXT` is set on the context.
     pub(crate) empty_context: ContextProbe,
-    /// The context declares an `IS_PASSWORD` input scope.
+    /// The context's password, PIN or private input scope.
     pub(crate) password: ContextProbe,
     /// The most recent password-scope read was unavailable or refused. The effective
     /// `password` value may still be the last known answer for this context.
@@ -183,6 +194,23 @@ impl ContextInputState {
             || self.password.blocks_input()
     }
 
+    pub(crate) fn uses_private_runtime(&self) -> bool {
+        matches!(
+            self.password,
+            ContextProbe::Private | ContextProbe::UncertainPrivate
+        )
+    }
+
+    pub(crate) fn input_policy(&self) -> InputContextPolicy {
+        if self.is_sensitive() {
+            InputContextPolicy::sensitive()
+        } else if self.uses_private_runtime() {
+            InputContextPolicy::private()
+        } else {
+            InputContextPolicy::default()
+        }
+    }
+
     pub(crate) fn block_reason(&self) -> Option<InputBlockReason> {
         if matches!(
             (self.keyboard_disabled, self.empty_context),
@@ -195,7 +223,7 @@ impl ContextInputState {
         }
         if [self.keyboard_disabled, self.empty_context, self.password]
             .into_iter()
-            .any(|probe| probe == ContextProbe::Unknown)
+            .any(|probe| matches!(probe, ContextProbe::Unknown | ContextProbe::UncertainPrivate))
         {
             return Some(InputBlockReason::ProbeFailed);
         }
@@ -230,6 +258,7 @@ impl ContextInputState {
                     matches!(
                         probe,
                         ContextProbe::Unknown
+                            | ContextProbe::UncertainPrivate
                             | ContextProbe::Unavailable
                             | ContextProbe::ProbeFailed
                     )
@@ -245,15 +274,23 @@ pub(crate) fn merge_probe_failed_state(
         inspected.password,
         ContextProbe::ProbeFailed | ContextProbe::Unavailable
     );
-    // Do not lose a declared restriction through a sequence such as
-    // Restricted -> Unknown -> Unavailable in the same context. Only a new
-    // known scope answer or a context change may clear that restriction.
-    let retain_restriction = inspected.password == ContextProbe::Unknown
-        && previous_same_context
-            .is_some_and(|previous| previous.password == ContextProbe::Restricted);
-    if unavailable || retain_restriction {
-        if let Some(previous) = previous_same_context.filter(|state| state.password.is_known()) {
-            inspected.password = previous.password;
+    let previous = previous_same_context.map(|state| state.password);
+    if unavailable {
+        if let Some(previous) =
+            previous.filter(|scope| scope.is_known() || *scope == ContextProbe::UncertainPrivate)
+        {
+            inspected.password = previous;
+        }
+        inspected.password_probe_failed = true;
+    } else if inspected.password == ContextProbe::Unknown {
+        // Optional reads cannot later clear a declared restriction that was
+        // followed by an invalid answer in this same context.
+        match previous {
+            Some(ContextProbe::Restricted) => inspected.password = ContextProbe::Restricted,
+            Some(ContextProbe::Private | ContextProbe::UncertainPrivate) => {
+                inspected.password = ContextProbe::UncertainPrivate;
+            }
+            _ => return inspected,
         }
         inspected.password_probe_failed = true;
     }
@@ -652,9 +689,9 @@ unsafe fn input_scope_value_probe(value: &VARIANT) -> ContextProbe {
             ContextProbe::Unknown
         };
     }
-    let found = scopes_declare_sensitive(std::slice::from_raw_parts(buffer, count as usize));
+    let scope = classify_input_scopes(std::slice::from_raw_parts(buffer, count as usize));
     CoTaskMemFree(Some(buffer.cast()));
-    ContextProbe::declared(found)
+    scope
 }
 
 /// The two context compartments. Plain reads: no edit cookie, no session, so
@@ -717,7 +754,8 @@ pub(crate) fn refresh_context_compartments(
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_probe_failed_state, scopes_declare_sensitive, ContextInputState, ContextProbe,
+        classify_input_scopes, merge_probe_failed_state, ContextInputState, ContextProbe,
+        InputContextPolicy,
     };
     use windows::Win32::UI::TextServices::{
         IS_ALPHANUMERIC_PIN, IS_ALPHANUMERIC_PIN_SET, IS_DEFAULT, IS_EMAIL_USERNAME,
@@ -725,30 +763,80 @@ mod tests {
     };
 
     #[test]
-    fn password_pin_and_private_scopes_all_block_composing() {
-        // A lock screen or payment dialog declares a PIN scope, not
-        // `IS_PASSWORD`; a host that only wants the field forgotten declares
-        // `IS_PRIVATE`. The IBus backend maps purpose PASSWORD/PIN and hint
-        // PRIVATE to the same sensitive policy, so TSF must not be narrower.
+    fn password_and_pin_scopes_block_composing_even_with_private_scope() {
         for scope in [
             IS_PASSWORD,
             IS_NUMERIC_PASSWORD,
             IS_NUMERIC_PIN,
             IS_ALPHANUMERIC_PIN,
             IS_ALPHANUMERIC_PIN_SET,
-            IS_PRIVATE,
         ] {
-            assert!(scopes_declare_sensitive(&[scope]));
+            assert_eq!(
+                classify_input_scopes(&[IS_DEFAULT, IS_PRIVATE, scope]),
+                ContextProbe::Restricted
+            );
         }
-        // Hosts attach several scopes to one range; one sensitive entry decides.
-        assert!(scopes_declare_sensitive(&[IS_DEFAULT, IS_NUMERIC_PIN]));
+    }
+
+    #[test]
+    fn private_scope_only_allows_composing_in_an_enabled_context() {
+        let private = ContextInputState {
+            password: classify_input_scopes(&[IS_DEFAULT, IS_PRIVATE]),
+            ..ContextInputState::unrestricted()
+        };
+        assert_eq!(private.block_reason(), None);
+        assert!(private.uses_private_runtime());
+        assert_eq!(private.input_policy(), InputContextPolicy::private());
+        for compartments in [
+            (ContextProbe::Restricted, ContextProbe::Clear),
+            (ContextProbe::Clear, ContextProbe::Restricted),
+            (ContextProbe::Unknown, ContextProbe::Clear),
+        ] {
+            let restricted = private.with_compartments(compartments.0, compartments.1);
+            assert!(restricted.block_reason().is_some());
+            assert_eq!(restricted.input_policy(), InputContextPolicy::sensitive());
+        }
+    }
+
+    #[test]
+    fn private_scope_cannot_fall_back_to_learning_after_an_inconclusive_retry() {
+        let private = ContextInputState {
+            password: ContextProbe::Private,
+            ..ContextInputState::unrestricted()
+        };
+        let probe = |previous, password| {
+            merge_probe_failed_state(
+                previous,
+                ContextInputState {
+                    password,
+                    ..ContextInputState::unrestricted()
+                },
+            )
+        };
+        let unavailable = probe(Some(private), ContextProbe::Unavailable);
+        assert_eq!(unavailable.input_policy(), InputContextPolicy::private());
+        let unknown = probe(Some(unavailable), ContextProbe::Unknown);
+        let still_unavailable = probe(Some(unknown), ContextProbe::Unavailable);
+        assert!(still_unavailable.uses_private_runtime());
+        assert_eq!(
+            still_unavailable.input_policy(),
+            InputContextPolicy::sensitive()
+        );
+        assert_eq!(
+            probe(Some(still_unavailable), ContextProbe::Clear).input_policy(),
+            InputContextPolicy::default()
+        );
+        assert!(!probe(None, ContextProbe::Unavailable).uses_private_runtime());
     }
 
     #[test]
     fn ordinary_scopes_leave_composing_alone() {
-        assert!(!scopes_declare_sensitive(&[]));
-        assert!(!scopes_declare_sensitive(&[IS_DEFAULT]));
-        assert!(!scopes_declare_sensitive(&[IS_EMAIL_USERNAME, IS_URL]));
+        assert_eq!(classify_input_scopes(&[]), ContextProbe::Clear);
+        assert_eq!(classify_input_scopes(&[IS_DEFAULT]), ContextProbe::Clear);
+        assert_eq!(
+            classify_input_scopes(&[IS_EMAIL_USERNAME, IS_URL]),
+            ContextProbe::Clear
+        );
     }
 
     #[test]

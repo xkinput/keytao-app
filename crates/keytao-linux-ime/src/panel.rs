@@ -514,11 +514,17 @@ impl X11OverlayPanel {
     }
 
     pub fn show(&mut self, state: &ImeState, x: i32, y: i32) {
-        if self.renderer.hide_candidate_panel() {
+        let theme = self.renderer.theme_resolver.current();
+        if !crate::engine::panel_has_composition(state, &theme.ui) {
             self.hide();
             return;
         }
-        let (pixels, w, h) = self.renderer.render(state, self.screen_width as f32);
+        let (pixels, w, h, _) = self.renderer.render_themed(
+            state,
+            self.screen_width as f32,
+            &theme,
+            !theme.ui.effective_embedded_composition(),
+        );
         let (x, y) = x11_panel_position(
             (x, y),
             (w, h),
@@ -748,7 +754,13 @@ impl PanelRenderer {
             let (pixels, width, height) = self.render_text_hint(text);
             (pixels, width, height, PanelHitAreas::default())
         } else if let Some(state) = state {
-            self.render_with_hit_areas(state, screen_width * scale)
+            let theme = self.theme_resolver.current();
+            self.render_themed(
+                state,
+                screen_width * scale,
+                &theme,
+                !theme.ui.effective_embedded_composition(),
+            )
         } else {
             let (pixels, width, height) = self.render_mode_hint(ascii_mode);
             (pixels, width, height, PanelHitAreas::default())
@@ -794,6 +806,7 @@ impl PanelRenderer {
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
+    #[cfg(test)]
     pub fn render(&mut self, state: &ImeState, screen_width: f32) -> (Vec<u8>, u32, u32) {
         let (pixels, width, height, _) = self.render_with_hit_areas(state, screen_width);
         (pixels, width, height)
@@ -805,7 +818,7 @@ impl PanelRenderer {
         state: &ImeState,
         screen_width: f32,
     ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
-        self.render_themed(state, screen_width, &self.theme_resolver.current())
+        self.render_themed(state, screen_width, &self.theme_resolver.current(), true)
     }
 
     fn render_themed(
@@ -813,11 +826,16 @@ impl PanelRenderer {
         state: &ImeState,
         screen_width: f32,
         theme: &keytao_theme::ResolvedImeTheme,
+        include_preedit: bool,
     ) -> (Vec<u8>, u32, u32, PanelHitAreas) {
         let theme = scaled_candidate_panel(theme);
         self.update_theme_font(theme.font.effective_family.as_deref());
+        let mut input = state_to_panel_input(state);
+        if !include_preedit {
+            input.preedit.clear();
+        }
         let model = theme.candidate_panel_model(
-            state_to_panel_input(state),
+            input,
             &UiCapabilities {
                 supports_hover: false,
                 ..UiCapabilities::full_custom()
@@ -838,7 +856,10 @@ impl PanelRenderer {
         let below = theme.candidate.comment_position == CommentPosition::Below;
         let align_stacked_row = below
             && model.orientation == PanelOrientation::Horizontal
-            && model.candidates.iter().any(|candidate| candidate.comment.is_some());
+            && model
+                .candidates
+                .iter()
+                .any(|candidate| candidate.comment.is_some());
         let min_option_height = self.s(theme.candidate.min_height);
         let single_line_height = font_size.max(label_size);
         let single_line_height = if below {
@@ -1850,9 +1871,9 @@ mod tests {
         for orientation in [PanelOrientation::Vertical, PanelOrientation::Horizontal] {
             theme.panel.orientation = orientation;
             theme.candidate.comment_position = CommentPosition::Inline;
-            let (_, _, _, inline) = renderer.render_themed(&state, 1920.0, &theme);
+            let (_, _, _, inline) = renderer.render_themed(&state, 1920.0, &theme, true);
             theme.candidate.comment_position = CommentPosition::Below;
-            let (pixels, width, _, stacked) = renderer.render_themed(&state, 1920.0, &theme);
+            let (pixels, width, _, stacked) = renderer.render_themed(&state, 1920.0, &theme, true);
             let first = stacked.candidates[0];
             assert!(first.width < inline.candidates[0].width);
             assert!(first.height > inline.candidates[0].height);
@@ -1893,7 +1914,7 @@ mod tests {
                 Some(crate::panel_hit::PanelClick::Candidate(0))
             );
         }
-        let (_, width, _, constrained) = renderer.render_themed(&state, 70.0, &theme);
+        let (_, width, _, constrained) = renderer.render_themed(&state, 70.0, &theme, true);
         let first = constrained.candidates[0];
         assert!(first.x + first.width <= width as f32);
     }

@@ -17,7 +17,7 @@
 //!      signals which the daemon proxies to the focused application.
 
 use crate::{
-    engine::{inline_preedit, CoreEngine, ImeSession},
+    engine::{client_preedit, panel_has_composition, CoreEngine, ImeSession},
     ibus_shared::{
         self, ibus_engine_desc, ibus_lookup_table_value, ibus_preedit_text_variant,
         ibus_text_as_variant, ibus_text_variant, state_to_panel_model, ContentTypeState,
@@ -323,9 +323,13 @@ impl IBusEngine {
 
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
         let ascii_mode = ime_state.is_english_mode();
-        let has_candidates = !ime_state.candidates.is_empty();
+        let theme = self.theme_resolver.current();
         let hide_candidate_panel =
-            self.theme_resolver.current().ui.hide_candidate_panel && !ime_state.is_package_switcher();
+            theme.ui.hide_candidate_panel && !ime_state.is_package_switcher();
+        let has_content = panel_has_composition(&ime_state, &theme.ui);
+        let auxiliary_preedit = !self.draws_candidates()
+            && !theme.ui.effective_embedded_composition()
+            && !ime_state.preedit.is_empty();
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus Engine CommitText: {} chars", text.chars().count());
@@ -342,7 +346,7 @@ impl IBusEngine {
             }
         }
 
-        let (preedit, cursor) = inline_preedit(&ime_state, hide_candidate_panel);
+        let (preedit, cursor) = client_preedit(&ime_state, &theme.ui, true);
         if preedit.is_empty() {
             let _ = IBusEngine::hide_preedit_text(ctxt).await;
         } else {
@@ -358,7 +362,6 @@ impl IBusEngine {
 
         if ime_state.candidates.is_empty() || hide_candidate_panel {
             let _ = IBusEngine::hide_lookup_table(ctxt).await;
-            self.overlay(OverlayPanelMessage::Hide);
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
             // Either the desktop panel renders the table or we draw it, never
@@ -369,18 +372,24 @@ impl IBusEngine {
                 !self.draws_candidates(),
             )
             .await;
-            let cx = self.cursor_x.load(Ordering::Relaxed);
-            let cy = self.cursor_y.load(Ordering::Relaxed);
-            self.overlay(OverlayPanelMessage::Show {
-                state: ime_state.clone(),
-                x: cx,
-                y: cy + 24,
+        }
+
+        if self.draws_candidates() {
+            self.overlay(if has_content {
+                OverlayPanelMessage::Show {
+                    state: ime_state.clone(),
+                    x: self.cursor_x.load(Ordering::Relaxed),
+                    y: self.cursor_y.load(Ordering::Relaxed) + 24,
+                }
+            } else {
+                OverlayPanelMessage::Hide
             });
         }
 
-        self.apply_mode_change(ascii_mode, !has_candidates, ctxt)
+        self.apply_mode_change(ascii_mode, !has_content, ctxt).await;
+        self.deployment
+            .apply_state(&ime_state, has_content, auxiliary_preedit)
             .await;
-        self.deployment.apply_state(&ime_state).await;
     }
 
     async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) {
@@ -505,7 +514,9 @@ impl IBusEngine {
             KeyOutcome::Forward => {}
             KeyOutcome::ClearUi => {
                 self.clear_ui(&ctxt).await;
-                self.deployment.apply_state(&ImeState::empty()).await;
+                self.deployment
+                    .apply_state(&ImeState::empty(), false, false)
+                    .await;
             }
             KeyOutcome::Publish { state, .. } => {
                 self.apply_ime_state(*state, &ctxt).await;

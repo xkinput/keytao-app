@@ -158,7 +158,7 @@ void unifiedGateCases(BridgePlatform platform) {
             if (platform == BridgePlatform.linux) {
               expect(find.text(AppStrings.linuxIme), findsOneWidget);
               expect(find.text(AppStrings.kdeProcesses(1)), findsOneWidget);
-              expect(find.text(AppStrings.embedded), findsNothing);
+              expect(find.text(AppStrings.embedded), findsOneWidget);
             }
             if (platform == BridgePlatform.ios) {
               expect(find.text(AppStrings.iosOnboarding), findsOneWidget);

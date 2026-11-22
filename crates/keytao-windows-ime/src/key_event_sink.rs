@@ -2999,8 +2999,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(());
             };
             reset_input_for_focus_change(&state);
-            refresh_engine_for_focus(&state);
             refresh_input_context(&state, None);
+            refresh_engine_for_focus(&state);
             Ok(())
         })
     }

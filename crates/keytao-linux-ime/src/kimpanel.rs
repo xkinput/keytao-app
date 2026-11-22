@@ -1,4 +1,4 @@
-use crate::engine::inline_preedit;
+use crate::engine::ibus_cursor_pos;
 use crate::ibus_shared::candidate_display_text;
 use crate::panel::state_to_panel_input;
 use keytao_core::ImeState;
@@ -163,7 +163,7 @@ impl KimpanelHandle {
         });
     }
 
-    pub async fn update_state(&self, state: &ImeState) {
+    pub async fn update_state(&self, state: &ImeState, has_native_panel: bool) {
         tracing::debug!(
             "Kimpanel: updating state, preedit={} chars, candidates_len={}",
             state.preedit.chars().count(),
@@ -171,7 +171,11 @@ impl KimpanelHandle {
         );
         let theme = self.theme_resolver.current();
         let hide_candidate_panel = theme.ui.hide_candidate_panel && !state.is_package_switcher();
-        let (preedit, cursor) = inline_preedit(state, hide_candidate_panel);
+        let preedit = if has_native_panel || theme.ui.effective_embedded_composition() {
+            ""
+        } else {
+            &state.preedit
+        };
         if preedit.is_empty() {
             if let Err(e) = Kimpanel::show_preedit(&self.ctxt, false).await {
                 tracing::warn!("Kimpanel: show_preedit(false) failed: {e}");
@@ -180,11 +184,7 @@ impl KimpanelHandle {
             if let Err(e) = Kimpanel::update_preedit_text(&self.ctxt, preedit, "").await {
                 tracing::warn!("Kimpanel: update_preedit_text failed: {e}");
             }
-            let caret = if hide_candidate_panel {
-                cursor as i32
-            } else {
-                preedit.chars().count() as i32
-            };
+            let caret = ibus_cursor_pos(state) as i32;
             if let Err(e) = Kimpanel::update_preedit_caret(&self.ctxt, caret).await {
                 tracing::warn!("Kimpanel: update_preedit_caret failed: {e}");
             }

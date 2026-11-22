@@ -36,8 +36,15 @@ pub struct IbusDeploymentHint {
     overlay: Option<std::sync::mpsc::Sender<crate::panel::OverlayPanelMessage>>,
     cursor_x: Arc<AtomicI32>,
     cursor_y: Arc<AtomicI32>,
-    normal_state: Mutex<Option<ImeState>>,
+    normal_state: Mutex<Option<PanelComposition>>,
     publication: tokio::sync::Mutex<()>,
+}
+
+#[derive(Clone)]
+struct PanelComposition {
+    state: ImeState,
+    visible: bool,
+    auxiliary_preedit: bool,
 }
 
 impl IbusDeploymentHint {
@@ -99,14 +106,27 @@ impl IbusDeploymentHint {
         });
     }
 
-    pub async fn apply_state(&self, state: &ImeState) {
+    pub fn has_overlay(&self) -> bool {
+        self.overlay.is_some()
+    }
+
+    pub async fn apply_state(&self, state: &ImeState, visible: bool, auxiliary_preedit: bool) {
         let generation = self.generation.load(Ordering::Acquire);
-        *self
+        let previous = self
             .normal_state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state.clone());
-        if let Some(hint) = self.deployment.hint() {
-            self.publish(Some(hint), generation).await;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(PanelComposition {
+                state: state.clone(),
+                visible,
+                auxiliary_preedit,
+            });
+        let hint = self.deployment.hint();
+        if hint.is_some()
+            || auxiliary_preedit
+            || previous.is_some_and(|state| state.auxiliary_preedit)
+        {
+            self.publish(hint, generation).await;
         }
     }
 
@@ -120,10 +140,15 @@ impl IbusDeploymentHint {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let has_candidates = state
-            .as_ref()
-            .is_some_and(|state| !state.candidates.is_empty());
-        let hint = keytao_core::DeploymentState::visible_hint(hint, has_candidates);
+        let has_content = state.as_ref().is_some_and(|state| state.visible);
+        let hint = keytao_core::DeploymentState::visible_hint(hint, has_content);
+        let auxiliary = match hint {
+            Some(text) => Some(text),
+            None => state
+                .as_ref()
+                .filter(|state| state.auxiliary_preedit)
+                .map(|state| state.state.preedit.as_str()),
+        };
         if let Some(context) = &self.context {
             let _ = context
                 .connection()
@@ -133,8 +158,8 @@ impl IbusDeploymentHint {
                     self.interface,
                     "UpdateAuxiliaryText",
                     &(
-                        ibus_text_variant(hint.unwrap_or_default()),
-                        hint.is_some() && self.overlay.is_none(),
+                        ibus_text_variant(auxiliary.unwrap_or_default()),
+                        auxiliary.is_some() && self.overlay.is_none(),
                     ),
                 )
                 .await;
@@ -150,8 +175,8 @@ impl IbusDeploymentHint {
             let y = self.cursor_y.load(Ordering::Relaxed) + 24;
             let message = match hint {
                 Some(text) => crate::panel::OverlayPanelMessage::DeploymentHint { text, x, y },
-                None if has_candidates => crate::panel::OverlayPanelMessage::Show {
-                    state: state.unwrap(),
+                None if has_content => crate::panel::OverlayPanelMessage::Show {
+                    state: state.unwrap().state,
                     x,
                     y,
                 },

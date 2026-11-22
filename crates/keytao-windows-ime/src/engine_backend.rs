@@ -68,7 +68,7 @@ pub trait ImeEngineBackend: Send + Sync {
     fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String>;
 }
 
-pub(crate) fn build_backend() -> Result<
+pub(crate) fn build_backend(private: bool) -> Result<
     (
         Arc<dyn ImeEngineBackend>,
         EngineHandle,
@@ -77,8 +77,21 @@ pub(crate) fn build_backend() -> Result<
     ),
     String,
 > {
+    let mode = read_engine_mode();
+    if private {
+        if mode == crate::engine_config::EngineMode::InProc {
+            return Err("private input requires the Windows IME service mode".into());
+        }
+        // Use the public package snapshot in a separate user directory. The
+        // IPC session uses the normal user dictionaries even when its session
+        // policy disables KeyTao's own learning.
+        let engine = Arc::new(InProcEngine::no_learning());
+        let handle = engine.build()?;
+        let (path, signature) = engine.reload_stamp();
+        return Ok((engine, handle, path, signature));
+    }
     let allow_in_process = host_allows_in_process_fallback();
-    if read_engine_mode() == crate::engine_config::EngineMode::Pipe || !allow_in_process {
+    if mode == crate::engine_config::EngineMode::Pipe || !allow_in_process {
         let pipe = crate::engine_pipe::PipeEngine::default();
         match pipe.build() {
             Ok(handle) => {

@@ -4,7 +4,7 @@
 //! (e.g. WeChatAppEx) can use keytao as their IME without requiring a real
 //! IBus daemon.
 
-use crate::engine::{inline_preedit, CoreEngine, ImeSession};
+use crate::engine::{client_preedit, panel_has_composition, CoreEngine, ImeSession};
 use crate::ibus_shared::{
     self, candidate_display_text, ibus_engine_desc, ibus_lookup_table_value,
     ibus_preedit_text_variant, ibus_text_variant, state_to_panel_model, ContentTypeState,
@@ -106,9 +106,10 @@ impl InputContext {
 
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
         let ascii_mode = ime_state.is_english_mode();
-        let has_candidates = !ime_state.candidates.is_empty();
+        let theme = self.theme_resolver.current();
         let hide_candidate_panel =
-            self.theme_resolver.current().ui.hide_candidate_panel && !ime_state.is_package_switcher();
+            theme.ui.hide_candidate_panel && !ime_state.is_package_switcher();
+        let has_content = panel_has_composition(&ime_state, &theme.ui);
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus CommitText: {} chars", text.chars().count());
@@ -118,12 +119,10 @@ impl InputContext {
             }
         }
 
-        let (preedit, cursor) = inline_preedit(&ime_state, hide_candidate_panel);
+        let (preedit, cursor) =
+            client_preedit(&ime_state, &theme.ui, self.deployment.has_overlay());
         if preedit.is_empty() {
             let _ = Self::hide_preedit_text(ctxt).await;
-            if let Some(kctxt) = &self.kimpanel_ctxt {
-                let _ = Kimpanel::show_preedit(kctxt, false).await;
-            }
         } else {
             clear_preedit(ctxt, &None).await;
 
@@ -134,13 +133,6 @@ impl InputContext {
                 true,
             )
             .await;
-            if let Some(kctxt) = &self.kimpanel_ctxt {
-                let _ = Kimpanel::update_preedit_text(kctxt, preedit, "").await;
-                if hide_candidate_panel {
-                    let _ = Kimpanel::update_preedit_caret(kctxt, cursor as i32).await;
-                }
-                let _ = Kimpanel::show_preedit(kctxt, true).await;
-            }
         }
 
         if ime_state.candidates.is_empty() || hide_candidate_panel {
@@ -148,7 +140,6 @@ impl InputContext {
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;
             }
-            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
             let _ = Self::update_lookup_table(ctxt, ibus_lookup_table_value(&model), true).await;
@@ -183,18 +174,23 @@ impl InputContext {
                 )
                 .await;
             }
-
-            let cx = self.cursor_x.load(Ordering::Relaxed);
-            let cy = self.cursor_y.load(Ordering::Relaxed);
-            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Show {
-                state: ime_state.clone(),
-                x: cx,
-                y: cy + 24,
-            });
         }
 
-        self.apply_mode_change(ascii_mode, !has_candidates).await;
-        self.deployment.apply_state(&ime_state).await;
+        let message = if has_content {
+            OverlayPanelMessage::Show {
+                state: ime_state.clone(),
+                x: self.cursor_x.load(Ordering::Relaxed),
+                y: self.cursor_y.load(Ordering::Relaxed) + 24,
+            }
+        } else {
+            OverlayPanelMessage::Hide
+        };
+        let _ = self.x11_panel_tx.send(message);
+
+        self.apply_mode_change(ascii_mode, !has_content).await;
+        self.deployment
+            .apply_state(&ime_state, has_content, false)
+            .await;
     }
 
     async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) {
@@ -343,7 +339,9 @@ impl InputContext {
             KeyOutcome::Forward => {}
             KeyOutcome::ClearUi => {
                 self.clear_ui(&ctxt).await;
-                self.deployment.apply_state(&ImeState::empty()).await;
+                self.deployment
+                    .apply_state(&ImeState::empty(), false, false)
+                    .await;
             }
             KeyOutcome::Publish { state, .. } => {
                 self.apply_ime_state(*state, &ctxt).await;

@@ -79,7 +79,7 @@ App installs schema/dict/lua/opencc files
 
 Windows 系统搜索等 AppContainer 宿主读取 App 从原始公开发行包生成的只读快照，首次在宿主自己的私有目录后台部署。普通应用的个人词库不会复制或授予沙箱权限。旧安装首次启动 App 时按已安装主方案准备公开包；后续公开包更新通过快照标记通知宿主。DLL 支持 IMMERSIVE/COMLESS 注册，部署与复制不在 TSF 输入线程执行。
 
-Windows 和 macOS 共享 `ui.embeddedComposition` 开关：开启时在输入框显示预编辑，关闭时仅候选窗显示。候选窗口使用单独的 `panel.preeditGap`（默认 10）分隔预编辑与候选行，嵌入模式不预留这一行；Windows、macOS、Linux 自绘候选窗口均读取该间距。
+Windows、macOS 和 Linux 共享 `ui.embeddedComposition` 开关。开启时在输入框显示预编辑，关闭时交由候选面板显示。Linux Wayland 和 IBus 根据后端的候选面板能力选择显示位置。候选窗口使用 `panel.preeditGap`（默认 10）分隔预编辑与候选行。嵌入模式下自绘候选窗口省略这行预编辑。
 
 按键通信里只有两种输入从平台进入通用层：
 
@@ -423,7 +423,7 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 
 ## 敏感输入上下文
 
-密码框、PIN 框和声明了隐私意图的输入框不得走中文组字，也不得让内容进入用户词库、剪贴板历史或输入历史。
+密码框和 PIN 框禁用中文组字。各平台按宿主声明区分禁止组字与禁止学习，两类输入都不得进入用户词库、剪贴板历史或输入历史。
 
 通用层提供 `InputContextPolicy { composing: bool, learning: bool }`：
 
@@ -433,7 +433,7 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 - 只读查询：Rust `input_policy()`，JNI `nativeInputPolicyComposing` / `nativeInputPolicyLearning`。
 - 策略存在 session 内部，跨 Engine 重建（reload）存活。
 
-**已知限制**：librime 没有 per-session 关闭用户词记忆的开关（`memorize` 是 translator 的 schema 级配置）。因此 `learning = false` 只有在 `composing = false` 时被真正强制；单独把 `learning` 置 false 而保持 `composing = true` 时，它只是一个交给平台自律的标志，用于关闭剪贴板记忆、建议和输入历史。
+**已知限制**：librime 的标准用户词学习由 schema 的 translator 配置控制。仅设置 `learning = false` 可以关闭自有剪贴板记忆、建议和输入历史。若同时保留组字，平台需要另外禁用 librime 学习，例如 Windows 使用独立的公开方案快照运行会话，并在构建副本中禁用标准用户词典。
 
 平台检测来源：
 
@@ -443,14 +443,14 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 | Linux Wayland v2 | `zwp_input_method_v2.content_type`，**text-input-v3 编号** | purpose password=8 / pin=9；hint hidden_text=0x40 / sensitive_data=0x80 |
 | Linux KDE v1 | `zwp_input_method_context_v1.content_type`，**text-input-v1 编号** | purpose password=8（v1 没有 pin，9 是 date）；hint 同 0x40 / 0x80，password 简写 0xc0 |
 | Linux XIM | 无 | **XIM 协议不表达输入用途，X11/XWayland 路径无法检测密码框**，属能力缺口而非实现缺陷 |
-| Windows | `GUID_COMPARTMENT_KEYBOARD_DISABLED`、`GUID_COMPARTMENT_EMPTYCONTEXT`、`GUID_PROP_INPUTSCOPE` 的密码/PIN/private 声明，以及原生 RichEdit 密码状态 | 任一命中即敏感；焦点文档为空同样禁用。焦点变化时同步只读探测，未知状态在按键入口限流重试；缓存仅属于已探测的 context，后台文档事件不能替换它 |
+| Windows | `GUID_COMPARTMENT_KEYBOARD_DISABLED`、`GUID_COMPARTMENT_EMPTYCONTEXT`、`GUID_PROP_INPUTSCOPE` 的密码/PIN/private 声明，以及原生 RichEdit 密码状态 | 密码、PIN、禁用或空上下文直通。`IS_PRIVATE` 使用公开方案的无学习会话。焦点变化时同步只读探测，未知状态在按键入口限流重试。缓存属于已探测的 context |
 | macOS | 无需检测 | 系统 secure input 下 IMK 自动切走。仍需确认代码无按键内容日志 |
 | Android | `inputType` 的四个 password 变体 | 直通（`composing = false, learning = false`） |
 | Android | `IME_FLAG_NO_PERSONALIZED_LEARNING`、`TYPE_TEXT_FLAG_NO_SUGGESTIONS` | 只置 `learning = false` 并关闭剪贴板记忆/建议与输入历史，**保留组字能力** |
 | iOS | `textDocumentProxy.isSecureTextEntry` | 直通 |
 | iOS | `keyboardType` 为 numberPad / decimalPad / phonePad / asciiCapableNumberPad | 强制数字层且直通 |
 
-Windows 可选 InputScope 兼容：Word 和 RichEdit 可能在 `GetAppProperty`、`GetSelection` 成功后，对 `GetValue` 返回 `E_FAIL`。将这一特定错误记为 `Unavailable`，允许未声明敏感的有效上下文继续组字并限流重试，而不是永久透传字母。`Unavailable` 不等于已证实安全，也不会关闭 Rime 自身的学习；显式密码/PIN/private、disabled/empty 声明以及本线程原生 RichEdit 的密码样式/密码字符始终优先，同 context 的既有敏感答案不能被后续失败清除。原生控件未遮蔽文字也不能否定此前的 PIN/private 声明。其他错误和畸形属性仍保持阻挡。原生窗口回归默认忽略，需在隔离 Windows 账户/虚拟机手动执行：`NOACTIVATETIP` 只限制初次激活，RichEdit 后续仍可能在测试进程中加载已安装的输入法，不能把它当作隔离保证。
+Word 和 RichEdit 的可选 InputScope 属性在 `GetAppProperty`、`GetSelection` 成功后，可能对 `GetValue` 返回 `E_FAIL`。将这一特定错误记为 `Unavailable`，允许有效上下文继续使用已知策略并限流重试。显式密码/PIN/private、disabled/empty 声明和本线程原生 RichEdit 的密码状态优先。后续探测失败不得将同一上下文降级到普通学习会话。其他错误和畸形属性仍保持阻挡。原生窗口回归默认忽略，需在隔离 Windows 账户或虚拟机手动执行。`NOACTIVATETIP` 只限制初次激活，RichEdit 后续仍可能加载已安装的输入法。
 
 三条容易照抄错的口径：
 
