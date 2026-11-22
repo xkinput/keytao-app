@@ -2268,13 +2268,15 @@ final class KeyTaoIOSKeyboardView: UIView {
             if let context = UIGraphicsGetCurrentContext() {
                 context.saveGState()
                 UIBezierPath(rect: inlineCandidateViewportRect()).addClip()
-                for candidate in candidateDrawItems(inlineOnly: true) {
+                let items = candidateDrawItems(inlineOnly: true)
+                let stacked = items.contains { belowComment($0) != nil }
+                for candidate in items {
                     guard let layout = inlineCandidateRects.first(where: { $0.identifierIndex == candidate.identifierIndex }) else {
                         continue
                     }
                     let pressed = pressedCandidate?.pageIndex == candidate.identifierIndex &&
                         inlineCandidateTouchActive && !candidateDragging && !candidateLongPressConsumed
-                    drawCandidateOption(candidate, rect: layout.drawingRect ?? layout.rect, pressed: pressed)
+                    drawCandidateOption(candidate, rect: layout.drawingRect ?? layout.rect, pressed: pressed, stacked: stacked)
                 }
                 context.restoreGState()
             }
@@ -2538,6 +2540,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
 
+        let stacked = items.contains { belowComment($0) != nil }
         for item in items {
             let drawingRect = expandedCandidateRects
                 .first(where: { $0.identifierIndex == item.identifierIndex })
@@ -2546,7 +2549,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             guard let drawingRect else {
                 continue
             }
-            drawCandidateOption(item, rect: drawingRect)
+            drawCandidateOption(item, rect: drawingRect, stacked: stacked)
         }
         drawVerticalScrollIndicator(
             viewportTop: top,
@@ -2598,7 +2601,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         )
     }
 
-    private func drawCandidateOption(_ item: CandidateDrawItem, rect: CGRect, pressed: Bool = false) {
+    private func drawCandidateOption(_ item: CandidateDrawItem, rect: CGRect, pressed: Bool = false, stacked: Bool = false) {
         if functionPanelActive, functionPanelMode == .settings {
             drawSettingsPanelItem(item, rect: rect, pressed: pressed)
             return
@@ -2649,7 +2652,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     drawClipboardCandidateRow(displayItem, rect: rect)
                 }
             default:
-                drawInlineCandidateOption(displayItem, rect: rect)
+                drawInlineCandidateOption(displayItem, rect: rect, stacked: stacked)
             }
         }
     }
@@ -3283,7 +3286,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             item.text,
             in: CGRect(x: textLeft, y: rect.midY, width: textWidth, height: 19),
             color: theme.mobile.candidateBar.commentColor.uiColor,
-            size: candidateCommentSize(),
+            size: candidateSecondarySize(),
             alignment: .left
         )
         (item.selected ? theme.mobile.candidateBar.selectedForeground.uiColor : theme.mobile.keyboard.key.borderColor.uiColor).setFill()
@@ -3380,7 +3383,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawTruncatedText(item.text, in: CGRect(x: textX, y: rect.midY - 26, width: textWidth, height: 28),
                           color: theme.mobile.candidateBar.foreground.uiColor, size: candidateTextSize(), alignment: .left)
         drawTruncatedText(item.comment ?? "", in: CGRect(x: textX, y: rect.midY + 3, width: textWidth, height: 24),
-                          color: theme.mobile.candidateBar.commentColor.uiColor, size: candidateCommentSize(), alignment: .left)
+                          color: theme.mobile.candidateBar.commentColor.uiColor, size: candidateSecondarySize(), alignment: .left)
         drawClipboardActionZone(actions.pin, label: entry.pinned ? "取消置顶" : "置顶")
         drawClipboardActionZone(actions.delete, label: "删除")
     }
@@ -3408,8 +3411,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         )
     }
 
-    private func drawInlineCandidateOption(_ item: CandidateDrawItem, rect: CGRect) {
-        if let comment = belowComment(item) {
+    private func drawInlineCandidateOption(_ item: CandidateDrawItem, rect: CGRect, stacked: Bool = false) {
+        let comment = belowComment(item)
+        if stacked || comment != nil {
             drawStackedCandidateOption(item, comment: comment, rect: rect)
             return
         }
@@ -3448,7 +3452,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
     }
 
-    private func drawStackedCandidateOption(_ item: CandidateDrawItem, comment: String, rect: CGRect) {
+    private func drawStackedCandidateOption(_ item: CandidateDrawItem, comment: String?, rect: CGRect) {
         let candidateBar = theme.mobile.candidateBar
         let scale = stackedCandidateTextScale()
         let textSize = candidateTextSize() * scale
@@ -3478,13 +3482,15 @@ final class KeyTaoIOSKeyboardView: UIView {
             size: textSize,
             alignment: .left
         )
-        drawTruncatedText(
-            comment,
-            in: CGRect(x: x, y: commentY - commentHeight / 2, width: width, height: commentHeight),
-            color: (item.selected ? candidateBar.selectedCommentColor : candidateBar.commentColor).uiColor,
-            size: commentSize,
-            alignment: .left
-        )
+        if let comment {
+            drawTruncatedText(
+                comment,
+                in: CGRect(x: x, y: commentY - commentHeight / 2, width: width, height: commentHeight),
+                color: (item.selected ? candidateBar.selectedCommentColor : candidateBar.commentColor).uiColor,
+                size: commentSize,
+                alignment: .left
+            )
+        }
     }
 
     private func drawToolbarChip(_ item: ToolbarRect) {
@@ -4363,9 +4369,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         let viewport = inlineCandidateViewportRect()
         candidateViewportWidth = viewport.width
         let items = candidateDrawItems(inlineOnly: true)
-        let candidateHeight = inlineCandidateHeight(stacked: items.contains { belowComment($0) != nil })
+        let stacked = items.contains { belowComment($0) != nil }
+        let candidateHeight = inlineCandidateHeight(stacked: stacked)
         let top = (barHeight - candidateHeight) / 2
-        let itemWidths = items.map(candidateWidth)
+        let itemWidths = items.map { candidateWidth($0, stacked: stacked) }
         candidateContentWidth = itemWidths.reduce(0, +) + gap * CGFloat(max(0, itemWidths.count - 1))
         coerceCandidateScroll()
         var x = viewport.minX - candidateScrollX
@@ -4413,6 +4420,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let left = gap * 1.5
         let right = bounds.width - left
         let columns = panelColumns(for: functionPanelActive ? functionPanelMode : .rime)
+        let stacked = columns == nil && items.contains { belowComment($0) != nil }
         let defaultRowHeight: CGFloat
         switch columns {
         case 4:
@@ -4420,7 +4428,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         case 1:
             defaultRowHeight = config.clipboardRowHeightDp
         default:
-            defaultRowHeight = items.contains { belowComment($0) != nil } ? stackedCandidateHeight : 36
+            defaultRowHeight = stacked ? stackedCandidateHeight : 36
         }
         let cellWidth = columns.map { columnCount in
             (right - left - gap * CGFloat(columnCount - 1)) / CGFloat(columnCount)
@@ -4476,7 +4484,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 width = cellWidth
                 itemRowHeight = defaultRowHeight
             } else {
-                width = min(max(candidateWidth(item), 56), right - left)
+                width = min(max(candidateWidth(item, stacked: stacked), 56), right - left)
                 if x + width > right && x > left {
                     x = left
                     y += defaultRowHeight + gap
@@ -5324,8 +5332,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         panelItems(items)
     }
 
-    private func candidateWidth(_ item: CandidateDrawItem) -> CGFloat {
-        let stacked = belowComment(item) != nil
+    private func candidateWidth(_ item: CandidateDrawItem, stacked: Bool) -> CGFloat {
         let scale = stacked ? stackedCandidateTextScale() : 1
         let labelWidth = textWidth(item.label, size: candidateLabelSize() * scale)
         let bodyWidth = textWidth(item.text, size: candidateTextSize() * scale)
@@ -6947,6 +6954,13 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func candidateCommentSize() -> CGFloat {
+        if let size = theme.mobile.candidateBar.commentFontSize, size.isFinite, size > 0 {
+            return min(size, candidateFontHeightLimit())
+        }
+        return candidateSecondarySize()
+    }
+
+    private func candidateSecondarySize() -> CGFloat {
         let desired = 12 * config.candidateFontScale * theme.mobile.candidateBar.fontScale
         return max(9, min(desired, candidateFontHeightLimit() * 0.68))
     }

@@ -340,6 +340,7 @@ pub(crate) fn sanitize_mobile_number(field: &str, value: f64) -> Option<f64> {
         "inlineGap" => (0.0, 18.0),
         "shadowOffsetY" => (0.0, 4.0),
         "fontScale" | "hintFontScale" => (0.8, 1.3),
+        "commentFontSize" => (9.0, 24.0),
         _ => return None,
     };
     value.is_finite().then(|| value.clamp(min, max))

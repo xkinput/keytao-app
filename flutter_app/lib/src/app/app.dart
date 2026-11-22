@@ -69,7 +69,11 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
                   ? AppShell(controller: widget.controller)
                   : OnboardingPage(
                       controller: widget.controller,
-                      onFinished: () => setState(() => _completed = true),
+                      onFinished: () {
+                        final c = widget.controller;
+                        if (c.isMobile) c.selectPage(AppPage.scheme);
+                        setState(() => _completed = true);
+                      },
                     ),
             ),
           ),

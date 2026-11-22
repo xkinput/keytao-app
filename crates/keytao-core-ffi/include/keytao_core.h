@@ -319,6 +319,11 @@ char *keytao_session_state_json(void *session);
 
 char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t modifiers);
 
+/**
+ * Send a confirmed solo Shift, Control or Alt tap as a single press/release batch.
+ */
+char *keytao_session_process_modifier_tap_json(void *session, uint32_t keyval);
+
 char *keytao_session_process_key_with_panel_json(void *session,
                                                  uint32_t keyval,
                                                  uint32_t modifiers,

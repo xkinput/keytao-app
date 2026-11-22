@@ -140,9 +140,10 @@ fn write_ime_ui_settings(
     font_size: f32,
     corner_radius: Option<f32>,
     background_color: String,
+    changed_fields: Option<u8>,
 ) -> Result<(), String> {
     let theme_path = ime_theme_path()?;
-    keytao_theme::write_ime_ui_settings_to_path(
+    keytao_theme::write_ime_ui_settings_to_path_with_changes(
         &theme_path,
         color_scheme,
         orientation,
@@ -150,6 +151,7 @@ fn write_ime_ui_settings(
         font_size,
         corner_radius,
         background_color,
+        changed_fields,
     )
 }
 
@@ -250,6 +252,7 @@ pub struct AndroidImeInputSettings {
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
     pub floating_landscape_scale: u8,
+    pub keyboard_layout_json: Option<String>,
     pub config_path: Option<String>,
     pub reload_stamp_path: Option<String>,
     pub message: String,
@@ -578,6 +581,7 @@ fn android_ime_haptics_settings_from_config(
         floating_portrait_scale,
         floating_landscape_enabled,
         floating_landscape_scale,
+        keyboard_layout_json: keytao_theme::resolved_keyboard_json(&keyboard).ok(),
         config_path: Some(path_string(path)),
         reload_stamp_path: Some(path_string({
             #[cfg(target_os = "ios")]
@@ -1028,6 +1032,7 @@ pub fn set_ime_ui_settings(
     font_size: f32,
     corner_radius: Option<f32>,
     background_color: String,
+    changed_fields: Option<u8>,
 ) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         write_ime_ui_settings(
@@ -1037,6 +1042,7 @@ pub fn set_ime_ui_settings(
             font_size,
             corner_radius,
             background_color,
+            changed_fields,
         )?;
         ime_ui_settings_with_message("已保存输入法 UI 配置".into())
     })();
@@ -1052,11 +1058,12 @@ pub fn set_ime_ui_settings(
     font_size: f32,
     corner_radius: Option<f32>,
     background_color: String,
+    changed_fields: Option<u8>,
 ) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         let root = host.user_root()?;
         let theme_path = root.join("theme.yaml");
-        keytao_theme::write_ime_ui_settings_to_path(
+        keytao_theme::write_ime_ui_settings_to_path_with_changes(
             &theme_path,
             color_scheme,
             orientation,
@@ -1064,6 +1071,7 @@ pub fn set_ime_ui_settings(
             font_size,
             corner_radius,
             background_color,
+            changed_fields,
         )?;
         let reload_message = match write_android_reload_stamp(&root) {
             Ok(path) => format!(
@@ -1090,11 +1098,12 @@ pub fn set_ime_ui_settings(
     font_size: f32,
     corner_radius: Option<f32>,
     background_color: String,
+    changed_fields: Option<u8>,
 ) -> Result<ImeUiSettings, CoreError> {
     let result: Result<_, String> = (|| {
         let root = host.user_root()?;
         let theme_path = root.join("theme.yaml");
-        keytao_theme::write_ime_ui_settings_to_path(
+        keytao_theme::write_ime_ui_settings_to_path_with_changes(
             &theme_path,
             color_scheme,
             orientation,
@@ -1102,6 +1111,7 @@ pub fn set_ime_ui_settings(
             font_size,
             corner_radius,
             background_color,
+            changed_fields,
         )?;
         let reload_message = match write_ios_reload_stamp(&root) {
             Ok(path) => format!(
@@ -1208,6 +1218,7 @@ mod tests {
                     27.0,
                     Some(9.0),
                     "#112233".into(),
+                    None,
                 ),
                 "embedded" => set_ime_embedded_composition(true),
                 "hide" => set_ime_hide_candidate_panel(true),

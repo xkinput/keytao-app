@@ -96,7 +96,7 @@ void main() {
   ) async {
     final c = ViewController(BridgePlatform.ios)
       ..iosKeyboardEnabled = true
-      ..iosKeyboardFullAccess = true;
+      ..iosKeyboardFullAccess = false;
     addTearDown(c.dispose);
     await tester.pumpWidget(
       KeyTaoTheme(
@@ -106,16 +106,24 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    for (final step in [SetupStep.enable, SetupStep.fullAccess]) {
+    expect(find.byKey(const ValueKey('setup-fullAccess')), findsOneWidget);
+    expect(find.text(AppStrings.testInput), findsOneWidget);
+    for (final (step, done) in [
+      (SetupStep.enable, true),
+      (SetupStep.fullAccess, false),
+    ]) {
       final nav = find.byKey(ValueKey('setup-nav-${step.name}'));
-      expect(tester.widget<FButton>(nav).semanticsLabel, contains('已完成'));
+      expect(
+        tester.widget<FButton>(nav).semanticsLabel,
+        contains(done ? '已完成' : '待完成'),
+      );
       expect(
         find.descendant(of: nav, matching: find.byIcon(FLucideIcons.check)),
-        findsOneWidget,
+        done ? findsOneWidget : findsNothing,
       );
       await tester.tap(nav);
       await tester.pumpAndSettle();
-      expect(find.text('已完成'), findsOneWidget);
+      expect(find.text(done ? '已完成' : '待完成'), findsOneWidget);
     }
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

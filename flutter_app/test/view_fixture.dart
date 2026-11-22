@@ -42,7 +42,7 @@ final _candidatePanelThemes = jsonDecode(
 
 // View-only fixture: local theme data, no bootstrap, events, network, or FFI.
 class ViewController extends AppController {
-  ViewController(BridgePlatform platform)
+  ViewController(BridgePlatform platform, {String? keyboardLayoutJson})
     : super(
         info: BridgeInfo(
           platform: platform,
@@ -139,6 +139,7 @@ class ViewController extends AppController {
       floatingLandscapeEnabled: true,
       floatingLandscapeScale: 72,
       configPath: '$defaultDir/keytao/keyboard.yaml',
+      keyboardLayoutJson: keyboardLayoutJson,
       message: '',
     );
     const github = PlatformReleaseDto(

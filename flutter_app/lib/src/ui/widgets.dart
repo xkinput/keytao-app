@@ -786,7 +786,7 @@ class _SliderSettingState extends State<SliderSetting> {
         onEnd: widget.onChanged == null
             ? null
             : (value) {
-                widget.onChanged!(_value(value.max));
+                widget.onChanged!(_draft ?? _value(value.max));
                 if (mounted) setState(() => _draft = null);
               },
       ),

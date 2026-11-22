@@ -485,7 +485,7 @@ class _ShellStatus extends StatelessWidget {
         controller.ime?['enabled'] == true &&
             controller.ime?['selected'] == true,
       BridgePlatform.ios => controller.iosKeyboardEnabled,
-      _ => controller.local?.deployed == true,
+      _ => controller.hasUsableBuild,
     };
     return StatusPill(
       macos

@@ -13,11 +13,7 @@ private let rimeReleaseMask: UInt32 = 1 << 30
 private let rimeKeyReturn: UInt32 = 0xff0d
 private let rimeKeyKeypadEnter: UInt32 = 0xff8d
 private let rimeKeyF4: UInt32 = 0xffc1
-private let rimeKeyShiftLeft: UInt32 = 0xffe1
-private let rimeKeyShiftRight: UInt32 = 0xffe2
 
-/// Modifiers whose presence means the key press belongs to a chord, not to a
-/// solo `Shift` tap.
 private let chordModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
 
 /// KeyTao's IMKInputController subclass.
@@ -31,7 +27,7 @@ final class KeyTaoInputController: IMKInputController {
     private var candidatePanel: CandidatePanel?
     private var modeIndicatorPanel: ModeIndicatorPanel?
     private var lastModifierFlags: NSEvent.ModifierFlags = []
-    private var shiftPressedWithoutKey = false
+    private var modifierTap = KeyTaoModifierTap()
     private var hasComposition = false
     private var isActive = false
     private var englishMode = false
@@ -104,7 +100,11 @@ final class KeyTaoInputController: IMKInputController {
         clearPendingChordReleases()
         let client = sender as? IMKTextInput
         isActive = true
-        lastModifierFlags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        lastModifierFlags = KeyTaoModifierKeyPolicy.activationFlags(
+            NSEvent.modifierFlags,
+            systemCapsLock: CGEventSource.flagsState(.combinedSessionState).contains(.maskAlphaShift)
+        )
+        modifierTap.clear()
         KeyTaoRuntime.shared.checkForReload()
         let hadSession = session != nil
         ensureSession()
@@ -128,7 +128,7 @@ final class KeyTaoInputController: IMKInputController {
         hideCandidates()
         hideModeIndicator()
         lastModifierFlags = []
-        shiftPressedWithoutKey = false
+        modifierTap.clear()
         // Wait until IMKit's callback returns, including any reentrant key handling.
         DispatchQueue.main.async {
             guard Self.keyHandlingDepth == 0,
@@ -181,10 +181,8 @@ final class KeyTaoInputController: IMKInputController {
         deploymentKeyPressed(client: sender as? IMKTextInput)
         guard inputContextGeneration.isCurrent(generation) else { return false }
 
-        // Every key press ends the solo-Shift window, chords included. Deciding
-        // this from lastModifierFlags at release time loses Cmd+Shift+key, whose
-        // key down the system may never route here.
-        shiftPressedWithoutKey = false
+        // Any ordinary key makes a pending modifier press part of a shortcut.
+        modifierTap.clear()
 
         let modifiers = rimeModifiers(from: event.modifierFlags)
         if modifiers & rimeModifierSuper != 0 {
@@ -730,6 +728,7 @@ final class KeyTaoInputController: IMKInputController {
     private func runtimeDidReload() {
         let generation = inputContextGeneration.invalidate()
         clearPendingChordReleases()
+        modifierTap.clear()
         guard isActive else {
             hasComposition = false
             hideCandidates()
@@ -754,7 +753,6 @@ final class KeyTaoInputController: IMKInputController {
         let generation = inputContextGeneration.current
         let newFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let previousFlags = lastModifierFlags
-        let changedFlags = previousFlags.symmetricDifference(newFlags)
         // Install before calling the host. A reentrant focus reset must not
         // later be overwritten by a defer from the obsolete flags callback.
         lastModifierFlags = newFlags
@@ -763,12 +761,8 @@ final class KeyTaoInputController: IMKInputController {
             guard inputContextGeneration.isCurrent(generation) else { return false }
         }
         guard !keytao_deployment_blocks_input() else {
-            shiftPressedWithoutKey = false
+            modifierTap.clear()
             return false
-        }
-
-        if !newFlags.isDisjoint(with: chordModifiers) {
-            shiftPressedWithoutKey = false
         }
 
         if Int(event.keyCode) == kVK_CapsLock,
@@ -776,7 +770,7 @@ final class KeyTaoInputController: IMKInputController {
                previousModifiers: rimeModifiers(from: previousFlags),
                currentModifiers: rimeModifiers(from: newFlags)
            ) {
-            shiftPressedWithoutKey = false
+            modifierTap.clear()
             guard let session = ensureSession(),
                   let state = KeyTaoImeState.consuming(keytao_session_process_key_json(
                       session, capsLock.keyval, capsLock.modifiers
@@ -788,61 +782,23 @@ final class KeyTaoInputController: IMKInputController {
             return false
         }
 
-        guard changedFlags.contains(.shift) else {
-            return false
-        }
-
-        if newFlags.contains(.shift) {
-            shiftPressedWithoutKey = newFlags.isDisjoint(with: chordModifiers)
-            return false
-        }
-
-        let wasSoloShift = shiftPressedWithoutKey
-            && previousFlags.isDisjoint(with: chordModifiers)
-            && newFlags.isDisjoint(with: chordModifiers)
-        shiftPressedWithoutKey = false
-
-        guard wasSoloShift else {
-            return false
-        }
-        guard let session = ensureSession() else { return false }
-
-        let keyval: UInt32 = Int(event.keyCode) == kVK_RightShift ? rimeKeyShiftRight : rimeKeyShiftLeft
+        guard let keyval = modifierTap.update(
+            keyCode: event.keyCode,
+            previousFlags: previousFlags,
+            currentFlags: newFlags,
+            time: event.timestamp
+        ), let session = ensureSession() else { return false }
         let wasEnglishMode = keytao_session_get_english_mode(session)
         guard let state = KeyTaoImeState.consuming(
-            keytao_session_process_key_json(session, keyval, rimeReleaseMask)
-        ) else {
-            return toggleEnglishMode(client: client)
-        }
-
-        apply(state, to: client)
-        guard inputContextGeneration.isCurrent(generation) else { return state.accepted }
-        // ascii_composer may change a mode while leaving the release event
-        // unhandled. Falling back after that would undo the language switch.
-        if state.accepted || englishMode != wasEnglishMode {
-            showModeIndicator(state.modeHint, client: client)
-            return true
-        }
-        return toggleEnglishMode(client: client)
-    }
-
-    private func toggleEnglishMode(client: IMKTextInput?) -> Bool {
-        let generation = inputContextGeneration.invalidate()
-        guard let session = ensureSession() else { return false }
-        let nextEnglishMode = !keytao_session_get_english_mode(session)
-        if hasComposition {
-            endComposition(commit: false, client: client)
-            guard inputContextGeneration.isCurrent(generation) else { return false }
-            hideCandidates()
-        }
-
-        guard let state = KeyTaoImeState.consuming(
-            keytao_session_set_english_mode_json(session, nextEnglishMode)
+            keytao_session_process_modifier_tap_json(session, keyval)
         ) else { return false }
         apply(state, to: client)
-        guard inputContextGeneration.isCurrent(generation) else { return true }
-        showModeIndicator(state.modeHint, client: client)
-        return true
+        guard inputContextGeneration.isCurrent(generation) else { return state.accepted }
+        let handled = state.accepted || englishMode != wasEnglishMode
+        if handled {
+            showModeIndicator(state.modeHint, client: client)
+        }
+        return handled
     }
 
     // MARK: Input menu

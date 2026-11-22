@@ -412,6 +412,7 @@ fn prepare_targets(
                     overlay_for(&key)?,
                     inputs,
                     stage,
+                    core.env().platform == crate::Platform::Windows,
                 )?;
                 Ok(prepared.map(|prepared| {
                     let name = prepared
@@ -830,6 +831,7 @@ fn prepare_runtime(
     overlay: Option<&Files>,
     legacy: &Files,
     stage: bool,
+    windows_lua: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
     let runtime = RuntimeDirs::isolated_user_data_dir(control_root, key)
         .ok_or_else(|| CoreError::Other("Invalid runtime package key".into()))?;
@@ -993,6 +995,17 @@ fn prepare_runtime(
     );
     let used = crate::account::runtime_dictionary_usage(schema_configs.map(Vec::as_slice), &dictionaries)?;
     crate::account::add_runtime_user_dictionary(control_root, &dictionaries, &used, &mut generated)?;
+    if windows_lua
+        && let Some(entry) = user.get("rime.lua").or_else(|| generated.get("rime.lua"))
+    {
+        // Publish the same Lua inputs that the deployment receipt covers.
+        let compatibility = keytao_core::WindowsLuaCompatibility::new(utf8(entry)?);
+        for (path, bytes) in owned.iter_mut().chain(&mut generated).chain(&mut user) {
+            if let Some(patched) = compatibility.patch_source(path, bytes) {
+                *bytes = patched.into_bytes();
+            }
+        }
+    }
     runtime_overrides.retain(|path| user.contains_key(path));
     write_runtime(
         &runtime,
@@ -1417,6 +1430,10 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
 pub(crate) use tests::hashes as test_hashes;
 
 #[cfg(test)]
+#[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
+mod smoke_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1438,6 +1455,7 @@ mod tests {
             overlay,
             legacy,
             false,
+            cfg!(windows),
         )
         .map(|_| ())
     }
@@ -1491,6 +1509,88 @@ mod tests {
         })
         .unwrap();
         digests
+    }
+
+    #[test]
+    fn windows_lua_compatibility_does_not_invalidate_the_deployment_receipt() {
+        if crate::run_librime_test_in_child(
+            "runtime_materialize::tests::windows_lua_compatibility_does_not_invalidate_the_deployment_receipt",
+        ) {
+            return;
+        }
+        struct Sink;
+        impl crate::EventSink for Sink {
+            fn emit(&self, _: crate::CoreEvent) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: root.to_owned(),
+                cache_dir: root.join("cache"),
+                resource_dir: root.to_owned(),
+                app_version: "test".into(),
+                platform: crate::Platform::Windows,
+            },
+            std::sync::Arc::new(Sink),
+        )
+        .unwrap();
+        smoke_fixture::write(&bundled).unwrap();
+        let schema = format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID);
+        let upstream_schema = fs::read_to_string(bundled.join(&schema)).unwrap().replace(
+            "- table_translator",
+            "- table_translator\n    - lua_translator@sample",
+        );
+        put(&bundled, &schema, &upstream_schema);
+        put(&bundled, "rime.lua", "sample = require('sample')\n");
+        put(&bundled, "lua/sample.lua", "return function() end\n");
+        let upstream_helpers = concat!(
+            "local function is_key(key, key_event)\n",
+            "    local target_key = string.char(key_event.keycode) -- 当前按键对应字符\n\n",
+            "    -- 若无目标键位，则交由其它函数进行判断\n",
+            "    if not key then\n",
+            "        return true\n",
+            "    end\n",
+            "    return target_key == key\n",
+            "end\n",
+        );
+        put(&bundled, "lua/helpers.lua", upstream_helpers);
+        let key = "builtin/keytao";
+        put(
+            root,
+            RuntimeDirs::MIGRATION_MARKER,
+            &serde_json::json!({"version": 1, "runtime_package": key}).to_string(),
+        );
+        let (targets, _stages) = prepare_deploy_targets(&core, root, &bundled, Some(key)).unwrap();
+        keytao_core::isolated_deploy::deploy_packages(root, &bundled, None, &targets, |_| {})
+            .unwrap();
+        let runtime = RuntimeDirs::resolve(root, &bundled).unwrap().user_data_dir;
+        assert!(keytao_core::schema_install_state_with_shared(root, &bundled).deployed);
+        let changed = keytao_core::patch_windows_lua_compatibility(&runtime).unwrap();
+        assert!(
+            keytao_core::schema_install_state_with_shared(root, &bundled).deployed,
+            "IME startup Lua compatibility invalidated the receipt: {changed:?}"
+        );
+        assert!(changed.is_empty());
+        assert!(
+            fs::read_to_string(runtime.join(&schema))
+                .unwrap()
+                .contains("lua_translator@*sample")
+        );
+        assert_eq!(
+            fs::read_to_string(bundled.join(&schema)).unwrap(),
+            upstream_schema
+        );
+        let helpers = fs::read_to_string(runtime.join("lua/helpers.lua")).unwrap();
+        assert!(helpers.contains("keycode >= 0x7f"));
+        assert_eq!(
+            fs::read_to_string(bundled.join("lua/helpers.lua")).unwrap(),
+            upstream_helpers
+        );
+        put(&runtime, "lua/helpers.lua", &(helpers + "-- local edit\n"));
+        assert!(!keytao_core::schema_install_state_with_shared(root, &bundled).deployed);
+        assert!(keytao_core::schema_build_is_available(root));
     }
 
     #[test]

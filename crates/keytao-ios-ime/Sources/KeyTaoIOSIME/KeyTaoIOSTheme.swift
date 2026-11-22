@@ -251,6 +251,7 @@ public struct KeyTaoImeTheme: Codable {
             public var paddingX: CGFloat
             public var inlineGap: CGFloat
             public var fontScale: CGFloat
+            public var commentFontSize: CGFloat?
             public var showComment: Bool
             public var commentPosition: String?
             public var preeditForeground: KeyTaoThemeColor

@@ -187,6 +187,7 @@ AndroidImeInputSettingsDto patchAndroidSettings(
       45,
       100,
     ),
+    keyboardLayoutJson: original.keyboardLayoutJson,
     configPath: original.configPath,
     reloadStampPath: original.reloadStampPath,
     message: original.message,

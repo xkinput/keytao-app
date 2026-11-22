@@ -191,8 +191,8 @@ session 本身不会被销毁重建：`keytao_reload()` 会丢弃 runtime 内全
 
 1. `recognizedEvents` 只声明 `keyDown` 和 `flagsChanged`。
 2. `flagsChanged` 交给 `handleFlagsChanged()`。
-3. 任何 keyDown 都先无条件清掉 `shiftPressedWithoutKey`——包括 Command 组合键。否则 Cmd+Shift+X 之后松开 Shift 会被误判成 solo Shift 并切换中英。
-4. Shift/CapsLock/Control/Option/Command 转成 Rime modifier mask；CapsLock 映射为 `Lock`（`0x0002`），由通用层按 CapsLock XOR Shift 折入字符后剥除；Command 映射为 **Super**（`1 << 26`），与 X11/Rime 对窗口系统修饰键的约定一致。
+3. 任何 keyDown 都取消待确认的单键修饰键轻点，包括 Command 组合键。
+4. Shift/CapsLock/Control/Option/Command 转成 Rime modifier mask。CapsLock 的 `Lock`（`0x0002`）既用于通用层归一字符大小写，也传给 Rime 判断锁定状态。Command 映射为 **Super**（`1 << 26`），与 X11/Rime 对窗口系统修饰键的约定一致。
 5. mask 含 Super 时提前放行：Cmd 组合是窗口系统保留组合，librime 在 macOS 上不绑定它们。
 6. Carbon 特殊键转换为 X11 keysym：Return、**小键盘 Enter（`XK_KP_Enter`/`0xff8d`）**、Backspace、Delete、Escape、Space、方向键、Home/End、PageUp/PageDown、Tab、F4。
 7. 其余按键的文本→keysym 转换调用 `keytao_text_to_keysym()`，即 `keytao-core::key_policy::keysym_for_text` —— Latin-1 直通、其余 `0x01000000 | codepoint`。macOS 不再自己限制 ASCII 范围。无修饰键时用 `event.characters` 保留布局实际产生的字符（Shift+a 得到 `0x41`），带 Control/Option/Command 时用 `charactersIgnoringModifiers` 取基键。
@@ -289,20 +289,13 @@ Apple 官方 SDK 头文件对这两个接口的坐标契约很明确：
 - `AppKit.framework/Headers/NSTextInputClient.h`
 - `Carbon.framework/Frameworks/HIToolbox.framework/Headers/IMKInputSession.h`
 
-## Shift 与中英模式
+## 中英模式与系统输入源
 
-`handleFlagsChanged()` 只关心 Shift：
+`handleFlagsChanged()` 跟踪左右 Shift、Control 和 Option 的独立轻点。普通按键、组合修饰键、焦点变化或引擎重载会取消待确认的轻点。确认同一物理键在 500 毫秒内抬起时，通过 `keytao_session_process_modifier_tap_json()` 一次交给引擎按下和抬起事件。Rime 据 `ascii_composer/switch_key` 处理，包括未绑定或 `noop` 的键。Command 由系统处理。
 
-1. 只要新的 modifier 集合里出现 Command/Control/Option，立即清掉 `shiftPressedWithoutKey`。这条不能只靠松开时读 `lastModifierFlags`：像 Cmd+Shift+4 这类系统热键，其 keyDown 根本不会派发给输入法。
-2. Shift 按下时，只有当时没有其它修饰键才设置 `shiftPressedWithoutKey=true`，然后放行。
-3. 任何 keyDown 都会清掉 `shiftPressedWithoutKey`（见「按键处理」第 3 条）。
-4. Shift 松开时，只有“前后都没有 Command/Control/Option 混入且期间没有其它 keyDown”的 solo Shift 才继续处理。
-5. 左/右 Shift 分别传 `XK_Shift_L`/`0xffe1` 和 `XK_Shift_R`/`0xffe2`。
-6. modifiers 传 `rimeReleaseMask`。
-7. 如果 librime accepted，则应用状态并按 `modeHint` 显示 `ModeIndicatorPanel`。
-8. 如果 librime 不接受，则 fallback 到 `keytao_session_set_ascii_mode_json(session, !asciiMode)`。
+`Info.plist` 声明 `TICapsLockLanguageSwitchCapable`。启用系统键盘设置中的 Caps Lock／中英键切换后，macOS 负责在键道和最近使用的拉丁输入源间切换。普通 Caps Lock 状态变化仍按切换前的锁定位传给 Rime。激活输入源时从系统会话读当前锁定位。
 
-`ModeIndicatorPanel` 是主题驱动的 nonactivating `NSPanel`，默认 72x48，文案取自通用层 `ModeHintModel.text`（默认 `中` / `英`），默认 0.75 秒后自动隐藏。
+`ModeIndicatorPanel` 是主题驱动的 nonactivating `NSPanel`，默认 48×36，文案取自通用层 `ModeHintModel.text`（默认 `中` / `英`），默认 0.75 秒后自动隐藏。
 
 ## 输入法菜单
 
@@ -382,7 +375,7 @@ macOS renderer 要保留系统适配能力：当字体或颜色缺失时使用�
 | 光标定位 | IMK client rect + 前台窗口转换 + 鼠标 fallback | 协议提供 text rectangle / spot location / compositor popup surface，能力按后端不同 |
 | 重载 | 后台队列上的 `DispatchSource` 监听用户目录 + `activateServer` 兜底，走 `keytao_reload_if_stamp_changed()`；按键路径无文件 I/O | daemon watcher 轮询 reload stamp，session 按 generation 懒刷新 |
 | 日志 | 当前主要 `NSLog` 到系统日志 | `/tmp/keytao-ime.log` 滚动日志，App 可读取 |
-| 模式提示 | AppKit HUD，Shift release 或 fallback 切换后显示 | input-method-v2 有自绘 hint；KDE 目前只记日志；IBus 系统通道未统一 hint |
+| 模式提示 | AppKit HUD，Rime 中英模式切换后显示 | input-method-v2 有自绘 hint；KDE 目前只记日志；IBus 系统通道未统一 hint |
 
 因此统一主题时，macOS 和 Linux 不能共享“渲染实现”，但应共享“输入模型、主题语义和 fallback 规则”。Mac 端负责把主题语义映射到 AppKit；Linux 自绘通道负责映射到像素 buffer；系统候选服务只能尽量映射文字、label、highlight/page 信息。
 
@@ -392,8 +385,7 @@ macOS renderer 要保留系统适配能力：当字体或颜色缺失时使用�
 
 1. ~~先抽出平台无关的候选/模式提示模型字段~~ 已完成：macOS 现在消费 `CandidatePanelModel` / `ModeHintModel`。
 2. 增强 `macos_ime_status`：检查 bundle、TIS 注册、主输入源 enabled/selectable/current、旧输入源残留。
-3. 如需支持 CapsLock 切换，再补 `flagsChanged` 状态同步并重新声明 `TICapsLockLanguageSwitchCapable`。
-4. 再补 schema 切换、选项开关、周边文本、鼠标 hover/滚轮等体验能力。
+3. 再补 schema 切换、选项开关、周边文本、鼠标 hover/滚轮等体验能力。
 
 ## librime 按键兼容基线
 
@@ -403,8 +395,8 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
 - Shift+a 在中文状态下应传 `0x41` 加 Shift mask，让 librime 的 ASCII composer 处理大写首字母或符号输入。
 - Ctrl/Option 组合键应保留为基键加 Control/Alt mask，先送 Rime，由 `accepted` 决定是否放行给应用（Rime 的 `key_binder`、`Ctrl+grave` 之类的绑定要能收到）。
 - Command 映射为 Super mask（`1 << 26`）；作为窗口系统保留组合，macOS 仍提前放行，见「按键处理」的偏离登记。
-- solo Shift release 才用于中英模式切换；Shift+字母、Shift+数字符号必须清掉 `shiftPressedWithoutKey`，走普通 key press 路径。
-- CapsLock 作为 `Lock` 传给通用层，确保与 Shift 同时按下时正确恢复小写；通用层折入字符后剥除该位，不把 Lock 交给 librime。这不代表实现 CapsLock 中英切换。
+- 只有独立轻点的 Shift、Control 或 Option 才成对传给引擎；组合按键走普通 key press 路径。
+- 普通 Caps Lock 变化使用切换前的 `Lock` 位，字母仍按当前 Shift／Caps Lock 状态归一。
 - 非 Latin-1 字符按 X11 约定编码为 `0x01000000 | codepoint`，由 `keytao_text_to_keysym()` 统一产出；Rime 不接受时 `handle` 返回 false，字符由 macOS 原生路径上屏，不会丢字。
 
 ## 当前已接入能力
@@ -418,7 +410,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
 - 候选点击选择。
 - 候选翻页按钮。
 - 候选窗/模式提示按 `client.windowLevel() + 1` 抬升层级。
-- Shift release 中英切换与 fallback 手动切换。
+- 遵循方案的 Shift、Control、Option 中英绑定，以及 macOS 的 Caps Lock／中英键输入源切换。
 - Shift+字母大写输入兼容。
 - 小键盘 Enter 映射为 `XK_KP_Enter`；无法映射的按键在有 composition 时先提交再放行。
 - 输入法菜单里的 redeploy 和打开主 App。
@@ -431,10 +423,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
 2. 输入源状态检测仍偏浅  
    `macos_ime_status` 已展示 user/shared/reload/log 目录信息，但输入源安装状态仍主要看可执行文件是否存在；没有检查 TIS 是否已注册、主输入源是否 enabled/selectable、当前是否选中，也没有展示旧输入源残留。
 
-3. CapsLock 切换尚未实现  
-   当前未声明 `TICapsLockLanguageSwitchCapable`。如果后续要支持 CapsLock 中英切换，需要补 `flagsChanged` 同步、Rime `ascii_mode` 状态规则，并避免和 solo Shift 切换冲突。
-
-4. 原生菜单缺少 Rime 常用操作
+3. 原生菜单缺少 Rime 常用操作
    `F4` 已通过 librime 打开 Rime schema / options 菜单；macOS 输入源菜单本身目前仍只有 Redeploy 和 Open App，尚未把同步用户数据、重置用户词典、显示当前 schema/status 等做成原生菜单项。
 
 5. 候选键盘操作未做 Mac 侧增强  

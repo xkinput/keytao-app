@@ -217,7 +217,7 @@ class _CurrentSchemeHero extends StatelessWidget {
           packageName: activePackage.displayName,
           schemaId: schema.id,
           name: schema.name,
-          ready: activePackage.ready,
+          ready: c.schemas.isNotEmpty || activePackage.ready,
         ));
       }
     } else {
@@ -315,7 +315,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                 local.installedScheme,
                 local.installedSchemeVersion,
               ));
-    final deployed = local?.deployed == true;
+    final deployed = c.hasUsableBuild;
     final deployLabel = local == null
         ? AppStrings.checking
         : !local.installed
@@ -451,6 +451,8 @@ class _CurrentSchemeHero extends StatelessWidget {
                     ? palette.successForeground
                     : palette.muted,
               ),
+              if (deployed && local?.deployed == false)
+                const AppBadge(AppStrings.pendingRedeploy),
               if (source != null) Text('来自 $source'),
             ],
           ),

@@ -128,7 +128,7 @@ void _narrowScreen(WidgetTester tester) {
 
 Future<void> _pumpSettings(
   WidgetTester tester,
-  _PreviewController controller,
+  ViewController controller,
 ) async {
   _narrowScreen(tester);
   addTearDown(controller.dispose);
@@ -203,7 +203,7 @@ void main() {
     }
   });
 
-  testWidgets('desktop and mobile previews keep number left of a two-line candidate', (
+  testWidgets('below-comment previews align horizontal candidates at the top', (
     tester,
   ) async {
     _narrowScreen(tester);
@@ -217,6 +217,8 @@ void main() {
     );
     theme['candidate']['commentPosition'] = 'below';
     theme['mobile']['candidateBar']['commentPosition'] = 'below';
+    theme['font']['commentSize'] = 18.0;
+    theme['mobile']['candidateBar']['commentFontSize'] = 19.0;
 
     for (final (keyboard, orientation) in [
       (false, PanelOrientationDto.horizontal),
@@ -231,10 +233,16 @@ void main() {
               theme: theme,
               orientation: orientation,
               showPreedit: false,
-              candidateCount: 1,
-              candidates: const [(text: '词条', comment: '测试注释')],
+              candidateCount: 2,
+              candidates: const [
+                (text: '词条', comment: '测试注释'),
+                (text: '无注释', comment: ''),
+              ],
               keyboard: keyboard,
               editorPreview: keyboard,
+              highlightPath: keyboard
+                  ? 'mobile.candidateBar.commentFontSize'
+                  : 'pc.font.commentSize',
             ),
           ),
         ),
@@ -246,6 +254,29 @@ void main() {
       expect(label.right, lessThanOrEqualTo(word.left));
       expect(comment.left, closeTo(word.left, 0.1));
       expect(comment.top, greaterThanOrEqualTo(word.bottom));
+      expect(
+        tester.widget<Text>(find.text('测试注释')).style?.fontSize,
+        keyboard ? 19 : 18,
+      );
+      expect(
+        find.ancestor(
+          of: find.text('测试注释'),
+          matching: find.byWidgetPredicate((widget) {
+            if (widget is! DecoratedBox) return false;
+            final decoration = widget.decoration;
+            if (decoration is! BoxDecoration) return false;
+            final border = decoration.border;
+            return border is Border &&
+                border.top.color == const Color(0xFFE02020) &&
+                border.top.width == 0.5;
+          }),
+        ),
+        findsOneWidget,
+      );
+      if (orientation == PanelOrientationDto.horizontal) {
+        expect(tester.getTopLeft(find.text('无注释')).dy, closeTo(word.top, 0.1));
+        expect(tester.getTopLeft(find.text('2.')).dy, closeTo(label.top, 0.1));
+      }
       expect(tester.takeException(), isNull);
     }
   });
@@ -269,20 +300,30 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    for (final key in 'qwertyuiopasdfghjkl'.split('')) {
+    for (final key in 'qwertyuiopasdfghjkl⇧zxcvbnm⌫'.split('')) {
       expect(find.byKey(ValueKey('keyboard-preview-key-$key')), findsOneWidget);
     }
-    // The home preview keeps the alpha.1 toolbar and two letter rows.
-    for (final key in 'zxcvbnm'.split('')) {
-      expect(find.text(key), findsNothing);
-    }
-    for (final label in ['⇧', '⌫', '，', '键道6', '。']) {
-      expect(find.byKey(ValueKey('keyboard-preview-key-$label')), findsNothing);
-    }
-    for (final label in ['123', '符', '空格', '↵']) {
-      expect(find.byKey(ValueKey('keyboard-preview-key-$label')), findsNothing);
+    for (final label in ['123', '，', '空格', '。', '↵']) {
+      expect(
+        find.byKey(ValueKey('keyboard-preview-key-$label')),
+        findsOneWidget,
+      );
     }
     final keyboard = find.byKey(const ValueKey('mobile-keyboard-preview'));
+    final viewport = find.byKey(
+      const ValueKey('mobile-keyboard-preview-viewport'),
+    );
+    final first = find.byKey(const ValueKey('keyboard-preview-key-q'));
+    final second = find.byKey(const ValueKey('keyboard-preview-key-a'));
+    final third = find.byKey(const ValueKey('keyboard-preview-key-z'));
+    final cropped = tester.getRect(viewport);
+    expect(tester.getRect(first).bottom, lessThan(cropped.bottom));
+    expect(tester.getRect(second).top, lessThan(cropped.bottom));
+    expect(tester.getRect(third).top, greaterThan(cropped.bottom));
+    expect(
+      find.ancestor(of: viewport, matching: find.byType(ShaderMask)),
+      findsOneWidget,
+    );
     expect(
       find.descendant(of: keyboard, matching: find.text('1')),
       findsOneWidget,
@@ -298,6 +339,144 @@ void main() {
     expect(find.bySemanticsLabel('KeyTao 键盘预览，键道6，静态展示'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+  testWidgets(
+    'mobile editor exposes the full keyboard and precise edit fields',
+    (tester) async {
+      _narrowScreen(tester);
+      final controller = ViewController(BridgePlatform.ios);
+      addTearDown(controller.dispose);
+      final theme = controller.resolveCandidatePanelPreview(
+        colorScheme: UiColorSchemeDto.light,
+        accentColor: '#3B73D9',
+        fontSize: 20,
+        systemDark: false,
+      );
+      final fields = <String>[];
+      Future<void> show({String? highlighted}) => tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.ios,
+          home: FScaffold(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: CandidatePanelPreview(
+                theme: theme,
+                showPreedit: false,
+                keyboard: true,
+                editorPreview: true,
+                highlightPath: highlighted,
+                onEditField: fields.add,
+              ),
+            ),
+          ),
+        ),
+      );
+      await show();
+      await tester.pumpAndSettle();
+      final space = find.byKey(const ValueKey('keyboard-preview-key-空格'));
+      final keyboard = find.byKey(const ValueKey('mobile-keyboard-preview'));
+      expect(
+        tester.getRect(space).bottom,
+        lessThan(tester.getRect(keyboard).bottom),
+      );
+      expect(
+        find.byKey(const ValueKey('mobile-keyboard-preview-viewport')),
+        findsNothing,
+      );
+      await tester.tapAt(tester.getRect(space).topLeft + const Offset(8, 8));
+      await tester.tap(find.text('KeyTao'));
+      await tester.tap(find.byIcon(FLucideIcons.grid2x2));
+      await show(highlighted: 'mobile.candidateBar.background');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('zhè'));
+      expect(fields, [
+        'mobile.keyboard.keyTypes.space.background',
+        'mobile.keyboard.keyTypes.space.foreground',
+        'mobile.keyboard.toolbar.foreground',
+        'mobile.candidateBar.selectedCommentColor',
+      ]);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets('phone home preview follows Auto and explicit appearance', (
+    tester,
+  ) async {
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    final controller = _PreviewController(BridgePlatform.android)
+      ..updateSettings(colorScheme: UiColorSchemeDto.auto);
+    await _pumpSettings(tester, controller);
+    final keyboard = find.byKey(const ValueKey('mobile-keyboard-preview'));
+    Color? background() =>
+        (tester.widget<Container>(keyboard).decoration as BoxDecoration).color;
+    final light = background();
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    await tester.pumpAndSettle();
+    expect(background(), isNot(light));
+    controller.updateSettings(colorScheme: UiColorSchemeDto.light);
+    await tester.pumpAndSettle();
+    expect(background(), light);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+  testWidgets('home and editor both use the resolved custom keyboard rows', (
+    tester,
+  ) async {
+    final controller = ViewController(
+      BridgePlatform.android,
+      keyboardLayoutJson: '''{
+        "horizontalGap": 8,
+        "rows": [
+          [{"label":"宽","weight":2,"hint":"①"},{"label":"窄"}],
+          [{"label":"次"}],
+          [{"label":"底"}]
+        ]
+      }''',
+    );
+    await _pumpSettings(tester, controller);
+    final wide = find.byKey(const ValueKey('keyboard-preview-key-宽'));
+    final narrow = find.byKey(const ValueKey('keyboard-preview-key-窄'));
+    void expectLayout() {
+      expect(
+        find.byKey(const ValueKey('keyboard-preview-key-q')),
+        findsNothing,
+      );
+      expect(find.text('①'), findsOneWidget);
+      expect(find.text('底'), findsOneWidget);
+      expect(
+        tester.getSize(wide).width,
+        closeTo(2 * tester.getSize(narrow).width, 0.01),
+      );
+    }
+
+    expectLayout();
+
+    final theme = controller.resolveCandidatePanelPreview(
+      colorScheme: UiColorSchemeDto.light,
+      accentColor: '#3B73D9',
+      fontSize: 20,
+      systemDark: false,
+    );
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: BridgePlatform.android,
+        home: FScaffold(
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: CandidatePanelPreview(
+              theme: theme,
+              showPreedit: false,
+              editorPreview: true,
+              keyboard: true,
+              keyboardSettings: controller.androidSettings,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expectLayout();
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   for (final orientation in PanelOrientationDto.values) {
@@ -455,15 +634,24 @@ void main() {
       // The first move starts the drag; the next move changes its value.
       await gesture.moveBy(const Offset(-24, 0));
       await tester.pump();
+      await gesture.moveTo(Offset(rect.left + rect.width * .3, rect.center.dy));
+      await tester.pump(const Duration(milliseconds: 16));
       await gesture.moveTo(Offset(rect.left + rect.width * .1, rect.center.dy));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.widget<Text>(_firstText).style!.fontSize, 24);
+      await tester.pump(const Duration(milliseconds: 80));
       final previewFont = tester.widget<Text>(_firstText).style!.fontSize!;
       expect(previewFont, lessThan(24));
       expect(tester.getSize(_panel).height, lessThan(originalHeight));
       expect(controller.savedFonts, isEmpty);
+      await gesture.moveTo(Offset(rect.left + rect.width * .9, rect.center.dy));
       await gesture.up();
       await tester.pumpAndSettle();
-      expect(controller.savedFonts, [previewFont]);
+      expect(controller.savedFonts.single, greaterThan(24));
+      expect(
+        tester.widget<Text>(_firstText).style!.fontSize,
+        controller.savedFonts.single,
+      );
 
       controller.saveGate = Completer<bool>();
       final horizontal = find.text('横排');
@@ -560,7 +748,7 @@ void main() {
       );
       await drag.moveBy(const Offset(20, 0));
       await drag.moveTo(Offset(bounds.right - 1, bounds.center.dy));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
       Map<String, dynamic> preview() => tester
           .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
           .theme;
@@ -590,7 +778,7 @@ void main() {
         ),
         '#102030',
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
       expect(_panelColor(tester), isNot(light));
       expect(controller.uiSettings!.backgroundColor, isEmpty);
       await tester.tap(find.text(AppStrings.cancel));
@@ -630,8 +818,13 @@ void main() {
       final radius = tester.widget<SliderSetting>(
         find.widgetWithText(SliderSetting, '圆角'),
       );
+      final previewElement = tester.element(find.byType(CandidatePanelPreview));
       radius.onPreview!(24);
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      expect(
+        tester.element(find.byType(CandidatePanelPreview)),
+        same(previewElement),
+      );
       if (!controller.isMobile) {
         expect(decoration(panel).borderRadius, BorderRadius.circular(24));
       }
@@ -647,7 +840,7 @@ void main() {
         );
       }
       radius.onPreview!(0);
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
       if (!controller.isMobile) {
         expect(decoration(panel).borderRadius, BorderRadius.zero);
       }
@@ -675,7 +868,7 @@ void main() {
           ),
           '#102030',
         );
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
       }
 
       await editBackground();

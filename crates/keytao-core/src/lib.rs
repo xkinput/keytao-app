@@ -9441,6 +9441,32 @@ fn patch_keydo_helpers(content: &str) -> Option<String> {
         .filter(|patched| patched != content)
 }
 
+/// Source adjustments required by Windows hosts that keep a Lua VM alive.
+pub struct WindowsLuaCompatibility {
+    bindings: HashMap<String, String>,
+}
+
+impl WindowsLuaCompatibility {
+    pub fn new(entry: &str) -> Self {
+        Self {
+            bindings: parse_rime_lua_require_bindings(entry),
+        }
+    }
+
+    pub fn patch_source(&self, path: &str, content: &[u8]) -> Option<String> {
+        if self.bindings.is_empty() {
+            return None;
+        }
+        if path.eq_ignore_ascii_case("lua/helpers.lua") {
+            patch_keydo_helpers(std::str::from_utf8(content).ok()?)
+        } else if path.ends_with(".schema.yaml") && !path.contains('/') {
+            rewrite_lua_component_autoloads(std::str::from_utf8(content).ok()?, &self.bindings)
+        } else {
+            None
+        }
+    }
+}
+
 /// Convert package-global Lua components to librime-lua's lazy module form.
 ///
 /// Windows loads a TSF DLL into long-lived host processes such as Explorer.
@@ -9454,8 +9480,8 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("read {}: {error}", rime_lua_path.display())),
     };
-    let bindings = parse_rime_lua_require_bindings(&rime_lua);
-    if bindings.is_empty() {
+    let compatibility = WindowsLuaCompatibility::new(&rime_lua);
+    if compatibility.bindings.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -9472,7 +9498,7 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
         }
         let content = std::fs::read_to_string(&path)
             .map_err(|error| format!("read {}: {error}", path.display()))?;
-        let Some(patched) = rewrite_lua_component_autoloads(&content, &bindings) else {
+        let Some(patched) = compatibility.patch_source(file_name, content.as_bytes()) else {
             continue;
         };
         // A deployment stage can share this file with the live package via a hard link.
@@ -9483,7 +9509,7 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
         let compiled_path = dirs.staging_dir.join(file_name);
         match std::fs::read_to_string(&compiled_path) {
             Ok(compiled) => {
-                if let Some(patched) = rewrite_lua_component_autoloads(&compiled, &bindings) {
+                if let Some(patched) = compatibility.patch_source(file_name, compiled.as_bytes()) {
                     write_file_atomic(&compiled_path, patched.as_bytes())
                         .map_err(|error| format!("write {}: {error}", compiled_path.display()))?;
                     changed.push(format!("build/{file_name}"));
@@ -9496,7 +9522,7 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
 
     let helpers_path = user_data_dir.join("lua").join("helpers.lua");
     if let Ok(content) = std::fs::read_to_string(&helpers_path) {
-        if let Some(patched) = patch_keydo_helpers(&content) {
+        if let Some(patched) = compatibility.patch_source("lua/helpers.lua", content.as_bytes()) {
             write_file_atomic(&helpers_path, patched.as_bytes())
                 .map_err(|error| format!("write {}: {error}", helpers_path.display()))?;
             changed.push("lua/helpers.lua".to_string());

@@ -9,6 +9,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
+import 'mobile_keyboard_preview.dart' show themePreviewOutline;
 import 'system_font_picker.dart';
 import 'theme.dart';
 import 'theme_library.dart';
@@ -20,14 +21,6 @@ Future<void> showThemeEditorDialog(
 }) => showFDialog<void>(
   context: context,
   builder: (context, _, animation) {
-    final content = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 8,
-      children: [
-        ThemeLibrarySection(controller: controller),
-        Expanded(child: ThemeEditorSection(controller: controller)),
-      ],
-    );
     final close = ActionButton('关闭', onPress: () => Navigator.pop(context));
     if (controller.isMobile) {
       return Scaffold(
@@ -35,23 +28,26 @@ Future<void> showThemeEditorDialog(
         body: SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              spacing: 12,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '编辑主题',
-                        style: context.theme.typography.display.lg,
+            child: ThemeEditorSection(
+              controller: controller,
+              header: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                spacing: 12,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '编辑主题',
+                          style: context.theme.typography.display.lg,
+                        ),
                       ),
-                    ),
-                    close,
-                  ],
-                ),
-                Expanded(child: content),
-              ],
+                      close,
+                    ],
+                  ),
+                  ThemeLibrarySection(controller: controller),
+                ],
+              ),
             ),
           ),
         ),
@@ -66,15 +62,23 @@ Future<void> showThemeEditorDialog(
       child: SizedBox(
         width: 1120,
         height: (MediaQuery.sizeOf(context).height - 200).clamp(240, 720),
-        child: content,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: 8,
+          children: [
+            ThemeLibrarySection(controller: controller),
+            Expanded(child: ThemeEditorSection(controller: controller)),
+          ],
+        ),
       ),
     );
   },
 );
 
 class ThemeEditorSection extends StatefulWidget {
-  const ThemeEditorSection({super.key, required this.controller});
+  const ThemeEditorSection({super.key, required this.controller, this.header});
   final AppController controller;
+  final Widget? header;
 
   @override
   State<ThemeEditorSection> createState() => _ThemeEditorSectionState();
@@ -82,11 +86,17 @@ class ThemeEditorSection extends StatefulWidget {
 
 class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   static const _commentPositions = {'inline': '词条旁', 'below': '词条下'};
+  static const _mobileCommentSizePath = 'mobile.candidateBar.commentFontSize';
 
   Map<String, dynamic>? _snapshot;
   Map<String, dynamic>? _draft;
   final Map<String, Map<String, dynamic>> _previews = {};
   (String, Object?)? _previewField;
+  (String, Object)? _queuedPreview;
+  Timer? _previewDebounce;
+  String? _hoveredField;
+  String? _activeField;
+  String? _openingGroup;
   ImeUiSettingsDto? _settings;
   bool _storageReady = false;
   bool _loading = false;
@@ -107,6 +117,10 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   Map<String, dynamic> get _source =>
       _snapshot!['source'] as Map<String, dynamic>;
   Map<String, dynamic> get _resolved => _draft ?? _previews[_target]!;
+  String? get _highlightPath =>
+      (_draft != null ? _previewField?.$1 : null) ??
+      _hoveredField ??
+      _activeField;
 
   Set<String> get _disabledTargets {
     final light = _snapshot!['resolvedLight']['ui']['effectiveColorScheme'];
@@ -115,6 +129,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   }
 
   void _accept(Map<String, dynamic> snapshot) {
+    _cancelPreview();
     _snapshot = snapshot;
     for (final target in ['light', 'dark']) {
       _previews[target] = _controller.resolveThemeEditorPreview(
@@ -156,6 +171,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
 
   @override
   void dispose() {
+    _cancelPreview();
     _controller.removeListener(_changed);
     super.dispose();
   }
@@ -208,6 +224,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   }
 
   Future<void> _perform(Future<Map<String, dynamic>> Function() action) async {
+    _cancelPreview();
     setState(() {
       _working = true;
       _error = null;
@@ -263,6 +280,9 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     }
     final rawValue = _at(raw, resolvedPath);
     final value = rawValue is Map ? _at(_resolved, resolvedPath) : rawValue;
+    if (value == null && path == _mobileCommentSizePath) {
+      return 12 * (_at(_resolved, 'mobile.candidateBar.fontScale') as num);
+    }
     if (value != null || !path.startsWith('mobile.keyboard.key')) return value;
     final field = path.split('.').last;
     if (path.startsWith('mobile.keyboard.keyTypes.space.') ||
@@ -277,7 +297,70 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       _mobile != _controller.isMobile ||
       (_snapshot!['capabilities']['supportedFields'] as List).contains(path);
 
+  Element? _findElement(Element? root, Key key) {
+    if (root == null || root.widget.key == key) return root;
+    Element? match;
+    root.visitChildren((child) => match ??= _findElement(child, key));
+    return match;
+  }
+
+  void _focusPreviewField(String path) {
+    if (!_enabled || !_supported(path)) return;
+    final tab = _mobile;
+    Element? findField() => _findElement(
+      _controlKeys[tab]!.currentContext as Element?,
+      ValueKey(('theme-control', path)),
+    );
+    final field = findField();
+    if (field == null) return;
+    final key = field.findAncestorWidgetOfExactType<FAccordion>()?.key;
+    final group = key is ValueKey<(String, String)> ? key.value.$2 : null;
+    setState(() {
+      _cancelPreview();
+      _draft = null;
+      _hoveredField = null;
+      _activeField = path;
+      _openingGroup = group;
+      if (group != null) _expandedGroups[group] = true;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _mobile != tab || _activeField != path) return;
+      final target = findField();
+      final focus = _findElement(target, const ValueKey('theme-field-focus'));
+      if (focus == null) return;
+      Focus.of(focus, createDependency: false).requestFocus();
+      Scrollable.ensureVisible(
+        focus,
+        alignment: .15,
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _cancelPreview() {
+    _previewDebounce?.cancel();
+    _previewDebounce = null;
+    _queuedPreview = null;
+  }
+
+  void _schedulePreview(String path, Object value) {
+    _previewDebounce?.cancel();
+    _queuedPreview = (path, value);
+    _previewDebounce = Timer(const Duration(milliseconds: 80), () {
+      if (_enabled) {
+        _preview(path, value);
+      } else {
+        _cancelPreview();
+      }
+    });
+  }
+
   void _preview(String path, Object? value) {
+    _cancelPreview();
+    if (_draft != null && _previewField == (path, value)) return;
     final source = jsonDecode(jsonEncode(_source)) as Map<String, dynamic>;
     var node = source;
     final parts = [_target, ...path.split('.')];
@@ -302,6 +385,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       setState(() {
         _draft = preview;
         _previewField = (path, value);
+        _activeField = path;
       });
       _loadFontWeights();
     } catch (failure) {
@@ -344,6 +428,12 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     bool compact = false,
   }) {
     final supported = _supported(path);
+    void activate() {
+      if (supported && _activeField != path) {
+        setState(() => _activeField = path);
+      }
+    }
+
     final reset = _reset(
       label,
       _enabled &&
@@ -384,7 +474,29 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     return KeyedSubtree(
       key: ValueKey(('theme-control', path)),
       child: supported
-          ? row
+          ? MouseRegion(
+              onEnter: (_) => setState(() => _hoveredField = path),
+              onExit: (_) {
+                if (_hoveredField == path) {
+                  setState(() => _hoveredField = null);
+                }
+              },
+              child: Listener(
+                behavior: HitTestBehavior.translucent,
+                onPointerDown: (_) => activate(),
+                child: Focus(
+                  skipTraversal: true,
+                  onFocusChange: (focused) {
+                    if (focused) activate();
+                  },
+                  child: Builder(
+                    key: const ValueKey('theme-field-focus'),
+                    builder: (_) =>
+                        themePreviewOutline(row, _highlightPath == path),
+                  ),
+                ),
+              ),
+            )
           : FTooltip(tipBuilder: (_, _) => const Text('本平台不支持'), child: row),
     );
   }
@@ -398,7 +510,9 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     bool scale = false,
     bool compact = false,
   }) {
-    final value = ((_value(path) as num).toDouble() * (scale ? 100 : 1)).clamp(
+    final pending = _queuedPreview;
+    final selected = pending?.$1 == path ? pending!.$2 : _value(path);
+    var value = ((selected as num).toDouble() * (scale ? 100 : 1)).clamp(
       min,
       max,
     );
@@ -409,44 +523,43 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     return _field(
       label,
       path,
-      Row(
-        spacing: 8,
-        children: [
-          Expanded(
-            child: FSlider(
-              enabled: _enabled && _supported(path),
-              // A disabled thumb can leave a queued tooltip layout; use the value tooltip.
-              tooltipControls: const FSliderTooltipControls.disabled(),
-              control: FSliderControl.liftedContinuous(
-                value: FSliderValue(max: (value - min) / (max - min)),
-                stepPercentage: 1 / divisions,
-                onChange: (value) {
-                  final draft = number(value.max);
-                  _preview(path, scale ? draft / 100 : draft);
-                },
-              ),
-              onEnd: _enabled && _supported(path)
-                  ? (value) {
-                      final next = number(value.max);
-                      _save(path, scale ? next / 100 : next);
-                    }
-                  : null,
-              semanticValueFormatterCallback: (value) =>
-                  '$label ${display(number(value))}',
-            ),
-          ),
-          FTooltip(
-            tipBuilder: (_, _) => Text('$label ${display(value)}'),
-            child: SizedBox(
-              width: compact ? 20 : 40,
-              child: Text(
-                display(value),
-                textAlign: TextAlign.right,
-                style: context.theme.typography.body.xs,
+      StatefulBuilder(
+        builder: (context, setLocalState) => Row(
+          spacing: 8,
+          children: [
+            Expanded(
+              child: FSlider(
+                enabled: _enabled && _supported(path),
+                // A disabled thumb can leave a queued tooltip layout; use the value tooltip.
+                tooltipControls: const FSliderTooltipControls.disabled(),
+                control: FSliderControl.liftedContinuous(
+                  value: FSliderValue(max: (value - min) / (max - min)),
+                  stepPercentage: 1 / divisions,
+                  onChange: (selection) {
+                    setLocalState(() => value = number(selection.max));
+                    _schedulePreview(path, scale ? value / 100 : value);
+                  },
+                ),
+                onEnd: _enabled && _supported(path)
+                    ? (_) => _save(path, scale ? value / 100 : value)
+                    : null,
+                semanticValueFormatterCallback: (value) =>
+                    '$label ${display(number(value))}',
               ),
             ),
-          ),
-        ],
+            FTooltip(
+              tipBuilder: (_, _) => Text('$label ${display(value)}'),
+              child: SizedBox(
+                width: compact ? 20 : 40,
+                child: Text(
+                  display(value),
+                  textAlign: TextAlign.right,
+                  style: context.theme.typography.body.xs,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
       compact: compact,
     );
@@ -639,10 +752,11 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                     context,
                     initial: value,
                     title: label,
-                    onPreview: (value) => _preview(path, value),
+                    onPreview: (value) => _schedulePreview(path, value),
                   );
                   if (!mounted) return;
                   if (color == null) {
+                    _cancelPreview();
                     setState(() => _draft = null);
                   } else {
                     await _save(path, color);
@@ -691,9 +805,15 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     key: ValueKey(('theme-group', id)),
     control: FAccordionControl.lifted(
       expanded: (_) => _expandedGroups[id] ?? false,
-      onChange: (_, expanded) => setState(() => _expandedGroups[id] = expanded),
+      onChange: (_, expanded) => setState(() {
+        _openingGroup = null;
+        _expandedGroups[id] = expanded;
+      }),
     ),
     style: FAccordionStyleDelta.delta(
+      motion: _openingGroup == id
+          ? const FAccordionMotionDelta.delta(expandDuration: Duration.zero)
+          : null,
       titlePadding: EdgeInsetsGeometryDelta.value(
         EdgeInsets.symmetric(vertical: context.platformVariant.touch ? 12 : 8),
       ),
@@ -713,65 +833,82 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     ],
   );
 
+  void _switchTab(bool mobile) {
+    if (_mobile == mobile) return;
+    setState(() {
+      _cancelPreview();
+      _mobile = mobile;
+      _draft = null;
+      _hoveredField = null;
+      _activeField = null;
+      _openingGroup = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_snapshot == null) {
       return Column(
         children: [
+          ?widget.header,
           if (_loading) const FProgress(),
           if (_error case final error?) ErrorMessage(error),
         ],
       );
     }
+    final settings = [
+      _row(
+        '外观',
+        _select<UiColorSchemeDto>(
+          '外观',
+          UiColorSchemeDto.values.byName(_snapshot!['colorScheme'] as String),
+          const {
+            UiColorSchemeDto.auto: '自动',
+            UiColorSchemeDto.light: '浅色',
+            UiColorSchemeDto.dark: '深色',
+          },
+          _enabled
+              ? (value) =>
+                    _perform(() => _controller.setThemeEditorColorScheme(value))
+              : null,
+        ),
+        trailing: _reset(
+          '外观',
+          _enabled
+              ? () =>
+                    _perform(() => _controller.setThemeEditorColorScheme(null))
+              : null,
+        ),
+      ),
+      _row(
+        '编辑目标',
+        _select<String>(
+          '编辑目标',
+          _target,
+          {
+            for (final entry in const {'light': '浅色', 'dark': '深色'}.entries)
+              if (!_disabledTargets.contains(entry.key)) entry.key: entry.value,
+          },
+          _enabled
+              ? (value) => setState(() {
+                  _cancelPreview();
+                  _target = value;
+                  _draft = null;
+                  _loadFontWeights();
+                })
+              : null,
+        ),
+      ),
+      if (_working) const FProgress(),
+    ];
+    if (_controller.isMobile) {
+      return _mobileEditor(settings);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       spacing: 4,
       children: [
-        _row(
-          '外观',
-          _select<UiColorSchemeDto>(
-            '外观',
-            UiColorSchemeDto.values.byName(_snapshot!['colorScheme'] as String),
-            const {
-              UiColorSchemeDto.auto: '自动',
-              UiColorSchemeDto.light: '浅色',
-              UiColorSchemeDto.dark: '深色',
-            },
-            _enabled
-                ? (value) => _perform(
-                    () => _controller.setThemeEditorColorScheme(value),
-                  )
-                : null,
-          ),
-          trailing: _reset(
-            '外观',
-            _enabled
-                ? () => _perform(
-                    () => _controller.setThemeEditorColorScheme(null),
-                  )
-                : null,
-          ),
-        ),
-        _row(
-          '编辑目标',
-          _select<String>(
-            '编辑目标',
-            _target,
-            {
-              for (final entry in const {'light': '浅色', 'dark': '深色'}.entries)
-                if (!_disabledTargets.contains(entry.key))
-                  entry.key: entry.value,
-            },
-            _enabled
-                ? (value) => setState(() {
-                    _target = value;
-                    _draft = null;
-                    _loadFontWeights();
-                  })
-                : null,
-          ),
-        ),
-        if (_working) const FProgress(),
+        ...settings,
         Expanded(
           child: FTabs(
             expands: true,
@@ -779,10 +916,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             style: const FTabsStyleDelta.delta(spacing: 6, minHeight: 32),
             control: FTabControl.lifted(
               index: _mobile ? 1 : 0,
-              onChange: (index) => setState(() {
-                _mobile = index == 1;
-                _draft = null;
-              }),
+              onChange: (index) => _switchTab(index == 1),
             ),
             children: [
               FTabEntry(label: const Text('PC'), child: _tabContent(false)),
@@ -795,320 +929,388 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     );
   }
 
-  Widget _tabContent(bool mobile) => LayoutBuilder(
-    builder: (context, constraints) {
-      final controls = SingleChildScrollView(
-        key: PageStorageKey(('theme-controls', mobile)),
-        padding: const EdgeInsets.only(right: 4, bottom: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: 2,
-          children: [
-            _colors(const {
-              'common.accentColor': '强调色',
-              'common.backgroundColor': '背景色',
-            }),
-            _slider('圆角', 'common.cornerRadius', 0, 28, 28),
-            _group(mobile ? 'mobile.font' : 'pc.font', '字体', [
-              _fontFamily(),
-              _fontWeight(),
-              if (!mobile)
-                _compactRows([
-                  _slider(
-                    AppStrings.candidateFontSize,
-                    'pc.font.size',
-                    10,
-                    36,
-                    26,
-                  ),
-                  for (final entry in const {
-                    'labelSize': '序号字号',
-                    'commentSize': '注释字号',
-                    'preeditSize': '编码字号',
-                  }.entries)
-                    _slider(entry.value, 'pc.font.${entry.key}', 9, 28, 19),
-                ]),
-            ]),
-            if (!mobile) ...[
-              _choice('方向', 'pc.panel.orientation', const {
-                'horizontal': '横排',
-                'vertical': '竖排',
-              }),
-              _group('pc.panel', '面板', [
-                _colors(const {
-                  'pc.panel.background': '面板背景',
-                  'pc.panel.borderColor': '面板边框',
-                }),
-                _compactRows([
-                  _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
-                  _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
-                ]),
-                Semantics(
-                  label: '面板内边距',
-                  child: Row(
-                    spacing: 12,
-                    children: [
-                      for (final side in const {
-                        'Top': '上',
-                        'Right': '右',
-                        'Bottom': '下',
-                        'Left': '左',
-                      }.entries)
-                        Expanded(
-                          child: _slider(
-                            side.value,
-                            'pc.panel.padding${side.key}',
-                            0,
-                            side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
-                            side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
-                            compact: true,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                _compactRows([
-                  _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
-                  _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
-                  _toggle('面板阴影', 'pc.panel.shadow'),
-                ]),
-              ]),
-              _group('pc.candidate', '候选', [
-                _choice(
-                  '注释位置',
-                  'pc.candidate.commentPosition',
-                  _commentPositions,
-                ),
-                _colors({
-                  for (final entry in const {
-                    'background': '候选底色',
-                    'foreground': '候选字色',
-                    'selectedForeground': '高亮字色',
-                    'selectedBackground': '高亮底色',
-                    'labelColor': '序号字色',
-                    'selectedLabelColor': '高亮序号',
-                    'commentColor': '注释字色',
-                    'selectedCommentColor': '高亮注释',
-                    'hoverBackground': '悬停底色',
-                    'borderColor': '候选边框',
-                    'selectedBorderColor': '高亮边框',
-                  }.entries)
-                    'pc.candidate.${entry.key}': entry.value,
-                }),
-                _compactRows([
-                  _slider('边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
-                  _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
-                ]),
-                _text('序号后缀', 'pc.candidate.labelSuffix'),
-              ]),
-              _group('pc.modeHint', '模式提示', [
-                _colors(const {
-                  'pc.modeHint.background': '背景',
-                  'pc.modeHint.foreground': '字色',
-                  'pc.modeHint.borderColor': '边框',
-                }),
-                _compactRows([
-                  _slider('边框宽度', 'pc.modeHint.borderWidth', 0, 4, 8),
-                  _slider('字号', 'pc.modeHint.fontSize', 12, 42, 30),
-                  _slider('宽度', 'pc.modeHint.width', 36, 180, 144),
-                  _slider('高度', 'pc.modeHint.height', 28, 140, 112),
-                  _slider('圆角', 'pc.modeHint.cornerRadius', 0, 32, 32),
-                  _toggle('阴影', 'pc.modeHint.shadow'),
-                ]),
-              ]),
-            ] else ...[
-              _colors(const {
-                'mobile.keyboard.background': '键盘背景',
-                'mobile.keyboard.key.background': '按键底色',
-                'mobile.keyboard.key.foreground': '按键字色',
-                'mobile.keyboard.key.hintForeground': '提示字色',
-              }),
-              _compactRows([
-                _slider('按键圆角', 'mobile.keyboard.key.cornerRadius', 0, 24, 24),
-                _slider(
-                  '按键字号',
-                  'mobile.keyboard.key.fontScale',
-                  80,
-                  130,
-                  50,
-                  scale: true,
-                ),
-              ]),
-              _group('mobile.keyTypes', '功能键', [
-                _colors({
-                  for (final entry in const {
-                    'keyTypes.function': '功能键',
-                    'keyTypes.space': '空格',
-                    'keyTypes.enter': '回车',
-                    'keyClasses.accent': '强调键',
-                  }.entries)
-                    for (final color in const {
-                      'background': '底色',
-                      'foreground': '字色',
-                      'borderColor': '边框',
-                    }.entries)
-                      'mobile.keyboard.${entry.key}.${color.key}':
-                          '${entry.value}${color.value}',
-                }),
-                _compactRows([
-                  for (final entry in const {
-                    'keyTypes.function': '功能键',
-                    'keyTypes.space': '空格',
-                    'keyTypes.enter': '回车',
-                    'keyClasses.accent': '强调键',
-                  }.entries)
-                    _slider(
-                      '${entry.value}边框宽度',
-                      'mobile.keyboard.${entry.key}.borderWidth',
-                      0,
-                      2,
-                      4,
+  Widget _mobileEditor(List<Widget> settings) => LayoutBuilder(
+    builder: (context, constraints) => CustomScrollView(
+      key: const ValueKey('theme-editor-scroll'),
+      slivers: [
+        SliverToBoxAdapter(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            spacing: 8,
+            children: [
+              ?widget.header,
+              ...settings,
+              Row(
+                spacing: 8,
+                children: [
+                  for (final (mobile, title) in [(false, 'PC'), (true, '移动端')])
+                    Expanded(
+                      child: FButton(
+                        variant: _mobile == mobile
+                            ? FButtonVariant.primary
+                            : FButtonVariant.outline,
+                        selected: _mobile == mobile,
+                        onPress: () => _switchTab(mobile),
+                        child: Text(title),
+                      ),
                     ),
-                ]),
-              ]),
-              _group('mobile.key', '按键细节', [
-                _colors(const {
-                  'mobile.keyboard.key.borderColor': '边框',
-                  'mobile.keyboard.key.shadowColor': '阴影',
-                }),
-                _compactRows([
-                  _slider('边框宽度', 'mobile.keyboard.key.borderWidth', 0, 2, 4),
-                  _slider('阴影偏移', 'mobile.keyboard.key.shadowOffsetY', 0, 4, 8),
-                  _slider(
-                    '提示字号',
-                    'mobile.keyboard.key.hintFontScale',
-                    80,
-                    130,
-                    50,
-                    scale: true,
-                  ),
-                ]),
-              ]),
-              _group('mobile.candidateBar', '候选栏', [
-                _choice(
-                  '注释位置',
-                  'mobile.candidateBar.commentPosition',
-                  _commentPositions,
-                ),
-                _colors({
-                  for (final entry in const {
-                    'background': '栏背景',
-                    'itemBackground': '候选底色',
-                    'foreground': '候选字色',
-                    'selectedBackground': '高亮底色',
-                    'selectedForeground': '高亮字色',
-                    'borderColor': '候选边框',
-                    'selectedBorderColor': '高亮边框',
-                    'labelColor': '序号字色',
-                    'selectedLabelColor': '高亮序号',
-                    'commentColor': '注释字色',
-                    'selectedCommentColor': '高亮注释',
-                  }.entries)
-                    'mobile.candidateBar.${entry.key}': entry.value,
-                }),
-                _compactRows([
-                  _slider('边框宽度', 'mobile.candidateBar.borderWidth', 0, 2, 4),
-                  _slider(
-                    '高亮边框宽度',
-                    'mobile.candidateBar.selectedBorderWidth',
-                    0,
-                    3,
-                    6,
-                  ),
-                  _slider('圆角', 'mobile.candidateBar.cornerRadius', 0, 24, 24),
-                  _slider('横向内边距', 'mobile.candidateBar.paddingX', 0, 28, 28),
-                  _slider('文字间距', 'mobile.candidateBar.inlineGap', 0, 18, 18),
-                  _slider(
-                    '字号缩放',
-                    'mobile.candidateBar.fontScale',
-                    80,
-                    130,
-                    50,
-                    scale: true,
-                  ),
-                  _toggle('显示注释', 'mobile.candidateBar.showComment'),
-                ]),
-              ]),
-              _group('mobile.toolbar', '工具栏', [
-                _colors({
-                  for (final entry in const {
-                    'background': '栏背景',
-                    'foreground': '图标字色',
-                    'selectedForeground': '选中字色',
-                    'buttonBackground': '按钮底色',
-                    'buttonBorderColor': '按钮边框',
-                    'activeBackground': '强调底色',
-                    'selectedBackground': '选中底色',
-                    'pressedBackground': '按下底色',
-                    'activeBorderColor': '强调边框',
-                  }.entries)
-                    'mobile.keyboard.toolbar.${entry.key}': entry.value,
-                }),
-                _compactRows([
-                  _slider(
-                    '边框宽度',
-                    'mobile.keyboard.toolbar.buttonBorderWidth',
-                    0,
-                    2,
-                    4,
-                  ),
-                  _slider(
-                    '按钮圆角',
-                    'mobile.keyboard.toolbar.buttonCornerRadius',
-                    0,
-                    24,
-                    24,
-                  ),
-                ]),
-              ]),
+                ],
+              ),
             ],
-          ],
+          ),
         ),
-      );
-      final preview = FittedBox(
-        fit: BoxFit.scaleDown,
-        alignment: Alignment.topCenter,
-        child: SizedBox(
-          width: 360,
-          child: mobile
-              ? CandidatePanelPreview(
+        PinnedHeaderSliver(
+          child: ColoredBox(
+            key: const ValueKey('theme-sticky-preview'),
+            color: AppPalette.of(context).surface,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: constraints.maxHeight * (_mobile ? .55 : .42),
+                ),
+                child: RepaintBoundary(child: _previewPanel(_mobile)),
+              ),
+            ),
+          ),
+        ),
+        SliverToBoxAdapter(
+          child: ConstrainedBox(
+            // Keep the header scrollable even when all control groups are collapsed.
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 4,
+              children: [
+                if (_error case final error?) ErrorMessage(error),
+                KeyedSubtree(
+                  key: _controlKeys[_mobile],
+                  child: _controls(_mobile),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _controls(bool mobile) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    spacing: 2,
+    children: [
+      _colors(const {
+        'common.accentColor': '强调色',
+        'common.backgroundColor': '背景色',
+      }),
+      _slider('圆角', 'common.cornerRadius', 0, 28, 28),
+      _group(mobile ? 'mobile.font' : 'pc.font', '字体', [
+        _fontFamily(),
+        _fontWeight(),
+        if (!mobile)
+          _compactRows([
+            _slider(AppStrings.candidateFontSize, 'pc.font.size', 10, 36, 26),
+            for (final entry in const {
+              'labelSize': '序号字号',
+              'preeditSize': '编码字号',
+            }.entries)
+              _slider(entry.value, 'pc.font.${entry.key}', 9, 28, 19),
+          ]),
+      ]),
+      if (!mobile) ...[
+        _choice('方向', 'pc.panel.orientation', const {
+          'horizontal': '横排',
+          'vertical': '竖排',
+        }),
+        _group('pc.panel', '面板', [
+          _colors(const {
+            'pc.panel.background': '面板背景',
+            'pc.panel.borderColor': '面板边框',
+          }),
+          _compactRows([
+            _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
+            _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
+          ]),
+          Semantics(
+            label: '面板内边距',
+            child: Row(
+              spacing: 12,
+              children: [
+                for (final side in const {
+                  'Top': '上',
+                  'Right': '右',
+                  'Bottom': '下',
+                  'Left': '左',
+                }.entries)
+                  Expanded(
+                    child: _slider(
+                      side.value,
+                      'pc.panel.padding${side.key}',
+                      0,
+                      side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
+                      side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
+                      compact: true,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          _compactRows([
+            _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
+            _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
+            _toggle('面板阴影', 'pc.panel.shadow'),
+          ]),
+        ]),
+        _group('pc.candidate', '候选', [
+          _choice('注释位置', 'pc.candidate.commentPosition', _commentPositions),
+          _slider('注释字号', 'pc.font.commentSize', 9, 28, 19),
+          _colors({
+            for (final entry in const {
+              'background': '候选底色',
+              'foreground': '候选字色',
+              'selectedForeground': '高亮字色',
+              'selectedBackground': '高亮底色',
+              'labelColor': '序号字色',
+              'selectedLabelColor': '高亮序号',
+              'commentColor': '注释字色',
+              'selectedCommentColor': '高亮注释',
+              'hoverBackground': '悬停底色',
+              'borderColor': '候选边框',
+              'selectedBorderColor': '高亮边框',
+            }.entries)
+              'pc.candidate.${entry.key}': entry.value,
+          }),
+          _compactRows([
+            _slider('边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
+            _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
+          ]),
+          _text('序号后缀', 'pc.candidate.labelSuffix'),
+        ]),
+        _group('pc.modeHint', '模式提示', [
+          _colors(const {
+            'pc.modeHint.background': '背景',
+            'pc.modeHint.foreground': '字色',
+            'pc.modeHint.borderColor': '边框',
+          }),
+          _compactRows([
+            _slider('边框宽度', 'pc.modeHint.borderWidth', 0, 4, 8),
+            _slider('字号', 'pc.modeHint.fontSize', 12, 42, 30),
+            _slider('宽度', 'pc.modeHint.width', 36, 180, 144),
+            _slider('高度', 'pc.modeHint.height', 28, 140, 112),
+            _slider('圆角', 'pc.modeHint.cornerRadius', 0, 32, 32),
+            _toggle('阴影', 'pc.modeHint.shadow'),
+          ]),
+        ]),
+      ] else ...[
+        _colors(const {
+          'mobile.keyboard.background': '键盘背景',
+          'mobile.keyboard.key.background': '按键底色',
+          'mobile.keyboard.key.foreground': '按键字色',
+          'mobile.keyboard.key.hintForeground': '提示字色',
+        }),
+        _compactRows([
+          _slider('按键圆角', 'mobile.keyboard.key.cornerRadius', 0, 24, 24),
+          _slider(
+            '按键字号',
+            'mobile.keyboard.key.fontScale',
+            80,
+            130,
+            50,
+            scale: true,
+          ),
+        ]),
+        _group('mobile.keyTypes', '功能键', [
+          _colors({
+            for (final entry in const {
+              'keyTypes.function': '功能键',
+              'keyTypes.space': '空格',
+              'keyTypes.enter': '回车',
+              'keyClasses.accent': '强调键',
+              'keyClasses.accentPunctuation': '标点键',
+            }.entries)
+              for (final color in const {
+                'background': '底色',
+                'foreground': '字色',
+                'borderColor': '边框',
+              }.entries)
+                'mobile.keyboard.${entry.key}.${color.key}':
+                    '${entry.value}${color.value}',
+          }),
+          _compactRows([
+            for (final entry in const {
+              'keyTypes.function': '功能键',
+              'keyTypes.space': '空格',
+              'keyTypes.enter': '回车',
+              'keyClasses.accent': '强调键',
+              'keyClasses.accentPunctuation': '标点键',
+            }.entries)
+              _slider(
+                '${entry.value}边框宽度',
+                'mobile.keyboard.${entry.key}.borderWidth',
+                0,
+                2,
+                4,
+              ),
+          ]),
+        ]),
+        _group('mobile.key', '按键细节', [
+          _colors(const {
+            'mobile.keyboard.key.borderColor': '边框',
+            'mobile.keyboard.key.shadowColor': '阴影',
+          }),
+          _compactRows([
+            _slider('边框宽度', 'mobile.keyboard.key.borderWidth', 0, 2, 4),
+            _slider('阴影偏移', 'mobile.keyboard.key.shadowOffsetY', 0, 4, 8),
+            _slider(
+              '提示字号',
+              'mobile.keyboard.key.hintFontScale',
+              80,
+              130,
+              50,
+              scale: true,
+            ),
+          ]),
+        ]),
+        _group('mobile.candidateBar', '候选栏', [
+          _choice(
+            '注释位置',
+            'mobile.candidateBar.commentPosition',
+            _commentPositions,
+          ),
+          _slider('注释字号', _mobileCommentSizePath, 9, 24, 15),
+          _colors({
+            for (final entry in const {
+              'background': '栏背景',
+              'itemBackground': '候选底色',
+              'foreground': '候选字色',
+              'selectedBackground': '高亮底色',
+              'selectedForeground': '高亮字色',
+              'borderColor': '候选边框',
+              'selectedBorderColor': '高亮边框',
+              'labelColor': '序号字色',
+              'selectedLabelColor': '高亮序号',
+              'commentColor': '注释字色',
+              'selectedCommentColor': '高亮注释',
+            }.entries)
+              'mobile.candidateBar.${entry.key}': entry.value,
+          }),
+          _compactRows([
+            _slider('边框宽度', 'mobile.candidateBar.borderWidth', 0, 2, 4),
+            _slider(
+              '高亮边框宽度',
+              'mobile.candidateBar.selectedBorderWidth',
+              0,
+              3,
+              6,
+            ),
+            _slider('圆角', 'mobile.candidateBar.cornerRadius', 0, 24, 24),
+            _slider('横向内边距', 'mobile.candidateBar.paddingX', 0, 28, 28),
+            _slider('文字间距', 'mobile.candidateBar.inlineGap', 0, 18, 18),
+            _slider(
+              '字号缩放',
+              'mobile.candidateBar.fontScale',
+              80,
+              130,
+              50,
+              scale: true,
+            ),
+            _toggle('显示注释', 'mobile.candidateBar.showComment'),
+          ]),
+        ]),
+        _group('mobile.toolbar', '工具栏', [
+          _colors({
+            for (final entry in const {
+              'background': '栏背景',
+              'foreground': '图标字色',
+              'selectedForeground': '选中字色',
+              'buttonBackground': '按钮底色',
+              'buttonBorderColor': '按钮边框',
+              'activeBackground': '强调底色',
+              'selectedBackground': '选中底色',
+              'pressedBackground': '按下底色',
+              'activeBorderColor': '强调边框',
+            }.entries)
+              'mobile.keyboard.toolbar.${entry.key}': entry.value,
+          }),
+          _compactRows([
+            _slider(
+              '边框宽度',
+              'mobile.keyboard.toolbar.buttonBorderWidth',
+              0,
+              2,
+              4,
+            ),
+            _slider(
+              '按钮圆角',
+              'mobile.keyboard.toolbar.buttonCornerRadius',
+              0,
+              24,
+              24,
+            ),
+          ]),
+        ]),
+      ],
+    ],
+  );
+
+  Widget _previewPanel(bool mobile) => FittedBox(
+    fit: BoxFit.scaleDown,
+    alignment: Alignment.topCenter,
+    child: SizedBox(
+      width: 360,
+      child: mobile
+          ? CandidatePanelPreview(
+              editorPreview: true,
+              highlightPath: _highlightPath,
+              onEditField: _focusPreviewField,
+              theme: _resolved,
+              fontCatalog: _fonts,
+              keyboard: true,
+              keyboardSettings: _controller.androidSettings,
+              showPreedit: false,
+              keyboardSchemeName:
+                  _controller.currentSchemaName ??
+                  _controller
+                      .installedPackageFor(_controller.activeSchemeKey)
+                      ?.displayName ??
+                  schemeDisplayName(_controller.activeSchemeKey),
+              candidates: _controller.candidatePreviewCandidates,
+              keyboardLogo: SchemaLogo(controller: _controller, size: 28),
+            )
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: 12,
+              children: [
+                CandidatePanelPreview(
                   editorPreview: true,
+                  highlightPath: _highlightPath,
+                  onEditField: _focusPreviewField,
                   theme: _resolved,
                   fontCatalog: _fonts,
-                  keyboard: true,
-                  showPreedit: false,
-                  keyboardSchemeName:
-                      _controller
-                          .installedPackageFor(_controller.activeSchemeKey)
-                          ?.displayName ??
-                      schemeDisplayName(_controller.activeSchemeKey),
+                  showPreedit: true,
+                  candidateCount: 3,
                   candidates: _controller.candidatePreviewCandidates,
-                  keyboardLogo: SchemaLogo(controller: _controller, size: 28),
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  spacing: 12,
-                  children: [
-                    CandidatePanelPreview(
-                      editorPreview: true,
-                      theme: _resolved,
-                      fontCatalog: _fonts,
-                      showPreedit: true,
-                      candidateCount: 3,
-                      candidates: _controller.candidatePreviewCandidates,
-                    ),
-                    _modeHintPreview(),
-                  ],
                 ),
-        ),
-      );
+                _modeHintPreview(),
+              ],
+            ),
+    ),
+  );
+
+  Widget _tabContent(bool mobile) => LayoutBuilder(
+    builder: (context, constraints) {
+      final preview = _previewPanel(mobile);
       final height = (MediaQuery.sizeOf(context).height * .30)
           .clamp(0, constraints.maxHeight * .55)
           .toDouble();
       final stableControls = KeyedSubtree(
         key: _controlKeys[mobile],
-        child: controls,
+        child: SingleChildScrollView(
+          key: PageStorageKey(('theme-controls', mobile)),
+          padding: const EdgeInsets.only(right: 4, bottom: 8),
+          child: _controls(mobile),
+        ),
       );
       return constraints.maxWidth >= 900
           ? Row(
@@ -1116,14 +1318,17 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
               spacing: 16,
               children: [
                 Expanded(child: stableControls),
-                SizedBox(width: 360, child: preview),
+                SizedBox(width: 360, child: RepaintBoundary(child: preview)),
               ],
             )
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               spacing: 8,
               children: [
-                SizedBox(height: height, child: preview),
+                SizedBox(
+                  height: height,
+                  child: RepaintBoundary(child: preview),
+                ),
                 Expanded(child: stableControls),
               ],
             );
@@ -1144,12 +1349,14 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
 
     final shadow = hint['shadowStyle'] as Map<String, dynamic>?;
     final family = _resolved['font']['effectiveFamily'] as String?;
-    Widget preview(String? fontFamily) => Semantics(
-      label: '模式提示预览',
-      child: Container(
-        width: (hint['width'] as num).toDouble(),
-        height: (hint['height'] as num).toDouble(),
-        alignment: Alignment.center,
+    final fontSize = (hint['fontSize'] as num).toDouble();
+    Widget preview(String? fontFamily) {
+      final badge = Container(
+        constraints: BoxConstraints(
+          minWidth: (hint['width'] as num).toDouble(),
+          minHeight: (hint['height'] as num).toDouble(),
+        ),
+        padding: EdgeInsets.all(fontSize / 6),
         decoration: BoxDecoration(
           color: color(hint, 'background'),
           borderRadius: BorderRadius.circular(
@@ -1171,17 +1378,37 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   ),
                 ],
         ),
-        child: Text(
-          hint['chineseText'] as String,
-          textScaler: TextScaler.noScaling,
-          style: TextStyle(
-            fontFamily: fontFamily,
-            color: color(hint, 'foreground'),
-            fontSize: (hint['fontSize'] as num).toDouble(),
+        child: Center(
+          widthFactor: 1,
+          heightFactor: 1,
+          child: themePreviewEditTarget(
+            Text(
+              hint['chineseText'] as String,
+              textScaler: TextScaler.noScaling,
+              style: TextStyle(
+                fontFamily: fontFamily,
+                color: color(hint, 'foreground'),
+                fontSize: fontSize,
+              ),
+            ),
+            'pc.modeHint.fontSize',
+            _focusPreviewField,
           ),
         ),
-      ),
-    );
+      );
+      return Semantics(
+        label: '模式提示预览',
+        child: themePreviewOutline(
+          themePreviewEditTarget(
+            badge,
+            'pc.modeHint.background',
+            _focusPreviewField,
+          ),
+          _highlightPath?.startsWith('pc.modeHint.') ?? false,
+        ),
+      );
+    }
+
     if (family == null || family.isEmpty) return preview(null);
     return FutureBuilder<String>(
       key: ValueKey(('mode-hint-font', family)),

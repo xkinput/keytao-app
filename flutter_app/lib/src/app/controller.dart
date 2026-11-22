@@ -174,6 +174,7 @@ class AppController extends ChangeNotifier {
   bool _disposed = false;
   bool _refreshSchemasWhenIdle = false;
   bool _resumeRefreshInFlight = false;
+  bool _refreshOnResumeWhenIdle = false;
   bool _manuallySelectedScheme = false;
   bool _startupStarted = false;
   bool _packageMigrationFailed = false;
@@ -359,6 +360,8 @@ class AppController extends ChangeNotifier {
   String? deployingSchemeKey;
 
   bool get hasPackageDeployProgress => _packageDeployProgress.isNotEmpty;
+  bool get hasUsableBuild =>
+      local?.deployed == true || local?.buildAvailable == true;
 
   String? packageDeployLabel(String key) {
     final packageKey = _packageDeployKey(key);
@@ -880,7 +883,7 @@ class AppController extends ChangeNotifier {
       ? null
       : AppStrings.localStatus(
           installed: local!.installed,
-          deployed: local!.deployed,
+          deployed: hasUsableBuild,
           version: displayedSchemeVersion(
             local!.schemas,
             local!.version,
@@ -923,7 +926,7 @@ class AppController extends ChangeNotifier {
       ? ImeBadgeState.componentMissing
       : local?.installed != true
       ? ImeBadgeState.schemeMissing
-      : local?.deployed != true
+      : !hasUsableBuild
       ? ImeBadgeState.pendingDeploy
       : ImeBadgeState.ready;
   String get macosImeBadgeText => switch (macosImeBadge) {
@@ -1057,13 +1060,15 @@ class AppController extends ChangeNotifier {
         const {'easy english', 'english'}.contains(schema.name.toLowerCase()),
   );
   bool get setupReady {
-    if (local?.installed != true || local?.deployed != true) return false;
     if (isAndroid) {
       return storageReady &&
           ime?['enabled'] == true &&
           ime?['selected'] == true;
     }
-    return isIos || !hasOnboarding || macosIme?.installed == true;
+    if (isIos) return iosKeyboardEnabled && iosKeyboardFullAccess == true;
+    return local?.installed == true &&
+        hasUsableBuild &&
+        (!hasOnboarding || macosIme?.installed == true);
   }
 
   PlatformReleaseDto? get selectedRelease =>
@@ -1357,6 +1362,10 @@ class AppController extends ChangeNotifier {
       _packageDeployProgress.clear();
       busy = false;
       _changed();
+      if (_refreshOnResumeWhenIdle) {
+        _refreshOnResumeWhenIdle = false;
+        unawaited(_refreshOnResume());
+      }
       if (_refreshSchemasWhenIdle && !_disposed) {
         _refreshSchemasWhenIdle = false;
         unawaited(refreshSchemas());
@@ -1448,7 +1457,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _readSchemas() async {
-    if (local?.deployed != true) {
+    if (!hasUsableBuild) {
       schemas = [];
       currentSchemaId = null;
       return;
@@ -1501,6 +1510,29 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshIosKeyboardStatus() async {
+    if (!isIos || busy || _resumeRefreshInFlight || _disposed || !_foreground) {
+      return;
+    }
+    try {
+      if (await _readIosKeyboardStatus()) _changed();
+    } catch (failure) {
+      debugPrint('Keyboard status refresh failed: ${errorText(failure)}');
+    }
+  }
+
+  Future<bool> _readIosKeyboardStatus() async {
+    final status = await const IosHost().keyboardStatus();
+    final enabled = status['enabled'] == true;
+    final fullAccess = enabled ? status['fullAccess'] == true : null;
+    if (iosKeyboardEnabled == enabled && iosKeyboardFullAccess == fullAccess) {
+      return false;
+    }
+    iosKeyboardEnabled = enabled;
+    iosKeyboardFullAccess = fullAccess;
+    return true;
+  }
+
   Future<void> _readState({bool quiet = false}) async {
     final errors = <String>[];
     Future<void> read(Future<void> Function() action) async {
@@ -1525,13 +1557,7 @@ class AppController extends ChangeNotifier {
     } else if (isIos) {
       iosKeyboardEnabled = false;
       iosKeyboardFullAccess = null;
-      await read(() async {
-        final status = await const IosHost().keyboardStatus();
-        iosKeyboardEnabled = status['enabled'] == true;
-        iosKeyboardFullAccess = iosKeyboardEnabled
-            ? status['fullAccess'] == true
-            : null;
-      });
+      await read(_readIosKeyboardStatus);
     } else if (isWindows) {
       await read(_readWindowsIme);
     } else if (isLinux) {
@@ -1625,10 +1651,6 @@ class AppController extends ChangeNotifier {
       } else {
         error = message;
       }
-    }
-    if (isAndroid && setupReady && !onboardingCompleted) {
-      await core.completeOnboarding();
-      onboardingCompleted = true;
     }
     unawaited(refreshCandidatePreview());
   }
@@ -1885,7 +1907,11 @@ class AppController extends ChangeNotifier {
   void onResume() {
     _foreground = true;
     _startUserDictionaryPull(resumed: true);
-    unawaited(_refreshOnResume());
+    if (isMobile && busy) {
+      _refreshOnResumeWhenIdle = true;
+    } else {
+      unawaited(_refreshOnResume());
+    }
   }
 
   Future<void> _refreshOnResume() async {
@@ -3902,7 +3928,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> finishOnboarding() => run(() async {
-    await _readState();
+    if (!isMobile) await _readState();
     if (!setupReady) throw StateError(AppStrings.finishSetupFirst);
     await core.completeOnboarding();
     onboardingCompleted = true;
@@ -4131,6 +4157,16 @@ class AppController extends ChangeNotifier {
   }) {
     final normalizedAccent = accentColor?.trim().toUpperCase();
     final normalizedBackground = backgroundColor?.trim().toUpperCase();
+    // Match the Rust IME_UI_*_CHANGED flags.
+    const radiusChanged = 1;
+    const backgroundChanged = 2;
+    const orientationChanged = 4;
+    const fontSizeChanged = 8;
+    final changedFields =
+        (resetCornerRadius || cornerRadius != null ? radiusChanged : 0) |
+        (backgroundColor != null ? backgroundChanged : 0) |
+        (orientation != null ? orientationChanged : 0) |
+        (fontSize != null ? fontSizeChanged : 0);
     if (normalizedAccent != null &&
         !RegExp(r'^#[0-9A-F]{6}$').hasMatch(normalizedAccent)) {
       return Future.value(false);
@@ -4153,6 +4189,7 @@ class AppController extends ChangeNotifier {
             : (cornerRadius ?? current.cornerRadius)?.clamp(0, 28),
         backgroundColor: normalizedBackground ?? current.backgroundColor,
         fontSize: (fontSize ?? current.fontSize).clamp(10, 36),
+        changedFields: changedFields,
       );
       if (hideCandidatePanel != null &&
           hideCandidatePanel != current.hideCandidatePanel) {

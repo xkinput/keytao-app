@@ -1117,10 +1117,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val maxRight = (expandRect?.left?.minus(gap) ?: (width - leftPadding)).coerceAtLeast(viewportLeft)
         candidateViewportWidth = (maxRight - viewportLeft).coerceAtLeast(0f)
         val items = inlineCandidateItems()
-        val itemWidths = items.map(::candidateWidth)
+        val stacked = items.any { belowComment(it) != null }
+        val itemWidths = items.map { candidateWidth(it, stacked) }
         candidateContentWidth = itemWidths.sum() + gap * (itemWidths.size - 1).coerceAtLeast(0)
         coerceCandidateScroll()
-        val candidateHeight = inlineCandidateHeight(barHeight, items.any { belowComment(it) != null })
+        val candidateHeight = inlineCandidateHeight(barHeight, stacked)
         val candidateTop = (barHeight - candidateHeight) / 2f
         val nextVisibleGlobalIndexes = mutableSetOf<Int>()
         var contentX = viewportLeft - candidateScrollX
@@ -1727,13 +1728,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val viewportLeft = leftPadding
         val maxRight = (expandRect?.left?.minus(gap) ?: (width - leftPadding)).coerceAtLeast(viewportLeft)
         val items = inlineCandidateItems()
+        val stacked = items.any { belowComment(it) != null }
         canvas.save()
         canvas.clipRect(viewportLeft, 0f, maxRight, barHeight)
         for (item in items) {
             val layout = candidateRects.firstOrNull { it.pageIndex == item.index } ?: continue
             val pressed = pressedInlineCandidate?.pageIndex == item.index &&
                 candidateTouchActive && !candidateDragging && !candidateLongPressConsumed
-            drawCandidateOption(canvas, item, layout.drawingRect, pressed)
+            drawCandidateOption(canvas, item, layout.drawingRect, pressed, stacked)
         }
         canvas.restore()
     }
@@ -1905,9 +1907,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 }
                 canvas.drawText(message, width / 2f, top + panelHeight / 2f + textBaselineOffset(textPaint), textPaint)
             }
+            val stacked = items.any { belowComment(it) != null }
             for (item in items) {
                 expandedCandidateDrawingRects[item.index]?.let { rect ->
-                    drawCandidateOption(canvas, item, rect)
+                    drawCandidateOption(canvas, item, rect, stacked = stacked)
                 }
             }
             canvas.restore()
@@ -1937,11 +1940,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val left = gap * 1.5f
         val right = width - left
         val columns = panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)
+        val stacked = columns == null && items.any { belowComment(it) != null }
         val defaultRowHeight = dp(
             when (columns) {
                 4 -> 52f
                 1 -> config.clipboardRowHeightDp
-                else -> if (items.any { belowComment(it) != null }) stackedCandidateHeightDp else 36f
+                else -> if (stacked) stackedCandidateHeightDp else 36f
             }
         )
         val cellWidth = columns?.let { columnCount ->
@@ -2003,7 +2007,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 chipWidth = cellWidth
                 itemRowHeight = defaultRowHeight
             } else {
-                chipWidth = candidateWidth(item).coerceAtLeast(dp(56f)).coerceAtMost(right - left)
+                chipWidth = candidateWidth(item, stacked).coerceAtLeast(dp(56f)).coerceAtMost(right - left)
                 if (x + chipWidth > right && x > left) {
                     x = left
                     y += defaultRowHeight + gap
@@ -2617,11 +2621,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         else -> "自动"
     }
 
-    private fun candidateWidth(item: CandidateDrawItem): Float {
+    private fun candidateWidth(item: CandidateDrawItem, stacked: Boolean): Float {
         textPaint.typeface = theme.typeface
-        val cacheKey = candidateWidthCacheKey(item)
+        val cacheKey = candidateWidthCacheKey(item, stacked)
         candidateWidthCache[cacheKey]?.let { return it }
-        val stacked = belowComment(item) != null
         val scale = if (stacked) stackedCandidateTextScale() else 1f
         textPaint.textSize = sp(candidateLabelSizeSp() * scale)
         val labelWidth = item.label.takeIf { it.isNotBlank() }?.let { textPaint.measureText(it) } ?: 0f
@@ -2642,7 +2645,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return width
     }
 
-    private fun candidateWidthCacheKey(item: CandidateDrawItem): String {
+    private fun candidateWidthCacheKey(item: CandidateDrawItem, stacked: Boolean): String {
         return buildString {
             append(item.label)
             append('\u0000')
@@ -2651,7 +2654,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(item.comment.orEmpty())
             append('\u0000')
             append(item.selected)
-            append(belowComment(item) != null)
+            append(stacked)
         }
     }
 
@@ -2678,6 +2681,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun candidateCommentSizeSp(): Float {
+        val size = theme.candidateCommentFontSize ?: return candidateSecondarySizeSp()
+        return min(size, candidateFontHeightLimitSp())
+    }
+
+    private fun candidateSecondarySizeSp(): Float {
         val desired = 12f * config.candidateFontScale * theme.candidateFontScale
         return min(desired, candidateFontHeightLimitSp() * 0.68f).coerceAtLeast(9f)
     }
@@ -2731,6 +2739,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         item: CandidateDrawItem,
         rect: RectF,
         pressed: Boolean = false,
+        stacked: Boolean = false,
     ) {
         if (functionPanelActive && functionPanelMode == FunctionPanelMode.SETTINGS) {
             drawSettingsPanelItem(canvas, item, rect, pressed)
@@ -2769,7 +2778,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             else -> when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
                 4 -> drawCandidateGridCell(canvas, displayItem, rect)
                 1 -> drawClipboardCandidateRow(canvas, displayItem, rect)
-                else -> drawInlineCandidateOption(canvas, displayItem, rect)
+                else -> drawInlineCandidateOption(canvas, displayItem, rect, stacked)
             }
         }
     }
@@ -3246,7 +3255,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val label = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(label, textLeft, rect.centerY() - dp(7f) + textBaselineOffset(textPaint), textPaint)
-        textPaint.textSize = sp(candidateCommentSizeSp())
+        textPaint.textSize = sp(candidateSecondarySizeSp())
         textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
         val stateLabel = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(stateLabel, textLeft, rect.centerY() + dp(9f) + textBaselineOffset(textPaint), textPaint)
@@ -3365,9 +3374,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         )
     }
 
-    private fun drawInlineCandidateOption(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+    private fun drawInlineCandidateOption(canvas: Canvas, item: CandidateDrawItem, rect: RectF, stacked: Boolean = false) {
         val stackedComment = belowComment(item)
-        if (stackedComment != null) {
+        if (stacked || stackedComment != null) {
             drawStackedCandidateOption(canvas, item, stackedComment, rect)
             return
         }
@@ -3394,7 +3403,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.restore()
     }
 
-    private fun drawStackedCandidateOption(canvas: Canvas, item: CandidateDrawItem, comment: String, rect: RectF) {
+    private fun drawStackedCandidateOption(canvas: Canvas, item: CandidateDrawItem, comment: String?, rect: RectF) {
         canvas.save()
         canvas.clipRect(rect)
         textPaint.textAlign = Paint.Align.LEFT
@@ -3421,10 +3430,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
         val word = TextUtils.ellipsize(item.text, textPaint, bodyWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(word, x, textY + textBaselineOffset(textPaint), textPaint)
-        textPaint.textSize = commentSize
-        textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
-        val annotation = TextUtils.ellipsize(comment, textPaint, bodyWidth, TextUtils.TruncateAt.END).toString()
-        canvas.drawText(annotation, x, commentY + textBaselineOffset(textPaint), textPaint)
+        if (comment != null) {
+            textPaint.textSize = commentSize
+            textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
+            val annotation = TextUtils.ellipsize(comment, textPaint, bodyWidth, TextUtils.TruncateAt.END).toString()
+            canvas.drawText(annotation, x, commentY + textBaselineOffset(textPaint), textPaint)
+        }
         canvas.restore()
     }
 

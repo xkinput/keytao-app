@@ -1,3 +1,5 @@
+import AppKit
+import Carbon
 import Foundation
 
 func forwards(
@@ -92,4 +94,46 @@ for otherModifiers: UInt32 in [0x0001, 0x0004, 0x0008, 1 << 26, 0x0001 | 0x0004 
 assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0, currentModifiers: 0) == nil)
 assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0x0002, currentModifiers: 0x0003) == nil,
        "unrelated modifier changes must not toggle Caps Lock again")
-print("chord key policy, release synthesis and Caps Lock policy tests passed")
+assert(KeyTaoModifierKeyPolicy.activationFlags([.capsLock, .option], systemCapsLock: false) == .option)
+assert(KeyTaoModifierKeyPolicy.activationFlags(.option, systemCapsLock: true) == [.capsLock, .option])
+
+var tap = KeyTaoModifierTap()
+func flags(
+    _ keyCode: Int, _ previous: NSEvent.ModifierFlags, _ current: NSEvent.ModifierFlags,
+    time: TimeInterval = 0
+) -> UInt32? {
+    tap.update(keyCode: UInt16(keyCode), previousFlags: previous, currentFlags: current, time: time)
+}
+
+let modifierKeys: [(Int, NSEvent.ModifierFlags, UInt32)] = [
+    (kVK_Shift, .shift, 0xffe1),
+    (kVK_RightShift, .shift, 0xffe2),
+    (kVK_Control, .control, 0xffe3),
+    (kVK_RightControl, .control, 0xffe4),
+    (kVK_Option, .option, 0xffe9),
+    (kVK_RightOption, .option, 0xffea),
+]
+for (keyCode, flag, keyval) in modifierKeys {
+    assert(flags(keyCode, .capsLock, [.capsLock, flag]) == nil, "press only arms a modifier tap")
+    assert(flags(keyCode, [.capsLock, flag], .capsLock, time: 0.1) == keyval,
+           "release preserves the left or right key identity even with Caps Lock on")
+    assert(flags(keyCode, flag, [], time: 0.2) == nil, "a release can switch only once")
+}
+assert(flags(kVK_Control, [], .control) == nil)
+tap.clear()
+assert(flags(kVK_Control, .control, [], time: 0.1) == nil, "typing or changing focus cancels the tap")
+assert(flags(kVK_Option, [], .option) == nil)
+assert(flags(kVK_Option, .option, [], time: 0.5) == nil, "a held modifier is not a tap")
+assert(flags(kVK_Shift, [], .shift) == nil)
+assert(flags(kVK_RightShift, .shift, .shift) == nil)
+assert(flags(kVK_Shift, .shift, .shift) == nil)
+assert(flags(kVK_RightShift, .shift, []) == nil, "overlapping left and right presses cannot form a solo tap")
+assert(flags(kVK_Control, [], .control) == nil)
+assert(flags(kVK_Command, .control, [.command, .control]) == nil)
+assert(flags(kVK_Command, [.command, .control], .control) == nil)
+assert(flags(kVK_Control, .control, []) == nil, "system Command chords cancel a modifier tap")
+assert(flags(kVK_Option, .function, [.function, .option]) == nil)
+assert(flags(kVK_Option, [.function, .option], .function) == nil, "Fn chords cannot switch modes")
+assert(flags(kVK_Command, [], .command) == nil)
+assert(flags(kVK_Command, .command, []) == nil, "Command is reserved for macOS")
+print("chord key policy, release synthesis, Caps Lock and modifier tap tests passed")

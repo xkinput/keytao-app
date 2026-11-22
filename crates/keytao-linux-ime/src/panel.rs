@@ -836,6 +836,9 @@ impl PanelRenderer {
         let option_pad_y = self.s(theme.candidate.padding_y);
         let inline_gap = self.s(theme.candidate.inline_gap);
         let below = theme.candidate.comment_position == CommentPosition::Below;
+        let align_stacked_row = below
+            && model.orientation == PanelOrientation::Horizontal
+            && model.candidates.iter().any(|candidate| candidate.comment.is_some());
         let min_option_height = self.s(theme.candidate.min_height);
         let single_line_height = font_size.max(label_size);
         let single_line_height = if below {
@@ -850,22 +853,28 @@ impl PanelRenderer {
             .as_ref()
             .map(|_| preedit_size + self.s(theme.panel.preedit_gap))
             .unwrap_or(0.0);
-        let (option_widths, stacked): (Vec<_>, Vec<_>) = model
+        let (option_widths, mut stacked): (Vec<_>, Vec<_>) = model
             .candidates
             .iter()
             .map(|candidate| {
-                if let Some(comment) = candidate.comment.as_deref().filter(|_| below) {
+                let comment = candidate.comment.as_deref().filter(|_| below);
+                if comment.is_some() || align_stacked_row {
                     let (_, label_top, label_right, label_bottom) =
                         self.text_bounds(&candidate.label, label_size);
                     let (word_left, word_top, word_right, word_bottom) =
                         self.text_bounds(&candidate.text, font_size);
-                    let (comment_left, comment_top, comment_right, comment_bottom) =
-                        self.text_bounds(comment, comment_size);
+                    let (comment_left, comment_top, comment_right, comment_bottom) = comment
+                        .map(|text| self.text_bounds(text, comment_size))
+                        .unwrap_or_default();
                     let word_x = label_right + inline_gap - word_left.min(comment_left);
                     let word_baseline = -label_top.min(word_top);
-                    let comment_baseline =
-                        word_baseline + label_bottom.max(word_bottom) + inline_gap * 0.5
-                            - comment_top;
+                    let word_bottom = word_baseline + label_bottom.max(word_bottom);
+                    let comment_baseline = word_bottom + inline_gap * 0.5 - comment_top;
+                    let height = if comment.is_some() {
+                        comment_baseline + comment_bottom
+                    } else {
+                        word_bottom
+                    };
                     let width = word_x + word_right.max(comment_right) + option_pad_x * 2.0;
                     return (
                         width,
@@ -873,7 +882,7 @@ impl PanelRenderer {
                             word_x,
                             word_baseline,
                             comment_baseline,
-                            height: comment_baseline + comment_bottom,
+                            height,
                         }),
                     );
                 }
@@ -887,6 +896,19 @@ impl PanelRenderer {
                 (width, None)
             })
             .unzip();
+        if align_stacked_row {
+            let row_baseline = stacked
+                .iter()
+                .flatten()
+                .map(|option| option.word_baseline)
+                .fold(0.0, f32::max);
+            for option in stacked.iter_mut().flatten() {
+                let offset = row_baseline - option.word_baseline;
+                option.word_baseline = row_baseline;
+                option.comment_baseline += offset;
+                option.height += offset;
+            }
+        }
         let option_heights = below.then(|| {
             stacked
                 .iter()
@@ -1036,6 +1058,7 @@ impl PanelRenderer {
                 font_size,
                 comment_size,
                 &theme,
+                align_stacked_row,
             );
             if theme.candidate.separator_visible && index + 1 < model.candidates.len() {
                 let (x, y, width, height) = if model.orientation == PanelOrientation::Vertical {
@@ -1111,7 +1134,7 @@ impl PanelRenderer {
         let theme = self.theme_resolver.current();
         self.update_theme_font(theme.font.effective_family.as_deref());
         let hint_size = self.s(theme.mode_hint.font_size);
-        let padding = hint_size / 3.0;
+        let padding = hint_size / 6.0;
         let (left, top, right, bottom) = self.text_bounds(&label, hint_size);
         let text_width = right - left;
         let text_height = bottom - top;
@@ -1183,6 +1206,7 @@ impl PanelRenderer {
         font_size: f32,
         comment_size: f32,
         theme: &keytao_theme::ResolvedImeTheme,
+        align_stacked_row: bool,
     ) {
         let PanelRect {
             x,
@@ -1217,7 +1241,11 @@ impl PanelRenderer {
         let inline_gap = self.s(candidate_theme.inline_gap);
         let label_x = x + option_pad_x;
         let (text_x, baseline, comment_baseline) = if let Some(stacked) = stacked {
-            let top = y + (height - stacked.height) * 0.5;
+            let top = y + if align_stacked_row {
+                self.s(candidate_theme.padding_y)
+            } else {
+                (height - stacked.height) * 0.5
+            };
             (
                 label_x + stacked.word_x,
                 top + stacked.word_baseline,
@@ -1803,7 +1831,7 @@ mod tests {
                 comment: Some("注释拼音 gpq".into()),
             },
             Candidate {
-                text: "空".into(),
+                text: "候选文字".into(),
                 comment: None,
             },
         ];
@@ -1818,6 +1846,7 @@ mod tests {
         theme.candidate.selected_label_color = color(255, 0, 0);
         theme.candidate.selected_foreground = color(0, 255, 0);
         theme.candidate.selected_comment_color = color(0, 0, 255);
+        theme.candidate.foreground = color(255, 0, 255);
         for orientation in [PanelOrientation::Vertical, PanelOrientation::Horizontal] {
             theme.panel.orientation = orientation;
             theme.candidate.comment_position = CommentPosition::Inline;
@@ -1842,6 +1871,14 @@ mod tests {
             let label = glyph_positions(theme.candidate.selected_label_color);
             let word = glyph_positions(theme.candidate.selected_foreground);
             let comment = glyph_positions(theme.candidate.selected_comment_color);
+            if orientation == PanelOrientation::Horizontal {
+                let unannotated = glyph_positions(theme.candidate.foreground);
+                assert!(!unannotated.is_empty());
+                assert_eq!(
+                    word.iter().map(|(_, y)| y).min(),
+                    unannotated.iter().map(|(_, y)| y).min()
+                );
+            }
             assert!(
                 label.iter().map(|(x, _)| x).max().unwrap()
                     < word.iter().map(|(x, _)| x).min().unwrap()

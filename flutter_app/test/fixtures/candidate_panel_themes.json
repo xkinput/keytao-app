@@ -506,7 +506,7 @@
         "green": 255,
         "red": 255
       },
-      "height": 44.0,
+      "height": 36.0,
       "shadow": true,
       "shadowStyle": {
         "blurRadius": 16.0,
@@ -519,7 +519,7 @@
         "margin": 24.0,
         "offsetY": 8.0
       },
-      "width": 72.0
+      "width": 48.0
     },
     "navigation": {
       "buttonSize": 28.0,
@@ -1401,7 +1401,7 @@
         "green": 255,
         "red": 255
       },
-      "height": 44.0,
+      "height": 36.0,
       "shadow": true,
       "shadowStyle": {
         "blurRadius": 16.0,
@@ -1414,7 +1414,7 @@
         "margin": 24.0,
         "offsetY": 8.0
       },
-      "width": 72.0
+      "width": 48.0
     },
     "navigation": {
       "buttonSize": 28.0,

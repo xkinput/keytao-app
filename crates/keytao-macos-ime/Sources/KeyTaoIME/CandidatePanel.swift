@@ -126,19 +126,30 @@ class CandidatePanel: NSPanel {
             candidateWidthConstraint.isActive = true
         }
 
+        let alignsFirstRow = orientation == .horizontal && theme.candidate.commentPosition == .below
+            && model.candidates.contains { !($0.comment ?? "").isEmpty }
+        var firstOption: CandidateOptionView?
         for (position, candidate) in model.candidates.enumerated() {
             let option = CandidateOptionView(
                 label: candidate.label,
                 text: candidate.text,
                 comment: candidate.comment ?? "",
                 highlighted: candidate.selected,
-                theme: theme
+                theme: theme,
+                alignsFirstRow: alignsFirstRow
             )
             option.target = self
             option.tag = candidate.index
             option.action = #selector(candidateClicked(_:))
             candidateStack.addArrangedSubview(option)
             option.widthAnchor.constraint(lessThanOrEqualTo: candidateStack.widthAnchor).isActive = true
+            if alignsFirstRow {
+                if let firstOption {
+                    option.heightAnchor.constraint(equalTo: firstOption.heightAnchor).isActive = true
+                } else {
+                    firstOption = option
+                }
+            }
 
             if theme.candidate.separatorVisible && position < model.candidates.count - 1 {
                 candidateStack.addArrangedSubview(makeSeparator(theme: theme))
@@ -288,7 +299,7 @@ private final class CandidateOptionView: NSControl {
         didSet { applyState() }
     }
 
-    init(label: String, text: String, comment: String, highlighted: Bool, theme: ImeTheme) {
+    init(label: String, text: String, comment: String, highlighted: Bool, theme: ImeTheme, alignsFirstRow: Bool) {
         self.theme = theme
         self.isSelectedOption = highlighted
         super.init(frame: .zero)
@@ -313,7 +324,7 @@ private final class CandidateOptionView: NSControl {
         commentField.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
         contentStack.orientation = .horizontal
-        contentStack.alignment = stacksComment ? .top : .firstBaseline
+        contentStack.alignment = stacksComment || alignsFirstRow ? .top : .firstBaseline
         contentStack.spacing = theme.candidate.inlineGap
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.addArrangedSubview(labelField)
@@ -329,11 +340,14 @@ private final class CandidateOptionView: NSControl {
         }
         addSubview(contentStack)
 
+        let bottomConstraint = alignsFirstRow
+            ? contentStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -theme.candidate.paddingY)
+            : contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -theme.candidate.paddingY)
         NSLayoutConstraint.activate([
             contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: theme.candidate.paddingX),
             contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -theme.candidate.paddingX),
             contentStack.topAnchor.constraint(equalTo: topAnchor, constant: theme.candidate.paddingY),
-            contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -theme.candidate.paddingY),
+            bottomConstraint,
             heightAnchor.constraint(greaterThanOrEqualToConstant: theme.candidate.minHeight),
         ])
 

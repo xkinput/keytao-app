@@ -46,6 +46,10 @@ pub const THEME_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
 pub const MIN_CANDIDATE_FONT_SIZE: f32 = 10.0;
 pub const MAX_CANDIDATE_FONT_SIZE: f32 = 36.0;
+const IME_UI_RADIUS_CHANGED: u8 = 1;
+const IME_UI_BACKGROUND_CHANGED: u8 = 2;
+const IME_UI_ORIENTATION_CHANGED: u8 = 4;
+const IME_UI_FONT_SIZE_CHANGED: u8 = 8;
 
 /// Update the active v3 source, then atomically compile its v2 `theme.yaml`.
 /// Local UI settings stay in the compiled document and are never shared.
@@ -58,6 +62,30 @@ pub fn write_ime_ui_settings_to_path(
     font_size: f32,
     corner_radius: Option<f32>,
     background_color: String,
+) -> Result<(), String> {
+    write_ime_ui_settings_to_path_with_changes(
+        theme_path,
+        color_scheme,
+        orientation,
+        accent_color,
+        font_size,
+        corner_radius,
+        background_color,
+        None,
+    )
+}
+
+/// A supplied mask identifies the App controls explicitly changed by the user.
+/// Bits 0–3 are corner radius, background color, orientation, and font size.
+pub fn write_ime_ui_settings_to_path_with_changes(
+    theme_path: &Path,
+    color_scheme: UiColorScheme,
+    orientation: PanelOrientation,
+    accent_color: Option<String>,
+    font_size: f32,
+    corner_radius: Option<f32>,
+    background_color: String,
+    changed_fields: Option<u8>,
 ) -> Result<(), String> {
     let accent_color = accent_color
         .map(|value| normalize_hex_color(&value))
@@ -73,6 +101,7 @@ pub fn write_ime_ui_settings_to_path(
         Some(background_color),
         Some(orientation),
         Some(font_size),
+        changed_fields,
     )
 }
 
@@ -114,6 +143,7 @@ pub fn write_theme_appearance_to_path(
         background_color,
         None,
         None,
+        Some(IME_UI_RADIUS_CHANGED | IME_UI_BACKGROUND_CHANGED),
     )
 }
 
@@ -721,13 +751,20 @@ pub fn resolve_candidate_panel_preview_from_paths(
         .transpose()?
         .flatten()
     {
+        let current = resolve_theme_from_paths(default_theme_path, user_theme_path);
+        let current_accent = current
+            .ui
+            .accent_color
+            .or(Some(current.candidate.selected_label_color));
         let source = theme_store::edit_source_settings(
             source,
-            Some(accent_color),
-            Some(corner_radius),
-            Some(background_color),
+            (!theme_store::matches_shortcut_color(current_accent, &accent_color))
+                .then_some(accent_color),
+            (corner_radius != current.ui.corner_radius).then_some(corner_radius),
+            (!theme_store::matches_shortcut_color(current.ui.background_color, &background_color))
+                .then_some(background_color),
             None,
-            Some(font_size),
+            (font_size != current.font.size).then_some(font_size),
         )?;
         let scheme = match color_scheme {
             UiColorScheme::Auto => system_scheme,
@@ -735,12 +772,7 @@ pub fn resolve_candidate_panel_preview_from_paths(
             UiColorScheme::Dark => EffectiveColorScheme::Dark,
         };
         let mut theme = source::resolve_theme_source(&source, scheme);
-        let local = resolve_theme_from_paths_with_system_scheme(
-            default_theme_path,
-            user_theme_path,
-            system_scheme,
-        )
-        .ui;
+        let local = current.ui;
         theme.ui.color_scheme = color_scheme;
         theme.ui.embedded_composition = local.embedded_composition;
         theme.ui.hide_candidate_panel = local.hide_candidate_panel;
@@ -1059,8 +1091,8 @@ impl ResolvedImeTheme {
                 border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
                 border_width: 1.0,
                 font_size: 24.0,
-                width: 72.0,
-                height: 44.0,
+                width: 48.0,
+                height: 36.0,
                 corner_radius: 14.0,
                 duration: 0.75,
                 shadow: true,
@@ -2365,8 +2397,8 @@ mod tests {
             theme.candidate.selected_border_color,
             rgba(0x5d, 0xa7, 0xd7, 0xff)
         );
-        assert_eq!(theme.mode_hint.width, 72.0);
-        assert_eq!(theme.mode_hint.height, 44.0);
+        assert_eq!(theme.mode_hint.width, 48.0);
+        assert_eq!(theme.mode_hint.height, 36.0);
     }
 
     #[test]

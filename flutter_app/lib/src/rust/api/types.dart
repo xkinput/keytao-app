@@ -78,6 +78,7 @@ class AndroidImeInputSettingsDto {
   final int floatingPortraitScale;
   final bool floatingLandscapeEnabled;
   final int floatingLandscapeScale;
+  final String? keyboardLayoutJson;
   final String? configPath;
   final String? reloadStampPath;
   final String message;
@@ -114,6 +115,7 @@ class AndroidImeInputSettingsDto {
     required this.floatingPortraitScale,
     required this.floatingLandscapeEnabled,
     required this.floatingLandscapeScale,
+    this.keyboardLayoutJson,
     this.configPath,
     this.reloadStampPath,
     required this.message,
@@ -152,6 +154,7 @@ class AndroidImeInputSettingsDto {
       floatingPortraitScale.hashCode ^
       floatingLandscapeEnabled.hashCode ^
       floatingLandscapeScale.hashCode ^
+      keyboardLayoutJson.hashCode ^
       configPath.hashCode ^
       reloadStampPath.hashCode ^
       message.hashCode;
@@ -193,6 +196,7 @@ class AndroidImeInputSettingsDto {
           floatingPortraitScale == other.floatingPortraitScale &&
           floatingLandscapeEnabled == other.floatingLandscapeEnabled &&
           floatingLandscapeScale == other.floatingLandscapeScale &&
+          keyboardLayoutJson == other.keyboardLayoutJson &&
           configPath == other.configPath &&
           reloadStampPath == other.reloadStampPath &&
           message == other.message;
@@ -899,6 +903,7 @@ class LinuxImeStatusDto {
 class LocalSchemaDto {
   final bool installed;
   final bool deployed;
+  final bool buildAvailable;
   final String? version;
   final List<String> schemas;
   final String? installedScheme;
@@ -909,6 +914,7 @@ class LocalSchemaDto {
   const LocalSchemaDto({
     required this.installed,
     required this.deployed,
+    this.buildAvailable = false,
     this.version,
     required this.schemas,
     this.installedScheme,
@@ -921,6 +927,7 @@ class LocalSchemaDto {
   int get hashCode =>
       installed.hashCode ^
       deployed.hashCode ^
+      buildAvailable.hashCode ^
       version.hashCode ^
       schemas.hashCode ^
       installedScheme.hashCode ^
@@ -935,6 +942,7 @@ class LocalSchemaDto {
           runtimeType == other.runtimeType &&
           installed == other.installed &&
           deployed == other.deployed &&
+          buildAvailable == other.buildAvailable &&
           version == other.version &&
           schemas == other.schemas &&
           installedScheme == other.installedScheme &&

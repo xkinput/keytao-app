@@ -269,6 +269,7 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
         return Ok(LocalSchemaInfo {
             installed: false,
             deployed: false,
+            build_available: false,
             version: None,
             schemas: vec![],
             deploy_warning: None,
@@ -277,6 +278,9 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
 
     let shared = crate::deploy::deploy_shared_data_dir(core, &dir);
     let state = keytao_core::schema_install_state_with_shared(&dir, &shared);
+    let build_available = state.deployed
+        || keytao_core::isolated_ime_schema_state(&dir, &shared)
+            .is_some_and(|build| build.deployed);
     let installed = state.installed
         || !core.lock_state().installed_packages.is_empty()
         || crate::addon_store::IDS.iter().any(|id| {
@@ -298,6 +302,7 @@ pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSche
     Ok(LocalSchemaInfo {
         installed,
         deployed: state.deployed,
+        build_available,
         version,
         schemas: state.schemas,
         deploy_warning: keytao_core::deployment_warning_with_shared(&dir, &shared),

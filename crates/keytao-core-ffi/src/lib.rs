@@ -1426,6 +1426,21 @@ pub extern "C" fn keytao_session_process_key_json(
     })
 }
 
+/// Send a confirmed solo Shift, Control or Alt tap as a single press/release batch.
+#[no_mangle]
+pub extern "C" fn keytao_session_process_modifier_tap_json(
+    session: *mut c_void,
+    keyval: u32,
+) -> *mut c_char {
+    session_json("keytao_session_process_modifier_tap_json", session, |s| {
+        if !matches!(keyval, 0xffe1..=0xffe4 | 0xffe9..=0xffea) {
+            return None;
+        }
+        s.process_keys_result(&[(keyval, 0), (keyval, keytao_core::RIME_RELEASE_MASK)])
+            .map(result_json)
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn keytao_session_process_key_with_panel_json(
     session: *mut c_void,
@@ -2397,6 +2412,7 @@ mod tests {
     fn session_exports_refuse_a_null_handle() {
         assert!(keytao_session_state_json(std::ptr::null_mut()).is_null());
         assert!(keytao_session_process_key_json(std::ptr::null_mut(), 0x61, 0).is_null());
+        assert!(keytao_session_process_modifier_tap_json(std::ptr::null_mut(), 0xffe1).is_null());
         assert!(keytao_session_process_key_with_panel_json(
             std::ptr::null_mut(),
             0xff52,

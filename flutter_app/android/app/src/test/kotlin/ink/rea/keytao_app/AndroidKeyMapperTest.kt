@@ -1,5 +1,6 @@
 package ink.rea.keytao_app
 
+import android.view.KeyEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -7,6 +8,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidKeyMapperTest {
+    @Test
+    fun `hardware Caps Lock reaches Rime while system language switching stays with Android`() {
+        assertEquals(0xffe5, AndroidKeyMapper.specialHardwareKeysym(KeyEvent.KEYCODE_CAPS_LOCK))
+        assertNull(AndroidKeyMapper.specialHardwareKeysym(KeyEvent.KEYCODE_LANGUAGE_SWITCH))
+    }
+
     @Test
     fun `hardware Unicode uses the shared keysym conversion instead of special key values`() {
         for ((text, keysym) in listOf(

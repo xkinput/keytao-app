@@ -199,6 +199,21 @@ async fn selected_local_schemas_survive_reimport_and_deploy_with_librime() {
     );
     assert!(dirs.join("build/keytao-dz.schema.yaml").is_file());
     assert!(dirs.join("build/support.schema.yaml").is_file());
+
+    let check = || {
+        keytao_app_core::scheme::check_local_schema(&fixture.core, Some(fixture.root.clone()))
+            .unwrap()
+    };
+    assert!(check().deployed);
+    let patch = dirs.join("default.custom.yaml");
+    let mut file = fs::OpenOptions::new().append(true).open(&patch).unwrap();
+    file.write_all(b"\n# Edited after deployment\n").unwrap();
+    drop(file);
+    let previous_build = check();
+    assert!(previous_build.installed);
+    assert!(!previous_build.deployed);
+    assert!(previous_build.build_available);
+    assert_eq!(previous_build.schemas, ["keytao-dz"]);
 }
 
 #[tokio::test]

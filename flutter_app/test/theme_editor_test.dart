@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -36,6 +37,16 @@ class _DragThemeEditorController extends ViewController {
   final writes = <(String, Object?)>[];
   Completer<void>? saveGate;
   int loads = 0;
+  int previewResolutions = 0;
+
+  @override
+  Map<String, dynamic> resolveThemeEditorPreview({
+    required Map<String, dynamic> source,
+    required bool dark,
+  }) {
+    previewResolutions++;
+    return super.resolveThemeEditorPreview(source: source, dark: dark);
+  }
 
   @override
   Future<Map<String, dynamic>> getThemeEditor() {
@@ -56,6 +67,73 @@ class _DragThemeEditorController extends ViewController {
 }
 
 void main() {
+  testWidgets('phone editor pins its preview and reveals the tapped field', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 800);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = ViewController(BridgePlatform.android);
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: BridgePlatform.android,
+        home: FScaffold(
+          child: ThemeEditorSection(
+            controller: controller,
+            header: const Text('主题库'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final scroll = find.byKey(const ValueKey('theme-editor-scroll'));
+    final preview = find.byKey(const ValueKey('theme-sticky-preview'));
+    Finder expectFocused(String path) {
+      final field = find.byKey(ValueKey(('theme-control', path)));
+      final focus = find.descendant(
+        of: field,
+        matching: find.byKey(const ValueKey('theme-field-focus')),
+      );
+      expect(Focus.of(tester.element(focus)).hasPrimaryFocus, isTrue);
+      expect(
+        tester.getTopLeft(field).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(preview).dy),
+      );
+      return field;
+    }
+
+    final mobileHeight = tester.getSize(preview).height;
+    await tester.tap(find.byKey(const ValueKey('keyboard-preview-key-空格')));
+    await tester.pumpAndSettle();
+    expectFocused('mobile.keyboard.keyTypes.space.foreground');
+    await tester.drag(scroll, const Offset(0, 800));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('PC'));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(preview).height, lessThan(mobileHeight));
+
+    await tester.drag(scroll, const Offset(0, -310));
+    await tester.pumpAndSettle();
+    expect(find.text('PC').hitTestable(), findsNothing);
+    expect(find.text('主题库').hitTestable(), findsNothing);
+    expect(tester.getTopLeft(preview).dy, tester.getTopLeft(scroll).dy);
+
+    const path = 'pc.font.commentSize';
+    final comment = find.byKey(const ValueKey(('theme-preview-edit', path)));
+    await tester.tap(comment.first);
+    await tester.pumpAndSettle();
+    expectFocused(path);
+    expect(
+      tester
+          .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
+          .highlightPath,
+      path,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('groups survive dragging, saves, reloads, layout and tabs', (
     tester,
   ) async {
@@ -76,13 +154,20 @@ void main() {
       of: find.text('字体'),
       matching: find.byType(FAccordion),
     );
+    final sliderField = find.descendant(
+      of: fontGroup,
+      matching: find.byKey(const ValueKey(('theme-control', 'pc.font.size'))),
+    );
     final slider = find.descendant(
-      of: find.descendant(
-        of: fontGroup,
-        matching: find.byKey(const ValueKey(('theme-control', 'pc.font.size'))),
-      ),
+      of: sliderField,
       matching: find.byType(FSlider),
     );
+    String? sliderLabel() => tester
+        .widgetList<Text>(
+          find.descendant(of: sliderField, matching: find.byType(Text)),
+        )
+        .last
+        .data;
     void expectExpanded() {
       expect(
         tester
@@ -102,12 +187,37 @@ void main() {
     expectExpanded();
     await tester.ensureVisible(slider);
     final element = tester.element(slider);
+    String? highlightedPath() => tester
+        .widget<CandidatePanelPreview>(
+          find.byWidgetPredicate(
+            (widget) => widget is CandidatePanelPreview && !widget.keyboard,
+          ),
+        )
+        .highlightPath;
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: tester.getCenter(slider));
+    await tester.pumpAndSettle();
+    expect(highlightedPath(), 'pc.font.size');
+    await mouse.moveTo(Offset.zero);
+    await mouse.removePointer();
+    await tester.pumpAndSettle();
+    expect(highlightedPath(), isNull);
     var bounds = tester.getRect(slider);
     final drag = await tester.startGesture(
       Offset(bounds.left + bounds.width * 8 / 26, bounds.center.dy),
     );
+    final beforeDrag = controller.previewResolutions;
+    final initialLabel = sliderLabel();
     await drag.moveBy(const Offset(24, 0));
+    await tester.pump(const Duration(milliseconds: 35));
+    await drag.moveBy(const Offset(10, 0));
+    await tester.pump(const Duration(milliseconds: 60));
+    expect(sliderLabel(), isNot(initialLabel));
+    expect(controller.previewResolutions, beforeDrag);
+    await tester.pump(const Duration(milliseconds: 20));
+    expect(controller.previewResolutions, beforeDrag + 1);
     await tester.pumpAndSettle();
+    expect(highlightedPath(), 'pc.font.size');
     expectExpanded();
     expect(tester.element(slider), same(element));
     tester.view.physicalSize = const Size(850, 1100);
@@ -115,8 +225,8 @@ void main() {
     expectExpanded();
     expect(tester.element(slider), same(element));
     bounds = tester.getRect(slider);
+    final beforeRelease = controller.previewResolutions;
     await drag.moveTo(Offset(bounds.right - 1, bounds.center.dy));
-    await tester.pumpAndSettle();
     expectExpanded();
     expect(controller.writes, isEmpty);
     controller.saveGate = Completer<void>();
@@ -124,6 +234,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expectExpanded();
     expect(controller.writes, [('pc.font.size', 36.0)]);
+    expect(controller.previewResolutions, beforeRelease + 1);
     controller.saveGate!.complete();
     await tester.pumpAndSettle();
     expectExpanded();

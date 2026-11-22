@@ -228,6 +228,7 @@ class SettingsCard extends StatefulWidget {
 
 class _SettingsCardState extends State<SettingsCard> {
   AppController get controller => widget.controller;
+  Timer? _previewTimer;
   ImeUiSettingsDto? _previewSource;
   UiColorSchemeDto? _previewScheme;
   PanelOrientationDto? _previewOrientation;
@@ -243,7 +244,26 @@ class _SettingsCardState extends State<SettingsCard> {
     unawaited(controller.refreshCandidatePreview());
   }
 
+  @override
+  void dispose() {
+    _previewTimer?.cancel();
+    super.dispose();
+  }
+
+  void _schedulePreview(VoidCallback update, {bool immediate = false}) {
+    if (!mounted) return;
+    _previewTimer?.cancel();
+    if (immediate) {
+      setState(update);
+    } else {
+      _previewTimer = Timer(const Duration(milliseconds: 80), () {
+        setState(update);
+      });
+    }
+  }
+
   void _resetPreview() {
+    _previewTimer?.cancel();
     _previewScheme = null;
     _previewOrientation = null;
     _previewAccent = null;
@@ -257,13 +277,19 @@ class _SettingsCardState extends State<SettingsCard> {
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,
     bool? hideCandidatePanel,
+    String? accentColor,
+    String? backgroundColor,
     double? fontSize,
     double? cornerRadius,
     bool resetCornerRadius = false,
   }) async {
+    if (!mounted) return;
+    _previewTimer?.cancel();
     setState(() {
       _previewScheme = colorScheme ?? _previewScheme;
       _previewOrientation = orientation ?? _previewOrientation;
+      _previewAccent = accentColor ?? _previewAccent;
+      _previewBackground = backgroundColor ?? _previewBackground;
       _previewFontSize = fontSize ?? _previewFontSize;
       _previewRadius = resetCornerRadius
           ? null
@@ -276,6 +302,8 @@ class _SettingsCardState extends State<SettingsCard> {
       colorScheme: colorScheme,
       orientation: orientation,
       hideCandidatePanel: hideCandidatePanel,
+      accentColor: accentColor,
+      backgroundColor: backgroundColor,
       fontSize: fontSize,
       cornerRadius: cornerRadius,
       resetCornerRadius: resetCornerRadius,
@@ -430,7 +458,7 @@ class _SettingsCardState extends State<SettingsCard> {
                     max: candidateFontMax,
                     divisions: candidateFontDivisions,
                     onPreview: (value) =>
-                        setState(() => _previewFontSize = value),
+                        _schedulePreview(() => _previewFontSize = value),
                     onChanged: c.busy
                         ? null
                         : (value) => _savePreview(fontSize: value),
@@ -474,16 +502,20 @@ class _SettingsCardState extends State<SettingsCard> {
       _separated(
         AccentPicker(
           controller: c,
-          onPreview: (value) {
-            if (mounted) setState(() => _previewAccent = value);
-          },
+          onPreview: (value) => _schedulePreview(
+            () => _previewAccent = value,
+            immediate: value == c.uiSettings?.accentColor,
+          ),
+          onChanged: (value) => _savePreview(accentColor: value),
         ),
       ),
       BackgroundPicker(
         controller: c,
-        onPreview: (value) {
-          if (mounted) setState(() => _previewBackground = value);
-        },
+        onPreview: (value) => _schedulePreview(
+          () => _previewBackground = value,
+          immediate: value == c.uiSettings?.backgroundColor,
+        ),
+        onChanged: (value) => _savePreview(backgroundColor: value),
       ),
       SliderSetting(
         label: '圆角',
@@ -491,7 +523,7 @@ class _SettingsCardState extends State<SettingsCard> {
         min: 0,
         max: 28,
         divisions: 28,
-        onPreview: (value) => setState(() {
+        onPreview: (value) => _schedulePreview(() {
           _previewRadius = value;
           _resetRadius = false;
         }),
@@ -525,17 +557,12 @@ class _SettingsCardState extends State<SettingsCard> {
         ? null
         : _previewRadius ?? s?.cornerRadius;
     final backgroundColor = _previewBackground ?? s?.backgroundColor ?? '';
+    final colorScheme = _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto;
     final preview = CandidatePanelPreview(
       fontCatalog: SystemFontCatalog.forController(c),
-      key: ValueKey((
-        _previewScheme ?? s?.colorScheme,
-        accent,
-        orientation,
-        cornerRadius,
-        backgroundColor,
-      )),
+      key: ValueKey((colorScheme, orientation)),
       theme: c.resolveCandidatePanelPreview(
-        colorScheme: _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto,
+        colorScheme: colorScheme,
         accentColor: accent,
         cornerRadius: cornerRadius,
         backgroundColor: backgroundColor,
@@ -547,7 +574,9 @@ class _SettingsCardState extends State<SettingsCard> {
       candidateCount: c.candidatePageSize ?? c.candidatePreviewPageSize ?? 6,
       candidates: c.candidatePreviewCandidates,
       keyboard: keyboard,
+      keyboardSettings: keyboard ? c.androidSettings : null,
       keyboardSchemeName:
+          c.currentSchemaName ??
           c.installedPackageFor(c.activeSchemeKey)?.displayName ??
           schemeDisplayName(c.activeSchemeKey),
       keyboardLogo: SchemaLogo(controller: c, size: 28),

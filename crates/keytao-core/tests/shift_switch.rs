@@ -1,12 +1,19 @@
-//! Shift switching follows the configured librime action without host commits.
+//! Solo modifiers follow the configured librime action without host commits.
 #[path = "support/smoke_fixture.rs"]
 mod smoke_fixture;
 
 use keytao_core::{ImeRuntime, RIME_RELEASE_MASK};
 
 #[test]
-fn shift_switch_key_styles_commit_once_and_unset_right_shift_is_noop() {
-    for style in ["commit_text", "clear", "commit_code", "noop"] {
+fn modifier_switch_key_styles_commit_once_and_unset_shift_is_noop() {
+    for (switch_key, switch_keysym, style) in [
+        ("Shift_L", 0xffe1, "commit_text"),
+        ("Shift_L", 0xffe1, "clear"),
+        ("Shift_L", 0xffe1, "commit_code"),
+        ("Shift_L", 0xffe1, "noop"),
+        ("Control_L", 0xffe3, "commit_text"),
+        ("Alt_R", 0xffea, "commit_code"),
+    ] {
         let dir = smoke_fixture::scratch_dir("shift-switch");
         std::fs::create_dir_all(dir.join("lua")).unwrap();
         for (name, contents) in [
@@ -32,7 +39,7 @@ fn shift_switch_key_styles_commit_once_and_unset_right_shift_is_noop() {
         }
         std::fs::write(
             dir.join("default.custom.yaml"),
-            format!("patch:\n  schema_list:\n    - schema: keytao\n    - schema: easy_en\n  ascii_composer/good_old_caps_lock: false\n  ascii_composer/switch_key:\n    Caps_Lock: commit_text\n    Shift_L: {style}\n"),
+            format!("patch:\n  schema_list:\n    - schema: keytao\n    - schema: easy_en\n  ascii_composer/good_old_caps_lock: false\n  ascii_composer/switch_key:\n    Caps_Lock: commit_text\n    {switch_key}: {style}\n"),
         )
         .unwrap();
         std::fs::write(
@@ -43,8 +50,8 @@ fn shift_switch_key_styles_commit_once_and_unset_right_shift_is_noop() {
         .unwrap();
         let runtime =
             ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
-        runtime.init().expect("deploy the Shift switch fixture");
-        for keysym in [0xffe1, 0xffe2] {
+        runtime.init().expect("deploy the modifier switch fixture");
+        for keysym in [switch_keysym, 0xffe2] {
             let session = runtime.create_session().unwrap();
             session.set_context_ascii_mode(Some(false)).unwrap();
             for key in b"fjv" {
@@ -52,34 +59,26 @@ fn shift_switch_key_styles_commit_once_and_unset_right_shift_is_noop() {
             }
             assert_eq!(session.state().preedit, "fjv");
             assert_eq!(session.state().candidates[0].text, "甲");
-            let press = session.process_key_result(keysym, 0).unwrap();
-            let release = session
-                .process_key_result(keysym, RIME_RELEASE_MASK)
+            let result = session
+                .process_keys_result(&[(keysym, 0), (keysym, RIME_RELEASE_MASK)])
                 .unwrap();
-            let commits: Vec<_> = [press.state.committed, release.state.committed.clone()]
-                .into_iter()
-                .flatten()
-                .collect();
-            let active = keysym == 0xffe1 && style != "noop";
+            let committed = result.state.committed.as_deref();
+            let active = keysym == switch_keysym && style != "noop";
             let expected = if active {
                 match style {
-                    "commit_text" => vec!["甲".to_owned()],
-                    "commit_code" => vec!["fjv".to_owned()],
-                    _ => Vec::new(),
+                    "commit_text" => Some("甲"),
+                    "commit_code" => Some("fjv"),
+                    _ => None,
                 }
             } else {
-                Vec::new()
+                None
             };
-            assert_eq!(commits, expected, "{style}, keysym={keysym:#x}");
-            assert!(commits.len() <= 1, "{style}, keysym={keysym:#x}");
-            if matches!(style, "commit_text" | "clear") {
-                assert!(commits.iter().all(|text| !text.contains("fjv")));
-            }
+            assert_eq!(committed, expected, "{style}, keysym={keysym:#x}");
             assert_eq!(
-                release.state.ascii_mode, active,
+                result.state.ascii_mode, active,
                 "{style}, keysym={keysym:#x}"
             );
-            assert_eq!(release.state.preedit, if active { "" } else { "fjv" });
+            assert_eq!(result.state.preedit, if active { "" } else { "fjv" });
         }
         drop(runtime);
         std::fs::remove_dir_all(dir).unwrap();

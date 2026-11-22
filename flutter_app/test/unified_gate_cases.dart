@@ -23,6 +23,8 @@ void unifiedGateCases(BridgePlatform platform) {
   };
   final desktopUngated =
       platform == BridgePlatform.windows || platform == BridgePlatform.linux;
+  final mobile =
+      platform == BridgePlatform.android || platform == BridgePlatform.ios;
   testWidgets(
     '${platform.name} onboarding opens on the first incomplete step',
     (tester) async {
@@ -33,6 +35,7 @@ void unifiedGateCases(BridgePlatform platform) {
           version: '',
           schemas: [],
         );
+      if (c.isAndroid) c.storage = {'granted': false, 'writable': false};
       addTearDown(c.dispose);
       const channel = MethodChannel('ink.rea.keytao/window');
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -59,7 +62,11 @@ void unifiedGateCases(BridgePlatform platform) {
         expect(
           find.byKey(
             ValueKey(
-              platform == BridgePlatform.ios ? 'setup-enable' : 'setup-install',
+              switch (platform) {
+                BridgePlatform.ios => 'setup-enable',
+                BridgePlatform.android => 'setup-storage',
+                _ => 'setup-install',
+              },
             ),
           ),
           findsOneWidget,
@@ -78,6 +85,9 @@ void unifiedGateCases(BridgePlatform platform) {
         (tester) async {
           final showShell = completed || desktopUngated;
           final c = ViewController(platform);
+          if (c.isAndroid && !completed) {
+            c.storage = {'granted': false, 'writable': false};
+          }
           addTearDown(c.dispose);
           tester.view.devicePixelRatio = 1;
           tester.view.physicalSize = Size(width, 860);
@@ -248,6 +258,7 @@ void unifiedGateCases(BridgePlatform platform) {
         variant: TargetPlatformVariant.only(target),
       );
     }
+    if (mobile) continue;
     testWidgets(
       '${platform.name} $width onboarding install error stays inline',
       (tester) async {

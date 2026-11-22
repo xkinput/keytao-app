@@ -977,7 +977,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }
             return passKeyDownToHost(keyCode, event)
         }
-        if (emojiSearchQuery != null) {
+        if (emojiSearchQuery != null && !isSystemLanguageKey(keyCode)) {
             if (isShiftKey(keyCode)) {
                 shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
                 pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
@@ -1056,6 +1056,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 )
                 engine.processKey(routedKeyCode, key.modifiers)
             }
+            if (key.keyCode == AndroidKeyMapper.XK_CAPS_LOCK) {
+                // Android toggles the lock on release, so Rime receives the pre-toggle mask.
+                applyState(result)
+                return passKeyDownToHost(keyCode, event)
+            }
             hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
             if (!result.accepted) {
                 if (key.keyCode != AndroidKeyMapper.OPEN_PACKAGE_MENU) {
@@ -1086,7 +1091,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             return if (release.passToHost) super.onKeyUp(keyCode, event) else true
         }
         if (!isShiftKey(keyCode)) {
-            if (emojiSearchQuery != null) return true
+            if (emojiSearchQuery != null && !isSystemLanguageKey(keyCode)) return true
             return super.onKeyUp(keyCode, event)
         }
         val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode &&
@@ -1106,17 +1111,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         val beforeAsciiMode = currentState.asciiMode
         val result = KeytaoRimeInput.processSoloShift(shiftKeysym, engine::processKey, ::applyState)
-        if (result.accepted || result.hasComposition || result.asciiMode != beforeAsciiMode) {
+        if (result.accepted || result.asciiMode != beforeAsciiMode) {
             applyState(result)
-        } else {
-            KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
-            if (usesEnglishSchema()) {
-                handleMode(null)
-            } else {
-                applyState(engine.setAsciiMode(!currentState.asciiMode))
-            }
+            return true
         }
-        return true
+        KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun allowsChordInput(): Boolean = !bypassesComposition()
@@ -3480,6 +3480,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun isShiftKey(keyCode: Int): Boolean {
         return keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT
     }
+
+    private fun isSystemLanguageKey(keyCode: Int): Boolean =
+        keyCode == KeyEvent.KEYCODE_CAPS_LOCK || keyCode == KeyEvent.KEYCODE_LANGUAGE_SWITCH
 
     companion object {
         private const val defaultUnavailableMessage = "请先在 KeyTao App 安装键道方案"

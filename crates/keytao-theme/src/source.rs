@@ -227,7 +227,7 @@ fn source_schema(preserve_local_text: bool) -> Value {
         "keyClasses":{"accent":style,"accentPunctuation":style},"keyStates":{"selected":colors,"shiftOn":colors},
         "toolbar":{"background":"color","foreground":"color","selectedForeground":"color",
             "buttonBackground":"color","buttonBorderColor":"color","activeBackground":"color","selectedBackground":"color","pressedBackground":"color","activeBorderColor":"color","buttonBorderWidth":0,"buttonCornerRadius":0},"floating":{"borderColor":"color","shadowColor":"color"}},
-        "candidateBar":{"background":"color","foreground":"color","selectedForeground":"color","selectedBackground":"color","commentColor":"color","fontScale":1,"showComment":true,"commentPosition":"commentPosition","preeditForeground":"color","preeditBackground":"color","expandedBackground":"color",
+        "candidateBar":{"background":"color","foreground":"color","selectedForeground":"color","selectedBackground":"color","commentColor":"color","fontScale":1,"commentFontSize":12,"showComment":true,"commentPosition":"commentPosition","preeditForeground":"color","preeditBackground":"color","expandedBackground":"color",
             "itemBackground":"color","borderColor":"color","selectedBorderColor":"color","labelColor":"color","selectedLabelColor":"color","selectedCommentColor":"color","borderWidth":0,"selectedBorderWidth":0,"cornerRadius":0,"paddingX":0,"inlineGap":0}});
     let variant = json!({"common":common,"pc":pc_schema,"mobile":mobile});
     json!({"version":3,"meta":{"id":"id","name":"text64","author":"text64","appearance":"appearance"},"common":common,"pc":pc_schema,"mobile":mobile,"light":variant,"dark":variant})

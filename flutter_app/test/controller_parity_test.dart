@@ -1228,6 +1228,28 @@ void main() {
     },
   );
 
+  test('Android completes setup without a scheme after a queued resume check', () async {
+    core.local = const LocalSchemaDto(
+      installed: false,
+      deployed: false,
+      schemas: [],
+    );
+    final gate = Completer<void>();
+    final action = controller.run(() => gate.future);
+    controller.onResume();
+    expect(controller.setupReady, isFalse);
+    gate.complete();
+    expect(await action, isTrue);
+    await settle();
+
+    expect(controller.setupReady, isTrue);
+    expect(controller.local!.installed, isFalse);
+    expect(core.onboardingWrites, 0);
+    expect(await controller.finishOnboarding(), isTrue);
+    expect(core.onboardingWrites, 1);
+    expect(core.calls, isNot(contains('deployImeData')));
+  });
+
   test('add-ons install without a main scheme and report callback failures', () async {
     core.local = const LocalSchemaDto(
       installed: false,

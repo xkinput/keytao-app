@@ -577,6 +577,7 @@ Future<ImeUiSettingsDto> setImeUiSettings({
   required double fontSize,
   double? cornerRadius,
   required String backgroundColor,
+  int? changedFields,
 }) => RustLib.instance.api.crateApiCoreSetImeUiSettings(
   colorScheme: colorScheme,
   orientation: orientation,
@@ -584,6 +585,7 @@ Future<ImeUiSettingsDto> setImeUiSettings({
   fontSize: fontSize,
   cornerRadius: cornerRadius,
   backgroundColor: backgroundColor,
+  changedFields: changedFields,
 );
 
 Future<ImeUiSettingsDto> setImeEmbeddedComposition({required bool embedded}) =>

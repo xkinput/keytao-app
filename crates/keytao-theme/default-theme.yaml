@@ -76,8 +76,8 @@ modeHint:
   borderColor: "#5DA7D7"
   borderWidth: 1
   fontSize: 24
-  width: 72
-  height: 44
+  width: 48
+  height: 36
   cornerRadius: 14
   duration: 0.75
   shadow: true

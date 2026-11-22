@@ -32,6 +32,8 @@
 
     <key>TISInputSourceID</key>
     <string>ink.rea.inputmethod.keytao</string>
+    <key>TICapsLockLanguageSwitchCapable</key>
+    <true/>
 
     <key>InputMethodConnectionName</key>
     <string>KeyTao_Connection</string>

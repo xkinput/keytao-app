@@ -142,14 +142,10 @@ extension AppViewOptions on AppController {
     if (isIos) ...[
       SetupStep.enable,
       SetupStep.fullAccess,
-      SetupStep.install,
-      SetupStep.deploy,
     ] else if (isAndroid) ...[
       SetupStep.enable,
       SetupStep.select,
       SetupStep.storage,
-      SetupStep.install,
-      SetupStep.deploy,
     ] else ...[
       SetupStep.component,
       SetupStep.install,

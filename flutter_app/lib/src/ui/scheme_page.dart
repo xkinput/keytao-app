@@ -644,7 +644,11 @@ class SchemePackageRow extends StatelessWidget {
     final isLocal = package?.source == 'local';
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
-    final inUse = active && package!.inUse;
+    final local = c.local;
+    final checksCurrentPackage =
+        local?.installedScheme == null || local?.installedScheme == schemeKey;
+    final inUse =
+        active && package!.inUse && checksCurrentPackage && c.hasUsableBuild;
     if (package == null || !package.hasPackageZip) {
       unawaited(c.ensureRemoteSchemeLogo(schemeKey));
     }
@@ -661,15 +665,21 @@ class SchemePackageRow extends StatelessWidget {
         deployLabel == AppStrings.deploying;
     final installing = c.installingSchemeKey == schemeKey;
     final changelogBody = schemeKey == 'keytao' ? c.changelogBody : null;
-    final failedDeploySteps = c.deploySteps.where(
+    final failures = c.deploySteps.where(
       (step) => step.state == DeployStepState.failed,
+    );
+    final hasPackageFailure = failures.any((step) => step.packageKey != null);
+    final failedDeploySteps = failures.where(
+      (step) =>
+          step.packageKey == schemeKey ||
+          step.packageKey == 'builtin/$schemeKey' ||
+          (active && !hasPackageFailure && step.packageKey == null),
     );
     final deployFailed = failedDeploySteps.isNotEmpty;
     final needsDeploy =
-        !c.hasPackageDeployProgress &&
         active &&
         !c.isDeploying &&
-        (deployFailed || c.local?.deployed != true);
+        (deployFailed || (checksCurrentPackage && local?.deployed == false));
     final actions = ActionRow(
       children: [
         if (schemeKey == 'keytao' && showSource) _SchemeSource(controller: c),
@@ -691,19 +701,17 @@ class SchemePackageRow extends StatelessWidget {
           )
         else if (package != null && (active || package.hasPackageZip))
           ActionButton(
-            needsDeploy
-                ? '使用'
-                : inUse
+            inUse
                 ? '使用中'
+                : needsDeploy
+                ? AppStrings.deploy
                 : '使用',
-            primary: needsDeploy || (!inUse && update == null),
-            success: inUse && !needsDeploy,
-            icon: inUse && !needsDeploy
-                ? FLucideIcons.check
-                : FLucideIcons.play,
-            onPress: c.busy || (inUse && !needsDeploy)
+            primary: !inUse && (needsDeploy || update == null),
+            success: inUse,
+            icon: inUse ? FLucideIcons.check : FLucideIcons.play,
+            onPress: c.busy || inUse
                 ? null
-                : needsDeploy && inUse
+                : needsDeploy
                 ? () => c.deploy(schemeKey: schemeKey)
                 : onActivate ?? () => c.activateSchemePackage(schemeKey),
           )
@@ -941,9 +949,13 @@ class SchemePackageRow extends StatelessWidget {
         ),
       ),
     );
-    final state = needsDeploy
+    final state = !c.isDeploying && (deployFailed || needsDeploy)
         ? AppBadge(
-            deployFailed ? '部署失败' : '待部署',
+            deployFailed
+                ? AppStrings.deployFailed
+                : inUse
+                ? AppStrings.pendingRedeploy
+                : AppStrings.pendingDeploy,
             background: deployFailed
                 ? palette.error.withValues(alpha: .12)
                 : null,
@@ -1080,7 +1092,7 @@ class SchemePackageRow extends StatelessWidget {
           const SizedBox(height: 8),
           ErrorMessage(error),
         ],
-        if (!c.hasPackageDeployProgress && active && !deploying)
+        if (!deploying && c.packageDeployError(schemeKey) == null)
           for (final step in failedDeploySteps) ...[
             const SizedBox(height: 8),
             ErrorMessage(step.message),
@@ -1409,7 +1421,9 @@ Map<String, Widget> _addonCells(
         ? c.addonHasUpdate
         : c.rimeIceHasUpdate;
     final inUse =
-        isolatedPackage?.active == true && isolatedPackage?.ready == true;
+        isolatedPackage?.active == true &&
+        (isolatedPackage?.ready == true ||
+            (currentPackage == packageKey && c.hasUsableBuild));
     final deployKey = overlay && active
         ? currentPackage ?? packageKey
         : packageKey;
@@ -1541,7 +1555,7 @@ Map<String, Widget> _addonCells(
             ],
             ActionRow(
               children: [
-                if (overlay)
+                if (overlay && installed)
                   ActionButton(
                     englishEnabled == true ? '从当前方案移除' : '加入当前方案',
                     primary: englishEnabled != true,
@@ -1556,7 +1570,9 @@ Map<String, Widget> _addonCells(
                           ),
                   ),
                 if (showInstall &&
-                    (overlay ? hasUpdate : label != AppStrings.deploy))
+                    (overlay
+                        ? !installed || hasUpdate
+                        : label != AppStrings.deploy))
                   ActionButton(
                     cloudCard ? (installed ? '更新' : '下载') : label,
                     primary: installed,

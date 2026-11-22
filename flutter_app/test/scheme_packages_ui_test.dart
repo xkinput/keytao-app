@@ -454,7 +454,9 @@ void main() {
               .map((button) => button.label),
           !installed
               ? isEmpty
-              : [for (var i = 0; i < 4; i++) ...[?label, '使用']],
+              : [
+                  for (var i = 0; i < 4; i++) ...[?label, '使用'],
+                ],
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
@@ -675,7 +677,7 @@ void main() {
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, '下载'),
     );
-    expect(installs, hasLength(5));
+    expect(installs, hasLength(6));
     expect(installs.every((button) => button.onPress != null), isTrue);
     expect(tester.takeException(), isNull);
   });
@@ -754,6 +756,7 @@ void main() {
             schemas: [],
           );
         c.addon = c.wanxiang;
+        if (c.isAndroid) c.storage = {'granted': false, 'writable': false};
         addTearDown(c.dispose);
         for (final completed in [true, false]) {
           await tester.pumpWidget(
@@ -955,6 +958,10 @@ void main() {
       await _pumpRow(tester, c, 'keytao');
       expect(find.text('使用中'), findsNothing);
       expect(find.text('待部署'), findsOneWidget);
+      expect(
+        find.widgetWithText(ActionButton, AppStrings.deploy),
+        findsOneWidget,
+      );
       const deployError =
           '方案 english：缺少构建产物 build/english.schema.yaml: No such file or directory';
       c.deploySteps.add(const DeployStep(deployError, DeployStepState.failed));
@@ -965,6 +972,78 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
+
+  testWidgets('a Git scheme keeps its deployed status while edits wait', (
+    tester,
+  ) async {
+    const key = 'local-evo';
+    final c = _PackageController(BridgePlatform.windows)
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: key,
+          active: true,
+          hasPackageZip: true,
+          source: 'local',
+          version: '90fea1d09811',
+          displayName: '进化键道',
+          git: GitSchemeConfigDto(
+            repoUrl: 'https://example.org/evo',
+            mode: 'branch',
+          ),
+        ),
+      ]
+      ..local = const LocalSchemaDto(
+        installed: true,
+        deployed: false,
+        buildAvailable: true,
+        installedScheme: key,
+        schemas: ['evo'],
+      );
+    addTearDown(c.dispose);
+    _size(tester, const Size(1200, 1000));
+    await _pumpRow(tester, c, key);
+    expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
+    expect(find.text(AppStrings.pendingDeploy), findsNothing);
+    expect(find.text(AppStrings.pendingRedeploy), findsOneWidget);
+
+    c.local = const LocalSchemaDto(
+      installed: true,
+      deployed: true,
+      installedScheme: key,
+      schemas: ['evo'],
+    );
+    c.deploySteps.addAll(const [
+      DeployStep(
+        'Another package failed',
+        DeployStepState.failed,
+        packageKey: 'keytao',
+      ),
+      DeployStep('Deployment failed', DeployStepState.failed),
+    ]);
+    await _pumpRow(tester, c, key);
+    expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
+    expect(find.text(AppStrings.deployFailed), findsNothing);
+
+    c.local = const LocalSchemaDto(
+      installed: true,
+      deployed: false,
+      buildAvailable: true,
+      installedScheme: key,
+      schemas: ['evo'],
+    );
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: FScaffold(child: InputPage(controller: c)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AppBadge, AppStrings.deployed), findsOneWidget);
+    expect(
+      find.widgetWithText(AppBadge, AppStrings.pendingDeploy),
+      findsNothing,
+    );
+  });
 
   testWidgets('package cards keep their own logo throughout deployment', (
     tester,
@@ -1603,7 +1682,18 @@ void main() {
             findsOneWidget,
           );
         }
-        if (overlay) {
+        if (!installed) {
+          final button = tester.widget<ActionButton>(
+            find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, AppStrings.download),
+            ),
+          );
+          expect(button.primary, isFalse);
+          expect(button.icon, FLucideIcons.download);
+          button.onPress!();
+          expect(c.actions.last, '$action:true');
+        } else if (overlay) {
           final button = tester.widget<ActionButton>(
             find.descendant(
               of: card,
@@ -1615,7 +1705,7 @@ void main() {
           );
           button.onPress!();
           expect(c.actions.last, 'overlay:keytao:${!active}');
-        } else if (installed) {
+        } else {
           final button = tester.widget<ActionButton>(
             find.descendant(
               of: card,

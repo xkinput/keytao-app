@@ -27,7 +27,7 @@ final class ModeIndicatorPanel: NSPanel {
 
         label.stringValue = modeHint.text
         let margin = theme.modeHint.shadow ? (theme.modeHint.shadowStyle?.margin ?? 0) : 0
-        let padding = theme.modeHint.fontSize / 3
+        let padding = theme.modeHint.fontSize / 6
         let contentSize = label.intrinsicContentSize
         let bodySize = NSSize(width: max(theme.modeHint.width, contentSize.width + padding * 2), height: max(theme.modeHint.height, contentSize.height + padding * 2))
         let size = NSSize(width: bodySize.width + margin * 2, height: bodySize.height + margin * 2)

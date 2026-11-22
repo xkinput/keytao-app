@@ -32,6 +32,7 @@ object AndroidKeyMapper {
     const val XK_DELETE = 0xffff
     const val XK_SHIFT_L = 0xffe1
     const val XK_SHIFT_R = 0xffe2
+    const val XK_CAPS_LOCK = 0xffe5
     const val PREVIOUS_CANDIDATE = 0x02000000
     const val NEXT_CANDIDATE = 0x02000001
     const val PREVIOUS_PAGE = 0x02000002
@@ -39,33 +40,38 @@ object AndroidKeyMapper {
     const val OPEN_PACKAGE_MENU = 0x02000004
 
     fun fromAndroidKeyEvent(event: KeyEvent): RimeKey? {
-        val special = when (event.keyCode) {
-            KeyEvent.KEYCODE_DEL -> XK_BACK_SPACE
-            KeyEvent.KEYCODE_FORWARD_DEL -> XK_DELETE
-            KeyEvent.KEYCODE_TAB -> XK_TAB
-            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> XK_RETURN
-            KeyEvent.KEYCODE_ESCAPE -> XK_ESCAPE
-            KeyEvent.KEYCODE_MOVE_HOME -> XK_HOME
-            KeyEvent.KEYCODE_DPAD_LEFT -> XK_LEFT
-            KeyEvent.KEYCODE_DPAD_UP -> XK_UP
-            KeyEvent.KEYCODE_DPAD_RIGHT -> XK_RIGHT
-            KeyEvent.KEYCODE_DPAD_DOWN -> XK_DOWN
-            KeyEvent.KEYCODE_PAGE_UP -> XK_PAGE_UP
-            KeyEvent.KEYCODE_PAGE_DOWN -> XK_PAGE_DOWN
-            KeyEvent.KEYCODE_MOVE_END -> XK_END
-            KeyEvent.KEYCODE_F4 -> XK_F4
-            else -> null
-        }
-        if (special != null) return RimeKey(special, modifiers(event))
-
+        val keyCode = event.keyCode
+        if (keyCode == KeyEvent.KEYCODE_LANGUAGE_SWITCH ||
+            (keyCode == KeyEvent.KEYCODE_CAPS_LOCK && event.repeatCount != 0)
+        ) return null
         val modifiers = modifiers(event)
+        specialHardwareKeysym(keyCode)?.let { return RimeKey(it, modifiers) }
         val key = fromUnicodeCodePoint(event.getUnicodeChar(event.metaState), modifiers) {
             KeytaoNativeBridge.textToKeysym(it)
         }
-        if (key == null && event.keyCode == KeyEvent.KEYCODE_GRAVE &&
+        if (key == null && keyCode == KeyEvent.KEYCODE_GRAVE &&
             modifiers and RIME_MOD_LOCK.inv() == RIME_MOD_CONTROL
         ) return RimeKey(OPEN_PACKAGE_MENU, 0)
         return key
+    }
+
+    internal fun specialHardwareKeysym(keyCode: Int): Int? = when (keyCode) {
+        KeyEvent.KEYCODE_DEL -> XK_BACK_SPACE
+        KeyEvent.KEYCODE_FORWARD_DEL -> XK_DELETE
+        KeyEvent.KEYCODE_TAB -> XK_TAB
+        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> XK_RETURN
+        KeyEvent.KEYCODE_ESCAPE -> XK_ESCAPE
+        KeyEvent.KEYCODE_MOVE_HOME -> XK_HOME
+        KeyEvent.KEYCODE_DPAD_LEFT -> XK_LEFT
+        KeyEvent.KEYCODE_DPAD_UP -> XK_UP
+        KeyEvent.KEYCODE_DPAD_RIGHT -> XK_RIGHT
+        KeyEvent.KEYCODE_DPAD_DOWN -> XK_DOWN
+        KeyEvent.KEYCODE_PAGE_UP -> XK_PAGE_UP
+        KeyEvent.KEYCODE_PAGE_DOWN -> XK_PAGE_DOWN
+        KeyEvent.KEYCODE_MOVE_END -> XK_END
+        KeyEvent.KEYCODE_F4 -> XK_F4
+        KeyEvent.KEYCODE_CAPS_LOCK -> XK_CAPS_LOCK
+        else -> null
     }
 
     /**

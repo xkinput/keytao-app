@@ -123,6 +123,13 @@ void main() {
     'flattens active and inactive package schemas without top package dropdown',
     (tester) async {
       final c = _SchemaController()
+        ..local = const LocalSchemaDto(
+          installed: true,
+          deployed: false,
+          buildAvailable: true,
+          installedScheme: 'xmjd',
+          schemas: ['xmjd6', 'easy_en'],
+        )
         ..schemas = const [
           SchemaDto(id: 'xmjd6', name: '🌟🐈'),
           SchemaDto(id: 'easy_en', name: 'English'),
@@ -133,7 +140,7 @@ void main() {
             packageKey: 'xmjd',
             displayName: '星猫键道',
             active: true,
-            ready: true,
+            ready: false,
             schemas: [
               SchemaDto(id: 'xmjd6', name: '🌟🐈'),
               SchemaDto(id: 'easy_en', name: 'English'),

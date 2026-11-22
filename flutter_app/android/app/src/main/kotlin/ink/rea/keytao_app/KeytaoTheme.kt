@@ -121,6 +121,8 @@ class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {
     val modeHintChineseText = modeHint.getString("chineseText")
     val modeHintEnglishText = modeHint.getString("englishText")
     val candidateFontScale = candidateBar.getDouble("fontScale").toFloat()
+    val candidateCommentFontSize = candidateBar.optDouble("commentFontSize").toFloat()
+        .takeIf { it.isFinite() && it > 0f }
     val showComment = candidateBar.getBoolean("showComment")
     val commentBelow = candidateBar.optString("commentPosition") == "below"
 

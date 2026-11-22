@@ -86,6 +86,10 @@ const FIELDS: &[(&str, u8)] = &[
     ("mobile.keyboard.keyClasses.accent.foreground", MOBILE),
     ("mobile.keyboard.keyClasses.accent.borderColor", MOBILE),
     ("mobile.keyboard.keyClasses.accent.borderWidth", MOBILE),
+    ("mobile.keyboard.keyClasses.accentPunctuation.background", MOBILE),
+    ("mobile.keyboard.keyClasses.accentPunctuation.foreground", MOBILE),
+    ("mobile.keyboard.keyClasses.accentPunctuation.borderColor", MOBILE),
+    ("mobile.keyboard.keyClasses.accentPunctuation.borderWidth", MOBILE),
     ("mobile.keyboard.toolbar.background", MOBILE),
     ("mobile.keyboard.toolbar.foreground", MOBILE),
     ("mobile.keyboard.toolbar.selectedForeground", MOBILE),
@@ -98,6 +102,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("mobile.keyboard.toolbar.buttonBorderWidth", MOBILE),
     ("mobile.keyboard.toolbar.buttonCornerRadius", MOBILE),
     ("mobile.candidateBar.fontScale", MOBILE),
+    ("mobile.candidateBar.commentFontSize", MOBILE),
     ("mobile.candidateBar.showComment", MOBILE),
     ("mobile.candidateBar.commentPosition", MOBILE),
     ("mobile.candidateBar.background", MOBILE),
@@ -312,7 +317,9 @@ mod tests {
             "shadow" | "showComment" => json!(false),
             "labelSuffix" => json!(":"),
             "fontScale" | "hintFontScale" => json!(1.1),
-            "size" | "labelSize" | "commentSize" | "preeditSize" | "fontSize" => json!(21),
+            "size" | "labelSize" | "commentSize" | "commentFontSize" | "preeditSize" | "fontSize" => {
+                json!(21)
+            }
             "width" => json!(60),
             "height" => json!(40),
             "cornerRadius" | "buttonCornerRadius" | "paddingX" | "paddingY" | "paddingTop"

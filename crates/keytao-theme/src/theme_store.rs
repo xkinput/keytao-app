@@ -1028,20 +1028,34 @@ pub(crate) fn write_source_settings(
     background_color: Option<String>,
     orientation: Option<crate::PanelOrientation>,
     font_size: Option<f32>,
+    changed_fields: Option<u8>,
 ) -> Result<(), String> {
     let _lock = lock_store();
     resolve_manual_theme_edits_unlocked(theme_path, ManualThemeEditChoice::SaveAsNew)?;
     let mut source =
         read_current_theme_source(theme_path)?.ok_or("Missing current theme source")?;
     let built_in = is_built_in(source.id()).then(|| source.clone());
-    source = edit_source_settings(
-        source,
-        accent_color,
-        corner_radius,
-        background_color,
-        orientation,
-        font_size,
-    )?;
+    source = if let Some(fields) = changed_fields {
+        edit_source_settings(
+            source,
+            accent_color,
+            corner_radius.filter(|_| fields & crate::IME_UI_RADIUS_CHANGED != 0),
+            background_color.filter(|_| fields & crate::IME_UI_BACKGROUND_CHANGED != 0),
+            orientation.filter(|_| fields & crate::IME_UI_ORIENTATION_CHANGED != 0),
+            font_size.filter(|_| fields & crate::IME_UI_FONT_SIZE_CHANGED != 0),
+        )?
+    } else {
+        let current = crate::resolve_theme_from_paths(None, Some(theme_path));
+        edit_source_settings(
+            source,
+            accent_color.filter(|color| !matches_shortcut_color(current.ui.accent_color, color)),
+            corner_radius.filter(|radius| radius != &current.ui.corner_radius),
+            background_color
+                .filter(|color| !matches_shortcut_color(current.ui.background_color, color)),
+            orientation.filter(|value| value != &current.panel.orientation),
+            font_size.filter(|size| size != &current.font.size),
+        )?
+    };
     if let Some(original) = built_in {
         let changed = [EffectiveColorScheme::Light, EffectiveColorScheme::Dark]
             .into_iter()
@@ -1072,8 +1086,11 @@ pub(crate) fn write_source_settings(
     }
 }
 
-/// Apply the existing App's global controls to a source without writing files.
-/// Release matching derived pins while preserving distinct explicit overrides.
+pub(crate) fn matches_shortcut_color(color: Option<crate::RgbaColor>, hex: &str) -> bool {
+    color.map(crate::opaque) == crate::parse_color(hex).map(crate::opaque)
+}
+
+/// Apply changed global controls to the base and any explicit overrides of those controls.
 pub(crate) fn edit_source_settings(
     mut source: ThemeSource,
     accent_color: Option<String>,
@@ -1091,18 +1108,40 @@ pub(crate) fn edit_source_settings(
         ("backgroundColor", background),
     ] {
         let Some(value) = value else { continue };
-        let old = source.value["common"][key].clone();
-        let mut normalized =
-            json!({"version":3,"meta":{"id":"my.validate","name":"Validate"},"common":{}});
-        if !value.is_null() {
-            normalized["common"][key] = value.clone();
+        release_matching_derivations(&mut source, key)?;
+        for variant in [None, Some("light"), Some("dark")] {
+            let layer = match variant {
+                Some(variant) => match source.value.get_mut(variant) {
+                    Some(layer) => layer,
+                    None => continue,
+                },
+                None => &mut source.value,
+            };
+            let previous = &layer["common"][key];
+            if variant.is_none() || !previous.is_null() {
+                let next = if key == "backgroundColor" {
+                    replace_background_rgb(previous, &value)
+                } else {
+                    value.clone()
+                };
+                set_optional(layer, &["common", key], Some(next));
+            }
+            match key {
+                "backgroundColor" => {
+                    if let Some(previous) = layer.pointer("/pc/panel/background") {
+                        let next = replace_background_rgb(previous, &value);
+                        set_optional(layer, &["pc", "panel", "background"], Some(next));
+                    }
+                }
+                "cornerRadius" => remove_field(layer, &["pc", "panel", "cornerRadius"]),
+                "accentColor" => {
+                    for field in ["selectedLabelColor", "selectedBorderColor"] {
+                        remove_field(layer, &["pc", "candidate", field]);
+                    }
+                }
+                _ => unreachable!(),
+            }
         }
-        let normalized = parse_source_value(normalized)?;
-        let new = &normalized.value["common"][key];
-        if &old != new {
-            release_matching_derivations(&mut source, key)?;
-        }
-        set_optional(&mut source.value, &["common", key], Some(value));
     }
     for (section, key, value) in [
         (
@@ -1120,6 +1159,18 @@ pub(crate) fn edit_source_settings(
         }
     }
     parse_source_value(source.value)
+}
+
+fn replace_background_rgb(previous: &Value, next: &Value) -> Value {
+    let alpha = previous
+        .as_str()
+        .filter(|previous| previous.len() != 7)
+        .and_then(crate::parse_color)
+        .map(|color| color.alpha);
+    match (alpha, next.as_str()) {
+        (Some(alpha), Some(rgb)) => json!(format!("{rgb}{alpha:02X}")),
+        _ => next.clone(),
+    }
 }
 
 fn release_matching_derivations(source: &mut ThemeSource, knob: &str) -> Result<(), String> {
@@ -1171,19 +1222,10 @@ fn release_matching_derivations(source: &mut ThemeSource, knob: &str) -> Result<
         };
         for (section, field) in &paths {
             let actual = &layer["pc"][section][field];
-            let matches = |expected: &Value| {
-                actual == expected
-                    || (section == "panel"
-                        && field == "background"
-                        && actual
-                            .as_str()
-                            .zip(expected.as_str())
-                            .is_some_and(|(a, b)| a.get(..7) == b.get(..7)))
-            };
             let release = match variant {
-                Some("dark") => matches(&dark[section][field]),
-                Some(_) => matches(&light[section][field]),
-                None => matches(&light[section][field]) || matches(&dark[section][field]),
+                Some("dark") => actual == &dark[section][field],
+                Some(_) => actual == &light[section][field],
+                None => actual == &light[section][field] || actual == &dark[section][field],
             };
             if release {
                 remove_field(layer, &["pc", section, field]);
@@ -1949,6 +1991,133 @@ mod tests {
             crate::parse_color("#22334455").unwrap()
         );
         assert_eq!(theme.candidate.corner_radius, 3.0);
+    }
+
+    #[test]
+    fn quick_appearance_updates_edited_variants_without_replaying_untouched_values() {
+        let dir = TempDir::new();
+        let path = dir.theme();
+        let source = parse_source_value(json!({
+            "version": 3,
+            "meta": {"id": "my.shortcuts", "name": "Shortcuts", "appearance": "both"},
+            "light": {
+                "common": {"accentColor": "#558844", "backgroundColor": "#F0E0D0", "cornerRadius": 14},
+                "pc": {
+                    "font": {"size": 18, "commentSize": 12},
+                    "panel": {"background": "#D0F0E080", "cornerRadius": 20},
+                    "candidate": {"selectedLabelColor": "#002200", "selectedBackground": "#667788", "cornerRadius": 3}
+                }
+            },
+            "dark": {
+                "common": {"accentColor": "#AA99DD", "backgroundColor": "#202020", "cornerRadius": 16},
+                "pc": {"font": {"size": 28, "commentSize": 22}, "panel": {"background": "#202020A0"}}
+            }
+        }))
+        .unwrap();
+        save_source_and_compile(&path, &source, &json!({"ui": {"colorScheme": "light"}}))
+            .unwrap();
+        let resolve = |scheme| {
+            crate::resolve_theme_from_paths_with_system_scheme(None, Some(&path), scheme)
+        };
+        let color = |hex| crate::parse_color(hex).unwrap();
+
+        // The App submits the current variant's displayed values with a mode-only change.
+        crate::write_ime_ui_settings_to_path(
+            &path,
+            UiColorScheme::Auto,
+            crate::PanelOrientation::Horizontal,
+            None,
+            18.0,
+            Some(14.0),
+            "#F0E0D0".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_current_theme_source(&path).unwrap().unwrap().value,
+            source.value
+        );
+        let mut base = read_base(&path).unwrap();
+        base["ui"]["colorScheme"] = json!("light");
+        write_compiled(&path, &source, &base).unwrap();
+
+        // Selecting the current swatch reapplies it after a direct panel edit.
+        crate::write_ime_ui_settings_to_path_with_changes(
+            &path,
+            UiColorScheme::Light,
+            crate::PanelOrientation::Horizontal,
+            Some("#558844".into()),
+            32.0,
+            Some(14.0),
+            "#F0E0D0".into(),
+            Some(crate::IME_UI_RADIUS_CHANGED | crate::IME_UI_BACKGROUND_CHANGED),
+        )
+        .unwrap();
+        let light = resolve(EffectiveColorScheme::Light);
+        assert_eq!(light.panel.background, color("#F0E0D080"));
+        assert_eq!(light.panel.corner_radius, 14.0);
+        assert_eq!(light.candidate.selected_label_color, color("#558844"));
+        assert_eq!(light.font.size, 18.0);
+        save_source_and_compile(&path, &source, &base).unwrap();
+
+        let preview = crate::resolve_candidate_panel_preview_from_paths(
+            None,
+            Some(&path),
+            EffectiveColorScheme::Dark,
+            UiColorScheme::Auto,
+            "#EE5500",
+            18.0,
+            Some(9.0),
+            "#E8DED2",
+        )
+        .unwrap();
+
+        // A shortcut edit wins over the same controls edited in either variant.
+        crate::write_ime_ui_settings_to_path(
+            &path,
+            UiColorScheme::Auto,
+            crate::PanelOrientation::Horizontal,
+            Some("#EE5500".into()),
+            18.0,
+            Some(9.0),
+            "#E8DED2".into(),
+        )
+        .unwrap();
+        let light = resolve(EffectiveColorScheme::Light);
+        let dark = resolve(EffectiveColorScheme::Dark);
+        for theme in [&light, &dark] {
+            assert_eq!(theme.ui.accent_color, Some(color("#EE5500")));
+            assert_eq!(theme.candidate.selected_label_color, color("#EE5500"));
+            assert_eq!(theme.panel.corner_radius, 9.0);
+        }
+        assert_eq!(light.panel.background, color("#E8DED280"));
+        assert_eq!(dark.panel.background, color("#E8DED2A0"));
+        assert_eq!(light.candidate.corner_radius, 3.0);
+        assert_eq!(light.candidate.selected_background, color("#667788"));
+        assert_eq!(light.font.size, 18.0);
+        assert_eq!(dark.font.size, 28.0);
+        assert_eq!(light.font.comment_size, 12.0);
+        assert_eq!(dark.font.comment_size, 22.0);
+        assert_eq!(
+            crate::resolved_theme_json(&preview).unwrap(),
+            crate::resolved_theme_json(&crate::scaled_candidate_panel(&dark)).unwrap()
+        );
+
+        crate::write_theme_appearance_to_path(
+            &path,
+            UiColorScheme::Auto,
+            None,
+            Some(None),
+            Some(String::new()),
+        )
+        .unwrap();
+        for scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+            let theme = resolve(scheme);
+            let defaults = crate::resolve_theme_from_paths_with_system_scheme(None, None, scheme);
+            assert_eq!(theme.ui.corner_radius, None);
+            assert_eq!(theme.ui.background_color, None);
+            assert_eq!(theme.panel.corner_radius, defaults.panel.corner_radius);
+            assert_eq!(theme.panel.background, defaults.panel.background);
+        }
     }
 
     #[test]

@@ -36,9 +36,12 @@ pub struct RimeSyncSettingsDto {
     pub effective_sync_dir: String,
 }
 
+#[flutter_rust_bridge::frb]
 pub struct LocalSchemaDto {
     pub installed: bool,
     pub deployed: bool,
+    #[frb(default = false)]
+    pub build_available: bool,
     pub version: Option<String>,
     pub schemas: Vec<String>,
     pub installed_scheme: Option<String>,
@@ -393,6 +396,7 @@ pub struct AndroidImeInputSettingsDto {
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
     pub floating_landscape_scale: u8,
+    pub keyboard_layout_json: Option<String>,
     pub config_path: Option<String>,
     pub reload_stamp_path: Option<String>,
     pub message: String,
@@ -606,6 +610,7 @@ mod tests {
             floating_portrait_scale: 85,
             floating_landscape_enabled: false,
             floating_landscape_scale: 65,
+            keyboard_layout_json: Some(r#"{"rows":[[{"label":"q"}]]}"#.into()),
             config_path: Some("/isolated/keytao/keytao_android_ime.json".into()),
             reload_stamp_path: Some("/isolated/keytao/.reload".into()),
             message: "settings fixture".into(),
@@ -618,7 +623,7 @@ mod tests {
             crate::runtime::dto(edited).unwrap();
         let actual: AndroidImeInputSettingsDto = crate::runtime::dto(saved).unwrap();
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
-        assert_eq!(expected.as_object().unwrap().len(), 34);
+        assert_eq!(expected.as_object().unwrap().len(), 35);
     }
 }
 

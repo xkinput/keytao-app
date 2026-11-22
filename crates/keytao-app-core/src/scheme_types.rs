@@ -78,6 +78,7 @@ pub struct AppUpdateInfo {
 pub struct LocalSchemaInfo {
     pub installed: bool,
     pub deployed: bool,
+    pub build_available: bool,
     pub version: Option<String>,
     pub schemas: Vec<String>,
     pub deploy_warning: Option<String>,

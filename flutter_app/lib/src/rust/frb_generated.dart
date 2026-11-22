@@ -463,6 +463,7 @@ abstract class RustLibApi extends BaseApi {
     required double fontSize,
     double? cornerRadius,
     required String backgroundColor,
+    int? changedFields,
   });
 
   Future<void> crateApiCoreSetPackageEasyEnglish({
@@ -4315,6 +4316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required double fontSize,
     double? cornerRadius,
     required String backgroundColor,
+    int? changedFields,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -4326,6 +4328,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_f_32(fontSize, serializer);
           sse_encode_opt_box_autoadd_f_32(cornerRadius, serializer);
           sse_encode_String(backgroundColor, serializer);
+          sse_encode_opt_box_autoadd_u_8(changedFields, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -4345,6 +4348,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           fontSize,
           cornerRadius,
           backgroundColor,
+          changedFields,
         ],
         apiImpl: this,
       ),
@@ -4361,6 +4365,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "fontSize",
           "cornerRadius",
           "backgroundColor",
+          "changedFields",
         ],
       );
 
@@ -5334,8 +5339,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 34)
-      throw Exception('unexpected arr length: expect 34 but see ${arr.length}');
+    if (arr.length != 35)
+      throw Exception('unexpected arr length: expect 35 but see ${arr.length}');
     return AndroidImeInputSettingsDto(
       hapticsEnabled: dco_decode_bool(arr[0]),
       hapticIntensity: dco_decode_u_8(arr[1]),
@@ -5368,9 +5373,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       floatingPortraitScale: dco_decode_u_8(arr[28]),
       floatingLandscapeEnabled: dco_decode_bool(arr[29]),
       floatingLandscapeScale: dco_decode_u_8(arr[30]),
-      configPath: dco_decode_opt_String(arr[31]),
-      reloadStampPath: dco_decode_opt_String(arr[32]),
-      message: dco_decode_String(arr[33]),
+      keyboardLayoutJson: dco_decode_opt_String(arr[31]),
+      configPath: dco_decode_opt_String(arr[32]),
+      reloadStampPath: dco_decode_opt_String(arr[33]),
+      message: dco_decode_String(arr[34]),
     );
   }
 
@@ -5988,17 +5994,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LocalSchemaDto dco_decode_local_schema_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return LocalSchemaDto(
       installed: dco_decode_bool(arr[0]),
       deployed: dco_decode_bool(arr[1]),
-      version: dco_decode_opt_String(arr[2]),
-      schemas: dco_decode_list_String(arr[3]),
-      installedScheme: dco_decode_opt_String(arr[4]),
-      installedSchemeVersion: dco_decode_opt_String(arr[5]),
-      easyEnglishEnabled: dco_decode_opt_box_autoadd_bool(arr[6]),
-      deployWarning: dco_decode_opt_String(arr[7]),
+      buildAvailable: dco_decode_bool(arr[2]),
+      version: dco_decode_opt_String(arr[3]),
+      schemas: dco_decode_list_String(arr[4]),
+      installedScheme: dco_decode_opt_String(arr[5]),
+      installedSchemeVersion: dco_decode_opt_String(arr[6]),
+      easyEnglishEnabled: dco_decode_opt_box_autoadd_bool(arr[7]),
+      deployWarning: dco_decode_opt_String(arr[8]),
     );
   }
 
@@ -6791,6 +6798,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_floatingPortraitScale = sse_decode_u_8(deserializer);
     var var_floatingLandscapeEnabled = sse_decode_bool(deserializer);
     var var_floatingLandscapeScale = sse_decode_u_8(deserializer);
+    var var_keyboardLayoutJson = sse_decode_opt_String(deserializer);
     var var_configPath = sse_decode_opt_String(deserializer);
     var var_reloadStampPath = sse_decode_opt_String(deserializer);
     var var_message = sse_decode_String(deserializer);
@@ -6826,6 +6834,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       floatingPortraitScale: var_floatingPortraitScale,
       floatingLandscapeEnabled: var_floatingLandscapeEnabled,
       floatingLandscapeScale: var_floatingLandscapeScale,
+      keyboardLayoutJson: var_keyboardLayoutJson,
       configPath: var_configPath,
       reloadStampPath: var_reloadStampPath,
       message: var_message,
@@ -7647,6 +7656,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_installed = sse_decode_bool(deserializer);
     var var_deployed = sse_decode_bool(deserializer);
+    var var_buildAvailable = sse_decode_bool(deserializer);
     var var_version = sse_decode_opt_String(deserializer);
     var var_schemas = sse_decode_list_String(deserializer);
     var var_installedScheme = sse_decode_opt_String(deserializer);
@@ -7656,6 +7666,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return LocalSchemaDto(
       installed: var_installed,
       deployed: var_deployed,
+      buildAvailable: var_buildAvailable,
       version: var_version,
       schemas: var_schemas,
       installedScheme: var_installedScheme,
@@ -8621,6 +8632,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_8(self.floatingPortraitScale, serializer);
     sse_encode_bool(self.floatingLandscapeEnabled, serializer);
     sse_encode_u_8(self.floatingLandscapeScale, serializer);
+    sse_encode_opt_String(self.keyboardLayoutJson, serializer);
     sse_encode_opt_String(self.configPath, serializer);
     sse_encode_opt_String(self.reloadStampPath, serializer);
     sse_encode_String(self.message, serializer);
@@ -9324,6 +9336,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.installed, serializer);
     sse_encode_bool(self.deployed, serializer);
+    sse_encode_bool(self.buildAvailable, serializer);
     sse_encode_opt_String(self.version, serializer);
     sse_encode_list_String(self.schemas, serializer);
     sse_encode_opt_String(self.installedScheme, serializer);

@@ -5,7 +5,7 @@
 //!
 use keytao_core::ImeState;
 use keytao_theme::{
-    panel_hit::{layout, PanelClick, PanelGeometry, PanelHitAreas},
+    panel_hit::{layout, PanelClick, PanelGeometry, PanelHitAreas, PanelRect},
     preedit_caret_color, resolved_panel_shadow, scaled_candidate_panel, CandidatePanelInput,
     CandidatePanelModel, CommentPosition, PanelOrientation, ResolvedImeTheme, RgbaColor,
     ThemeCandidate, ThemeResolver, UiCapabilities,
@@ -188,6 +188,13 @@ fn load_font_set() -> Option<FontSet> {
 
 type RasterizedGlyph = (fontdue::Metrics, Arc<[u8]>);
 
+struct CandidateMeasurements {
+    width: f32,
+    text_width: f32,
+    text_extra_height: f32,
+    content_height: f32,
+}
+
 pub struct PanelRenderer {
     fonts: Arc<FontSet>,
     glyph_cache: RefCell<VecDeque<((char, u32), Option<RasterizedGlyph>)>>,
@@ -272,34 +279,72 @@ impl PanelRenderer {
         let option_pad_y = theme.candidate.padding_y;
         let inline_gap = theme.candidate.inline_gap;
         let comment_below = theme.candidate.comment_position == CommentPosition::Below;
+        let align_stacked_row = comment_below
+            && model.orientation == PanelOrientation::Horizontal
+            && model
+                .candidates
+                .iter()
+                .any(|candidate| candidate.comment.is_some());
         let single_line_height = if comment_below {
             font_size.max(label_size)
         } else {
             font_size.max(label_size).max(comment_size)
         };
-        let option_height = theme
-            .candidate
-            .min_height
-            .max(single_line_height + option_pad_y * 2.0);
-        let option_heights: Option<Vec<_>> = comment_below.then(|| {
-            let annotated_height = theme
+        let measurements: Vec<_> = model
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let (text_width, text_extra_height) =
+                    self.text_block_dimensions(&candidate.text, font_size);
+                let (word_width, extra_height) = match candidate.comment.as_deref() {
+                    Some(comment) => {
+                        let (comment_width, comment_extra_height) =
+                            self.text_block_dimensions(comment, comment_size);
+                        if comment_below {
+                            (
+                                text_width.max(comment_width),
+                                text_extra_height
+                                    + inline_gap * 0.5
+                                    + comment_size
+                                    + comment_extra_height,
+                            )
+                        } else {
+                            (
+                                text_width + inline_gap + comment_width,
+                                text_extra_height.max(comment_extra_height),
+                            )
+                        }
+                    }
+                    None => (text_width, text_extra_height),
+                };
+                CandidateMeasurements {
+                    width: option_pad_x * 2.0
+                        + self.text_width(&candidate.label, label_size)
+                        + inline_gap
+                        + word_width,
+                    text_width,
+                    text_extra_height,
+                    content_height: single_line_height + extra_height,
+                }
+            })
+            .collect();
+        let option_widths: Vec<_> = measurements.iter().map(|measure| measure.width).collect();
+        let row_content_height = measurements
+            .iter()
+            .map(|measure| measure.content_height)
+            .fold(single_line_height, f32::max);
+        let padded_height = |content_height| {
+            theme
                 .candidate
                 .min_height
-                .max(single_line_height + inline_gap * 0.5 + comment_size + option_pad_y * 2.0);
-            model
-                .candidates
+                .max(content_height + option_pad_y * 2.0)
+        };
+        let option_height = padded_height(row_content_height);
+        let option_heights = (model.orientation == PanelOrientation::Vertical).then(|| {
+            measurements
                 .iter()
-                .map(|candidate| {
-                    if candidate.comment.is_some() {
-                        annotated_height
-                    } else {
-                        option_height
-                    }
-                })
-                .collect()
-        });
-        let option_height = option_heights.as_ref().map_or(option_height, |heights| {
-            heights.iter().copied().fold(option_height, f32::max)
+                .map(|measure| padded_height(measure.content_height))
+                .collect::<Vec<_>>()
         });
         let nav_button = theme.navigation.button_size;
         let preedit_height = model
@@ -307,25 +352,6 @@ impl PanelRenderer {
             .as_ref()
             .map(|_| preedit_size + theme.panel.preedit_gap)
             .unwrap_or(0.0);
-        let option_widths: Vec<f32> = model
-            .candidates
-            .iter()
-            .map(|candidate| {
-                let text_width = self.text_width(&candidate.text, font_size);
-                let word_width = candidate.comment.as_ref().map_or(text_width, |comment| {
-                    let comment_width = self.text_width(comment, comment_size);
-                    if comment_below {
-                        text_width.max(comment_width)
-                    } else {
-                        text_width + inline_gap + comment_width
-                    }
-                });
-                option_pad_x * 2.0
-                    + self.text_width(&candidate.label, label_size)
-                    + inline_gap
-                    + word_width
-            })
-            .collect();
         let nav_count = usize::from(model.navigation.can_go_previous)
             + usize::from(model.navigation.can_go_next);
         let nav_width = if nav_count == 0 {
@@ -433,24 +459,28 @@ impl PanelRenderer {
             can_go_previous: model.navigation.can_go_previous,
             can_go_next: model.navigation.can_go_next,
         });
-        for (index, (candidate, rect)) in model
+        for (index, ((candidate, measure), rect)) in model
             .candidates
             .iter()
+            .zip(measurements.iter())
             .zip(hit_areas.candidates.iter())
             .enumerate()
         {
+            let content_height = if model.orientation == PanelOrientation::Horizontal {
+                row_content_height
+            } else {
+                measure.content_height
+            };
             self.draw_candidate_option(
                 &mut pm,
                 candidate,
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                label_size,
-                font_size,
-                comment_size,
+                *rect,
+                measure,
+                content_height,
+                single_line_height,
                 scale,
                 &theme,
+                align_stacked_row,
                 hovered == Some(PanelClick::Candidate(index)),
                 pressed == Some(PanelClick::Candidate(index)),
             );
@@ -553,7 +583,7 @@ impl PanelRenderer {
         scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme.mode_hint_model(ascii_mode);
         let font_size = theme.mode_hint.font_size;
-        let padding = font_size / 3.0;
+        let padding = font_size / 6.0;
         let label = model.text;
         let (text_left, text_bottom, text_right, text_top) = self.text_bounds(&label, font_size);
         let text_width = text_right - text_left;
@@ -631,19 +661,26 @@ impl PanelRenderer {
         &self,
         pm: &mut Pixmap,
         candidate: &keytao_theme::CandidateOptionModel,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        label_size: f32,
-        font_size: f32,
-        comment_size: f32,
+        rect: PanelRect,
+        measure: &CandidateMeasurements,
+        content_height: f32,
+        single_line_height: f32,
         scale: f32,
         theme: &keytao_theme::ResolvedImeTheme,
+        align_stacked_row: bool,
         hovered: bool,
         pressed: bool,
     ) {
         let option = &theme.candidate;
+        let PanelRect {
+            x,
+            y,
+            width,
+            height,
+        } = rect;
+        let label_size = theme.font.label_size;
+        let font_size = theme.font.size;
+        let comment_size = theme.font.comment_size;
         let background = if pressed {
             option.pressed_background
         } else if candidate.selected {
@@ -675,13 +712,12 @@ impl PanelRenderer {
         let comment_below =
             option.comment_position == CommentPosition::Below && candidate.comment.is_some();
         let comment_gap = option.inline_gap * 0.5;
-        let baseline = if comment_below {
-            let word_row_height = font_size.max(label_size);
-            let content_height = word_row_height + comment_gap + comment_size;
-            y + (height - content_height) * 0.5 + word_row_height - 3.0 * scale
+        let first_baseline = if comment_below || align_stacked_row {
+            single_line_height
         } else {
-            y + (height + font_size) * 0.5 - 3.0 * scale
+            (single_line_height + font_size) * 0.5
         };
+        let baseline = y + (height - content_height) * 0.5 + first_baseline - 3.0 * scale;
         let label_color = if candidate.selected {
             option.selected_label_color
         } else {
@@ -707,7 +743,7 @@ impl PanelRenderer {
             bgra(label_color),
             label_size,
         );
-        self.draw_text(
+        self.draw_text_block(
             pm,
             &candidate.text,
             text_x,
@@ -717,14 +753,14 @@ impl PanelRenderer {
         );
         if let Some(comment) = candidate.comment.as_ref() {
             let (comment_x, comment_baseline) = if comment_below {
-                (text_x, baseline + comment_gap + comment_size)
-            } else {
                 (
-                    text_x + self.text_width(&candidate.text, font_size) + option.inline_gap,
-                    baseline,
+                    text_x,
+                    baseline + measure.text_extra_height + comment_gap + comment_size,
                 )
+            } else {
+                (text_x + measure.text_width + option.inline_gap, baseline)
             };
-            self.draw_text(
+            self.draw_text_block(
                 pm,
                 comment,
                 comment_x,
@@ -732,6 +768,49 @@ impl PanelRenderer {
                 bgra(comment_color),
                 comment_size,
             );
+        }
+    }
+
+    fn text_block_dimensions(&self, text: &str, size: f32) -> (f32, f32) {
+        let mut width = 0.0_f32;
+        let mut extra_lines = 0;
+        for (index, line) in text_block_lines(text).enumerate() {
+            width = width.max(self.text_width(line, size));
+            extra_lines = index;
+        }
+        let extra_height = if extra_lines == 0 {
+            0.0
+        } else {
+            extra_lines as f32 * self.line_advance(size)
+        };
+        (width, extra_height)
+    }
+
+    fn line_advance(&self, size: f32) -> f32 {
+        self.fonts
+            .fonts
+            .iter()
+            .filter_map(|font| font.horizontal_line_metrics(size))
+            .map(|metrics| metrics.new_line_size)
+            .fold(size * 1.25, f32::max)
+    }
+
+    fn draw_text_block(
+        &self,
+        pm: &mut Pixmap,
+        text: &str,
+        x: f32,
+        baseline: f32,
+        color: [u8; 4],
+        size: f32,
+    ) {
+        let step = if text.contains('\n') {
+            self.line_advance(size)
+        } else {
+            0.0
+        };
+        for (index, line) in text_block_lines(text).enumerate() {
+            self.draw_text(pm, line, x, baseline + index as f32 * step, color, size);
         }
     }
 
@@ -867,6 +946,11 @@ impl PanelRenderer {
         cache.push_back((key, glyph.clone()));
         glyph
     }
+}
+
+fn text_block_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 // fontdue does not shape emoji sequences; isolated modifiers render as missing-glyph boxes.
@@ -1181,6 +1265,95 @@ mod tests {
     }
 
     #[test]
+    fn multiline_candidate_text_and_comments_preserve_lines_and_hit_areas() {
+        let renderer = PanelRenderer::new(
+            load_font(Some("Consolas, Menlo, DejaVu Sans Mono")).expect("load a test font"),
+        );
+        let report = "AA\r\n\r\n  BB\nCC";
+        for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
+            for comment_position in [
+                None,
+                Some(CommentPosition::Inline),
+                Some(CommentPosition::Below),
+            ] {
+                let mut theme = ResolvedImeTheme::default();
+                theme.panel.orientation = orientation;
+                theme.panel.shadow = false;
+                let green = keytao_theme::RgbaColor {
+                    red: 0,
+                    green: 255,
+                    blue: 0,
+                    alpha: 255,
+                };
+                if let Some(position) = comment_position {
+                    theme.candidate.comment_position = position;
+                    theme.candidate.selected_comment_color = green;
+                } else {
+                    theme.candidate.selected_foreground = green;
+                }
+                let render = |text: &str| {
+                    let candidate = if comment_position.is_some() {
+                        ThemeCandidate {
+                            text: "word".into(),
+                            comment: Some(text.into()),
+                        }
+                    } else {
+                        ThemeCandidate {
+                            text: text.into(),
+                            comment: None,
+                        }
+                    };
+                    let model = theme.candidate_panel_model(
+                        CandidatePanelInput {
+                            preedit: String::new(),
+                            candidates: vec![candidate],
+                            highlighted_candidate_index: 0,
+                            page: 0,
+                            is_last_page: true,
+                            select_keys: None,
+                        },
+                        &UiCapabilities::full_custom(),
+                    );
+                    renderer.render(&model, 1.0, theme.clone(), 1920.0, None)
+                };
+                let panel = render(report);
+                let single = render("  BB");
+                let rect = panel.hit_areas.candidates[0];
+                assert_eq!(rect.width, single.hit_areas.candidates[0].width);
+                assert!(rect.height > single.hit_areas.candidates[0].height);
+                assert_eq!(
+                    panel
+                        .hit_areas
+                        .click_at((rect.x + 1.0).into(), (rect.y + rect.height - 1.0).into(),),
+                    Some(super::PanelClick::Candidate(0))
+                );
+                let mut bands = Vec::new();
+                let mut inside_band = false;
+                for (y, row) in panel
+                    .pixels
+                    .chunks_exact(panel.width as usize * 4)
+                    .enumerate()
+                {
+                    if let Some(x) = row.chunks_exact(4).position(|p| p[1] > p[0] && p[1] > p[2]) {
+                        if !inside_band {
+                            bands.push((x, y));
+                        }
+                        inside_band = true;
+                    } else {
+                        inside_band = false;
+                    }
+                }
+                assert_eq!(bands.len(), 3);
+                assert!(bands[1].0 > bands[0].0 && bands[1].0 > bands[2].0);
+                assert!(bands[1].1 - bands[0].1 > bands[2].1 - bands[1].1);
+                let lf = render(&report.replace("\r\n", "\n"));
+                assert_eq!(panel.pixels, lf.pixels);
+                assert_eq!(panel.hit_areas, lf.hit_areas);
+            }
+        }
+    }
+
+    #[test]
     fn long_candidates_and_comments_are_limited_only_by_available_width() {
         let renderer = PanelRenderer::new(Arc::new(FontSet {
             family: String::new(),
@@ -1356,11 +1529,13 @@ mod tests {
             fonts: Vec::new(),
         }));
         let mut theme = ResolvedImeTheme::default();
+        theme.mode_hint.shadow = false;
+        let default = renderer.render_mode_hint(false, 1.0, theme.clone());
+        assert_eq!((default.width, default.height), (48, 36));
         theme.mode_hint.english_text = "English".into();
         theme.mode_hint.font_size = 26.0;
         theme.mode_hint.width = 96.0;
         theme.mode_hint.height = 60.0;
-        theme.mode_hint.shadow = false;
         for font_size in [10.0, 20.0, 36.0] {
             for dpi_scale in [1.0, 2.0] {
                 theme.font.size = font_size;
@@ -1373,13 +1548,13 @@ mod tests {
                     assert_eq!(
                         width,
                         (theme.mode_hint.width * dpi_scale)
-                            .max(text_width + font_size / 3.0 * 2.0)
+                            .max(text_width + font_size / 3.0)
                             .ceil() as u32
                     );
                     assert_eq!(
                         height,
                         (theme.mode_hint.height * dpi_scale)
-                            .max(font_size + font_size / 3.0 * 2.0)
+                            .max(font_size + font_size / 3.0)
                             .ceil() as u32
                     );
                 }

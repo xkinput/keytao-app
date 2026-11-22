@@ -4404,6 +4404,7 @@ fn wire__crate__api__core__set_ime_ui_settings_impl(
             let api_font_size = <f32>::sse_decode(&mut deserializer);
             let api_corner_radius = <Option<f32>>::sse_decode(&mut deserializer);
             let api_background_color = <String>::sse_decode(&mut deserializer);
+            let api_changed_fields = <Option<u8>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -4414,6 +4415,7 @@ fn wire__crate__api__core__set_ime_ui_settings_impl(
                         api_font_size,
                         api_corner_radius,
                         api_background_color,
+                        api_changed_fields,
                     )?;
                     std::result::Result::Ok(output_ok)
                 })())
@@ -5505,6 +5507,7 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
         let mut var_floatingPortraitScale = <u8>::sse_decode(deserializer);
         let mut var_floatingLandscapeEnabled = <bool>::sse_decode(deserializer);
         let mut var_floatingLandscapeScale = <u8>::sse_decode(deserializer);
+        let mut var_keyboardLayoutJson = <Option<String>>::sse_decode(deserializer);
         let mut var_configPath = <Option<String>>::sse_decode(deserializer);
         let mut var_reloadStampPath = <Option<String>>::sse_decode(deserializer);
         let mut var_message = <String>::sse_decode(deserializer);
@@ -5540,6 +5543,7 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
             floating_portrait_scale: var_floatingPortraitScale,
             floating_landscape_enabled: var_floatingLandscapeEnabled,
             floating_landscape_scale: var_floatingLandscapeScale,
+            keyboard_layout_json: var_keyboardLayoutJson,
             config_path: var_configPath,
             reload_stamp_path: var_reloadStampPath,
             message: var_message,
@@ -6286,6 +6290,7 @@ impl SseDecode for crate::api::types::LocalSchemaDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_installed = <bool>::sse_decode(deserializer);
         let mut var_deployed = <bool>::sse_decode(deserializer);
+        let mut var_buildAvailable = <bool>::sse_decode(deserializer);
         let mut var_version = <Option<String>>::sse_decode(deserializer);
         let mut var_schemas = <Vec<String>>::sse_decode(deserializer);
         let mut var_installedScheme = <Option<String>>::sse_decode(deserializer);
@@ -6295,6 +6300,7 @@ impl SseDecode for crate::api::types::LocalSchemaDto {
         return crate::api::types::LocalSchemaDto {
             installed: var_installed,
             deployed: var_deployed,
+            build_available: var_buildAvailable,
             version: var_version,
             schemas: var_schemas,
             installed_scheme: var_installedScheme,
@@ -7566,6 +7572,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::AndroidImeInputSetting
             self.floating_portrait_scale.into_into_dart().into_dart(),
             self.floating_landscape_enabled.into_into_dart().into_dart(),
             self.floating_landscape_scale.into_into_dart().into_dart(),
+            self.keyboard_layout_json.into_into_dart().into_dart(),
             self.config_path.into_into_dart().into_dart(),
             self.reload_stamp_path.into_into_dart().into_dart(),
             self.message.into_into_dart().into_dart(),
@@ -8189,6 +8196,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::LocalSchemaDto {
         [
             self.installed.into_into_dart().into_dart(),
             self.deployed.into_into_dart().into_dart(),
+            self.build_available.into_into_dart().into_dart(),
             self.version.into_into_dart().into_dart(),
             self.schemas.into_into_dart().into_dart(),
             self.installed_scheme.into_into_dart().into_dart(),
@@ -9130,6 +9138,7 @@ impl SseEncode for crate::api::types::AndroidImeInputSettingsDto {
         <u8>::sse_encode(self.floating_portrait_scale, serializer);
         <bool>::sse_encode(self.floating_landscape_enabled, serializer);
         <u8>::sse_encode(self.floating_landscape_scale, serializer);
+        <Option<String>>::sse_encode(self.keyboard_layout_json, serializer);
         <Option<String>>::sse_encode(self.config_path, serializer);
         <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
         <String>::sse_encode(self.message, serializer);
@@ -9699,6 +9708,7 @@ impl SseEncode for crate::api::types::LocalSchemaDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.installed, serializer);
         <bool>::sse_encode(self.deployed, serializer);
+        <bool>::sse_encode(self.build_available, serializer);
         <Option<String>>::sse_encode(self.version, serializer);
         <Vec<String>>::sse_encode(self.schemas, serializer);
         <Option<String>>::sse_encode(self.installed_scheme, serializer);

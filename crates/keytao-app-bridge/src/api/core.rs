@@ -47,6 +47,7 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
     Ok(LocalSchemaDto {
         installed: local.installed,
         deployed: local.deployed,
+        build_available: local.build_available,
         version: local.version,
         schemas: local.schemas,
         installed_scheme,
@@ -1476,6 +1477,7 @@ pub fn set_ime_ui_settings(
     font_size: f32,
     corner_radius: Option<f32>,
     background_color: String,
+    changed_fields: Option<u8>,
 ) -> Result<ImeUiSettingsDto, String> {
     let state = runtime::state()?;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1490,6 +1492,7 @@ pub fn set_ime_ui_settings(
             font_size,
             corner_radius,
             background_color,
+            changed_fields,
         )
         .map_err(|error| error.to_string())?,
     )

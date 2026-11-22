@@ -58,10 +58,10 @@ fn compiled_json_round_trips_against_swift_decoder_fields() {
             "version": 3,
             "meta": {"id": "my.contract", "name": "Contract", "appearance": appearance},
             "common": {"accentColor": "#12345678", "font": {"family": "A, B", "weight": "heavy"}},
-            "pc": {"candidate": {"commentPosition": "below"}},
+            "pc": {"font": {"commentSize": 17}, "candidate": {"commentPosition": "below"}},
             "mobile": {
                 "keyboard": {"key": {"background": "#12345678"}},
-                "candidateBar": {"commentPosition": "inline"}
+                "candidateBar": {"commentPosition": "inline", "commentFontSize": 30}
             }
         }).to_string()).unwrap();
         let compiled = compile_theme(&source, "").unwrap();
@@ -86,7 +86,9 @@ fn compiled_json_round_trips_against_swift_decoder_fields() {
             }
             assert_eq!(decoded["version"], 2);
             assert_eq!(decoded["candidate"]["commentPosition"], "below");
+            assert_eq!(decoded["font"]["commentSize"], 17.0);
             assert_eq!(decoded["mobile"]["candidateBar"]["commentPosition"], "inline");
+            assert_eq!(decoded["mobile"]["candidateBar"]["commentFontSize"], 24.0);
             assert_eq!(
                 decoded["mobile"],
                 resolve_theme_source(&source, scheme).mobile

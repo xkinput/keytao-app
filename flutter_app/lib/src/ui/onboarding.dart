@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:forui/forui.dart';
 
@@ -22,15 +24,17 @@ class OnboardingPage extends StatefulWidget {
 class _OnboardingPageState extends State<OnboardingPage>
     with WidgetsBindingObserver {
   int _index = 0;
-  bool _completionScheduled = false;
+  bool _completionAttempted = false;
   bool _finished = false;
   bool _retargetPending = false;
+  Set<SetupStep> _detectedSteps = {};
+  Timer? _iosAccessCheck;
+  bool _checkingIosAccess = false;
   late final AppLifecycleListener _lifecycle;
   List<SetupStep> get _steps => widget.controller.setupSteps;
   bool _done(SetupStep step) => step.isComplete(widget.controller);
   int get _firstIncomplete => _steps.indexWhere((step) => !_done(step));
   int get _initialIndex {
-    if (widget.controller.isIos) return _index;
     final first = _firstIncomplete;
     return first < 0 ? _steps.length - 1 : first;
   }
@@ -40,10 +44,12 @@ class _OnboardingPageState extends State<OnboardingPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _index = _initialIndex;
+    _detectedSteps = _steps.where(_done).toSet();
     _retargetPending = widget.controller.busy;
     widget.controller.addListener(_onControllerChanged);
     _lifecycle = AppLifecycleListener(
       onResume: () {
+        if (widget.controller.isMobile) return;
         _retargetPending = true;
         _retargetWhenIdle();
       },
@@ -64,7 +70,11 @@ class _OnboardingPageState extends State<OnboardingPage>
       oldWidget.controller.removeListener(_onControllerChanged);
       widget.controller.addListener(_onControllerChanged);
       _index = _initialIndex;
+      _detectedSteps = _steps.where(_done).toSet();
       _retargetPending = widget.controller.busy;
+      _completionAttempted = false;
+      _finished = false;
+      _iosAccessCheck?.cancel();
       widget.controller.setWindowTitle(_steps[_index].title);
     }
     _checkCompletion();
@@ -72,7 +82,15 @@ class _OnboardingPageState extends State<OnboardingPage>
 
   void _onControllerChanged() {
     setState(() {});
-    if (_retargetPending) _retargetWhenIdle();
+    final c = widget.controller;
+    if (c.isMobile && !c.busy) {
+      final detected = _steps.where(_done).toSet();
+      final advanced = detected.any((step) => !_detectedSteps.contains(step));
+      _detectedSteps = detected;
+      if (advanced && _index != _initialIndex) _move(_initialIndex);
+    } else if (!c.isMobile && _retargetPending) {
+      _retargetWhenIdle();
+    }
     _checkCompletion();
   }
 
@@ -89,26 +107,54 @@ class _OnboardingPageState extends State<OnboardingPage>
 
   void _checkCompletion() {
     final c = widget.controller;
-    if (!c.isAndroid ||
-        _finished ||
-        _completionScheduled ||
-        c.busy ||
-        !c.setupReady ||
-        !c.onboardingCompleted) {
+    if (!c.isMobile || _finished || c.busy) return;
+    if (!c.setupReady) {
+      _completionAttempted = false;
       return;
     }
-    _completionScheduled = true;
+    if (_completionAttempted) return;
+    _completionAttempted = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _completionScheduled = false;
-      if (!mounted ||
-          _finished ||
-          !widget.controller.setupReady ||
-          !widget.controller.onboardingCompleted) {
+      if (!mounted || _finished || c != widget.controller) return;
+      if (c.busy || !c.setupReady) {
+        _completionAttempted = false;
         return;
       }
-      _finished = true;
-      widget.onFinished();
+      _finish();
     });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _finish() async {
+    final c = widget.controller;
+    final completed = c.onboardingCompleted || await c.finishOnboarding();
+    if (!mounted || _finished || c != widget.controller) return;
+    if (completed) {
+      _finished = true;
+      FocusScope.of(context).unfocus();
+      widget.onFinished();
+    } else if (_firstIncomplete >= 0) {
+      _move(_firstIncomplete);
+    }
+  }
+
+  void _onIosInputFocus(bool focused) {
+    _iosAccessCheck?.cancel();
+    if (!focused) return;
+    _iosAccessCheck = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => _checkIosAccess(),
+    );
+  }
+
+  Future<void> _checkIosAccess() async {
+    if (_checkingIosAccess) return;
+    _checkingIosAccess = true;
+    try {
+      await widget.controller.refreshIosKeyboardStatus();
+    } finally {
+      _checkingIosAccess = false;
+    }
   }
 
   void _move(int index) {
@@ -124,13 +170,7 @@ class _OnboardingPageState extends State<OnboardingPage>
       return;
     }
     if (_index == _steps.length - 1) {
-      final completed = await widget.controller.finishOnboarding();
-      if (!mounted) return;
-      if (completed) {
-        widget.onFinished();
-      } else if (_firstIncomplete >= 0) {
-        _move(_firstIncomplete);
-      }
+      await _finish();
     } else {
       _move(_index + 1);
     }
@@ -138,6 +178,7 @@ class _OnboardingPageState extends State<OnboardingPage>
 
   @override
   void dispose() {
+    _iosAccessCheck?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _lifecycle.dispose();
     widget.controller.removeListener(_onControllerChanged);
@@ -149,14 +190,9 @@ class _OnboardingPageState extends State<OnboardingPage>
     final c = widget.controller;
     final steps = _steps;
     final step = steps[_index];
-    final title = !c.isAndroid
-        ? step.title
-        : switch (step) {
-            SetupStep.storage => AppStrings.grantStorage,
-            SetupStep.install => AppStrings.installKeytao,
-            SetupStep.deploy => AppStrings.deployKeytao,
-            _ => step.title,
-          };
+    final title = step == SetupStep.storage
+        ? AppStrings.grantStorage
+        : step.title;
     final description = switch (step) {
       SetupStep.enable =>
         c.isIos
@@ -166,21 +202,15 @@ class _OnboardingPageState extends State<OnboardingPage>
         '${AppStrings.iosEnableFullAccess}\n${AppStrings.iosFullAccessDescription}',
       SetupStep.select => AppStrings.selectDescription,
       SetupStep.storage => c.permissionDescription,
-      SetupStep.install =>
-        c.isIos ? AppStrings.iosInstallDeploy : AppStrings.installDescription,
-      SetupStep.deploy =>
-        c.isIos
-            ? '${AppStrings.iosInstallDeploy}\n${AppStrings.iosGlobe}'
-            : AppStrings.deployDescription,
+      SetupStep.install => AppStrings.installDescription,
+      SetupStep.deploy => AppStrings.deployDescription,
       SetupStep.component => '安装 KeyTao 输入法组件后，重新检测安装状态。',
       SetupStep.finish =>
         c.setupReady ? '设置已就绪，点击完成开始使用 KeyTao。' : AppStrings.finishSetupFirst,
     };
     final errors = <String>{
-      if (c.isAndroid) ...[
+      if (c.isMobile) ...[
         if (c.error?.isNotEmpty == true) c.error!,
-        if (c.installError?.isNotEmpty == true) c.installError!,
-        if (c.releaseError?.isNotEmpty == true) c.releaseError!,
       ] else ...[
         if (step == SetupStep.component && c.macosImeError != null)
           c.macosImeError!,
@@ -188,22 +218,11 @@ class _OnboardingPageState extends State<OnboardingPage>
           c.installError!,
       ],
     };
-    double progress;
-    if (!c.isAndroid) {
-      progress = (_index + (_done(step) ? 1 : 0)) / steps.length;
-    } else if (c.setupReady) {
-      progress = 1;
-    } else if (c.local?.installed == true) {
-      progress = .9;
-    } else if (c.storageReady) {
-      progress = .72;
-    } else if (c.ime?['selected'] == true) {
-      progress = .55;
-    } else if (c.ime?['enabled'] == true) {
-      progress = .36;
-    } else {
-      progress = c.ime != null ? .18 : .08;
-    }
+    final progress =
+        (c.isMobile
+            ? steps.where(_done).length
+            : _index + (_done(step) ? 1 : 0)) /
+        steps.length;
     final onboarding = FScaffold(
       scaffoldStyle: FScaffoldStyleDelta.delta(
         systemOverlayStyle: c.isAndroid ? AppSystemBars.styleOf(context) : null,
@@ -381,19 +400,25 @@ class _OnboardingPageState extends State<OnboardingPage>
                                   ),
                                 ],
                               ),
+                            if (step == SetupStep.fullAccess &&
+                                c.iosKeyboardEnabled &&
+                                !_done(step)) ...[
+                              const Text(AppStrings.iosGlobe),
+                              Focus(
+                                onFocusChange: _onIosInputFocus,
+                                child: FTextField(
+                                  label: const Text(AppStrings.testInput),
+                                  onSubmit: (_) => _checkIosAccess(),
+                                ),
+                              ),
+                            ],
                             if (step == SetupStep.install) ...[
-                              if (!c.isAndroid) ...[
-                                SchemeSelection(controller: c),
-                                VersionPicker(controller: c),
-                              ],
+                              SchemeSelection(controller: c),
+                              VersionPicker(controller: c),
                               ActionRow(
                                 children: [
                                   ActionButton(
-                                    c.isAndroid
-                                        ? c.isInstalling
-                                              ? AppStrings.installing
-                                              : AppStrings.installKeytao
-                                        : c.installButtonTitle,
+                                    c.installButtonTitle,
                                     primary: true,
                                     onPress: c.canInstallDuringSetup
                                         ? c.install
@@ -406,11 +431,7 @@ class _OnboardingPageState extends State<OnboardingPage>
                               ActionRow(
                                 children: [
                                   ActionButton(
-                                    c.isAndroid
-                                        ? c.isDeploying
-                                              ? AppStrings.deploying
-                                              : AppStrings.deployKeytao
-                                        : '部署方案',
+                                    AppStrings.deployScheme,
                                     primary: true,
                                     onPress: c.canDeploy ? c.deploy : null,
                                   ),
@@ -424,10 +445,16 @@ class _OnboardingPageState extends State<OnboardingPage>
                                     true)
                               StatusMessage(c.storage!['message'] as String),
                             for (final error in errors) ErrorMessage(error),
-                            if (c.isAndroid ||
-                                step == SetupStep.install ||
+                            if (c.checkingStorage)
+                              InstallProgressView(
+                                active: true,
+                                progress: c.installProgress,
+                                fraction: c.installFraction,
+                                message: c.progress,
+                              ),
+                            if (step == SetupStep.install ||
                                 step == SetupStep.deploy) ...[
-                              if (c.isInstalling || c.checkingStorage)
+                              if (c.isInstalling)
                                 InstallProgressView(
                                   active: true,
                                   progress: c.installProgress,
@@ -436,7 +463,7 @@ class _OnboardingPageState extends State<OnboardingPage>
                                 ),
                               if (c.deploySteps.isNotEmpty)
                                 DeploySteps(controller: c),
-                              if (!c.isAndroid && c.operationLogCount > 0)
+                              if (c.operationLogCount > 0)
                                 ActionRow(
                                   children: [OperationLogButton(controller: c)],
                                 ),

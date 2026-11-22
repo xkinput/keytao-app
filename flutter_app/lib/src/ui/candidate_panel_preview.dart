@@ -6,6 +6,22 @@ import '../rust/api/types.dart';
 import 'mobile_keyboard_preview.dart';
 import 'system_font_picker.dart';
 
+Widget themePreviewEditTarget(
+  Widget child,
+  String path,
+  ValueChanged<String>? onEditField,
+) => onEditField == null
+    ? child
+    : MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          key: ValueKey(('theme-preview-edit', path)),
+          behavior: HitTestBehavior.opaque,
+          onTap: () => onEditField(path),
+          child: child,
+        ),
+      );
+
 class CandidatePanelPreview extends StatelessWidget {
   const CandidatePanelPreview({
     super.key,
@@ -17,8 +33,11 @@ class CandidatePanelPreview extends StatelessWidget {
     this.keyboard = false,
     this.keyboardSchemeName = 'KeyTao',
     this.keyboardLogo,
+    this.keyboardSettings,
     this.editorPreview = false,
     this.fontCatalog,
+    this.highlightPath,
+    this.onEditField,
   }) : assert(candidateCount >= 1 && candidateCount <= 255);
 
   final Map<String, dynamic> theme;
@@ -28,8 +47,11 @@ class CandidatePanelPreview extends StatelessWidget {
   final bool keyboard;
   final String keyboardSchemeName;
   final Widget? keyboardLogo;
+  final AndroidImeInputSettingsDto? keyboardSettings;
   final bool editorPreview;
   final SystemFontCatalog? fontCatalog;
+  final String? highlightPath;
+  final ValueChanged<String>? onEditField;
   // The IME shows the preedit in the panel only when it is not embedded.
   final bool showPreedit;
 
@@ -91,15 +113,20 @@ class CandidatePanelPreview extends StatelessWidget {
         theme: theme,
         schemeName: keyboardSchemeName,
         logo: keyboardLogo,
+        keyboardSettings: keyboardSettings,
         candidates: this.candidates,
         editorPreview: editorPreview,
         fontFamily: family,
+        highlightPath: highlightPath,
+        onEditField: onEditField,
       );
     }
     final font = theme['font'] as Map<String, dynamic>;
     final panel = theme['panel'] as Map<String, dynamic>;
     final option = theme['candidate'] as Map<String, dynamic>;
     final navigation = theme['navigation'] as Map<String, dynamic>;
+    Widget edit(String path, Widget child) =>
+        themePreviewEditTarget(child, path, onEditField);
     final vertical = orientation == null
         ? panel['orientation'] == 'vertical'
         : orientation == PanelOrientationDto.vertical;
@@ -173,11 +200,7 @@ class CandidatePanelPreview extends StatelessWidget {
       ),
     );
 
-    final widths = <double>[];
-    final candidates = <Widget>[];
-    for (var index = 0; index < candidateCount; index++) {
-      final selected = index == 0;
-      final label = '${index + 1}${option['labelSuffix']}';
+    final previewCandidates = List.generate(candidateCount, (index) {
       final candidate = this.candidates.isEmpty && index < _candidates.length
           ? (text: _candidates[index], comment: _comments[index])
           : index < this.candidates.length
@@ -188,6 +211,20 @@ class CandidatePanelPreview extends StatelessWidget {
               (candidate.comment.isEmpty || candidate.comment == '🚫')
           ? '注释'
           : candidate.comment;
+      return (text: candidate.text, comment: comment);
+    });
+    final commentsBelow = option['commentPosition'] == 'below';
+    final alignStackedRow =
+        !vertical &&
+        commentsBelow &&
+        previewCandidates.any((candidate) => candidate.comment.isNotEmpty);
+    final widths = <double>[];
+    final candidates = <Widget>[];
+    for (var index = 0; index < previewCandidates.length; index++) {
+      final selected = index == 0;
+      final label = '${index + 1}${option['labelSuffix']}';
+      final candidate = previewCandidates[index];
+      final comment = candidate.comment;
       final labelStyle = style(
         _metric(font, 'labelSize'),
         _color(option, selected ? 'selectedLabelColor' : 'labelColor'),
@@ -203,7 +240,7 @@ class CandidatePanelPreview extends StatelessWidget {
         _color(option, selected ? 'selectedCommentColor' : 'commentColor'),
         FontWeight.w400,
       );
-      final stacked = option['commentPosition'] == 'below' && comment.isNotEmpty;
+      final stacked = commentsBelow && (alignStackedRow || comment.isNotEmpty);
       final labelSize = measure(label, labelStyle);
       final wordSize = measure(candidate.text, textStyle);
       final commentWidth = comment.isEmpty
@@ -217,24 +254,64 @@ class CandidatePanelPreview extends StatelessWidget {
               : wordSize.width +
                     (comment.isEmpty ? 0 : commentWidth + inlineGap)) +
           _metric(option, 'paddingX') * 2;
-      final word = Text(
-        candidate.text,
-        key: ValueKey('candidate-preview-text-$index'),
-        style: textStyle,
-        textScaler: TextScaler.noScaling,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+      final word = themePreviewOutline(
+        edit(
+          'pc.font.size',
+          Text(
+            candidate.text,
+            key: ValueKey('candidate-preview-text-$index'),
+            style: textStyle,
+            textScaler: TextScaler.noScaling,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        switch (highlightPath) {
+          'pc.candidate.foreground' => index == 1 || candidateCount == 1,
+          'pc.candidate.selectedForeground' ||
+          'pc.font.size' ||
+          'common.font.family' ||
+          'common.font.weight' => selected,
+          _ => false,
+        },
       );
-      final annotation = Text(
-        comment,
-        style: commentStyle,
-        textScaler: TextScaler.noScaling,
+      final annotation = themePreviewOutline(
+        edit(
+          'pc.font.commentSize',
+          Text(comment, style: commentStyle, textScaler: TextScaler.noScaling),
+        ),
+        switch (highlightPath) {
+          'pc.candidate.commentColor' => index == 1 || candidateCount == 1,
+          'pc.candidate.selectedCommentColor' ||
+          'pc.font.commentSize' => selected,
+          _ => false,
+        },
       );
-      final number = Text(
-        label,
-        style: labelStyle,
-        textScaler: TextScaler.noScaling,
+      final number = themePreviewOutline(
+        edit(
+          'pc.font.labelSize',
+          Text(label, style: labelStyle, textScaler: TextScaler.noScaling),
+        ),
+        switch (highlightPath) {
+          'pc.candidate.labelColor' => index == 1 || candidateCount == 1,
+          'pc.candidate.selectedLabelColor' ||
+          'pc.candidate.labelSuffix' ||
+          'pc.font.labelSize' => selected,
+          _ => false,
+        },
       );
+      final highlightItem = switch (highlightPath) {
+        'pc.candidate.background' => index == 2 || candidateCount == 1,
+        'pc.candidate.borderColor' ||
+        'pc.candidate.hoverBackground' => index == 1 || candidateCount == 1,
+        'common.accentColor' ||
+        'pc.candidate.selectedBackground' ||
+        'pc.candidate.selectedBorderColor' ||
+        'pc.candidate.borderWidth' ||
+        'pc.candidate.cornerRadius' ||
+        'pc.candidate.commentPosition' => selected,
+        _ => false,
+      };
       widths.add(width);
       candidates.add(
         Semantics(
@@ -242,84 +319,96 @@ class CandidatePanelPreview extends StatelessWidget {
               '候选 ${index + 1}，${candidate.text}${comment.isEmpty ? '' : '，注释 $comment'}',
           selected: selected,
           child: ExcludeSemantics(
-            child: Container(
-              width: width,
-              constraints: BoxConstraints(
-                minHeight: _metric(option, 'minHeight'),
-              ),
-              decoration: BoxDecoration(
-                color: _color(
-                  option,
-                  selected
-                      ? 'selectedBackground'
-                      : editorPreview && index == 1
-                      ? 'hoverBackground'
-                      : 'background',
+            excluding: onEditField == null,
+            child: edit(
+              selected
+                  ? 'pc.candidate.selectedBackground'
+                  : 'pc.candidate.background',
+              Container(
+                width: width,
+                constraints: BoxConstraints(
+                  minHeight: _metric(option, 'minHeight'),
                 ),
-                borderRadius: BorderRadius.circular(
-                  _metric(option, 'cornerRadius'),
+                decoration: BoxDecoration(
+                  color: _color(
+                    option,
+                    selected
+                        ? 'selectedBackground'
+                        : editorPreview && index == 1
+                        ? 'hoverBackground'
+                        : 'background',
+                  ),
+                  borderRadius: BorderRadius.circular(
+                    _metric(option, 'cornerRadius'),
+                  ),
                 ),
-              ),
-              foregroundDecoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(
-                  _metric(option, 'cornerRadius'),
+                foregroundDecoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(
+                    _metric(option, 'cornerRadius'),
+                  ),
+                  border:
+                      themePreviewBorder(highlightItem) ??
+                      (!editorPreview || _metric(option, 'borderWidth') > 0
+                          ? Border.all(
+                              color: _color(
+                                option,
+                                selected
+                                    ? 'selectedBorderColor'
+                                    : 'borderColor',
+                              ),
+                              width: !editorPreview && selected
+                                  ? math
+                                        .max(1, _metric(option, 'borderWidth'))
+                                        .toDouble()
+                                  : _metric(option, 'borderWidth'),
+                            )
+                          : null),
                 ),
-                border: !editorPreview || _metric(option, 'borderWidth') > 0
-                    ? Border.all(
-                        color: _color(
-                          option,
-                          selected ? 'selectedBorderColor' : 'borderColor',
-                        ),
-                        width: !editorPreview && selected
-                            ? math
-                                  .max(1, _metric(option, 'borderWidth'))
-                                  .toDouble()
-                            : _metric(option, 'borderWidth'),
-                      )
-                    : null,
-              ),
-              padding: EdgeInsets.symmetric(
-                horizontal: math.min(_metric(option, 'paddingX'), width / 2),
-                vertical: _metric(option, 'paddingY'),
-              ),
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: stacked
-                      ? CrossAxisAlignment.start
-                      : CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    if (stacked)
-                      Padding(
-                        padding: EdgeInsets.only(
-                          top: math.max(
-                            0,
-                            (wordSize.height - labelSize.height) / 2,
+                padding: EdgeInsets.symmetric(
+                  horizontal: math.min(_metric(option, 'paddingX'), width / 2),
+                  vertical: _metric(option, 'paddingY'),
+                ),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: alignStackedRow
+                      ? Alignment.topLeft
+                      : Alignment.centerLeft,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: stacked
+                        ? CrossAxisAlignment.start
+                        : CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      if (stacked)
+                        Padding(
+                          padding: EdgeInsets.only(
+                            top: math.max(
+                              0,
+                              (wordSize.height - labelSize.height) / 2,
+                            ),
                           ),
-                        ),
-                        child: number,
-                      )
-                    else
-                      number,
-                    SizedBox(width: inlineGap),
-                    if (stacked)
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        spacing: inlineGap / 2,
-                        children: [word, annotation],
-                      )
-                    else ...[
-                      word,
-                      if (comment.isNotEmpty) ...[
-                        SizedBox(width: inlineGap),
-                        annotation,
+                          child: number,
+                        )
+                      else
+                        number,
+                      SizedBox(width: inlineGap),
+                      if (stacked)
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          spacing: inlineGap / 2,
+                          children: [word, if (comment.isNotEmpty) annotation],
+                        )
+                      else ...[
+                        word,
+                        if (comment.isNotEmpty) ...[
+                          SizedBox(width: inlineGap),
+                          annotation,
+                        ],
                       ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -352,6 +441,8 @@ class CandidatePanelPreview extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: vertical
           ? CrossAxisAlignment.start
+          : alignStackedRow
+          ? CrossAxisAlignment.stretch
           : CrossAxisAlignment.center,
       children: items,
     );
@@ -369,64 +460,82 @@ class CandidatePanelPreview extends StatelessWidget {
               return Semantics(
                 container: true,
                 label: '候选窗预览',
-                child: Container(
-                  key: const ValueKey('candidate-panel-preview'),
-                  width: math.min(width, constraints.maxWidth),
-                  constraints: BoxConstraints(
-                    maxHeight: math.min(360, _metric(panel, 'maxHeight')),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  decoration: BoxDecoration(
-                    color: _color(panel, 'background'),
-                    boxShadow: editorPreview && panel['shadowStyle'] != null
-                        ? [
-                            BoxShadow(
-                              color: _color(panel['shadowStyle'], 'color'),
-                              blurRadius: _metric(
-                                panel['shadowStyle'],
-                                'blurRadius',
+                child: edit(
+                  'pc.panel.background',
+                  Container(
+                    key: const ValueKey('candidate-panel-preview'),
+                    width: math.min(width, constraints.maxWidth),
+                    constraints: BoxConstraints(
+                      maxHeight: math.min(360, _metric(panel, 'maxHeight')),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(
+                      color: _color(panel, 'background'),
+                      boxShadow: editorPreview && panel['shadowStyle'] != null
+                          ? [
+                              BoxShadow(
+                                color: _color(panel['shadowStyle'], 'color'),
+                                blurRadius: _metric(
+                                  panel['shadowStyle'],
+                                  'blurRadius',
+                                ),
+                                offset: Offset(
+                                  0,
+                                  _metric(panel['shadowStyle'], 'offsetY'),
+                                ),
                               ),
-                              offset: Offset(
-                                0,
-                                _metric(panel['shadowStyle'], 'offsetY'),
+                            ]
+                          : null,
+                      borderRadius: BorderRadius.circular(
+                        _metric(panel, 'cornerRadius'),
+                      ),
+                    ),
+                    foregroundDecoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(
+                        _metric(panel, 'cornerRadius'),
+                      ),
+                      border:
+                          themePreviewBorder(
+                            (highlightPath?.startsWith('pc.panel.') ?? false) ||
+                                highlightPath == 'common.backgroundColor' ||
+                                highlightPath == 'common.cornerRadius',
+                          ) ??
+                          (!editorPreview || _metric(panel, 'borderWidth') > 0
+                              ? Border.all(
+                                  color: _color(panel, 'borderColor'),
+                                  width: _metric(panel, 'borderWidth'),
+                                )
+                              : null),
+                    ),
+                    padding: padding,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.topLeft,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showPreedit) ...[
+                            themePreviewOutline(
+                              edit(
+                                'pc.font.preeditSize',
+                                Text(
+                                  'f',
+                                  semanticsLabel: '预编辑 f',
+                                  style: preeditStyle,
+                                  textScaler: TextScaler.noScaling,
+                                ),
                               ),
+                              highlightPath == 'pc.font.preeditSize',
                             ),
-                          ]
-                        : null,
-                    borderRadius: BorderRadius.circular(
-                      _metric(panel, 'cornerRadius'),
-                    ),
-                  ),
-                  foregroundDecoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(
-                      _metric(panel, 'cornerRadius'),
-                    ),
-                    border: !editorPreview || _metric(panel, 'borderWidth') > 0
-                        ? Border.all(
-                            color: _color(panel, 'borderColor'),
-                            width: _metric(panel, 'borderWidth'),
-                          )
-                        : null,
-                  ),
-                  padding: padding,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.topLeft,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (showPreedit) ...[
-                          Text(
-                            'f',
-                            semanticsLabel: '预编辑 f',
-                            style: preeditStyle,
-                            textScaler: TextScaler.noScaling,
-                          ),
-                          SizedBox(height: _metric(panel, 'preeditGap')),
+                            SizedBox(height: _metric(panel, 'preeditGap')),
+                          ],
+                          if (alignStackedRow)
+                            IntrinsicHeight(child: candidateList)
+                          else
+                            candidateList,
                         ],
-                        candidateList,
-                      ],
+                      ),
                     ),
                   ),
                 ),
