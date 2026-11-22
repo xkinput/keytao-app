@@ -50,12 +50,12 @@ impl ITfInputScope_Impl for DeclaredScope_Impl {
 }
 
 #[test]
-fn input_scope_com_values_keep_declared_sensitive_fields_blocked() {
+fn input_scope_com_values_distinguish_private_and_blocked_fields() {
     for (scope, expected) in [
         (IS_DEFAULT, ContextProbe::Clear),
         (IS_PASSWORD, ContextProbe::Restricted),
         (IS_NUMERIC_PIN, ContextProbe::Restricted),
-        (IS_PRIVATE, ContextProbe::Restricted),
+        (IS_PRIVATE, ContextProbe::Private),
     ] {
         let object: ITfInputScope = DeclaredScope(scope).into();
         let value = VARIANT::from(object.cast::<windows::core::IUnknown>().unwrap());
@@ -332,14 +332,13 @@ fn optional_scope_value_other_failures_remain_unknown() {
 }
 
 #[test]
-fn full_property_probe_preserves_every_declared_sensitive_scope() {
+fn full_property_probe_distinguishes_private_and_blocked_fields() {
     for scope in [
         IS_PASSWORD,
         IS_NUMERIC_PASSWORD,
         IS_NUMERIC_PIN,
         IS_ALPHANUMERIC_PIN,
         IS_ALPHANUMERIC_PIN_SET,
-        IS_PRIVATE,
     ] {
         assert_eq!(
             probe_property(PropertyAnswer::Scope(scope)),
@@ -347,6 +346,10 @@ fn full_property_probe_preserves_every_declared_sensitive_scope() {
             "scope {scope:?}"
         );
     }
+    assert_eq!(
+        probe_property(PropertyAnswer::Scope(IS_PRIVATE)),
+        ContextProbe::Private
+    );
     assert_eq!(
         probe_property(PropertyAnswer::Scope(IS_DEFAULT)),
         ContextProbe::Clear
