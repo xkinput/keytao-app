@@ -16,6 +16,9 @@ val keystoreProperties = Properties().apply {
 val repoRoot = rootProject.projectDir.resolve("../..").canonicalFile
 val androidRuntimeScript = repoRoot.resolve("scripts/android-librime-runtime.sh")
 val runtimeAssetsDir = layout.buildDirectory.dir("generated/keytao/assets")
+val bundleLibjdEngine = repoRoot.resolve("scripts/bundle-libjd-engine.py")
+val libjdJniDir = layout.buildDirectory.dir("generated/keytao/libjd-engine/jniLibs")
+val libjdNoticesDir = layout.buildDirectory.dir("generated/keytao/libjd-engine/assets")
 val googlePlayDistribution = providers.gradleProperty("keytaoGooglePlayDistribution")
     .orElse("false")
     .get()
@@ -75,8 +78,10 @@ android {
 
     sourceSets.getByName("main").assets.srcDirs(
         runtimeAssetsDir.get().asFile,
+        libjdNoticesDir.get().asFile,
         repoRoot.resolve("crates/keytao-theme/resources"),
     )
+    sourceSets.getByName("main").jniLibs.srcDir(libjdJniDir.get().asFile)
 }
 
 kotlin {
@@ -113,6 +118,18 @@ tasks.register<Exec>("syncKeytaoAndroidAssets") {
     )
 }
 
+tasks.register<Exec>("bundleKeytaoLibjdEngine") {
+    inputs.files(bundleLibjdEngine)
+    outputs.dirs(libjdJniDir, libjdNoticesDir)
+    commandLine(
+        "python3",
+        bundleLibjdEngine.absolutePath,
+        "android",
+        libjdJniDir.get().asFile.absolutePath,
+        libjdNoticesDir.get().asFile.absolutePath,
+    )
+}
+
 tasks.named("preBuild") {
-    dependsOn("syncKeytaoAndroidAssets")
+    dependsOn("syncKeytaoAndroidAssets", "bundleKeytaoLibjdEngine")
 }

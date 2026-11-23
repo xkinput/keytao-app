@@ -138,4 +138,4 @@ install(DIRECTORY "${KEYTAO_RUNTIME}/current/rime-data"
   DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 install(DIRECTORY "${KEYTAO_ROOT}/target/keytao-windows-app-runtime/"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime
-  FILES_MATCHING PATTERN "*.dll")
+  FILES_MATCHING PATTERN "*.dll" PATTERN "libjd-engine-*.txt")

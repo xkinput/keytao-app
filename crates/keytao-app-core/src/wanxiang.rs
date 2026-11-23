@@ -880,14 +880,19 @@ impl InstallReceipt {
         let root = self.root.clone();
         let active = || RuntimeDirs::active_package_key(&root).as_deref() == Some(id);
         if active() {
+            let ime_jd = crate::libjd::input_engine(&root)
+                == keytao_core::engine_choice::PackageEngine::LibjdEngine;
             let packages = crate::runtime_materialize::isolated_packages(core, &root)
                 .map_err(|error| error.to_string())?;
-            let fallback = packages
-                .iter()
-                .find(|package| package.package_key != id);
+            let fallback = packages.iter().find(|package| {
+                package.package_key != id
+                    && (!ime_jd || crate::libjd::imported_package_ready(core, &package.package_key))
+            });
             if let Some(package) = fallback {
                 host.switch_package(&package.package_key).await?;
-            } else if crate::deploy::deploy_shared_data_dir(core, &root).join("default.yaml").is_file() {
+            } else if !ime_jd
+                && crate::deploy::deploy_shared_data_dir(core, &root).join("default.yaml").is_file()
+            {
                 host.switch_package("builtin/keytao").await?;
             } else {
                 crate::packages::clear_active_package(&root, id).map_err(|error| error.to_string())?;
@@ -932,6 +937,18 @@ impl InstallReceipt {
         defer_multi_schema: bool,
         host: &impl SchemeHost,
     ) -> Result<bool, String> {
+        if crate::libjd::input_engine(&self.root)
+            == keytao_core::engine_choice::PackageEngine::LibjdEngine
+        {
+            self.commit_store(true)?;
+            self.finish()?;
+            core.emit(CoreEvent::InstallProgress(InstallProgress {
+                stage: "done".into(),
+                percent: 100,
+                message: format!("{name}已下载"),
+            }));
+            return Ok(false);
+        }
         if defer_multi_schema {
             let files = crate::package_schemas::directory_schemas(&self.work.join("files"))
                 .map_err(|error| error.to_string())?;
@@ -1887,10 +1904,6 @@ where
     let result: Result<_, String> = async {
         variant_source(&variant)?;
         let root = host.user_root()?;
-        if installed {
-            crate::deploy::ensure_not_using_libjd(core, &root)
-                .map_err(|error| error.to_string())?;
-        }
         crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
         let mut receipt = InstallReceipt::new(&root)?;
         receipt.attach_store(core, SCHEMA_ID)?;

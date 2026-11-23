@@ -12,7 +12,6 @@ void showGitSchemeDialog(
   AppController controller, {
   InstalledPackageDto? existing,
 }) {
-  if (!controller.requireRimeEngine()) return;
   showFDialog<void>(
     context: context,
     builder: (_, _, animation) => ListenableBuilder(

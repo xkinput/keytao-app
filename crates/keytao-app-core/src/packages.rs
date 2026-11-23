@@ -1,6 +1,6 @@
 use crate::package_store::PackageStore;
 use crate::{Core, CoreError};
-use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine};
+use keytao_core::engine_choice::PackageEngine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -153,7 +153,6 @@ pub async fn download_scheme_package(
     source: &str,
     user_root: &Path,
 ) -> Result<(), CoreError> {
-    crate::deploy::ensure_not_using_libjd(core, user_root)?;
     crate::package_migration::ensure_before_write(core, user_root).await?;
     if crate::scheme::is_local_scheme_key(scheme_key) {
         sync_git_scheme(core, user_root, scheme_key).await?;
@@ -449,58 +448,6 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
     PackageStore::new(core).list_installed_packages()
 }
 
-fn notify_package_engine_change(root: &Path) -> Result<(), CoreError> {
-    keytao_core::ReloadStamp::write(root).map_err(CoreError::Other)?;
-    Ok(())
-}
-
-pub fn set_package_engine(core: &Core, root: &Path, key: &str, engine: &str) -> Result<(), CoreError> {
-    let engine = match engine {
-        "rime" => PackageEngine::Rime,
-        "libjd" if key == PACKAGE_KEY => PackageEngine::Libjd,
-        "libjd_engine" => PackageEngine::LibjdEngine,
-        "libjd" => return Err(CoreError::Other("只有键道6支持 ime-jd".into())),
-        _ => return Err(CoreError::Other("未知输入引擎".into())),
-    };
-    if engine == PackageEngine::Libjd {
-        let status = crate::libjd::libjd_status(core);
-        if !status.available || status.installed_version.is_none() {
-            return Err(CoreError::Other("请先安装 ime-jd".into()));
-        }
-    }
-    if engine == PackageEngine::LibjdEngine && !crate::libjd::imported_package_ready(core, key) {
-        return Err(CoreError::Other("请先转换此方案的词库".into()));
-    }
-    let previous = keytao_core::engine_choice::read(root, Some(key));
-    keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
-        PackageStore::new(core).set_engine(root, key, engine).map_err(|error| error.to_string())
-    })
-    .map_err(CoreError::Other)?;
-    let switched = if keytao_core::engine_choice::active_package(root).as_deref() == Some(key) {
-        notify_package_engine_change(root)
-    } else if !engine.is_rime() && !keytao_core::RuntimeDirs::needs_migration(root) {
-        let shared = crate::deploy::deploy_shared_data_dir(core, root);
-        keytao_core::isolated_deploy::switch_ready_package_in_store(
-            root,
-            &shared,
-            Some(&core.env().data_dir),
-            key,
-            None,
-        )
-        .map_err(CoreError::Other)
-    } else {
-        Ok(())
-    };
-    if let Err(error) = switched {
-        keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
-            PackageStore::new(core).set_engine(root, key, previous).map_err(|error| error.to_string())
-        })
-        .map_err(|rollback| CoreError::Other(format!("{error}; {rollback}")))?;
-        return Err(error);
-    }
-    Ok(())
-}
-
 pub async fn remove_scheme_package(
     core: &Core,
     scheme_key: &str,
@@ -520,6 +467,9 @@ pub async fn remove_scheme_package(
                 .map(str::to_owned),
         );
         installed.remove(scheme_key);
+        if crate::libjd::input_engine(&root) == PackageEngine::LibjdEngine {
+            installed.retain(|key| crate::libjd::imported_package_ready(core, key));
+        }
         if let Some(replacement) = installed.first() {
             host.switch_package(replacement).await.map_err(CoreError::Other)?;
         } else {

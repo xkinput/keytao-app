@@ -366,10 +366,6 @@ impl Addon {
     {
         let result: Result<_, String> = async {
             let root = host.user_root()?;
-            if installed {
-                crate::deploy::ensure_not_using_libjd(core, &root)
-                    .map_err(|error| error.to_string())?;
-            }
             crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
             let mut receipt = InstallReceipt::new(&root)?;
             receipt.attach_store(core, self.id)?;

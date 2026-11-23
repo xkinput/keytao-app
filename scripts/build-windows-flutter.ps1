@@ -52,6 +52,7 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
 
 $flutter = (Get-Command flutter -ErrorAction Stop).Source
 $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+$python = (Get-Command python.exe -ErrorAction Stop).Source
 # Keep dumpbin and the matching x64 CRT tools available to final verification,
 # even when invoked from a plain CI PowerShell session.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
@@ -85,6 +86,14 @@ try {
         Invoke-Checked $powershell $imeArgs
     }
     Invoke-Checked $powershell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts\build-windows-arm64x.ps1")
+    $imeRuntime = Join-Path $repoRoot "target\keytao-windows-ime-runtime"
+    $x64Runtime = Join-Path $imeRuntime "current"
+    $arm64Runtime = Join-Path $imeRuntime "arm64x"
+    $bundleEngine = Join-Path $PSScriptRoot "bundle-libjd-engine.py"
+    Invoke-Checked $python @($bundleEngine, "windows-x86_64", $x64Runtime, $x64Runtime)
+    Invoke-Checked $python @($bundleEngine, "windows-arm64", $arm64Runtime, $arm64Runtime)
+    Copy-Item -Force -Path (Join-Path $x64Runtime "libjd-engine*") `
+        -Destination (Join-Path $repoRoot "target\keytao-windows-app-runtime")
 
     # Remove only this build's replaceable output, avoiding stale native assets.
     if (Test-Path -LiteralPath $releaseDir) { Remove-Item -LiteralPath $releaseDir -Recurse -Force }

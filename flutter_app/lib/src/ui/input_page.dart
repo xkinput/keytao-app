@@ -182,46 +182,54 @@ class _CurrentSchemeHero extends StatelessWidget {
 
   List<_SchemaMenuChoice> _buildChoices(IsolatedPackageDto? activePackage) {
     final c = controller;
+    final pendingLabel = c.prefersLibjd ? '转换后可用' : '部署后可用';
     if (c.isolatedPackages.isEmpty) {
       return [
         for (final schema in c.schemas)
-          _SchemaMenuChoice(
-            activePackage: true,
-            packageKey: null,
-            schemaId: schema.id,
-            title: schema.name,
-            subtitle: null,
-            checked: schema.id == c.currentSchemaId,
-          ),
+          if (!c.prefersLibjd || schema.id != 'easy_en')
+            _SchemaMenuChoice(
+              activePackage: true,
+              packageKey: null,
+              schemaId: schema.id,
+              title: schema.name,
+              subtitle: null,
+              checked: schema.id == c.currentSchemaId,
+            ),
       ];
     }
 
     final raw =
-        <({
-          bool activePkg,
-          String packageKey,
-          String packageName,
-          String schemaId,
-          String name,
-          bool ready,
-        })>[];
+        <
+          ({
+            bool activePkg,
+            String packageKey,
+            String packageName,
+            String schemaId,
+            String name,
+            bool ready,
+          })
+        >[];
 
     final activeSchemas = c.schemas.isNotEmpty
         ? c.schemas
         : (activePackage?.schemas ?? const <SchemaDto>[]);
     if (activePackage != null) {
       for (final schema in activeSchemas) {
+        if (c.prefersLibjd && schema.id == 'easy_en') continue;
         raw.add((
           activePkg: true,
           packageKey: activePackage.packageKey,
           packageName: activePackage.displayName,
           schemaId: schema.id,
           name: schema.name,
-          ready: c.schemas.isNotEmpty || activePackage.ready,
+          ready: c.prefersLibjd
+              ? c.usesImportedLibjd(activePackage.packageKey)
+              : c.schemas.isNotEmpty || activePackage.ready,
         ));
       }
     } else {
       for (final schema in c.schemas) {
+        if (c.prefersLibjd && schema.id == 'easy_en') continue;
         raw.add((
           activePkg: true,
           packageKey: '',
@@ -241,7 +249,9 @@ class _CurrentSchemeHero extends StatelessWidget {
           packageName: pkg.displayName,
           schemaId: pkg.packageKey,
           name: pkg.displayName,
-          ready: pkg.ready,
+          ready: c.prefersLibjd
+              ? c.usesImportedLibjd(pkg.packageKey)
+              : pkg.ready,
         ));
       } else {
         for (final schema in pkg.schemas) {
@@ -252,7 +262,9 @@ class _CurrentSchemeHero extends StatelessWidget {
             packageName: pkg.displayName,
             schemaId: schema.id,
             name: schema.name,
-            ready: pkg.ready,
+            ready: c.prefersLibjd
+                ? c.usesImportedLibjd(pkg.packageKey)
+                : pkg.ready,
           ));
         }
       }
@@ -276,14 +288,108 @@ class _CurrentSchemeHero extends StatelessWidget {
                 item.packageName != item.name,
             !item.ready,
           )) {
-            (true, true) => '${item.packageName} · 部署后可用',
+            (true, true) => '${item.packageName} · $pendingLabel',
             (true, false) => item.packageName,
-            (false, true) => '部署后可用',
+            (false, true) => pendingLabel,
             (false, false) => null,
           },
           checked: item.activePkg && item.schemaId == c.currentSchemaId,
         ),
     ];
+  }
+
+  Widget _schemeMenu(
+    List<_SchemaMenuChoice> choices,
+    Widget Function(FPopoverController) builder,
+  ) {
+    final c = controller;
+    return FPopoverMenu(
+      menuAnchor: Alignment.topLeft,
+      childAnchor: Alignment.bottomLeft,
+      menuBuilder: (_, popover, _) => [
+        FItemGroup(
+          enabled: !c.busy,
+          children: [
+            for (final choice in choices)
+              FItem(
+                title: Text(choice.title),
+                subtitle: choice.subtitle == null
+                    ? null
+                    : Text(choice.subtitle!),
+                semanticsChecked: choice.checked,
+                suffix: choice.checked ? const Icon(FLucideIcons.check) : null,
+                onPress: c.busy
+                    ? null
+                    : () {
+                        popover.hide();
+                        if (choice.packageKey == null ||
+                            (choice.activePackage && !c.prefersLibjd)) {
+                          c.selectSchema(choice.schemaId);
+                        } else {
+                          c.selectPackageSchema(
+                            choice.packageKey!,
+                            choice.schemaId,
+                          );
+                        }
+                      },
+              ),
+          ],
+        ),
+      ],
+      builder: (_, popover, _) => builder(popover),
+    );
+  }
+
+  Widget _engineMenu(String engine, Color color) {
+    final c = controller;
+    return FPopoverMenu(
+      menuAnchor: Alignment.topLeft,
+      childAnchor: Alignment.bottomLeft,
+      menuBuilder: (_, popover, _) => [
+        FItemGroup(
+          enabled: !c.busy,
+          children: [
+            for (final (id, name) in [
+              ('rime', 'Rime'),
+              ('libjd_engine', 'ime-jd'),
+            ])
+              FItem(
+                title: Text(name),
+                semanticsChecked: c.inputEngine == id,
+                suffix: c.inputEngine == id
+                    ? const Icon(FLucideIcons.check)
+                    : null,
+                onPress: () {
+                  popover.hide();
+                  if (c.inputEngine != id) c.setInputEngine(id);
+                },
+              ),
+          ],
+        ),
+      ],
+      builder: (context, popover, _) => FButton.raw(
+        key: const ValueKey('current-engine-selector'),
+        variant: FButtonVariant.ghost,
+        semanticsLabel: '切换引擎，$engine',
+        onPress: c.busy ? null : popover.toggle,
+        child: ConstrainedBox(
+          constraints: context.platformVariant.touch
+              ? const BoxConstraints(minWidth: 44, minHeight: 44)
+              : const BoxConstraints(),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 4,
+              children: [
+                EyebrowLabel(engine),
+                Icon(FLucideIcons.chevronDown, size: 14, color: color),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -303,7 +409,7 @@ class _CurrentSchemeHero extends StatelessWidget {
         .where((package) => package.active)
         .firstOrNull;
     final choices = _buildChoices(isolatedPackage);
-    final needsScheme = !c.isMobile && local?.installed == false;
+    final installed = c.activeSchemeDownloaded;
     final version =
         package?.version ??
         addon?.version ??
@@ -315,24 +421,36 @@ class _CurrentSchemeHero extends StatelessWidget {
                 local.installedScheme,
                 local.installedSchemeVersion,
               ));
-    final deployed = c.hasUsableBuild;
-    final deployLabel = local == null
-        ? AppStrings.checking
-        : !local.installed
-        ? AppStrings.notInstalled
-        : deployed
-        ? AppStrings.deployed
-        : AppStrings.pendingDeploy;
-    final title =
+    final deployment = c.packageDeployLabel(
+      c.deployingSchemeKey ?? c.activeSchemeKey,
+    );
+    final status = switch (c) {
+      _ when c.isImportingLibjd => '转换中',
+      _ when deployment != null => deployment,
+      _ when c.isSwitchingInput => '切换中',
+      _ when c.isDeploying => AppStrings.packageDeploying,
+      _ when c.isUsingLibjd => null,
+      _ when local == null => AppStrings.checking,
+      _ when !installed => AppStrings.schemeMissing,
+      _ when c.prefersLibjd => '未转换',
+      _ when !c.hasUsableBuild => '未部署',
+      _ when !local.deployed => AppStrings.pendingRedeploy,
+      _ => null,
+    };
+    final schemeName =
         c.currentSchemaName ??
         isolatedPackage?.displayName ??
         package?.displayName ??
-        (local?.installed == true
-            ? schemeDisplayName(c.activeSchemeKey)
-            : local == null
-            ? AppStrings.checking
-            : AppStrings.notInstalled);
+        (installed ? schemeDisplayName(c.activeSchemeKey) : null);
+    final title = schemeName ?? status ?? AppStrings.checking;
+    final caption = schemeName == null ? null : status;
+    final engine = c.prefersLibjd ? 'ime-jd' : 'Rime';
+    final engineAvailable = c.libjd?.available == true;
+    final platform = '${c.aboutValues['平台']} 系统输入法';
     final source = downloadSources[package?.source];
+    final showDeploy = installed && !c.prefersLibjd && !c.hasUsableBuild;
+    final showInstall =
+        choices.isEmpty && (!c.prefersLibjd || c.hasConvertedSchemes);
     return Container(
       margin: desktop ? EdgeInsets.zero : const EdgeInsets.only(top: 4),
       padding: desktop
@@ -349,58 +467,31 @@ class _CurrentSchemeHero extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         spacing: desktop ? 15 : 9,
         children: [
-          EyebrowLabel(
-            desktop ? '当前方案 · ${c.aboutValues['平台']} 系统输入法' : '当前方案',
-          ),
+          if (engineAvailable)
+            Wrap(
+              spacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                EyebrowLabel('$platform ·'),
+                _engineMenu(engine, palette.muted),
+              ],
+            )
+          else
+            EyebrowLabel('$platform · $engine'),
           Row(
             spacing: 12,
             children: [
               SchemaLogo(controller: c, size: desktop ? 40 : 30),
               Expanded(
-                child: FPopoverMenu(
-                  menuAnchor: Alignment.topLeft,
-                  childAnchor: Alignment.bottomLeft,
-                  menuBuilder: (_, popover, _) => [
-                    FItemGroup(
-                      enabled: !c.busy,
-                      children: [
-                        for (final choice in choices)
-                          FItem(
-                            title: Text(choice.title),
-                            subtitle: choice.subtitle == null
-                                ? null
-                                : Text(choice.subtitle!),
-                            semanticsChecked: choice.checked,
-                            suffix: choice.checked
-                                ? const Icon(FLucideIcons.check)
-                                : null,
-                            onPress: c.busy
-                                ? null
-                                : () {
-                                    popover.hide();
-                                    if (choice.activePackage ||
-                                        choice.packageKey == null) {
-                                      c.selectSchema(choice.schemaId);
-                                    } else {
-                                      c.selectPackageSchema(
-                                        choice.packageKey!,
-                                        choice.schemaId,
-                                      );
-                                    }
-                                  },
-                          ),
-                      ],
-                    ),
-                  ],
-                  builder: (_, popover, _) => FButton.raw(
+                child: _schemeMenu(
+                  choices,
+                  (popover) => FButton.raw(
                     key: const ValueKey('current-schema-selector'),
                     variant: FButtonVariant.ghost,
-                    semanticsLabel: '方案，$title',
-                    onPress: c.busy
-                        ? null
-                        : c.isUsingLibjd
-                        ? () => c.requireRimeEngine()
-                        : choices.isEmpty
+                    semanticsLabel: caption == null
+                        ? '方案，$title'
+                        : '方案，$title，$caption',
+                    onPress: c.busy || choices.isEmpty
                         ? null
                         : () {
                             c.refreshSchemas();
@@ -411,18 +502,32 @@ class _CurrentSchemeHero extends StatelessWidget {
                       spacing: 12,
                       children: [
                         Flexible(
-                          child: Text(
-                            title,
-                            style: context.theme.typography.body.sm.copyWith(
-                              color: palette.ink,
-                              fontSize: desktop ? 44 : 28,
-                              fontWeight: FontWeight.w700,
-                              height: 1.05,
-                              letterSpacing: desktop ? -1.12 : -.32,
-                            ),
+                          child: Wrap(
+                            spacing: 12,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                title,
+                                style: context.theme.typography.body.sm
+                                    .copyWith(
+                                      color: palette.ink,
+                                      fontSize: desktop ? 44 : 28,
+                                      fontWeight: FontWeight.w700,
+                                      height: 1.05,
+                                      letterSpacing: desktop ? -1.12 : -.32,
+                                    ),
+                              ),
+                              if (caption != null)
+                                Text(
+                                  caption,
+                                  style: context.theme.typography.body.sm
+                                      .copyWith(color: palette.muted),
+                                ),
+                            ],
                           ),
                         ),
-                        if (choices.isNotEmpty && !c.isUsingLibjd)
+                        if (choices.isNotEmpty)
                           Icon(
                             FLucideIcons.chevronDown,
                             size: desktop ? 20 : 18,
@@ -435,45 +540,57 @@ class _CurrentSchemeHero extends StatelessWidget {
               ),
             ],
           ),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (version?.isNotEmpty == true)
-                Text(version!.startsWith('v') ? version : 'v$version'),
-              AppBadge(
-                deployLabel,
-                background: deployed
-                    ? palette.successBackground
-                    : palette.controlSurface,
-                foreground: deployed
-                    ? palette.successForeground
-                    : palette.muted,
-              ),
-              if (deployed && local?.deployed == false)
-                const AppBadge(AppStrings.pendingRedeploy),
-              if (source != null) Text('来自 $source'),
-            ],
-          ),
-          if (needsScheme) const Text('请先安装输入方案。'),
-          if (c.packageError != null) ErrorMessage(c.packageError),
-          ActionRow(
-            children: [
-              if (!needsScheme)
+          if (version?.isNotEmpty == true || source != null)
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (version != null && version.isNotEmpty)
+                  Text(version.startsWith('v') ? version : 'v$version'),
+                if (source != null) Text('来自 $source'),
+              ],
+            ),
+          if (c.prefersLibjd && !c.hasConvertedSchemes) ...[
+            const Text('请前往方案页下载并转换你的方案。ime-jd 目前仅支持键道方案。'),
+            ActionRow(
+              children: [
                 ActionButton(
-                  c.isDeploying ? AppStrings.deploying : AppStrings.redeploy,
-                  primary: true,
-                  tooltip: c.deployTooltip,
-                  onPress: c.canDeploy ? c.deploy : null,
+                  '前往方案页',
+                  onPress: () => c.selectPage(AppPage.scheme),
                 ),
-              ActionButton(
-                needsScheme ? '前往安装方案' : '切换方案',
-                primary: needsScheme,
-                onPress: () => c.selectPage(AppPage.scheme),
-              ),
-            ],
-          ),
+                ActionButton(
+                  '了解 ime-jd',
+                  onPress: () => c.open(AppController.libjdRepositoryUrl),
+                ),
+              ],
+            ),
+          ],
+          if (c.packageError != null) ErrorMessage(c.packageError),
+          if (c.isImportingLibjd)
+            InstallProgressView(
+              active: true,
+              progress: c.installProgress,
+              fraction: c.installFraction,
+              message: c.progress,
+            ),
+          if (showDeploy || showInstall)
+            ActionRow(
+              children: [
+                if (showDeploy)
+                  ActionButton(
+                    AppStrings.deploy,
+                    primary: true,
+                    tooltip: c.deployTooltip,
+                    onPress: c.canDeploy ? c.deploy : null,
+                  ),
+                if (showInstall)
+                  ActionButton(
+                    '前往安装方案',
+                    onPress: () => c.selectPage(AppPage.scheme),
+                  ),
+              ],
+            ),
         ],
       ),
     );
@@ -650,10 +767,15 @@ class MacosImeCard extends StatelessWidget {
   Widget build(BuildContext context) => Section(
     title: AppStrings.macosIme,
     icon: FLucideIcons.keyboard,
-    trailing: _StatusBadge(
-      controller.macosImeBadgeText,
-      ready: controller.macosImeBadge == ImeBadgeState.ready,
-    ),
+    trailing:
+        controller.prefersLibjd &&
+            !controller.isUsingLibjd &&
+            controller.macosIme?.installed == true
+        ? null
+        : _StatusBadge(
+            controller.macosImeBadgeText,
+            ready: controller.macosImeBadge == ImeBadgeState.ready,
+          ),
     children: [
       if (controller.macosIme?.appPath case final path?)
         ValueRow(AppStrings.systemLocation, path),

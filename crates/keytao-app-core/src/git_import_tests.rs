@@ -331,9 +331,8 @@ async fn git_fixed_latest_asset_survives_rate_limit_and_branch_tree_url_syncs_in
     assert!(updated.manifest.contains_key("lua/helper.lua"));
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 #[tokio::test]
-async fn active_libjd_blocks_downloading_and_switching_other_schemes_until_reverted() {
+async fn engine_preference_does_not_deploy_downloads_or_discard_converted_words() {
     let dir = tempfile::tempdir().unwrap();
     let core = open_core(dir.path());
     let user_root = dir.path().join("rime");
@@ -342,73 +341,87 @@ async fn active_libjd_blocks_downloading_and_switching_other_schemes_until_rever
         .await
         .unwrap();
 
-    let keytao_zip = zip_bytes(&[(
-        "keytao.schema.yaml",
-        "schema:\n  schema_id: keytao\n  name: 键道6\n".as_bytes(),
-    )]);
-    crate::packages::store_cloud_archive(
-        &core,
-        "keytao",
-        Some("v1.0.0"),
-        "official",
-        None,
-        &keytao_zip,
-        &user_root,
-    )
-    .unwrap();
-
-    // Fake an installed libjd tag in core.env().data_dir and set keytao engine to libjd.
-    let platform = keytao_core::libjd::platform().unwrap();
-    let engine_root = keytao_core::libjd::engine_root(&core.env().data_dir).unwrap();
-    let lib_path = platform.library_path(&core.env().data_dir, "v0.1.0").unwrap();
-    fs::create_dir_all(lib_path.parent().unwrap()).unwrap();
-    fs::write(&lib_path, b"libjd").unwrap();
     fs::write(
-        lib_path.with_file_name("manifest.json"),
-        serde_json::to_vec(&keytao_core::libjd::LibjdManifest {
-            tag: "v0.1.0".into(),
-            asset: platform.asset_name("v0.1.0"),
-            sha256: "a".repeat(64),
-            abi_layout: serde_json::json!({}),
-            installed_at: 1,
-        })
-        .unwrap(),
+        user_root.join(keytao_core::english_mode::SETTINGS_FILE),
+        br#"{"engine":"libjd_engine"}"#,
     )
     .unwrap();
-    fs::write(platform.current_path(&engine_root), b"v0.1.0").unwrap();
-
-    crate::packages::set_package_engine(&core, &user_root, "keytao", "libjd").unwrap();
-    assert_eq!(
-        keytao_core::RuntimeDirs::active_package_key(&user_root).as_deref(),
-        Some("keytao")
-    );
-
-    // While using ime-jd, downloading and switching to other schemes must fail with the exact hint.
-    let git_err = import_git_scheme(
+    let active = keytao_core::RuntimeDirs::active_package_key(&user_root);
+    let routes = Arc::new(Mutex::new(HashMap::from([
+        (
+            "/github/api/repos/acme/other/releases/latest".into(),
+            MockRoute {
+                status: "403 Forbidden",
+                headers: "x-ratelimit-remaining: 0\r\nContent-Type: application/json\r\n",
+                body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+            },
+        ),
+        (
+            "/github/acme/other/releases/latest/download/full.zip".into(),
+            MockRoute {
+                status: "200 OK",
+                headers: "Content-Type: application/zip\r\n",
+                body: zip_bytes(&[(
+                    "other.schema.yaml",
+                    b"schema:\n  schema_id: other\n  name: Other\n",
+                )]),
+            },
+        ),
+    ])));
+    let origin = spawn_mock_github(routes).await;
+    keytao_core::ReloadStamp::write(&user_root).unwrap();
+    let stamp = keytao_core::ReloadStamp::path(&user_root);
+    let before = fs::read(&stamp).unwrap();
+    let other = import_git_scheme(
         &core,
         &user_root,
         GitSchemeConfig {
-            repo_url: "https://github.com/acme/other".into(),
+            repo_url: format!("{origin}/github/acme/other"),
             mode: GitSchemeMode::Release,
             branch: None,
-            asset_name: None,
+            asset_name: Some("full.zip".into()),
         },
         "",
         None,
     )
     .await
-    .unwrap_err()
-    .to_string();
-    assert_eq!(git_err, crate::deploy::LIBJD_SWITCH_BACK_HINT);
+    .unwrap();
+    assert_eq!(other, "local-other");
+    assert!(PackageStore::new(&core).read_meta(&other).unwrap().is_some());
+    assert_eq!(fs::read(&stamp).unwrap(), before);
+    assert_eq!(
+        keytao_core::RuntimeDirs::active_package_key(&user_root).as_deref(),
+        active.as_deref()
+    );
 
-    let dl_err = crate::packages::download_scheme_package(&core, "xmjd", "github", &user_root)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert_eq!(dl_err, crate::deploy::LIBJD_SWITCH_BACK_HINT);
-
-    let sw_err = crate::deploy::switch_package_with_schema(&core, &user_root, "xmjd", None)
-        .await
-        .unwrap_err();
-    assert_eq!(sw_err, crate::deploy::LIBJD_SWITCH_BACK_HINT);
+    let dictionary = PackageStore::new(&core).package_path(&other).join("libjd-dictionary");
+    fs::create_dir(&dictionary).unwrap();
+    fs::write(dictionary.join("dictionary.bin"), b"converted").unwrap();
+    fs::write(
+        dictionary.join("schema.json"),
+        br#"{"id":"other","name":"Other"}"#,
+    )
+    .unwrap();
+    import_git_scheme(
+        &core,
+        &user_root,
+        GitSchemeConfig {
+            repo_url: format!("{origin}/github/acme/other"),
+            mode: GitSchemeMode::Release,
+            branch: None,
+            asset_name: Some("full.zip".into()),
+        },
+        "",
+        Some(&other),
+    )
+    .await
+    .unwrap();
+    let (converted, _) = keytao_core::libjd::imported_dictionary(&core.env().data_dir, &other).unwrap();
+    assert_ne!(converted, dictionary.join("dictionary.bin"));
+    assert_eq!(fs::read(&converted).unwrap(), b"converted");
+    assert_eq!(fs::read(&stamp).unwrap(), before);
+    PackageStore::new(&core).remove(&other).unwrap();
+    assert!(!dictionary.exists());
+    assert!(!converted.exists());
+    assert!(keytao_core::libjd::imported_dictionary(&core.env().data_dir, &other).is_none());
 }

@@ -133,6 +133,8 @@ class AboutPage extends StatelessWidget {
               AppStrings.librimeVersion,
               c.versions?.librimeVersion ?? '—',
             ),
+            if (c.libjd?.installedVersion case final version?)
+              ValueRow('libjd-engine 版本', version),
             ValueRow(
               AppStrings.librimeLuaVersion,
               c.versions?.librimeLuaVersion ?? '—',

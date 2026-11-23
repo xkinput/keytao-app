@@ -92,22 +92,6 @@ fn run_librime_test_in_child(name: &str) -> bool {
     true
 }
 
-fn validate_libjd_library(path: &std::path::Path) -> Result<serde_json::Value, String> {
-    #[cfg(windows)]
-    return ime_status::windows::validate_libjd_library(path);
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
-    {
-        // The installer passes only a library extracted from the digest-verified release asset.
-        let layout = unsafe { keytao_core::jd_backend::JdBackend::validate_library(path)? };
-        serde_json::to_value(layout).map_err(|error| error.to_string())
-    }
-    #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
-    {
-        let _ = path;
-        Err("此平台不支持 ime-jd".into())
-    }
-}
-
 use std::{
     fs,
     path::PathBuf,

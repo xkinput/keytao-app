@@ -421,7 +421,13 @@ void main() {
         await tester.tap(find.byKey(const ValueKey('nav-ime')));
         await tester.pumpAndSettle();
       }
-      expect(find.text('请先安装输入方案。'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('current-schema-selector')),
+          matching: find.text(AppStrings.schemeMissing),
+        ),
+        findsOneWidget,
+      );
       final button = find.widgetWithText(ActionButton, '前往安装方案');
       await tester.ensureVisible(button);
       await tester.tap(button);
@@ -790,7 +796,13 @@ void main() {
             completed ? findsNothing : findsOneWidget,
           );
           if (completed) {
-            expect(find.text(AppStrings.notInstalled), findsWidgets);
+            expect(
+              find.descendant(
+                of: find.byKey(const ValueKey('current-schema-selector')),
+                matching: find.text(AppStrings.schemeMissing),
+              ),
+              findsOneWidget,
+            );
           }
           expect(tester.takeException(), isNull);
           await tester.pumpWidget(const SizedBox.shrink());
@@ -1055,10 +1067,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.widgetWithText(AppBadge, AppStrings.deployed), findsOneWidget);
+    expect(find.widgetWithText(AppBadge, AppStrings.deployed), findsNothing);
     expect(
-      find.widgetWithText(AppBadge, AppStrings.pendingDeploy),
-      findsNothing,
+      find.descendant(
+        of: find.byKey(const ValueKey('current-schema-selector')),
+        matching: find.text(AppStrings.pendingRedeploy),
+      ),
+      findsOneWidget,
     );
   });
 

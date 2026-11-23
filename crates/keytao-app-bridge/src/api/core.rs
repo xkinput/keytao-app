@@ -121,10 +121,12 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
         for package in &mut packages {
             package.active = key.as_deref() == Some(package.scheme_key.as_str());
             package.in_use = package.active;
-            let engine = package_engine(&state.core, &root, &package.scheme_key);
+            let engine = package_engine(&state.core, &package.scheme_key);
             if engine == keytao_core::engine_choice::PackageEngine::LibjdEngine {
                 package.engine = engine.as_str().into();
-                package.supports_user_words = false;
+                if keytao_core::engine_choice::preferred(&root) == engine {
+                    package.supports_user_words = false;
+                }
             }
         }
     }
@@ -133,17 +135,14 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
 
 fn package_engine(
     core: &keytao_app_core::Core,
-    root: &std::path::Path,
     key: &str,
 ) -> keytao_core::engine_choice::PackageEngine {
-    use keytao_core::engine_choice::{self, PackageEngine};
-    let engine = engine_choice::read(root, Some(key));
-    if engine == PackageEngine::LibjdEngine
-        && !keytao_app_core::libjd::imported_package_ready(core, key)
-    {
-        return PackageEngine::Rime;
+    use keytao_core::engine_choice::PackageEngine;
+    if keytao_app_core::libjd::imported_package_ready(core, key) {
+        PackageEngine::LibjdEngine
+    } else {
+        PackageEngine::Rime
     }
-    engine
 }
 
 pub async fn isolated_packages() -> Result<Vec<IsolatedPackageDto>, String> {
@@ -157,7 +156,7 @@ pub async fn isolated_packages() -> Result<Vec<IsolatedPackageDto>, String> {
                 .map_err(|error| error.to_string())?,
         )?;
         for package in &mut packages {
-            package.engine = package_engine(&core, &root, &package.package_key).as_str().into();
+            package.engine = package_engine(&core, &package.package_key).as_str().into();
         }
         Ok(packages)
     })
@@ -241,8 +240,6 @@ pub async fn import_local_scheme(
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let root = state.host.user_root()?;
-    keytao_app_core::deploy::ensure_not_using_libjd(&state.core, &root)
-        .map_err(|error| error.to_string())?;
     keytao_app_core::package_migration::ensure_before_write(&state.core, &root)
         .await
         .map_err(|error| error.to_string())?;
@@ -639,47 +636,40 @@ pub async fn set_package_easy_english(
 }
 
 pub fn libjd_status() -> Result<LibjdStatusDto, String> {
-    let status = keytao_app_core::libjd::libjd_status(&runtime::state()?.core);
+    let status = keytao_app_core::libjd::libjd_status();
     Ok(LibjdStatusDto {
         available: status.available,
         installed_version: status.installed_version,
     })
 }
 
-pub async fn libjd_release() -> Result<LibjdReleaseDto, String> {
+pub fn input_engine() -> Result<String, String> {
+    let root = runtime::state()?.host.user_root()?;
+    Ok(keytao_app_core::libjd::input_engine(&root).as_str().into())
+}
+
+pub async fn set_input_engine(engine: String) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    let release = keytao_app_core::libjd::libjd_release(&state.core)
+    #[cfg(target_os = "windows")]
+    if engine == "libjd_engine" {
+        state.host.require_default_windows_root()?;
+    }
+    let root = state.host.user_root()?;
+    keytao_app_core::package_migration::ensure_before_write(&state.core, &root)
         .await
         .map_err(format_libjd_error)?;
-    Ok(LibjdReleaseDto(release))
+    keytao_app_core::libjd::set_input_engine(&state.core, &root, &engine)
+        .map_err(format_libjd_error)
 }
 
-/// Download progress uses core_events. Cancel with cancel_scheme_download.
-pub async fn install_or_update_libjd(release: LibjdReleaseDto) -> Result<LibjdStatusDto, String> {
-    let state = runtime::state()?;
-    let _guard = state.install_lock.lock().await;
-    let root = state.host.user_root()?;
-    let status = keytao_app_core::libjd::install_or_update_libjd(&state.core, release.0)
-        .await
-        .map_err(|error| libjd_failure(&state.core, &root, error))?;
-    keytao_app_core::packages::set_package_engine(
-        &state.core, &root, keytao_core::engine_choice::PACKAGE_KEY, "libjd",
-    )
-    .map_err(|error| libjd_failure(&state.core, &root, error))?;
-    Ok(LibjdStatusDto {
-        available: status.available,
-        installed_version: status.installed_version,
-    })
-}
-
-pub async fn import_libjd_package(key: String) -> Result<u32, String> {
+pub async fn import_libjd_package(key: String, schema_id: Option<String>) -> Result<u32, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     #[cfg(target_os = "windows")]
     state.host.require_default_windows_root()?;
     let root = state.host.user_root()?;
-    let skipped = keytao_app_core::libjd::import_package(&state.core, &root, &key)
+    let skipped = keytao_app_core::libjd::import_package(&state.core, &root, &key, schema_id.as_deref())
         .await
         .map_err(format_libjd_error)?;
     Ok(u32::try_from(skipped).unwrap_or(u32::MAX))
@@ -694,27 +684,6 @@ fn format_libjd_error(error: keytao_app_core::CoreError) -> String {
         CoreError::Other(message) | CoreError::Unsupported(message) => message,
         _ => "ime-jd 操作失败".into(),
     }
-}
-
-fn libjd_failure(core: &keytao_app_core::Core, root: &std::path::Path, error: keytao_app_core::CoreError) -> String {
-    use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine, read};
-    if read(root, Some(PACKAGE_KEY)) == PackageEngine::Libjd
-        && keytao_app_core::libjd::libjd_status(core).installed_version.is_none()
-    {
-        if let Err(rollback) = keytao_app_core::packages::set_package_engine(core, root, PACKAGE_KEY, "rime") {
-            eprintln!("ime-jd rollback failed: {rollback}");
-            return "ime-jd 操作失败，无法切回 Rime".into();
-        }
-    }
-    format_libjd_error(error)
-}
-
-pub async fn set_package_engine(key: String, engine: String) -> Result<(), String> {
-    let state = runtime::state()?;
-    let _guard = state.install_lock.lock().await;
-    let root = state.host.user_root()?;
-    keytao_app_core::packages::set_package_engine(&state.core, &root, &key, &engine)
-        .map_err(|error| error.to_string())
 }
 
 pub async fn remove_scheme_package(

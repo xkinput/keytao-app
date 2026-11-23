@@ -6,7 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart';
-import 'package:keytao/src/app/options.dart' show AppPage;
+import 'package:keytao/src/app/options.dart' show AppPage, AppViewOptions;
+import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/input_page.dart';
@@ -15,27 +16,8 @@ import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
-import 'controller_parity_test.dart' show FakeCore, deployedLocal, installedAddon;
+import 'controller_parity_test.dart' show FakeCore, deployedLocal;
 import 'view_fixture.dart';
-
-class _FakeLibjdRelease implements LibjdReleaseDto {
-  const _FakeLibjdRelease(this.version);
-
-  @override
-  final String version;
-
-  @override
-  int get size => 1024;
-
-  @override
-  String get sourceUrl => 'https://github.com/hronro/ime-jd/releases/download/$version/libjd.tar.xz';
-
-  @override
-  bool get isDisposed => false;
-
-  @override
-  void dispose() {}
-}
 
 class _FollowupsCore extends FakeCore {
   _FollowupsCore() {
@@ -48,12 +30,13 @@ class _FollowupsCore extends FakeCore {
   bool dismissedBackupNotice = false;
   LibjdStatusDto libjd = const LibjdStatusDto(
     available: true,
-    installedVersion: 'v0.1.0',
+    installedVersion: 'v0.14.0',
   );
-  String latestLibjdVersion = 'v0.1.0';
-  String keytaoEngine = 'rime';
-  int libjdDownloads = 0;
+  String inputEngine = 'rime';
+  Completer<void>? engineSwitchGate;
   Completer<int>? libjdImportGate;
+  Completer<String>? previewGate;
+  String previewWord = '键道';
   List<IsolatedPackageDto> isolatedPackages = [];
 
   @override
@@ -88,9 +71,58 @@ class _FollowupsCore extends FakeCore {
           version: '1.0.0',
           active: true,
           hasPackageZip: true,
-          engine: keytaoEngine,
         ),
       ];
+
+  @override
+  Future<void> crateApiCoreDownloadSchemePackage({
+    required String schemeKey,
+    required String source,
+  }) async {
+    calls.add('downloadSchemePackage:$schemeKey');
+    await _storeDownloadedPackage(schemeKey);
+  }
+
+  @override
+  Future<void> crateApiCoreDownloadCloudPackage({required String id}) async {
+    calls.add('downloadCloudPackage:$id');
+    await _storeDownloadedPackage('local-cloud-fixture');
+  }
+
+  Future<void> _storeDownloadedPackage(String key) async {
+    final packages = await crateApiCoreListInstalledPackages();
+    customInstalledPackages = [
+      for (final package in packages)
+        if (package.schemeKey != key) package,
+      InstalledPackageDto(
+        schemeKey: key,
+        version: 'v1.0.0',
+        active: false,
+        hasPackageZip: true,
+        source: key.startsWith('local-') ? 'local' : 'official',
+      ),
+    ];
+  }
+
+  @override
+  Future<AddonStatusDto> crateApiCoreManageRimeIce({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    if (!installed || inputEngine != 'libjd_engine') {
+      return super.crateApiCoreManageRimeIce(
+        installed: installed,
+        androidDeploy: androidDeploy,
+      );
+    }
+    calls.add('rimeIce:$installed');
+    return rimeIceStatus = const AddonStatusDto(
+      installed: true,
+      deployed: false,
+      version: 'v1.0.0',
+      englishAvailable: false,
+    );
+  }
 
   @override
   Future<String> crateApiCoreImportGitScheme({
@@ -110,18 +142,14 @@ class _FollowupsCore extends FakeCore {
       'schemeKey': schemeKey,
     });
     final key = schemeKey ?? 'local-git-demo';
+    final packages = await crateApiCoreListInstalledPackages();
     customInstalledPackages = [
-      InstalledPackageDto(
-        schemeKey: 'keytao',
-        version: '1.0.0',
-        active: false,
-        hasPackageZip: true,
-        engine: keytaoEngine,
-      ),
+      for (final package in packages)
+        if (package.schemeKey != key) package,
       InstalledPackageDto(
         schemeKey: key,
         version: 'v1.0.0',
-        active: true,
+        active: inputEngine == 'rime',
         hasPackageZip: true,
         source: 'local',
         displayName: displayName.isEmpty ? 'Git 示例方案' : displayName,
@@ -143,30 +171,41 @@ class _FollowupsCore extends FakeCore {
     required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('switchPackage:$packageKey:${schemaId ?? ''}');
+    if (inputEngine == 'libjd_engine') {
+      _activate(packageKey, schemaId ?? packageKey);
+    }
   }
 
   @override
   Future<LibjdStatusDto> crateApiCoreLibjdStatus() async => libjd;
 
   @override
-  Future<LibjdReleaseDto> crateApiCoreLibjdRelease() async =>
-      _FakeLibjdRelease(latestLibjdVersion);
+  Future<String> crateApiCoreInputEngine() async => inputEngine;
 
   @override
-  Future<LibjdStatusDto> crateApiCoreInstallOrUpdateLibjd({
-    required LibjdReleaseDto release,
-  }) async {
-    libjdDownloads++;
-    keytaoEngine = 'libjd';
-    return libjd = LibjdStatusDto(
-      available: true,
-      installedVersion: release.version,
-    );
+  Future<void> crateApiCoreSetInputEngine({required String engine}) async {
+    calls.add('setInputEngine:$engine');
+    await engineSwitchGate?.future;
+    inputEngine = engine;
   }
 
   @override
-  Future<int> crateApiCoreImportLibjdPackage({required String key}) async {
+  Future<List<PackageSchemaDto>> crateApiCorePackageSchemas({
+    required String schemeKey,
+  }) => schemeKey == 'xmjd'
+      ? Future.value(const [
+          PackageSchemaDto(id: 'xmjd6', name: '星猫键道', selected: true),
+          PackageSchemaDto(id: 'xmjd_alt', name: '星猫备用方案', selected: false),
+        ])
+      : super.crateApiCorePackageSchemas(schemeKey: schemeKey);
+
+  @override
+  Future<int> crateApiCoreImportLibjdPackage({
+    required String key,
+    String? schemaId,
+  }) async {
     calls.add('importLibjd:$key');
+    if (schemaId != null) calls.add('convertSchema:$key:$schemaId');
     events.add(
       const BridgeEvent(
         kind: BridgeEventKind.installProgress,
@@ -177,37 +216,43 @@ class _FollowupsCore extends FakeCore {
         ),
       ),
     );
-    final skipped = await libjdImportGate!.future;
+    final skipped = await libjdImportGate?.future ?? 0;
+    _activate(key, schemaId ?? key);
+    return skipped;
+  }
+
+  void _activate(String key, String schemaId) {
     local = LocalSchemaDto(
       installed: true,
-      deployed: true,
+      deployed: false,
       installedScheme: key,
-      schemas: [key],
+      schemas: [schemaId],
     );
     isolatedPackages = [
+      for (final entry in isolatedPackages)
+        if (entry.packageKey != key)
+          IsolatedPackageDto(
+            packageKey: entry.packageKey,
+            displayName: entry.displayName,
+            active: false,
+            ready: entry.ready,
+            engine: entry.engine,
+            schemas: entry.schemas,
+          ),
       IsolatedPackageDto(
         packageKey: key,
         displayName: key,
         active: true,
         ready: true,
         engine: 'libjd_engine',
+        schemas: [SchemaDto(id: schemaId, name: schemaId)],
       ),
     ];
-    return skipped;
   }
 
   @override
   Future<List<IsolatedPackageDto>> crateApiCoreIsolatedPackages() async =>
       isolatedPackages;
-
-  @override
-  Future<void> crateApiCoreSetPackageEngine({
-    required String key,
-    required String engine,
-  }) async {
-    calls.add('setEngine:$key:$engine');
-    keytaoEngine = engine;
-  }
 
   @override
   Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => const [
@@ -221,8 +266,12 @@ class _FollowupsCore extends FakeCore {
   ];
 
   @override
-  Future<String> crateApiCorePreviewCandidates({int? size}) async =>
-      '{"page_size":${size ?? 5},"candidates":[{"text":"键道","comment":"jd"}]}';
+  Future<String> crateApiCorePreviewCandidates({int? size}) async {
+    final gate = previewGate;
+    previewGate = null;
+    return gate?.future ??
+        '{"page_size":${size ?? 5},"candidates":[{"text":"$previewWord","comment":"jd"}]}';
+  }
 
   final Map<String, String?> remoteLogos = {};
 
@@ -434,52 +483,55 @@ void main() {
   );
 
   test(
-    'switching back to installed ime-jd skips download when up to date and candidate count skips Rime deploy on ime-jd',
+    'engine preference preserves converted schemes and Rime deployment',
     () async {
-      final api = _FollowupsCore();
-      RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: '1.2.15-alpha.7',
-          userRoot: '/rime',
-        ),
-      )
-        ..local = deployedLocal
-        ..libjd = api.libjd
-        ..schemaSwitches = const [
-          SchemaSwitchDto(
-            schemaId: 'keytao',
-            name: 'simplification',
-            states: ['简体', '繁体'],
-            value: 0,
-            options: [],
-          ),
-        ]
-        ..installedPackages = [
-          const InstalledPackageDto(
-            schemeKey: 'keytao',
-            version: '1.0.0',
+      final api = _FollowupsCore()
+        ..isolatedPackages = const [
+          IsolatedPackageDto(
+            packageKey: 'keytao',
+            displayName: '键道6',
             active: true,
-            hasPackageZip: true,
-            engine: 'rime',
+            ready: true,
+            engine: 'libjd_engine',
           ),
         ];
+      RustLib.initMock(api: api);
+      final c =
+          AppController(
+              info: const BridgeInfo(
+                platform: BridgePlatform.macOs,
+                appVersion: '1.2.15-alpha.7',
+                userRoot: '/rime',
+              ),
+            )
+            ..local = deployedLocal
+            ..libjd = api.libjd
+            ..schemaSwitches = const [
+              SchemaSwitchDto(
+                schemaId: 'keytao',
+                name: 'simplification',
+                states: ['简体', '繁体'],
+                value: 0,
+                options: [],
+              ),
+            ]
+            ..installedPackages = [
+              const InstalledPackageDto(
+                schemeKey: 'keytao',
+                version: '1.0.0',
+                active: true,
+                hasPackageZip: true,
+                engine: 'rime',
+              ),
+            ];
       addTearDown(() async {
         c.dispose();
         await api.events.close();
         RustLib.dispose();
       });
 
-      var confirmPrompts = 0;
-      final notice = await c.downloadLibjd((_) async {
-        confirmPrompts++;
-        return true;
-      });
-      expect(notice, isNull);
-      expect(confirmPrompts, 0);
-      expect(api.libjdDownloads, 0);
-      expect(api.calls, contains('setEngine:keytao:libjd'));
+      expect(await c.setInputEngine('libjd_engine'), isTrue);
+      expect(api.calls, contains('setInputEngine:libjd_engine'));
       expect(c.usesLibjd('keytao'), isTrue);
       // Rime schema switches are cleared and hidden while using ime-jd.
       expect(c.schemaSwitches, isEmpty);
@@ -490,8 +542,10 @@ void main() {
       expect(api.calls.where((call) => call.contains('deploy')), isEmpty);
 
       // Switching back to Rime restores Rime schema switches and candidate count triggers Rime deploy.
-      await c.revertLibjd();
+      expect(await c.setInputEngine('rime'), isTrue);
       expect(c.usesLibjd('keytao'), isFalse);
+      expect(c.usesImportedLibjd('keytao'), isTrue);
+      expect(api.calls.where((call) => call.contains('deploy')), isEmpty);
       expect(c.schemaSwitches, hasLength(1));
       api.calls.clear();
       expect(await c.saveCandidatePageSize(6), isTrue);
@@ -505,13 +559,14 @@ void main() {
       const target = 'xmjd';
       const other = 'txjx';
       final api = _FollowupsCore()
+        ..inputEngine = 'libjd_engine'
         ..libjdImportGate = Completer<int>()
         ..customInstalledPackages = const [
           InstalledPackageDto(
             schemeKey: 'keytao',
             active: true,
             hasPackageZip: true,
-            engine: 'libjd',
+            engine: 'libjd_engine',
           ),
           InstalledPackageDto(
             schemeKey: target,
@@ -525,16 +580,18 @@ void main() {
           ),
         ];
       RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: '1.2.16-alpha.3',
-          userRoot: '/rime',
-        ),
-      )
-        ..local = deployedLocal
-        ..libjd = api.libjd
-        ..installedPackages = api.customInstalledPackages!;
+      final c =
+          AppController(
+              info: const BridgeInfo(
+                platform: BridgePlatform.macOs,
+                appVersion: '1.2.16-alpha.3',
+                userRoot: '/rime',
+              ),
+            )
+            ..local = deployedLocal
+            ..libjd = api.libjd
+            ..inputEngine = api.inputEngine
+            ..installedPackages = api.customInstalledPackages!;
       addTearDown(() async {
         c.dispose();
         await api.events.close();
@@ -564,11 +621,9 @@ void main() {
           ),
         ),
       );
-      Finder inCard(String key, Finder child) => find.descendant(
-        of: find.byKey(ValueKey(key)),
-        matching: child,
-      );
-      await tester.tap(inCard(target, find.text('导入并使用')));
+      Finder inCard(String key, Finder child) =>
+          find.descendant(of: find.byKey(ValueKey(key)), matching: child);
+      await tester.tap(inCard(target, find.text('使用')));
       await tester.pump();
       expect(api.calls, contains('importLibjd:$target'));
       final progress = find.text('正在转换词库 1/2');
@@ -580,60 +635,62 @@ void main() {
       api.libjdImportGate!.complete(0);
       await tester.pumpAndSettle();
       expect(inCard(target, find.text('使用中')), findsOneWidget);
-      expect(inCard(target, find.text('切回 Rime')), findsOneWidget);
-      expect(inCard(other, find.text('导入并使用')), findsOneWidget);
+      expect(inCard(target, find.text('切回 Rime')), findsNothing);
+      expect(inCard(other, find.text('使用')), findsOneWidget);
       expect(progress, findsNothing);
       expect(c.activeSchemeKey, target);
     },
   );
 
   testWidgets(
-    'using ime-jd blocks downloading and switching other schemes with toast prompt until switched back to Rime',
+    'home selects engines and ime-jd automatically converts downloaded schemes',
     (tester) async {
-      final api = _FollowupsCore()..keytaoEngine = 'libjd';
-      RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: '1.2.15-alpha.7',
-          userRoot: '/rime',
+      const packages = [
+        IsolatedPackageDto(
+          packageKey: 'keytao',
+          displayName: '键道6',
+          active: true,
+          ready: true,
+          schemas: [SchemaDto(id: 'keytao', name: '键道6')],
         ),
-      )
-        ..local = deployedLocal
-        ..libjd = api.libjd
-        ..schemas = const [SchemaDto(id: 'keytao', name: '键道6')]
-        ..currentSchemaId = 'keytao'
-        ..isolatedPackages = const [
-          IsolatedPackageDto(
-            packageKey: 'keytao',
-            displayName: '键道6',
-            active: true,
-            ready: true,
-            schemas: [SchemaDto(id: 'keytao', name: '键道6')],
-          ),
-          IsolatedPackageDto(
-            packageKey: 'xmjd',
-            displayName: '星猫键道',
-            active: false,
-            ready: true,
-            schemas: [SchemaDto(id: 'xmjd6', name: '星猫键道')],
-          ),
-        ]
-        ..installedPackages = const [
-          InstalledPackageDto(
-            schemeKey: 'keytao',
-            version: '1.0.0',
-            active: true,
-            hasPackageZip: true,
-            engine: 'libjd',
-          ),
-          InstalledPackageDto(
-            schemeKey: 'xmjd',
-            version: '20261101',
-            active: false,
-            hasPackageZip: true,
-          ),
-        ];
+        IsolatedPackageDto(
+          packageKey: 'xmjd',
+          displayName: '星猫键道',
+          active: false,
+          ready: true,
+          schemas: [SchemaDto(id: 'xmjd6', name: '星猫键道')],
+        ),
+      ];
+      final api = _FollowupsCore()..isolatedPackages = packages;
+      RustLib.initMock(api: api);
+      final c =
+          AppController(
+              info: const BridgeInfo(
+                platform: BridgePlatform.macOs,
+                appVersion: '1.2.15-alpha.7',
+                userRoot: '/rime',
+              ),
+            )
+            ..local = deployedLocal
+            ..libjd = api.libjd
+            ..macosIme = const MacosImeStatusDto(installed: true, message: '')
+            ..schemas = const [SchemaDto(id: 'keytao', name: '键道6')]
+            ..currentSchemaId = 'keytao'
+            ..isolatedPackages = packages
+            ..installedPackages = const [
+              InstalledPackageDto(
+                schemeKey: 'keytao',
+                version: '1.0.0',
+                active: true,
+                hasPackageZip: true,
+              ),
+              InstalledPackageDto(
+                schemeKey: 'xmjd',
+                version: '20261101',
+                active: false,
+                hasPackageZip: true,
+              ),
+            ];
       addTearDown(() async {
         c.dispose();
         await api.events.close();
@@ -651,45 +708,165 @@ void main() {
       );
       await tester.pump();
       expect(find.byType(InputPage), findsOneWidget);
-
-      // Tapping current-schema-selector on Home while on ime-jd prompts to switch back to Rime.
-      await tester.tap(find.byKey(const ValueKey('current-schema-selector')));
+      final engineSelector = find.byKey(
+        const ValueKey('current-engine-selector'),
+      );
+      final schemeSelector = find.byKey(
+        const ValueKey('current-schema-selector'),
+      );
+      expect(find.text('macOS 系统输入法 ·'), findsOneWidget);
+      expect(find.descendant(of: engineSelector, matching: find.text('Rime')),
+          findsOneWidget);
+      expect(find.text('已部署'), findsNothing);
+      expect(find.text('重新部署'), findsNothing);
+      expect(find.text('切换引擎'), findsNothing);
+      expect(find.text('切换方案'), findsNothing);
+      await c.refreshCandidatePreview();
+      expect(c.candidatePreviewCandidates.single.text, '键道');
+      final macosReady = find.descendant(
+        of: find.byType(MacosImeCard),
+        matching: find.text('可使用'),
+      );
+      expect(macosReady, findsOneWidget);
+      api.local = const LocalSchemaDto(
+        installed: true,
+        deployed: false,
+        buildAvailable: true,
+        schemas: ['keytao'],
+      );
+      await tester.tap(engineSelector);
+      await tester.pumpAndSettle();
+      api.engineSwitchGate = Completer<void>();
+      await tester.tap(find.widgetWithText(FItem, 'ime-jd'));
       await tester.pump();
-      expect(find.text('请先切换回 Rime 才能使用'), findsWidgets);
+      expect(find.text('切换中'), findsOneWidget);
+      api.previewWord = 'ime-jd预览';
+      expect(c.candidatePreviewCandidates.single.text, '键道');
+      api.engineSwitchGate!.complete();
+      await tester.pumpAndSettle();
+      expect(c.prefersLibjd, isTrue);
+      expect(c.isUsingLibjd, isFalse);
+      expect(c.hasUsableBuild, isTrue);
+      expect(find.descendant(of: engineSelector, matching: find.text('ime-jd')),
+          findsOneWidget);
+      expect(c.candidatePreviewCandidates.single.text, 'ime-jd预览');
+      expect(find.text('未转换'), findsOneWidget);
+      expect(find.text('已部署'), findsNothing);
+      expect(find.text('未部署'), findsNothing);
+      expect(find.text('改动待部署'), findsNothing);
+      expect(macosReady, findsNothing);
+      expect(find.textContaining('请前往方案页下载并转换你的方案'), findsOneWidget);
+      expect(find.text('了解 ime-jd'), findsOneWidget);
 
-      // Controller actions for downloading or switching other schemes are all blocked.
-      expect(await c.activateSchemePackage('xmjd'), isFalse);
-      expect(await c.downloadSchemePackage('xmjd'), isFalse);
-      expect(await c.installSchemePackage('txjx'), isFalse);
-      expect(await c.importLocalScheme(), isFalse);
+      final stalePreview = Completer<String>();
+      api.previewGate = stalePreview;
+      final firstPreview = c.refreshCandidatePreview();
+      await tester.tap(schemeSelector);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FItem, '星猫键道'));
+      await tester.pumpAndSettle();
+      expect(api.calls, contains('convertSchema:xmjd:xmjd6'));
+      expect(find.descendant(of: engineSelector, matching: find.text('ime-jd')),
+          findsOneWidget);
+      api.previewWord = '星猫预览';
+      stalePreview.complete(
+        '{"page_size":5,"candidates":[{"text":"过期待选","comment":""}]}',
+      );
+      await firstPreview;
+      expect(c.candidatePreviewCandidates.single.text, '星猫预览');
+      expect(find.text('已转换'), findsNothing);
+      expect(macosReady, findsOneWidget);
+      expect(find.textContaining('请前往方案页下载并转换你的方案'), findsNothing);
+
+      expect(await c.downloadSchemePackage('keytao'), isTrue);
+      expect(await c.downloadSchemePackage('xmjd'), isTrue);
+      expect(await c.installSchemePackage('txjx'), isTrue);
       expect(
         await c.importGitScheme(
           repoUrl: 'https://github.com/acme/demo',
           mode: 'release',
         ),
-        isFalse,
+        isTrue,
       );
-      expect(await c.installAddon(), isFalse);
-      expect(await c.manageWanxiang(true), isFalse);
-      expect(await c.manageRimeIce(true), isFalse);
-      expect(c.packageError, '请先切换回 Rime 才能使用');
-      expect(api.calls.where((call) => call.startsWith('switchPackage:')), isEmpty);
-      expect(api.gitImports, isEmpty);
-
-      c.wanxiang = installedAddon;
+      c.cloudPackages = [
+        {'id': 'fixture', 'schemeKey': 'local-cloud-fixture'},
+      ];
+      expect(await c.downloadCloudPackage('fixture'), isTrue);
+      expect(await c.manageRimeIce(true), isTrue);
+      expect(c.activeSchemeKey, 'rime_ice');
+      expect(c.hasPendingSchemaSelectionPrompt, isFalse);
+      expect(c.installedPackageFor('txjx')?.hasPackageZip, isTrue);
+      expect(c.installedPackageFor('local-git-demo')?.hasPackageZip, isTrue);
+      expect(
+        c.installedPackageFor('local-cloud-fixture')?.hasPackageZip,
+        isTrue,
+      );
+      expect(c.rimeIce?.installed, isTrue);
+      expect(c.rimeIce?.deployed, isFalse);
+      expect(c.rimeIceStatusText, contains('使用中'));
+      expect(
+        api.calls.where((call) => call.startsWith('switchPackage:')),
+        isEmpty,
+      );
+      expect(
+        api.calls,
+        containsAllInOrder([
+          'importLibjd:keytao',
+          'importLibjd:xmjd',
+          'importLibjd:txjx',
+          'importLibjd:local-git-demo',
+          'importLibjd:local-cloud-fixture',
+          'importLibjd:rime_ice',
+        ]),
+      );
+      expect(api.gitImports, hasLength(1));
+      api.calls.clear();
+      expect(await c.switchPackage('xmjd'), isTrue);
+      expect(api.calls, contains('switchPackage:xmjd:'));
+      expect(api.calls, isNot(contains('importLibjd:xmjd')));
       c.selectPage(AppPage.scheme);
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('addon-schemes-button')));
-      await tester.pumpAndSettle();
-      final addonImport = find.descendant(
-        of: find.byKey(const ValueKey('addon-wanxiang')),
-        matching: find.widgetWithText(ActionButton, '导入并使用'),
+      final xmjdMenu = find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) => widget is SchemePackageRow && widget.schemeKey == 'xmjd',
+        ),
+        matching: find.byIcon(FLucideIcons.ellipsis),
       );
-      expect(tester.widget<ActionButton>(addonImport).onPress, isNotNull);
-
-      // Let toast auto-dismiss timer finish cleanly.
-      await tester.pump(const Duration(seconds: 5));
+      await tester.ensureVisible(xmjdMenu);
+      await tester.tap(xmjdMenu);
       await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FItem, '选择转换方案'));
+      await tester.pumpAndSettle();
+      expect(find.text('星猫备用方案'), findsOneWidget);
+      await tester.tap(find.text('星猫备用方案'));
+      await tester.pump();
+      await tester.tap(find.text('转换词库'));
+      await tester.pumpAndSettle();
+      expect(api.calls, contains('convertSchema:xmjd:xmjd_alt'));
+      expect(c.activeSchemeKey, 'xmjd');
+      expect(
+        c.isolatedPackages
+            .singleWhere((package) => package.active)
+            .schemas
+            .single
+            .id,
+        'xmjd_alt',
+      );
+      c.selectPage(AppPage.input);
+      await tester.pumpAndSettle();
+      api.local = const LocalSchemaDto(
+        installed: false,
+        deployed: false,
+        schemas: [],
+      );
+      expect(await c.setInputEngine('rime'), isTrue);
+      await tester.pumpAndSettle();
+      expect(find.descendant(of: engineSelector, matching: find.text('Rime')),
+          findsOneWidget);
+      expect(find.text('未部署'), findsOneWidget);
+      expect(find.text('请先安装输入方案。'), findsNothing);
+      expect(c.canDeploy, isTrue);
+      expect(c.usesImportedLibjd('xmjd'), isTrue);
     },
   );
 

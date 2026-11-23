@@ -438,6 +438,12 @@ jobs:
             arch="${pair#*:}"
             apk="flutter_app/build/app/outputs/flutter-apk/app-${abi}-release.apk"
             "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
+            files="$(unzip -Z1 "$apk")"
+            grep -Fx 'assets/libjd-engine-LICENSE.txt' <<< "$files"
+            grep -Fx 'assets/libjd-engine-SOURCE.txt' <<< "$files"
+            if [[ "$abi" != armeabi-v7a ]]; then
+              grep -Fx "lib/$abi/libjd-engine.so" <<< "$files"
+            fi
             cp "$apk" "dist/release-upload/keytao-app-${VERSION}-android-${arch}-release.apk"
           done
 

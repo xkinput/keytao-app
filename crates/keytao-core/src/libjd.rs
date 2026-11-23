@@ -1,150 +1,64 @@
-use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
 pub const MAX_DICTIONARY_TEXT_BYTES: usize = 64 * 1024 * 1024;
+pub const BUNDLED_ENGINE_VERSION: &str = "v0.14.0";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct LibjdPlatform {
-    pub target: &'static str,
-    pub library: &'static str,
-    pub archive_entry: &'static str,
-    pub archive_suffix: &'static str,
-    engine_only: bool,
+pub fn bundled_engine_library() -> Option<PathBuf> {
+    #[cfg(not(target_os = "android"))]
+    return engine_library_for_executable(&std::env::current_exe().ok()?);
+    #[cfg(target_os = "android")]
+    android_bundled_engine_library()
 }
 
-pub fn platform() -> Option<LibjdPlatform> {
-    platform_for(std::env::consts::OS, std::env::consts::ARCH)
-}
-
-pub fn platform_for(os: &str, arch: &str) -> Option<LibjdPlatform> {
-    let (target, library, archive_entry, archive_suffix) = match (os, arch) {
-        ("macos", "aarch64") => ("macos-arm64", "libjd.dylib", "libjd.dylib", "dylib.tar.xz"),
-        ("macos", "x86_64") => ("macos-x86_64", "libjd.dylib", "libjd.dylib", "dylib.tar.xz"),
-        ("linux", "aarch64") => ("linux-arm64", "libjd.so", "libjd.so", "so.tar.xz"),
-        ("linux", "x86_64") => ("linux-x86_64", "libjd.so", "libjd.so", "so.tar.xz"),
-        ("android", "aarch64") => ("android-arm64", "libjd.so", "libjd.so", "so.tar.xz"),
-        ("android", "x86_64") => ("android-x86_64", "libjd.so", "libjd.so", "so.tar.xz"),
-        ("windows", "aarch64") => ("windows-arm64", "libjd.dll", "jd.dll", "zip"),
-        ("windows", "x86_64") => ("windows-x86_64", "libjd.dll", "jd.dll", "zip"),
+pub fn engine_library_for_executable(executable: &Path) -> Option<PathBuf> {
+    if !executable.is_absolute() {
+        return None;
+    }
+    let relative = match std::env::consts::OS {
+        "macos" => "../Frameworks/libjd-engine.dylib",
+        "windows" => "libjd-engine.dll",
+        "linux" => "runtime/lib/libjd-engine.so",
         _ => return None,
     };
-    Some(LibjdPlatform {
-        target,
-        library,
-        archive_entry,
-        archive_suffix,
-        engine_only: false,
-    })
+    let library = executable.parent()?.join(relative);
+    fs::symlink_metadata(&library)
+        .is_ok_and(|metadata| metadata.is_file())
+        .then_some(library)
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct LibjdManifest {
-    pub tag: String,
-    pub asset: String,
-    pub sha256: String,
-    pub abi_layout: serde_json::Value,
-    pub installed_at: u64,
-}
-
-pub fn valid_tag(tag: &str) -> bool {
-    tag.len() <= 80
-        && tag.strip_prefix('v').is_some_and(|version| {
-            version.starts_with(|c: char| c.is_ascii_digit())
-                && version
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
-                && !version.ends_with('.')
+#[cfg(target_os = "android")]
+fn android_bundled_engine_library() -> Option<PathBuf> {
+    use std::{ffi::CStr, mem::MaybeUninit, os::unix::ffi::OsStrExt, sync::OnceLock};
+    static LIBRARY: OnceLock<Option<PathBuf>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| {
+            if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+                return None;
+            }
+            let mut info = MaybeUninit::<libc::Dl_info>::uninit();
+            let address = android_bundled_engine_library as *const () as *const libc::c_void;
+            if unsafe { libc::dladdr(address, info.as_mut_ptr()) } == 0 {
+                return None;
+            }
+            let filename = unsafe { info.assume_init() }.dli_fname;
+            if filename.is_null() {
+                return None;
+            }
+            let filename = unsafe { CStr::from_ptr(filename) }.to_bytes();
+            let library = Path::new(std::ffi::OsStr::from_bytes(filename))
+                .parent()?
+                .join("libjd-engine.so");
+            if !library.is_absolute() {
+                return None;
+            }
+            // An unextracted JNI library has a linker path inside the signed APK.
+            unsafe { libloading::Library::new(&library) }.ok()?;
+            Some(library)
         })
-}
-
-pub fn valid_sha256(sha256: &str) -> bool {
-    sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-impl LibjdPlatform {
-    pub fn engine_only(self) -> Self {
-        Self {
-            engine_only: true,
-            ..self
-        }
-    }
-
-    pub fn is_engine_only(self) -> bool {
-        self.engine_only
-    }
-
-    pub fn install_target(self) -> String {
-        if self.engine_only {
-            format!("{}-engine", self.target)
-        } else {
-            self.target.to_owned()
-        }
-    }
-
-    pub fn asset_name(self, tag: &str) -> String {
-        let prefix = if self.engine_only {
-            "libjd-engine"
-        } else {
-            "libjd"
-        };
-        format!("{prefix}-{tag}-{}.{}", self.target, self.archive_suffix)
-    }
-
-    pub fn current_path(self, root: &Path) -> PathBuf {
-        root.join(format!("current-{}", self.install_target()))
-    }
-
-    pub fn library_path(self, data: &Path, tag: &str) -> Option<PathBuf> {
-        if !valid_tag(tag) {
-            return None;
-        }
-        let version = engine_root(data)?.join(tag);
-        let directory = version.join(self.install_target());
-        (dir_or_missing(&version) && dir_or_missing(&directory))
-            .then(|| directory.join(self.library))
-    }
-
-    pub fn manifest_at(self, library: &Path, tag: &str) -> Option<LibjdManifest> {
-        if !fs::symlink_metadata(library).is_ok_and(|metadata| metadata.is_file()) {
-            return None;
-        }
-        let text = small_text(&library.with_file_name("manifest.json"), 8192)?;
-        let manifest: LibjdManifest = serde_json::from_str(&text).ok()?;
-        (manifest.tag == tag
-            && manifest.asset == self.asset_name(tag)
-            && valid_sha256(&manifest.sha256)
-            && manifest.abi_layout.is_object())
-        .then_some(manifest)
-    }
-
-    fn installed(self, data: &Path) -> Option<(LibjdManifest, PathBuf)> {
-        let root = engine_root(data)?;
-        let tag = small_text(&self.current_path(&root), 128)?;
-        let library = self.library_path(data, &tag)?;
-        if let Some(manifest) = self.manifest_at(&library, &tag) {
-            return Some((manifest, library));
-        }
-        // A same-tag replacement can be interrupted between the two directory renames.
-        let previous = root
-            .join(&tag)
-            .join(format!(".old-{}", self.install_target()));
-        if !fs::symlink_metadata(&previous).is_ok_and(|metadata| metadata.is_dir()) {
-            return None;
-        }
-        let library = previous.join(self.library);
-        Some((self.manifest_at(&library, &tag)?, library))
-    }
-
-    pub fn installed_tag(self, data: &Path) -> Option<String> {
-        self.installed(data).map(|(manifest, _)| manifest.tag)
-    }
-
-    pub fn installed_library(self, data: &Path) -> Option<PathBuf> {
-        self.installed(data).map(|(_, library)| library)
-    }
+        .clone()
 }
 
 fn dir_or_missing(path: &Path) -> bool {
@@ -160,10 +74,6 @@ pub fn engine_root(data: &Path) -> Option<PathBuf> {
     (dir_or_missing(&engines) && dir_or_missing(&root)).then_some(root)
 }
 
-pub fn library_path(data: &Path, tag: &str) -> Option<PathBuf> {
-    platform()?.library_path(data, tag)
-}
-
 fn small_text(path: &Path, limit: u64) -> Option<String> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() || metadata.len() > limit {
@@ -172,20 +82,27 @@ fn small_text(path: &Path, limit: u64) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-pub fn manifest_at(library: &Path, tag: &str) -> Option<LibjdManifest> {
-    platform()?.manifest_at(library, tag)
-}
-
-pub fn installed_library(data: &Path) -> Option<PathBuf> {
-    platform()?.installed_library(data)
-}
-
 pub fn dictionary_directory(data: &Path, key: &str) -> Option<PathBuf> {
+    installed_package_directory(data, key)?;
+    stable_dictionary_directory(data, key)
+}
+
+fn stable_dictionary_directory(data: &Path, key: &str) -> Option<PathBuf> {
+    let dictionaries = engine_root(data)?.join("dictionaries");
+    let package = dictionaries.join(key);
+    let directory = package.join("libjd-dictionary");
+    [dictionaries, package, directory.clone()]
+        .iter()
+        .all(|path| dir_or_missing(path))
+        .then_some(directory)
+}
+
+fn installed_package_directory(data: &Path, key: &str) -> Option<PathBuf> {
     if key.is_empty()
         || key.len() > 128
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+        || !key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
     {
         return None;
     }
@@ -193,16 +110,24 @@ pub fn dictionary_directory(data: &Path, key: &str) -> Option<PathBuf> {
     if !fs::symlink_metadata(&store).is_ok_and(|metadata| metadata.is_dir()) {
         return None;
     }
-    // Package replacement and uninstall retire the converted dictionary with its sources.
-    let files = crate::runtime_dirs::package_files_dir(&store, key).ok()?;
-    let directory = files.parent()?.join("libjd-dictionary");
-    dir_or_missing(&directory).then_some(directory)
+    crate::runtime_dirs::package_files_dir(&store, key)
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
 }
 
 pub fn imported_dictionary(data: &Path, key: &str) -> Option<(PathBuf, crate::SchemaInfo)> {
-    let directory = dictionary_directory(data, key)?;
+    let legacy = installed_package_directory(data, key)?;
+    let directory = stable_dictionary_directory(data, key)?;
     let previous = directory.with_file_name(".old-libjd-dictionary");
-    [directory, previous].into_iter().find_map(|directory| {
+    [
+        directory,
+        previous,
+        legacy.join("libjd-dictionary"),
+        legacy.join(".old-libjd-dictionary"),
+    ]
+    .into_iter()
+    .find_map(|directory| {
         if !fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir()) {
             return None;
         }
@@ -210,7 +135,61 @@ pub fn imported_dictionary(data: &Path, key: &str) -> Option<(PathBuf, crate::Sc
         if !fs::symlink_metadata(&dictionary).is_ok_and(|meta| meta.is_file()) {
             return None;
         }
-        let schema = serde_json::from_str(&small_text(&directory.join("schema.json"), 8192)?).ok()?;
+        let schema =
+            serde_json::from_str(&small_text(&directory.join("schema.json"), 8192)?).ok()?;
         Some((dictionary, schema))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dictionaries_survive_source_replacement_and_reject_symlinked_cache() {
+        let root =
+            std::env::temp_dir().join(format!("keytao-libjd-dictionary-{}", std::process::id()));
+        let package = crate::package_store::root(&root).join("cloud/example");
+        let files = package.join("files");
+        fs::create_dir_all(&files).unwrap();
+        let write_dictionary = |directory: &Path, id: &str| {
+            fs::create_dir_all(directory).unwrap();
+            fs::write(directory.join("dictionary.bin"), b"dictionary").unwrap();
+            fs::write(
+                directory.join("schema.json"),
+                serde_json::json!({"id": id, "name": id}).to_string(),
+            )
+            .unwrap();
+        };
+        let legacy = package.join("libjd-dictionary");
+        write_dictionary(&legacy, "legacy");
+        assert_eq!(
+            imported_dictionary(&root, "example").unwrap().1.id,
+            "legacy"
+        );
+        let stable = dictionary_directory(&root, "example").unwrap();
+        assert!(stable.starts_with(root.join("engines/libjd/dictionaries")));
+        let backup = stable.with_file_name(".old-libjd-dictionary");
+        write_dictionary(&backup, "backup");
+        assert_eq!(
+            imported_dictionary(&root, "example").unwrap().1.id,
+            "backup"
+        );
+        write_dictionary(&stable, "stable");
+        fs::remove_dir_all(&package).unwrap();
+        assert!(imported_dictionary(&root, "example").is_none());
+        fs::create_dir_all(&files).unwrap();
+        assert_eq!(
+            imported_dictionary(&root, "example").unwrap().1.id,
+            "stable"
+        );
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(&stable).unwrap();
+            std::os::unix::fs::symlink(&backup, &stable).unwrap();
+            assert!(dictionary_directory(&root, "example").is_none());
+            assert!(imported_dictionary(&root, "example").is_none());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

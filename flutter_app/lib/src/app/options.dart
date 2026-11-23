@@ -168,7 +168,7 @@ extension AppViewOptions on AppController {
     for (final mode in disabledEnglishModes) mode.name,
   };
   bool get canInstallDuringSetup => canInstall;
-  bool get canDeploy => !busy && local?.installed == true;
+  bool get canDeploy => !busy && !prefersLibjd && activeSchemeDownloaded;
   bool get canOpenTheme =>
       !busy && uiSettings?.themeExists == true && uiSettings?.themePath != null;
   bool get canEditLogs => !busy && logSettings != null;

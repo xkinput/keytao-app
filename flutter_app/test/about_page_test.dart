@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/rust/api/core.dart' show LibjdStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/about_page.dart';
@@ -28,13 +29,18 @@ void main() {
     final core = _AboutCore();
     RustLib.initMock(api: core);
     addTearDown(RustLib.dispose);
-    final controller = AppController(
-      info: const BridgeInfo(
-        platform: BridgePlatform.android,
-        appVersion: '1',
-        userRoot: '/isolated/keytao',
-      ),
-    );
+    final controller =
+        AppController(
+            info: const BridgeInfo(
+              platform: BridgePlatform.android,
+              appVersion: '1',
+              userRoot: '/isolated/keytao',
+            ),
+          )
+          ..libjd = const LibjdStatusDto(
+            available: false,
+            installedVersion: 'v0.14.0',
+          );
     addTearDown(controller.dispose);
     await tester.pumpWidget(
       KeyTaoTheme(
@@ -48,6 +54,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.text('libjd-engine 版本'), findsOneWidget);
+    expect(find.text('v0.14.0'), findsOneWidget);
     expect(find.widgetWithText(SettingRow, '检查更新'), findsOneWidget);
     await tester.tap(find.text('检查更新'));
     await tester.pump();

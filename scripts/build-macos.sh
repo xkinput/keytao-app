@@ -96,7 +96,11 @@ fi
 
 echo "==> Building macOS IME runtime..."
 export KEYTAO_RIME_SHARED_DATA_DIR="$RIME_DATA_DIR"
+LIBJD_ENGINE_DIR="$(mktemp -d)"
+trap 'rm -rf "$LIBJD_ENGINE_DIR"' EXIT
+python3 "$PROJECT_DIR/scripts/bundle-libjd-engine.py" macos-universal "$LIBJD_ENGINE_DIR" "$LIBJD_ENGINE_DIR"
 KEYTAO_MACOS_BUILD_DIR="$IME_BUILD_DIR" \
+    KEYTAO_BUNDLED_LIBJD_DIR="$LIBJD_ENGINE_DIR" \
     "$PROJECT_DIR/crates/keytao-macos-ime/build.sh" --release --skip-pkg
 
 echo "==> Building KeyTao Flutter macOS app bundle..."
@@ -141,6 +145,8 @@ if [ ! -f "$MAIN_FRAMEWORKS_DIR/rime-plugins/librime-lua.dylib" ]; then
     echo "ERROR: macOS main app bundle is missing rime-plugins/librime-lua.dylib" >&2
     exit 1
 fi
+cp "$LIBJD_ENGINE_DIR/libjd-engine.dylib" "$MAIN_FRAMEWORKS_DIR/"
+cp "$LIBJD_ENGINE_DIR/libjd-engine-LICENSE.txt" "$LIBJD_ENGINE_DIR/libjd-engine-SOURCE.txt" "$MAIN_APP/Contents/Resources/"
 
 echo "==> Re-signing KeyTao macOS app bundle..."
 ENTITLEMENTS="$PKG_BUILD_DIR/app.entitlements.plist"

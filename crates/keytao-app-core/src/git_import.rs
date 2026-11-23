@@ -893,7 +893,6 @@ pub async fn import_git_scheme(
     display_name: &str,
     scheme_key: Option<&str>,
 ) -> Result<String, CoreError> {
-    crate::deploy::ensure_not_using_libjd(core, user_root)?;
     crate::package_migration::ensure_before_write(core, user_root).await?;
 
     let (normalized, host) = normalize_config(config)?;

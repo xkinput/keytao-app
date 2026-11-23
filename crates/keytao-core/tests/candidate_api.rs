@@ -74,7 +74,7 @@ fn smoke_key_sequence_matches_rime_golden_states() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn runtime_routes_libjd_and_falls_back_when_loading_fails() {
+fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
     use keytao_core::libjd;
 
     let _serialized = serialized();
@@ -88,41 +88,130 @@ fn runtime_routes_libjd_and_falls_back_when_loading_fails() {
     .unwrap();
     let settings = dir.join(keytao_core::english_mode::SETTINGS_FILE);
     std::fs::write(&settings, br#"{"engines":{"keytao":"libjd"}}"#).unwrap();
-    let platform = libjd::platform().unwrap();
-    let tag = "v0.0.0";
-    let library = libjd::library_path(&dir, tag).unwrap();
-    std::fs::create_dir_all(library.parent().unwrap()).unwrap();
-    std::fs::write(&library, b"invalid dylib").unwrap();
-    std::fs::write(
-        library.with_file_name("manifest.json"),
-        serde_json::to_vec(&libjd::LibjdManifest {
-            tag: tag.into(),
-            asset: platform.asset_name(tag),
-            sha256: "0".repeat(64),
-            abi_layout: serde_json::json!({}),
-            installed_at: 0,
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    std::fs::write(platform.current_path(&libjd::engine_root(&dir).unwrap()), tag).unwrap();
-
     let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
     runtime.reload_without_deploy().unwrap();
     let session = runtime.create_session().unwrap();
     assert_eq!(type_code(&session).schema_id, smoke_fixture::SCHEMA_ID);
 
-    if std::env::var("LIBJD_TEST").as_deref() == Ok("1") {
-        let verified_library = std::env::var_os("LIBJD_TEST_LIBRARY").expect("verified libjd path");
-        std::fs::copy(verified_library, &library).unwrap();
-        runtime.reload_without_deploy().unwrap();
-        assert_eq!(session.state().schema_name, keytao_core::jd_backend::SCHEMA_NAME);
-        let peer = runtime.create_session().unwrap();
-        assert_eq!(peer.process_key_result('a' as u32, 0).unwrap().state.preedit, "a");
-        assert!(session.state().preedit.is_empty());
+    std::fs::write(
+        &settings,
+        br#"{"engine":"libjd_engine"}"#,
+    )
+    .unwrap();
+    runtime.reload_without_deploy().unwrap();
 
-        std::fs::write(&settings, b"{}").unwrap();
+    if let Some(library) = libjd::bundled_engine_library() {
+        assert!(!runtime.is_initialized());
+        assert!(session.process_key_result(b'a'.into(), 0).is_none());
+        unsafe {
+            let api = &*librime_sys::rime_get_api();
+            assert_eq!((api.create_session.unwrap())(), 0);
+        }
+        runtime.init_without_deploy().unwrap();
+        let idle = runtime.create_session().unwrap();
+        assert!(idle.process_key_result(b'a'.into(), 0).is_none());
+        std::fs::write(&settings, br#"{"engine":"rime"}"#).unwrap();
         runtime.reload_without_deploy().unwrap();
+        assert_eq!(type_code(&session).schema_id, smoke_fixture::SCHEMA_ID);
+        assert_eq!(idle.state().schema_id, smoke_fixture::SCHEMA_ID);
+
+        std::fs::create_dir_all(package_store.join("cloud/keytao/files")).unwrap();
+        let dictionary = libjd::dictionary_directory(&dir, "keytao").unwrap();
+        std::fs::create_dir_all(&dictionary).unwrap();
+        let blob = dictionary.join("dictionary.bin");
+        std::fs::write(
+            dictionary.join("schema.json"),
+            br#"{"id":"converted_fixture","name":"Converted Fixture"}"#,
+        )
+        .unwrap();
+        let composing = type_code(&session);
+        assert_eq!(composing.candidates[0].text, smoke_fixture::WORDS[0]);
+        let rime_generation = runtime.generation();
+        std::fs::write(&blob, b"invalid dictionary").unwrap();
+        std::fs::write(
+            &settings,
+            br#"{"engine":"libjd_engine","engines":{"keytao":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        let failed_reload = runtime.reload_without_deploy();
+        assert_eq!(runtime.generation(), rime_generation);
+        let retained = session.state();
+        assert_eq!(retained.preedit, composing.preedit);
+        assert_eq!(retained.candidates[0].text, smoke_fixture::WORDS[0]);
+        assert!(failed_reload.is_err());
+
+        unsafe {
+            keytao_core::jd_backend::JdBackend::build_dictionary(&library, b"converted\ta\n", &blob)
+        }
+        .unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert!(runtime.generation() > rime_generation);
+        assert_eq!(session.state().schema_id, "converted_fixture");
+        assert!(session.state().preedit.is_empty());
+        unsafe {
+            let api = &*librime_sys::rime_get_api();
+            assert_eq!((api.create_session.unwrap())(), 0);
+        }
+        assert_eq!(keytao_core::deployed_schemas(&dir)[0].id, "converted_fixture");
+        assert_eq!(
+            keytao_core::current_schema_id_from_dir(&dir).as_deref(),
+            Some("converted_fixture")
+        );
+        let typed = session.process_key_result(b'a'.into(), 0).unwrap().state;
+        assert_eq!(typed.candidates[0].text, "converted");
+        let jd_generation = runtime.generation();
+        let good_blob = std::fs::read(&blob).unwrap();
+        std::fs::write(&blob, b"invalid dictionary").unwrap();
+        assert!(runtime.reload_without_deploy().is_err());
+        assert_eq!(runtime.generation(), jd_generation);
+        let retained = session.state();
+        assert_eq!(retained.preedit, typed.preedit);
+        assert_eq!(retained.candidates[0].text, "converted");
+        std::fs::write(&blob, good_blob).unwrap();
+
+        std::fs::write(
+            &settings,
+            br#"{"engine":"rime","engines":{"keytao":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert!(runtime.generation() > jd_generation);
+        assert!(session.state().preedit.is_empty());
+        unsafe {
+            let api = &*librime_sys::rime_get_api();
+            let native = (api.create_session.unwrap())();
+            assert_ne!(native, 0);
+            (api.destroy_session.unwrap())(native);
+        }
+        let typed = type_code(&session);
+        assert_eq!(typed.schema_id, smoke_fixture::SCHEMA_ID);
+        assert_eq!(typed.candidates[0].text, smoke_fixture::WORDS[0]);
+        assert!(blob.is_file());
+
+        std::fs::write(
+            &settings,
+            br#"{"engine":"libjd_engine","engines":{"keytao":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert_eq!(session.state().schema_id, "converted_fixture");
+        let saved = dir.join("test-saved-build");
+        std::fs::rename(dir.join("build"), &saved).unwrap();
+        std::fs::write(
+            &settings,
+            br#"{"engine":"rime","engines":{"keytao":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert!(!runtime.is_initialized());
+        assert!(session.process_key_result(b'a'.into(), 0).is_none());
+        assert!(!keytao_core::schema_install_state(&dir).deployed);
+        assert!(blob.is_file());
+        std::fs::rename(saved, dir.join("build")).unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert_eq!(type_code(&session).schema_id, smoke_fixture::SCHEMA_ID);
+    } else {
+        assert!(runtime.is_initialized());
         assert_eq!(type_code(&session).schema_id, smoke_fixture::SCHEMA_ID);
     }
     runtime.shutdown().unwrap();

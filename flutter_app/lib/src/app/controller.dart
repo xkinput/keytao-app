@@ -159,6 +159,8 @@ class AppController extends ChangeNotifier {
   bool get hasOnboarding => isMobile || info.platform == BridgePlatform.macOs;
   bool get showsEmbeddedComposition => !isMobile;
   bool _busy = false;
+  bool _switchingInput = false;
+  bool get isSwitchingInput => _switchingInput;
   bool get busy =>
       _busy || windowsRegistrationBusy || _pendingUserWordDeletes.isNotEmpty;
   bool get busyWithoutPendingUserWordDeletes =>
@@ -191,7 +193,7 @@ class AppController extends ChangeNotifier {
     return message;
   }
 
-  static const libjdSwitchBackHint = '请先切换回 Rime 才能使用';
+  static const libjdRepositoryUrl = 'https://github.com/hronro/ime-jd';
   String? _pendingToast;
   bool get hasPendingToast => _pendingToast != null;
   String? takePendingToast() {
@@ -238,11 +240,14 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _deferAddonSchemaSelection(
+  Future<void> _finishAddonDownload(
     String key,
     core.AddonStatusDto status,
   ) async {
-    if (status.installed && !status.deployed) {
+    if (!status.installed) return;
+    if (prefersLibjd) {
+      await _convertSchemePackage(key);
+    } else if (!status.deployed) {
       await _deferDeployForSchemaSelection(key, activateOnConfirm: false);
     }
   }
@@ -312,6 +317,7 @@ class AppController extends ChangeNotifier {
   final List<DeployStep> deploySteps = [];
   final _packageDeployProgress = <String, DeployProgressDto?>{};
   LibjdStatusDto? libjd;
+  String inputEngine = 'rime';
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
@@ -350,6 +356,7 @@ class AppController extends ChangeNotifier {
   int? candidatePreviewPageSize;
   int _candidatePreviewRequest = 0;
   Future<void>? _candidatePreviewRefresh;
+  (String, String, String?)? _candidatePreviewTarget;
   List<SchemaSwitchDto> schemaSwitches = [];
   String? schemaSwitchError;
   List<SchemaDto> schemas = [];
@@ -359,6 +366,10 @@ class AppController extends ChangeNotifier {
   bool get hasPackageDeployProgress => _packageDeployProgress.isNotEmpty;
   bool get hasUsableBuild =>
       local?.deployed == true || local?.buildAvailable == true;
+  bool get activeSchemeDownloaded =>
+      local?.installed == true ||
+      installedPackageFor(activeSchemeKey)?.hasPackageZip == true ||
+      isolatedPackages.any((package) => package.active);
 
   String? packageDeployLabel(String key) {
     final packageKey = _packageDeployKey(key);
@@ -551,6 +562,10 @@ class AppController extends ChangeNotifier {
           ? installed.substring('builtin/'.length)
           : installed;
     }
+    final isolated = isolatedPackages
+        .where((package) => package.active)
+        .firstOrNull;
+    if (isolated != null) return isolated.packageKey;
     for (final package in installedPackages) {
       if (package.active) return package.schemeKey;
     }
@@ -664,31 +679,33 @@ class AppController extends ChangeNotifier {
         .where((package) => package.packageKey == key)
         .firstOrNull;
     return !isIos &&
-        (isolated?.engine ?? installedPackageFor(key)?.engine) == 'libjd_engine';
+        (isolated?.engine ?? installedPackageFor(key)?.engine) ==
+            'libjd_engine';
   }
 
-  bool usesLibjd(String key) =>
-      usesImportedLibjd(key) ||
-      (key == 'keytao' &&
-          libjd?.available == true &&
-          installedPackageFor(key)?.engine == 'libjd');
+  bool get prefersLibjd => !isIos && inputEngine == 'libjd_engine';
+  bool get hasConvertedSchemes =>
+      isolatedPackages.any(
+        (package) => usesImportedLibjd(package.packageKey),
+      ) ||
+      installedPackages.any((package) => usesImportedLibjd(package.schemeKey));
+
+  bool usesLibjd(String key) => prefersLibjd && usesImportedLibjd(key);
 
   bool get isUsingLibjd => usesLibjd(activeSchemeKey);
 
   bool requireRimeEngine() {
     if (!isUsingLibjd) return true;
-    packageError = libjdSwitchBackHint;
-    showToast(libjdSwitchBackHint);
+    const message = '这项功能仅适用于 Rime';
+    packageError = message;
+    showToast(message);
     return false;
   }
 
-  bool get hasSchemeUpdates => schemeUpdates.any(
-    (update) => update.hasUpdate && !usesLibjd(update.schemeKey),
-  );
+  bool get hasSchemeUpdates => schemeUpdates.any((update) => update.hasUpdate);
   List<SchemeUpdateDto> get visibleSchemeUpdates => [
     for (final update in schemeUpdates)
       if (update.hasUpdate &&
-          !usesLibjd(update.schemeKey) &&
           _normalizedVersion(dismissedSchemeUpdates[update.schemeKey] ?? '') !=
               _normalizedVersion(update.latestVersion))
         update,
@@ -804,7 +821,7 @@ class AppController extends ChangeNotifier {
                     scheme)
       ? AppStrings.updateScheme
       : AppStrings.installScheme;
-  String get deployTooltip => local?.installed == true
+  String get deployTooltip => activeSchemeDownloaded
       ? AppStrings.deployCurrent
       : AppStrings.installFirst;
   String get addonTooltip => AppStrings.installEnglishTooltip;
@@ -866,6 +883,16 @@ class AppController extends ChangeNotifier {
   String _addonStatus(String key, core.AddonStatusDto? addon, bool hasUpdate) {
     if (addon == null) return AppStrings.checking;
     if (!addon.installed) return AppStrings.notInstalled;
+    if (prefersLibjd && key != 'easy_en') {
+      final status = activeSchemeKey == key && isUsingLibjd
+          ? '使用中'
+          : hasUpdate
+          ? '可更新'
+          : usesImportedLibjd(key)
+          ? '已转换'
+          : '待转换';
+      return '$status · ${addon.version.isEmpty ? AppStrings.unknownVersion : addon.version}';
+    }
     final state = activeSchemeKey == key
         ? addon.deployed
               ? '使用中'
@@ -923,9 +950,9 @@ class AppController extends ChangeNotifier {
       ? ImeBadgeState.checking
       : !macosIme!.installed
       ? ImeBadgeState.componentMissing
-      : local?.installed != true
+      : !activeSchemeDownloaded
       ? ImeBadgeState.schemeMissing
-      : !hasUsableBuild
+      : !hasUsableBuild && !isUsingLibjd
       ? ImeBadgeState.pendingDeploy
       : ImeBadgeState.ready;
   String get macosImeBadgeText => switch (macosImeBadge) {
@@ -1338,9 +1365,13 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
-  Future<bool> run(Future<void> Function() action) async {
+  Future<bool> run(
+    Future<void> Function() action, {
+    bool switchingInput = false,
+  }) async {
     if (busy || _disposed) return false;
     busy = true;
+    _switchingInput = switchingInput;
     error = null;
     _changed();
     try {
@@ -1359,6 +1390,7 @@ class AppController extends ChangeNotifier {
     } finally {
       _migrationDuringOperation = false;
       _packageDeployProgress.clear();
+      _switchingInput = false;
       busy = false;
       _changed();
       if (_refreshOnResumeWhenIdle) {
@@ -1379,6 +1411,13 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readLocal() async {
     _localSchemaError = null;
+    if (!isIos) {
+      try {
+        inputEngine = await core.inputEngine();
+      } catch (failure) {
+        debugPrint('Input engine refresh failed: ${errorText(failure)}');
+      }
+    }
     try {
       local = await core.checkLocalSchema();
       deployWarning = local?.deployWarning;
@@ -1410,8 +1449,8 @@ class AppController extends ChangeNotifier {
     } catch (failure) {
       rimeIceError ??= errorText(failure);
     }
-    await _readSchemas();
     await refreshIsolatedPackages(notify: false);
+    await _readSchemas();
     await _readSchemaSwitches();
     final logoPath = await core.activeSchemaLogoPath();
     if (logoPath != null) await _readSchemaLogoVersion(logoPath);
@@ -1453,7 +1492,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _readSchemas() async {
-    if (!hasUsableBuild) {
+    if (!hasUsableBuild && !isUsingLibjd) {
       schemas = [];
       currentSchemaId = null;
       return;
@@ -1470,11 +1509,15 @@ class AppController extends ChangeNotifier {
       return;
     }
     try {
+      final previous = _activePreviewTarget;
       local = await core.checkLocalSchema();
       deployWarning = local?.deployWarning;
-      await _readSchemas();
       await _readInstalledPackages();
       await refreshIsolatedPackages(notify: false);
+      await _readSchemas();
+      if (previous != _activePreviewTarget) {
+        unawaited(refreshCandidatePreview());
+      }
       _changed();
     } catch (_) {
       // Keep the last schema visible if a foreground refresh is unavailable.
@@ -1834,7 +1877,7 @@ class AppController extends ChangeNotifier {
     final packages = await core.listInstalledPackages();
     if (_disposed || request != _schemeUpdatesRequest) return;
     LibjdStatusDto? libjdStatus;
-    if (!isIos && packages.any((package) => package.schemeKey == 'keytao')) {
+    if (!isIos) {
       try {
         libjdStatus = await core.libjdStatus();
       } catch (failure) {
@@ -2074,88 +2117,53 @@ class AppController extends ChangeNotifier {
     if (canCancelDownload) await core.cancelSchemeDownload();
   }
 
-  Future<String?> downloadLibjd(
-    Future<bool> Function(LibjdReleaseDto) confirm,
-  ) => _changeLibjd(() async {
-    _startOperation(OperationKind.libjd, '正在查询 ime-jd…');
-    libjd = await core.libjdStatus();
-    final alreadyInstalled = libjd?.installedVersion;
-    final switchingFromRime = !usesLibjd('keytao');
-    if (switchingFromRime && alreadyInstalled != null) {
-      LibjdReleaseDto? release;
-      try {
-        release = await core.libjdRelease();
-      } catch (_) {
-        await core.setPackageEngine(key: 'keytao', engine: 'libjd');
-        return null;
-      }
-      if (release.version == alreadyInstalled) {
-        await core.setPackageEngine(key: 'keytao', engine: 'libjd');
-        return null;
-      }
-      if (!await confirm(release)) return null;
-      progress = '正在下载 ime-jd…';
-      _changed();
-      libjd = await core.installOrUpdateLibjd(release: release);
-      return null;
+  Future<bool> setInputEngine(String engine) => run(() async {
+    packageError = null;
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      await core.setInputEngine(engine: engine);
+      if (engine == 'libjd_engine') _pendingSchemaSelectionPrompt = null;
+      await _readInstalledPackages();
+      await _readLocal();
+      unawaited(refreshCandidatePreview());
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
     }
-    final release = await core.libjdRelease();
-    if (usesLibjd('keytao') && alreadyInstalled == release.version) {
-      return 'ime-jd 已是最新版本';
-    }
-    if (!await confirm(release)) return null;
-    progress = '正在下载 ime-jd…';
-    _changed();
-    libjd = await core.installOrUpdateLibjd(release: release);
-    return null;
+  }, switchingInput: true);
+
+  Future<bool> convertSchemePackage(String key, String schemaId) => run(() async {
+    packageError = null;
+    await _convertSchemePackage(key, schemaId: schemaId);
   });
 
-  Future<String?> importLibjdPackage(String key) => _changeLibjd(() async {
+  Future<void> _convertSchemePackage(String key, {String? schemaId}) async {
+    final previousOperation = operation;
+    final previousKey = installingSchemeKey;
     installingSchemeKey = key;
     _startOperation(OperationKind.libjd, '正在准备转换词库…');
-    if (isAndroid) await _requireStorage(redirect: true);
-    final skipped = await core.importLibjdPackage(key: key);
-    if (schemeAssets.containsKey(key) || isLocalScheme(key)) {
-      _manuallySelectedScheme = true;
-      scheme = key;
-      latestRelease = null;
-      schemeRelease = null;
-    }
-    return skipped == 0 ? null : '已导入并使用，跳过 $skipped 条不兼容词条';
-  });
-
-  Future<String?> revertLibjd([String key = 'keytao']) => _changeLibjd(() async {
-    await core.setPackageEngine(key: key, engine: 'rime');
-    await _readLocal();
-    if (activeSchemeKey == key &&
-        local?.installed == true &&
-        local?.deployed != true) {
-      await _deploy(schemeKey: key);
-    }
-    return null;
-  });
-
-  Future<String?> _changeLibjd(Future<String?> Function() action) async {
-    String? notice;
-    await run(() async {
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      final skipped = await core.importLibjdPackage(
+        key: key,
+        schemaId: schemaId,
+      );
+      await _refreshAfterPackageSwitch(key);
+      if (skipped > 0) showToast('已转换，跳过 $skipped 条不兼容词条');
+    } catch (failure) {
+      packageError = errorText(failure);
+      // The downloaded source stays installed even if it cannot be converted.
       try {
-        notice = await action();
-      } catch (failure) {
-        notice = errorText(failure).split('\n').first;
-      } finally {
-        installingSchemeKey = null;
-        operation = null;
-        try {
-          await _readInstalledPackages();
-          await _readLocal();
-          await _readSchemaSwitches();
-        } catch (failure) {
-          notice ??= '刷新方案状态失败';
-        }
-        _refreshSchemasWhenIdle = true;
+        await _readInstalledPackages();
+        await _readLocal();
+      } catch (refreshFailure) {
+        debugPrint('Scheme refresh failed: ${errorText(refreshFailure)}');
       }
-    });
-    return notice;
+      rethrow;
+    } finally {
+      installingSchemeKey = previousKey;
+      operation = previousOperation;
+    }
   }
 
   Future<void> cancelWanxiangGrammarDownload() async {
@@ -2165,6 +2173,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> installAndDeploy() async {
+    if (prefersLibjd) return downloadSchemePackage(scheme);
     if (!canInstall || !requireRimeEngine()) return false;
     var deferred = false;
     final result = await run(() async {
@@ -2185,6 +2194,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> install() {
+    if (prefersLibjd) return downloadSchemePackage(scheme);
     if (!canInstall || !requireRimeEngine()) return Future.value(false);
     return run(() async {
       final installing = scheme;
@@ -2262,9 +2272,8 @@ class AppController extends ChangeNotifier {
   );
 
   Future<bool> _installSchemePackage(String key, {required bool latest}) {
-    if (!schemeAssets.containsKey(key) || !requireRimeEngine()) {
-      return Future.value(false);
-    }
+    if (!schemeAssets.containsKey(key)) return Future.value(false);
+    if (prefersLibjd) return downloadSchemePackage(key);
     return run(() async {
       installingSchemeKey = key;
       try {
@@ -2316,7 +2325,6 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> downloadSchemePackage(String key) {
-    if (!requireRimeEngine()) return Future.value(false);
     return run(() async {
       installingSchemeKey = key;
       packageError = null;
@@ -2325,16 +2333,18 @@ class AppController extends ChangeNotifier {
       try {
         if (isAndroid) await _requireStorage(redirect: true);
         await core.downloadSchemePackage(schemeKey: key, source: source);
-        final defer = await _deferDeployForSchemaSelection(
-          key,
-          activateOnConfirm: true,
-        );
-        if (!defer) {
-          await _switchSchemePackage(key);
+        if (prefersLibjd) {
+          await _convertSchemePackage(key);
+        } else {
+          final defer = await _deferDeployForSchemaSelection(
+            key,
+            activateOnConfirm: true,
+          );
+          if (!defer) await _switchSchemePackage(key);
+          await _readInstalledPackages();
+          if (defer) await _readLocal();
         }
         _invalidateSchemeUpdates();
-        await _readInstalledPackages();
-        if (defer) await _readLocal();
         await _readUserWordsReport(key);
         scheduleSchemeProfileSync(packageKey: key);
         progress = AppStrings.installDone;
@@ -2355,7 +2365,6 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> importLocalScheme({String? schemeKey}) async {
-    if (!requireRimeEngine()) return false;
     final wasActive = installedPackageFor(schemeKey ?? '')?.active == true;
     String? importedKey;
     var deferred = false;
@@ -2392,6 +2401,11 @@ class AppController extends ChangeNotifier {
         importedKey = key;
         _pendingCloudPackageUploads.remove(key);
         _invalidateSchemeUpdates();
+        if (prefersLibjd) {
+          await _convertSchemePackage(key);
+          scheduleSchemeProfileSync();
+          return;
+        }
         await _readInstalledPackages();
         await _readLocal();
         _manuallySelectedScheme = true;
@@ -2422,7 +2436,10 @@ class AppController extends ChangeNotifier {
     });
     return result &&
         importedKey != null &&
-        (!wasActive || deferred || verification.every((entry) => entry.ok));
+        (prefersLibjd ||
+            !wasActive ||
+            deferred ||
+            verification.every((entry) => entry.ok));
   }
 
   Future<bool> importGitScheme({
@@ -2434,9 +2451,9 @@ class AppController extends ChangeNotifier {
     String? schemeKey,
     bool activate = true,
   }) async {
-    if (!requireRimeEngine()) return false;
     final existingActive = installedPackageFor(schemeKey ?? '')?.active == true;
-    final shouldActivate = schemeKey == null ? activate : existingActive;
+    final shouldActivate =
+        !prefersLibjd && (schemeKey == null ? activate : existingActive);
     String? importedKey;
     var deferred = false;
     final result = await run(() async {
@@ -2456,16 +2473,20 @@ class AppController extends ChangeNotifier {
         importedKey = key;
         _pendingCloudPackageUploads.remove(key);
         _invalidateSchemeUpdates();
-        await _readInstalledPackages();
-        await _readLocal();
-        _manuallySelectedScheme = true;
-        scheme = key;
-        await refreshRelease();
-        await _persistSchemeSettings(schedule: false);
-        deferred = await _deferDeployForSchemaSelection(
-          key,
-          activateOnConfirm: shouldActivate,
-        );
+        if (prefersLibjd) {
+          await _convertSchemePackage(key);
+        } else {
+          await _readInstalledPackages();
+          await _readLocal();
+          _manuallySelectedScheme = true;
+          scheme = key;
+          await refreshRelease();
+          await _persistSchemeSettings(schedule: false);
+          deferred = await _deferDeployForSchemaSelection(
+            key,
+            activateOnConfirm: shouldActivate,
+          );
+        }
         if (!deferred && shouldActivate) {
           await _switchSchemePackage(key);
         } else {
@@ -2494,16 +2515,19 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> activateSchemePackage(String key) async {
-    if (usesImportedLibjd(key)) {
-      return activeSchemeKey != key && await switchPackage(key);
-    }
-    if (!requireRimeEngine()) return false;
     var package = installedPackageFor(key);
     final addonStatus = switch (key) {
       'easy_en' => addon,
       'rime_ice' => rimeIce,
       _ => null,
     };
+    if (prefersLibjd &&
+        (package?.hasPackageZip == true ||
+            addonStatus?.installed == true ||
+            usesImportedLibjd(key))) {
+      return (activeSchemeKey != key || !isUsingLibjd) &&
+          await switchPackage(key);
+    }
     if (package?.active == true && package!.inUse) return false;
     if (addonStatus?.installed != true && package?.hasPackageZip != true) {
       if (package == null || isLocalScheme(key)) return false;
@@ -2555,6 +2579,10 @@ class AppController extends ChangeNotifier {
 
   Future<void> _switchSchemePackage(String key, {String? schemaId}) async {
     packageError = null;
+    if (prefersLibjd && !usesImportedLibjd(key)) {
+      await _convertSchemePackage(key, schemaId: schemaId);
+      return;
+    }
     deployingSchemeKey = key;
     _startOperation(
       OperationKind.deploy,
@@ -2564,7 +2592,7 @@ class AppController extends ChangeNotifier {
       if (isAndroid) await _requireStorage(redirect: true);
       await core.switchPackage(
         packageKey: key,
-        schemaId: schemaId,
+        schemaId: prefersLibjd ? null : schemaId,
         androidDeploy: _androidDeploy,
       );
       await _refreshAfterPackageSwitch(key);
@@ -2584,20 +2612,14 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<bool> switchPackage(String key, {String? schemaId}) {
-    if (key != 'keytao' && !usesImportedLibjd(key) && !requireRimeEngine()) {
-      return Future.value(false);
-    }
-    return run(() => _switchSchemePackage(key, schemaId: schemaId));
-  }
+  Future<bool> switchPackage(String key, {String? schemaId}) => run(
+    () => _switchSchemePackage(key, schemaId: schemaId),
+    switchingInput: true,
+  );
 
   Future<bool> selectPackageSchema(String packageKey, String schemaId) {
-    if (usesImportedLibjd(packageKey)) {
+    if (prefersLibjd) {
       return switchPackage(packageKey, schemaId: schemaId);
-    }
-    if ((packageKey != 'keytao' || schemaId != 'keytao') &&
-        !requireRimeEngine()) {
-      return Future.value(false);
     }
     final active = isolatedPackages.where((pkg) => pkg.active).firstOrNull;
     if (active != null && active.packageKey == packageKey && active.ready) {
@@ -2628,7 +2650,11 @@ class AppController extends ChangeNotifier {
       case 'triple_pinyin_lssp':
         rimeLssp = await core.rimeLsspStatus();
     }
-    scheduleSchemeProfileSync(packageKey: key, afterSuccessfulDeploy: true);
+    scheduleSchemeProfileSync(
+      packageKey: key,
+      afterSuccessfulDeploy: !prefersLibjd,
+    );
+    unawaited(refreshCandidatePreview());
   }
 
   Future<void> startPackageMigration({VoidCallback? onPending}) async {
@@ -2796,11 +2822,12 @@ class AppController extends ChangeNotifier {
         installedPackages
             .where((package) => package.inUse)
             .map((package) => package.schemeKey)
-            .firstOrNull;
+              .firstOrNull ??
+        (activeSchemeDownloaded ? activeSchemeKey : null);
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
-      if (local?.installed != true) {
+      if (!activeSchemeDownloaded) {
         throw StateError(
           _localSchemaError == null
               ? AppStrings.noSchemeForDeploy
@@ -3432,9 +3459,7 @@ class AppController extends ChangeNotifier {
             .toList();
       }, modal: true);
 
-  Future<bool> downloadCloudPackage(String id) {
-    if (!requireRimeEngine()) return Future.value(false);
-    return _schemeCloudAction(() async {
+  Future<bool> downloadCloudPackage(String id) => _schemeCloudAction(() async {
     if (!cloudPackages.any((package) => package['id'] == id)) {
       cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
           .map((value) => Map<String, dynamic>.from(value as Map))
@@ -3453,12 +3478,16 @@ class AppController extends ChangeNotifier {
             .firstOrNull
             ?.schemeKey ??
         package['schemeKey'] as String;
-    if (!await _deferDeployForSchemaSelection(key, activateOnConfirm: true)) {
+    if (prefersLibjd) {
+      await _convertSchemePackage(key);
+    } else if (!await _deferDeployForSchemaSelection(
+      key,
+      activateOnConfirm: true,
+    )) {
       await _switchSchemePackage(key);
     }
     scheduleSchemeProfileSync();
   }, modal: true);
-  }
 
   Future<bool> deleteCloudPackage(String id) => _schemeCloudAction(() async {
     await core.deleteCloudPackage(id: id);
@@ -3703,10 +3732,8 @@ class AppController extends ChangeNotifier {
     }
   });
 
-  Future<bool> manageWanxiang(bool installed) {
-    if (installed && !requireRimeEngine()) return Future.value(false);
-    return run(() async {
-      _addonUpdateChecks['wanxiang'] = Object();
+  Future<bool> manageWanxiang(bool installed) => run(() async {
+    _addonUpdateChecks['wanxiang'] = Object();
     _startOperation(
       OperationKind.wanxiang,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -3722,12 +3749,18 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         wanxiangLatestVersion = wanxiang!.version;
-        await _deferAddonSchemaSelection('wanxiang', wanxiang!);
+        await _finishAddonDownload('wanxiang', wanxiang!);
       }
       await _readWanxiangGrammar();
       await _readLocal();
       addOperationLogs([
-        installed ? AppStrings.wanxiangInstalled : AppStrings.wanxiangRemoved,
+        installed
+          ? prefersLibjd
+              ? '[ADDON] ${AppStrings.wanxiang}已转换'
+              : wanxiang?.deployed == true
+                  ? AppStrings.wanxiangInstalled
+                  : '[ADDON] ${AppStrings.wanxiang}已下载'
+            : AppStrings.wanxiangRemoved,
       ]);
     } catch (failure) {
       wanxiangError = errorText(failure);
@@ -3743,7 +3776,6 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   });
-  }
 
   Future<void> _readWanxiangGrammar() async {
     try {
@@ -3791,10 +3823,8 @@ class AppController extends ChangeNotifier {
   });
   }
 
-  Future<bool> manageRimeIce(bool installed) {
-    if (installed && !requireRimeEngine()) return Future.value(false);
-    return run(() async {
-      _addonUpdateChecks['rime_ice'] = Object();
+  Future<bool> manageRimeIce(bool installed) => run(() async {
+    _addonUpdateChecks['rime_ice'] = Object();
     _startOperation(
       OperationKind.rimeIce,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -3809,11 +3839,17 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         rimeIceLatestVersion = rimeIce!.version;
-        await _deferAddonSchemaSelection('rime_ice', rimeIce!);
+        await _finishAddonDownload('rime_ice', rimeIce!);
       }
       await _readLocal();
       addOperationLogs([
-        installed ? AppStrings.rimeIceInstalled : AppStrings.rimeIceRemoved,
+        installed
+          ? prefersLibjd
+              ? '[ADDON] ${AppStrings.rimeIce}已转换'
+              : rimeIce?.deployed == true
+                  ? AppStrings.rimeIceInstalled
+                  : '[ADDON] ${AppStrings.rimeIce}已下载'
+            : AppStrings.rimeIceRemoved,
       ]);
     } catch (failure) {
       rimeIceError = errorText(failure);
@@ -3829,12 +3865,9 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   });
-  }
 
-  Future<bool> manageRimeMint(bool installed) {
-    if (installed && !requireRimeEngine()) return Future.value(false);
-    return run(() async {
-      _addonUpdateChecks['rime_mint'] = Object();
+  Future<bool> manageRimeMint(bool installed) => run(() async {
+    _addonUpdateChecks['rime_mint'] = Object();
     _startOperation(
       OperationKind.rimeMint,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -3849,11 +3882,17 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         rimeMintLatestVersion = rimeMint!.version;
-        await _deferAddonSchemaSelection('rime_mint', rimeMint!);
+        await _finishAddonDownload('rime_mint', rimeMint!);
       }
       await _readLocal();
       addOperationLogs([
-        installed ? AppStrings.rimeMintInstalled : AppStrings.rimeMintRemoved,
+        installed
+          ? prefersLibjd
+              ? '[ADDON] ${AppStrings.rimeMint}已转换'
+              : rimeMint?.deployed == true
+                  ? AppStrings.rimeMintInstalled
+                  : '[ADDON] ${AppStrings.rimeMint}已下载'
+            : AppStrings.rimeMintRemoved,
       ]);
     } catch (failure) {
       rimeMintError = errorText(failure);
@@ -3868,12 +3907,9 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   });
-  }
 
-  Future<bool> manageRimeFrost(bool installed) {
-    if (installed && !requireRimeEngine()) return Future.value(false);
-    return run(() async {
-      _addonUpdateChecks['rime_frost'] = Object();
+  Future<bool> manageRimeFrost(bool installed) => run(() async {
+    _addonUpdateChecks['rime_frost'] = Object();
     _startOperation(
       OperationKind.rimeFrost,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -3888,11 +3924,17 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         rimeFrostLatestVersion = rimeFrost!.version;
-        await _deferAddonSchemaSelection('rime_frost', rimeFrost!);
+        await _finishAddonDownload('rime_frost', rimeFrost!);
       }
       await _readLocal();
       addOperationLogs([
-        installed ? AppStrings.rimeFrostInstalled : AppStrings.rimeFrostRemoved,
+        installed
+          ? prefersLibjd
+              ? '[ADDON] ${AppStrings.rimeFrost}已转换'
+              : rimeFrost?.deployed == true
+                  ? AppStrings.rimeFrostInstalled
+                  : '[ADDON] ${AppStrings.rimeFrost}已下载'
+            : AppStrings.rimeFrostRemoved,
       ]);
     } catch (failure) {
       rimeFrostError = errorText(failure);
@@ -3907,12 +3949,9 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   });
-  }
 
-  Future<bool> manageRimeLssp(bool installed) {
-    if (installed && !requireRimeEngine()) return Future.value(false);
-    return run(() async {
-      _addonUpdateChecks['triple_pinyin_lssp'] = Object();
+  Future<bool> manageRimeLssp(bool installed) => run(() async {
+    _addonUpdateChecks['triple_pinyin_lssp'] = Object();
     _startOperation(
       OperationKind.rimeLssp,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -3927,11 +3966,17 @@ class AppController extends ChangeNotifier {
       );
       if (installed) {
         rimeLsspLatestVersion = rimeLssp!.version;
-        await _deferAddonSchemaSelection('triple_pinyin_lssp', rimeLssp!);
+        await _finishAddonDownload('triple_pinyin_lssp', rimeLssp!);
       }
       await _readLocal();
       addOperationLogs([
-        installed ? AppStrings.rimeLsspInstalled : AppStrings.rimeLsspRemoved,
+        installed
+          ? prefersLibjd
+              ? '[ADDON] ${AppStrings.rimeLssp}已转换'
+              : rimeLssp?.deployed == true
+                  ? AppStrings.rimeLsspInstalled
+                  : '[ADDON] ${AppStrings.rimeLssp}已下载'
+            : AppStrings.rimeLsspRemoved,
       ]);
     } catch (failure) {
       rimeLsspError = errorText(failure);
@@ -3946,7 +3991,6 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   });
-  }
 
   Future<bool> finishOnboarding() => run(() async {
     if (!isMobile) await _readState();
@@ -4001,13 +4045,10 @@ class AppController extends ChangeNotifier {
       });
 
   Future<bool> selectSchema(String schemaId) {
-    if (usesImportedLibjd(activeSchemeKey)) {
+    if (prefersLibjd) {
       return switchPackage(activeSchemeKey, schemaId: schemaId);
     }
-    if (schemaId != 'keytao' && !requireRimeEngine()) {
-      return Future.value(false);
-    }
-    return run(() => _selectSchema(schemaId));
+    return run(() => _selectSchema(schemaId), switchingInput: true);
   }
 
   Future<void> _selectSchema(String schemaId) async {
@@ -4021,12 +4062,15 @@ class AppController extends ChangeNotifier {
   Future<bool> saveCandidatePageSize(int? size) => run(() async {
     if (isAndroid) await _requireStorage();
     candidatePageSize = await core.setCandidatePageSize(size: size);
-    if (local?.installed == true && !usesLibjd(activeSchemeKey)) {
+    if (local?.installed == true && !prefersLibjd) {
       await _deploy();
     } else {
       unawaited(refreshCandidatePreview());
     }
   });
+
+  (String, String, String?) get _activePreviewTarget =>
+      (inputEngine, activeSchemeKey, currentSchemaId);
 
   Future<void> refreshCandidatePreview() {
     if (_disposed) return Future.value();
@@ -4046,7 +4090,7 @@ class AppController extends ChangeNotifier {
     while (!_disposed && request != _candidatePreviewRequest) {
       request = _candidatePreviewRequest;
       final size = candidatePageSize;
-      final schemeKey = activeSchemeKey;
+      final target = _activePreviewTarget;
       try {
         final result =
             jsonDecode(await core.previewCandidates(size: size)) as Map;
@@ -4058,20 +4102,31 @@ class AppController extends ChangeNotifier {
               comment: candidate['comment'] as String,
             ),
         ];
-        if (pageSize < 1 || pageSize > 255 || candidates.isEmpty) {
+        if (pageSize < 1 || pageSize > 255) {
           throw const FormatException('Invalid candidate preview');
         }
         if (_disposed ||
             request != _candidatePreviewRequest ||
             size != candidatePageSize ||
-            schemeKey != activeSchemeKey) {
+            target != _activePreviewTarget) {
           continue;
         }
         candidatePreviewCandidates = candidates;
         candidatePreviewPageSize = pageSize;
+        _candidatePreviewTarget = target;
         _changed();
       } catch (_) {
-        // Keep the last preview when deployed data is unavailable.
+        // A temporary failure may keep the preview for the same scheme.
+        if (!_disposed &&
+            request == _candidatePreviewRequest &&
+            target == _activePreviewTarget &&
+            _candidatePreviewTarget != null &&
+            _candidatePreviewTarget != target) {
+          candidatePreviewCandidates = [];
+          candidatePreviewPageSize = null;
+          _candidatePreviewTarget = null;
+          _changed();
+        }
       }
     }
     return request;

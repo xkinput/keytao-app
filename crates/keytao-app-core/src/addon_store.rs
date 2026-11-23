@@ -43,6 +43,7 @@ pub(crate) struct ManifestFile {
 pub(crate) struct AddonStore {
     id: String,
     root: PathBuf,
+    data_dir: PathBuf,
     destination: PathBuf,
     staging: PathBuf,
     skip_trime_assets: bool,
@@ -93,6 +94,7 @@ impl AddonStore {
         Ok(Self {
             id: id.into(),
             root,
+            data_dir: core.env().data_dir.clone(),
             destination,
             staging,
             skip_trime_assets: core.env().platform == crate::Platform::Android,
@@ -218,6 +220,8 @@ impl AddonStore {
         manifest: &[u8],
     ) -> Result<tempfile::TempDir, String> {
         let _guard = operation();
+        crate::libjd::preserve_imported_dictionary(&self.data_dir, &self.id)
+            .map_err(|error| error.to_string())?;
         fs::create_dir_all(&self.staging).map_err(|error| error.to_string())?;
         let rollback = tempfile::tempdir_in(&self.staging).map_err(|error| error.to_string())?;
         if self
@@ -455,7 +459,19 @@ impl AddonStore {
         }
         fs::create_dir_all(&self.staging).map_err(|e| e.to_string())?;
         let stage = tempfile::tempdir_in(&self.staging).map_err(|e| e.to_string())?;
-        fs::rename(&self.destination, stage.path().join("removed")).map_err(|e| e.to_string())
+        let dictionary = keytao_core::libjd::dictionary_directory(&self.data_dir, &self.id);
+        let removed = stage.path().join("removed");
+        fs::rename(&self.destination, &removed).map_err(|e| e.to_string())?;
+        if let Some(path) = dictionary.as_deref().and_then(Path::parent)
+            && let Err(error) = fs::rename(path, stage.path().join("converted"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            if let Err(restore) = fs::rename(&removed, &self.destination) {
+                return Err(format!("{error}; restore add-on: {restore}; backup: {}", stage.keep().display()));
+            }
+            return Err(error.to_string());
+        }
+        Ok(())
     }
 }
 

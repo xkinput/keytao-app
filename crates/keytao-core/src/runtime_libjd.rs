@@ -16,9 +16,7 @@ impl ProcessRimeState {
     }
 
     pub(super) fn finalize_backend(&self) -> Result<(), String> {
-        if self.clear_libjd() {
-            return Ok(());
-        }
+        self.clear_libjd();
         desktop::finalize_rime()
     }
 
@@ -41,6 +39,28 @@ impl ProcessRimeState {
 
 impl ImeRuntime {
     #[cfg(target_os = "ios")]
+    pub(super) fn libjd_requested(&self, _: &Path) -> bool {
+        false
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    pub(super) fn libjd_requested(&self, root: &Path) -> bool {
+        if !self.0.ime_host {
+            return false;
+        }
+        #[cfg(windows)]
+        if !self.0.libjd_server {
+            return false;
+        }
+        #[cfg(target_os = "android")]
+        if !android_libjd_enabled() {
+            return false;
+        }
+        engine_choice::preferred(root) == engine_choice::PackageEngine::LibjdEngine
+            && libjd::bundled_engine_library().is_some()
+    }
+
+    #[cfg(target_os = "ios")]
     pub(super) fn activate_libjd(&self, _: &RimeDataDirs, _: bool) -> Result<bool, String> {
         Ok(false)
     }
@@ -48,67 +68,99 @@ impl ImeRuntime {
     #[cfg(not(target_os = "ios"))]
     pub(super) fn activate_libjd(&self, dirs: &RimeDataDirs, reload: bool) -> Result<bool, String> {
         use engine_choice::PackageEngine;
-        if !self.0.ime_host || libjd::platform().is_none() {
+        if !self.libjd_requested(&dirs.user) {
             return Ok(false);
         }
-        #[cfg(windows)]
-        if !self.0.libjd_server {
-            return Ok(false);
-        }
-        #[cfg(target_os = "android")]
-        if !android_libjd_enabled() {
-            return Ok(false);
-        }
+        let generation = self.generation();
         let key = engine_choice::active_package(&dirs.user);
-        let engine = engine_choice::read(&dirs.user, key.as_deref());
-        if engine.is_rime() {
-            return Ok(false);
-        }
+        let package_engine = engine_choice::read(&dirs.user, key.as_deref());
+        let signature = ReloadStamp::current_signature(&dirs.user);
         if !RuntimeDirs::needs_migration(&dirs.user)
             && ReloadStamp::package_key(&ReloadStamp::path(&dirs.user))
                 .is_some_and(|requested| Some(requested.as_str()) != key.as_deref())
         {
             return Err(PACKAGE_SWITCH_PENDING.into());
         }
-        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
-        if !reload && initialized.as_ref() == Some(dirs) && PROCESS_RIME.using_libjd() {
+        if !reload
+            && lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() == Some(dirs)
+            && PROCESS_RIME.using_libjd()
+        {
             return Ok(true);
         }
-        runtime_log::init_for_engine(&dirs.user);
-        let library_path = installed_library(&dirs.user, engine);
-        let page_size =
-            runtime_dirs::read_regular_file(&dirs.user.join(english_mode::SETTINGS_FILE))
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|settings| settings["candidatePageSize"].as_u64())
-                .filter(|size| (1..=10).contains(size))
-                .unwrap_or(5) as usize;
-        let backend = library_path
-            .ok_or_else(|| "verified libjd installation missing".to_string())
-            // The installation resolver requires the digest-verified publication manifest.
-            .and_then(|path| unsafe {
-                if engine == PackageEngine::LibjdEngine {
-                    let (dictionary, schema) =
-                        imported_dictionary(&dirs.user, None, key.as_deref())
-                            .ok_or("converted ime-jd dictionary is missing")?;
-                    jd_backend::JdBackend::load_dictionary(&path, &dictionary, page_size, schema)
-                } else {
-                    jd_backend::JdBackend::load_with_page_size(&path, page_size)
+        let imported = (package_engine == PackageEngine::LibjdEngine)
+            .then(|| imported_dictionary(&dirs.user, None, key.as_deref()))
+            .flatten();
+        let prepared = imported
+            .map(|(dictionary, schema)| {
+                runtime_log::init_for_engine(&dirs.user);
+                let page_size =
+                    runtime_dirs::read_regular_file(&dirs.user.join(english_mode::SETTINGS_FILE))
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .and_then(|settings| settings["candidatePageSize"].as_u64())
+                        .filter(|size| (1..=10).contains(size))
+                        .unwrap_or(jd_backend::DEFAULT_PAGE_SIZE as u64)
+                        as usize;
+                let path =
+                    libjd::bundled_engine_library().ok_or("bundled ime-jd engine is missing")?;
+                unsafe {
+                    jd_backend::JdBackend::prepare_dictionary(&path, &dictionary, page_size, schema)
                 }
-            });
-        let backend = match backend {
-            Ok(backend) => backend,
-            Err(error) => {
-                crate::rt_log!(Level::Info, "error", "libjd_fallback", msg = &error);
-                eprintln!("KeyTao: libjd could not load, falling back to Rime: {error}");
-                return Ok(false);
-            }
-        };
-
+            })
+            .transpose()?;
+        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        if self.generation() != generation {
+            return Err("Rime generation changed".into());
+        }
         let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
-        PROCESS_RIME.shutdown_for_dir_change(&mut initialized, dirs, true)?;
-        *lock_ignore_poison(&PROCESS_RIME.libjd) = Some(backend);
-        *initialized = Some(dirs.clone());
-        Ok(true)
+        if deployment_in_progress(&dirs.user) {
+            return Err("Rime deployment is busy".into());
+        }
+        if ReloadStamp::current_signature(&dirs.user) != signature
+            || engine_choice::active_package(&dirs.user) != key
+            || !self.libjd_requested(&dirs.user)
+            || engine_choice::read(&dirs.user, key.as_deref()) != package_engine
+        {
+            return Err(PACKAGE_SWITCH_PENDING.into());
+        }
+        desktop::initialized_user_dir()?;
+        let previous_dirs = initialized.clone();
+        let previous_rime = desktop::loaded_runtime();
+        let previous_jd = lock_ignore_poison(&PROCESS_RIME.libjd)
+            .as_ref()
+            .map(jd_backend::JdBackend::source);
+        if initialized.is_some() {
+            PROCESS_RIME.shutdown_for_dir_change(&mut initialized, dirs, true)?;
+        } else if previous_rime.is_some() {
+            desktop::finalize_rime()?;
+        }
+        let Some(prepared) = prepared else {
+            // Keep the host in passthrough until a converted scheme is ready.
+            return Ok(true);
+        };
+        match prepared.start() {
+            Ok(backend) => {
+                *lock_ignore_poison(&PROCESS_RIME.libjd) = Some(backend);
+                *initialized = Some(dirs.clone());
+                Ok(true)
+            }
+            Err(error) => {
+                let restore = if let Some(source) = previous_jd {
+                    source.start().map(|backend| {
+                        *lock_ignore_poison(&PROCESS_RIME.libjd) = Some(backend);
+                    })
+                } else if let Some(rime) = previous_rime {
+                    let root = previous_dirs.as_ref().map_or(&dirs.user, |dirs| &dirs.user);
+                    desktop::setup_resolved_runtime(root, &rime, DeployProcess::InProcess)
+                } else {
+                    return Err(error);
+                };
+                if let Err(restore) = restore {
+                    return Err(format!("{error}; restore previous input engine: {restore}"));
+                }
+                *initialized = previous_dirs;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -127,11 +179,15 @@ pub fn android_libjd_enabled() -> bool {
 
 #[cfg(target_os = "android")]
 pub fn android_libjd_ready(root: &Path) -> bool {
-    package_libjd_ready(root, engine_choice::active_package(root).as_deref())
+    active_libjd_schema(root).is_some()
 }
 
 pub(crate) fn package_libjd_ready(root: &Path, key: Option<&str>) -> bool {
     package_libjd_ready_in_store(root, None, key)
+}
+
+pub(crate) fn active_libjd_schema(root: &Path) -> Option<SchemaInfo> {
+    package_libjd_schema_in_store(root, None, engine_choice::active_package(root).as_deref())
 }
 
 pub(crate) fn package_libjd_ready_in_store(
@@ -139,6 +195,14 @@ pub(crate) fn package_libjd_ready_in_store(
     data_root: Option<&Path>,
     key: Option<&str>,
 ) -> bool {
+    package_libjd_schema_in_store(root, data_root, key).is_some()
+}
+
+pub(crate) fn package_libjd_schema_in_store(
+    root: &Path,
+    data_root: Option<&Path>,
+    key: Option<&str>,
+) -> Option<SchemaInfo> {
     #[cfg(any(
         target_os = "macos",
         target_os = "linux",
@@ -146,20 +210,11 @@ pub(crate) fn package_libjd_ready_in_store(
         target_os = "android"
     ))]
     {
-        use engine_choice::PackageEngine;
-        let engine = engine_choice::read(root, key);
-        let Some(platform) = engine_platform(engine) else {
-            return false;
-        };
-        let ready = |data: &Path| {
-            platform.installed_library(data).is_some()
-                && (engine != PackageEngine::LibjdEngine
-                    || key
-                        .and_then(|key| libjd::imported_dictionary(data, key))
-                        .is_some())
-        };
-        return data_root.is_some_and(ready)
-            || runtime_data_root(root).as_deref().is_some_and(ready);
+        if engine_choice::read(root, key) != engine_choice::PackageEngine::LibjdEngine {
+            return None;
+        }
+        libjd::bundled_engine_library()?;
+        imported_dictionary(root, data_root, key).map(|(_, schema)| schema)
     }
     #[cfg(not(any(
         target_os = "macos",
@@ -169,7 +224,7 @@ pub(crate) fn package_libjd_ready_in_store(
     )))]
     {
         let _ = (root, data_root, key);
-        false
+        None
     }
 }
 
@@ -191,19 +246,4 @@ fn runtime_data_root(root: &Path) -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     Some(RuntimeDirs::app_data_root(root).unwrap_or_else(|| root.to_path_buf()))
-}
-
-#[cfg(not(target_os = "ios"))]
-fn engine_platform(engine: engine_choice::PackageEngine) -> Option<libjd::LibjdPlatform> {
-    use engine_choice::PackageEngine;
-    match engine {
-        PackageEngine::Rime => None,
-        PackageEngine::Libjd => libjd::platform(),
-        PackageEngine::LibjdEngine => libjd::platform().map(libjd::LibjdPlatform::engine_only),
-    }
-}
-
-#[cfg(not(target_os = "ios"))]
-fn installed_library(root: &Path, engine: engine_choice::PackageEngine) -> Option<PathBuf> {
-    engine_platform(engine)?.installed_library(&runtime_data_root(root)?)
 }

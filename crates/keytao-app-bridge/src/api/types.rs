@@ -83,26 +83,6 @@ pub struct LibjdStatusDto {
     pub installed_version: Option<String>,
 }
 
-#[flutter_rust_bridge::frb(opaque)]
-pub struct LibjdReleaseDto(pub(crate) keytao_app_core::libjd::LibjdRelease);
-
-impl LibjdReleaseDto {
-    #[flutter_rust_bridge::frb(sync, getter)]
-    pub fn version(&self) -> String {
-        self.0.version().to_owned()
-    }
-
-    #[flutter_rust_bridge::frb(sync, getter)]
-    pub fn size(&self) -> u32 {
-        self.0.size()
-    }
-
-    #[flutter_rust_bridge::frb(sync, getter)]
-    pub fn source_url(&self) -> String {
-        self.0.source_url().to_owned()
-    }
-}
-
 #[derive(serde::Deserialize)]
 #[flutter_rust_bridge::frb]
 pub struct IsolatedPackageDto {

@@ -5,7 +5,6 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
-import '../rust/api/types.dart';
 import 'git_scheme_dialog.dart';
 import 'progress.dart';
 import 'package_orphans.dart';
@@ -18,18 +17,6 @@ import 'widgets.dart';
 
 const _homeSchemeKeys = {'keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'};
 const _homeAddonKeys = ['rime_ice', 'easy_en'];
-const _libjdImportLabel = '导入并使用';
-
-Future<void> _showLibjdNotice(
-  BuildContext context,
-  Future<String?> Function() action,
-) async {
-  final toaster = FToaster.of(context);
-  final notice = await action();
-  if (toaster.mounted && notice != null) {
-    toaster.show(builder: (_, _) => FToast(title: Text(notice)));
-  }
-}
 
 void _showAddonSchemes(BuildContext context, AppController c) {
   showFDialog<void>(
@@ -389,12 +376,17 @@ class _SchemePageState extends State<SchemePage> {
             ),
             HairlineGridCell(
               child: Section(
-                title: AppStrings.deploy,
+                title: c.prefersLibjd ? '词库转换' : AppStrings.deploy,
                 children: [
                   if (c.packageError case final error?) ErrorMessage(error),
                   if (c.schemeSyncError case final error?) ErrorMessage(error),
-                  ValueRow(AppStrings.directory, c.activeSchemeDir),
-                  if (c.localStatusLine case final status?)
+                  if (!c.prefersLibjd)
+                    ValueRow(AppStrings.directory, c.activeSchemeDir),
+                  if (c.prefersLibjd)
+                    StatusMessage(
+                      c.isUsingLibjd ? '当前方案已转换' : '下载或导入方案后自动转换',
+                    )
+                  else if (c.localStatusLine case final status?)
                     StatusMessage(
                       '$status${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
                       icon: c.local!.deployed
@@ -415,14 +407,15 @@ class _SchemePageState extends State<SchemePage> {
                           AppStrings.cancel,
                           onPress: c.cancelDownload,
                         ),
-                      ActionButton(
-                        c.isDeploying
-                            ? AppStrings.deploying
-                            : AppStrings.deploy,
-                        icon: FLucideIcons.play,
-                        tooltip: c.deployTooltip,
-                        onPress: c.canDeploy ? c.deploy : null,
-                      ),
+                      if (!c.prefersLibjd)
+                        ActionButton(
+                          c.isDeploying
+                              ? AppStrings.deploying
+                              : AppStrings.deploy,
+                          icon: FLucideIcons.play,
+                          tooltip: c.deployTooltip,
+                          onPress: c.canDeploy ? c.deploy : null,
+                        ),
                       ActionButton(
                         AppStrings.checkLocal,
                         icon: FLucideIcons.refreshCw,
@@ -435,7 +428,7 @@ class _SchemePageState extends State<SchemePage> {
                             ? null
                             : c.openActiveSchemeDirectory,
                       ),
-                      if (!c.isMobile)
+                      if (!c.isMobile && !c.prefersLibjd)
                         ActionButton(
                           AppStrings.dictManager,
                           onPress: c.canOpenDictionaryManager
@@ -452,7 +445,8 @@ class _SchemePageState extends State<SchemePage> {
                       fraction: c.installFraction,
                       message: c.progress,
                     ),
-                  if (c.deploySteps.isNotEmpty) DeploySteps(controller: c),
+                  if (!c.prefersLibjd && c.deploySteps.isNotEmpty)
+                    DeploySteps(controller: c),
                   if (c.operationLogCount > 0)
                     ActionRow(children: [OperationLogButton(controller: c)]),
                 ],
@@ -552,102 +546,7 @@ class SchemePackageRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      schemeKey == 'keytao' &&
-      controller.usesLibjd(schemeKey) &&
-      !controller.usesImportedLibjd(schemeKey)
-      ? _buildLibjd(context)
-      : _SchemeCardMenu(key: ValueKey(schemeKey), builder: _build);
-
-  Future<void> _downloadLibjd(BuildContext context, String title) {
-    Future<bool> confirm(LibjdReleaseDto release) async {
-      if (!context.mounted) return false;
-      final confirmed = await showFDialog<bool>(
-        context: context,
-        builder: (context, _, animation) => AppDialog(
-          title: title,
-          animation: animation,
-          actions: [
-            ActionButton(
-              AppStrings.cancel,
-              onPress: () => Navigator.pop(context),
-            ),
-            ActionButton(
-              AppStrings.download,
-              primary: true,
-              onPress: () => Navigator.pop(context, true),
-            ),
-          ],
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            spacing: 8,
-            children: [
-              ValueRow('版本', release.version),
-              if (release.size > 0)
-                ValueRow('大小', formatLogBytes(BigInt.from(release.size))),
-              ValueRow('来源', release.sourceUrl),
-              const ValueRow('许可证', 'GPL-3.0'),
-              const Text('会加载第三方原生代码。'),
-            ],
-          ),
-        ),
-      );
-      return confirmed == true;
-    }
-
-    return _showLibjdNotice(context, () => controller.downloadLibjd(confirm));
-  }
-
-  Widget _buildLibjd(BuildContext context) {
-    final c = controller;
-    final version = c.libjd?.installedVersion ?? AppStrings.unknownVersion;
-    return Column(
-      key: const ValueKey('scheme-package-keytao'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      spacing: 10,
-      children: [
-        Text('键道6', style: context.theme.typography.display.md),
-        Text('libjd $version'),
-        ActionRow(
-          children: [
-            if (c.activeSchemeKey != schemeKey)
-              ActionButton(
-                '使用',
-                primary: true,
-                icon: FLucideIcons.play,
-                onPress: c.busy ? null : () => c.switchPackage(schemeKey),
-              ),
-            ActionButton(
-              '更新 ime-jd',
-              onPress: c.busy
-                  ? null
-                  : () => _downloadLibjd(context, '更新 ime-jd'),
-            ),
-            ActionButton(
-              '切回 Rime',
-              onPress: c.busy
-                  ? null
-                  : () => _showLibjdNotice(context, c.revertLibjd),
-            ),
-          ],
-        ),
-        if (c.isManagingLibjd && !c.isImportingLibjd) _libjdProgress(),
-      ],
-    );
-  }
-
-  Widget _libjdProgress() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    spacing: 8,
-    children: [
-      InstallProgressView(
-        active: true,
-        progress: controller.installProgress,
-        message: controller.progress,
-      ),
-      if (controller.canCancelDownload)
-        ActionButton(AppStrings.cancel, onPress: controller.cancelDownload),
-    ],
-  );
+      _SchemeCardMenu(key: ValueKey(schemeKey), builder: _build);
 
   Widget _build(BuildContext context, FPopoverController menu) {
     final c = controller;
@@ -660,15 +559,9 @@ class SchemePackageRow extends StatelessWidget {
     final local = c.local;
     final checksCurrentPackage =
         local?.installedScheme == null || local?.installedScheme == schemeKey;
-    final imported = c.usesImportedLibjd(schemeKey);
-    final inUse = imported
-        ? c.isolatedPackages.any(
-            (entry) =>
-                entry.packageKey == schemeKey && entry.active && entry.ready,
-          )
+    final inUse = c.prefersLibjd
+        ? c.isUsingLibjd && c.activeSchemeKey == schemeKey
         : active && package!.inUse && checksCurrentPackage && c.hasUsableBuild;
-    final importToLibjd =
-        c.isUsingLibjd && package?.hasPackageZip == true && !imported && !inUse;
     if (package == null || !package.hasPackageZip) {
       unawaited(c.ensureRemoteSchemeLogo(schemeKey));
     }
@@ -698,7 +591,7 @@ class SchemePackageRow extends StatelessWidget {
     final deployFailed = failedDeploySteps.isNotEmpty;
     final needsDeploy =
         active &&
-        !imported &&
+        !c.prefersLibjd &&
         !c.isDeploying &&
         (deployFailed || (checksCurrentPackage && local?.deployed == false));
     final actions = ActionRow(
@@ -724,8 +617,6 @@ class SchemePackageRow extends StatelessWidget {
           ActionButton(
             inUse
                 ? '使用中'
-                : importToLibjd
-                ? _libjdImportLabel
                 : needsDeploy
                 ? AppStrings.deploy
                 : '使用',
@@ -734,13 +625,6 @@ class SchemePackageRow extends StatelessWidget {
             icon: inUse ? FLucideIcons.check : FLucideIcons.play,
             onPress: c.busy || inUse
                 ? null
-                : importToLibjd
-                ? () => _showLibjdNotice(
-                    context,
-                    () => c.importLibjdPackage(schemeKey),
-                  )
-                : imported
-                ? () => c.switchPackage(schemeKey)
                 : needsDeploy
                 ? () => c.deploy(schemeKey: schemeKey)
                 : onActivate ?? () => c.activateSchemePackage(schemeKey),
@@ -750,14 +634,6 @@ class SchemePackageRow extends StatelessWidget {
             '下载',
             icon: FLucideIcons.download,
             onPress: c.busy ? null : () => c.downloadSchemePackage(schemeKey),
-          ),
-        if (imported && inUse)
-          ActionButton(
-            '切回 Rime',
-            onPress: c.busy
-                ? null
-                : () =>
-                      _showLibjdNotice(context, () => c.revertLibjd(schemeKey)),
           ),
         if (changelogBody != null ||
             schemeRepositoryUrls[schemeKey] != null ||
@@ -805,7 +681,7 @@ class SchemePackageRow extends StatelessWidget {
                                 c.downloadSchemePackage(schemeKey);
                               },
                       ),
-                    if (active && !imported)
+                    if (active && !c.prefersLibjd)
                       FItem(
                         title: const Text('重新部署'),
                         prefix: const Icon(FLucideIcons.refreshCw),
@@ -816,7 +692,9 @@ class SchemePackageRow extends StatelessWidget {
                               }
                             : null,
                       ),
-                    if (deployFailed || c.packageDeployError(schemeKey) != null)
+                    if (!c.prefersLibjd &&
+                        (deployFailed ||
+                            c.packageDeployError(schemeKey) != null))
                       FItem(
                         title: Text(
                           isLocal && package.git == null
@@ -831,9 +709,13 @@ class SchemePackageRow extends StatelessWidget {
                                 c.repairSchemePackage(schemeKey);
                               },
                       ),
-                    if (!imported)
+                    if (!c.prefersLibjd || package.hasPackageZip)
                       FItem(
-                        title: const Text(AppStrings.selectSchemas),
+                        title: Text(
+                          c.prefersLibjd
+                              ? selectConversionSchemaLabel
+                              : AppStrings.selectSchemas,
+                        ),
                         prefix: const Icon(FLucideIcons.listChecks),
                         onPress: c.busy
                             ? null
@@ -843,6 +725,7 @@ class SchemePackageRow extends StatelessWidget {
                                   context,
                                   c,
                                   schemeKey,
+                                  convert: c.prefersLibjd,
                                 );
                               },
                       ),
@@ -992,7 +875,8 @@ class SchemePackageRow extends StatelessWidget {
         ),
       ),
     );
-    final state = !c.isDeploying && (deployFailed || needsDeploy)
+    final state =
+        !c.prefersLibjd && !c.isDeploying && (deployFailed || needsDeploy)
         ? AppBadge(
             deployFailed
                 ? AppStrings.deployFailed
@@ -1004,6 +888,11 @@ class SchemePackageRow extends StatelessWidget {
                 : null,
             foreground: deployFailed ? palette.error : null,
           )
+        : c.prefersLibjd &&
+              package?.hasPackageZip == true &&
+              !inUse &&
+              update == null
+        ? AppBadge(c.usesImportedLibjd(schemeKey) ? '已转换' : '待转换')
         : inUse || deployLabel != null || (package != null && update == null)
         ? null
         : StatusPill(
@@ -1161,27 +1050,6 @@ class SchemePackageRow extends StatelessWidget {
           )
         else
           actions,
-        if (schemeKey == 'keytao' &&
-            package?.hasPackageZip == true &&
-            c.libjd?.available == true &&
-            !imported &&
-            !c.isUsingLibjd) ...[
-          const SizedBox(height: 8),
-          ActionRow(
-            children: [
-              ActionButton(
-                '切换到 ime-jd 引擎',
-                onPress: c.busy
-                    ? null
-                    : () => _downloadLibjd(context, '切换到 ime-jd 引擎'),
-              ),
-            ],
-          ),
-          if (c.isManagingLibjd && !c.isImportingLibjd) ...[
-            const SizedBox(height: 8),
-            _libjdProgress(),
-          ],
-        ],
         if (installing || deploying) ...[
           const SizedBox(height: 8),
           InstallProgressView(
@@ -1460,13 +1328,11 @@ Map<String, Widget> _addonCells(
     final hasUpdate = packageKey == 'easy_en'
         ? c.addonHasUpdate
         : c.rimeIceHasUpdate;
-    final inUse =
-        isolatedPackage?.active == true &&
-        (isolatedPackage?.ready == true ||
-            (currentPackage == packageKey && c.hasUsableBuild));
-    final imported = c.usesImportedLibjd(packageKey);
-    final importToLibjd =
-        c.isUsingLibjd && !overlay && installed && !imported && !inUse;
+    final inUse = c.prefersLibjd && !overlay
+        ? c.isUsingLibjd && c.activeSchemeKey == packageKey
+        : isolatedPackage?.active == true &&
+              (isolatedPackage?.ready == true ||
+                  (currentPackage == packageKey && c.hasUsableBuild));
     final importing = c.isImportingLibjd && c.installingSchemeKey == packageKey;
     final uninstalled = !inUse && !installed && info != null;
     final deployKey = overlay && active
@@ -1573,12 +1439,17 @@ Map<String, Widget> _addonCells(
                   Flexible(child: name),
                   if (!inUse &&
                       !uninstalled &&
-                      (info == null || hasUpdate || !info.deployed))
+                      (info == null ||
+                          hasUpdate ||
+                          (!c.prefersLibjd && !info.deployed) ||
+                          (c.prefersLibjd && !overlay)))
                     StatusPill(
                       info == null
                           ? AppStrings.checking
                           : hasUpdate
                           ? '可更新'
+                          : c.prefersLibjd && !overlay
+                          ? (c.usesImportedLibjd(packageKey) ? '已转换' : '待转换')
                           : AppStrings.pendingDeploy,
                       color: hasUpdate
                           ? ChromeAccent.of(context)
@@ -1632,33 +1503,13 @@ Map<String, Widget> _addonCells(
                   ),
                 if (!overlay && (installed || deployLabel != null))
                   ActionButton(
-                    deployLabel ??
-                        (inUse
-                            ? '使用中'
-                            : importToLibjd
-                            ? _libjdImportLabel
-                            : '使用'),
+                    deployLabel ?? (inUse ? '使用中' : '使用'),
                     primary: !inUse,
                     success: inUse && deployLabel == null,
                     icon: inUse ? FLucideIcons.check : FLucideIcons.play,
                     onPress: c.busy || inUse || deployLabel != null
                         ? null
-                        : importToLibjd
-                        ? () => _showLibjdNotice(
-                            context,
-                            () => c.importLibjdPackage(packageKey),
-                          )
                         : () => c.switchPackage(packageKey),
-                  ),
-                if (imported && inUse)
-                  ActionButton(
-                    '切回 Rime',
-                    onPress: c.busy
-                        ? null
-                        : () => _showLibjdNotice(
-                            context,
-                            () => c.revertLibjd(packageKey),
-                          ),
                   ),
                 FPopoverMenu(
                   control: FPopoverControl.managed(controller: menu),
@@ -1667,7 +1518,10 @@ Map<String, Widget> _addonCells(
                   menuBuilder: (_, popover, _) => [
                     FItemGroup(
                       children: [
-                        if (!overlay && cloudCard && installed && !imported)
+                        if (!overlay &&
+                            cloudCard &&
+                            installed &&
+                            !c.prefersLibjd)
                           FItem(
                             title: const Text('重新部署'),
                             prefix: const Icon(FLucideIcons.refreshCw),
@@ -1678,9 +1532,13 @@ Map<String, Widget> _addonCells(
                                   }
                                 : null,
                           ),
-                        if (!overlay && installed && !imported)
+                        if (!overlay && installed)
                           FItem(
-                            title: const Text(AppStrings.selectSchemas),
+                            title: Text(
+                              c.prefersLibjd
+                                  ? selectConversionSchemaLabel
+                                  : AppStrings.selectSchemas,
+                            ),
                             prefix: const Icon(FLucideIcons.listChecks),
                             enabled: !c.busy,
                             onPress: c.busy
@@ -1691,6 +1549,7 @@ Map<String, Widget> _addonCells(
                                       context,
                                       c,
                                       packageKey,
+                                      convert: c.prefersLibjd,
                                     );
                                   },
                           ),

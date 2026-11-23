@@ -23,20 +23,10 @@ object KeytaoNativeBridge {
     }.getOrDefault(false)
 
     fun configureLibjd(dataDir: String) {
-        if (loaded) nativeConfigureLibjd(dataDir, BuildConfig.GOOGLE_PLAY_DISTRIBUTION)
+        if (loaded) nativeConfigureLibjd(dataDir)
     }
 
-    @JvmStatic
-    @androidx.annotation.Keep
-    fun loadLibjdLibrary(path: String): Boolean {
-        if (BuildConfig.GOOGLE_PLAY_DISTRIBUTION) return false
-        return runCatching {
-            System.load(path)
-            true
-        }.getOrDefault(false)
-    }
-
-    private external fun nativeConfigureLibjd(dataDir: String, googlePlayDistribution: Boolean)
+    private external fun nativeConfigureLibjd(dataDir: String)
 
     inline fun rtLog(
         level: Int,

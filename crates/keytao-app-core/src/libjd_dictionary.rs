@@ -97,6 +97,7 @@ pub(crate) fn convert(
     core: &Core,
     root: &Path,
     package: &str,
+    schema_id: Option<&str>,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<ConvertedDictionary, CoreError> {
     if package == crate::addon::EASY_EN_ADDON_ID {
@@ -156,28 +157,17 @@ pub(crate) fn convert(
     }
     let schemas =
         crate::package_schemas::enumerate(package, &configs, meta.selected_schemas.as_deref())?;
-    let current = runtime_source(&runtime, ".keytao-current-schema")?
-        .map(|source| source.config())
-        .transpose()?
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .map(|id| id.trim().to_owned());
-    let previous = runtime_yaml(&runtime, "user.yaml")?.and_then(|value| {
-        value["var"]["previously_selected_schema"]
-            .as_str()
-            .map(str::to_owned)
-    });
-    let schema = current
-        .iter()
-        .chain(previous.iter())
-        .chain(meta.selected_schemas.iter().flatten())
-        .find_map(|id| {
-            schemas
-                .iter()
-                .find(|schema| schema.selected && &schema.id == id)
-        })
-        .or_else(|| schemas.iter().find(|schema| schema.selected))
-        .or_else(|| schemas.first())
-        .ok_or_else(|| CoreError::Other("Rime 方案没有可导入的配置".into()))?;
+    let schema = match schema_id {
+        Some(id) => schemas
+            .iter()
+            .find(|schema| schema.id == id)
+            .ok_or_else(|| CoreError::Other(format!("找不到 Rime 子方案：{id}")))?,
+        None => schemas
+            .iter()
+            .find(|schema| schema.selected)
+            .or_else(|| schemas.first())
+            .ok_or_else(|| CoreError::Other("Rime 方案没有可导入的配置".into()))?,
+    };
     let id = &schema.id;
     let filename = format!("{id}.schema.yaml");
     let (_, bytes) = configs
@@ -185,9 +175,10 @@ pub(crate) fn convert(
         .find(|(name, _)| name == &filename)
         .ok_or_else(|| CoreError::Other(format!("缺少 Rime 方案配置：{filename}")))?;
     let config = yaml(bytes, &filename)?;
-    let name = config["schema"]["name"].as_str().unwrap_or(id);
+    let name = config["schema"]["name"].as_str().unwrap_or(&schema.name);
     let shared = crate::deploy::deploy_shared_data_dir(core, root);
     let compiled = RuntimeDirs::for_package_in_store(root, &shared, &core.env().data_dir, package)
+        .filter(|dirs| keytao_core::isolated_deploy::rime_package_build_ready(root, dirs))
         .and_then(|dirs| {
             dirs.staging_dir
                 .strip_prefix(&runtime)
@@ -345,19 +336,29 @@ fn collect_tables<'a>(
 
 fn read_header(mut input: impl BufRead, name: &str) -> Result<(Value, u64), CoreError> {
     let mut header = Vec::new();
+    let mut line = Vec::new();
+    let mut data_offset = 0;
     loop {
-        let offset = header.len();
+        line.clear();
         let read = (&mut input)
-            .take(MAX_CONFIG_BYTES + 1 - offset as u64)
-            .read_until(b'\n', &mut header)?;
-        if header.len() as u64 > MAX_CONFIG_BYTES {
+            .take(MAX_CONFIG_BYTES + 1 - data_offset)
+            .read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        data_offset += read as u64;
+        if data_offset > MAX_CONFIG_BYTES {
             return Err(CoreError::Other(format!("Rime 词库表头过大：{name}")));
         }
-        if read == 0 || header[offset..].trim_ascii() == b"..." {
+        // Match librime's header trimming without changing the TSV byte offset.
+        let content = line.trim_ascii_end();
+        header.extend_from_slice(content);
+        header.push(b'\n');
+        if content.trim_ascii_start() == b"..." {
             break;
         }
     }
-    Ok((yaml(&header, name)?, header.len() as u64))
+    Ok((yaml(&header, name)?, data_offset))
 }
 
 fn dictionary_columns(config: &Value, name: &str) -> Result<(usize, Option<usize>), CoreError> {
@@ -487,13 +488,15 @@ mod tests {
         let root = temp.path();
         let core = core(root);
         let files: Vec<_> = [
-            ("default.yaml", "schema_list: [{schema: other}, {schema: main}]\n"),
-            ("other.schema.yaml", "schema: {schema_id: other}\n"),
+            ("default.yaml", "schema_list: [{schema: main}, {schema: other}]\n"),
+            ("default.custom.yaml", "patch: {schema_list: [{schema: other}, {schema: main}]}\n"),
+            ("other.schema.yaml", "schema: {schema_id: other, name: 另一方案}\ntranslator: {dictionary: other}\n"),
+            ("other.dict.yaml", "name: other\n...\n另\tbc\n"),
             ("main.schema.yaml", "schema: {schema_id: main, name: 测试}\ntranslator: {dictionary: main}\n"),
             ("main.dict.yaml", "---\nname: main\ncolumns: [code, text, weight]\nimport_tables: [dicts/first, dicts/last, main.user]\n...\r\nab\t主\t50\r\nabcdefgh\t长\t0\r\n"),
             ("dicts/first.dict.yaml", "name: first\nimport_tables: [dicts/shared]\n...\n一\tab\n"),
             ("dicts/shared.dict.yaml", "name: shared\n...\n共享\tab\n拼音\tni hao\n"),
-            ("dicts/last.dict.yaml", "name: last\nimport_tables: [dicts/shared]\n...\n末\t;;a\n"),
+            ("dicts/last.dict.yaml", "# Dictionary\t\r\n\t\r\n---\t\r\nname: last\t\r\ncolumns: [code, text]\t\r\nimport_tables: [dicts/shared]\t# Shared entries\r\n...\t\r\n;;a\t末\r\n"),
             ("main.user.dict.yaml", "name: main.user\n...\n旧\tab\n"),
         ].into_iter().map(|(name, content)| (name.into(), content.as_bytes().to_vec())).collect();
         let archive = packages::archive_from_files(&files).unwrap();
@@ -509,6 +512,7 @@ mod tests {
         .unwrap();
         let runtime = root.join("runtime/keytao");
         fs::create_dir_all(&runtime).unwrap();
+        fs::write(runtime.join(".keytao-current-schema"), "main\n").unwrap();
         fs::write(
             runtime.join("user.yaml"),
             "var: {previously_selected_schema: main}\n",
@@ -520,8 +524,27 @@ mod tests {
         )
         .unwrap();
 
+        let shared = crate::deploy::deploy_shared_data_dir(&core, root);
+        let dirs = RuntimeDirs::for_package_in_store(root, &shared, &core.env().data_dir, "keytao")
+            .unwrap();
+        fs::create_dir_all(&dirs.staging_dir).unwrap();
+        fs::write(
+            dirs.staging_dir.join("main.schema.yaml"),
+            "translator: {dictionary: obsolete}\n",
+        )
+        .unwrap();
+
+        let default = convert(&core, root, "keytao", None, |_, _| {}).unwrap();
+        assert_eq!(default.schema_id, "other");
+        assert_eq!(default.schema_name, "另一方案");
+        assert_eq!(default.text, "另\tbc\n".as_bytes());
+
+        crate::package_schemas::set_package_schemas(&core, "keytao", &["other".into()]).unwrap();
         let mut progress = Vec::new();
-        let result = convert(&core, root, "keytao", |i, n| progress.push((i, n))).unwrap();
+        let result = convert(&core, root, "keytao", Some("main"), |i, n| {
+            progress.push((i, n));
+        })
+        .unwrap();
         assert_eq!(result.schema_id, "main");
         assert_eq!(result.schema_name, "测试");
         assert_eq!(
@@ -530,6 +553,16 @@ mod tests {
         );
         assert_eq!(result.skipped, 2);
         assert_eq!(progress, [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
+        let error = convert(
+            &core,
+            root,
+            "keytao",
+            Some("missing"),
+            |_, _| unreachable!(),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("找不到 Rime 子方案：missing"));
     }
 
     #[test]
@@ -568,7 +601,10 @@ mod tests {
             .unwrap();
 
         let mut progress = Vec::new();
-        let result = convert(&core, root, "rime_ice", |i, n| progress.push((i, n))).unwrap();
+        let result = convert(&core, root, "rime_ice", Some("rime_ice"), |i, n| {
+            progress.push((i, n))
+        })
+        .unwrap();
         assert_eq!(result.schema_id, "rime_ice");
         assert_eq!(result.text, "冰\tbing\n".as_bytes());
         assert_eq!(progress, [(1, 1)]);

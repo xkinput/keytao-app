@@ -31,9 +31,12 @@ def check_layout(root):
                  'runtime/default-theme.yaml', 'runtime/rime-data/default.yaml',
                  'runtime/rime-data/key_bindings.yaml', 'runtime/rime-data/punctuation.yaml',
                  'runtime/rime-data/symbols.yaml', 'runtime/rime-data/essay.txt',
-                 'runtime/lib/librime.so.1'):
+                 'runtime/lib/librime.so.1', 'runtime/lib/libjd-engine.so',
+                 'runtime/libjd-engine-LICENSE.txt', 'runtime/libjd-engine-SOURCE.txt'):
         assert (app / name).is_file(), name
-    assert {path.name for path in (app / 'runtime/lib').iterdir()} == {'librime.so.1'}, 'Rime runtime libraries'
+    assert {path.name for path in (app / 'runtime/lib').iterdir()} == {
+        'librime.so.1', 'libjd-engine.so',
+    }, 'Bundled runtime libraries'
     assert any((app / 'data/flutter_assets').iterdir()), 'Flutter assets'
     assert any((app / 'runtime/rime-data/opencc').iterdir()), 'OpenCC data'
     assert (app / 'rime-data').is_symlink()
@@ -104,7 +107,8 @@ def fixtures():
         for name in ('default-theme.yaml', 'rime-data/default.yaml', 'rime-data/key_bindings.yaml',
                      'rime-data/punctuation.yaml', 'rime-data/symbols.yaml', 'rime-data/essay.txt',
                      'rime-data/opencc/test.json',
-                     'lib/librime.so.1'):
+                     'lib/librime.so.1', 'lib/libjd-engine.so',
+                     'libjd-engine-LICENSE.txt', 'libjd-engine-SOURCE.txt'):
             path = runtime / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture\n')

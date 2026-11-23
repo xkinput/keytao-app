@@ -239,6 +239,10 @@ fn package_build_ready_in_store(
     ) {
         return true;
     }
+    rime_package_build_ready(control_root, dirs)
+}
+
+pub fn rime_package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
     has_published_package_build(dirs) && package_receipt_matches(control_root, dirs)
 }
 
@@ -250,7 +254,7 @@ pub(crate) fn has_published_package_build(dirs: &RuntimeDirs) -> bool {
 
 /// The IME can select a committed build. Only the app can prepare an unready package.
 pub fn switch_ready_package(control_root: &Path, shared: &Path, key: &str) -> Result<(), String> {
-    switch_package(control_root, shared, None, key, None, true)
+    switch_package(control_root, shared, None, key, None, true, false)
 }
 
 pub fn switch_ready_package_with_schema(
@@ -259,7 +263,7 @@ pub fn switch_ready_package_with_schema(
     key: &str,
     schema_id: Option<&str>,
 ) -> Result<(), String> {
-    switch_package(control_root, shared, None, key, schema_id, true)
+    switch_package(control_root, shared, None, key, schema_id, true, false)
 }
 
 pub fn switch_ready_package_in_store(
@@ -269,7 +273,7 @@ pub fn switch_ready_package_in_store(
     key: &str,
     schema_id: Option<&str>,
 ) -> Result<(), String> {
-    switch_package(control_root, shared, data_root, key, schema_id, true)
+    switch_package(control_root, shared, data_root, key, schema_id, true, false)
 }
 
 pub(crate) fn try_switch_ready_package_with_schema(
@@ -277,11 +281,10 @@ pub(crate) fn try_switch_ready_package_with_schema(
     shared: &Path,
     key: &str,
     schema_id: Option<&str>,
+    libjd_only: bool,
 ) -> Result<(), String> {
-    switch_package(control_root, shared, None, key, schema_id, false)
+    switch_package(control_root, shared, None, key, schema_id, false, libjd_only)
 }
-
-pub const LIBJD_SWITCH_BACK_HINT: &str = "请先切换回 Rime 才能使用";
 
 fn switch_package(
     control_root: &Path,
@@ -290,21 +293,11 @@ fn switch_package(
     key: &str,
     schema_id: Option<&str>,
     wait: bool,
+    libjd_only: bool,
 ) -> Result<(), String> {
     let not_ready = || "请在键道 App 部署此方案包".to_owned();
     if RuntimeDirs::needs_migration(control_root) {
         return Err(not_ready());
-    }
-    let libjd_ready =
-        crate::runtime_libjd::package_libjd_ready_in_store(control_root, data_root, Some(key));
-    if key != crate::engine_choice::PACKAGE_KEY && !libjd_ready
-        && crate::runtime_libjd::package_libjd_ready_in_store(
-            control_root,
-            data_root,
-            RuntimeDirs::active_package_key(control_root).as_deref(),
-        )
-    {
-        return Err(LIBJD_SWITCH_BACK_HINT.into());
     }
     let resolve = || {
         data_root
@@ -312,6 +305,12 @@ fn switch_package(
             .or_else(|| RuntimeDirs::for_package(control_root, shared, key))
             .ok_or_else(not_ready)
     };
+    let _deploy = deploy_lock(control_root, wait)?;
+    let libjd_ready =
+        crate::runtime_libjd::package_libjd_ready_in_store(control_root, data_root, Some(key));
+    if libjd_only && !libjd_ready {
+        return Err("请在键道 App 转换此方案的词库".into());
+    }
     let dirs = resolve()?;
     if !dirs.user_data_dir.is_dir() {
         if libjd_ready {
@@ -320,11 +319,26 @@ fn switch_package(
             return Err(not_ready());
         }
     }
-    let _deploy = deploy_lock(control_root, wait)?;
     let _materialize = lock(&dirs.user_data_dir.join(MATERIALIZE_LOCK), wait)?;
     let dirs = resolve()?;
     if !package_build_ready_in_store(control_root, data_root, &dirs) {
         return Err(not_ready());
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "android"
+    ))]
+    if libjd_only {
+        use crate::jd_backend::{JdBackend, DEFAULT_PAGE_SIZE};
+
+        let (dictionary, schema) =
+            crate::runtime_libjd::imported_dictionary(control_root, data_root, Some(key))
+                .ok_or("请在键道 App 转换此方案的词库")?;
+        let library = crate::libjd::bundled_engine_library().ok_or("找不到内置 ime-jd 引擎")?;
+        // Validation opens no context, so the current engine can keep serving keys.
+        unsafe { JdBackend::prepare_dictionary(&library, &dictionary, DEFAULT_PAGE_SIZE, schema) }?;
     }
     if !libjd_ready {
         if let Some(schema_id) = schema_id.filter(|id| !id.is_empty()) {
@@ -1083,6 +1097,56 @@ fn walk_files(
 #[cfg(all(test, not(target_os = "ios")))]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    #[ignore = "requires the bundled ime-jd engine beside the test executable"]
+    fn invalid_libjd_dictionary_preserves_active_package_and_reload_stamp() {
+        let fixture = crate::preview::PreviewDirectory::create().unwrap();
+        let root = fixture.path();
+        let store = crate::package_store::root(root);
+        fs::create_dir_all(store.join("cloud/converted/files")).unwrap();
+        let active = store.join("active-manifest.json");
+        let previous = br#"{"active_package":"previous"}"#;
+        fs::write(&active, previous).unwrap();
+        let stamp = crate::ReloadStamp::write_package(root, "previous").unwrap();
+        let previous_stamp = fs::read(&stamp).unwrap();
+        fs::write(
+            root.join(crate::english_mode::SETTINGS_FILE),
+            br#"{"engine":"libjd_engine","engines":{"converted":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        let dictionary = crate::libjd::dictionary_directory(root, "converted").unwrap();
+        fs::create_dir_all(&dictionary).unwrap();
+        fs::write(
+            dictionary.join("schema.json"),
+            br#"{"id":"converted","name":"Converted"}"#,
+        )
+        .unwrap();
+        let blob = dictionary.join("dictionary.bin");
+        fs::write(&blob, b"invalid ime-jd dictionary").unwrap();
+
+        let error =
+            try_switch_ready_package_with_schema(root, root, "converted", None, true).unwrap_err();
+        assert!(error.contains("invalid ime-jd dictionary"), "{error}");
+        assert_eq!(fs::read(&active).unwrap(), previous);
+        assert_eq!(fs::read(&stamp).unwrap(), previous_stamp);
+
+        let library = crate::libjd::bundled_engine_library().unwrap();
+        unsafe {
+            crate::jd_backend::JdBackend::build_dictionary(&library, b"converted\ta\n", &blob)
+        }
+        .unwrap();
+        try_switch_ready_package_with_schema(root, root, "converted", None, true).unwrap();
+        assert_eq!(
+            RuntimeDirs::active_package_key(root).as_deref(),
+            Some("converted")
+        );
+        assert_eq!(
+            crate::ReloadStamp::package_key(&stamp).as_deref(),
+            Some("converted")
+        );
+    }
 
     #[test]
     fn windows_swaps_build_generations_for_inactive_packages_too() {

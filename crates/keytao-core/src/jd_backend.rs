@@ -62,6 +62,7 @@ struct DictionaryApi {
         *mut usize,
         *mut c_void,
     ) -> c_uint,
+    check: unsafe extern "C" fn(*const c_void, usize, *mut c_void) -> c_uint,
     embedded: bool,
 }
 
@@ -158,19 +159,21 @@ struct JdLibrary {
     _library: Option<Library>,
 }
 
-#[cfg(target_os = "android")]
-type AndroidLoader = fn(&Path) -> Result<(), String>;
-
-#[cfg(target_os = "android")]
-static ANDROID_LIBRARY_LOADER: std::sync::OnceLock<AndroidLoader> = std::sync::OnceLock::new();
-
-#[cfg(target_os = "android")]
-pub fn set_android_library_loader(loader: AndroidLoader) {
-    let _ = ANDROID_LIBRARY_LOADER.set(loader);
-}
-
 pub struct JdBackend {
     session: Mutex<Session>,
+}
+
+pub(super) struct PreparedJd {
+    library: Arc<JdLibrary>,
+    dictionary: Option<Arc<DictionaryBlob>>,
+    schema: SchemaInfo,
+    page_size: usize,
+}
+
+impl PreparedJd {
+    pub(super) fn start(self) -> Result<JdBackend, String> {
+        JdBackend::from_library(self.library, self.page_size, self.dictionary, self.schema)
+    }
 }
 
 impl JdBackend {
@@ -195,13 +198,36 @@ impl JdBackend {
         page_size: usize,
         schema: SchemaInfo,
     ) -> Result<Self, String> {
+        unsafe { Self::prepare_dictionary(path, dictionary, page_size, schema) }?.start()
+    }
+
+    /// Validate without creating an engine context so a live Rime engine can
+    /// keep serving keys while the incoming dictionary is checked.
+    pub(super) unsafe fn prepare_dictionary(
+        path: &Path,
+        dictionary: &Path,
+        page_size: usize,
+        schema: SchemaInfo,
+    ) -> Result<PreparedJd, String> {
         let library = unsafe { Self::load_library(path) }?;
-        Self::from_library(
+        let api = library
+            .api
+            .dictionary
+            .as_ref()
+            .ok_or("ime-jd does not support custom dictionaries")?;
+        let dictionary = DictionaryBlob::read(dictionary)?;
+        let status = unsafe {
+            (api.check)(dictionary.words.as_ptr().cast(), dictionary.len, ptr::null_mut())
+        };
+        if status != 0 {
+            return Err(format!("invalid ime-jd dictionary (status {status})"));
+        }
+        Ok(PreparedJd {
             library,
-            page_size,
-            Some(Arc::new(DictionaryBlob::read(dictionary)?)),
+            dictionary: Some(Arc::new(dictionary)),
             schema,
-        )
+            page_size,
+        })
     }
 
     /// # Safety
@@ -273,11 +299,7 @@ impl JdBackend {
         if !path.is_absolute() {
             return Err("libjd library path must be absolute".into());
         }
-        #[cfg(target_os = "android")]
-        ANDROID_LIBRARY_LOADER
-            .get()
-            .ok_or("libjd Android library loader is unavailable")?(path)?;
-        // The caller supplies the exact path of the verified release library.
+        // The caller supplies the exact path of the trusted package library.
         #[cfg(target_os = "windows")]
         let library: Result<Library, _> = unsafe {
             use libloading::os::windows::{
@@ -303,6 +325,7 @@ impl JdBackend {
                 16_777_215 if layout(14) == 1023 && layout(5) == 32 => Some(DictionaryApi {
                     bound: *library.get(b"jd_dict_blob_bound\0").map_err(symbol_error)?,
                     build: *library.get(b"jd_dict_build\0").map_err(symbol_error)?,
+                    check: *library.get(b"jd_dict_check\0").map_err(symbol_error)?,
                     embedded: layout(16) != 0,
                 }),
                 _ => return Err("unrecognized libjd dictionary ABI".into()),
@@ -370,14 +393,37 @@ impl JdBackend {
         })
     }
 
+    /// Generate the same sample as the Rime preview in a disposable context.
+    pub fn preview_candidates(self) -> crate::CandidatePreview {
+        let page_size = lock_ignore_poison(&self.session).page_size as u8;
+        let candidates = self
+            .process_key_result(u32::from(b'f'), 0)
+            .state
+            .candidates
+            .into_iter()
+            .map(|candidate| crate::PreviewCandidate {
+                text: candidate.text,
+                comment: candidate.comment.unwrap_or_default(),
+            })
+            .collect();
+        crate::CandidatePreview {
+            candidates,
+            page_size,
+        }
+    }
+
     pub fn new_session(&self) -> Result<Self, String> {
+        self.source().start()
+    }
+
+    pub(super) fn source(&self) -> PreparedJd {
         let source = lock_ignore_poison(&self.session);
-        Self::from_library(
-            Arc::clone(&source.library),
-            source.page_size,
-            source.dictionary.clone(),
-            source.schema.clone(),
-        )
+        PreparedJd {
+            library: Arc::clone(&source.library),
+            dictionary: source.dictionary.clone(),
+            schema: source.schema.clone(),
+            page_size: source.page_size,
+        }
     }
 
     pub fn abi_layout(&self) -> JdAbiLayout {
@@ -948,7 +994,7 @@ mod tests {
         let previous = *state;
         *state = EMPTY;
         match key as u8 {
-            b'a' => state.options_count = VALUES.len() as c_uint,
+            b'a' | b'f' => state.options_count = VALUES.len() as c_uint,
             b'b' => {
                 state.options_count = 3;
                 if previous.options_count != 0 {
@@ -1039,6 +1085,16 @@ mod tests {
         let error = JdBackend::from_api(api, None, 2).err().unwrap();
         assert!(error.contains("ABI mismatch"));
         assert!(!INITIALIZED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn preview_samples_the_active_dictionary_and_respects_page_size() {
+        let backend = JdBackend::from_api(fake_api(), None, 2).unwrap();
+        let preview = backend.preview_candidates();
+        assert_eq!(preview.page_size, 2);
+        assert_eq!(preview.candidates.len(), 2);
+        assert_eq!(preview.candidates[0].text, "甲");
+        assert_eq!(preview.candidates[0].comment, "x");
     }
 
     #[test]

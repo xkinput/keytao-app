@@ -22,21 +22,27 @@ mod handshake;
 mod pipe_io;
 
 #[cfg(any(windows, test))]
-fn is_staged_libjd(root: &std::path::Path, path: &std::path::Path) -> bool {
-    let Ok(relative) = path.strip_prefix(root) else {
+fn is_staged_libjd_dictionary(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root.join("dictionaries")) else {
         return false;
     };
     let mut parts = relative.iter();
-    let valid_tag = parts
+    let valid_key = parts
         .next()
-        .and_then(|tag| tag.to_str())
-        .is_some_and(keytao_core::libjd::valid_tag);
+        .and_then(|key| key.to_str())
+        .is_some_and(|key| {
+            !key.is_empty()
+                && key.len() <= 128
+                && key.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+                })
+        });
     let valid_stage = parts
         .next()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix(".libjd-"))
         .is_some_and(|suffix| !suffix.is_empty());
-    valid_tag && valid_stage && parts.eq([std::ffi::OsStr::new("libjd.dll")])
+    valid_key && valid_stage && parts.eq([std::ffi::OsStr::new("dictionary.txt")])
 }
 
 #[cfg(windows)]
@@ -47,16 +53,14 @@ fn main() {
     let mut args = std::env::args_os().skip(1);
     if args.next().is_some_and(|arg| arg == LIBJD_CHECK_SUBCOMMAND) {
         let result = (|| -> Result<(), String> {
-            let path = std::path::PathBuf::from(args.next().ok_or("missing ime-jd path")?);
-            let next = args.next();
-            let build = next.as_deref() == Some(std::ffi::OsStr::new("--build-dictionary"));
-            let deploy = if build { args.next() } else { next };
-            if deploy.as_deref() != Some(std::ffi::OsStr::new(DEPLOY_SUBCOMMAND))
+            let path = std::path::PathBuf::from(args.next().ok_or("missing ime-jd dictionary path")?);
+            if args.next().as_deref() != Some(std::ffi::OsStr::new("--build-dictionary"))
+                || args.next().as_deref() != Some(std::ffi::OsStr::new(DEPLOY_SUBCOMMAND))
                 || args.next().is_some()
                 || !path.is_absolute()
                 || !std::fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file())
             {
-                return Err("invalid ime-jd validation arguments".into());
+                return Err("invalid ime-jd dictionary build arguments".into());
             }
             let data = std::env::var_os("LOCALAPPDATA")
                 .map(std::path::PathBuf::from)
@@ -67,38 +71,28 @@ fn main() {
                 .ok_or("invalid ime-jd installation root")?;
             let path = path
                 .canonicalize()
-                .map_err(|error| format!("resolve ime-jd library: {error}"))?;
-            if !is_staged_libjd(&root, &path) {
-                return Err("invalid ime-jd staging library".into());
+                .map_err(|error| format!("resolve ime-jd dictionary source: {error}"))?;
+            if !is_staged_libjd_dictionary(&root, &path) {
+                return Err("invalid ime-jd staging dictionary".into());
             }
-            // The app passes a staging library only after checking the release digest.
-            if build {
-                use std::io::Read;
-                let input = path.with_file_name("dictionary.txt");
-                let metadata =
-                    std::fs::symlink_metadata(&input).map_err(|error| error.to_string())?;
-                const MAX_TEXT: u64 = keytao_core::libjd::MAX_DICTIONARY_TEXT_BYTES as u64;
-                if !metadata.is_file() || metadata.len() > MAX_TEXT {
-                    return Err("invalid ime-jd dictionary source".into());
-                }
-                let mut text = Vec::new();
-                std::fs::File::open(&input)
-                    .and_then(|file| file.take(MAX_TEXT + 1).read_to_end(&mut text))
-                    .map_err(|error| error.to_string())?;
-                if text.len() as u64 > MAX_TEXT {
-                    return Err("ime-jd dictionary source is too large".into());
-                }
-                unsafe {
-                    keytao_core::jd_backend::JdBackend::build_dictionary(
-                        &path,
-                        &text,
-                        &path.with_file_name("dictionary.bin"),
-                    )
-                }?;
-            } else {
-                unsafe { keytao_core::jd_backend::JdBackend::validate_library(&path) }?;
+            use std::io::Read;
+            const MAX_TEXT: u64 = keytao_core::libjd::MAX_DICTIONARY_TEXT_BYTES as u64;
+            let mut text = Vec::new();
+            std::fs::File::open(&path)
+                .and_then(|file| file.take(MAX_TEXT + 1).read_to_end(&mut text))
+                .map_err(|error| error.to_string())?;
+            if text.len() as u64 > MAX_TEXT {
+                return Err("ime-jd dictionary source is too large".into());
             }
-            Ok(())
+            let engine = keytao_core::libjd::bundled_engine_library()
+                .ok_or("bundled ime-jd engine is missing")?;
+            unsafe {
+                keytao_core::jd_backend::JdBackend::build_dictionary(
+                    &engine,
+                    &text,
+                    &path.with_file_name("dictionary.bin"),
+                )
+            }
         })();
         let ok = result.is_ok();
         println!("{}", serde_json::json!({"ok": ok, "error": result.err()}));
@@ -153,21 +147,21 @@ mod engine_status;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn libjd_validation_accepts_only_a_versioned_staging_library() {
+    fn libjd_build_accepts_only_staged_dictionary_text() {
         use std::path::Path;
 
         let root = Path::new("engines/libjd");
-        let staged = "v0.13.0/.libjd-123456/libjd.dll";
-        assert!(super::is_staged_libjd(root, &root.join(staged)));
-        assert!(!super::is_staged_libjd(root, Path::new(staged)));
+        let staged = "dictionaries/xmjd-feiding/.libjd-123456/dictionary.txt";
+        assert!(super::is_staged_libjd_dictionary(root, &root.join(staged)));
+        assert!(!super::is_staged_libjd_dictionary(root, Path::new(staged)));
         for invalid in [
             "latest/.libjd-123456/libjd.dll",
-            "v0.13.0/windows-x86_64/libjd.dll",
-            "v0.13.0/.libjd-/libjd.dll",
-            "v0.13.0/.libjd-123456/other.dll",
-            "v0.13.0/.libjd-123456/nested/libjd.dll",
+            "dictionaries/xmjd/.libjd-123456/libjd.dll",
+            "dictionaries/xmjd/.libjd-/dictionary.txt",
+            "dictionaries/xmjd/.libjd-123456/nested/dictionary.txt",
+            "dictionaries/../.libjd-123456/dictionary.txt",
         ] {
-            assert!(!super::is_staged_libjd(root, &root.join(invalid)));
+            assert!(!super::is_staged_libjd_dictionary(root, &root.join(invalid)));
         }
     }
 

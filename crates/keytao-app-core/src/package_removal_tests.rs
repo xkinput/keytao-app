@@ -64,6 +64,67 @@ async fn removing_last_active_package_clears_marker_fallback_and_backs_up_learni
     assert!(host.core.state().installed_packages.is_empty());
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires bundled ime-jd engine"]
+async fn removing_active_ime_jd_packages_skips_unconverted_fallbacks() {
+    let (_directory, host) = fixture();
+    let root = &host.root;
+    for key in ["txjx", "xmjd"] {
+        let archive = archive_from_files(&[(
+            format!("{key}.schema.yaml"),
+            format!("schema: {{schema_id: {key}}}\n").into_bytes(),
+        )])
+        .unwrap();
+        store_cloud_archive(
+            &host.core,
+            key,
+            Some("v1"),
+            "official",
+            None,
+            &archive,
+            root,
+        )
+        .unwrap();
+    }
+    let library = keytao_core::libjd::bundled_engine_library().unwrap();
+    let dictionary =
+        keytao_core::libjd::dictionary_directory(&host.core.env().data_dir, "xmjd").unwrap();
+    fs::create_dir_all(&dictionary).unwrap();
+    unsafe {
+        keytao_core::jd_backend::JdBackend::build_dictionary(
+            &library,
+            "测试词\ta\n".as_bytes(),
+            &dictionary.join("dictionary.bin"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        dictionary.join("schema.json"),
+        br#"{"id":"xmjd","name":"Fixture"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join(keytao_core::english_mode::SETTINGS_FILE),
+        br#"{"engine":"libjd_engine","engines":{"keytao":"libjd_engine","xmjd":"libjd_engine"}}"#,
+    )
+    .unwrap();
+
+    remove_scheme_package(&host.core, "keytao", &host)
+        .await
+        .unwrap();
+    assert_eq!(
+        RuntimeDirs::active_package_key(root).as_deref(),
+        Some("xmjd")
+    );
+
+    remove_scheme_package(&host.core, "xmjd", &host)
+        .await
+        .unwrap();
+    assert!(RuntimeDirs::active_package_key(root).is_none());
+    assert!(host.core.state().installed_packages.contains_key("txjx"));
+}
+
 #[tokio::test]
 async fn removing_local_scheme_never_retains_or_backs_up_modified_files() {
     let (_directory, host) = fixture();

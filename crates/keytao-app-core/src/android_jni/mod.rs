@@ -28,57 +28,17 @@ fn optional_jni_path(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<PathBuf
 }
 
 #[cfg(target_os = "android")]
-static LIBJD_JAVA: std::sync::OnceLock<(jni::JavaVM, jni::objects::GlobalRef)> =
-    std::sync::OnceLock::new();
-
-#[cfg(target_os = "android")]
-fn android_load_libjd(path: &Path) -> Result<(), String> {
-    let (vm, class) = LIBJD_JAVA.get().ok_or("ime-jd Java loader is unavailable")?;
-    let mut env = vm.attach_current_thread().map_err(|error| error.to_string())?;
-    let path = path.to_str().ok_or("invalid ime-jd library path")?;
-    let class: &jni::objects::JClass<'_> = class.as_obj().into();
-    let result = env.with_local_frame(8, |env| {
-        let path = JObject::from(env.new_string(path)?);
-        env.call_static_method(
-            class,
-            "loadLibjdLibrary",
-            "(Ljava/lang/String;)Z",
-            &[jni::objects::JValue::Object(&path)],
-        )?
-        .z()
-    });
-    match result {
-        Ok(true) => Ok(()),
-        _ => {
-            let _ = env.exception_clear();
-            Err("Android System.load could not load ime-jd".into())
-        }
-    }
-}
-
-#[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeConfigureLibjd(
     mut env: JNIEnv<'_>,
-    receiver: JObject<'_>,
+    _receiver: JObject<'_>,
     data_dir: JString<'_>,
-    google_play_distribution: jboolean,
 ) {
     android_jni_guard("nativeConfigureLibjd", (), || {
-        if google_play_distribution != 0 || keytao_core::libjd::platform().is_none() {
-            return;
-        }
         let Some(data_dir) = optional_jni_path(&mut env, data_dir).filter(|path| path.is_absolute())
         else {
             return;
         };
-        if LIBJD_JAVA.get().is_none() {
-            let Ok(vm) = env.get_java_vm() else { return };
-            let Ok(class) = env.get_object_class(receiver) else { return };
-            let Ok(class) = env.new_global_ref(class) else { return };
-            let _ = LIBJD_JAVA.set((vm, class));
-        }
-        keytao_core::jd_backend::set_android_library_loader(android_load_libjd);
         keytao_core::set_android_libjd_data_root(data_dir);
     });
 }

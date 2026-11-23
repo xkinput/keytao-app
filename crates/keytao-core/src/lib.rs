@@ -4862,13 +4862,10 @@ fn with_schema_switch_config<T>(
     target_os = "ios"
 ))]
 pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>, String> {
-    let dirs = RuntimeDirs::resolve(user_dir, user_dir)?;
-    let key = dirs.active_package_key.as_deref();
-    if engine_choice::read(user_dir, key) == engine_choice::PackageEngine::Libjd
-        || runtime_libjd::package_libjd_ready(user_dir, key)
-    {
+    if runtime_libjd::active_libjd_schema(user_dir).is_some() {
         return Ok(Vec::new());
     }
+    let dirs = RuntimeDirs::resolve(user_dir, user_dir)?;
     let Some(schema_id) = deployed_schema_id_from_dir(user_dir) else {
         return Ok(Vec::new());
     };
@@ -6280,6 +6277,7 @@ impl ImeRuntime {
             Path::new(&dirs.shared),
             key,
             schema_id,
+            PROCESS_RIME.using_libjd(),
         )?;
         let signature = ReloadStamp::current_signature(&dirs.user);
         finish_composition();
@@ -6547,6 +6545,20 @@ impl ImeRuntime {
                 return Err(PACKAGE_SWITCH_PENDING.into());
             }
             let schema_state = resolved_schema_install_state(&runtime);
+            if self.0.ime_host
+                && !schema_state.deployed
+                && initialized.as_ref() == Some(&dirs)
+                && PROCESS_RIME.using_libjd()
+                && engine_choice::preferred(&dirs.user) == engine_choice::PackageEngine::Rime
+            {
+                // An explicit mode switch must take effect even without a Rime build.
+                let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+                if deployment_in_progress(&dirs.user) {
+                    return Err("Rime deployment is busy".into());
+                }
+                PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs, true)?;
+                return Ok(());
+            }
             if schema_state.schemas.is_empty() {
                 if runtime.active_package_key.is_some() {
                     return Err("请在键道 App 部署此方案包".into());
@@ -6819,64 +6831,78 @@ impl ImeRuntime {
             // teardown cannot race creation or block peers behind this session.
             let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)
                 .ok_or("librime initialization or reload is busy")?;
-            if initialized.as_ref() != Some(&dirs) {
+            let has_backend = initialized.as_ref() == Some(&dirs);
+            // Frontends keep a session handle while ime-jd is waiting for its first scheme.
+            if !has_backend && !(initialized.is_none() && self.libjd_requested(&dirs.user)) {
                 return Err("librime is running for other data directories".into());
             }
             let barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)
                 .ok_or("librime initialization or reload is busy")?;
             drop(initialized);
-            let libjd = PROCESS_RIME.using_libjd();
-            let rime = if libjd {
-                None
-            } else {
-                Some(desktop::try_rime_api_lock().ok_or("librime session is busy")?)
-            };
             let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
-            let schema_root = PROCESS_RIME.schema_root(&dirs.user);
-            let request = if self.0.ime_host && !libjd {
-                // Schema requests need the registered session's Lua reload barrier first.
-                let pending = schema_switch_request::pending_for_process(&schema_root)?;
-                if pending
-                    .as_ref()
-                    .is_some_and(|request| request.schema_id.is_some())
-                {
-                    None
-                } else {
-                    RimeBackend::prepare_switch_request(&dirs.user)?
-                }
+            let libjd = has_backend && PROCESS_RIME.using_libjd();
+            let rime = if has_backend && !libjd {
+                Some(desktop::try_rime_api_lock().ok_or("librime session is busy")?)
             } else {
                 None
             };
-            let engine = PROCESS_RIME.create_backend(&dirs.user)?;
             let mut english_mode = english_mode::EnglishModeController::default();
-            english_mode.configure(
-                english_mode::read_english_mode(&dirs.user),
-                engine.list_schemas(),
-            );
-            if self.0.ime_host {
-                engine.apply_reset_switch_request(&schema_root)?;
-            }
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            if self.0.ime_host {
-                let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
-                let global = global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
-                global.english_mode.configure(
+            let engine = if has_backend {
+                let schema_root = PROCESS_RIME.schema_root(&dirs.user);
+                let request = if self.0.ime_host && !libjd {
+                    // Schema requests need the registered session's Lua reload barrier first.
+                    let pending = schema_switch_request::pending_for_process(&schema_root)?;
+                    if pending
+                        .as_ref()
+                        .is_some_and(|request| request.schema_id.is_some())
+                    {
+                        None
+                    } else {
+                        RimeBackend::prepare_switch_request(&dirs.user)?
+                    }
+                } else {
+                    None
+                };
+                let engine = PROCESS_RIME.create_backend(&dirs.user)?;
+                english_mode.configure(
                     english_mode::read_english_mode(&dirs.user),
                     engine.list_schemas(),
                 );
-                global.apply(engine.as_ref(), &schema_root)?;
-            }
-            if request.is_some() {
-                PROCESS_RIME.apply_switch_request(&dirs.user, Some(engine.as_ref()), request.as_ref())?;
-            }
-            let usable = deployment_state::engine_loaded(&dirs.user);
+                if self.0.ime_host {
+                    engine.apply_reset_switch_request(&schema_root)?;
+                }
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                if self.0.ime_host {
+                    let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
+                    let global =
+                        global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
+                    global.english_mode.configure(
+                        english_mode::read_english_mode(&dirs.user),
+                        engine.list_schemas(),
+                    );
+                    global.apply(engine.as_ref(), &schema_root)?;
+                }
+                if request.is_some() {
+                    PROCESS_RIME.apply_switch_request(
+                        &dirs.user,
+                        Some(engine.as_ref()),
+                        request.as_ref(),
+                    )?;
+                }
+                Some(engine)
+            } else {
+                None
+            };
+            let usable = engine
+                .is_some()
+                .then(|| deployment_state::engine_loaded(&dirs.user));
             let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
                 user_data_dir: dirs.user.clone(),
                 ime_host: self.0.ime_host,
                 #[cfg(windows)]
                 libjd_server: self.0.libjd_server,
-                engine: Some(engine),
-                usable: Some(usable),
+                engine,
+                usable,
                 generation,
                 carried_ascii_mode: None,
                 carried_english_mode: None,
@@ -7096,7 +7122,8 @@ impl ImeRuntimeSession {
             return Some(result);
         }
         if self.has_package_hotkey(&[(key, mask)]) {
-            let force_open = PROCESS_RIME.using_libjd() || key == switcher_model::OPEN_PACKAGE_MENU;
+            let libjd_active = PROCESS_RIME.using_libjd();
+            let force_open = libjd_active || key == switcher_model::OPEN_PACKAGE_MENU;
             let opened = self.with_engine_and_policy(|engine, policy| {
                 let state = engine.state();
                 if !policy.composing || state.schema_id == ".default" {
@@ -7111,6 +7138,7 @@ impl ImeRuntimeSession {
                     active_schemas,
                     active_switches,
                     force_open,
+                    libjd_active,
                 )?;
                 menu.keep_input_mode(state);
                 let state = menu.state();
@@ -7526,7 +7554,11 @@ impl ImeRuntimeSession {
         if !self.can_use_mobile_package_switcher() {
             return Vec::new();
         }
-        switcher_model::mobile_packages(&self.dirs.user, Path::new(&self.dirs.shared))
+        switcher_model::mobile_packages(
+            &self.dirs.user,
+            Path::new(&self.dirs.shared),
+            PROCESS_RIME.using_libjd(),
+        )
     }
 
     pub fn select_package_schema(
@@ -7544,7 +7576,6 @@ impl ImeRuntimeSession {
     fn can_use_mobile_package_switcher(&self) -> bool {
         self.policy.current().composing
             && try_lock_ignore_poison(&self.inner).is_some_and(|inner| inner.ime_host)
-            && !PROCESS_RIME.using_libjd()
     }
 
     pub fn current_schema(&self) -> Option<SchemaInfo> {
@@ -8182,20 +8213,12 @@ fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> 
 }
 
 pub fn deployed_schemas(root: &Path) -> Vec<SchemaInfo> {
+    if let Some(schema) = runtime_libjd::active_libjd_schema(root) {
+        return vec![schema];
+    }
     let Ok(dirs) = RuntimeDirs::resolve(root, root) else {
         return Vec::new();
     };
-    if runtime_libjd::package_libjd_ready(root, dirs.active_package_key.as_deref()) {
-        if let Some((_, schema)) = runtime_libjd::imported_dictionary(root, None, dirs.active_package_key.as_deref())
-            .filter(|_| engine_choice::read(root, dirs.active_package_key.as_deref()) == engine_choice::PackageEngine::LibjdEngine)
-        {
-            return vec![schema];
-        }
-        return vec![SchemaInfo {
-            id: engine_choice::PACKAGE_KEY.into(),
-            name: "键道6".into(),
-        }];
-    }
     resolved_deployed_schemas(&dirs)
 }
 
@@ -8205,19 +8228,12 @@ pub fn package_switchable_schemas(
     data_root: Option<&Path>,
     package_key: &str,
 ) -> Vec<SchemaInfo> {
-    if engine_choice::read(control_root, Some(package_key)) == engine_choice::PackageEngine::LibjdEngine {
-        if let Some((_, schema)) = runtime_libjd::imported_dictionary(control_root, data_root, Some(package_key)) {
-            return vec![schema];
-        }
-    }
-    if package_key == engine_choice::PACKAGE_KEY
-        && engine_choice::read(control_root, Some(package_key))
-            == engine_choice::PackageEngine::Libjd
-    {
-        return vec![SchemaInfo {
-            id: engine_choice::PACKAGE_KEY.into(),
-            name: "键道6".into(),
-        }];
+    if let Some(schema) = runtime_libjd::package_libjd_schema_in_store(
+        control_root,
+        data_root,
+        Some(package_key),
+    ) {
+        return vec![schema];
     }
     let Some(dirs) = data_root
         .and_then(|data| RuntimeDirs::for_package_in_store(control_root, shared, data, package_key))
@@ -8306,10 +8322,10 @@ fn resolved_deployed_schemas(dirs: &RuntimeDirs) -> Vec<SchemaInfo> {
 }
 
 pub fn current_schema_id_from_dir(root: &Path) -> Option<String> {
-    let dirs = RuntimeDirs::resolve(root, root).ok()?;
-    if runtime_libjd::package_libjd_ready(root, dirs.active_package_key.as_deref()) {
-        return Some(engine_choice::PACKAGE_KEY.into());
+    if let Some(schema) = runtime_libjd::active_libjd_schema(root) {
+        return Some(schema.id);
     }
+    let dirs = RuntimeDirs::resolve(root, root).ok()?;
     std::fs::read_to_string(dirs.user_data_dir.join(".keytao-current-schema"))
         .ok()
         .map(|id| id.trim().to_owned())
@@ -9104,16 +9120,16 @@ pub fn schema_install_state_with_shared(
     user_data_dir: &Path,
     shared_dir: &Path,
 ) -> SchemaInstallState {
-    let Ok(dirs) = RuntimeDirs::resolve(user_data_dir, shared_dir) else {
-        return SchemaInstallState::default();
-    };
-    if runtime_libjd::package_libjd_ready(user_data_dir, dirs.active_package_key.as_deref()) {
+    if let Some(schema) = runtime_libjd::active_libjd_schema(user_data_dir) {
         return SchemaInstallState {
             installed: true,
             deployed: true,
-            schemas: vec![engine_choice::PACKAGE_KEY.into()],
+            schemas: vec![schema.id],
         };
     }
+    let Ok(dirs) = RuntimeDirs::resolve(user_data_dir, shared_dir) else {
+        return SchemaInstallState::default();
+    };
     let state = resolved_schema_install_state(&dirs);
     #[cfg(any(
         target_os = "linux",

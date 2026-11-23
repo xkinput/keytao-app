@@ -55,7 +55,7 @@ pub fn packages_in_store(
     })
 }
 
-pub(crate) fn mobile_packages(root: &Path, shared: &Path) -> Vec<Package> {
+pub(crate) fn mobile_packages(root: &Path, shared: &Path, libjd_active: bool) -> Vec<Package> {
     // Reading the last build is enough for display. Selection validates current inputs.
     let mut packages = collect_packages(
         root,
@@ -64,7 +64,7 @@ pub(crate) fn mobile_packages(root: &Path, shared: &Path) -> Vec<Package> {
         installed_packages(root),
         crate::isolated_deploy::has_published_package_build,
     );
-    if crate::runtime_libjd::package_libjd_ready(root, RuntimeDirs::active_package_key(root).as_deref()) {
+    if libjd_active {
         packages.retain(|package| crate::runtime_libjd::package_libjd_ready(root, Some(&package.package_key)));
     }
     packages
@@ -291,12 +291,9 @@ impl Menu {
         active_schemas: Vec<SchemaInfo>,
         active_switches: Vec<SchemaSwitchSetting>,
         force_open: bool,
+        libjd_active: bool,
     ) -> Option<Self> {
         let page_size = configured_page_size(root);
-        let libjd_active = crate::runtime_libjd::package_libjd_ready(
-            root,
-            RuntimeDirs::active_package_key(root).as_deref(),
-        );
         Self::open(
             !RuntimeDirs::needs_migration(root),
             active_schema_id,

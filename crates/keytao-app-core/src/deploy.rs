@@ -414,23 +414,17 @@ impl<'a> IsolatedDeploy<'a> {
     }
 }
 
-pub const LIBJD_SWITCH_BACK_HINT: &str = keytao_core::isolated_deploy::LIBJD_SWITCH_BACK_HINT;
-
 pub(crate) fn active_uses_libjd(core: &Core, root: &Path) -> bool {
-    use keytao_core::engine_choice::{self, PackageEngine};
-    let active = engine_choice::active_package(root);
-    let key = active.as_deref().unwrap_or(engine_choice::PACKAGE_KEY);
-    match engine_choice::read(root, Some(key)) {
-        PackageEngine::Rime => false,
-        PackageEngine::Libjd => core.lock_state().installed_packages.contains_key(key)
-            && crate::libjd::libjd_status(core).installed_version.is_some(),
-        PackageEngine::LibjdEngine => crate::libjd::imported_package_ready(core, key),
-    }
+    RuntimeDirs::active_package_key(root).is_some_and(|key| {
+        keytao_core::engine_choice::read(root, Some(&key))
+            == keytao_core::engine_choice::PackageEngine::LibjdEngine
+            && crate::libjd::imported_package_ready(core, &key)
+    })
 }
 
 pub fn ensure_not_using_libjd(core: &Core, root: &Path) -> Result<(), CoreError> {
     if active_uses_libjd(core, root) {
-        return Err(CoreError::Other(LIBJD_SWITCH_BACK_HINT.into()));
+        return Err(CoreError::Other("此功能适用于 Rime 引擎".into()));
     }
     Ok(())
 }
@@ -548,22 +542,17 @@ pub async fn switch_package_with_schema<#[cfg(target_os = "android")] F: std::fu
     schema_id: Option<&str>,
     #[cfg(target_os = "android")] deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
-    if active_uses_libjd(core, root) {
-        use keytao_core::engine_choice::{self, PackageEngine};
-        let schema = match engine_choice::read(root, Some(key)) {
-            PackageEngine::Rime => None,
-            PackageEngine::Libjd => Some(engine_choice::PACKAGE_KEY.to_owned()),
-            PackageEngine::LibjdEngine => keytao_core::libjd::imported_dictionary(&core.env().data_dir, key)
-                .map(|(_, schema)| schema.id),
-        };
+    if crate::libjd::input_engine(root) == keytao_core::engine_choice::PackageEngine::LibjdEngine {
+        let schema = keytao_core::libjd::imported_dictionary(&core.env().data_dir, key)
+            .map(|(_, schema)| schema.id);
         if !schema.is_some_and(|schema| schema_id.is_none_or(|id| id == schema)) {
-            return Err(LIBJD_SWITCH_BACK_HINT.into());
+            return Err("请先转换此方案的词库".into());
         }
         crate::package_migration::ensure_before_write(core, root)
             .await
             .map_err(|error| error.to_string())?;
         let shared = deploy_shared_data_dir(core, root);
-        return switch_prepared_package(core, root, &shared, Some(&core.env().data_dir), key, None)
+        return switch_prepared_package(core, root, &shared, Some(&core.env().data_dir), key, schema_id)
             .await;
     }
     deploy_package_mode(
@@ -638,7 +627,7 @@ async fn switch_cached_package(
     let key = &target.package_key;
     let dirs = RuntimeDirs::for_package(root, shared, key)
         .ok_or_else(|| format!("无法读取方案包：{}", target.package_name))?;
-    if !keytao_core::package_build_ready(root, &dirs) {
+    if !keytao_core::isolated_deploy::rime_package_build_ready(root, &dirs) {
         return Ok(false);
     }
     switch_prepared_package(core, root, shared, None, key, schema_id).await?;
@@ -879,7 +868,7 @@ fn verified_macos_deploy_executable(app: &std::path::Path) -> Result<std::path::
     Ok(executable)
 }
 
-/// Read candidates without keeping a desktop librime engine in the App.
+/// Read candidates without keeping an input engine in the App.
 pub async fn preview_candidates(
     core: &Core,
     host: impl ImeHost,
@@ -892,6 +881,32 @@ pub async fn preview_candidates(
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     if keytao_core::default_user_data_dir().as_ref() != Some(&root) {
         return Err("Desktop candidate previews require the default user root".into());
+    }
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    ))]
+    if crate::libjd::input_engine(&root) == keytao_core::engine_choice::PackageEngine::LibjdEngine {
+        use keytao_core::{jd_backend::JdBackend, libjd};
+
+        let key = keytao_core::engine_choice::active_package(&root)
+            .ok_or("no active ime-jd scheme")?;
+        let (dictionary, schema) = libjd::imported_dictionary(&core.env().data_dir, &key)
+            .ok_or("no converted ime-jd dictionary")?;
+        let library = libjd::bundled_engine_library().ok_or("bundled ime-jd engine is missing")?;
+        let page_size = size
+            .or_else(|| crate::ime_settings::read_candidate_page_size(&root))
+            .map_or(keytao_core::jd_backend::DEFAULT_PAGE_SIZE, usize::from);
+        return tokio::task::spawn_blocking(move || {
+            // Load the App's own bundled library, which matches its architecture.
+            let backend =
+                unsafe { JdBackend::load_dictionary(&library, &dictionary, page_size, schema) }?;
+            Ok(backend.preview_candidates())
+        })
+        .await
+        .map_err(|error| format!("Candidate preview task failed: {error}"))?;
     }
     #[cfg(target_os = "linux")]
     let (mut command, _) = crate::ime_status::linux::resolve_keytao_ime_command(core);

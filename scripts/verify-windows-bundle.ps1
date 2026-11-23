@@ -252,6 +252,9 @@ foreach ($dll in Get-ChildItem -LiteralPath (Join-Path $repoRoot "target\keytao-
         throw "App runtime dependency differs from the built x64 runtime: $copy"
     }
 }
+Require-PeMachine (Join-Path $ReleaseDir "libjd-engine.dll") 0x8664 "App libjd-engine"
+Require-File (Join-Path $ReleaseDir "libjd-engine-LICENSE.txt") "Missing libjd-engine license"
+Require-File (Join-Path $ReleaseDir "libjd-engine-SOURCE.txt") "Missing libjd-engine source notice"
 foreach ($runtime in @("current", "x86", "arm64x")) {
     $root = Join-Path $ReleaseDir "keytao-windows-ime-runtime\$runtime"
     Require-MatchingTree (Join-Path $repoRoot "target\keytao-windows-ime-runtime\$runtime") $root
@@ -265,6 +268,9 @@ foreach ($runtime in @("current", "x86", "arm64x")) {
     if ($runtime -ne "x86") {
         Require-File (Join-Path $root "keytao-windows-ime-server.exe") "Missing $runtime TSF payload: keytao-windows-ime-server.exe"
         Require-PeMachine (Join-Path $root "keytao-windows-ime-server.exe") ([UInt16]$machine) "$runtime IME server"
+        Require-PeMachine (Join-Path $root "libjd-engine.dll") ([UInt16]$machine) "$runtime libjd-engine"
+        Require-File (Join-Path $root "libjd-engine-LICENSE.txt") "Missing $runtime libjd-engine license"
+        Require-File (Join-Path $root "libjd-engine-SOURCE.txt") "Missing $runtime libjd-engine source notice"
     }
     if ($runtime -ne "arm64x") {
         foreach ($dll in Get-ChildItem -LiteralPath $root -Filter "*.dll" -File) {

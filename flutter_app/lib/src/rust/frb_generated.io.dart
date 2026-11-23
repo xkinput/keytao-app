@@ -22,24 +22,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     required super.portManager,
   });
 
-  CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_LibjdReleaseDtoPtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDtoPtr;
-
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
-
-  @protected
-  LibjdReleaseDto
-  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    dynamic raw,
-  );
-
-  @protected
-  LibjdReleaseDto
-  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    dynamic raw,
-  );
 
   @protected
   FutureOr<String> Function()
@@ -50,12 +34,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Map<String, String> dco_decode_Map_String_String_None(dynamic raw);
-
-  @protected
-  LibjdReleaseDto
-  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    dynamic raw,
-  );
 
   @protected
   RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
@@ -490,28 +468,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
-  LibjdReleaseDto
-  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  LibjdReleaseDto
-  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   Object sse_decode_DartOpaque(SseDeserializer deserializer);
 
   @protected
   Map<String, String> sse_decode_Map_String_String_None(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  LibjdReleaseDto
-  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
     SseDeserializer deserializer,
   );
 
@@ -1059,20 +1019,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void
-  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    LibjdReleaseDto self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void
-  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    LibjdReleaseDto self,
-    SseSerializer serializer,
-  );
-
-  @protected
   void sse_encode_DartFn_Inputs__Output_String_AnyhowException(
     FutureOr<String> Function() self,
     SseSerializer serializer,
@@ -1084,13 +1030,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_Map_String_String_None(
     Map<String, String> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void
-  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    LibjdReleaseDto self,
     SseSerializer serializer,
   );
 
@@ -1789,38 +1728,4 @@ class RustLibWire implements BaseWire {
   /// The symbols are looked up in [dynamicLibrary].
   RustLibWire(ffi.DynamicLibrary dynamicLibrary)
     : _lookup = dynamicLibrary.lookup;
-
-  void
-  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    ffi.Pointer<ffi.Void> ptr,
-  ) {
-    return _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-      ptr,
-    );
-  }
-
-  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDtoPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
-        'frbgen_keytao_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto',
-      );
-  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto =
-      _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDtoPtr
-          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
-
-  void
-  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-    ffi.Pointer<ffi.Void> ptr,
-  ) {
-    return _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto(
-      ptr,
-    );
-  }
-
-  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDtoPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
-        'frbgen_keytao_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto',
-      );
-  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDto =
-      _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLibjdReleaseDtoPtr
-          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
 }

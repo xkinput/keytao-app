@@ -297,65 +297,6 @@ impl<'a> PackageStore<'a> {
         Ok(Some(stored.meta))
     }
 
-    pub(crate) fn set_engine(
-        &self,
-        root: &Path,
-        key: &str,
-        engine: PackageEngine,
-    ) -> Result<(), CoreError> {
-        use crate::scheme_files::write_file_atomic;
-
-        let _pending = self.core.pending_package.lock().unwrap_or_else(|error| error.into_inner());
-        if !crate::package_schemas::is_addon_package_key(key) {
-            crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
-        }
-        let metadata = if key == PACKAGE_KEY {
-            let path = self.checked_metadata_path(key)?;
-            let before = fs::read(&path)?;
-            validate_metadata(key, &serde_json::from_slice(&before)?)?;
-            let mut metadata: serde_json::Value = serde_json::from_slice(&before)?;
-            // Keep package metadata readable by versions without the standalone engine.
-            if engine == PackageEngine::Libjd {
-                metadata["engine"] = serde_json::to_value(engine)?;
-            } else {
-                metadata.as_object_mut().unwrap().remove("engine");
-            }
-            Some((path, before, serde_json::to_vec_pretty(&metadata)?))
-        } else {
-            None
-        };
-        let settings_path = safe_path(root, keytao_core::english_mode::SETTINGS_FILE)
-            .map_err(CoreError::Other)?;
-        let mut settings: serde_json::Map<String, serde_json::Value> = match fs::read(&settings_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
-            Err(error) => return Err(error.into()),
-        };
-        let engines = settings
-            .entry("engines")
-            .or_insert_with(|| serde_json::json!({}));
-        let engines = engines
-            .as_object_mut()
-            .ok_or_else(|| CoreError::Other("输入引擎设置格式无效".into()))?;
-        if engine.is_rime() {
-            engines.remove(key);
-        } else {
-            engines.insert(key.into(), serde_json::to_value(engine)?);
-        }
-        let settings = serde_json::to_vec_pretty(&settings)?;
-        if let Some((path, _, metadata)) = &metadata {
-            write_file_atomic(path, metadata)?;
-        }
-        if let Err(error) = write_file_atomic(&settings_path, &settings) {
-            if let Some((path, before, _)) = &metadata {
-                write_file_atomic(path, before)
-                    .map_err(|restore| CoreError::Other(format!("{error}; {restore}")))?;
-            }
-            return Err(error.into());
-        }
-        Ok(())
-    }
-
     pub(crate) fn read_files_at(
         path: &Path,
         key: &str,
@@ -615,6 +556,7 @@ impl<'a> PackageStore<'a> {
         fs::create_dir_all(parent).map_err(|error| context("创建目录", parent, error))?;
         sync_directory(&self.root())?;
         self.recover_old(&meta.scheme_key)?;
+        crate::libjd::preserve_imported_dictionary(&self.core.env().data_dir, &meta.scheme_key)?;
         publish_directory(&destination, &stage.0, rename_new)
     }
 
@@ -665,15 +607,32 @@ impl<'a> PackageStore<'a> {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let destination = self.checked_package_path(key)?;
+        let dictionary = keytao_core::libjd::dictionary_directory(&self.core.env().data_dir, key);
         let tombstone = self.stage()?;
-        for (path, name) in [
+        let paths = [
             (destination.with_file_name(format!(".old-{key}")), "old"),
             (destination.clone(), "package"),
-        ] {
-            match package_fs::rename(&path, &tombstone.0.join(name)) {
-                Ok(()) => {}
+        ];
+        let dictionary = dictionary.as_deref().and_then(Path::parent);
+        let mut moved = Vec::new();
+        for (path, name) in paths.iter().map(|(path, name)| (path.as_path(), *name))
+            .chain(dictionary.map(|path| (path, "converted"))) {
+            let staged = tombstone.0.join(name);
+            match package_fs::rename(path, &staged) {
+                Ok(()) => moved.push((path, staged)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    for (original, staged) in moved.into_iter().rev() {
+                        if let Err(restore) = package_fs::rename(&staged, original) {
+                            let backup = tombstone.0.clone();
+                            std::mem::forget(tombstone);
+                            return Err(CoreError::Other(format!(
+                                "{error}; restore package: {restore}; backup: {}", backup.display()
+                            )));
+                        }
+                    }
+                    return Err(error.into());
+                }
             }
         }
         sync_directory(&tombstone.0)?;
@@ -924,7 +883,6 @@ impl<'a> PackageStore<'a> {
                 }
             } else { None };
             let active = state.active_scheme.as_deref() == Some(&scheme_key);
-            let engine = meta.as_ref().map_or(PackageEngine::Rime, |meta| meta.engine);
             let git = meta.as_ref().and_then(|meta| meta.git.clone());
             Some(InstalledPackageInfo {
                 logo_path: if has_package_zip {
@@ -932,12 +890,12 @@ impl<'a> PackageStore<'a> {
                 } else { None },
                 active,
                 in_use: active,
-                supports_user_words: engine.is_rime() && crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
+                supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false
                 }),
                 scheme_key,
-                engine: engine.as_str().into(),
+                engine: PackageEngine::Rime.as_str().into(),
                 version: package.version,
                 has_package_zip,
                 source: meta.as_ref().map(|meta| meta.source.clone()).unwrap_or_else(|| "official".into()),
@@ -1012,6 +970,15 @@ pub(crate) fn publish_directory(
     stage: &Path,
     rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), CoreError> {
+    publish_directory_then(destination, stage, rename_new, || Ok(()))
+}
+
+pub(crate) fn publish_directory_then(
+    destination: &Path,
+    stage: &Path,
+    rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    activate: impl FnOnce() -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
     let name = destination.file_name().unwrap().to_string_lossy();
     let old = destination.with_file_name(format!(".old-{name}"));
     let had_old = destination
@@ -1040,12 +1007,15 @@ pub(crate) fn publish_directory(
         }
         return Err(error.into());
     }
-    if let Err(error) = sync_directory(destination.parent().unwrap()) {
+    if let Err(error) = sync_directory(destination.parent().unwrap())
+        .map_err(CoreError::from)
+        .and_then(|()| activate())
+    {
         package_fs::remove_dir_all(destination)?;
         if had_old {
             package_fs::rename(&old, destination)?;
         }
-        return Err(error.into());
+        return Err(error);
     }
     if had_old {
         if let Err(error) = package_fs::remove_dir_all(&old) {
@@ -1132,41 +1102,6 @@ mod tests {
             git: None,
             manifest: BTreeMap::new(),
             zip_sha256: sha256_reader(zip).unwrap(),
-        }
-    }
-
-    #[test]
-    fn package_engine_mirror_preserves_settings_and_rolls_back_on_write_failure() {
-        let directory = tempfile::tempdir().unwrap();
-        let core = core(directory.path());
-        let store = PackageStore::new(&core);
-        let package = store.package_path(PACKAGE_KEY);
-        fs::create_dir_all(&package).unwrap();
-        let meta = metadata(PACKAGE_KEY, b"fixture");
-        let mut record = serde_json::to_value(&meta).unwrap();
-        record["key"] = PACKAGE_KEY.into();
-        record["files"] = serde_json::json!([]);
-        record["installed_at"] = meta.installed_at_unix.into();
-        let path = package.join("package.json");
-        let original = serde_json::to_vec(&record).unwrap();
-        fs::write(&path, &original).unwrap();
-
-        let ime = directory.path().join("ime");
-        assert!(store.set_engine(&ime, PACKAGE_KEY, PackageEngine::Libjd).is_err());
-        assert_eq!(fs::read(&path).unwrap(), original);
-
-        fs::create_dir(&ime).unwrap();
-        let settings = ime.join(keytao_core::english_mode::SETTINGS_FILE);
-        fs::write(&settings, br#"{"candidatePageSize":7}"#).unwrap();
-        for (engine, metadata_engine) in [
-            (PackageEngine::Libjd, PackageEngine::Libjd),
-            (PackageEngine::LibjdEngine, PackageEngine::Rime),
-            (PackageEngine::Rime, PackageEngine::Rime),
-        ] {
-            store.set_engine(&ime, PACKAGE_KEY, engine).unwrap();
-            assert_eq!(store.read_meta(PACKAGE_KEY).unwrap().unwrap().engine, metadata_engine);
-            assert_eq!(keytao_core::engine_choice::read(&ime, Some(PACKAGE_KEY)), engine);
-            assert_eq!(crate::ime_settings::read_candidate_page_size(&ime), Some(7));
         }
     }
 

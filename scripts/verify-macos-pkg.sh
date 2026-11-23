@@ -166,6 +166,9 @@ require_universal "$MAIN_APP/Contents/Frameworks/keytao_app_bridge.framework/key
 require_universal "$IME_APP/Contents/MacOS/KeyTaoIME"
 require_universal "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
 for bundle in "$MAIN_APP" "$IME_APP"; do
+    require_universal "$bundle/Contents/Frameworks/libjd-engine.dylib"
+    require_file "$bundle/Contents/Resources/libjd-engine-LICENSE.txt"
+    require_file "$bundle/Contents/Resources/libjd-engine-SOURCE.txt"
     for dylib in "$bundle/Contents/Frameworks/"librime*.dylib; do
         require_universal "$dylib"
     done

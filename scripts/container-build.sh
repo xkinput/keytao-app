@@ -23,8 +23,8 @@ printf '[toolchain]\nchannel = "%s"\nprofile = "minimal"\n' "$RUSTUP_TOOLCHAIN" 
 VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
 [[ $(sed -n 's/^version: \([^+]*\).*/\1/p' flutter_app/pubspec.yaml) == "$VERSION" ]] || { echo 'Cargo/Flutter versions differ' >&2; exit 1; }
 case "$(uname -m)" in
-  x86_64) FLUTTER_ARCH=x64 ;;
-  aarch64) FLUTTER_ARCH=arm64 ;;
+  x86_64) FLUTTER_ARCH=x64; LIBJD_ARCH=x86_64 ;;
+  aarch64) FLUTTER_ARCH=arm64; LIBJD_ARCH=arm64 ;;
   *) echo 'Only x86_64 and aarch64 are supported' >&2; exit 1 ;;
 esac
 LINUX_RUNTIME_DIR="$WORK_DIR/target/keytao-linux-runtime"
@@ -85,6 +85,7 @@ prepare_linux_runtime() {
 
 cargo build --locked -p keytao-linux-ime --bin keytao-ime --release
 prepare_linux_runtime
+python3 scripts/bundle-libjd-engine.py "linux-$LIBJD_ARCH" "$LINUX_RUNTIME_LIB_DIR" "$LINUX_RUNTIME_DIR"
 (
   cd flutter_app
   flutter build linux --release --target-platform "linux-$FLUTTER_ARCH" --build-name "$VERSION"
