@@ -1700,8 +1700,37 @@ mod desktop {
         }
         let _ = std::fs::create_dir_all(&log_dir);
 
+        if dirs.active_package_key.as_deref().is_some_and(|key| {
+            RuntimeDirs::isolated_user_data_dir(control_root, key).as_deref() == Some(user_dir)
+        }) {
+            ensure_installation_branding(user_dir);
+        }
         setup_rime(dirs, &log_dir.to_string_lossy(), deployer_only, user_dir);
         *lock_ignore_poison(&RIME_RUNTIME_DIRS) = Some(dirs.clone());
+    }
+
+    fn ensure_installation_branding(user_dir: &Path) {
+        let path = user_dir.join("installation.yaml");
+        let missing = std::fs::symlink_metadata(&path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if !missing {
+            return;
+        }
+        // Leave device identity and sync settings to the installation and sync paths.
+        let branding = b"distribution_name: KeyTao\ndistribution_code_name: keytao\n";
+        #[cfg(not(target_os = "android"))]
+        let result = schema_switch_request::create_file_atomic(&path, branding);
+        #[cfg(target_os = "android")]
+        let result = {
+            // Android shared storage can reject hard links.
+            use std::io::Write;
+            std::fs::File::create_new(&path).and_then(|mut file| file.write_all(branding))
+        };
+        if let Err(error) = result {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                eprintln!("KeyTao: could not write {}: {error}", path.display());
+            }
+        }
     }
 
     pub(super) fn loaded_runtime() -> Option<RuntimeDirs> {

@@ -72,6 +72,55 @@ fn smoke_key_sequence_matches_rime_golden_states() {
     assert_eq!(serde_json::to_value(states).unwrap(), golden);
 }
 
+#[test]
+fn isolated_rime_runtime_exposes_keytao_installation_branding() {
+    use keytao_core::{isolated_deploy, RuntimeDirs};
+
+    let _serialized = serialized();
+    let root = smoke_fixture::scratch_dir("installation-branding");
+    let shared = root.join("shared");
+    smoke_fixture::write(&shared).unwrap();
+    let key = "builtin/branding";
+    let user = RuntimeDirs::isolated_user_data_dir(&root, key).unwrap();
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::copy(shared.join("default.custom.yaml"), user.join("default.custom.yaml")).unwrap();
+    std::fs::write(
+        root.join(RuntimeDirs::MIGRATION_MARKER),
+        r#"{"version":1,"runtime_package":"builtin/branding"}"#,
+    )
+    .unwrap();
+    isolated_deploy::deploy_packages(
+        &root,
+        &shared,
+        None,
+        &[isolated_deploy::PackageDeployTarget {
+            package_key: key.into(),
+            package_name: "Branding".into(),
+            materialize_error: None,
+            staged_inputs: None,
+        }],
+        |_| {},
+    )
+    .unwrap();
+    let path = user.join("installation.yaml");
+    assert!(!path.exists());
+
+    let runtime = ImeRuntime::with_dirs(&root, shared.to_string_lossy()).with_ime_host();
+    runtime.init_without_deploy().unwrap();
+    let metadata: serde_yaml::Value =
+        serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(metadata["distribution_name"].as_str(), Some("KeyTao"));
+    assert_eq!(metadata["distribution_code_name"].as_str(), Some("keytao"));
+    assert!(metadata.get("installation_id").is_none());
+
+    let existing = b"# Retain local settings\ninstallation_id: old-device\nsync_dir: /sync\n";
+    std::fs::write(&path, existing).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), existing);
+    runtime.shutdown().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {

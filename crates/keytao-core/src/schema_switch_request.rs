@@ -125,6 +125,23 @@ fn save_request(root: &Path, request: &mut SchemaSwitchRequest) -> Result<(), St
 /// Replace a shared file without exposing partially written contents.
 /// Keep the temporary file beside the destination so rename is atomic.
 pub fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    publish_file(path, content, |temporary| std::fs::rename(temporary, path))
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn create_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    publish_file(path, content, |temporary| {
+        std::fs::hard_link(temporary, path)?;
+        let _ = std::fs::remove_file(temporary);
+        Ok(())
+    })
+}
+
+fn publish_file(
+    path: &Path,
+    content: &[u8],
+    publish: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -144,7 +161,7 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
             file.write_all(content)?;
             file.sync_all()
         })
-        .and_then(|()| std::fs::rename(&tmp, path));
+        .and_then(|()| publish(&tmp));
     if outcome.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
