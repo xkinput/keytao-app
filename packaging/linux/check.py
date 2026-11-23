@@ -22,6 +22,9 @@ def desktop(path):
 
 def check_layout(root):
     app = root / 'usr/lib/KeyTao'
+    updater = app / 'install-update'
+    assert updater.stat().st_mode & 0o777 == 0o755, updater
+    assert updater.read_bytes() == (PROJECT / 'packaging/linux/install-update.sh').read_bytes()
     for name in ('keytao-app', 'keytao-ime'):
         entry = root / 'usr/bin' / name
         assert entry.is_symlink() and os.readlink(entry) == f'../lib/KeyTao/{name}', entry

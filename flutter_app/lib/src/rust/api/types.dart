@@ -198,12 +198,14 @@ class AppUpdateDto {
   final String latestVersion;
   final String currentVersion;
   final String releaseUrl;
+  final String? installMode;
 
   const AppUpdateDto({
     required this.hasUpdate,
     required this.latestVersion,
     required this.currentVersion,
     required this.releaseUrl,
+    this.installMode,
   });
 
   @override
@@ -211,7 +213,8 @@ class AppUpdateDto {
       hasUpdate.hashCode ^
       latestVersion.hashCode ^
       currentVersion.hashCode ^
-      releaseUrl.hashCode;
+      releaseUrl.hashCode ^
+      installMode.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -221,7 +224,8 @@ class AppUpdateDto {
           hasUpdate == other.hasUpdate &&
           latestVersion == other.latestVersion &&
           currentVersion == other.currentVersion &&
-          releaseUrl == other.releaseUrl;
+          releaseUrl == other.releaseUrl &&
+          installMode == other.installMode;
 }
 
 class BridgeConfig {

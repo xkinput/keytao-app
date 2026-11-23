@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/platform/android_host.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/about_page.dart';
@@ -12,9 +13,38 @@ import 'package:keytao/src/ui/widgets.dart';
 
 class _AboutCore implements RustLibApi {
   final update = Completer<AppUpdateDto>();
+  final download = Completer<bool>();
+  final events = StreamController<BridgeEvent>();
+  final downloads = <String>[];
+  final installerCalls = <({String version, bool restart})>[];
 
   @override
   Future<AppUpdateDto> crateApiCoreCheckAppUpdate() => update.future;
+
+  @override
+  Stream<BridgeEvent> crateApiCoreCoreEvents() async* {
+    yield const BridgeEvent(kind: BridgeEventKind.ready);
+    yield* events.stream;
+  }
+
+  @override
+  Future<void> crateApiCoreHandleAppArgs({required List<String> args}) async {}
+
+  @override
+  Future<bool> crateApiCoreDownloadAppUpdate({required String version}) {
+    downloads.add(version);
+    return download.future;
+  }
+
+  @override
+  Future<String> crateApiCoreOpenAppUpdatePackage({
+    required String version,
+    required bool restart,
+  }) async {
+    installerCalls.add((version: version, restart: restart));
+    if (restart) throw StateError('安装请求已取消');
+    return r'C:\verified\update.exe';
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>
@@ -31,6 +61,16 @@ class _AboutController extends AppController {
     openedUrls.add(value);
     return true;
   }
+}
+
+class _PlayHost extends AndroidHost {
+  final openedUrls = <String>[];
+
+  @override
+  Future<String> appUpdateSource() async => 'play';
+
+  @override
+  Future<void> openUrl(String url) async => openedUrls.add(url);
 }
 
 void main() {
@@ -109,5 +149,116 @@ void main() {
     expect(find.byType(FCircularProgress), findsNothing);
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('the update banner downloads before offering installer actions', (
+    tester,
+  ) async {
+    final core = _AboutCore();
+    RustLib.initMock(api: core);
+    addTearDown(RustLib.dispose);
+    addTearDown(core.events.close);
+    final controller =
+        AppController(
+            info: const BridgeInfo(
+              platform: BridgePlatform.windows,
+              appVersion: '1',
+              userRoot: '/isolated/keytao',
+            ),
+          )
+          ..appUpdate = const AppUpdateDto(
+            currentVersion: '1',
+            latestVersion: '2',
+            hasUpdate: true,
+            releaseUrl: 'https://example.com/releases/2',
+            installMode: 'restart',
+          );
+    addTearDown(controller.dispose);
+    await controller.connectEvents();
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: controller.info.platform,
+        home: FScaffold(
+          child: ListenableBuilder(
+            listenable: controller,
+            builder: (_, _) => AboutPage(controller: controller),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('下载升级包'));
+    await tester.pump();
+    expect(core.downloads, ['2']);
+    expect(find.text('正在下载升级包…'), findsOneWidget);
+    expect(find.text('重启并安装'), findsNothing);
+
+    core.events.add(
+      const BridgeEvent(
+        kind: BridgeEventKind.installProgress,
+        installProgress: InstallProgressDto(
+          stage: 'app_update_downloading',
+          percent: 40,
+          message: '正在下载升级包',
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('正在下载升级包 40%'), findsOneWidget);
+    expect(
+      tester
+          .widget<FDeterminateProgress>(find.byType(FDeterminateProgress))
+          .value,
+      .4,
+    );
+    expect(controller.installProgress, isNull);
+    core.download.complete(true);
+    await tester.pumpAndSettle();
+    expect(find.byType(FDeterminateProgress), findsNothing);
+    expect(find.text('重启并安装'), findsOneWidget);
+
+    await tester.tap(find.text('重启并安装'));
+    await tester.pumpAndSettle();
+    expect(find.text('安装请求已取消'), findsOneWidget);
+    await tester.tap(find.text('打开升级包'));
+    await tester.pumpAndSettle();
+    expect(core.installerCalls, [
+      (version: '2', restart: true),
+      (version: '2', restart: false),
+    ]);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  test('Play builds open Google Play without downloading an APK', () async {
+    final core = _AboutCore();
+    RustLib.initMock(api: core);
+    addTearDown(RustLib.dispose);
+    final android = _PlayHost();
+    final controller = AppController(
+      info: const BridgeInfo(
+        platform: BridgePlatform.android,
+        appVersion: '1',
+        userRoot: '/isolated/keytao',
+      ),
+      android: android,
+    );
+    addTearDown(controller.dispose);
+    core.update.complete(
+      const AppUpdateDto(
+        currentVersion: '1',
+        latestVersion: '2',
+        hasUpdate: true,
+        releaseUrl: 'https://example.com/releases/2',
+        installMode: 'package',
+      ),
+    );
+    await controller.checkAppUpdateNow();
+
+    expect(controller.appUpdateAction, AppUpdateAction.openLink);
+    expect(await controller.openAppUpdate(), isTrue);
+    expect(core.downloads, isEmpty);
+    expect(android.openedUrls, [
+      'https://play.google.com/store/apps/details?id=ink.rea.keytao_app',
+    ]);
   });
 }

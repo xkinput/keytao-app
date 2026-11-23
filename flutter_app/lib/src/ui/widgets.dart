@@ -1016,7 +1016,30 @@ class AppUpdateBanner extends StatelessWidget {
   final AppController controller;
   @override
   Widget build(BuildContext context) {
-    final update = controller.appUpdate!;
+    final update = controller.appUpdate;
+    if (update == null || !update.hasUpdate) return const SizedBox.shrink();
+    final locale = Localizations.localeOf(context);
+    final action = controller.appUpdateAction;
+    final (label, icon) = switch (action) {
+      AppUpdateAction.download => (
+        AppStrings.downloadAppUpdatePackage(locale),
+        FLucideIcons.download,
+      ),
+      AppUpdateAction.openPackage => (
+        AppStrings.openAppUpdatePackage(locale),
+        FLucideIcons.packageOpen,
+      ),
+      AppUpdateAction.restart => (
+        AppStrings.restartForAppUpdate(locale),
+        FLucideIcons.refreshCw,
+      ),
+      AppUpdateAction.openLink => (
+        AppStrings.downloadAppUpdate(locale),
+        FLucideIcons.externalLink,
+      ),
+    };
+    final progress = controller.appUpdateProgress;
+    final percent = progress?.percent.clamp(0, 100);
     return FTileGroup(
       children: [
         FTile(
@@ -1037,11 +1060,57 @@ class AppUpdateBanner extends StatelessWidget {
             children: [
               FBadge(child: Text('v${update.latestVersion}')),
               Text(AppStrings.currentVersion(update.currentVersion)),
+              Text(label),
             ],
           ),
-          suffix: const Icon(FLucideIcons.externalLink, size: 16),
-          onPress: controller.openAppUpdate,
+          suffix: Icon(icon, size: 16),
+          onPress: controller.canRunAppUpdate ? controller.openAppUpdate : null,
         ),
+        if (action == AppUpdateAction.restart)
+          FTile(
+            title: Text(AppStrings.openAppUpdatePackage(locale)),
+            suffix: const Icon(FLucideIcons.packageOpen, size: 16),
+            onPress: controller.canRunAppUpdate
+                ? () => controller.openAppUpdate(interactive: true)
+                : null,
+          ),
+        if (controller.appUpdateBusy)
+          FTile.raw(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 8,
+              children: [
+                if (percent == null)
+                  const FProgress()
+                else
+                  FDeterminateProgress(value: percent / 100),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    progress != null
+                        ? '${progress.message} $percent%'
+                        : action == AppUpdateAction.download
+                        ? AppStrings.appUpdateDownloading(locale)
+                        : action == AppUpdateAction.restart
+                        ? AppStrings.appUpdateInstalling(locale)
+                        : AppStrings.appUpdateOpening(locale),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (controller.appUpdateActionError case final error?) ...[
+          FTile.raw(child: ErrorMessage(error)),
+          if (action == AppUpdateAction.restart ||
+              action == AppUpdateAction.openPackage)
+            FTile(
+              title: Text(AppStrings.redownloadAppUpdatePackage(locale)),
+              suffix: const Icon(FLucideIcons.download, size: 16),
+              onPress: controller.canRunAppUpdate
+                  ? () => controller.openAppUpdate(redownload: true)
+                  : null,
+            ),
+        ],
       ],
     );
   }

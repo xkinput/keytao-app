@@ -75,6 +75,14 @@ class AndroidHost {
       _channel.invokeMethod<void>('adoptAppLogger');
   Future<void> openUrl(String url) =>
       _channel.invokeMethod<void>('openUrl', {'url': url});
+  Future<String> appUpdateSource() async =>
+      await _channel.invokeMethod<String>('appUpdateSource') ?? 'link';
+  Future<bool> openAppUpdatePackage(String path, String version) async =>
+      await _channel.invokeMethod<bool>('openAppUpdatePackage', {
+        'path': path,
+        'version': version,
+      }) ??
+      false;
   Future<Map<String, dynamic>?> shareRuntimeLog() =>
       _channel.invokeMapMethod<String, dynamic>('shareRuntimeLog');
   Future<void> shareThemeFile(String fileName, String json) =>

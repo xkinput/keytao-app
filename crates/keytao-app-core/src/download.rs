@@ -20,7 +20,8 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
     cancel.borrow_and_update();
     let result: Result<_, String> = async {
         let client = build_client(core)?;
-        let mut temp = download_to_temp_with(core, client.get(&url), &mut cancel, None, None).await?;
+        let mut temp =
+            download_to_temp_with(core, client.get(&url), &mut cancel, None, None).await?;
 
         if url.starts_with("https://github.com/rimeinn/rime-snow-pinyin/releases/download/")
             && url.ends_with("/snow-pinyin.zip")
@@ -53,6 +54,39 @@ pub(crate) async fn download_to_temp_with(
     max_size: Option<u64>,
 ) -> Result<tempfile::NamedTempFile, String> {
     emit_progress(core, "downloading", 0, "正在下载...");
+    download_with_progress(
+        core,
+        request,
+        cancel,
+        expected_size,
+        max_size,
+        |downloaded, total_size| {
+            if total_size > 0 {
+                let percent = (downloaded.saturating_mul(60) / total_size).min(60) as u32;
+                emit_progress(
+                    core,
+                    "downloading",
+                    percent,
+                    &format!(
+                        "正在下载... {:.1}MB / {:.1}MB",
+                        downloaded as f64 / 1_048_576.0,
+                        total_size as f64 / 1_048_576.0
+                    ),
+                );
+            }
+        },
+    )
+    .await
+}
+
+pub(crate) async fn download_with_progress(
+    core: &Core,
+    request: reqwest::RequestBuilder,
+    cancel: &mut tokio::sync::watch::Receiver<u64>,
+    expected_size: Option<u64>,
+    max_size: Option<u64>,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<tempfile::NamedTempFile, String> {
     let response = tokio::select! {
         biased;
         _ = cancel.changed() => return Err(DOWNLOAD_CANCELLED.to_string()),
@@ -90,19 +124,7 @@ pub(crate) async fn download_to_temp_with(
         }
         temp.write_all(&chunk)
             .map_err(|e| format!("保存临时文件失败: {e}"))?;
-        if total_size > 0 {
-            let percent = (downloaded.saturating_mul(60) / total_size).min(60) as u32;
-            emit_progress(
-                core,
-                "downloading",
-                percent,
-                &format!(
-                    "正在下载... {:.1}MB / {:.1}MB",
-                    downloaded as f64 / 1_048_576.0,
-                    total_size as f64 / 1_048_576.0
-                ),
-            );
-        }
+        progress(downloaded, total_size);
     }
     if expected_size.is_some_and(|size| downloaded != size) {
         return Err("下载大小与发布记录不符".into());

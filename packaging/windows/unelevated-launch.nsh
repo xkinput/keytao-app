@@ -7,6 +7,7 @@
 
 Function LaunchKeyTaoAsUser
   ${If} ${Silent}
+  ${AndIf} $RestartAfterUpgrade != 1
     Return
   ${EndIf}
   System::Store "S"
@@ -83,6 +84,9 @@ Function LaunchKeyTaoAsUser
   ${If} $9 == 0
     ; Fail closed: a missing or elevated shell must never launch an elevated app.
     DetailPrint "KeyTao was not launched because a non-elevated user launch was unavailable."
+    ${If} $RestartAfterUpgrade == 1
+      SetErrorLevel 1
+    ${EndIf}
   ${EndIf}
   System::Store "L"
 FunctionEnd

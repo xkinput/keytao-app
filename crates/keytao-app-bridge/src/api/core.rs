@@ -925,6 +925,16 @@ pub async fn check_app_update() -> Result<AppUpdateDto, String> {
     )
 }
 
+pub async fn download_app_update(version: String) -> Result<bool, String> {
+    keytao_app_core::update::download_app_update(&runtime::state()?.core, &version).await
+}
+
+pub async fn open_app_update_package(version: String, restart: bool) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::update::open_app_update_package(&state.core, &version, restart).await
+}
+
 /// Reads a filesystem directory. Android SAF tree URIs use the readLocalSchemas
 /// platform channel instead. Both Core-supported custom-config filenames count.
 pub fn read_local_schemas(dir: String) -> Result<LocalSchemasDto, String> {

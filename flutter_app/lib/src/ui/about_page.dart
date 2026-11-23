@@ -29,16 +29,12 @@ class AboutPage extends StatelessWidget {
         title: AppStrings.checkAppUpdate(locale),
         animation: animation,
         actions: [
-          ActionButton(
-            AppStrings.downloadAppUpdate(locale),
-            primary: true,
-            onPress: () {
-              Navigator.pop(context);
-              controller.openAppUpdate();
-            },
-          ),
+          ActionButton(AppStrings.close, onPress: () => Navigator.pop(context)),
         ],
-        child: Text('v${update.latestVersion}'),
+        child: ListenableBuilder(
+          listenable: controller,
+          builder: (_, _) => AppUpdateBanner(controller: controller),
+        ),
       ),
     );
   }
@@ -122,7 +118,7 @@ class AboutPage extends StatelessWidget {
                     child: FButton.icon(
                       key: const ValueKey('check-app-update'),
                       variant: FButtonVariant.ghost,
-                      onPress: c.checkingAppUpdate
+                      onPress: c.checkingAppUpdate || c.appUpdateBusy
                           ? null
                           : () => _checkForUpdates(context, locale),
                       child: c.checkingAppUpdate

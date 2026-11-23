@@ -72,6 +72,7 @@ pub struct AppUpdateInfo {
     pub latest_version: String,
     pub has_update: bool,
     pub release_url: String,
+    pub install_mode: Option<String>,
 }
 
 #[derive(Serialize, Clone)]

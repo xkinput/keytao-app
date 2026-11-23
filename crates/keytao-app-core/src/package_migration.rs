@@ -535,6 +535,7 @@ mod tests {
             sink: Arc::new(Sink),
             state: Mutex::new(AppState::default()),
             download_cancel: tokio::sync::watch::channel(0).0,
+            app_update_package: tokio::sync::Mutex::new(None),
             recovered_state_file: None,
             pending_package: Mutex::new(()),
             user_words: Mutex::new(crate::user_words::UserWordsState::default()),

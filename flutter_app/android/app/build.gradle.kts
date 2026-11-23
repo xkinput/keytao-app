@@ -82,6 +82,9 @@ android {
         repoRoot.resolve("crates/keytao-theme/resources"),
     )
     sourceSets.getByName("main").jniLibs.srcDir(libjdJniDir.get().asFile)
+    if (!googlePlayDistribution) {
+        sourceSets.getByName("release").manifest.srcFile("src/directRelease/AndroidManifest.xml")
+    }
 }
 
 kotlin {

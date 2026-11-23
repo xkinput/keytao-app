@@ -29,6 +29,7 @@ mkdir -p "$APP" "$ROOT/usr/bin" "$ROOT/usr/share/applications" \
   "$ROOT/usr/share/ibus/component" "$ROOT/etc/xdg/autostart"
 cp -a "$BUNDLE/." "$APP/"
 install -m 755 "$IME" "$APP/keytao-ime"
+install -m 755 "$PROJECT_DIR/packaging/linux/install-update.sh" "$APP/install-update"
 cp -a "$RUNTIME" "$APP/runtime"
 ln -s runtime/rime-data "$APP/rime-data"
 ln -s ../lib/KeyTao/keytao-app "$ROOT/usr/bin/keytao-app"

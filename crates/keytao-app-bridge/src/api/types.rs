@@ -180,6 +180,7 @@ pub struct AppUpdateDto {
     pub latest_version: String,
     pub current_version: String,
     pub release_url: String,
+    pub install_mode: Option<String>,
 }
 
 pub struct OnboardingDto {

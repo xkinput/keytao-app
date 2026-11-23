@@ -79,6 +79,8 @@ class KeytaoAndroidChannel(
                 "deployImeData" -> deployImeData(reply)
                 "adoptAppLogger" -> adoptAppLogger(reply)
                 "openUrl" -> openUrl(call, reply)
+                "appUpdateSource" -> reply.success(appUpdateSource())
+                "openAppUpdatePackage" -> openAppUpdatePackage(call, reply)
                 "shareRuntimeLog" -> shareRuntimeLog(reply)
                 "shareThemeFile" -> shareThemeFile(call, reply)
                 else -> reply.notImplemented()
@@ -143,6 +145,100 @@ class KeytaoAndroidChannel(
         } catch (ex: Exception) {
             reply.error(ex.message ?: "Failed to open URL")
         }
+    }
+
+    private fun updatePackageArch(): String? =
+        when (File(activity.applicationInfo.nativeLibraryDir).name) {
+            "arm" -> "arm"
+            "arm64" -> "arm64"
+            "x86_64" -> "x86_64"
+            else -> null
+        }
+
+    @Suppress("DEPRECATION")
+    private fun appUpdateSource(): String {
+        if (BuildConfig.GOOGLE_PLAY_DISTRIBUTION) return "play"
+        val packageManager = activity.packageManager
+        val packageName = activity.packageName
+        val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            packageManager.getInstallSourceInfo(packageName).installingPackageName
+        } else {
+            packageManager.getInstallerPackageName(packageName)
+        }
+        if (installer == "com.android.vending") return "play"
+        val permissions = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
+            .requestedPermissions.orEmpty()
+        return if (updatePackageArch() != null && Manifest.permission.REQUEST_INSTALL_PACKAGES in permissions) {
+            "package"
+        } else {
+            "link"
+        }
+    }
+
+    private fun openAppUpdatePackage(call: MethodCall, reply: Reply) {
+        val path = requireNotNull(call.argument<String>("path"))
+        val version = requireNotNull(call.argument<String>("version"))
+        require(Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?").matches(version)) {
+            "升级版本无效"
+        }
+        Thread {
+            try {
+                check(appUpdateSource() == "package") { "当前安装来源不支持打开升级包" }
+                val file = File(path)
+                val name = "keytao-app-$version-android-${updatePackageArch()}-release.apk"
+                val cache = activity.cacheDir
+                val expected = File(cache, "app-updates/$name")
+                require(file == expected &&
+                    file.canonicalFile == File(cache.canonicalFile, "app-updates/$name") &&
+                    file.isFile) { "升级包路径无效" }
+                verifyAppUpdatePackage(file, version)
+
+                mainHandler.post {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !activity.packageManager.canRequestPackageInstalls()) {
+                            val source = Uri.fromParts("package", activity.packageName, null)
+                            activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, source))
+                            reply.success(false)
+                        } else {
+                            val uri = FileProvider.getUriForFile(
+                                activity, "${activity.packageName}.fileprovider", file,
+                            )
+                            activity.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, "application/vnd.android.package-archive")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            })
+                            reply.success(true)
+                        }
+                    } catch (error: Exception) {
+                        reply.error(error.message ?: "无法打开升级包")
+                    }
+                }
+            } catch (error: Exception) {
+                reply.error(error.message ?: "无法验证升级包")
+            }
+        }.start()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun verifyAppUpdatePackage(file: File, version: String) {
+        val packageManager = activity.packageManager
+        val useSigningInfo = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        val flags = if (useSigningInfo) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val archive = requireNotNull(packageManager.getPackageArchiveInfo(file.absolutePath, flags)) {
+            "升级包无法读取"
+        }
+        val installed = packageManager.getPackageInfo(activity.packageName, flags)
+        require(archive.packageName == installed.packageName && archive.versionName == version &&
+            archive.versionName != installed.versionName) { "升级包应用标识或版本不匹配" }
+        val archiveCode = if (useSigningInfo) archive.longVersionCode else archive.versionCode.toLong()
+        val installedCode = if (useSigningInfo) installed.longVersionCode else installed.versionCode.toLong()
+        // Prereleases and their final release share the same version code.
+        require(archiveCode >= installedCode) { "升级包版本低于已安装版本" }
+        val archiveSigners = if (useSigningInfo) archive.signingInfo?.apkContentsSigners else archive.signatures
+        val installedSigners = if (useSigningInfo) installed.signingInfo?.apkContentsSigners else installed.signatures
+        require(!archiveSigners.isNullOrEmpty() && !installedSigners.isNullOrEmpty() &&
+            archiveSigners.toSet() == installedSigners.toSet()) { "升级包签名与已安装应用不一致" }
     }
 
     private fun requestStoragePermission(reply: Reply, callback: (Reply) -> Unit) {

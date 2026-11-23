@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the finish-page launch contract and compile the real installer offline."""
+"""Check both installer launch paths and compile the real installer offline."""
 
 import pathlib
 import subprocess
@@ -14,7 +14,13 @@ launch = (windows / "unelevated-launch.nsh").read_text(encoding="utf-8")
 assert '!define MUI_FINISHPAGE_RUN_FUNCTION LaunchKeyTaoAsUser' in source
 assert 'MUI_FINISHPAGE_RUN_NOTCHECKED' not in source
 assert 'LangString KeyTaoRunText ${LANG_SIMPCHINESE} "运行 KeyTao"' in source
-assert launch.index('${If} ${Silent}') < launch.index('System::Store "S"')
+assert '${If} ${Silent}\n  ${AndIf} $RestartAfterUpgrade != 1\n    Return' in launch
+init = source.split('Function .onInit\n', 1)[1].split('FunctionEnd', 1)[0]
+assert init.index('${If} ${Silent}') < init.index('"/KEYTAO_RESTART"')
+assert init.index('"MainBinaryName"') < init.index('StrCpy $RestartAfterUpgrade 1')
+success = source.split('Function .onInstSuccess\n', 1)[1].split('FunctionEnd', 1)[0]
+assert '${If} $RestartAfterUpgrade == 1' in success
+assert success.index('${If} $0 == "registered"') < success.index('Call LaunchKeyTaoAsUser')
 assert 'GetTokenInformation(p r2, i 20' in launch
 assert 'StrCmp $R1 0 done\n  StrCmp $0 0 0 done' in launch
 assert 'CreateEnvironmentBlock(*p .r8, p r3, i 0)' in launch
@@ -55,4 +61,4 @@ with tempfile.TemporaryDirectory(prefix="keytao-unelevated-nsis-") as directory:
         check=True,
     )
     assert (work / "keytao-launch-fixture.exe").is_file()
-print("PASS: checked finish checkbox, fail-closed launch contract and real NSIS compilation")
+print("PASS: checked finish checkbox, opt-in upgrade, fail-closed launch and real NSIS compilation")

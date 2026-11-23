@@ -8,6 +8,7 @@ abstract final class AppStrings {
   static const migratingPackageDirs = '正在迁移方案目录…';
   static const retryPackageMigration = '迁移失败，重试';
   static const appUpdate = 'KeyTao 有新版本可用';
+  static const allowAppUpdatePackage = '请允许安装来自此来源的应用，然后再打开升级包';
   static const ime = '输入法';
   static const scheme = '方案';
   static const selectSchemas = '选择方案';
@@ -310,6 +311,21 @@ abstract final class AppStrings {
       : 'Update check failed: $message';
   static String downloadAppUpdate(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '前往下载' : 'Download';
+  static String downloadAppUpdatePackage(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '下载升级包' : 'Download update';
+  static String redownloadAppUpdatePackage(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '重新下载升级包' : 'Download again';
+  static String openAppUpdatePackage(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '打开升级包' : 'Open installer';
+  static String restartForAppUpdate(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '重启并安装' : 'Restart and install';
+  static String appUpdateDownloading(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '正在下载升级包…' : 'Downloading update…';
+  static String appUpdateInstalling(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '正在安装升级包…' : 'Installing update…';
+  static String appUpdateOpening(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '正在打开…' : 'Opening…';
+  static const appUpdateReopenManually = '更新已安装，请重新打开 KeyTao';
   static String changelogTitle(String release) => '$release 更新内容';
   static String operationLogCount(int count) => '日志 ($count)';
   static String useColor(String hex) => '使用颜色 $hex';

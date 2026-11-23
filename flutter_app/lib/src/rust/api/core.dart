@@ -373,6 +373,17 @@ Future<ReleaseInfoDto> fetchLatestRelease() =>
 Future<AppUpdateDto> checkAppUpdate() =>
     RustLib.instance.api.crateApiCoreCheckAppUpdate();
 
+Future<bool> downloadAppUpdate({required String version}) =>
+    RustLib.instance.api.crateApiCoreDownloadAppUpdate(version: version);
+
+Future<String> openAppUpdatePackage({
+  required String version,
+  required bool restart,
+}) => RustLib.instance.api.crateApiCoreOpenAppUpdatePackage(
+  version: version,
+  restart: restart,
+);
+
 /// Reads a filesystem directory. Android SAF tree URIs use the readLocalSchemas
 /// platform channel instead. Both Core-supported custom-config filenames count.
 Future<LocalSchemasDto> readLocalSchemas({required String dir}) =>

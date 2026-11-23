@@ -3,6 +3,14 @@ use reqwest::{Client, Url, header::LOCATION, redirect::Policy};
 use semver::Version;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+mod linux;
+mod package;
+#[cfg(windows)]
+mod windows;
+pub(crate) use package::VerifiedPackage;
+pub use package::{download_app_update, open_app_update_package};
+
 const RELEASES: &str = "https://github.com/xkinput/keytao-app/releases";
 const RELEASE_TAG: &str = "https://github.com/xkinput/keytao-app/releases/tag/";
 
@@ -100,6 +108,7 @@ async fn check_app_update_at(
         latest_version: latest,
         has_update,
         release_url,
+        install_mode: None,
     })
 }
 
@@ -121,7 +130,16 @@ pub async fn check_app_update(core: &Core) -> Result<AppUpdateInfo, CoreError> {
             t0.elapsed().as_millis()
         ),
     }
-    result.map_err(CoreError::Other)
+    let mut info = result.map_err(CoreError::Other)?;
+    if !info.has_update {
+        return Ok(info);
+    }
+    tokio::task::spawn_blocking(move || {
+        info.install_mode = Some(package::install_mode(&info).into());
+        info
+    })
+    .await
+    .map_err(|error| CoreError::Other(error.to_string()))
 }
 
 #[cfg(test)]

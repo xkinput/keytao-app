@@ -62,6 +62,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (C) 2026 rea"
 
 Var PreviousInstallDir
 Var UpdateMode
+Var RestartAfterUpgrade
 !define MUI_PAGE_CUSTOMFUNCTION_PRE DirectoryPage
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom CreateRunningProcessesPage LeaveRunningProcessesPage
@@ -107,6 +108,36 @@ Function .onInit
   ${EndIf}
   ${If} $PreviousInstallDir != ""
     StrCpy $INSTDIR $PreviousInstallDir
+  ${EndIf}
+  StrCpy $RestartAfterUpgrade 0
+  ${If} ${Silent}
+    ${GetParameters} $0
+    ClearErrors
+    ${GetOptions} $0 "/KEYTAO_RESTART" $1
+    ${IfNot} ${Errors}
+    ${AndIf} $1 == ""
+      ReadRegStr $0 HKLM "${MANUPRODUCTKEY}" ""
+      ReadRegStr $1 HKLM "${UNINSTKEY}" "MainBinaryName"
+      ReadRegStr $2 HKLM "${UNINSTKEY}" "InstallLocation"
+      ${If} $0 == ""
+      ${OrIf} $1 != "keytao-app.exe"
+        SetErrorLevel 1
+        Abort
+      ${EndIf}
+      ${If} $2 != '$\"$0$\"'
+      ${AndIf} $2 != $0
+        SetErrorLevel 1
+        Abort
+      ${EndIf}
+      ${IfNot} ${FileExists} "$PreviousInstallDir\keytao-app.exe"
+      ${OrIfNot} ${FileExists} "$PreviousInstallDir\uninstall.exe"
+      ${OrIfNot} ${FileExists} "$PreviousInstallDir\flutter_windows.dll"
+      ${OrIfNot} ${FileExists} "$PreviousInstallDir\keytao_app_bridge.dll"
+        SetErrorLevel 1
+        Abort
+      ${EndIf}
+      StrCpy $RestartAfterUpgrade 1
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -161,6 +192,17 @@ SectionEnd
 
 Function InstallIme
   !insertmacro NSIS_HOOK_POSTINSTALL
+FunctionEnd
+
+Function .onInstSuccess
+  ${If} $RestartAfterUpgrade == 1
+    ReadRegStr $0 HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeInstallStatus"
+    ${If} $0 == "registered"
+      Call LaunchKeyTaoAsUser
+    ${Else}
+      SetErrorLevel 1
+    ${EndIf}
+  ${EndIf}
 FunctionEnd
 
 Function un.onInit

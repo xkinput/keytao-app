@@ -41,6 +41,8 @@ enum LogLineKind { normal, error, warning, deploy, merged }
 
 enum DeployStepState { neutral, ok, failed }
 
+enum AppUpdateAction { download, openPackage, restart, openLink }
+
 enum ImeBadgeState {
   checking,
   componentMissing,
@@ -271,6 +273,31 @@ class AppController extends ChangeNotifier {
   AppUpdateDto? appUpdate;
   bool checkingAppUpdate = false;
   String? appUpdateError;
+  bool appUpdateBusy = false;
+  InstallProgressDto? appUpdateProgress;
+  String? appUpdateActionError;
+  String? _appUpdateDownloadedVersion;
+  String? _appUpdateMissingPackageVersion;
+  String _androidAppUpdateSource = 'link';
+
+  AppUpdateAction get appUpdateAction {
+    final update = appUpdate;
+    if (update == null ||
+        (update.installMode != 'package' && update.installMode != 'restart') ||
+        (isAndroid && _androidAppUpdateSource != 'package') ||
+        _appUpdateMissingPackageVersion == update.latestVersion) {
+      return AppUpdateAction.openLink;
+    }
+    if (_appUpdateDownloadedVersion != update.latestVersion) {
+      return AppUpdateAction.download;
+    }
+    return update.installMode == 'restart'
+        ? AppUpdateAction.restart
+        : AppUpdateAction.openPackage;
+  }
+
+  bool get canRunAppUpdate => !busy && !appUpdateBusy && !checkingAppUpdate;
+
   List<InstalledPackageDto> installedPackages = [];
   List<IsolatedPackageDto> isolatedPackages = [];
   int _isolatedPackagesRequest = 0;
@@ -1216,6 +1243,14 @@ class AppController extends ChangeNotifier {
   }
 
   void _receiveInstallProgress(InstallProgressDto value) {
+    if (value.stage == 'app_update_downloading' ||
+        value.stage == 'app_update_verifying') {
+      if (appUpdateBusy && appUpdateAction == AppUpdateAction.download) {
+        appUpdateProgress = value;
+        _changed();
+      }
+      return;
+    }
     installProgress = value;
     progress = value.message;
     installFraction = value.percent.clamp(0, 100) / 100;
@@ -1731,7 +1766,7 @@ class AppController extends ChangeNotifier {
     if (!_startupStarted && !_disposed) {
       _startupStarted = true;
       unawaited(_loadAccount());
-      unawaited(_checkAppUpdate());
+      unawaited(_checkAppUpdate(silent: true));
       unawaited(refreshSchemeUpdates());
       unawaited(refreshRelease());
     }
@@ -1843,28 +1878,33 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _checkAppUpdate() async {
-    try {
-      final update = await core.checkAppUpdate();
-      if (!_disposed) appUpdate = update.hasUpdate ? update : null;
-    } catch (_) {
-      // Startup update failures are intentionally silent, as in App.tsx.
-    }
-    _changed();
-  }
+  Future<AppUpdateDto?> checkAppUpdateNow() => _checkAppUpdate();
 
-  Future<AppUpdateDto?> checkAppUpdateNow() async {
-    if (_disposed || checkingAppUpdate) return null;
+  Future<AppUpdateDto?> _checkAppUpdate({bool silent = false}) async {
+    if (_disposed || checkingAppUpdate || appUpdateBusy) return null;
     checkingAppUpdate = true;
     appUpdateError = null;
     _changed();
     try {
       final update = await core.checkAppUpdate();
+      if (isAndroid && update.hasUpdate) {
+        try {
+          _androidAppUpdateSource = await android.appUpdateSource();
+        } on PlatformException {
+          _androidAppUpdateSource = 'link';
+        } on MissingPluginException {
+          _androidAppUpdateSource = 'link';
+        }
+      }
       if (_disposed) return null;
-      appUpdate = update;
+      if (appUpdate?.latestVersion != update.latestVersion) {
+        appUpdateActionError = null;
+      }
+      _appUpdateMissingPackageVersion = null;
+      appUpdate = silent && !update.hasUpdate ? null : update;
       return update;
     } catch (failure) {
-      if (!_disposed) appUpdateError = errorText(failure);
+      if (!_disposed && !silent) appUpdateError = errorText(failure);
       return null;
     } finally {
       checkingAppUpdate = false;
@@ -4371,18 +4411,79 @@ class AppController extends ChangeNotifier {
     if (key == null) return openDefaultDirectory();
     return openSchemeDirectory(key);
   }
+
   Future<bool> openTheme() => uiSettings?.themePath == null
       ? Future.value(false)
       : open(uiSettings!.themePath!);
-  Future<bool> openAppUpdate() async {
-    if (appUpdate == null) return false;
-    try {
-      await _open(appUpdate!.releaseUrl);
-      return true;
-    } catch (failure) {
-      error = errorText(failure);
-      _changed();
+  Future<bool> openAppUpdate({
+    bool interactive = false,
+    bool redownload = false,
+  }) async {
+    final update = appUpdate;
+    if (_disposed || update == null || !update.hasUpdate || !canRunAppUpdate) {
       return false;
+    }
+    final version = update.latestVersion;
+    if (redownload) _appUpdateDownloadedVersion = null;
+    final action = interactive && appUpdateAction == AppUpdateAction.restart
+        ? AppUpdateAction.openPackage
+        : appUpdateAction;
+    appUpdateBusy = true;
+    appUpdateProgress = null;
+    appUpdateActionError = null;
+    _changed();
+    try {
+      switch (action) {
+        case AppUpdateAction.download:
+          if (!await core.downloadAppUpdate(version: version)) {
+            _appUpdateMissingPackageVersion = version;
+            return false;
+          }
+          _appUpdateDownloadedVersion = version;
+          return true;
+        case AppUpdateAction.openPackage:
+        case AppUpdateAction.restart:
+          final restartLinux = isLinux && action == AppUpdateAction.restart;
+          final executable = restartLinux ? Platform.resolvedExecutable : null;
+          final path = await core.openAppUpdatePackage(
+            version: version,
+            restart: action == AppUpdateAction.restart,
+          );
+          if (executable != null) {
+            if (busy) throw StateError(AppStrings.appUpdateReopenManually);
+            try {
+              await Process.start(
+                executable,
+                [],
+                mode: ProcessStartMode.detached,
+              );
+            } on ProcessException {
+              throw StateError(AppStrings.appUpdateReopenManually);
+            }
+            exit(0);
+          }
+          if (isAndroid) {
+            if (await android.openAppUpdatePackage(path, version)) return true;
+            showToast(AppStrings.allowAppUpdatePackage);
+            return false;
+          }
+          if (!isWindows) await _open(path);
+          return true;
+        case AppUpdateAction.openLink:
+          await _open(
+            isAndroid && _androidAppUpdateSource == 'play'
+                ? 'https://play.google.com/store/apps/details?id=ink.rea.keytao_app'
+                : update.releaseUrl,
+          );
+          return true;
+      }
+    } catch (failure) {
+      appUpdateActionError = errorText(failure);
+      return false;
+    } finally {
+      appUpdateBusy = false;
+      appUpdateProgress = null;
+      _changed();
     }
   }
 
