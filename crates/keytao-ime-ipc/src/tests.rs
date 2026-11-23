@@ -31,6 +31,12 @@ fn state() -> ImeState {
         select_keys: Some("12345".into()),
         ascii_mode: false,
         chord_composer: true,
+        schema_shortcuts: serde_json::from_value(serde_json::json!([{
+            "key": 0x60,
+            "modifiers": keytao_core::RIME_MOD_CONTROL,
+            "condition": "Switcher",
+        }]))
+        .unwrap(),
         schema_id: "xmjd6".into(),
         schema_name: "星猫键道".into(),
     }
@@ -146,11 +152,14 @@ fn every_response_variant_round_trips() {
 }
 
 #[test]
-fn older_engine_states_default_to_no_chord_composer() {
+fn older_engine_states_default_to_no_chord_composer_or_shortcuts() {
     let mut value = serde_json::to_value(state()).unwrap();
-    value.as_object_mut().unwrap().remove("chord_composer");
+    let fields = value.as_object_mut().unwrap();
+    fields.remove("chord_composer");
+    fields.remove("schema_shortcuts");
     let decoded: ImeState = serde_json::from_value(value).unwrap();
     assert!(!decoded.chord_composer);
+    assert!(decoded.schema_shortcuts.is_empty());
 }
 
 #[test]
