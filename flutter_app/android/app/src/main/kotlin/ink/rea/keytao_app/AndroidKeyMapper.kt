@@ -46,13 +46,9 @@ object AndroidKeyMapper {
         ) return null
         val modifiers = modifiers(event)
         specialHardwareKeysym(keyCode)?.let { return RimeKey(it, modifiers) }
-        val key = fromUnicodeCodePoint(event.getUnicodeChar(event.metaState), modifiers) {
+        return fromHardwareUnicode(keyCode, event.getUnicodeChar(event.metaState), modifiers) {
             KeytaoNativeBridge.textToKeysym(it)
         }
-        if (key == null && keyCode == KeyEvent.KEYCODE_GRAVE &&
-            modifiers and RIME_MOD_LOCK.inv() == RIME_MOD_CONTROL
-        ) return RimeKey(OPEN_PACKAGE_MENU, 0)
-        return key
     }
 
     internal fun specialHardwareKeysym(keyCode: Int): Int? = when (keyCode) {
@@ -72,6 +68,20 @@ object AndroidKeyMapper {
         KeyEvent.KEYCODE_F4 -> XK_F4
         KeyEvent.KEYCODE_CAPS_LOCK -> XK_CAPS_LOCK
         else -> null
+    }
+
+    internal fun fromHardwareUnicode(
+        keyCode: Int,
+        codePoint: Int,
+        modifiers: Int,
+        textToKeysym: (String) -> Int,
+    ): RimeKey? {
+        if (keyCode == KeyEvent.KEYCODE_SPACE && codePoint == 0) return RimeKey(XK_SPACE, modifiers)
+        val key = fromUnicodeCodePoint(codePoint, modifiers, textToKeysym)
+        if (key == null && keyCode == KeyEvent.KEYCODE_GRAVE &&
+            modifiers and RIME_MOD_LOCK.inv() == RIME_MOD_CONTROL
+        ) return RimeKey(OPEN_PACKAGE_MENU, 0)
+        return key
     }
 
     /**
@@ -106,10 +116,19 @@ object AndroidKeyMapper {
         return RimeKey(keysym, modifiers)
     }
 
-    fun permitsSoloShift(event: KeyEvent): Boolean = permitsSoloShift(modifiers(event))
-
-    internal fun permitsSoloShift(modifiers: Int): Boolean {
-        return modifiers and (RIME_MOD_CONTROL or RIME_MOD_ALT or RIME_MOD_SUPER) == 0
+    internal fun modifierTapKeysym(keyCode: Int, metaState: Int = 0): Int? {
+        val (keysym, ownModifier) = when (keyCode) {
+            KeyEvent.KEYCODE_SHIFT_LEFT -> XK_SHIFT_L to (KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON)
+            KeyEvent.KEYCODE_SHIFT_RIGHT -> XK_SHIFT_R to (KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_RIGHT_ON)
+            KeyEvent.KEYCODE_CTRL_LEFT -> 0xffe3 to (KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON)
+            KeyEvent.KEYCODE_CTRL_RIGHT -> 0xffe4 to (KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_RIGHT_ON)
+            KeyEvent.KEYCODE_ALT_LEFT -> 0xffe9 to (KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON)
+            KeyEvent.KEYCODE_ALT_RIGHT -> 0xffea to (KeyEvent.META_ALT_ON or KeyEvent.META_ALT_RIGHT_ON)
+            else -> return null
+        }
+        val modifiers = KeyEvent.META_SHIFT_MASK or KeyEvent.META_CTRL_MASK or
+            KeyEvent.META_ALT_MASK or KeyEvent.META_META_MASK or KeyEvent.META_FUNCTION_ON or KeyEvent.META_SYM_ON
+        return keysym.takeIf { metaState and modifiers and ownModifier.inv() == 0 }
     }
 
     private fun modifiers(event: KeyEvent): Int {

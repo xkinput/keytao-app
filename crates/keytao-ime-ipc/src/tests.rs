@@ -37,6 +37,7 @@ fn state() -> ImeState {
             "condition": "Switcher",
         }]))
         .unwrap(),
+        modifier_taps: vec![0xffe3],
         schema_id: "xmjd6".into(),
         schema_name: "星猫键道".into(),
     }
@@ -157,9 +158,11 @@ fn older_engine_states_default_to_no_chord_composer_or_shortcuts() {
     let fields = value.as_object_mut().unwrap();
     fields.remove("chord_composer");
     fields.remove("schema_shortcuts");
+    fields.remove("modifier_taps");
     let decoded: ImeState = serde_json::from_value(value).unwrap();
     assert!(!decoded.chord_composer);
     assert!(decoded.schema_shortcuts.is_empty());
+    assert!(decoded.modifier_taps.is_empty());
 }
 
 #[test]

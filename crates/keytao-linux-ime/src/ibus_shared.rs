@@ -14,7 +14,7 @@
 //! only publish the outcome over their own interface.
 
 use crate::engine::{
-    candidate_panel_layout, ibus_content_type_policy, shift_key_modifiers, ImeSession,
+    candidate_panel_layout, ibus_content_type_policy, shift_key_modifiers, ControlAltTap, ImeSession,
 };
 use crate::panel::state_to_panel_input;
 use keytao_core::{key_policy, ImeState, InputContextPolicy, KeyProcessResult, RIME_RELEASE_MASK};
@@ -247,7 +247,7 @@ pub fn press_route(keyval: u32, mods: u32, before: &ImeState) -> PressRoute {
         return PressRoute::BypassEmptyComposition;
     }
     if key_policy::is_enter_key(keyval)
-        && !key_policy::is_configured_switcher_hotkey(keyval, mods, before)
+        && !key_policy::is_configured_schema_shortcut(keyval, mods, before)
         && key_policy::enter_action(before) == key_policy::EnterAction::ForwardToRime
     {
         return PressRoute::Enter;
@@ -294,13 +294,20 @@ impl KeyOutcome {
 /// Run one IBus `ProcessKeyEvent` against `session`.
 pub fn process_key_event(
     session: &ImeSession,
+    control_alt_tap: &ControlAltTap,
     keyval: u32,
     state: u32,
     theme_resolver: &ThemeResolver,
 ) -> KeyOutcome {
     match key_phase(keyval, state, session.input_policy()) {
-        KeyPhase::Sensitive => KeyOutcome::Forward,
+        KeyPhase::Sensitive => {
+            control_alt_tap.clear();
+            KeyOutcome::Forward
+        }
         KeyPhase::OtherRelease => {
+            if let Some(result) = control_alt_tap.release(keyval, state, session) {
+                return KeyOutcome::from_result(Some(result));
+            }
             if key_policy::should_forward_chord_release(keyval, state, &session.state()) {
                 // IBus can report Super as the X11 Mod4 bit instead of Rime's bit 26.
                 let state = if state & (1 << 6) != 0 {
@@ -320,6 +327,9 @@ pub fn process_key_event(
             KeyOutcome::from_result(session.process_key_result(keyval, shift_key_modifiers(state)))
         }
         KeyPhase::Press => {
+            if control_alt_tap.press(keyval, state) {
+                return KeyOutcome::Forward;
+            }
             tracing::trace!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
             let before = session.state();
             match press_route(keyval, state, &before) {

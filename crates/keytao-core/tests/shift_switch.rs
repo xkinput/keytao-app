@@ -2,7 +2,7 @@
 #[path = "support/smoke_fixture.rs"]
 mod smoke_fixture;
 
-use keytao_core::{ImeRuntime, RIME_RELEASE_MASK};
+use keytao_core::{ImeRuntime, RIME_RELEASE_MASK, key_policy};
 
 #[test]
 fn modifier_switch_key_styles_commit_once_and_unset_shift_is_noop() {
@@ -53,6 +53,14 @@ fn modifier_switch_key_styles_commit_once_and_unset_shift_is_noop() {
         runtime.init().expect("deploy the modifier switch fixture");
         for keysym in [switch_keysym, 0xffe2] {
             let session = runtime.create_session().unwrap();
+            let state = session.state();
+            for modifier in [0xffe3, 0xffe4, 0xffe9, 0xffea] {
+                assert_eq!(
+                    key_policy::is_configured_modifier_tap(modifier, &state),
+                    modifier == switch_keysym && style != "noop",
+                    "shortcut snapshot for {switch_key}: {style}, keysym={modifier:#x}"
+                );
+            }
             session.set_context_ascii_mode(Some(false)).unwrap();
             for key in b"fjv" {
                 session.process_key_result(u32::from(*key), 0).unwrap();

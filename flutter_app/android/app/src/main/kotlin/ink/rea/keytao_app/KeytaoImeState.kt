@@ -64,6 +64,7 @@ data class KeytaoImeState(
     val schemaName: String = "",
     val accepted: Boolean = false,
     val candidatePanel: KeytaoPanelModel = KeytaoPanelModel(),
+    val modifierTapKeys: List<Int> = emptyList(),
 ) {
     val hasComposition: Boolean
         get() = preedit.isNotEmpty() || candidates.isNotEmpty()
@@ -100,6 +101,9 @@ data class KeytaoImeState(
                     schemaName = root.safeString("schemaName"),
                     accepted = root.optBoolean("accepted"),
                     candidatePanel = parsePanelModel(root.optJSONObject("candidatePanel")),
+                    modifierTapKeys = root.optJSONArray("modifierTapKeys")?.let { keys ->
+                        List(keys.length()) { keys.optInt(it) }
+                    }.orEmpty(),
                 )
             }.getOrNull()
         }

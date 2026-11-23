@@ -24,7 +24,7 @@ pub(crate) struct DeferredKey {
     pub keysym: u32,
     pub mods: u32,
     pub enter: bool,
-    pub shift_toggle: bool,
+    pub modifier_tap: bool,
 }
 
 #[derive(Default)]
@@ -92,7 +92,7 @@ mod tests {
             keysym: ch as u32,
             mods: 0,
             enter: false,
-            shift_toggle: false,
+            modifier_tap: false,
         }
     }
 
@@ -119,12 +119,12 @@ mod tests {
     }
 
     #[test]
-    fn shift_toggle_waits_for_prior_keys_and_written_timeout_never_replays() {
+    fn modifier_tap_waits_for_prior_keys_and_written_timeout_never_replays() {
         let now = Instant::now();
         let mut queue = DeferredKeys::default();
         let toggle = DeferredKey {
             keysym: 0xffe1,
-            shift_toggle: true,
+            modifier_tap: true,
             ..key(' ')
         };
         assert!(queue.defer_failed(key('y'), false, now));

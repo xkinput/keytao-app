@@ -100,10 +100,7 @@ final class KeyTaoInputController: IMKInputController {
         clearPendingChordReleases()
         let client = sender as? IMKTextInput
         isActive = true
-        lastModifierFlags = KeyTaoModifierKeyPolicy.activationFlags(
-            NSEvent.modifierFlags,
-            systemCapsLock: CGEventSource.flagsState(.combinedSessionState).contains(.maskAlphaShift)
-        )
+        lastModifierFlags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         modifierTap.clear()
         KeyTaoRuntime.shared.checkForReload()
         let hadSession = session != nil
@@ -756,45 +753,16 @@ final class KeyTaoInputController: IMKInputController {
         // Install before calling the host. A reentrant focus reset must not
         // later be overwritten by a defer from the obsolete flags callback.
         lastModifierFlags = newFlags
-        if !newFlags.subtracting(previousFlags).isEmpty || Int(event.keyCode) == kVK_CapsLock {
+        if Int(event.keyCode) == kVK_CapsLock {
+            modifierTap.clear()
+            return false
+        }
+        if !newFlags.subtracting(previousFlags).isEmpty {
             deploymentKeyPressed(client: client)
             guard inputContextGeneration.isCurrent(generation) else { return false }
         }
         guard !keytao_deployment_blocks_input() else {
             modifierTap.clear()
-            return false
-        }
-
-        if Int(event.keyCode) == kVK_CapsLock,
-           let capsLock = KeyTaoModifierKeyPolicy.capsLockEvent(
-               previousModifiers: rimeModifiers(from: previousFlags),
-               currentModifiers: rimeModifiers(from: newFlags)
-           ) {
-            modifierTap.clear()
-            guard let session = ensureSession() else { return false }
-            if isActive, let unlockedFlags = KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(
-                previousFlags: previousFlags, currentFlags: newFlags
-            ) {
-                switch KeyTaoCapsLockRestore.afterModeKeyPress() {
-                case .restored:
-                    lastModifierFlags = unlockedFlags
-                    toggleEnglishMode(session: session, client: client)
-                    return true
-                case .alreadyUnlocked:
-                    // A newer event already released the lock.
-                    lastModifierFlags = unlockedFlags
-                    return false
-                case .unavailable:
-                    break
-                }
-            }
-            guard let state = KeyTaoImeState.consuming(keytao_session_process_key_json(
-                session, capsLock.keyval, capsLock.modifiers
-            )) else { return false }
-            apply(state, to: client)
-            if inputContextGeneration.isCurrent(generation) {
-                showModeIndicator(state.modeHint, client: client)
-            }
             return false
         }
 
@@ -815,21 +783,6 @@ final class KeyTaoInputController: IMKInputController {
             showModeIndicator(state.modeHint, client: client)
         }
         return handled
-    }
-
-    private func toggleEnglishMode(session: UnsafeMutableRawPointer, client: IMKTextInput?) {
-        let generation = inputContextGeneration.current
-        let toEnglish = !keytao_session_get_english_mode(session)
-        if hasComposition {
-            endComposition(commit: true, client: client)
-        }
-        guard inputContextGeneration.isCurrent(generation),
-              let state = KeyTaoImeState.consuming(keytao_session_set_english_mode_json(session, toEnglish))
-        else { return }
-        apply(state, to: client)
-        if inputContextGeneration.isCurrent(generation) {
-            showModeIndicator(state.modeHint, client: client)
-        }
     }
 
     // MARK: Input menu

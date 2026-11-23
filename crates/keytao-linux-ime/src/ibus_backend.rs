@@ -4,7 +4,7 @@
 //! (e.g. WeChatAppEx) can use keytao as their IME without requiring a real
 //! IBus daemon.
 
-use crate::engine::{client_preedit, panel_has_composition, CoreEngine, ImeSession};
+use crate::engine::{client_preedit, panel_has_composition, ControlAltTap, CoreEngine, ImeSession};
 use crate::ibus_shared::{
     self, candidate_display_text, ibus_engine_desc, ibus_lookup_table_value,
     ibus_preedit_text_variant, ibus_text_variant, state_to_panel_model, ContentTypeState,
@@ -28,6 +28,7 @@ use zbus::{connection, interface, object_server::SignalContext, zvariant};
 
 struct InputContext {
     session: ImeSession,
+    control_alt_tap: ControlAltTap,
     deployment: Arc<ibus_shared::IbusDeploymentHint>,
     kimpanel_ctxt: Option<SignalContext<'static>>,
     cursor_x: Arc<AtomicI32>,
@@ -93,6 +94,7 @@ impl InputContext {
         let _activity = crate::hot_update::activity();
         let change = self.content_type.set(purpose, hints);
         if change.turned_sensitive {
+            self.control_alt_tap.clear();
             self.deployment.reset().await;
         }
         self.session.set_input_policy(change.policy);
@@ -221,12 +223,14 @@ impl InputContext {
 #[interface(name = "org.freedesktop.IBus.InputContext", spawn = true)]
 impl InputContext {
     async fn focus_in(&self) {
+        self.control_alt_tap.clear();
         tracing::debug!("IBus InputContext: FocusIn");
         self.deployment.reset().await;
         self.publish_current_mode().await;
     }
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
         self.deployment.reset().await;
         tracing::debug!("IBus InputContext: FocusOut");
@@ -236,6 +240,7 @@ impl InputContext {
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
         self.deployment.reset().await;
         tracing::debug!("IBus InputContext: Reset");
@@ -279,6 +284,7 @@ impl InputContext {
     }
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
         self.deployment.reset().await;
         tracing::debug!("IBus InputContext: Disable");
@@ -332,8 +338,13 @@ impl InputContext {
         }
         // The decision is shared with the GNOME engine backend; this object only
         // publishes the outcome over org.freedesktop.IBus.InputContext.
-        let outcome =
-            ibus_shared::process_key_event(&self.session, keyval, state, &self.theme_resolver);
+        let outcome = ibus_shared::process_key_event(
+            &self.session,
+            &self.control_alt_tap,
+            keyval,
+            state,
+            &self.theme_resolver,
+        );
         let accepted = outcome.accepted();
         match outcome {
             KeyOutcome::Forward => {}
@@ -481,6 +492,7 @@ impl IBusBus {
         );
         let ctx = InputContext {
             session: session.clone(),
+            control_alt_tap: ControlAltTap::default(),
             deployment: deployment.clone(),
             kimpanel_ctxt: self.kimpanel_ctxt.clone(),
             cursor_x,

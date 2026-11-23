@@ -418,17 +418,37 @@ pub fn rime_mod_mask_for_vk(vk: u16, mods: u32) -> u32 {
     }
 }
 
-/// Solo-Shift tracking: Shift toggles Chinese/English only when no other key
-/// was pressed while it was held.
-///
-/// This has to be fed from `OnTestKeyDown`, which TSF calls for every key —
-/// `OnKeyDown` only runs for keys the test callback claimed, so a flag kept
-/// there alone would never be cleared by a passed-through key and, worse,
-/// would never be set at all because Shift itself is never claimed.
-pub fn shift_pending_after_key_down(vk: u16, mods: u32) -> bool {
-    is_shift_vk(vk)
-        && mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) == 0
+pub(crate) fn modifier_tap_keysym(vk: u16, lparam: isize) -> Option<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let extended = lparam & (1 << 24) != 0;
+    match VIRTUAL_KEY(vk) {
+        VK_SHIFT | VK_LSHIFT | VK_RSHIFT => Some(crate::solo_shift::solo_shift_keysym(vk, lparam)),
+        VK_CONTROL if extended => Some(0xffe4),
+        VK_CONTROL | VK_LCONTROL => Some(0xffe3),
+        VK_RCONTROL => Some(0xffe4),
+        VK_MENU if extended => Some(0xffea),
+        VK_MENU | VK_LMENU => Some(0xffe9),
+        VK_RMENU => Some(0xffea),
+        _ => None,
+    }
+}
+
+pub(crate) fn modifier_tap_is_alone(keysym: u32, mods: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let (own, opposite_side) = match keysym {
+        0xffe1 => (RIME_MOD_SHIFT, VK_RSHIFT),
+        0xffe2 => (RIME_MOD_SHIFT, VK_LSHIFT),
+        0xffe3 => (RIME_MOD_CONTROL, VK_RCONTROL),
+        0xffe4 => (RIME_MOD_CONTROL, VK_LCONTROL),
+        0xffe9 => (RIME_MOD_ALT, VK_RMENU),
+        0xffea => (RIME_MOD_ALT, VK_LMENU),
+        _ => return false,
+    };
+    mods & (RIME_MOD_SHIFT | RIME_MOD_CONTROL | RIME_MOD_ALT) & !own == 0
         && !key_policy::is_system_reserved_modifier(mods)
+        && unsafe { GetKeyState(i32::from(opposite_side.0)) as u16 & 0x8000 == 0 }
 }
 
 pub fn is_enter_vk(vk: u16) -> bool {
@@ -711,8 +731,7 @@ mod tests {
     use super::{
         ascii_mode_rejects_key, chord_keysym_for_vk, fallback_printable_keysym,
         is_application_shortcut, letters_are_uppercase, rime_mod_mask_for_vk,
-        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
-        vk_to_keysym,
+        modifier_tap_keysym, should_bypass_empty_composition, should_eat_key, vk_to_keysym,
     };
 
     fn composing_state() -> ImeState {
@@ -955,19 +974,15 @@ mod tests {
     }
 
     #[test]
-    fn solo_shift_survives_keys_the_test_callback_declines() {
-        // Shift arms the toggle; any other key down disarms it, including keys
-        // that are passed through to the host and never reach OnKeyDown.
-        assert!(shift_pending_after_key_down(VK_SHIFT.0, RIME_MOD_SHIFT));
-        assert!(!shift_pending_after_key_down(VK_A.0, RIME_MOD_SHIFT));
-        assert!(!shift_pending_after_key_down(VK_BACK.0, 0));
-        for modifier in [RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
-            assert!(!shift_pending_after_key_down(
-                VK_SHIFT.0,
-                modifier | RIME_MOD_SHIFT
-            ));
-        }
-        assert!(!should_eat_key(VK_BACK.0, false, 0));
+    fn modifier_taps_distinguish_extended_ctrl_and_alt_from_left_keys() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU};
+
+        assert_eq!(modifier_tap_keysym(VK_SHIFT.0, 0x36 << 16), Some(0xffe2));
+        assert_eq!(modifier_tap_keysym(VK_CONTROL.0, 0), Some(0xffe3));
+        assert_eq!(modifier_tap_keysym(VK_CONTROL.0, 1 << 24), Some(0xffe4));
+        assert_eq!(modifier_tap_keysym(VK_MENU.0, 0), Some(0xffe9));
+        assert_eq!(modifier_tap_keysym(VK_MENU.0, 1 << 24), Some(0xffea));
+        assert_eq!(modifier_tap_keysym(VK_A.0, 0), None);
     }
 
     #[test]

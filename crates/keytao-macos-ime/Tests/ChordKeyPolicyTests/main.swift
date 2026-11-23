@@ -77,45 +77,6 @@ press(2, 0x64, accepted: false)
 press(36, 0xff0d)
 assert(releases.isEmpty, "ordinary schemas, ASCII, rejected and nonprintable presses stay unchanged")
 
-let capsOn = KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0, currentModifiers: 0x0002)
-assert(capsOn?.keyval == 0xffe5 && capsOn?.modifiers == 0, "Caps Lock on sends the pre-toggle unlocked state")
-let capsOff = KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0x0002, currentModifiers: 0)
-assert(capsOff?.keyval == 0xffe5 && capsOff?.modifiers == 0x0002, "Caps Lock off sends the pre-toggle locked state")
-for otherModifiers: UInt32 in [0x0001, 0x0004, 0x0008, 1 << 26, 0x0001 | 0x0004 | 0x0008 | (1 << 26)] {
-    let on = KeyTaoModifierKeyPolicy.capsLockEvent(
-        previousModifiers: otherModifiers, currentModifiers: otherModifiers | 0x0002
-    )
-    assert(on?.modifiers == otherModifiers, "Caps Lock preserves other modifiers")
-    let off = KeyTaoModifierKeyPolicy.capsLockEvent(
-        previousModifiers: otherModifiers | 0x0002, currentModifiers: otherModifiers
-    )
-    assert(off?.modifiers == otherModifiers | 0x0002, "Caps Lock off preserves other modifiers")
-}
-assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0, currentModifiers: 0) == nil)
-assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0x0002, currentModifiers: 0x0003) == nil,
-       "unrelated modifier changes must not toggle Caps Lock again")
-assert(KeyTaoModifierKeyPolicy.activationFlags([.capsLock, .option], systemCapsLock: false) == .option)
-assert(KeyTaoModifierKeyPolicy.activationFlags(.option, systemCapsLock: true) == [.capsLock, .option])
-
-var capsFlags: NSEvent.ModifierFlags = []
-for _ in 0..<2 {
-    guard let restored = KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(
-        previousFlags: capsFlags, currentFlags: .capsLock
-    ) else { fatalError("each standalone Caps Lock press switches the input mode") }
-    assert(restored.isEmpty, "a restored lock allows another press without an intervening flagsChanged event")
-    capsFlags = restored
-    assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(previousFlags: capsFlags, currentFlags: []) == nil)
-}
-assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(previousFlags: .capsLock, currentFlags: []) == nil,
-       "releasing a lock already active when KeyTao gained focus must preserve the hardware unlock")
-assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(previousFlags: .capsLock, currentFlags: .capsLock) == nil,
-       "duplicate flags with the hardware lock latched must preserve the normal Caps Lock policy")
-for modifier: NSEvent.ModifierFlags in [.shift, .control, .option, .command, .function] {
-    assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(
-        previousFlags: modifier, currentFlags: [.capsLock, modifier]
-    ) == nil, "combined Caps Lock presses must preserve the normal Caps Lock policy")
-}
-
 var tap = KeyTaoModifierTap()
 func flags(
     _ keyCode: Int, _ previous: NSEvent.ModifierFlags, _ current: NSEvent.ModifierFlags,
@@ -155,4 +116,8 @@ assert(flags(kVK_Option, .function, [.function, .option]) == nil)
 assert(flags(kVK_Option, [.function, .option], .function) == nil, "Fn chords cannot switch modes")
 assert(flags(kVK_Command, [], .command) == nil)
 assert(flags(kVK_Command, .command, []) == nil, "Command is reserved for macOS")
-print("chord key policy, release synthesis, Caps Lock and modifier tap tests passed")
+assert(flags(kVK_CapsLock, [], .capsLock) == nil, "Caps Lock belongs to macOS")
+assert(flags(kVK_Shift, .capsLock, [.shift, .capsLock]) == nil)
+assert(flags(kVK_CapsLock, [.shift, .capsLock], .shift, time: 0.1) == nil)
+assert(flags(kVK_Shift, .shift, [], time: 0.2) == nil, "Caps Lock cancels an in-progress Shift tap")
+print("chord key policy, release synthesis and modifier tap tests passed")

@@ -17,7 +17,7 @@
 //!      signals which the daemon proxies to the focused application.
 
 use crate::{
-    engine::{client_preedit, panel_has_composition, CoreEngine, ImeSession},
+    engine::{client_preedit, panel_has_composition, ControlAltTap, CoreEngine, ImeSession},
     ibus_shared::{
         self, ibus_engine_desc, ibus_lookup_table_value, ibus_preedit_text_variant,
         ibus_text_as_variant, ibus_text_variant, state_to_panel_model, ContentTypeState,
@@ -212,6 +212,7 @@ impl IBusFactory {
                 path.clone(),
                 IBusEngine {
                     session: session.clone(),
+                    control_alt_tap: ControlAltTap::default(),
                     theme_resolver: self.theme_resolver.clone(),
                     cursor_x,
                     cursor_y,
@@ -258,6 +259,7 @@ impl IBusFactoryService {
 
 pub struct IBusEngine {
     session: ImeSession,
+    control_alt_tap: ControlAltTap,
     deployment: Arc<ibus_shared::IbusDeploymentHint>,
     theme_resolver: Arc<ThemeResolver>,
     cursor_x: Arc<AtomicI32>,
@@ -419,6 +421,7 @@ impl IBusEngine {
         let _activity = crate::hot_update::activity();
         let change = self.content_type.set(purpose, hints);
         if change.turned_sensitive {
+            self.control_alt_tap.clear();
             self.deployment.reset().await;
         }
         self.session.set_input_policy(change.policy);
@@ -507,8 +510,13 @@ impl IBusEngine {
         }
         // The decision is shared with the standalone IBus shim; this object only
         // publishes the outcome over org.freedesktop.IBus.Engine.
-        let outcome =
-            ibus_shared::process_key_event(&self.session, keyval, state, &self.theme_resolver);
+        let outcome = ibus_shared::process_key_event(
+            &self.session,
+            &self.control_alt_tap,
+            keyval,
+            state,
+            &self.theme_resolver,
+        );
         let accepted = outcome.accepted();
         match outcome {
             KeyOutcome::Forward => {}
@@ -527,12 +535,14 @@ impl IBusEngine {
     }
 
     async fn focus_in(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         tracing::debug!("IBus Engine: FocusIn");
         self.deployment.reset().await;
         self.register_mode_property(&ctxt).await;
     }
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
         self.deployment.reset().await;
         self.session.clear_composition();
@@ -541,6 +551,7 @@ impl IBusEngine {
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
         self.deployment.reset().await;
         self.session.clear_composition();
@@ -554,6 +565,7 @@ impl IBusEngine {
     }
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
         self.deployment.reset().await;
         self.session.clear_composition();

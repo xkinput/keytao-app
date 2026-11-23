@@ -55,7 +55,7 @@ use xkbcommon::xkb;
 use crate::{
     engine::{
         candidate_panel_layout, client_preedit, panel_has_composition, shift_key_modifiers,
-        CoreEngine, ImeSession,
+        ControlAltTap, CoreEngine, ImeSession,
     },
     ibus_shared::is_shift_key,
     kimpanel::KimpanelHandle,
@@ -108,6 +108,7 @@ fn retire_proxy(proxy: impl Proxy) {
 
 struct App {
     session: ImeSession,
+    control_alt_tap: ControlAltTap,
     deployment: crate::engine::DeploymentHint,
     deployment_text: Option<&'static str>,
     theme_resolver: ThemeResolver,
@@ -162,6 +163,7 @@ impl App {
         let renderer = load_font().and_then(PanelRenderer::new);
         Self {
             session,
+            control_alt_tap: ControlAltTap::default(),
             deployment: crate::engine::DeploymentHint::default(),
             deployment_text: None,
             theme_resolver: ThemeResolver::from_default_locations(),
@@ -207,6 +209,7 @@ impl App {
 
     /// Stop using the context as soon as KWin deactivates or replaces it.
     fn reset_context_state(&mut self) {
+        self.control_alt_tap.clear();
         self.deployment.reset();
         self.deployment_text = None;
         if let Some(kimpanel) = &self.kimpanel {
@@ -293,6 +296,7 @@ impl App {
     fn apply_content_type(&mut self, hint: u32, purpose: u32) {
         let policy = content_type_policy(hint, purpose);
         if !policy.composing {
+            self.control_alt_tap.clear();
             self.deployment.reset();
             self.deployment_text = None;
             if let Some(kimpanel) = &self.kimpanel {
@@ -609,6 +613,7 @@ impl App {
 
         let sym_raw = key_sym(self.xkb_state.as_ref(), evdev_keycode);
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
+            self.control_alt_tap.clear();
             tracing::warn!("KDE IME unmapped key: forwarding without XKB translation");
             self.forward_key_press(evdev_keycode);
             return;
@@ -635,7 +640,10 @@ impl App {
         }
         let before_state = self.session.state();
         self.refresh_deployment_hint(qh);
-        if key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
+        let tap_mods = ControlAltTap::xkb_modifiers(sym_raw, self.mods, self.xkb_state.as_ref());
+        if self.control_alt_tap.press(sym_raw, tap_mods)
+            || key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state)
+        {
             self.forward_key_press(evdev_keycode);
             return;
         }
@@ -644,7 +652,7 @@ impl App {
         // confirms the highlighted candidate or commits the raw code.  Space
         // and the digits are ordinary keys for the same reason.
         if key_policy::is_enter_key(sym_raw)
-            && !key_policy::is_configured_switcher_hotkey(sym_raw, effective_mods, &before_state)
+            && !key_policy::is_configured_schema_shortcut(sym_raw, effective_mods, &before_state)
             && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
             let Some(result) = self.session.process_enter() else {
@@ -739,7 +747,14 @@ impl App {
             }
         } else if self.active && self.session.input_policy().composing {
             let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
-            if key_policy::should_forward_chord_release(sym, self.mods, &self.session.state()) {
+            let tap_mods = ControlAltTap::xkb_modifiers(sym, self.mods, self.xkb_state.as_ref());
+            if let Some(result) = self.control_alt_tap.release(sym, tap_mods, &self.session) {
+                self.update_ascii_mode(result.state.is_english_mode(), qh);
+                self.commit_state_to_context(&result.state);
+                self.update_kimpanel(&result.state);
+                self.show_panel(result.state, qh);
+                runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+            } else if key_policy::should_forward_chord_release(sym, self.mods, &self.session.state()) {
                 if let Some(result) = self
                     .session
                     .process_key_result(sym, self.mods | RIME_RELEASE_MASK)

@@ -53,7 +53,7 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 - `ITfThreadMgrEventSink` 和 `ITfThreadFocusSink` 在 `Activate` 时通过 `ITfSource::AdviseSink` 安装，并在 `Deactivate` 时按 cookie 反注册；document/context 焦点变化会异步申请 TSF write edit session，清空未提交 range/display attribute 并真正结束旧 composition，然后复位 Rime session 和候选 UI。除与 `composition_in_flight` COM identity 匹配的主动终止外，任何 `OnCompositionTerminated` 都是宿主的真实终止事件，必须清空 Rime 状态、caret cache 与候选 UI。
 - `Deactivate` 与 `OnKillThreadFocus` 不能用异步 edit session 收尾：前者返回后 TSF 立刻释放 text service 与 client id，后者之后本线程不再泵我们的 session，排队的 `EndComposition` 永远不会执行。这两条路径改用同步 write session，宿主拒绝同步锁时退回 `ITfContextOwnerCompositionServices::TerminateComposition`（该接口允许在 edit session 之外调用）。普通 focus 切换仍走异步路径。
 - `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` 与 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` 在 `Activate` 时写入初值（开 + native），并各自 `AdviseSink(ITfCompartmentEventSink)`；系统 Ctrl+Space、输入指示器改写这两个 compartment 时会反向驱动 Rime（关闭即停止组字并透传按键，conversion mode 变化即 `set_ascii_mode`）。语言栏写回同一数值，因此 sink 只在数值真正不同时才动 Rime，不会产生回环。
-- `OnTestKeyDown` / `OnTestKeyUp` 只声明当前按键是否会被处理；真正的状态更新、commit 和 composition 操作在 `OnKeyDown` / `OnKeyUp` 中完成。solo Shift 的 pending 标志必须在测试回调里维护：TSF 不会为测试回调拒绝的按键调用 `OnKeyDown`，只在 `OnKeyDown` 里置位/清零会让该标志永远为 false，中英切换链路整条断开。
+- `OnTestKeyDown` / `OnTestKeyUp` 判断当前按键是否会被处理。状态更新、commit 和 composition 操作由 `OnKeyDown` / `OnKeyUp` 完成。修饰键轻点记录在测试回调里维护，因为 TSF 只会为已接管的按键调用 `OnKeyDown`。
 - 候选面板定位结果区分 `CaretSource::Probe / Cache / System / Accessibility / View / Window` 来源；只有未裁剪且位于 owner monitor 内的 fresh Probe 会写入 `last_caret` 并停止重探，Cache/System 仅作临时显示，不能冒充新探测。每次 `apply_ime_state` 只允许启动一次 `16/32/64/128/256 ms` 退避链，总计最多 5 次；Probe 成功停止当前链，layout 回调不能重置预算或重启链。`OnLayoutChange` 只对可见面板当前 context 的 `TF_LC_CHANGE` 安排独立的 16 ms 单次 timer，同一 burst 合并成一次只读重探。系统 caret 只通过 `GetGUIThreadInfo(GetCurrentThreadId())` 获取，并拒绝非同一 root window、退化矩形和 client origin；TSF 与系统 caret 失败后，在文档锁外通过当前线程焦点窗口的 `OBJID_CARET` / `IAccessible::accLocation` 查询自绘光标，调用前后校验窗口归属与焦点，拒绝重入、零高及无效矩形。若仍没有真实 caret 且存在候选内容，则在可见编辑视口（`GetScreenExt` 与 owner client 交集，必要时 owner client）左上内侧显示候选；`View/Window` 明确表示降级位置，不写 caret cache、不停止重探、不用于中英模式提示。所有定位仍受窗口可见性及屏幕边界约束，后续有效 TSF 布局优先恢复光标跟随。
 - `reposition_ime_windows` 在任何 TSF 探测前校验 `panel_context`（最后一次显示面板的 context）的 COM identity，并用进程内 guard 阻止自身重入；timer 在 guard 忙时不会消耗一次重试预算，并在文档锁外重新布置 timer，继续原有退避链。
 - composition 必须在 TSF edit session 里用 `ITfContextComposition::StartComposition` 创建，用 `ITfRange::SetText` 更新 range，用 `ITfComposition::EndComposition` 结束。非嵌入模式在宿主不提供有效 caret 时保留独立的空 `PanelAnchor` composition，触发 TSF/IMM 的原生组字与布局协议；提交前只结束 anchor，再在同一个 write session 内从当前 QUERYONLY insertion range 创建文本 composition、写入提交文本并结束。嵌入模式可复用 active composition；两种模式都不存在 `TF_IAS_NOQUERY` 裸写路径。
@@ -163,8 +163,8 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 
 流程：
 
-1. `OnTestKeyDown` 先透传应用快捷键，再按上下文短路（见下），最后调用 `should_eat_key()` 告诉 TSF 是否拦截，同时维护 solo Shift 的 pending 标志。直接调用 `OnKeyDown` 的宿主也执行相同的快捷键透传。
-2. `OnTestKeyUp` 只对 solo Shift release 返回拦截，避免 Shift+字母/数字误触发中英切换。
+1. `OnTestKeyDown` 维护修饰键轻点记录，再按应用快捷键和输入上下文决定是否接管。直接调用 `OnKeyDown` 的宿主也执行同一套规则。
+2. `OnTestKeyUp` 识别同侧的 Shift 轻点、方案配置的 Control／Alt 轻点，以及和弦按键释放。
 3. `OnKeyDown` 把 Windows Virtual Key 转成 librime 使用的 X11 keysym。
 4. `current_mod_mask()` 读取 Shift、Control、Alt、Win 与 CapsLock 状态。
 5. 不论是否正在组字，Ctrl / Alt / Win 组合以及 Shift+Insert、Shift+Delete、Shift+F4 都在进入 Rime 前交给宿主。只保留输入法的 Ctrl+grave、Ctrl+Shift+grave、Ctrl+Shift+1..5 和裸 F4；附加 Alt/Win 时仍透传。这样 Ctrl+V 不再被默认 Emacs 绑定当作候选翻页，Ctrl+A 不再变成预编辑 Home，AltGr 字符也交由宿主布局处理。唯一例外是 librime 的删除候选键 Ctrl+Delete（`rime/gear/editor.cc`）：有可见 preedit 或候选时交给 Rime 以删除已学习的用户词，没有 composition 时仍是宿主的删词快捷键。没有 composition 时，裸 Space、Return、Backspace、Delete、Tab、Escape 和导航键继续放行。
@@ -180,7 +180,7 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 
 降级限制：首次同步 write session 被宿主拒绝时无法取得原插入 range，异步 commit retry 仍从执行时的 selection 建 range。同一输入上下文内，若宿主把 retry 排到后续按键或光标移动之后，该降级分支尚不保证原始字符顺序/位置；本轮没有引入按键队列或猜测旧光标坐标。正常同步提交与跨 context generation 失效不受此限制。
 
-`OnKeyUp` 只处理 solo Shift：先发送 `Shift_L` 或 `Shift_R` keysym 的 press（mask `0`），再发送同一 keysym 的 release（`RIME_RELEASE_MASK`）。librime 的 ascii composer 必须先看到 press 才会在 release 上切换；两次调用都在真实 `OnKeyUp` 内，`OnTestKeyDown` 始终不调用 librime。如果 Shift 按下后出现其它 keyDown，或同时按着 Ctrl/Alt/Win，pending flag 会被清除；两个 release 入口也复核组合修饰键，避免 Ctrl+Shift 触发额外中英切换。Shift keydown 仍向宿主透传。
+`OnKeyUp` 确认轻点后会将同一个 keysym 的 press（mask `0`）和 release（`RIME_RELEASE_MASK`）成对交给 librime。Shift 仍按当前方案处理，Control／Alt 需由有效的 `ascii_composer/switch_key` 显式开启。其它按键、组合修饰键或达到 500 毫秒会取消轻点，按下事件仍向宿主透传。
 
 release 即使返回 `accepted=false`，只要 `ascii_mode` 改变也必须 apply；返回宿主的 eaten 仍是原来的 `consumed`，不因模式变化而吞掉 keyup。只有无 commit、模式改变且没有可见 preedit / 候选的 mode-only apply 可以在 composition 为空时保留有效 caret cache；普通非嵌入 apply 或任何 commit 都清除旧 cache。新 probe 不可用时，模式提示使用可验证的上次 caret / system caret；完全无坐标时省略提示，但照常更新 `st.ascii_mode` 与语言栏。
 
@@ -272,7 +272,7 @@ stamp 的路径、签名格式和变化检测统一由 `keytao_core::ReloadStamp
 
 诊断行时间戳精确到毫秒，统一带 `[pid:...][tid:...]`，并记录 input block reason、input-context 三项探测、password probe HRESULT、session reset、commit 丢失长度和 TSF edit-session 失败阶段。用户数据目录只解析一次，append log File 保存在进程级 `OnceLock` / `Mutex`，显式允许 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`，避免常驻句柄阻止其他进程删除或轮转日志；每行可 flush 但不 fsync，不再逐行建目录、open / close。保留现有 `KEY_DIAGNOSTIC_LIMIT = 65_536`；所有按键与 commit 诊断只写长度和布尔状态，不写输入正文。
 
-增加 `composition terminated identity_match={0|1} cleared={0|1}`、solo Shift 测试回调诊断及 `OnKeyUp shift keysym=... pending=... accepted=... ascii=...->...`。termination 实际清理时追加清零前的 `shift_pending={0|1}`，focus reset 同样记录 `focus reset cleared shift_pending={0|1}`，便于分辨 pending 被 focus / termination 清除、引擎未就绪和 Rime 已切换但未消费按键。engine-not-ready 日志使用实际 callback 名称。
+修饰键轻点诊断记录 `modifier_tap` 和 `pending`。组字结束和焦点重置时记录清零前的 `modifier_pending={0|1}`，便于区分轻点被清理、引擎未就绪和 Rime 已切换模式。engine-not-ready 日志使用实际 callback 名称。
 
 F8 纯逻辑回归覆盖 mode-only apply、可见面板 layout 合并、每 apply 单次 ladder、相同上传签名跳过、语言栏只在 change 时写 compartment，以及 churn 不重置 probe 时间戳和三次同步拒绝后的退避。Windows `--tests` 检查只验证这些测试能够编译，不等同于已执行测试或 Windows / Chromium 性能验收。
 

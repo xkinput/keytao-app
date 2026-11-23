@@ -384,6 +384,8 @@ mask = Rime modifier mask
 
 平台前端必须区分 solo Shift 和 Shift+letter/number/symbol。Shift+其它按键必须走普通按键路径。
 
+macOS 的中／英键（Caps Lock）按系统键盘设置切换输入源。Windows、Linux 和 Android 的实体键盘还支持有效 Rime 配置中的 Control／Alt 轻点，单按需在 500 毫秒内完成并保持同侧。系统接管的快捷键仍由系统处理。方案声明的中英组合键在空闲时也可交给 Rime。
+
 ## 候选交互规范
 
 候选行为由 core 统一，平台只负责把用户动作转成 session 调用：

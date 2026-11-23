@@ -63,7 +63,7 @@ use xkbcommon::xkb;
 use crate::{
     engine::{
         candidate_panel_layout, client_preedit, panel_has_composition, shift_key_modifiers,
-        unhandled_key_text, CoreEngine, ImeSession,
+        unhandled_key_text, ControlAltTap, CoreEngine, ImeSession,
     },
     ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer, WaylandPanel},
@@ -120,6 +120,7 @@ fn unhandled_keysym_text(sym: u32, mods: u32) -> Option<char> {
 
 struct App {
     session: ImeSession,
+    control_alt_tap: ControlAltTap,
     deployment: crate::engine::DeploymentHint,
     deployment_text: Option<&'static str>,
     renderer: Option<PanelRenderer>,
@@ -185,6 +186,7 @@ impl App {
         }
         Self {
             session,
+            control_alt_tap: ControlAltTap::default(),
             deployment: crate::engine::DeploymentHint::default(),
             deployment_text: None,
             renderer,
@@ -488,6 +490,7 @@ impl App {
     fn apply_content_type(&mut self, hint: u32, purpose: u32) {
         let policy = content_type_policy(hint, purpose);
         if !policy.composing {
+            self.control_alt_tap.clear();
             self.deployment.reset();
             self.deployment_text = None;
         }
@@ -600,6 +603,7 @@ impl App {
         let sym_raw = key_sym(self.xkb_state.as_ref(), evdev_keycode);
         tracing::trace!("key sym: {sym_raw:#x}");
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
+            self.control_alt_tap.clear();
             tracing::warn!("unmapped key: forwarding without XKB translation");
             self.forward_unhandled_key(evdev_keycode, sym_raw);
             return;
@@ -626,6 +630,14 @@ impl App {
         }
         let before_state = self.session.state();
         self.refresh_deployment_hint(qh);
+        let tap_mods = ControlAltTap::xkb_modifiers(sym_raw, self.mods, self.xkb_state.as_ref());
+        if self.control_alt_tap.press(sym_raw, tap_mods) {
+            if self.pending_active == Some(false) || self.deactivate_deadline.is_some() {
+                self.control_alt_tap.clear();
+            }
+            self.forward_unhandled_key(evdev_keycode, sym_raw);
+            return;
+        }
         if key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
             self.forward_unhandled_key(evdev_keycode, sym_raw);
             return;
@@ -634,7 +646,7 @@ impl App {
         // confirms the highlighted candidate or commits the raw code.  Space
         // and the digits are ordinary keys for the same reason.
         if key_policy::is_enter_key(sym_raw)
-            && !key_policy::is_configured_switcher_hotkey(sym_raw, effective_mods, &before_state)
+            && !key_policy::is_configured_schema_shortcut(sym_raw, effective_mods, &before_state)
             && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
             let Some(result) = self.session.process_enter() else {
@@ -745,7 +757,13 @@ impl App {
             }
         } else if self.active && self.session.input_policy().composing {
             let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
-            if key_policy::should_forward_chord_release(sym, self.mods, &self.session.state()) {
+            let tap_mods = ControlAltTap::xkb_modifiers(sym, self.mods, self.xkb_state.as_ref());
+            if let Some(result) = self.control_alt_tap.release(sym, tap_mods, &self.session) {
+                self.update_ascii_mode(result.state.is_english_mode(), qh);
+                self.apply_state_to_input_method(&result.state);
+                self.show_panel(result.state, qh);
+                runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+            } else if key_policy::should_forward_chord_release(sym, self.mods, &self.session.state()) {
                 if let Some(result) = self
                     .session
                     .process_key_result(sym, self.mods | RIME_RELEASE_MASK)
@@ -940,6 +958,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
+                state.control_alt_tap.clear();
                 state.surrounding_text.invalidate();
                 state.pending_active = Some(true);
                 // activate resets the content type together with everything
@@ -951,6 +970,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 tracing::debug!("IME activate pending until done");
             }
             zwp_input_method_v2::Event::Deactivate => {
+                state.control_alt_tap.clear();
                 state.surrounding_text.invalidate();
                 state.pending_active = Some(false);
                 tracing::debug!("IME deactivate pending until done");

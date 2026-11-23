@@ -26,7 +26,7 @@ use xim::{
 };
 
 use crate::{
-    engine::{inline_preedit, shift_key_modifiers, CoreEngine, ImeSession},
+    engine::{inline_preedit, shift_key_modifiers, ControlAltTap, CoreEngine, ImeSession},
     ibus_shared::is_shift_key,
     panel::{load_font, x11_panel_position, x11_panel_visual, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
@@ -107,6 +107,7 @@ fn draw_client_preedit(
 // Spot location is stored directly on InputContext by xim (via preedit_spot()).
 struct IcData {
     session: ImeSession,
+    control_alt_tap: ControlAltTap,
     /// Last state drawn for this context, so a spot update can move the panel
     /// without waiting for the next key.
     last_state: Option<ImeState>,
@@ -647,6 +648,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         let session = crate::engine::create_session(&self.engine).map_err(ServerError::Internal)?;
         Ok(IcData {
             session,
+            control_alt_tap: ControlAltTap::default(),
             last_state: None,
             state_epoch: self.reload_epoch,
         })
@@ -714,6 +716,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<String, ServerError> {
         tracing::info!("XIM ResetIC client_win={}", user_ic.ic.client_win());
+        user_ic.user_data.control_alt_tap.clear();
         self.deployment.reset();
         self.deployment_text = None;
         self.deployment_input_state = None;
@@ -755,6 +758,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
         tracing::info!("XIM SetFocus client_win={}", user_ic.ic.client_win());
+        user_ic.user_data.control_alt_tap.clear();
         self.deployment.reset();
         self.deployment_text = None;
         self.deployment_input_state = None;
@@ -769,6 +773,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
         tracing::info!("XIM UnsetFocus client_win={}", user_ic.ic.client_win());
+        user_ic.user_data.control_alt_tap.clear();
         runtime_log::drain_key_stats();
         self.deployment.reset();
         self.deployment_text = None;
@@ -800,16 +805,28 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         };
 
         if keysym == 0 {
+            user_ic.user_data.control_alt_tap.clear();
             return Ok(false);
         }
 
         let mods = u32::from(xev.state);
 
-        // ascii_composer needs Shift releases; chord_composer needs printable ones.
+        // ascii_composer needs modifier releases; chord_composer needs printable ones.
         match xev.response_type & 0x7f {
-            X_KEY_PRESS => {}
+            X_KEY_PRESS => {
+                if user_ic.user_data.control_alt_tap.press(keysym, mods) {
+                    return Ok(false);
+                }
+            }
             X_KEY_RELEASE => {
-                if is_shift_key(keysym) {
+                if let Some(result) = user_ic.user_data.control_alt_tap.release(
+                    keysym,
+                    mods,
+                    &user_ic.user_data.session,
+                ) {
+                    self.apply_ime_state(server, user_ic, result.state)?;
+                    runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+                } else if is_shift_key(keysym) {
                     if let Some(result) = user_ic
                         .user_data
                         .session
@@ -897,7 +914,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         // confirms the highlighted candidate or commits the raw code.  Space
         // and the digits are ordinary keys for the same reason.
         let result = if key_policy::is_enter_key(keysym)
-            && !key_policy::is_configured_switcher_hotkey(keysym, effective_mods, &before_state)
+            && !key_policy::is_configured_schema_shortcut(keysym, effective_mods, &before_state)
             && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
             user_ic.user_data.session.process_enter()

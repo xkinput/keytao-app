@@ -67,17 +67,41 @@ class AndroidKeyMapperTest {
 
     @Test
     fun `only Shift without control alt or meta may toggle the input mode`() {
-        assertTrue(AndroidKeyMapper.permitsSoloShift(0))
-        assertTrue(AndroidKeyMapper.permitsSoloShift(AndroidKeyMapper.RIME_MOD_SHIFT))
-        assertTrue(AndroidKeyMapper.permitsSoloShift(AndroidKeyMapper.RIME_MOD_SHIFT or AndroidKeyMapper.RIME_MOD_LOCK))
+        val shift = KeyEvent.KEYCODE_SHIFT_LEFT
+        val shiftOn = KeyEvent.META_SHIFT_LEFT_ON or KeyEvent.META_SHIFT_ON
+        assertEquals(AndroidKeyMapper.XK_SHIFT_L, AndroidKeyMapper.modifierTapKeysym(shift))
+        assertEquals(AndroidKeyMapper.XK_SHIFT_L, AndroidKeyMapper.modifierTapKeysym(shift, shiftOn))
+        assertEquals(AndroidKeyMapper.XK_SHIFT_L, AndroidKeyMapper.modifierTapKeysym(shift, shiftOn or KeyEvent.META_CAPS_LOCK_ON))
         for (modifier in listOf(
-            AndroidKeyMapper.RIME_MOD_CONTROL,
-            AndroidKeyMapper.RIME_MOD_ALT,
-            AndroidKeyMapper.RIME_MOD_SUPER,
+            KeyEvent.META_CTRL_ON,
+            KeyEvent.META_ALT_ON,
+            KeyEvent.META_META_ON,
+            KeyEvent.META_SHIFT_RIGHT_ON,
         )) {
-            assertFalse(AndroidKeyMapper.permitsSoloShift(modifier))
-            assertFalse(AndroidKeyMapper.permitsSoloShift(modifier or AndroidKeyMapper.RIME_MOD_SHIFT))
+            assertNull(AndroidKeyMapper.modifierTapKeysym(shift, modifier))
+            assertNull(AndroidKeyMapper.modifierTapKeysym(shift, modifier or shiftOn))
         }
+    }
+
+    @Test
+    fun `standalone Control and Alt use the physical side and leave AltGr chords alone`() {
+        assertEquals(0xffe3, AndroidKeyMapper.modifierTapKeysym(KeyEvent.KEYCODE_CTRL_LEFT))
+        assertEquals(0xffe4, AndroidKeyMapper.modifierTapKeysym(KeyEvent.KEYCODE_CTRL_RIGHT, KeyEvent.META_CTRL_RIGHT_ON))
+        assertEquals(0xffe9, AndroidKeyMapper.modifierTapKeysym(KeyEvent.KEYCODE_ALT_LEFT))
+        val altRight = KeyEvent.KEYCODE_ALT_RIGHT
+        assertEquals(0xffea, AndroidKeyMapper.modifierTapKeysym(altRight, KeyEvent.META_ALT_RIGHT_ON))
+        assertNull(AndroidKeyMapper.modifierTapKeysym(altRight, KeyEvent.META_ALT_RIGHT_ON or KeyEvent.META_CTRL_ON))
+        assertNull(AndroidKeyMapper.modifierTapKeysym(KeyEvent.KEYCODE_LANGUAGE_SWITCH))
+    }
+
+    @Test
+    fun `modified Space falls back to its keysym only when the keymap gives no character`() {
+        val space = KeyEvent.KEYCODE_SPACE
+        val ctrl = AndroidKeyMapper.RIME_MOD_CONTROL
+        val alt = AndroidKeyMapper.RIME_MOD_ALT
+        assertEquals(RimeKey(AndroidKeyMapper.XK_SPACE, ctrl), AndroidKeyMapper.fromHardwareUnicode(space, 0, ctrl) { 0 })
+        val noBreakSpace = '\u00a0'.code
+        assertEquals(RimeKey(noBreakSpace, alt), AndroidKeyMapper.fromHardwareUnicode(space, noBreakSpace, alt) { it.single().code })
     }
 
     @Test

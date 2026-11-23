@@ -5,10 +5,10 @@ import org.junit.Test
 
 class KeytaoRimeInputTest {
     @Test
-    fun `solo Shift sends a press before release and preserves an intermediate commit`() {
+    fun `a modifier tap sends a press before release and preserves an intermediate commit`() {
         val log = mutableListOf<String>()
         val released = accepted(committed = "remaining").copy(asciiMode = true)
-        val result = KeytaoRimeInput.processSoloShift(
+        val result = KeytaoRimeInput.processModifierTap(
             AndroidKeyMapper.XK_SHIFT_L,
             processKey = { keysym, modifiers ->
                 assertEquals(AndroidKeyMapper.XK_SHIFT_L, keysym)

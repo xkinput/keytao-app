@@ -293,7 +293,7 @@ Apple 官方 SDK 头文件对这两个接口的坐标契约很明确：
 
 `handleFlagsChanged()` 跟踪左右 Shift、Control 和 Option 的独立轻点。普通按键、组合修饰键、焦点变化或引擎重载会取消待确认的轻点。确认同一物理键在 500 毫秒内抬起时，通过 `keytao_session_process_modifier_tap_json()` 一次交给引擎按下和抬起事件。Rime 据 `ascii_composer/switch_key` 处理，包括未绑定或 `noop` 的键。Command 由系统处理。
 
-`Info.plist` 将 `TICapsLockLanguageSwitchCapable` 设为 `false`。键道处于活动状态时，单独按中英键（Caps Lock）会复原硬件锁定位，提交正在组字的文本，再通过 `keytao_session_set_english_mode_json()` 切换当前会话的 ASCII 或 Easy English 模式。恢复锁定位只在收到活动输入会话的真实 Caps Lock 开启事件时执行。组合键、已有大写锁定的解锁以及无法复原硬件锁定的情况仍按切换前的锁定位传给 Rime。系统输入源快捷键继续由 macOS 处理。
+`Info.plist` 将 `TICapsLockLanguageSwitchCapable` 设为 `true`。中／英键（Caps Lock）由 macOS 按键盘设置处理，开启相应系统设置时用于切换输入源。键道内的中英模式通过单独轻点 Shift 切换，遵循方案的 `ascii_composer/switch_key` 配置。
 
 `ModeIndicatorPanel` 是主题驱动的 nonactivating `NSPanel`，默认 48×36，文案取自通用层 `ModeHintModel.text`（默认 `中` / `英`），默认 0.75 秒后自动隐藏。
 
@@ -410,7 +410,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
 - 候选点击选择。
 - 候选翻页按钮。
 - 候选窗/模式提示按 `client.windowLevel() + 1` 抬升层级。
-- 遵循方案的 Shift、Control、Option 中英绑定。单独按 macOS 中英键（Caps Lock）时，切换键道内部的中英模式。
+- 遵循方案的 Shift、Control、Option 中英绑定。macOS 中／英键（Caps Lock）由系统处理。
 - Shift+字母大写输入兼容。
 - 小键盘 Enter 映射为 `XK_KP_Enter`；无法映射的按键在有 composition 时先提交再放行。
 - 输入法菜单里的 redeploy 和打开主 App。

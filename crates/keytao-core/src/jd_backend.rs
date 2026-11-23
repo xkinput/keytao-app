@@ -308,6 +308,7 @@ impl Session {
             ascii_mode: self.ascii_mode,
             chord_composer: false,
             schema_shortcuts: Vec::new(),
+            modifier_taps: Vec::new(),
             schema_id: SCHEMA_ID.to_owned(),
             schema_name: SCHEMA_NAME.to_owned(),
         }

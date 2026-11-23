@@ -66,8 +66,11 @@ impl SchemaShortcut {
     }
 
     pub(crate) fn matches_switcher(self, key: u32, mask: u32) -> bool {
-        self.is_switcher()
-            && self.modifiers == (rime_modifier_mask(mask) | (mask & self.modifiers & RIME_MOD_LOCK))
+        self.is_switcher() && self.matches_key(key, mask)
+    }
+
+    pub(crate) fn matches_key(self, key: u32, mask: u32) -> bool {
+        self.modifiers == (rime_modifier_mask(mask) | (mask & self.modifiers & RIME_MOD_LOCK))
             && (self.key == key
                 || key_policy::normalize_key_for_modifiers(self.key, self.modifiers).0 == key
                 // Shift+grave can arrive as either the physical key or its shifted symbol.

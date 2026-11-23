@@ -156,7 +156,7 @@ fn state_and_sink(ime: ImeState) -> (SharedState, ITfKeyEventSink) {
         st.english_mode = ime.is_english_mode();
         st.ime_state = Some(ime);
         // A passed-through chord must still disarm solo-Shift tracking.
-        st.shift_pressed_without_key = true;
+        st.modifier_tap_press = Some((0xffe1, std::time::Instant::now()));
     }
     let sink = KeyEventSink {
         state: Rc::downgrade(&state),
@@ -267,7 +267,7 @@ fn application_shortcuts_pass_through_com_before_context_or_engine_work() {
                         ContextInputState::unrestricted(),
                         "{case}"
                     );
-                    assert!(!st.shift_pressed_without_key, "{case}: stale solo Shift");
+                    assert!(st.modifier_tap_press.is_none(), "{case}: stale solo Shift");
                     assert!(
                         !st.engine_building && st.engine_error.is_none(),
                         "{case}: started warmup"
@@ -421,11 +421,12 @@ fn control_shift_release_order_never_toggles_mode_or_probes_context() {
                 (false, VK_CONTROL, 0),
             ],
         ];
-        for ime in [ImeState::empty(), composition(false), composition(true)] {
+        for mut ime in [ImeState::empty(), composition(false), composition(true)] {
+            ime.modifier_taps = vec![0xffe3];
             for (index, sequence) in sequences.iter().enumerate() {
                 for test_callback in [true, false] {
                     let (state, sink) = state_and_sink(ime.clone());
-                    state.borrow_mut().shift_pressed_without_key = false;
+                    state.borrow_mut().modifier_tap_press = None;
                     let before = format!("{:?}", state.borrow().ime_state);
                     for (down, key, mods) in sequence {
                         keyboard.set_table(None, *mods);
@@ -466,7 +467,7 @@ fn control_shift_release_order_never_toggles_mode_or_probes_context() {
                         assert!(st.deployment_hint.is_none());
                     }
                     assert!(
-                        !state.borrow().shift_pressed_without_key,
+                        state.borrow().modifier_tap_press.is_none(),
                         "sequence {index}: left solo Shift armed"
                     );
                 }
@@ -477,6 +478,52 @@ fn control_shift_release_order_never_toggles_mode_or_probes_context() {
             initial_modules,
             "modifier test loaded Rime or installed TIP"
         );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn only_configured_ctrl_and_alt_taps_arm_and_application_chords_disarm_them() {
+    std::thread::spawn(|| {
+        let keyboard = KeyboardStateGuard::save();
+        let calls = Calls::default();
+        let context: ITfContext = SpyContext {
+            calls: calls.clone(),
+            allow_input: false,
+        }
+        .into();
+        for configured in [false, true] {
+            for test_callback in [false, true] {
+                let mut ime = ImeState::empty();
+                if configured {
+                    ime.modifier_taps = vec![0xffe3, 0xffe9, 0xffea];
+                }
+                let (state, sink) = state_and_sink(ime);
+                state.borrow_mut().modifier_tap_press = None;
+                let press = |key: VIRTUAL_KEY, mods| {
+                    keyboard.set(key, mods);
+                    let vk = WPARAM(usize::from(key.0));
+                    let eaten = unsafe {
+                        if test_callback {
+                            sink.OnTestKeyDown(&context, vk, LPARAM(0))
+                        } else {
+                            sink.OnKeyDown(&context, vk, LPARAM(0))
+                        }
+                    }
+                    .unwrap()
+                    .as_bool();
+                    assert!(!eaten);
+                    state.borrow().modifier_tap_press.map(|(key, _)| key)
+                };
+                assert_eq!(press(VK_CONTROL, RIME_MOD_CONTROL), configured.then_some(0xffe3));
+                assert_eq!(press(VK_SPACE, RIME_MOD_CONTROL), None);
+                assert_eq!(press(VK_MENU, RIME_MOD_ALT), configured.then_some(0xffe9));
+                assert_eq!(press(VK_TAB, RIME_MOD_ALT), None);
+                assert_eq!(press(VK_RMENU, RIME_MOD_CONTROL | RIME_MOD_ALT), None);
+                assert!(calls.borrow().is_empty());
+            }
+        }
     })
     .join()
     .unwrap();

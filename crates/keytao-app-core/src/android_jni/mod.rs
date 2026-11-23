@@ -286,6 +286,8 @@ struct AndroidImeStateJson {
     select_keys: String,
     ascii_mode: bool,
     chord_composer: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    modifier_tap_keys: Vec<u32>,
     schema_id: String,
     schema_name: String,
     accepted: bool,
@@ -329,6 +331,7 @@ fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
         select_keys: state.select_keys.unwrap_or_default(),
         ascii_mode: state.ascii_mode,
         chord_composer: state.chord_composer,
+        modifier_tap_keys: state.modifier_taps,
         schema_id: state.schema_id,
         schema_name: state.schema_name,
         accepted,

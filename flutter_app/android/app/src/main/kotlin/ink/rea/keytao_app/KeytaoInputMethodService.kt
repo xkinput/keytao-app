@@ -186,8 +186,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var hasKnownCursor = false
     private var knownSelectionEnd = -1
     private var emojiSearchQuery: String? = null
-    private var shiftPressedWithoutKey = false
-    private var pendingShiftKeyCode = 0
+    private var pendingModifierTap: KeyEvent? = null
     private var inputAvailable = false
     // Readiness is probed on a background thread, so the first frames of the
     // keyboard must say "still starting up" rather than accuse the user of not
@@ -372,13 +371,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
+        pendingModifierTap = null
         if (restarting && configurationChanging) {
             applyEditorInfo(attribute, reloadIfNeeded = true)
             logStartInput("input", attribute, restarting, started)
             return
         }
-        shiftPressedWithoutKey = false
-        pendingShiftKeyCode = 0
         discardPendingHostBackspace(resetOutstanding = true)
         hasKnownCursor = (attribute?.initialSelStart ?: -1) >= 0 &&
             (attribute?.initialSelEnd ?: -1) >= 0
@@ -932,8 +930,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         editorUpdateGeneration++
-        shiftPressedWithoutKey = false
-        pendingShiftKeyCode = 0
+        pendingModifierTap = null
         rimeOptionsGeneration++
         editorUpdatePending = false
         // finishComposingText() already puts the composing text into the editor,
@@ -965,6 +962,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }) return true
         onUserInteraction()
         discardPendingHostBackspace()
+        val modifierKeysym = AndroidKeyMapper.modifierTapKeysym(keyCode)
+        val emojiSearchActive = emojiSearchQuery != null && !isSystemLanguageKey(keyCode)
+        pendingModifierTap = if (modifierKeysym != null && event.repeatCount == 0 &&
+            AndroidKeyMapper.modifierTapKeysym(keyCode, event.metaState) != null &&
+            (isShiftKey(keyCode) || (!emojiSearchActive && modifierKeysym in currentState.modifierTapKeys))
+        ) deferredEvent else null
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (!panelBackDownConsumed && currentState.isPackageSwitcher) {
                 applyState(engine.processKey(AndroidKeyMapper.XK_ESCAPE, 0))
@@ -976,13 +979,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }
             return passKeyDownToHost(keyCode, event)
         }
-        if (emojiSearchQuery != null && !isSystemLanguageKey(keyCode)) {
-            if (isShiftKey(keyCode)) {
-                shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
-                pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
-            } else {
-                shiftPressedWithoutKey = false
-                pendingShiftKeyCode = 0
+        if (emojiSearchActive) {
+            if (modifierKeysym == null) {
                 when (keyCode) {
                     KeyEvent.KEYCODE_ESCAPE -> onEmojiSearchRequested(false)
                     KeyEvent.KEYCODE_DEL -> handleBackspace()
@@ -1007,15 +1005,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }
             return true
         }
-        if (isShiftKey(keyCode)) {
-            shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
-            pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
-            return passKeyDownToHost(keyCode, event)
-        }
-        if (shiftPressedWithoutKey) {
-            shiftPressedWithoutKey = false
-            pendingShiftKeyCode = 0
-        }
+        if (modifierKeysym != null) return super.onKeyDown(keyCode, event)
         if (!inputAvailable || event.isMetaPressed) {
             if (lastReadiness == Readiness.DEPLOYING) showUnavailableMessage()
             return passKeyDownToHost(keyCode, event)
@@ -1089,30 +1079,28 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             release.key?.let { key -> applyState(engine.processKey(key.keyCode, key.modifiers)) }
             return if (release.passToHost) super.onKeyUp(keyCode, event) else true
         }
-        if (!isShiftKey(keyCode)) {
-            if (emojiSearchQuery != null && !isSystemLanguageKey(keyCode)) return true
-            return super.onKeyUp(keyCode, event)
-        }
-        val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode &&
-            AndroidKeyMapper.permitsSoloShift(event)
+        val shift = isShiftKey(keyCode)
+        if (!shift && emojiSearchQuery != null && !isSystemLanguageKey(keyCode)) return true
+        val keysym = AndroidKeyMapper.modifierTapKeysym(keyCode) ?: return super.onKeyUp(keyCode, event)
+        val pressed = pendingModifierTap
+        val shouldToggle = pressed != null && !event.isCanceled && pressed.keyCode == keyCode &&
+            pressed.deviceId == event.deviceId && pressed.downTime == event.downTime &&
+            AndroidKeyMapper.modifierTapKeysym(keyCode, event.metaState) != null &&
+            (shift || (keysym in currentState.modifierTapKeys &&
+                event.eventTime - pressed.eventTime in 0L until 500L))
         if (shouldToggle && !bypassesComposition() &&
             deferDeploymentKey { onKeyUp(keyCode, deferredEvent) }
         ) return true
-        shiftPressedWithoutKey = false
-        pendingShiftKeyCode = 0
+        pendingModifierTap = null
         if (!shouldToggle) return super.onKeyUp(keyCode, event)
         if (bypassesComposition()) return super.onKeyUp(keyCode, event)
 
-        val shiftKeysym = if (keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT) {
-            AndroidKeyMapper.XK_SHIFT_R
-        } else {
-            AndroidKeyMapper.XK_SHIFT_L
-        }
         val beforeAsciiMode = currentState.asciiMode
-        val result = KeytaoRimeInput.processSoloShift(shiftKeysym, engine::processKey, ::applyState)
+        val result = KeytaoRimeInput.processModifierTap(keysym, engine::processKey, ::applyState)
         if (result.accepted || result.asciiMode != beforeAsciiMode) {
             applyState(result)
-            return true
+            // Keep Control/Alt releases paired with their downs in the editor.
+            return if (shift) true else super.onKeyUp(keyCode, event)
         }
         KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
         return super.onKeyUp(keyCode, event)
@@ -1121,7 +1109,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun allowsChordInput(): Boolean = !bypassesComposition()
 
     private fun passKeyDownToHost(keyCode: Int, event: KeyEvent): Boolean {
-        if (!isShiftKey(keyCode)) hardwareChordKeys.passToHost(keyCode)
+        hardwareChordKeys.passToHost(keyCode)
         return super.onKeyDown(keyCode, event)
     }
 

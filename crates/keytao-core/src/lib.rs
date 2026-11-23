@@ -282,6 +282,9 @@ pub struct ImeState {
     /// Active Rime option/schema switch bindings and switcher hotkeys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_shortcuts: Vec<SchemaShortcut>,
+    /// Configured Control and Alt keysyms that may switch mode on a solo tap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifier_taps: Vec<u32>,
     #[serde(default)]
     pub schema_id: String,
     pub schema_name: String,
@@ -552,6 +555,7 @@ impl ImeState {
             ascii_mode: false,
             chord_composer: false,
             schema_shortcuts: Vec::new(),
+            modifier_taps: Vec::new(),
             schema_id: String::new(),
             schema_name: String::new(),
         }
@@ -3119,10 +3123,18 @@ mod desktop {
         })
     });
 
+    #[derive(Default)]
+    struct SchemaKeyPolicy {
+        schema_id: String,
+        chord_composer: bool,
+        shortcuts: Vec<SchemaShortcut>,
+        modifier_taps: Vec<u32>,
+    }
+
     /// An active rime input session.
     pub struct RimeBackend {
         session: ManuallyDrop<rime_api::Session>,
-        schema_keys: RefCell<(String, bool, Vec<SchemaShortcut>)>,
+        schema_keys: RefCell<SchemaKeyPolicy>,
         switcher_hotkeys: Vec<SchemaShortcut>,
         user_data_dir: Option<PathBuf>,
         user_dictionary_source_available: bool,
@@ -3247,7 +3259,7 @@ mod desktop {
             }
             Ok(Self {
                 session: ManuallyDrop::new(session),
-                schema_keys: RefCell::new((String::new(), false, Vec::new())),
+                schema_keys: RefCell::new(SchemaKeyPolicy::default()),
                 switcher_hotkeys: switcher_hotkeys_locked(),
                 user_data_dir: Some(dirs.user_data_dir),
                 user_dictionary_source_available,
@@ -3345,7 +3357,7 @@ mod desktop {
         }
 
         fn has_declared_shortcut(&self, keycode: u32, mask: u32) -> bool {
-            self.schema_keys.borrow().2.iter().any(|shortcut| {
+            self.schema_keys.borrow().shortcuts.iter().any(|shortcut| {
                 (shortcut.key, shortcut.modifiers) == (keycode, mask)
             })
         }
@@ -3360,15 +3372,17 @@ mod desktop {
             let Ok(schema) = CString::new(schema) else {
                 return false;
             };
-            read_rime_config_locked(&schema, true, |config| shift_disabled_in_config(config, path))
-                .flatten()
-                .or_else(|| {
-                    read_rime_config_locked(c"default", false, |config| {
-                        shift_disabled_in_config(config, path)
-                    })
-                    .flatten()
+            read_rime_config_locked(&schema, true, |config| {
+                ascii_switch_disabled_in_config(config, path)
+            })
+            .flatten()
+            .or_else(|| {
+                read_rime_config_locked(c"default", false, |config| {
+                    ascii_switch_disabled_in_config(config, path)
                 })
-                .unwrap_or(false)
+                .flatten()
+            })
+            .unwrap_or(false)
         }
 
         /// What this librime can do natively, see [`EngineCapabilities`].
@@ -3926,9 +3940,17 @@ mod desktop {
         }
     }
 
-    fn shift_disabled_in_config(config: &mut RimeConfig, path: &str) -> Option<bool> {
+    fn ascii_switch_disabled_in_config(config: &mut RimeConfig, path: &str) -> Option<bool> {
         if let Some(style) = config_string_locked(config, path) {
-            return Some(style == "noop");
+            return Some(!matches!(
+                style.as_str(),
+                "inline_ascii"
+                    | "commit_code"
+                    | "commit_text"
+                    | "clear"
+                    | "set_ascii_mode"
+                    | "unset_ascii_mode"
+            ));
         }
         unsafe {
             let api = rime_get_api();
@@ -3944,9 +3966,24 @@ mod desktop {
         }
     }
 
-    fn schema_key_policy_locked(schema_id: &str) -> (bool, Vec<SchemaShortcut>) {
+    fn modifier_taps_in_config(config: &mut RimeConfig) -> Option<Vec<u32>> {
+        let mut taps = Vec::new();
+        for (key, path) in [
+            (0xffe3, "ascii_composer/switch_key/Control_L"),
+            (0xffe4, "ascii_composer/switch_key/Control_R"),
+            (0xffe9, "ascii_composer/switch_key/Alt_L"),
+            (0xffea, "ascii_composer/switch_key/Alt_R"),
+        ] {
+            if !ascii_switch_disabled_in_config(config, path)? {
+                taps.push(key);
+            }
+        }
+        Some(taps)
+    }
+
+    fn schema_key_policy_locked(schema_id: &str) -> SchemaKeyPolicy {
         let Ok(schema_id) = CString::new(schema_id) else {
-            return (false, Vec::new());
+            return SchemaKeyPolicy::default();
         };
         read_rime_config_locked(&schema_id, true, |config| {
             let processors = config_string_list_locked(config, "engine/processors");
@@ -3961,7 +3998,25 @@ mod desktop {
             } else {
                 Vec::new()
             };
-            (has_chord, shortcuts)
+            let modifier_taps = if processors
+                .iter()
+                .any(|processor| processor.split('@').next() == Some("ascii_composer"))
+            {
+                modifier_taps_in_config(config)
+                    .or_else(|| {
+                        read_rime_config_locked(c"default", false, modifier_taps_in_config)
+                            .flatten()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            SchemaKeyPolicy {
+                chord_composer: has_chord,
+                shortcuts,
+                modifier_taps,
+                ..SchemaKeyPolicy::default()
+            }
         })
         .unwrap_or_default()
     }
@@ -4560,14 +4615,18 @@ mod desktop {
             .as_ref()
             .map(|s| s.schema_name().to_string())
             .unwrap_or_default();
-        let (chord_composer, schema_shortcuts) = {
+        let (chord_composer, schema_shortcuts, modifier_taps) = {
             let mut cached = engine.schema_keys.borrow_mut();
-            if cached.0 != schema_id {
-                let (chord_composer, mut shortcuts) = schema_key_policy_locked(&schema_id);
-                shortcuts.extend_from_slice(&engine.switcher_hotkeys);
-                *cached = (schema_id.clone(), chord_composer, shortcuts);
+            if cached.schema_id != schema_id {
+                *cached = schema_key_policy_locked(&schema_id);
+                cached.schema_id.clone_from(&schema_id);
+                cached.shortcuts.extend_from_slice(&engine.switcher_hotkeys);
             }
-            (cached.1, cached.2.clone())
+            (
+                cached.chord_composer,
+                cached.shortcuts.clone(),
+                cached.modifier_taps.clone(),
+            )
         };
         let Some(ctx) = session.context() else {
             return ImeState {
@@ -4575,6 +4634,7 @@ mod desktop {
                 ascii_mode,
                 chord_composer,
                 schema_shortcuts,
+                modifier_taps,
                 schema_id,
                 schema_name,
                 ..ImeState::empty()
@@ -4614,6 +4674,7 @@ mod desktop {
             ascii_mode,
             chord_composer,
             schema_shortcuts,
+            modifier_taps,
             schema_id,
             schema_name,
         }
@@ -4913,7 +4974,7 @@ pub mod key_policy {
         use CandidatePanelLayout::*;
         if state.candidates.is_empty()
             || super::rime_modifier_mask(mods) != 0
-            || is_configured_switcher_hotkey(sym, mods, state)
+            || is_configured_schema_shortcut(sym, mods, state)
         {
             return None;
         }
@@ -4996,15 +5057,26 @@ pub mod key_policy {
     /// switching, punctuation and the schema's bindings, and it reports the
     /// key as not accepted when the application should get it.
     pub fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-        !(mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) == 0
-            && !is_system_reserved_modifier(mods)
-            && should_forward_chord_release(sym, mods, state))
-            && !is_configured_switcher_hotkey(sym, mods, state)
-            && should_bypass_empty_composition_key(is_nonstarter_key(sym), mods, state)
+        should_bypass_empty_composition_key(is_nonstarter_key(sym), mods, state)
+            && !(mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) == 0
+                && !is_system_reserved_modifier(mods)
+                && should_forward_chord_release(sym, mods, state))
+            && !is_configured_schema_shortcut(sym, mods, state)
     }
 
     pub fn is_configured_switcher_hotkey(sym: u32, mods: u32, state: &ImeState) -> bool {
         state.schema_shortcuts.iter().any(|shortcut| shortcut.matches_switcher(sym, mods))
+    }
+
+    pub fn is_configured_schema_shortcut(sym: u32, mods: u32, state: &ImeState) -> bool {
+        !is_system_reserved_modifier(mods)
+            && state.schema_shortcuts.iter().any(|shortcut| {
+                shortcut.applies(state) && shortcut.matches_key(sym, mods)
+            })
+    }
+
+    pub fn is_configured_modifier_tap(sym: u32, state: &ImeState) -> bool {
+        state.modifier_taps.contains(&sym)
     }
 
     /// Chord composers must see releases even if modifiers changed after the press.

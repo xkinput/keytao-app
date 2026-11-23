@@ -339,6 +339,7 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
     let bindings = "key_binder:
   bindings:
     - { when: always, accept: Control+period, toggle: ascii_mode }
+    - { when: always, accept: Control+space, toggle: ascii_mode }
     - { when: always, accept: Shift+space, toggle: ascii_mode }
     - { when: always, accept: Control+Alt+F8, toggle: ascii_mode }
     - { when: composing, accept: Control+v, send: Page_Down }
@@ -363,7 +364,7 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
     let session = runtime.create_session().unwrap();
 
     let state = session.state();
-    assert_eq!(state.schema_shortcuts.len(), 4);
+    assert_eq!(state.schema_shortcuts.len(), 5);
     let composing = type_code(&session);
     assert!(!composing.candidates.is_empty());
     assert!(!composing.schema_shortcuts.iter().any(|shortcut| {
@@ -373,9 +374,11 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
     session.clear_composition();
     for (keysym, mask) in [
         (b'.' as u32, RIME_MOD_CONTROL),
+        (0x20, RIME_MOD_CONTROL),
         (0x20, RIME_MOD_SHIFT),
         (0xffc5, RIME_MOD_CONTROL | RIME_MOD_ALT),
     ] {
+        assert!(!keytao_core::key_policy::should_bypass_empty_composition(keysym, mask, &state));
         assert!(state.schema_shortcuts.iter().any(|shortcut| {
             (shortcut.key, shortcut.modifiers) == (keysym, mask) && shortcut.applies(&state)
         }));

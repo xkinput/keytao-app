@@ -7,10 +7,13 @@ import org.junit.Test
 
 class KeytaoImeStateTest {
     @Test
-    fun `chord composer defaults to false and decodes when enabled`() {
+    fun `physical keyboard capabilities default to disabled and decode when enabled`() {
         assertFalse(KeytaoImeState().chordComposer)
         assertFalse(KeytaoImeState.fromJson("{}")!!.chordComposer)
-        assertTrue(KeytaoImeState.fromJson("""{"chordComposer":true}""")!!.chordComposer)
+        assertTrue(KeytaoImeState.fromJson("{}")!!.modifierTapKeys.isEmpty())
+        val state = KeytaoImeState.fromJson("""{"chordComposer":true,"modifierTapKeys":[65507,65514]}""")!!
+        assertTrue(state.chordComposer)
+        assertEquals(listOf(0xffe3, 0xffea), state.modifierTapKeys)
     }
 
     @Test

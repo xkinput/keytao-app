@@ -55,14 +55,12 @@ use crate::{
     guard,
     key_map::{
         ascii_mode_rejects_key, chord_keysym_for_vk, current_mod_mask, is_application_shortcut,
-        is_caps_lock_vk, is_enter_vk, is_shift_vk, rime_mod_mask_for_vk, schema_shortcut_key,
-        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
-        vk_to_keysym, RIME_RELEASE_MASK,
+        is_caps_lock_vk, is_enter_vk, modifier_tap_is_alone, modifier_tap_keysym,
+        rime_mod_mask_for_vk, schema_shortcut_key, should_bypass_empty_composition,
+        should_eat_key, vk_to_keysym, RIME_RELEASE_MASK,
     },
     panel_anchor::{start_panel_anchor, PanelAnchor},
-    solo_shift::{
-        solo_shift_keysym, solo_shift_press_time, solo_shift_should_apply, solo_shift_should_send,
-    },
+    solo_shift::{modifier_tap_matches, modifier_tap_should_apply, record_modifier_tap},
     state::{
         append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
         clear_input_for_blocked_context, clear_layout_sink, current_theme, defer_ime_ui_hide,
@@ -93,21 +91,30 @@ fn upgrade_state(state: &WeakState) -> Option<SharedState> {
     state.upgrade()
 }
 
-fn record_shift_press(state: &SharedState, vk: u16, lparam: isize, mods: u32) {
-    let mut st = state.borrow_mut();
-    st.shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
-    if st.shift_pressed_without_key {
-        st.shift_pressed_at = solo_shift_press_time(st.shift_pressed_at, lparam, Instant::now());
-    } else {
-        st.shift_pressed_at = None;
-    }
+fn modifier_tap_enabled(st: &TsfState, keysym: u32) -> bool {
+    matches!(keysym, 0xffe1 | 0xffe2)
+        || st
+            .ime_state
+            .as_ref()
+            .is_some_and(|ime| key_policy::is_configured_modifier_tap(keysym, ime))
 }
 
-fn solo_shift_pending(st: &TsfState) -> bool {
-    st.shift_pressed_without_key
-        && st
-            .shift_pressed_at
-            .is_some_and(|pressed| solo_shift_should_send(pressed.elapsed().as_millis()))
+fn record_modifier_press(state: &SharedState, keysym: u32, lparam: isize, mods: u32) {
+    let mut st = state.borrow_mut();
+    st.modifier_tap_press = if st.keyboard_open
+        && modifier_tap_enabled(&st, keysym)
+        && modifier_tap_is_alone(keysym, mods)
+    {
+        record_modifier_tap(st.modifier_tap_press, keysym, lparam, Instant::now())
+    } else {
+        None
+    };
+}
+
+fn modifier_tap_pending(st: &TsfState, keysym: u32, mods: u32) -> bool {
+    modifier_tap_matches(st.modifier_tap_press, keysym, Instant::now())
+        && modifier_tap_enabled(st, keysym)
+        && modifier_tap_is_alone(keysym, mods)
 }
 
 // ── Composition helpers ───────────────────────────────────────────────────────
@@ -2719,7 +2726,7 @@ fn process_deferred_key(
     key: DeferredKey,
     before: &ImeState,
 ) -> Option<KeyProcessResult> {
-    if key.shift_toggle {
+    if key.modifier_tap {
         return runtime_session(state)?
             .process_keys(&[(key.keysym, 0), (key.keysym, RIME_RELEASE_MASK)]);
     }
@@ -2858,8 +2865,8 @@ pub(crate) fn flush_deferred_keys(state: &SharedState) {
                 break;
             };
             state.borrow_mut().deferred_keys.pop();
-            if key.shift_toggle {
-                if !solo_shift_should_apply(
+            if key.modifier_tap {
+                if !modifier_tap_should_apply(
                     result.accepted,
                     before.ascii_mode,
                     result.state.ascii_mode,
@@ -3028,10 +3035,16 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
             state.borrow_mut().claimed_key = None;
-            // TSF only calls OnKeyDown for keys claimed here, so solo-Shift state
-            // has to be maintained in the test callback (windows-1).
-            record_shift_press(&state, vk, lparam.0, mods);
+            // Intervening application shortcuts may never reach OnKeyDown.
+            let modifier = modifier_tap_keysym(vk, lparam.0);
+            if modifier.is_none() {
+                state.borrow_mut().modifier_tap_press = None;
+            }
             poll_pending_key_state(&state);
+            if let Some(keysym) = modifier {
+                record_modifier_press(&state, keysym, lparam.0, mods);
+                return Ok(BOOL::from(false));
+            }
             let cached_state = cached_ime_state(&state);
             let composing = cached_state.as_ref().is_some_and(has_visible_state)
                 || deferred_input_pending(&state, pic);
@@ -3039,10 +3052,6 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 .as_ref()
                 .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
             if schema_shortcut.is_none() && is_application_shortcut(vk, mods, composing) {
-                return Ok(BOOL::from(false));
-            }
-            if is_shift_vk(vk) {
-                append_key_diagnostic!("OnTestKeyDown modifier pending=true eat=false");
                 return Ok(BOOL::from(false));
             }
             prime_theme_resolver();
@@ -3125,26 +3134,22 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
-            let is_shift = is_shift_vk(vk);
-            if !is_shift
-                && !cached_ime_state(&state).is_some_and(|st| {
-                    st.chord_composer
-                        && chord_keysym_for_vk(vk, lparam.0, current_mod_mask(), &st).is_some()
-                })
-            {
-                return Ok(BOOL::from(false));
-            }
-            if is_shift
-                && (!solo_shift_pending(&state.borrow())
-                    || is_application_shortcut(vk, current_mod_mask(), false))
-            {
-                state.borrow_mut().shift_pressed_without_key = false;
-                state.borrow_mut().shift_pressed_at = None;
+            let modifier = modifier_tap_keysym(vk, lparam.0);
+            if let Some(keysym) = modifier {
+                if !modifier_tap_pending(&state.borrow(), keysym, current_mod_mask()) {
+                    state.borrow_mut().modifier_tap_press = None;
+                    return Ok(BOOL::from(false));
+                }
+            } else if !cached_ime_state(&state).is_some_and(|st| {
+                st.chord_composer
+                    && chord_keysym_for_vk(vk, lparam.0, current_mod_mask(), &st).is_some()
+            }) {
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
+            let is_modifier_tap = modifier.is_some();
             if input_is_blocked(&state, pic) {
-                append_key_diagnostic!("OnTestKeyUp shift={is_shift} blocked=true eat=false");
+                append_key_diagnostic!("OnTestKeyUp modifier_tap={is_modifier_tap} blocked=true eat=false");
                 return Ok(BOOL::from(false));
             }
             let input_generation = state.borrow().input_generation;
@@ -3156,7 +3161,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 let mut st = state.borrow_mut();
                 let reload_needed = st.reload_needed_cached();
                 (
-                    (!is_shift || st.shift_pressed_without_key)
+                    modifier.is_none_or(|keysym| modifier_tap_pending(&st, keysym, current_mod_mask()))
                         && st.engine_ready()
                         && !reload_needed,
                     !st.engine_ready(),
@@ -3170,8 +3175,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 start_reload_if_needed(&state);
             }
             append_key_diagnostic!(
-                "OnTestKeyUp shift={is_shift} pending={} ready={} reload={} eat={should_eat}",
-                state.borrow().shift_pressed_without_key,
+                "OnTestKeyUp modifier_tap={is_modifier_tap} pending={} ready={} reload={} eat={should_eat}",
+                state.borrow().modifier_tap_press.is_some(),
                 !should_retry,
                 should_reload,
             );
@@ -3189,8 +3194,15 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
             let claimed = state.borrow_mut().claimed_key.take() == Some((vk, lparam.0));
-            record_shift_press(&state, vk, lparam.0, mods);
+            let modifier = modifier_tap_keysym(vk, lparam.0);
+            if modifier.is_none() {
+                state.borrow_mut().modifier_tap_press = None;
+            }
             poll_pending_key_state(&state);
+            if let Some(keysym) = modifier {
+                record_modifier_press(&state, keysym, lparam.0, mods);
+                return Ok(BOOL::from(false));
+            }
             // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
             // shortcut policy before context inspection, warmup, or Enter's
             // modifier-free process_enter path.
@@ -3201,9 +3213,6 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 .as_ref()
                 .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
             if !claimed && schema_shortcut.is_none() && is_application_shortcut(vk, mods, composing) {
-                return Ok(BOOL::from(false));
-            }
-            if is_shift_vk(vk) {
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
@@ -3255,7 +3264,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 keysym,
                 mods,
                 enter: schema_shortcut.is_none() && is_enter_vk(vk),
-                shift_toggle: false,
+                modifier_tap: false,
             };
             if deferred_input_pending(&state, Some(&context)) {
                 let consumed = !is_caps_lock_vk(vk) && defer_key(&state, &context, key, false);
@@ -3265,7 +3274,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
 
             let prepared_engine = {
                 let mut st = state.borrow_mut();
-                st.shift_pressed_without_key = false;
+                st.modifier_tap_press = None;
                 st.key_context = Some(context.clone());
                 drop(st);
                 prepare_engine_for_key(&context, &state, KeyEventSource::OnKeyDown)?
@@ -3357,9 +3366,14 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             };
             let vk = (wparam.0 & 0xFFFF) as u16;
-            let is_shift = is_shift_vk(vk);
-            let (keysym, mods) = if is_shift {
-                (solo_shift_keysym(vk, lparam.0), 0)
+            let modifier = modifier_tap_keysym(vk, lparam.0);
+            let is_modifier_tap = modifier.is_some();
+            let (keysym, mods) = if let Some(keysym) = modifier {
+                if !modifier_tap_pending(&state.borrow(), keysym, current_mod_mask()) {
+                    state.borrow_mut().modifier_tap_press = None;
+                    return Ok(BOOL::from(false));
+                }
+                (keysym, 0)
             } else {
                 let Some(before_state) =
                     cached_ime_state(&state).filter(|st| st.chord_composer && !st.ascii_mode)
@@ -3372,15 +3386,6 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 };
                 (keysym, mods)
             };
-            if is_shift
-                && (!solo_shift_pending(&state.borrow())
-                    || is_application_shortcut(vk, current_mod_mask(), false))
-            {
-                state.borrow_mut().shift_pressed_without_key = false;
-                state.borrow_mut().shift_pressed_at = None;
-                return Ok(BOOL::from(false));
-            }
-
             let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
             if input_is_blocked(&state, Some(&context)) {
                 return Ok(BOOL::from(false));
@@ -3390,32 +3395,33 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             if state.borrow().input_generation != input_generation {
                 return Ok(BOOL::from(false));
             }
+            if is_modifier_tap
+                && !state
+                    .borrow_mut()
+                    .modifier_tap_press
+                    .take()
+                    .is_some_and(|(key, _)| key == keysym)
+            {
+                return Ok(BOOL::from(false));
+            }
             let key = DeferredKey {
                 keysym,
-                mods: if is_shift {
+                mods: if is_modifier_tap {
                     0
                 } else {
                     mods | RIME_RELEASE_MASK
                 },
                 enter: false,
-                shift_toggle: is_shift,
+                modifier_tap: is_modifier_tap,
             };
             if deferred_input_pending(&state, Some(&context)) {
-                state.borrow_mut().shift_pressed_without_key = false;
-                state.borrow_mut().shift_pressed_at = None;
+                state.borrow_mut().modifier_tap_press = None;
                 let consumed = defer_key(&state, &context, key, false);
                 flush_deferred_keys(&state);
                 return Ok(BOOL::from(consumed));
             }
             let prepared_engine = {
                 let mut st = state.borrow_mut();
-                if is_shift && !st.shift_pressed_without_key {
-                    return Ok(BOOL::from(false));
-                }
-                if is_shift {
-                    st.shift_pressed_without_key = false;
-                    st.shift_pressed_at = None;
-                }
                 st.key_context = Some(context.clone());
                 drop(st);
                 prepare_engine_for_key(&context, &state, KeyEventSource::OnKeyUp)?
@@ -3426,7 +3432,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
 
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
-            if !is_shift && !key_policy::should_forward_chord_release(keysym, mods, &before_state) {
+            if !is_modifier_tap
+                && !key_policy::should_forward_chord_release(keysym, mods, &before_state)
+            {
                 return Ok(BOOL::from(false));
             }
             // ascii_composer only recognizes a release after seeing its press.
@@ -3436,20 +3444,20 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 let already_written =
                     runtime_session(&state).is_some_and(|session| session.consume_failed_key());
                 let consumed = defer_key(&state, &context, key, already_written);
-                append_key_diagnostic!("OnKeyUp shift={is_shift} result=false");
+                append_key_diagnostic!("OnKeyUp modifier_tap={is_modifier_tap} result=false");
                 hide_candidate_window(&state);
                 crate::state::refresh_deployment_hint(&state);
                 return Ok(BOOL::from(consumed));
             };
             state.borrow_mut().deployment_loaded();
             append_key_diagnostic!(
-                "OnKeyUp shift={is_shift} accepted={} ascii={}->{}",
+                "OnKeyUp modifier_tap={is_modifier_tap} accepted={} ascii={}->{}",
                 result.accepted,
                 before_state.ascii_mode,
                 result.state.ascii_mode,
             );
-            let processed = if is_shift {
-                solo_shift_should_apply(
+            let processed = if is_modifier_tap {
+                modifier_tap_should_apply(
                     result.accepted,
                     before_state.ascii_mode,
                     result.state.ascii_mode,
@@ -3457,8 +3465,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             } else {
                 should_consume_processed_state(result.accepted, &before_state, &result.state)
             };
-            let consumed = result.accepted || (is_shift && processed);
-            if (if is_shift {
+            let consumed = result.accepted || (is_modifier_tap && processed);
+            if (if is_modifier_tap {
                 processed
             } else {
                 should_apply_processed_state(processed, &before_state, &result.state)
@@ -3473,7 +3481,13 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
     }
 
     fn OnPreservedKey(&self, _pic: Option<&ITfContext>, _rguid: *const GUID) -> Result<BOOL> {
-        guard(|| Ok(BOOL::from(false))).or(Ok(BOOL::from(false)))
+        guard(|| {
+            if let Some(state) = upgrade_state(&self.state) {
+                state.borrow_mut().modifier_tap_press = None;
+            }
+            Ok(BOOL::from(false))
+        })
+        .or(Ok(BOOL::from(false)))
     }
 }
 

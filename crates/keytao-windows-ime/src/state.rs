@@ -162,8 +162,7 @@ pub struct TsfState {
     reload_retry_after: Option<Instant>,
     reload_stamp_checked_at: Option<Instant>,
     reload_stamp_changed: bool,
-    pub shift_pressed_without_key: bool,
-    pub shift_pressed_at: Option<Instant>,
+    pub(crate) modifier_tap_press: Option<(u32, Instant)>,
     session_reset_pending: bool,
     focus_state_refresh_pending: bool,
     /// What TSF says about the focused context (password field, disabled
@@ -329,8 +328,7 @@ impl TsfState {
             reload_retry_after: None,
             reload_stamp_checked_at: None,
             reload_stamp_changed: false,
-            shift_pressed_without_key: false,
-            shift_pressed_at: None,
+            modifier_tap_press: None,
             session_reset_pending: false,
             focus_state_refresh_pending: false,
             input_context: ContextInputState::default(),
@@ -1156,7 +1154,11 @@ pub(crate) fn clear_input_for_blocked_context(shared_state: &SharedState) {
 }
 
 pub(crate) fn set_keyboard_open_state(shared_state: &SharedState, open: bool) {
-    shared_state.borrow_mut().keyboard_open = open;
+    {
+        let mut st = shared_state.borrow_mut();
+        st.keyboard_open = open;
+        st.modifier_tap_press = None;
+    }
     if !open {
         reset_input_for_focus_change(shared_state);
     }
@@ -1881,9 +1883,7 @@ fn take_active_composition(
     st.input_generation = st.input_generation.wrapping_add(1);
     st.pending_commit_retry = None;
     st.pending_ime_apply = None;
-    let shift_pending = st.shift_pressed_without_key;
-    st.shift_pressed_without_key = false;
-    st.shift_pressed_at = None;
+    let modifier_pending = st.modifier_tap_press.take().is_some();
     st.session_reset_pending = true;
     st.deployment_state.reset_input();
     st.deployment_hint = None;
@@ -1910,8 +1910,8 @@ fn take_active_composition(
     st.key_context = None;
     drop(st);
     append_diagnostic(format!(
-        "focus reset cleared shift_pending={}",
-        u8::from(shift_pending)
+        "focus reset cleared modifier_pending={}",
+        u8::from(modifier_pending)
     ));
     active_composition
 }
@@ -1958,7 +1958,7 @@ pub(crate) fn clear_input_after_composition_terminated(
     }
     crate::key_event_sink::queue_terminated_preedit_cleanup(shared_state, terminated);
 
-    let (in_write_session, shift_pending, panel_anchor, client_id) = {
+    let (in_write_session, modifier_pending, panel_anchor, client_id) = {
         let mut st = shared_state.borrow_mut();
         st.input_generation = st.input_generation.wrapping_add(1);
         st.pending_commit_retry = None;
@@ -1967,9 +1967,7 @@ pub(crate) fn clear_input_after_composition_terminated(
         st.deferred_keys.reset();
         st.deferred_context = None;
         st.claimed_key = None;
-        let shift_pending = st.shift_pressed_without_key;
-        st.shift_pressed_without_key = false;
-        st.shift_pressed_at = None;
+        let modifier_pending = st.modifier_tap_press.take().is_some();
         st.session_reset_pending = true;
         st.composition = None;
         st.composition_context = None;
@@ -1990,7 +1988,7 @@ pub(crate) fn clear_input_after_composition_terminated(
         }
         (
             in_write_session,
-            shift_pending,
+            modifier_pending,
             st.panel_anchor.take(),
             st.client_id,
         )
@@ -1999,8 +1997,8 @@ pub(crate) fn clear_input_after_composition_terminated(
         request_panel_anchor_end(shared_state, anchor, client_id);
     }
     append_diagnostic(format!(
-        "composition terminated identity_match=0 cleared=1 shift_pending={}",
-        u8::from(shift_pending)
+        "composition terminated identity_match=0 cleared=1 modifier_pending={}",
+        u8::from(modifier_pending)
     ));
     if !in_write_session {
         hide_ime_windows(shared_state);

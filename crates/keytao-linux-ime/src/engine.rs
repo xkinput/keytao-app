@@ -4,8 +4,12 @@
 //! create sessions through `CoreEngine` and send normalized X11 keysym events.
 
 pub use keytao_core::ImeRuntime as CoreEngine;
-use keytao_core::{ImeState, InputContextPolicy};
+use keytao_core::{
+    key_policy, ImeState, InputContextPolicy, KeyProcessResult, RIME_MOD_ALT, RIME_MOD_CONTROL,
+    RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub struct DeploymentHint {
     root: Option<std::path::PathBuf>,
@@ -102,6 +106,87 @@ pub fn shift_key_modifiers(mods: u32) -> u32 {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct ControlAltTap(Mutex<Option<(u32, Instant)>>);
+
+impl ControlAltTap {
+    const X11_MOD5: u32 = 1 << 7;
+
+    fn mask(sym: u32) -> Option<u32> {
+        match sym {
+            0xffe3 | 0xffe4 => Some(RIME_MOD_CONTROL),
+            0xffe9 | 0xffea => Some(RIME_MOD_ALT),
+            _ => None,
+        }
+    }
+
+    fn solo(mods: u32, own: u32) -> bool {
+        const X11_MOD4: u32 = 1 << 6;
+        let other = (RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_MOD_SHIFT) & !own;
+        mods & (other | X11_MOD4 | Self::X11_MOD5) == 0
+            && !key_policy::is_system_reserved_modifier(mods)
+    }
+
+    pub(crate) fn xkb_modifiers(sym: u32, mods: u32, state: Option<&xkbcommon::xkb::State>) -> u32 {
+        if Self::mask(sym).is_some()
+            && state.is_some_and(|state| {
+                state.mod_name_is_active("Mod5", xkbcommon::xkb::STATE_MODS_EFFECTIVE)
+            })
+        {
+            return mods | Self::X11_MOD5;
+        }
+        mods
+    }
+
+    pub(crate) fn press(&self, sym: u32, mods: u32) -> bool {
+        let mut key = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = key.take();
+        let Some(own) = Self::mask(sym) else {
+            return false;
+        };
+        if previous.is_none() && Self::solo(mods, own) {
+            *key = Some((sym, Instant::now()));
+        }
+        true
+    }
+
+    fn take_tap(&self, sym: u32, mods: u32) -> bool {
+        let Some(own) = Self::mask(sym) else {
+            return false;
+        };
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_some_and(|(key, started)| {
+                key == sym && started.elapsed() < Duration::from_millis(500) && Self::solo(mods, own)
+            })
+    }
+
+    pub(crate) fn release(&self, sym: u32, mods: u32, session: &ImeSession) -> Option<KeyProcessResult> {
+        // Delay the Rime press to avoid arming a tap for keys already handled by the host.
+        if self.take_tap(sym, mods)
+            && session.input_policy().composing
+            && key_policy::is_configured_modifier_tap(sym, &session.state())
+        {
+            let mut result = session.process_keys_result(&[(sym, 0), (sym, RIME_RELEASE_MASK)])?;
+            result.accepted = false;
+            return Some(result);
+        }
+        None
+    }
+
+    pub(crate) fn clear(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 /// `IBusInputPurpose::PASSWORD`, mirroring `GtkInputPurpose` and
 /// `zwp_text_input_v3::content_purpose`.
 pub const IBUS_INPUT_PURPOSE_PASSWORD: u32 = 8;
@@ -180,7 +265,7 @@ pub fn panel_has_composition(state: &ImeState, ui: &keytao_theme::UiTheme) -> bo
 mod tests {
     use super::{
         client_preedit, ibus_content_type_policy, ibus_cursor_pos, inline_preedit,
-        panel_has_composition, shift_key_modifiers, unhandled_key_text, ImeState,
+        panel_has_composition, shift_key_modifiers, unhandled_key_text, ControlAltTap, ImeState,
         IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_PURPOSE_PIN,
     };
     use keytao_core::rime_modifier_mask;
@@ -204,6 +289,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn control_alt_taps_ignore_chords_and_altgr() {
+        use keytao_core::{RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SUPER};
+
+        let control = 0xffe3;
+        let alt = 0xffea;
+        let tap = ControlAltTap::default();
+        assert!(tap.press(control, RIME_MOD_CONTROL));
+        assert!(tap.take_tap(control, 0));
+        assert!(tap.press(alt, RIME_MOD_ALT));
+        assert!(tap.take_tap(alt, 0));
+
+        assert!(tap.press(control, 0));
+        assert!(!tap.press(b' ' as u32, RIME_MOD_CONTROL));
+        assert!(!tap.take_tap(control, 0));
+        assert!(tap.press(control, 0));
+        tap.clear();
+        assert!(!tap.take_tap(control, 0));
+        for mods in [RIME_MOD_CONTROL, RIME_MOD_SUPER, ControlAltTap::X11_MOD5] {
+            assert!(tap.press(alt, mods));
+            assert!(!tap.take_tap(alt, 0));
+        }
+        assert!(!tap.press(0xfe03, 0)); // ISO_Level3_Shift (AltGr)
+        assert!(!tap.take_tap(alt, 0));
     }
 
     #[test]

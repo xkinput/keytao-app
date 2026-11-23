@@ -25,8 +25,8 @@ internal interface KeytaoRimeKeySink {
 }
 
 internal object KeytaoRimeInput {
-    /** Rime only switches on release after it has observed the Shift press. */
-    fun processSoloShift(
+    /** Rime only switches on release after it has observed the modifier press. */
+    fun processModifierTap(
         keysym: Int,
         processKey: (Int, Int) -> KeytaoImeState,
         applyPress: (KeytaoImeState) -> Unit,

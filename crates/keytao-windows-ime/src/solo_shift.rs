@@ -8,27 +8,32 @@ pub(crate) fn solo_shift_keysym(vk: u16, lparam: isize) -> u32 {
     }
 }
 
-pub(crate) fn solo_shift_should_send(elapsed_ms: u128) -> bool {
-    elapsed_ms < 500
-}
-
-pub(crate) fn solo_shift_press_time(
-    previous: Option<Instant>,
+pub(crate) fn record_modifier_tap(
+    previous: Option<(u32, Instant)>,
+    keysym: u32,
     lparam: isize,
     now: Instant,
-) -> Option<Instant> {
-    if lparam & (1 << 30) == 0 {
-        Some(now)
+) -> Option<(u32, Instant)> {
+    if previous.is_some_and(|(key, _)| key != keysym) {
+        None
+    } else if lparam & (1 << 30) == 0 {
+        Some((keysym, now))
     } else {
         previous
     }
 }
 
-pub(crate) fn solo_shift_should_apply(
-    accepted: bool,
-    before_ascii: bool,
-    after_ascii: bool,
+pub(crate) fn modifier_tap_matches(
+    press: Option<(u32, Instant)>,
+    keysym: u32,
+    now: Instant,
 ) -> bool {
+    press.is_some_and(|(key, at)| {
+        key == keysym && now.saturating_duration_since(at).as_millis() < 500
+    })
+}
+
+pub(crate) fn modifier_tap_should_apply(accepted: bool, before_ascii: bool, after_ascii: bool) -> bool {
     accepted || before_ascii != after_ascii
 }
 
@@ -46,30 +51,35 @@ mod tests {
     }
 
     #[test]
-    fn solo_shift_uses_librimes_half_second_window() {
-        assert!(solo_shift_should_send(499));
-        assert!(!solo_shift_should_send(500));
-        assert!(!solo_shift_should_send(501));
+    fn modifier_tap_requires_the_same_side_within_librimes_half_second_window() {
+        let at = Instant::now();
+        let press = Some((0xffe3, at));
+        let after = |ms| at + std::time::Duration::from_millis(ms);
+        assert!(modifier_tap_matches(press, 0xffe3, after(499)));
+        assert!(!modifier_tap_matches(press, 0xffe4, after(499)));
+        assert!(!modifier_tap_matches(press, 0xffe3, after(500)));
+        assert_eq!(record_modifier_tap(press, 0xffe4, 0, after(1)), None);
     }
 
     #[test]
-    fn solo_shift_applies_only_librimes_acceptance_or_mode_change() {
+    fn modifier_tap_applies_only_librimes_acceptance_or_mode_change() {
         for before in [false, true] {
-            assert!(solo_shift_should_apply(true, before, before));
-            assert!(solo_shift_should_apply(false, before, !before));
-            assert!(!solo_shift_should_apply(false, before, before));
+            assert!(modifier_tap_should_apply(true, before, before));
+            assert!(modifier_tap_should_apply(false, before, !before));
+            assert!(!modifier_tap_should_apply(false, before, before));
         }
     }
 
     #[test]
-    fn solo_shift_repeats_preserve_time_and_a_new_press_restarts_it() {
+    fn modifier_repeats_preserve_time_and_a_new_press_restarts_it() {
         let first = Instant::now();
         let later = first + std::time::Duration::from_millis(499);
+        let press = Some((0xffe1, first));
+        assert_eq!(record_modifier_tap(press, 0xffe1, 1 << 30, later), press);
         assert_eq!(
-            solo_shift_press_time(Some(first), 1 << 30, later),
-            Some(first)
+            record_modifier_tap(press, 0xffe1, 0, later),
+            Some((0xffe1, later))
         );
-        assert_eq!(solo_shift_press_time(Some(first), 0, later), Some(later));
-        assert_eq!(solo_shift_press_time(None, 1 << 30, later), None);
+        assert_eq!(record_modifier_tap(None, 0xffe1, 1 << 30, later), None);
     }
 }
