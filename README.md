@@ -1,4 +1,6 @@
-<h1><img src="packaging/icons/icon.png" width="40" height="40" align="left" alt="">&nbsp;键道 KeyTao</h1>
+<h1><img src="packaging/icons/icon.png" width="40" height="40" align="left" alt="">&nbsp;KeyTao 输入法</h1>
+
+KeyTao 是支持 librime 与 libjd 的跨平台输入法。
 
 <p align="center">
   <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS（浅色/深色）与手机上的设置界面、候选框和键盘">
@@ -6,12 +8,11 @@
 
 ## 特性
 
-- 默认支持键道6四种流行方案：键道6、星猫键道、天行键、键道·我流。
+- 默认支持键道6、星猫键道、天行键和键道·我流。
 - 支持导入通用 Rime 方案。
 - 内置下载万象拼音、雾凇拼音、Easy English。
 - 支持 macOS、Windows、Linux、Android、iOS 五端。
-
-键道输入方案的安装工具与各平台系统输入法：App 负责下载、安装、合并和部署 Rime 方案，系统输入法通过同一套 librime 核心输入。
+- macOS、Windows、Linux 和 Android 发行包内置 [libjd-engine](https://github.com/hronro/ime-jd)，可在首页切换输入引擎。
 
 | 平台 | 系统输入法形态 | Release 产物 |
 | --- | --- | --- |
@@ -33,7 +34,8 @@
 
 ## 使用
 
-在 App 中安装方案，再点击“部署”。安装只写文件，部署才让 librime 编译并加载新配置。
+- 使用 **Rime** 时，在 App 中安装方案，再点击“部署”，由 librime 编译并加载配置。
+- 使用 **ime-jd** 时，在首页切换引擎，在方案页将兼容方案的词库转换后即可使用。
 
 附加方案 Easy English 随 App 离线提供，安装后与键道方案一起部署。
 
