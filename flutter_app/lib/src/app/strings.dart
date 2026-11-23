@@ -227,7 +227,7 @@ abstract final class AppStrings {
   static const openLogDirectory = '打开日志目录';
   static const copyPath = '复制路径';
   static const clear = '清空';
-  static const keytaoVersion = 'KeyTao 版本';
+  static const keytaoVersion = 'KeyTao IM 版本';
   static const librimeVersion = 'librime 版本';
   static const librimeLuaVersion = 'librime-lua';
   static const openccVersion = 'OpenCC 版本';

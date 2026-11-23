@@ -9,10 +9,57 @@ import 'widgets.dart';
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key, required this.controller});
   final AppController controller;
+
+  Future<void> _checkForUpdates(BuildContext context, Locale locale) async {
+    final update = await controller.checkAppUpdateNow();
+    if (!context.mounted) return;
+    if (update == null) {
+      if (controller.appUpdateError case final error?) {
+        controller.showToast(AppStrings.appUpdateFailure(locale, error));
+      }
+      return;
+    }
+    if (!update.hasUpdate) {
+      controller.showToast(AppStrings.appUpToDate(locale));
+      return;
+    }
+    await showFDialog<void>(
+      context: context,
+      builder: (context, _, animation) => AppDialog(
+        title: AppStrings.checkAppUpdate(locale),
+        animation: animation,
+        actions: [
+          ActionButton(
+            AppStrings.downloadAppUpdate(locale),
+            primary: true,
+            onPress: () {
+              Navigator.pop(context);
+              controller.openAppUpdate();
+            },
+          ),
+        ],
+        child: Text('v${update.latestVersion}'),
+      ),
+    );
+  }
+
+  Widget _repositoryButton(String name, String url) {
+    final label = '打开 $name 的 GitHub 首页';
+    return FTooltip(
+      tipBuilder: (_, _) => Text(label),
+      child: FButton.icon(
+        variant: FButtonVariant.ghost,
+        onPress: controller.busy ? null : () => controller.open(url),
+        child: Icon(FLucideIcons.externalLink, size: 16, semanticLabel: label),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = controller;
     final locale = Localizations.localeOf(context);
+    final checkUpdateLabel = AppStrings.checkAppUpdate(locale);
     return AppPageBody(
       controller: c,
       page: AppPage.about,
@@ -25,7 +72,7 @@ class AboutPage extends StatelessWidget {
                 Image.asset(logoAsset, width: 60, height: 60),
                 const SizedBox(height: 12),
                 Text(
-                  AppStrings.title,
+                  'KeyTao 输入法',
                   style: context.theme.typography.display.xl2.copyWith(
                     fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 28,
                     color: AppPalette.of(context).ink,
@@ -42,7 +89,7 @@ class AboutPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  AppStrings.tagline,
+                  'KeyTao 是支持 librime 与 libjd 的跨平台输入法',
                   textAlign: TextAlign.center,
                   style: context.theme.typography.body.sm.copyWith(
                     color: AppPalette.of(context).muted,
@@ -67,74 +114,54 @@ class AboutPage extends StatelessWidget {
             ValueRow(
               AppStrings.keytaoVersion,
               c.versions?.appVersion ?? c.info.appVersion,
-            ),
-            FTappable(
-              onPress: c.checkingAppUpdate
-                  ? null
-                  : () async {
-                      final update = await c.checkAppUpdateNow();
-                      if (!context.mounted ||
-                          update == null ||
-                          !update.hasUpdate) {
-                        return;
-                      }
-                      await showFDialog<void>(
-                        context: context,
-                        builder: (context, _, animation) => AppDialog(
-                          title: AppStrings.checkAppUpdate(locale),
-                          animation: animation,
-                          actions: [
-                            ActionButton(
-                              AppStrings.downloadAppUpdate(locale),
-                              primary: true,
-                              onPress: () {
-                                Navigator.pop(context);
-                                c.openAppUpdate();
-                              },
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FTooltip(
+                    tipBuilder: (_, _) => Text(checkUpdateLabel),
+                    child: FButton.icon(
+                      key: const ValueKey('check-app-update'),
+                      variant: FButtonVariant.ghost,
+                      onPress: c.checkingAppUpdate
+                          ? null
+                          : () => _checkForUpdates(context, locale),
+                      child: c.checkingAppUpdate
+                          ? Semantics(
+                              label: checkUpdateLabel,
+                              child: const SizedBox.square(
+                                dimension: 16,
+                                child: FCircularProgress(),
+                              ),
+                            )
+                          : Icon(
+                              FLucideIcons.refreshCw,
+                              size: 16,
+                              semanticLabel: checkUpdateLabel,
                             ),
-                          ],
-                          child: Text('v${update.latestVersion}'),
-                        ),
-                      );
-                    },
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 44),
-                child: SettingRow(
-                  AppStrings.checkAppUpdate(locale),
-                  keepInline: true,
-                  description: c.checkingAppUpdate
-                      ? null
-                      : c.appUpdateError != null
-                      ? AppStrings.appUpdateFailure(locale, c.appUpdateError!)
-                      : c.appUpdate?.hasUpdate == false
-                      ? AppStrings.appUpToDate(locale)
-                      : null,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (c.appUpdate?.hasUpdate == true) ...[
-                        FBadge(child: Text('v${c.appUpdate!.latestVersion}')),
-                        const SizedBox(width: 8),
-                      ],
-                      if (c.checkingAppUpdate)
-                        const SizedBox.square(
-                          dimension: 18,
-                          child: FCircularProgress(),
-                        )
-                      else
-                        const Icon(FLucideIcons.chevronRight, size: 16),
-                    ],
+                    ),
                   ),
-                ),
+                  _repositoryButton('KeyTao', repositoryUrl),
+                ],
               ),
             ),
             ValueRow('Flutter', c.aboutValues['Flutter']!),
             ValueRow(
               AppStrings.librimeVersion,
               c.versions?.librimeVersion ?? '—',
+              trailing: _repositoryButton(
+                'librime',
+                'https://github.com/rime/librime',
+              ),
             ),
             if (c.libjd?.installedVersion case final version?)
-              ValueRow('libjd-engine 版本', version),
+              ValueRow(
+                'libjd-engine 版本',
+                version,
+                trailing: _repositoryButton(
+                  'libjd-engine',
+                  AppController.libjdRepositoryUrl,
+                ),
+              ),
             ValueRow(
               AppStrings.librimeLuaVersion,
               c.versions?.librimeLuaVersion ?? '—',
@@ -144,28 +171,6 @@ class AboutPage extends StatelessWidget {
               c.versions?.openccVersion ?? '—',
             ),
             ValueRow(AppStrings.platform, c.aboutValues['平台']!),
-            ValueRow(
-              AppStrings.keytaoDirectory,
-              c.versions?.dataDir ?? c.defaultDir,
-            ),
-            if (c.isAndroid)
-              ActionRow(
-                children: [
-                  ActionButton(
-                    'GitHub',
-                    icon: FLucideIcons.externalLink,
-                    onPress: c.busy ? null : () => c.open(repositoryUrl),
-                  ),
-                ],
-              )
-            else
-              SettingRow(
-                'GitHub',
-                child: ActionButton(
-                  Uri.parse(repositoryUrl).path.substring(1),
-                  onPress: c.busy ? null : () => c.open(repositoryUrl),
-                ),
-              ),
           ],
         ),
       ],
