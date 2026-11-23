@@ -1,5 +1,28 @@
 use super::*;
 
+#[cfg(not(target_os = "ios"))]
+pub(super) struct ActiveJd {
+    source: jd_backend::PreparedJd,
+    first_session: Option<jd_backend::JdBackend>,
+}
+
+#[cfg(not(target_os = "ios"))]
+impl ActiveJd {
+    fn new(backend: jd_backend::JdBackend) -> Self {
+        Self {
+            source: backend.source(),
+            first_session: Some(backend),
+        }
+    }
+
+    fn new_session(&mut self) -> Result<jd_backend::JdBackend, String> {
+        match self.first_session.take() {
+            Some(backend) => Ok(backend),
+            None => self.source.clone().start(),
+        }
+    }
+}
+
 impl ProcessRimeState {
     pub(super) fn using_libjd(&self) -> bool {
         #[cfg(not(target_os = "ios"))]
@@ -22,7 +45,7 @@ impl ProcessRimeState {
 
     pub(super) fn create_backend(&self, root: &Path) -> Result<Box<dyn ImeBackend>, String> {
         #[cfg(not(target_os = "ios"))]
-        if let Some(backend) = lock_ignore_poison(&self.libjd).as_ref() {
+        if let Some(backend) = lock_ignore_poison(&self.libjd).as_mut() {
             return Ok(Box::new(backend.new_session()?));
         }
         Ok(Box::new(RimeBackend::new_with_user_data_dir(root)?))
@@ -90,7 +113,9 @@ impl ImeRuntime {
         let imported = (package_engine == PackageEngine::LibjdEngine)
             .then(|| imported_dictionary(&dirs.user, None, key.as_deref()))
             .flatten();
-        let prepared = imported
+        // Start the validated target before releasing the current runtime so
+        // an unreadable dictionary or failed allocation leaves typing intact.
+        let backend = imported
             .map(|(dictionary, schema)| {
                 runtime_log::init_for_engine(&dirs.user);
                 let page_size =
@@ -103,7 +128,7 @@ impl ImeRuntime {
                 let path =
                     libjd::bundled_engine_library().ok_or("bundled ime-jd engine is missing")?;
                 unsafe {
-                    jd_backend::JdBackend::prepare_dictionary(&path, &dictionary, page_size, schema)
+                    jd_backend::JdBackend::load_dictionary(&path, &dictionary, page_size, schema)
                 }
             })
             .transpose()?;
@@ -123,44 +148,17 @@ impl ImeRuntime {
             return Err(PACKAGE_SWITCH_PENDING.into());
         }
         desktop::initialized_user_dir()?;
-        let previous_dirs = initialized.clone();
-        let previous_rime = desktop::loaded_runtime();
-        let previous_jd = lock_ignore_poison(&PROCESS_RIME.libjd)
-            .as_ref()
-            .map(jd_backend::JdBackend::source);
         if initialized.is_some() {
             PROCESS_RIME.shutdown_for_dir_change(&mut initialized, dirs, true)?;
-        } else if previous_rime.is_some() {
+        } else if desktop::loaded_runtime().is_some() {
             desktop::finalize_rime()?;
         }
-        let Some(prepared) = prepared else {
-            // Keep the host in passthrough until a converted scheme is ready.
-            return Ok(true);
-        };
-        match prepared.start() {
-            Ok(backend) => {
-                *lock_ignore_poison(&PROCESS_RIME.libjd) = Some(backend);
-                *initialized = Some(dirs.clone());
-                Ok(true)
-            }
-            Err(error) => {
-                let restore = if let Some(source) = previous_jd {
-                    source.start().map(|backend| {
-                        *lock_ignore_poison(&PROCESS_RIME.libjd) = Some(backend);
-                    })
-                } else if let Some(rime) = previous_rime {
-                    let root = previous_dirs.as_ref().map_or(&dirs.user, |dirs| &dirs.user);
-                    desktop::setup_resolved_runtime(root, &rime, DeployProcess::InProcess)
-                } else {
-                    return Err(error);
-                };
-                if let Err(restore) = restore {
-                    return Err(format!("{error}; restore previous input engine: {restore}"));
-                }
-                *initialized = previous_dirs;
-                Err(error)
-            }
+        // Without a converted scheme the host remains in passthrough mode.
+        if let Some(backend) = backend {
+            *lock_ignore_poison(&PROCESS_RIME.libjd) = Some(ActiveJd::new(backend));
+            *initialized = Some(dirs.clone());
         }
+        Ok(true)
     }
 }
 

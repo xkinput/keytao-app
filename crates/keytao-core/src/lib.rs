@@ -5967,7 +5967,7 @@ struct ProcessRimeState {
     /// The directories librime is initialized for, `None` while it is down.
     initialized: Mutex<Option<RimeDataDirs>>,
     #[cfg(not(target_os = "ios"))]
-    libjd: Mutex<Option<jd_backend::JdBackend>>,
+    libjd: Mutex<Option<runtime_libjd::ActiveJd>>,
     /// Bumped whenever librime was torn down; a session whose generation is
     /// behind rebuilds its engine before its next call.
     generation: AtomicU64,
@@ -6706,7 +6706,8 @@ impl ImeRuntime {
         PROCESS_RIME.generation.load(Ordering::SeqCst)
     }
 
-    /// Rebuild the focused engine first, then its peers, on the caller's worker.
+    /// Rebuild the focused engine first on the caller's worker. Rime also
+    /// rebuilds its peers, while ime-jd can restart idle sessions as needed.
     /// Keys wait for this worker without holding engine/native locks.
     /// Returns whether any session was rebuilt.
     pub fn prewarm(&self, focused: Option<&ImeRuntimeSession>) -> Result<bool, String> {
@@ -6727,6 +6728,7 @@ impl ImeRuntime {
             if deployment_in_progress(&dirs.user) {
                 return Err("Rime deployment is busy".into());
             }
+            let libjd = PROCESS_RIME.using_libjd();
             let mut focused = focused.cloned();
             loop {
                 let mut sessions: Vec<_> = lock_ignore_poison(&PROCESS_RIME.sessions)
@@ -6737,6 +6739,10 @@ impl ImeRuntime {
                 if let Some(first) = focused.take().filter(|session| session.dirs == dirs) {
                     sessions.retain(|session| !Arc::ptr_eq(&session.inner, &first.inner));
                     sessions.insert(0, first);
+                }
+                if libjd {
+                    // Each jd_init scans the whole dictionary even when contexts share its bytes.
+                    sessions.truncate(1);
                 }
                 if self.generation() != generation {
                     return Err("Rime generation changed".into());
@@ -6766,7 +6772,7 @@ impl ImeRuntime {
                         if deployment_in_progress(&dirs.user) {
                             return Err("Rime deployment is busy".into());
                         }
-                        let rime = (!PROCESS_RIME.using_libjd()).then(desktop::rime_api_lock);
+                        let rime = (!libjd).then(desktop::rime_api_lock);
                         if self.generation() != generation {
                             return Err("Rime generation changed".into());
                         }
@@ -6782,7 +6788,7 @@ impl ImeRuntime {
                     drop(barrier);
                     std::thread::yield_now();
                 }
-                if !worked {
+                if !worked || libjd {
                     return Ok(generation != initial_generation || !changed.is_empty());
                 }
             }

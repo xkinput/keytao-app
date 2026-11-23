@@ -104,6 +104,21 @@ impl DictionaryBlob {
         file.read_exact(bytes).map_err(|error| error.to_string())?;
         Ok(blob)
     }
+
+    fn check(&self, library: &JdLibrary) -> Result<(), String> {
+        let api = library
+            .api
+            .dictionary
+            .as_ref()
+            .ok_or("ime-jd does not support custom dictionaries")?;
+        let status = unsafe {
+            (api.check)(self.words.as_ptr().cast(), self.len, ptr::null_mut())
+        };
+        if status != 0 {
+            return Err(format!("invalid ime-jd dictionary (status {status})"));
+        }
+        Ok(())
+    }
 }
 
 struct JdApi {
@@ -163,6 +178,7 @@ pub struct JdBackend {
     session: Mutex<Session>,
 }
 
+#[derive(Clone)]
 pub(super) struct PreparedJd {
     library: Arc<JdLibrary>,
     dictionary: Option<Arc<DictionaryBlob>>,
@@ -198,7 +214,9 @@ impl JdBackend {
         page_size: usize,
         schema: SchemaInfo,
     ) -> Result<Self, String> {
-        unsafe { Self::prepare_dictionary(path, dictionary, page_size, schema) }?.start()
+        let (library, dictionary) = unsafe { Self::read_dictionary_source(path, dictionary) }?;
+        // jd_init fully validates the blob before exposing a context.
+        Self::from_library(library, page_size, Some(dictionary), schema)
     }
 
     /// Validate without creating an engine context so a live Rime engine can
@@ -209,25 +227,25 @@ impl JdBackend {
         page_size: usize,
         schema: SchemaInfo,
     ) -> Result<PreparedJd, String> {
-        let library = unsafe { Self::load_library(path) }?;
-        let api = library
-            .api
-            .dictionary
-            .as_ref()
-            .ok_or("ime-jd does not support custom dictionaries")?;
-        let dictionary = DictionaryBlob::read(dictionary)?;
-        let status = unsafe {
-            (api.check)(dictionary.words.as_ptr().cast(), dictionary.len, ptr::null_mut())
-        };
-        if status != 0 {
-            return Err(format!("invalid ime-jd dictionary (status {status})"));
-        }
+        let (library, dictionary) = unsafe { Self::read_dictionary_source(path, dictionary) }?;
+        dictionary.check(&library)?;
         Ok(PreparedJd {
             library,
-            dictionary: Some(Arc::new(dictionary)),
+            dictionary: Some(dictionary),
             schema,
             page_size,
         })
+    }
+
+    unsafe fn read_dictionary_source(
+        path: &Path,
+        dictionary: &Path,
+    ) -> Result<(Arc<JdLibrary>, Arc<DictionaryBlob>), String> {
+        let library = unsafe { Self::load_library(path) }?;
+        if library.api.dictionary.is_none() {
+            return Err("ime-jd does not support custom dictionaries".into());
+        }
+        Ok((library, Arc::new(DictionaryBlob::read(dictionary)?)))
     }
 
     /// # Safety
@@ -470,8 +488,13 @@ impl Session {
                     init(data, len, ptr::null(), 0)
                 }
             }
-        })
-        .ok_or("create libjd context")?;
+        });
+        let Some(ctx) = ctx else {
+            if let Some(dictionary) = &dictionary {
+                dictionary.check(&library)?;
+            }
+            return Err("create libjd context".into());
+        };
         let Some(state) = NonNull::new(unsafe { (library.api.state)(ctx.as_ptr()) }.cast_mut())
         else {
             unsafe { (library.api.deinit)(ctx.as_ptr()) };

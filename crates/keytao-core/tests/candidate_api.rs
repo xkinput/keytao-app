@@ -195,6 +195,11 @@ fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
         .unwrap();
         runtime.reload_without_deploy().unwrap();
         assert!(runtime.generation() > rime_generation);
+        assert!(runtime.prewarm(Some(&session)).unwrap());
+        assert_eq!(session.peek_state().schema_id, "converted_fixture");
+        assert!(idle.peek_state().schema_id.is_empty());
+        let first_key = idle.process_key_result(b'a'.into(), 0).unwrap();
+        assert_eq!(first_key.state.candidates[0].text, "converted");
         assert_eq!(session.state().schema_id, "converted_fixture");
         assert!(session.state().preedit.is_empty());
         unsafe {
