@@ -1,7 +1,11 @@
-use crate::{ime_host::ImeHost, scheme_files::write_file_atomic};
+use crate::{Core, CoreError, ime_host::ImeHost, scheme_files::write_file_atomic};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RimeSyncSettings {
@@ -10,11 +14,87 @@ pub struct RimeSyncSettings {
     pub effective_sync_dir: String,
 }
 
+pub(crate) fn ensure_installation(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let path = crate::packages::safe_path(root, "installation.yaml").map_err(CoreError::Other)?;
+    if path.try_exists()? {
+        return Ok(());
+    }
+    fs::create_dir_all(root)?;
+    if !fs::symlink_metadata(root)?.is_dir() {
+        return Err(CoreError::Other("Rime user root must be a directory".into()));
+    }
+
+    #[cfg(target_os = "android")]
+    let _lock = {
+        // Shared storage may reject both locking and no-replace rename.
+        let data_dir = &core.env().data_dir;
+        fs::create_dir_all(data_dir)?;
+        let lock = fs::File::options()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data_dir.join(".rime-installation.lock"))?;
+        keytao_core::lock_file(&lock, true)?;
+        if path.try_exists()? {
+            return Ok(());
+        }
+        lock
+    };
+
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|error| CoreError::Other(error.to_string()))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = format!("{:032x}", u128::from_be_bytes(bytes));
+    let installation_id = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..],
+    );
+    let version = match core.env().app_version.trim() {
+        "" => env!("CARGO_PKG_VERSION"),
+        version => version,
+    };
+    let mut document = Mapping::new();
+    for (key, value) in [
+        ("distribution_name", "KeyTao".into()),
+        ("distribution_code_name", "keytao".into()),
+        ("distribution_version", version.into()),
+        ("installation_id", installation_id),
+        ("install_time", time::OffsetDateTime::now_utc().to_string()),
+    ] {
+        document.insert(key.into(), value.into());
+    }
+    if let Some(version) = keytao_core::librime_runtime_version() {
+        document.insert("rime_version".into(), version.into());
+    }
+    let yaml =
+        serde_yaml::to_string(&document).map_err(|error| CoreError::Other(error.to_string()))?;
+    #[cfg(target_os = "android")]
+    write_file_atomic(&path, yaml.as_bytes())?;
+    #[cfg(not(target_os = "android"))]
+    {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(root)?;
+        file.write_all(yaml.as_bytes())?;
+        file.as_file().sync_all()?;
+        match file.persist_noclobber(path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn read_document(root: &Path) -> Result<(PathBuf, String, Mapping), String> {
     let path = crate::packages::safe_path(root, "installation.yaml")?;
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("Read installation.yaml: {error}")),
     };
     let value: Value =

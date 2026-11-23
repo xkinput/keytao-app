@@ -57,13 +57,17 @@ pub fn packages_in_store(
 
 pub(crate) fn mobile_packages(root: &Path, shared: &Path) -> Vec<Package> {
     // Reading the last build is enough for display. Selection validates current inputs.
-    collect_packages(
+    let mut packages = collect_packages(
         root,
         shared,
         None,
         installed_packages(root),
         crate::isolated_deploy::has_published_package_build,
-    )
+    );
+    if crate::runtime_libjd::package_libjd_ready(root, RuntimeDirs::active_package_key(root).as_deref()) {
+        packages.retain(|package| crate::runtime_libjd::package_libjd_ready(root, Some(&package.package_key)));
+    }
+    packages
 }
 
 fn collect_packages(
@@ -86,7 +90,7 @@ fn collect_packages(
             let dirs = data_root
                 .and_then(|data| RuntimeDirs::for_package_in_store(root, shared, data, &package_key))
                 .or_else(|| RuntimeDirs::for_package(root, shared, &package_key));
-            let ready = crate::runtime_libjd::package_libjd_ready(root, Some(&package_key))
+            let ready = crate::runtime_libjd::package_libjd_ready_in_store(root, data_root, Some(&package_key))
                 || dirs.as_ref().is_some_and(&build_ready);
             let mut schemas =
                 crate::package_switchable_schemas(root, shared, data_root, &package_key);
@@ -301,11 +305,11 @@ impl Menu {
             page_size,
             force_open,
             || {
+                let mut packages = packages(root, shared, installed_packages(root));
                 if libjd_active {
-                    Vec::new()
-                } else {
-                    packages(root, shared, installed_packages(root))
+                    packages.retain(|package| crate::runtime_libjd::package_libjd_ready(root, Some(&package.package_key)));
                 }
+                packages
             },
         )
     }

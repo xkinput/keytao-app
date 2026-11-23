@@ -793,3 +793,39 @@ fn real_xmjd6_sample_is_read_only_and_never_executed() {
     );
     println!("XMJD6_FILES {:?}", bundle.files);
 }
+
+#[test]
+fn utf8_bom_dictionary_headers_parse_without_modifying_archive_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let schema = b"schema:\n  schema_id: xkjd6\ntranslator:\n  dictionary: xkjd6.extended\n";
+    let extended = b"---\r\nname: xkjd6.extended\r\nimport_tables:\r\n  - xkjd6.fuhao\r\n  - xkjd6.user\r\n...\r\n";
+    let fuhao = b"\xef\xbb\xbf---\r\nname: xkjd6.fuhao\r\nversion: \"Q1\"\r\nsort: original\r\n...\r\n\xc2\xb7\t`\r\n";
+    let user = b"\xef\xbb\xbf# coding: utf-8\r\n---\r\nname: xkjd6.user\r\nversion: \"Q1\"\r\nsort: original\r\n...\r\n\xe9\x9c\x8d\xe6\xa0\xbc\thlge\r\n";
+    fs::write(root.join("xkjd6.schema.yaml"), schema).unwrap();
+    fs::write(root.join("xkjd6.extended.dict.yaml"), extended).unwrap();
+    fs::write(root.join("xkjd6.fuhao.dict.yaml"), fuhao).unwrap();
+    fs::write(root.join("xkjd6.user.dict.yaml"), user).unwrap();
+
+    let dictionaries = BTreeMap::from([
+        ("xkjd6.extended.dict.yaml".into(), extended.to_vec()),
+        ("xkjd6.fuhao.dict.yaml".into(), fuhao.to_vec()),
+        ("xkjd6.user.dict.yaml".into(), user.to_vec()),
+    ]);
+    let used =
+        crate::account::runtime_dictionary_usage([schema.as_slice()].into_iter(), &dictionaries)
+            .unwrap();
+    assert_eq!(
+        used.into_iter().collect::<Vec<_>>(),
+        ["xkjd6.extended", "xkjd6.fuhao", "xkjd6.user"]
+    );
+
+    let bundle = build(root, None, &["xkjd6".into()]).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bundle.bytes)).unwrap();
+    let mut archived = Vec::new();
+    zip.by_name("xkjd6.fuhao.dict.yaml")
+        .unwrap()
+        .read_to_end(&mut archived)
+        .unwrap();
+    assert_eq!(archived, fuhao);
+}

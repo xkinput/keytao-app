@@ -60,7 +60,8 @@ impl ImeRuntime {
             return Ok(false);
         }
         let key = engine_choice::active_package(&dirs.user);
-        if engine_choice::read(&dirs.user, key.as_deref()) != PackageEngine::Libjd {
+        let engine = engine_choice::read(&dirs.user, key.as_deref());
+        if engine.is_rime() {
             return Ok(false);
         }
         if !RuntimeDirs::needs_migration(&dirs.user)
@@ -74,7 +75,7 @@ impl ImeRuntime {
             return Ok(true);
         }
         runtime_log::init_for_engine(&dirs.user);
-        let library_path = installed_library(&dirs.user);
+        let library_path = installed_library(&dirs.user, engine);
         let page_size =
             runtime_dirs::read_regular_file(&dirs.user.join(english_mode::SETTINGS_FILE))
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -85,7 +86,14 @@ impl ImeRuntime {
             .ok_or_else(|| "verified libjd installation missing".to_string())
             // The installation resolver requires the digest-verified publication manifest.
             .and_then(|path| unsafe {
-                jd_backend::JdBackend::load_with_page_size(&path, page_size)
+                if engine == PackageEngine::LibjdEngine {
+                    let (dictionary, schema) =
+                        imported_dictionary(&dirs.user, None, key.as_deref())
+                            .ok_or("converted ime-jd dictionary is missing")?;
+                    jd_backend::JdBackend::load_dictionary(&path, &dictionary, page_size, schema)
+                } else {
+                    jd_backend::JdBackend::load_with_page_size(&path, page_size)
+                }
             });
         let backend = match backend {
             Ok(backend) => backend,
@@ -137,10 +145,22 @@ pub(crate) fn package_libjd_ready_in_store(
         target_os = "windows",
         target_os = "android"
     ))]
-    return key == Some(engine_choice::PACKAGE_KEY)
-        && engine_choice::read(root, key) == engine_choice::PackageEngine::Libjd
-        && (data_root.and_then(libjd::installed_library).is_some()
-            || installed_library(root).is_some());
+    {
+        use engine_choice::PackageEngine;
+        let engine = engine_choice::read(root, key);
+        let Some(platform) = engine_platform(engine) else {
+            return false;
+        };
+        let ready = |data: &Path| {
+            platform.installed_library(data).is_some()
+                && (engine != PackageEngine::LibjdEngine
+                    || key
+                        .and_then(|key| libjd::imported_dictionary(data, key))
+                        .is_some())
+        };
+        return data_root.is_some_and(ready)
+            || runtime_data_root(root).as_deref().is_some_and(ready);
+    }
     #[cfg(not(any(
         target_os = "macos",
         target_os = "linux",
@@ -153,13 +173,37 @@ pub(crate) fn package_libjd_ready_in_store(
     }
 }
 
-#[cfg(target_os = "android")]
-fn installed_library(_: &Path) -> Option<PathBuf> {
-    libjd::installed_library(ANDROID_DATA_ROOT.get()?)
+pub(crate) fn imported_dictionary(
+    root: &Path,
+    data: Option<&Path>,
+    key: Option<&str>,
+) -> Option<(PathBuf, SchemaInfo)> {
+    let key = key?;
+    data.and_then(|data| libjd::imported_dictionary(data, key))
+        .or_else(|| libjd::imported_dictionary(&runtime_data_root(root)?, key))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn installed_library(root: &Path) -> Option<PathBuf> {
-    let app_data = RuntimeDirs::app_data_root(root);
-    libjd::installed_library(app_data.as_deref().unwrap_or(root))
+fn runtime_data_root(root: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = root;
+        ANDROID_DATA_ROOT.get().cloned()
+    }
+    #[cfg(not(target_os = "android"))]
+    Some(RuntimeDirs::app_data_root(root).unwrap_or_else(|| root.to_path_buf()))
+}
+
+#[cfg(not(target_os = "ios"))]
+fn engine_platform(engine: engine_choice::PackageEngine) -> Option<libjd::LibjdPlatform> {
+    use engine_choice::PackageEngine;
+    match engine {
+        PackageEngine::Rime => None,
+        PackageEngine::Libjd => libjd::platform(),
+        PackageEngine::LibjdEngine => libjd::platform().map(libjd::LibjdPlatform::engine_only),
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+fn installed_library(root: &Path, engine: engine_choice::PackageEngine) -> Option<PathBuf> {
+    engine_platform(engine)?.installed_library(&runtime_data_root(root)?)
 }

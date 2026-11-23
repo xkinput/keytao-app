@@ -277,6 +277,9 @@ pub struct ImeState {
     pub committed: Option<String>,
     pub select_keys: Option<String>,
     pub ascii_mode: bool,
+    /// Label of a Rime switch changed by this key, absent in ordinary snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_hint: Option<String>,
     #[serde(default)]
     pub chord_composer: bool,
     /// Active Rime option/schema switch bindings and switcher hotkeys.
@@ -553,6 +556,7 @@ impl ImeState {
             committed: None,
             select_keys: None,
             ascii_mode: false,
+            switch_hint: None,
             chord_composer: false,
             schema_shortcuts: Vec::new(),
             modifier_taps: Vec::new(),
@@ -3349,6 +3353,35 @@ mod desktop {
                 cstr_to_str(get_input(self.session.session_id))
             }
         }
+
+        fn switches_before_shortcut(&self, keycode: u32, mask: u32) -> Vec<SchemaSwitchSetting> {
+            if mask & RIME_RELEASE_MASK != 0 {
+                return Vec::new();
+            }
+            let mut cached = self.schema_keys.borrow_mut();
+            if cached.schema_id.is_empty() {
+                if let Ok(status) = self.session.status() {
+                    *cached = schema_key_policy_locked(status.schema_id());
+                    cached.schema_id = status.schema_id().into();
+                    cached.shortcuts.extend_from_slice(&self.switcher_hotkeys);
+                }
+            }
+            if !cached
+                .shortcuts
+                .iter()
+                .any(|shortcut| !shortcut.is_switcher() && shortcut.matches_key(keycode, mask))
+            {
+                return Vec::new();
+            }
+            visible_switch_settings(
+                &cached.schema_id,
+                read_schema_switches_locked(&cached.schema_id),
+                |name, _| Some(get_session_option(&self.session, name)),
+            )
+            .into_iter()
+            .filter(|switch| switch.name != "ascii_mode")
+            .collect()
+        }
     }
 
     impl ImeBackend for RimeBackend {
@@ -3395,8 +3428,26 @@ mod desktop {
         fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
+            let switches = self.switches_before_shortcut(keycode, mask);
             let status = self.session.process_key(key_event(keycode, mask));
-            let state = extract_state_with_commit(self);
+            let mut state = extract_state_with_commit(self);
+            if matches!(status, KeyStatus::Accept) {
+                state.switch_hint = switches
+                    .into_iter()
+                    .filter(|switch| switch.schema_id == state.schema_id)
+                    .find_map(|switch| {
+                        let get = |name| get_session_option(&self.session, name);
+                        let value = if switch.options.is_empty() {
+                            usize::from(get(switch.name.as_str()))
+                        } else {
+                            switch.options.iter().position(|name| get(name))?
+                        };
+                        (value != switch.value)
+                            .then(|| &switch.states[value])
+                            .filter(|label| !label.trim().is_empty())
+                            .cloned()
+                    });
+            }
             self.remember_committed_user_phrase(&state);
             drop(_rime);
             let result = KeyProcessResult {
@@ -4672,6 +4723,7 @@ mod desktop {
             committed,
             select_keys: menu.select_keys.map(|s: &str| s.to_string()),
             ascii_mode,
+            switch_hint: None,
             chord_composer,
             schema_shortcuts,
             modifier_taps,
@@ -4811,9 +4863,9 @@ fn with_schema_switch_config<T>(
 ))]
 pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>, String> {
     let dirs = RuntimeDirs::resolve(user_dir, user_dir)?;
-    if dirs.active_package_key.as_deref() == Some(engine_choice::PACKAGE_KEY)
-        && engine_choice::read(user_dir, Some(engine_choice::PACKAGE_KEY))
-            == engine_choice::PackageEngine::Libjd
+    let key = dirs.active_package_key.as_deref();
+    if engine_choice::read(user_dir, key) == engine_choice::PackageEngine::Libjd
+        || runtime_libjd::package_libjd_ready(user_dir, key)
     {
         return Ok(Vec::new());
     }
@@ -8134,6 +8186,11 @@ pub fn deployed_schemas(root: &Path) -> Vec<SchemaInfo> {
         return Vec::new();
     };
     if runtime_libjd::package_libjd_ready(root, dirs.active_package_key.as_deref()) {
+        if let Some((_, schema)) = runtime_libjd::imported_dictionary(root, None, dirs.active_package_key.as_deref())
+            .filter(|_| engine_choice::read(root, dirs.active_package_key.as_deref()) == engine_choice::PackageEngine::LibjdEngine)
+        {
+            return vec![schema];
+        }
         return vec![SchemaInfo {
             id: engine_choice::PACKAGE_KEY.into(),
             name: "键道6".into(),
@@ -8148,6 +8205,11 @@ pub fn package_switchable_schemas(
     data_root: Option<&Path>,
     package_key: &str,
 ) -> Vec<SchemaInfo> {
+    if engine_choice::read(control_root, Some(package_key)) == engine_choice::PackageEngine::LibjdEngine {
+        if let Some((_, schema)) = runtime_libjd::imported_dictionary(control_root, data_root, Some(package_key)) {
+            return vec![schema];
+        }
+    }
     if package_key == engine_choice::PACKAGE_KEY
         && engine_choice::read(control_root, Some(package_key))
             == engine_choice::PackageEngine::Libjd

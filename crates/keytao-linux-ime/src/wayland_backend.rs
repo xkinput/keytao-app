@@ -344,6 +344,12 @@ impl App {
             .filter(|state| panel_has_composition(state, &theme.ui));
         let deployment_hint =
             keytao_core::DeploymentState::visible_hint(self.deployment_text, state.is_some());
+        let text_hint = deployment_hint.or_else(|| {
+            self.ime_state
+                .as_ref()
+                .filter(|_| show_hint)
+                .and_then(|state| state.switch_hint.as_deref())
+        });
         if state.is_none() && !show_hint && deployment_hint.is_none() {
             self.hide_panel_popup();
             return;
@@ -360,7 +366,7 @@ impl App {
             self.ascii_mode,
             self.panel_scale.scale(surface),
             self.panel_scale.screen_width(),
-            deployment_hint,
+            text_hint,
         );
         if w == 0 || h == 0 {
             return;
@@ -413,7 +419,14 @@ impl App {
         self.pressed_click = None;
         let has_content = self.renderer.is_some()
             && panel_has_composition(&state, &self.theme_resolver.current().ui);
-        if has_content || !state.candidates.is_empty() {
+        if state.switch_hint.is_some() {
+            self.mode_hint_until = Some(mode_hint_deadline(
+                self.renderer.as_ref().map(PanelRenderer::mode_hint_duration),
+            ));
+        } else if has_content
+            || !state.candidates.is_empty()
+            || self.ime_state.as_ref().is_some_and(|state| state.switch_hint.is_some())
+        {
             // A hint's timeout must never hide candidates typed after it.
             self.mode_hint_until = None;
         }
@@ -1435,7 +1448,11 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
 
         app.refresh_deployment_hint(&qh);
         if take_expired_deadline(&mut app.mode_hint_until) {
-            app.show_panel(ImeState::empty(), &qh);
+            let mut state = app.ime_state.take()
+                .filter(|state| state.switch_hint.is_some())
+                .unwrap_or_else(ImeState::empty);
+            state.switch_hint = None;
+            app.show_panel(state, &qh);
         }
 
         if app

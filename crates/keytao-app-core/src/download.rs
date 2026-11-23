@@ -20,7 +20,7 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
     cancel.borrow_and_update();
     let result: Result<_, String> = async {
         let client = build_client(core)?;
-        let mut temp = download_to_temp_with(core, client.get(&url), &mut cancel, None).await?;
+        let mut temp = download_to_temp_with(core, client.get(&url), &mut cancel, None, None).await?;
 
         if url.starts_with("https://github.com/rimeinn/rime-snow-pinyin/releases/download/")
             && url.ends_with("/snow-pinyin.zip")
@@ -50,12 +50,13 @@ pub(crate) async fn download_to_temp_with(
     request: reqwest::RequestBuilder,
     cancel: &mut tokio::sync::watch::Receiver<u64>,
     expected_size: Option<u64>,
+    max_size: Option<u64>,
 ) -> Result<tempfile::NamedTempFile, String> {
     emit_progress(core, "downloading", 0, "正在下载...");
     let response = tokio::select! {
         biased;
         _ = cancel.changed() => return Err(DOWNLOAD_CANCELLED.to_string()),
-        response = request.send() => response.map_err(|e| format!("下载失败: {}", e.without_url()))?,
+        response = send_get_with_retry(request) => response.map_err(|e| format!("下载失败: {}", e.without_url()))?,
     };
     if !response.status().is_success() {
         return Err(format!("下载失败，HTTP {}", response.status()));
@@ -64,6 +65,9 @@ pub(crate) async fn download_to_temp_with(
     let total_size = expected_size
         .or_else(|| response.content_length())
         .unwrap_or(0);
+    if max_size.is_some_and(|limit| total_size > limit) {
+        return Err("下载文件超过大小限制".into());
+    }
     let mut downloaded = 0u64;
     let cache_dir = &core.env().cache_dir;
     std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
@@ -78,6 +82,9 @@ pub(crate) async fn download_to_temp_with(
     } {
         let chunk = chunk.map_err(|e| format!("下载中断: {}", e.without_url()))?;
         downloaded += chunk.len() as u64;
+        if max_size.is_some_and(|limit| downloaded > limit) {
+            return Err("下载文件超过大小限制".into());
+        }
         if expected_size.is_some_and(|size| downloaded > size) {
             return Err("下载大小与发布记录不符".into());
         }
@@ -101,6 +108,21 @@ pub(crate) async fn download_to_temp_with(
         return Err("下载大小与发布记录不符".into());
     }
     Ok(temp)
+}
+
+pub(crate) async fn send_get_with_retry(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let retry = request.try_clone();
+    let result = request.send().await;
+    if let (Some(retry), Err(error)) = (retry, &result)
+        && !error.is_redirect()
+        && (error.is_connect() || error.is_timeout() || error.is_request())
+    {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return retry.send().await;
+    }
+    result
 }
 
 #[cfg(test)]

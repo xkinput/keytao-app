@@ -121,9 +121,29 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
         for package in &mut packages {
             package.active = key.as_deref() == Some(package.scheme_key.as_str());
             package.in_use = package.active;
+            let engine = package_engine(&state.core, &root, &package.scheme_key);
+            if engine == keytao_core::engine_choice::PackageEngine::LibjdEngine {
+                package.engine = engine.as_str().into();
+                package.supports_user_words = false;
+            }
         }
     }
     runtime::dto(packages)
+}
+
+fn package_engine(
+    core: &keytao_app_core::Core,
+    root: &std::path::Path,
+    key: &str,
+) -> keytao_core::engine_choice::PackageEngine {
+    use keytao_core::engine_choice::{self, PackageEngine};
+    let engine = engine_choice::read(root, Some(key));
+    if engine == PackageEngine::LibjdEngine
+        && !keytao_app_core::libjd::imported_package_ready(core, key)
+    {
+        return PackageEngine::Rime;
+    }
+    engine
 }
 
 pub async fn isolated_packages() -> Result<Vec<IsolatedPackageDto>, String> {
@@ -132,10 +152,14 @@ pub async fn isolated_packages() -> Result<Vec<IsolatedPackageDto>, String> {
     let root = state.host.user_root()?;
     let core = state.core.clone();
     tokio::task::spawn_blocking(move || {
-        runtime::dto(
+        let mut packages: Vec<IsolatedPackageDto> = runtime::dto(
             keytao_app_core::runtime_materialize::isolated_packages(&core, &root)
                 .map_err(|error| error.to_string())?,
-        )
+        )?;
+        for package in &mut packages {
+            package.engine = package_engine(&core, &root, &package.package_key).as_str().into();
+        }
+        Ok(packages)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -647,6 +671,18 @@ pub async fn install_or_update_libjd(release: LibjdReleaseDto) -> Result<LibjdSt
         available: status.available,
         installed_version: status.installed_version,
     })
+}
+
+pub async fn import_libjd_package(key: String) -> Result<u32, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    #[cfg(target_os = "windows")]
+    state.host.require_default_windows_root()?;
+    let root = state.host.user_root()?;
+    let skipped = keytao_app_core::libjd::import_package(&state.core, &root, &key)
+        .await
+        .map_err(format_libjd_error)?;
+    Ok(u32::try_from(skipped).unwrap_or(u32::MAX))
 }
 
 fn format_libjd_error(error: keytao_app_core::CoreError) -> String {

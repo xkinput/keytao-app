@@ -1782,6 +1782,7 @@ fn state_json(state: ImeState, accepted: bool) -> String {
         "englishMode": english_mode,
         "schemaId": state.schema_id,
         "schemaName": state.schema_name,
+        "switchHint": state.switch_hint,
         "accepted": accepted,
         "candidatePanel": candidate_panel,
         "modeHint": mode_hint,

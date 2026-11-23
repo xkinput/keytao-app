@@ -1624,7 +1624,7 @@ pub(crate) fn update_ime_windows(
                 && !matches!(source, CaretSource::View | CaretSource::Window)
         }) {
             mode_hint_win.show_mode_hint(
-                ime_state.is_english_mode(),
+                ime_state,
                 caret.x,
                 caret.y,
                 caret.owner_hwnd,

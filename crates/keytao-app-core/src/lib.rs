@@ -20,6 +20,7 @@ pub mod rime_sync;
 pub mod ime_status;
 pub mod download;
 pub mod libjd;
+mod libjd_dictionary;
 pub mod install;
 mod package_store;
 mod package_fs;
@@ -97,8 +98,8 @@ fn validate_libjd_library(path: &std::path::Path) -> Result<serde_json::Value, S
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     {
         // The installer passes only a library extracted from the digest-verified release asset.
-        let backend = unsafe { keytao_core::jd_backend::JdBackend::load(path)? };
-        serde_json::to_value(backend.abi_layout()).map_err(|error| error.to_string())
+        let layout = unsafe { keytao_core::jd_backend::JdBackend::validate_library(path)? };
+        serde_json::to_value(layout).map_err(|error| error.to_string())
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
     {

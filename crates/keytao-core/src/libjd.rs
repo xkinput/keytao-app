@@ -4,12 +4,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const MAX_DICTIONARY_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LibjdPlatform {
     pub target: &'static str,
     pub library: &'static str,
     pub archive_entry: &'static str,
     pub archive_suffix: &'static str,
+    engine_only: bool,
 }
 
 pub fn platform() -> Option<LibjdPlatform> {
@@ -33,6 +36,7 @@ pub fn platform_for(os: &str, arch: &str) -> Option<LibjdPlatform> {
         library,
         archive_entry,
         archive_suffix,
+        engine_only: false,
     })
 }
 
@@ -61,12 +65,36 @@ pub fn valid_sha256(sha256: &str) -> bool {
 }
 
 impl LibjdPlatform {
+    pub fn engine_only(self) -> Self {
+        Self {
+            engine_only: true,
+            ..self
+        }
+    }
+
+    pub fn is_engine_only(self) -> bool {
+        self.engine_only
+    }
+
+    pub fn install_target(self) -> String {
+        if self.engine_only {
+            format!("{}-engine", self.target)
+        } else {
+            self.target.to_owned()
+        }
+    }
+
     pub fn asset_name(self, tag: &str) -> String {
-        format!("libjd-{tag}-{}.{}", self.target, self.archive_suffix)
+        let prefix = if self.engine_only {
+            "libjd-engine"
+        } else {
+            "libjd"
+        };
+        format!("{prefix}-{tag}-{}.{}", self.target, self.archive_suffix)
     }
 
     pub fn current_path(self, root: &Path) -> PathBuf {
-        root.join(format!("current-{}", self.target))
+        root.join(format!("current-{}", self.install_target()))
     }
 
     pub fn library_path(self, data: &Path, tag: &str) -> Option<PathBuf> {
@@ -74,7 +102,7 @@ impl LibjdPlatform {
             return None;
         }
         let version = engine_root(data)?.join(tag);
-        let directory = version.join(self.target);
+        let directory = version.join(self.install_target());
         (dir_or_missing(&version) && dir_or_missing(&directory))
             .then(|| directory.join(self.library))
     }
@@ -100,7 +128,9 @@ impl LibjdPlatform {
             return Some((manifest, library));
         }
         // A same-tag replacement can be interrupted between the two directory renames.
-        let previous = root.join(&tag).join(format!(".old-{}", self.target));
+        let previous = root
+            .join(&tag)
+            .join(format!(".old-{}", self.install_target()));
         if !fs::symlink_metadata(&previous).is_ok_and(|metadata| metadata.is_dir()) {
             return None;
         }
@@ -110,6 +140,10 @@ impl LibjdPlatform {
 
     pub fn installed_tag(self, data: &Path) -> Option<String> {
         self.installed(data).map(|(manifest, _)| manifest.tag)
+    }
+
+    pub fn installed_library(self, data: &Path) -> Option<PathBuf> {
+        self.installed(data).map(|(_, library)| library)
     }
 }
 
@@ -143,5 +177,40 @@ pub fn manifest_at(library: &Path, tag: &str) -> Option<LibjdManifest> {
 }
 
 pub fn installed_library(data: &Path) -> Option<PathBuf> {
-    platform()?.installed(data).map(|(_, library)| library)
+    platform()?.installed_library(data)
+}
+
+pub fn dictionary_directory(data: &Path, key: &str) -> Option<PathBuf> {
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let store = crate::package_store::root(data);
+    if !fs::symlink_metadata(&store).is_ok_and(|metadata| metadata.is_dir()) {
+        return None;
+    }
+    // Package replacement and uninstall retire the converted dictionary with its sources.
+    let files = crate::runtime_dirs::package_files_dir(&store, key).ok()?;
+    let directory = files.parent()?.join("libjd-dictionary");
+    dir_or_missing(&directory).then_some(directory)
+}
+
+pub fn imported_dictionary(data: &Path, key: &str) -> Option<(PathBuf, crate::SchemaInfo)> {
+    let directory = dictionary_directory(data, key)?;
+    let previous = directory.with_file_name(".old-libjd-dictionary");
+    [directory, previous].into_iter().find_map(|directory| {
+        if !fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir()) {
+            return None;
+        }
+        let dictionary = directory.join("dictionary.bin");
+        if !fs::symlink_metadata(&dictionary).is_ok_and(|meta| meta.is_file()) {
+            return None;
+        }
+        let schema = serde_json::from_str(&small_text(&directory.join("schema.json"), 8192)?).ok()?;
+        Some((dictionary, schema))
+    })
 }

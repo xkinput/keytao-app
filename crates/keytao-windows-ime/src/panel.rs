@@ -579,13 +579,14 @@ impl PanelRenderer {
         ascii_mode: bool,
         scale: f32,
         mut theme: ResolvedImeTheme,
+        switch_hint: Option<&str>,
     ) -> RenderedPanel {
         scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme.mode_hint_model(ascii_mode);
         let font_size = theme.mode_hint.font_size;
         let padding = font_size / 6.0;
-        let label = model.text;
-        let (text_left, text_bottom, text_right, text_top) = self.text_bounds(&label, font_size);
+        let label = switch_hint.unwrap_or(&model.text);
+        let (text_left, text_bottom, text_right, text_top) = self.text_bounds(label, font_size);
         let text_width = text_right - text_left;
         let text_height = text_top - text_bottom;
         let width = theme
@@ -622,7 +623,7 @@ impl PanelRenderer {
         let baseline = (height as f32 - text_height) * 0.5 + text_top;
         self.draw_text(
             &mut pm,
-            &label,
+            label,
             x,
             baseline,
             bgra(theme.mode_hint.foreground),
@@ -1530,7 +1531,7 @@ mod tests {
         }));
         let mut theme = ResolvedImeTheme::default();
         theme.mode_hint.shadow = false;
-        let default = renderer.render_mode_hint(false, 1.0, theme.clone());
+        let default = renderer.render_mode_hint(false, 1.0, theme.clone(), None);
         assert_eq!((default.width, default.height), (48, 36));
         theme.mode_hint.english_text = "English".into();
         theme.mode_hint.font_size = 26.0;
@@ -1540,7 +1541,7 @@ mod tests {
             for dpi_scale in [1.0, 2.0] {
                 theme.font.size = font_size;
                 for ascii_mode in [false, true] {
-                    let rendered = renderer.render_mode_hint(ascii_mode, dpi_scale, theme.clone());
+                    let rendered = renderer.render_mode_hint(ascii_mode, dpi_scale, theme.clone(), None);
                     let (width, height) = (rendered.width, rendered.height);
                     let font_size = theme.mode_hint.font_size * dpi_scale;
                     let label = theme.mode_hint_model(ascii_mode).text;

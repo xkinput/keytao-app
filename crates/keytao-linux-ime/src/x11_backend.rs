@@ -418,6 +418,10 @@ impl KeyTaoHandler {
             self.show_deployment_hint(text);
             return;
         }
+        if let Some(hint) = state.switch_hint.as_deref() {
+            self.show_mode_hint(state.is_english_mode(), Some(hint));
+            return;
+        }
         // Under both offered styles the preedit lives in this window, so a
         // composition without candidates still has to be visible.
         if state.preedit.is_empty() && state.candidates.is_empty() {
@@ -496,12 +500,14 @@ impl KeyTaoHandler {
         self.clicked_state = Some(state);
     }
 
-    /// Show the same 中/英 hint the other backends draw when Rime switches.
-    fn show_mode_hint(&mut self, ascii_mode: bool) {
+    fn show_mode_hint(&mut self, ascii_mode: bool, switch_hint: Option<&str>) {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
-        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode);
+        let (pixels, w, h) = match switch_hint {
+            Some(label) => renderer.render_text_hint(label),
+            None => renderer.render_mode_hint(ascii_mode),
+        };
         let inset = renderer.hint_shadow_inset();
         let duration = renderer.mode_hint_duration();
         self.panel_hit_areas = PanelHitAreas::default();
@@ -560,7 +566,7 @@ impl KeyTaoHandler {
         }
         self.ascii_mode = ascii_mode;
         tracing::debug!("XIM mode changed: {}", if ascii_mode { "EN" } else { "CN" });
-        self.show_mode_hint(ascii_mode);
+        self.show_mode_hint(ascii_mode, None);
     }
 
     fn apply_ime_state(
@@ -615,7 +621,14 @@ impl KeyTaoHandler {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             self.mode_hint_until = None;
-            self.hide_panel();
+            let state = self.panel_owner.as_ref().map(|owner| owner.session.peek_state());
+            if let Some(state) = state.filter(|state| {
+                !state.candidates.is_empty() || !state.preedit.is_empty()
+            }) {
+                self.draw_composition(&state);
+            } else {
+                self.hide_panel();
+            }
         }
     }
 

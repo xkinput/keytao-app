@@ -908,7 +908,7 @@ pub async fn import_git_scheme(
     };
 
     let client = build_client(core).map_err(CoreError::Other)?;
-    let downloaded = download_to_temp_with(core, client.get(&resolved.download_url), &mut cancel, None)
+    let downloaded = download_to_temp_with(core, client.get(&resolved.download_url), &mut cancel, None, None)
         .await
         .map_err(CoreError::Other)?;
 

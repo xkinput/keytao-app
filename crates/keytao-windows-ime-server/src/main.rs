@@ -48,7 +48,11 @@ fn main() {
     if args.next().is_some_and(|arg| arg == LIBJD_CHECK_SUBCOMMAND) {
         let result = (|| -> Result<(), String> {
             let path = std::path::PathBuf::from(args.next().ok_or("missing ime-jd path")?);
-            if !args.eq([std::ffi::OsString::from(DEPLOY_SUBCOMMAND)])
+            let next = args.next();
+            let build = next.as_deref() == Some(std::ffi::OsStr::new("--build-dictionary"));
+            let deploy = if build { args.next() } else { next };
+            if deploy.as_deref() != Some(std::ffi::OsStr::new(DEPLOY_SUBCOMMAND))
+                || args.next().is_some()
                 || !path.is_absolute()
                 || !std::fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file())
             {
@@ -68,7 +72,32 @@ fn main() {
                 return Err("invalid ime-jd staging library".into());
             }
             // The app passes a staging library only after checking the release digest.
-            unsafe { keytao_core::jd_backend::JdBackend::load(&path) }?;
+            if build {
+                use std::io::Read;
+                let input = path.with_file_name("dictionary.txt");
+                let metadata =
+                    std::fs::symlink_metadata(&input).map_err(|error| error.to_string())?;
+                const MAX_TEXT: u64 = keytao_core::libjd::MAX_DICTIONARY_TEXT_BYTES as u64;
+                if !metadata.is_file() || metadata.len() > MAX_TEXT {
+                    return Err("invalid ime-jd dictionary source".into());
+                }
+                let mut text = Vec::new();
+                std::fs::File::open(&input)
+                    .and_then(|file| file.take(MAX_TEXT + 1).read_to_end(&mut text))
+                    .map_err(|error| error.to_string())?;
+                if text.len() as u64 > MAX_TEXT {
+                    return Err("ime-jd dictionary source is too large".into());
+                }
+                unsafe {
+                    keytao_core::jd_backend::JdBackend::build_dictionary(
+                        &path,
+                        &text,
+                        &path.with_file_name("dictionary.bin"),
+                    )
+                }?;
+            } else {
+                unsafe { keytao_core::jd_backend::JdBackend::validate_library(&path) }?;
+            }
             Ok(())
         })();
         let ok = result.is_ok();

@@ -417,11 +417,15 @@ impl<'a> IsolatedDeploy<'a> {
 pub const LIBJD_SWITCH_BACK_HINT: &str = keytao_core::isolated_deploy::LIBJD_SWITCH_BACK_HINT;
 
 pub(crate) fn active_uses_libjd(core: &Core, root: &Path) -> bool {
-    let key = keytao_core::engine_choice::PACKAGE_KEY;
-    core.lock_state().installed_packages.contains_key(key)
-        && keytao_core::engine_choice::read(root, Some(key))
-            == keytao_core::engine_choice::PackageEngine::Libjd
-        && crate::libjd::libjd_status(core).installed_version.is_some()
+    use keytao_core::engine_choice::{self, PackageEngine};
+    let active = engine_choice::active_package(root);
+    let key = active.as_deref().unwrap_or(engine_choice::PACKAGE_KEY);
+    match engine_choice::read(root, Some(key)) {
+        PackageEngine::Rime => false,
+        PackageEngine::Libjd => core.lock_state().installed_packages.contains_key(key)
+            && crate::libjd::libjd_status(core).installed_version.is_some(),
+        PackageEngine::LibjdEngine => crate::libjd::imported_package_ready(core, key),
+    }
 }
 
 pub fn ensure_not_using_libjd(core: &Core, root: &Path) -> Result<(), CoreError> {
@@ -545,9 +549,14 @@ pub async fn switch_package_with_schema<#[cfg(target_os = "android")] F: std::fu
     #[cfg(target_os = "android")] deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
     if active_uses_libjd(core, root) {
-        if key != keytao_core::engine_choice::PACKAGE_KEY
-            || schema_id.is_some_and(|id| id != keytao_core::engine_choice::PACKAGE_KEY)
-        {
+        use keytao_core::engine_choice::{self, PackageEngine};
+        let schema = match engine_choice::read(root, Some(key)) {
+            PackageEngine::Rime => None,
+            PackageEngine::Libjd => Some(engine_choice::PACKAGE_KEY.to_owned()),
+            PackageEngine::LibjdEngine => keytao_core::libjd::imported_dictionary(&core.env().data_dir, key)
+                .map(|(_, schema)| schema.id),
+        };
+        if !schema.is_some_and(|schema| schema_id.is_none_or(|id| id == schema)) {
             return Err(LIBJD_SWITCH_BACK_HINT.into());
         }
         crate::package_migration::ensure_before_write(core, root)

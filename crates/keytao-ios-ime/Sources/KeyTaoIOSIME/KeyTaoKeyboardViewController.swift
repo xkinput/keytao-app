@@ -2067,6 +2067,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         updateHostMarkedText()
         guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         keyboardView?.update(state: currentState)
+        if let hint = state.switchHint, !hint.isEmpty {
+            keyboardView?.showSwitchHint(hint)
+        }
     }
 
     // MARK: - Host text

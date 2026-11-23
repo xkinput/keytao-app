@@ -805,6 +805,7 @@ class IsolatedPackageDto {
   final String displayName;
   final bool active;
   final bool ready;
+  final String engine;
   final List<SchemaDto> schemas;
 
   const IsolatedPackageDto({
@@ -812,6 +813,7 @@ class IsolatedPackageDto {
     required this.displayName,
     required this.active,
     required this.ready,
+    this.engine = r"rime",
     this.schemas = const [],
   });
 
@@ -821,6 +823,7 @@ class IsolatedPackageDto {
       displayName.hashCode ^
       active.hashCode ^
       ready.hashCode ^
+      engine.hashCode ^
       schemas.hashCode;
 
   @override
@@ -832,6 +835,7 @@ class IsolatedPackageDto {
           displayName == other.displayName &&
           active == other.active &&
           ready == other.ready &&
+          engine == other.engine &&
           schemas == other.schemas;
 }
 

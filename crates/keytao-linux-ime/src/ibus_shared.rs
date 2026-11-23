@@ -128,6 +128,17 @@ impl IbusDeploymentHint {
         {
             self.publish(hint, generation).await;
         }
+        if let (Some(overlay), Some(text)) = (&self.overlay, &state.switch_hint) {
+            if self.generation.load(Ordering::Acquire) == generation
+                && keytao_core::DeploymentState::visible_hint(hint, visible).is_none()
+            {
+                let _ = overlay.send(crate::panel::OverlayPanelMessage::SwitchHint {
+                    text: text.clone(),
+                    x: self.cursor_x.load(Ordering::Relaxed),
+                    y: self.cursor_y.load(Ordering::Relaxed) + 24,
+                });
+            }
+        }
     }
 
     async fn publish(&self, hint: Option<&'static str>, generation: u64) {

@@ -301,6 +301,9 @@ Future<LibjdStatusDto> installOrUpdateLibjd({
   required LibjdReleaseDto release,
 }) => RustLib.instance.api.crateApiCoreInstallOrUpdateLibjd(release: release);
 
+Future<int> importLibjdPackage({required String key}) =>
+    RustLib.instance.api.crateApiCoreImportLibjdPackage(key: key);
+
 Future<void> setPackageEngine({required String key, required String engine}) =>
     RustLib.instance.api.crateApiCoreSetPackageEngine(key: key, engine: engine);
 

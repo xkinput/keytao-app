@@ -66,6 +66,7 @@ public struct KeyTaoImeState: Codable, Equatable {
     public var committed: String
     public var selectKeys: String
     public var asciiMode: Bool
+    public var switchHint: String?
     public var chordComposer: Bool
     public var schemaId: String
     public var schemaName: String
@@ -84,6 +85,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         var next = self
         next.committed = ""
         next.accepted = false
+        next.switchHint = nil
         return next
     }
 
@@ -118,6 +120,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         case committed
         case selectKeys
         case asciiMode
+        case switchHint
         case chordComposer
         case schemaId
         case schemaName
@@ -143,6 +146,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         committed = Self.field(container, .committed, empty.committed)
         selectKeys = Self.field(container, .selectKeys, empty.selectKeys)
         asciiMode = Self.field(container, .asciiMode, empty.asciiMode)
+        switchHint = Self.field(container, .switchHint, empty.switchHint)
         chordComposer = Self.field(container, .chordComposer, empty.chordComposer)
         schemaId = Self.field(container, .schemaId, empty.schemaId)
         schemaName = Self.field(container, .schemaName, empty.schemaName)
@@ -171,6 +175,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         committed: String,
         selectKeys: String,
         asciiMode: Bool,
+        switchHint: String? = nil,
         chordComposer: Bool = false,
         schemaId: String = "",
         schemaName: String,
@@ -189,6 +194,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         self.committed = committed
         self.selectKeys = selectKeys
         self.asciiMode = asciiMode
+        self.switchHint = switchHint
         self.chordComposer = chordComposer
         self.schemaId = schemaId
         self.schemaName = schemaName

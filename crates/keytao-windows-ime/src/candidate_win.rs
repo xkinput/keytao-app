@@ -909,7 +909,7 @@ impl CandidateWindow {
 
     pub fn show_mode_hint(
         &mut self,
-        ascii_mode: bool,
+        ime_state: &ImeState,
         caret_x: i32,
         caret_y: i32,
         owner_hwnd: HWND,
@@ -927,7 +927,12 @@ impl CandidateWindow {
 
         let scale = dpi_scale(self.owner_hwnd);
         let hint_duration_ms = PanelRenderer::mode_hint_duration_ms(&theme);
-        let rendered = renderer.render_mode_hint(ascii_mode, scale, theme);
+        let rendered = renderer.render_mode_hint(
+            ime_state.is_english_mode(),
+            scale,
+            theme,
+            ime_state.switch_hint.as_deref(),
+        );
         let (w, h) = (rendered.width, rendered.height);
         if w == 0 || h == 0 {
             return;

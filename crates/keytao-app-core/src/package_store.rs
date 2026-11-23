@@ -306,18 +306,24 @@ impl<'a> PackageStore<'a> {
         use crate::scheme_files::write_file_atomic;
 
         let _pending = self.core.pending_package.lock().unwrap_or_else(|error| error.into_inner());
-        let path = self.checked_metadata_path(key)?;
-        let before = fs::read(&path)?;
-        validate_metadata(key, &serde_json::from_slice(&before)?)?;
-        if key != PACKAGE_KEY {
-            return Ok(());
+        if !crate::package_schemas::is_addon_package_key(key) {
+            crate::scheme::validate_scheme_key(key).map_err(CoreError::Other)?;
         }
-        let mut metadata: serde_json::Value = serde_json::from_slice(&before)?;
-        if engine.is_rime() {
-            metadata.as_object_mut().unwrap().remove("engine");
+        let metadata = if key == PACKAGE_KEY {
+            let path = self.checked_metadata_path(key)?;
+            let before = fs::read(&path)?;
+            validate_metadata(key, &serde_json::from_slice(&before)?)?;
+            let mut metadata: serde_json::Value = serde_json::from_slice(&before)?;
+            // Keep package metadata readable by versions without the standalone engine.
+            if engine == PackageEngine::Libjd {
+                metadata["engine"] = serde_json::to_value(engine)?;
+            } else {
+                metadata.as_object_mut().unwrap().remove("engine");
+            }
+            Some((path, before, serde_json::to_vec_pretty(&metadata)?))
         } else {
-            metadata["engine"] = serde_json::to_value(engine)?;
-        }
+            None
+        };
         let settings_path = safe_path(root, keytao_core::english_mode::SETTINGS_FILE)
             .map_err(CoreError::Other)?;
         let mut settings: serde_json::Map<String, serde_json::Value> = match fs::read(&settings_path) {
@@ -337,11 +343,14 @@ impl<'a> PackageStore<'a> {
             engines.insert(key.into(), serde_json::to_value(engine)?);
         }
         let settings = serde_json::to_vec_pretty(&settings)?;
-        let metadata = serde_json::to_vec_pretty(&metadata)?;
-        write_file_atomic(&path, &metadata)?;
+        if let Some((path, _, metadata)) = &metadata {
+            write_file_atomic(path, metadata)?;
+        }
         if let Err(error) = write_file_atomic(&settings_path, &settings) {
-            write_file_atomic(&path, &before)
-                .map_err(|restore| CoreError::Other(format!("{error}; {restore}")))?;
+            if let Some((path, before, _)) = &metadata {
+                write_file_atomic(path, before)
+                    .map_err(|restore| CoreError::Other(format!("{error}; {restore}")))?;
+            }
             return Err(error.into());
         }
         Ok(())
@@ -1149,9 +1158,13 @@ mod tests {
         fs::create_dir(&ime).unwrap();
         let settings = ime.join(keytao_core::english_mode::SETTINGS_FILE);
         fs::write(&settings, br#"{"candidatePageSize":7}"#).unwrap();
-        for engine in [PackageEngine::Libjd, PackageEngine::Rime] {
+        for (engine, metadata_engine) in [
+            (PackageEngine::Libjd, PackageEngine::Libjd),
+            (PackageEngine::LibjdEngine, PackageEngine::Rime),
+            (PackageEngine::Rime, PackageEngine::Rime),
+        ] {
             store.set_engine(&ime, PACKAGE_KEY, engine).unwrap();
-            assert_eq!(store.read_meta(PACKAGE_KEY).unwrap().unwrap().engine, engine);
+            assert_eq!(store.read_meta(PACKAGE_KEY).unwrap().unwrap().engine, metadata_engine);
             assert_eq!(keytao_core::engine_choice::read(&ime, Some(PACKAGE_KEY)), engine);
             assert_eq!(crate::ime_settings::read_candidate_page_size(&ime), Some(7));
         }

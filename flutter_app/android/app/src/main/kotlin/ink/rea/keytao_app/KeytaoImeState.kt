@@ -65,6 +65,7 @@ data class KeytaoImeState(
     val accepted: Boolean = false,
     val candidatePanel: KeytaoPanelModel = KeytaoPanelModel(),
     val modifierTapKeys: List<Int> = emptyList(),
+    val switchHint: String? = null,
 ) {
     val hasComposition: Boolean
         get() = preedit.isNotEmpty() || candidates.isNotEmpty()
@@ -72,7 +73,7 @@ data class KeytaoImeState(
     val isPackageSwitcher: Boolean
         get() = schemaId == ".keytao_packages"
 
-    fun withoutTransientCommit() = copy(committed = "", accepted = false)
+    fun withoutTransientCommit() = copy(committed = "", accepted = false, switchHint = null)
 
     companion object {
         fun empty(asciiMode: Boolean = false) = KeytaoImeState(asciiMode = asciiMode)
@@ -104,6 +105,7 @@ data class KeytaoImeState(
                     modifierTapKeys = root.optJSONArray("modifierTapKeys")?.let { keys ->
                         List(keys.length()) { keys.optInt(it) }
                     }.orEmpty(),
+                    switchHint = root.optionalString("switchHint"),
                 )
             }.getOrNull()
         }

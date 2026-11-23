@@ -2295,7 +2295,8 @@ fn apply_ime_state(
             let mode_changed = ime_state_clone.is_english_mode() != st.english_mode;
             // Retain the caret only for a mode-only hint without a commit.
             // Normal panel applies must discard the previous caret cache.
-            let mode_only_update = mode_changed && !has_visible_state(&ime_state_clone);
+            let mode_only_update = (mode_changed || ime_state_clone.switch_hint.is_some())
+                && !has_visible_state(&ime_state_clone);
             if committed.is_some() || (composition.is_none() && !mode_only_update) {
                 st.last_caret = None;
             }
@@ -2308,7 +2309,8 @@ fn apply_ime_state(
             st.ime_state = Some(ime_state_clone.clone());
             mode_changed
         };
-        let show_mode_hint = show_mode_hint_on_change && mode_changed;
+        let show_mode_hint =
+            (show_mode_hint_on_change && mode_changed) || ime_state_clone.switch_hint.is_some();
         {
             let mut st = state_arc_for_session.borrow_mut();
             st.pending_window_update = Some(PendingWindowUpdate {

@@ -1,5 +1,5 @@
 use crate::{
-    english_mode::EnglishBackend, key_policy::*, lock_ignore_poison, Candidate, EngineCapabilities,
+    english_mode::EnglishBackend, key_policy::*, libjd::MAX_DICTIONARY_TEXT_BYTES, lock_ignore_poison, Candidate, EngineCapabilities,
     ImeBackend, ImeState, KeyProcessResult, SchemaInfo, SchemaSwitch, SchemaSwitchRequest,
     DEFAULT_SELECT_KEYS, RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
 };
@@ -7,6 +7,8 @@ use libloading::Library;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_char, c_uint, c_void, CStr},
+    fs::File,
+    io::Read,
     mem::size_of,
     path::Path,
     ptr::{self, NonNull},
@@ -42,10 +44,72 @@ struct RawCandidate {
 }
 
 type Context = *mut c_void;
+const MAX_DICTIONARY_BYTES: usize = 512 * 1024 * 1024;
+
+enum JdInit {
+    Legacy(unsafe extern "C" fn(*const c_void, usize) -> Context),
+    Dictionary(unsafe extern "C" fn(*const c_void, usize, *const c_void, usize) -> Context),
+}
+
+struct DictionaryApi {
+    bound: unsafe extern "C" fn(*const c_char, usize) -> usize,
+    build: unsafe extern "C" fn(
+        *const c_char,
+        usize,
+        u64,
+        *mut c_void,
+        usize,
+        *mut usize,
+        *mut c_void,
+    ) -> c_uint,
+    embedded: bool,
+}
+
+struct DictionaryBlob {
+    words: Vec<u32>,
+    len: usize,
+}
+
+impl DictionaryBlob {
+    fn allocate(len: usize) -> Result<Self, String> {
+        if len == 0 || len > MAX_DICTIONARY_BYTES {
+            return Err("ime-jd dictionary exceeds the supported size".into());
+        }
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(len.div_ceil(4))
+            .map_err(|error| error.to_string())?;
+        words.resize(len.div_ceil(4), 0);
+        Ok(Self { words, len })
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        // The library requires four-byte alignment. All bytes are initialized.
+        unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast(), self.len) }
+    }
+
+    fn read(path: &Path) -> Result<Self, String> {
+        if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
+            return Err("ime-jd dictionary is missing or invalid".into());
+        }
+        let mut file = File::open(path).map_err(|error| error.to_string())?;
+        let len = file.metadata().map_err(|error| error.to_string())?.len();
+        let mut blob = Self::allocate(
+            len.try_into()
+                .map_err(|_| "ime-jd dictionary is too large")?,
+        )?;
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(blob.words.as_mut_ptr().cast(), blob.len) };
+        file.read_exact(bytes).map_err(|error| error.to_string())?;
+        Ok(blob)
+    }
+}
 
 struct JdApi {
+    #[cfg(test)]
     layout: unsafe extern "C" fn(c_uint) -> c_uint,
-    init: unsafe extern "C" fn(*const c_void, usize) -> Context,
+    init: JdInit,
+    dictionary: Option<DictionaryApi>,
     deinit: unsafe extern "C" fn(Context),
     state: unsafe extern "C" fn(Context) -> *const RawState,
     press_key: unsafe extern "C" fn(Context, c_char),
@@ -119,6 +183,93 @@ impl JdBackend {
     /// # Safety
     /// `path` must identify a verified libjd library trusted to run native code.
     pub unsafe fn load_with_page_size(path: &Path, page_size: usize) -> Result<Self, String> {
+        let library = unsafe { Self::load_library(path) }?;
+        Self::from_library(library, page_size, None, Self::built_in_schema())
+    }
+
+    /// # Safety
+    /// The library must have been verified before it is loaded as native code.
+    pub unsafe fn load_dictionary(
+        path: &Path,
+        dictionary: &Path,
+        page_size: usize,
+        schema: SchemaInfo,
+    ) -> Result<Self, String> {
+        let library = unsafe { Self::load_library(path) }?;
+        Self::from_library(
+            library,
+            page_size,
+            Some(Arc::new(DictionaryBlob::read(dictionary)?)),
+            schema,
+        )
+    }
+
+    /// # Safety
+    /// The library must have been verified before it is loaded as native code.
+    pub unsafe fn validate_library(path: &Path) -> Result<JdAbiLayout, String> {
+        let library = unsafe { Self::load_library(path) }?;
+        let layout = library.layout;
+        if library
+            .api
+            .dictionary
+            .as_ref()
+            .is_none_or(|api| api.embedded)
+        {
+            Self::from_library(library, DEFAULT_PAGE_SIZE, None, Self::built_in_schema())?;
+        }
+        Ok(layout)
+    }
+
+    /// Build and open a context with the supplied dictionary before publishing it.
+    ///
+    /// # Safety
+    /// The library must have been verified before it is loaded as native code.
+    pub unsafe fn build_dictionary(path: &Path, text: &[u8], output: &Path) -> Result<(), String> {
+        if text.len() > MAX_DICTIONARY_TEXT_BYTES {
+            return Err("ime-jd dictionary source exceeds the supported size".into());
+        }
+        let library = unsafe { Self::load_library(path) }?;
+        let api = library
+            .api
+            .dictionary
+            .as_ref()
+            .ok_or("ime-jd does not support custom dictionaries")?;
+        let text_ptr = text.as_ptr().cast();
+        let capacity = unsafe { (api.bound)(text_ptr, text.len()) };
+        let mut blob = DictionaryBlob::allocate(capacity)?;
+        let mut len = 0;
+        let mut report = [0 as c_uint; 8];
+        let status = unsafe {
+            (api.build)(
+                text_ptr,
+                text.len(),
+                0,
+                blob.words.as_mut_ptr().cast(),
+                capacity,
+                &mut len,
+                report.as_mut_ptr().cast(),
+            )
+        };
+        if status != 0 || len == 0 || len > capacity {
+            return Err(format!(
+                "could not build ime-jd dictionary (status {status})"
+            ));
+        }
+        if report[2] == 0 {
+            return Err("ime-jd dictionary contains no usable entries".into());
+        }
+        blob.len = len;
+        let blob = Arc::new(blob);
+        let _session = Self::from_library(
+            library,
+            DEFAULT_PAGE_SIZE,
+            Some(Arc::clone(&blob)),
+            Self::built_in_schema(),
+        )?;
+        crate::write_file_atomic(output, blob.as_bytes()).map_err(|error| error.to_string())
+    }
+
+    unsafe fn load_library(path: &Path) -> Result<Arc<JdLibrary>, String> {
         if !path.is_absolute() {
             return Err("libjd library path must be absolute".into());
         }
@@ -145,10 +296,28 @@ impl JdBackend {
         // These signatures are from the public C ABI. The library is kept alive
         // by every ctx until its deinit has completed.
         unsafe {
-            Self::from_api(
-                JdApi {
-                    layout: *library.get(b"jd_abi_layout\0").map_err(symbol_error)?,
-                    init: *library.get(b"jd_init\0").map_err(symbol_error)?,
+            let layout: unsafe extern "C" fn(c_uint) -> c_uint =
+                *library.get(b"jd_abi_layout\0").map_err(symbol_error)?;
+            let dictionary = match layout(13) {
+                0 if library.get::<*const c_void>(b"jd_dict_build\0").is_err() => None,
+                16_777_215 if layout(14) == 1023 && layout(5) == 32 => Some(DictionaryApi {
+                    bound: *library.get(b"jd_dict_blob_bound\0").map_err(symbol_error)?,
+                    build: *library.get(b"jd_dict_build\0").map_err(symbol_error)?,
+                    embedded: layout(16) != 0,
+                }),
+                _ => return Err("unrecognized libjd dictionary ABI".into()),
+            };
+            let init = if dictionary.is_some() {
+                JdInit::Dictionary(*library.get(b"jd_init\0").map_err(symbol_error)?)
+            } else {
+                JdInit::Legacy(*library.get(b"jd_init\0").map_err(symbol_error)?)
+            };
+            Ok(Arc::new(JdLibrary {
+                api: JdApi {
+                    #[cfg(test)]
+                    layout,
+                    init,
+                    dictionary,
                     deinit: *library.get(b"jd_deinit\0").map_err(symbol_error)?,
                     state: *library.get(b"jd_state_ptr\0").map_err(symbol_error)?,
                     press_key: *library.get(b"jd_press_key\0").map_err(symbol_error)?,
@@ -157,12 +326,20 @@ impl JdBackend {
                     set_anchor: *library.get(b"jd_set_anchor\0").map_err(symbol_error)?,
                     read_range: *library.get(b"jd_read_range\0").map_err(symbol_error)?,
                 },
-                Some(library),
-                page_size,
-            )
+                layout: JdAbiLayout::check(layout)?,
+                _library: Some(library),
+            }))
         }
     }
 
+    fn built_in_schema() -> SchemaInfo {
+        SchemaInfo {
+            id: SCHEMA_ID.into(),
+            name: SCHEMA_NAME.into(),
+        }
+    }
+
+    #[cfg(test)]
     fn from_api(api: JdApi, library: Option<Library>, page_size: usize) -> Result<Self, String> {
         let layout = JdAbiLayout::check(api.layout)?;
         Self::from_library(
@@ -171,19 +348,36 @@ impl JdBackend {
                 layout,
                 _library: library,
             }),
-            page_size.clamp(1, DEFAULT_SELECT_KEYS.len()),
+            page_size,
+            None,
+            Self::built_in_schema(),
         )
     }
 
-    fn from_library(library: Arc<JdLibrary>, page_size: usize) -> Result<Self, String> {
+    fn from_library(
+        library: Arc<JdLibrary>,
+        page_size: usize,
+        dictionary: Option<Arc<DictionaryBlob>>,
+        schema: SchemaInfo,
+    ) -> Result<Self, String> {
         Ok(Self {
-            session: Mutex::new(Session::new(library, page_size)?),
+            session: Mutex::new(Session::new(
+                library,
+                page_size.clamp(1, DEFAULT_SELECT_KEYS.len()),
+                dictionary,
+                schema,
+            )?),
         })
     }
 
     pub fn new_session(&self) -> Result<Self, String> {
         let source = lock_ignore_poison(&self.session);
-        Self::from_library(Arc::clone(&source.library), source.page_size)
+        Self::from_library(
+            Arc::clone(&source.library),
+            source.page_size,
+            source.dictionary.clone(),
+            source.schema.clone(),
+        )
     }
 
     pub fn abi_layout(&self) -> JdAbiLayout {
@@ -197,6 +391,8 @@ fn symbol_error(error: libloading::Error) -> String {
 
 struct Session {
     library: Arc<JdLibrary>,
+    dictionary: Option<Arc<DictionaryBlob>>,
+    schema: SchemaInfo,
     ctx: NonNull<c_void>,
     state: NonNull<RawState>,
     preedit: String,
@@ -209,10 +405,27 @@ struct Session {
 unsafe impl Send for Session {}
 
 impl Session {
-    fn new(library: Arc<JdLibrary>, page_size: usize) -> Result<Self, String> {
-        // ABI validation precedes allocation. A null dictionary uses only built-in words.
-        let ctx = NonNull::new(unsafe { (library.api.init)(ptr::null(), 0) })
-            .ok_or("create libjd context")?;
+    fn new(
+        library: Arc<JdLibrary>,
+        page_size: usize,
+        dictionary: Option<Arc<DictionaryBlob>>,
+        schema: SchemaInfo,
+    ) -> Result<Self, String> {
+        let ctx = NonNull::new(unsafe {
+            match (&library.api.init, dictionary.as_deref()) {
+                (JdInit::Legacy(init), None) => init(ptr::null(), 0),
+                (JdInit::Legacy(_), Some(_)) => {
+                    return Err("ime-jd does not support custom dictionaries".into())
+                }
+                (JdInit::Dictionary(init), dictionary) => {
+                    let (data, len) = dictionary.map_or((ptr::null(), 0), |blob| {
+                        (blob.words.as_ptr().cast(), blob.len)
+                    });
+                    init(data, len, ptr::null(), 0)
+                }
+            }
+        })
+        .ok_or("create libjd context")?;
         let Some(state) = NonNull::new(unsafe { (library.api.state)(ctx.as_ptr()) }.cast_mut())
         else {
             unsafe { (library.api.deinit)(ctx.as_ptr()) };
@@ -220,6 +433,8 @@ impl Session {
         };
         Ok(Self {
             library,
+            dictionary,
+            schema,
             ctx,
             state,
             preedit: String::new(),
@@ -309,8 +524,9 @@ impl Session {
             chord_composer: false,
             schema_shortcuts: Vec::new(),
             modifier_taps: Vec::new(),
-            schema_id: SCHEMA_ID.to_owned(),
-            schema_name: SCHEMA_NAME.to_owned(),
+            switch_hint: None,
+            schema_id: self.schema.id.clone(),
+            schema_name: self.schema.name.clone(),
         }
     }
 
@@ -364,7 +580,9 @@ impl Session {
         let next = if backward {
             anchor.saturating_sub(1)
         } else {
-            anchor.saturating_add(1).min(self.candidate_count().saturating_sub(1))
+            anchor
+                .saturating_add(1)
+                .min(self.candidate_count().saturating_sub(1))
         };
         self.set_anchor(next);
         self.snapshot(None)
@@ -442,10 +660,7 @@ fn string_from_jd(value: *const c_char) -> String {
 
 impl EnglishBackend for JdBackend {
     fn current_schema(&self) -> Option<SchemaInfo> {
-        Some(SchemaInfo {
-            id: SCHEMA_ID.into(),
-            name: SCHEMA_NAME.into(),
-        })
+        Some(lock_ignore_poison(&self.session).schema.clone())
     }
 
     fn schema_switches(&self) -> Vec<SchemaSwitch> {
@@ -465,10 +680,11 @@ impl EnglishBackend for JdBackend {
     }
 
     fn select_schema(&self, id: &str) -> Result<ImeState, String> {
-        if id != SCHEMA_ID {
+        let session = lock_ignore_poison(&self.session);
+        if id != session.schema.id {
             return Err(format!("libjd does not provide schema {id}"));
         }
-        Ok(self.state())
+        Ok(session.snapshot(None))
     }
 
     fn discard_composition(&self) {
@@ -789,7 +1005,8 @@ mod tests {
     fn fake_api() -> JdApi {
         JdApi {
             layout: fake_layout,
-            init: fake_init,
+            init: JdInit::Legacy(fake_init),
+            dictionary: None,
             deinit: fake_deinit,
             state: fake_state,
             press_key: fake_press,
@@ -816,7 +1033,7 @@ mod tests {
         }
         let api = JdApi {
             layout: bad_layout,
-            init: track_init,
+            init: JdInit::Legacy(track_init),
             ..fake_api()
         };
         let error = JdBackend::from_api(api, None, 2).err().unwrap();
@@ -916,6 +1133,44 @@ mod tests {
 
         let committed = backend.process_key_result(b' '.into(), 0).state;
         assert_eq!(committed.committed.as_deref(), Some("乙"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn real_macos_engine_import_smoke() {
+        let Some(library) = std::env::var_os("LIBJD_TEST_ENGINE_LIBRARY") else {
+            return;
+        };
+        let library = Path::new(&library);
+        let root = std::env::temp_dir().join(format!("keytao-jd-import-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let dictionary = root.join("dictionary.bin");
+        let schema = SchemaInfo {
+            id: "converted".into(),
+            name: "转换测试".into(),
+        };
+        unsafe {
+            assert!(JdBackend::validate_library(library).is_ok());
+            assert!(JdBackend::load(library).is_err());
+            JdBackend::build_dictionary(library, "测试词\ta\n第二词\ta\n".as_bytes(), &dictionary)
+                .unwrap();
+            let backend = JdBackend::load_dictionary(library, &dictionary, 5, schema).unwrap();
+            let typed = backend
+                .new_session()
+                .unwrap()
+                .process_key_result(b'a'.into(), 0)
+                .state;
+            assert_eq!(typed.schema_id, "converted");
+            assert_eq!(
+                typed
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["测试词", "第二词"]
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "macos")]

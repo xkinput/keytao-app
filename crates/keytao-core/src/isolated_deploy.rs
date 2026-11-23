@@ -295,7 +295,9 @@ fn switch_package(
     if RuntimeDirs::needs_migration(control_root) {
         return Err(not_ready());
     }
-    if key != crate::engine_choice::PACKAGE_KEY
+    let libjd_ready =
+        crate::runtime_libjd::package_libjd_ready_in_store(control_root, data_root, Some(key));
+    if key != crate::engine_choice::PACKAGE_KEY && !libjd_ready
         && crate::runtime_libjd::package_libjd_ready_in_store(
             control_root,
             data_root,
@@ -311,8 +313,6 @@ fn switch_package(
             .ok_or_else(not_ready)
     };
     let dirs = resolve()?;
-    let libjd_ready =
-        crate::runtime_libjd::package_libjd_ready_in_store(control_root, data_root, Some(key));
     if !dirs.user_data_dir.is_dir() {
         if libjd_ready {
             fs::create_dir_all(&dirs.user_data_dir).map_err(|error| error.to_string())?;

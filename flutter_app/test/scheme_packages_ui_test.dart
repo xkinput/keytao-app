@@ -475,7 +475,7 @@ void main() {
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
-          hasLength(installed ? 4 : 0),
+          isEmpty,
         );
         for (final (key, name) in [
           ('addon-wanxiang', 'wanxiang'),
@@ -495,13 +495,15 @@ void main() {
             expect(c.actions.last, '$name:true');
           }
           if (installed) {
-            final uninstall = find.descendant(
+            final more = find.descendant(
               of: card,
-              matching: find.widgetWithText(ActionButton, AppStrings.uninstall),
+              matching: find.byIcon(FLucideIcons.ellipsis),
             );
-            await tester.ensureVisible(uninstall);
-            await tester.tap(uninstall);
-            await tester.pump(const Duration(seconds: 1));
+            await tester.ensureVisible(more);
+            await tester.tap(more);
+            await tester.pumpAndSettle();
+            await tester.tap(find.widgetWithText(FItem, AppStrings.uninstall));
+            await tester.pumpAndSettle();
             expect(c.actions.last, '$name:false');
           }
         }
@@ -1711,7 +1713,7 @@ void main() {
       final scheme = key == 'easy-en' ? 'easy_en' : 'rime_ice';
       for (final (installed, deployed, active, latest, status) in [
         (false, false, false, '1', '未安装'),
-        (true, true, false, '1', '已安装'),
+        (true, true, false, '1', null),
         (true, false, false, '1', AppStrings.pendingDeploy),
         (true, true, false, '2', '可更新'),
         (true, false, true, '2', '可更新'),
@@ -1772,7 +1774,7 @@ void main() {
           of: card,
           matching: find.byType(StatusPill),
         );
-        if (inUse) {
+        if (inUse || status == null) {
           expect(badge, findsNothing);
         } else {
           expect(
@@ -1827,10 +1829,12 @@ void main() {
           ),
           findsNothing,
         );
-        expect(
-          find.descendant(of: card, matching: find.text('$status · 1')),
-          findsNothing,
-        );
+        if (status != null) {
+          expect(
+            find.descendant(of: card, matching: find.text('$status · 1')),
+            findsNothing,
+          );
+        }
         expect(
           find.descendant(of: card, matching: find.text('1')),
           installed ? findsOneWidget : findsNothing,
@@ -1844,15 +1848,25 @@ void main() {
           matching: find.widgetWithText(ActionButton, '更新'),
         ),
       );
-      await tester.tap(
-        find.descendant(
-          of: card,
-          matching: find.widgetWithText(
-            ActionButton,
-            key == 'easy-en' ? '从当前方案移除' : '卸载',
+      if (key == 'easy-en') {
+        await tester.tap(
+          find.descendant(
+            of: card,
+            matching: find.widgetWithText(ActionButton, '从当前方案移除'),
           ),
-        ),
-      );
+        );
+      } else {
+        expect(find.text(AppStrings.uninstall), findsNothing);
+        await tester.tap(
+          find.descendant(
+            of: card,
+            matching: find.byIcon(FLucideIcons.ellipsis),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FItem, AppStrings.uninstall));
+        await tester.pumpAndSettle();
+      }
       expect(c.actions, [
         '$action:true',
         key == 'easy-en' ? 'overlay:keytao:false' : '$action:false',

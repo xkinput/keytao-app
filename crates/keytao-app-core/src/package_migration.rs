@@ -33,6 +33,9 @@ pub fn start_app(core: &Core, root: &Path) -> Result<(), CoreError> {
 }
 
 pub fn migrate_if_needed(core: &Core, root: &Path, _bundled: &Path) -> Result<bool, CoreError> {
+    if let Err(error) = crate::rime_sync::ensure_installation(core, root) {
+        tracing::warn!(%error, "Rime installation metadata creation will retry");
+    }
     if RuntimeDirs::migration_complete(root) {
         return Ok(false);
     }
@@ -568,6 +571,9 @@ mod tests {
         put(&root, "rime.lua", b"-- user lua");
         put(&root, "build/xmjd6.table.bin", b"compiled");
         put(&root, "theme.yaml", b"ui: {}");
+        let installation =
+            b"# Keep settings\ninstallation_id: legacy-device\nsync_dir: /rime-sync\n";
+        put(&root, "installation.yaml", installation);
         put(&root, "sync/installation/xmjd6.userdb.txt", b"synced");
         put(&root, crate::account::USER_DICTIONARY, b"words");
 
@@ -581,6 +587,10 @@ mod tests {
 
         // Global files remain untouched in root.
         assert_eq!(fs::read(root.join("theme.yaml")).unwrap(), b"ui: {}");
+        assert_eq!(
+            fs::read(root.join("installation.yaml")).unwrap(),
+            installation
+        );
         assert_eq!(
             fs::read(root.join("sync/installation/xmjd6.userdb.txt")).unwrap(),
             b"synced"
@@ -613,12 +623,44 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let core = fixture(&temp.path().join("data"), "1.2.15");
         let root = temp.path().join("rime");
-        fs::create_dir_all(&root).unwrap();
 
         assert!(!RuntimeDirs::needs_migration(&root));
         start_app(&core, &root).unwrap();
         assert!(!root.join("migrations").exists());
         assert_eq!(pending_backup_notice(&root).unwrap(), None);
+        let path = root.join("installation.yaml");
+        let bytes = fs::read(&path).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+        assert_eq!(yaml["distribution_name"].as_str(), Some("KeyTao"));
+        assert_eq!(yaml["distribution_code_name"].as_str(), Some("keytao"));
+        assert_eq!(yaml["distribution_version"].as_str(), Some("1.2.15"));
+        assert!(yaml["install_time"].as_str().is_some());
+        assert_eq!(
+            yaml["rime_version"].as_str(),
+            keytao_core::librime_runtime_version().as_deref()
+        );
+        let settings = crate::rime_sync::read_settings(&root).unwrap();
+        let id = settings.installation_id.as_bytes();
+        assert_eq!(id.len(), 36);
+        assert_eq!(id[14], b'4');
+        assert!(b"89ab".contains(&id[19]));
+        assert_eq!(Path::new(&settings.effective_sync_dir), root.join("sync"));
+        start_app(&core, &root).unwrap();
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_metadata_leaves_symlinked_root_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = fixture(&temp.path().join("data"), "1.2.15");
+        let target = temp.path().join("target");
+        let root = temp.path().join("rime");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+
+        assert!(crate::rime_sync::ensure_installation(&core, &root).is_err());
+        assert!(!target.join("installation.yaml").exists());
     }
 
     #[test]

@@ -378,6 +378,7 @@ struct StackedCandidate {
 pub enum OverlayPanelMessage {
     Show { state: ImeState, x: i32, y: i32 },
     ModeHint { ascii_mode: bool, x: i32, y: i32 },
+    SwitchHint { text: String, x: i32, y: i32 },
     DeploymentHint { text: &'static str, x: i32, y: i32 },
     Hide,
 }
@@ -638,13 +639,18 @@ pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) -> bool {
             tracing::warn!("X11 overlay panel unavailable; falling back to system lookup UI");
         }
         let mut mode_hint_until: Option<Instant> = None;
+        let mut composition = None;
         loop {
             let msg = match mode_hint_until {
                 Some(deadline) => {
                     let now = Instant::now();
                     if now >= deadline {
                         if let Some(panel) = panel.as_mut() {
-                            panel.hide();
+                            if let Some((state, x, y)) = composition.take() {
+                                panel.show(&state, x, y);
+                            } else {
+                                panel.hide();
+                            }
                         }
                         mode_hint_until = None;
                         continue;
@@ -665,16 +671,24 @@ pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) -> bool {
                     OverlayPanelMessage::Show { state, x, y } => {
                         mode_hint_until = None;
                         panel.show(&state, x, y);
+                        composition = Some((state, x, y));
                     }
                     OverlayPanelMessage::ModeHint { ascii_mode, x, y } => {
+                        composition = None;
                         mode_hint_until = panel.show_mode_hint(ascii_mode, x, y);
+                    }
+                    OverlayPanelMessage::SwitchHint { text, x, y } => {
+                        panel.show_deployment_hint(&text, x, y);
+                        mode_hint_until = Some(Instant::now() + panel.renderer.mode_hint_duration());
                     }
                     OverlayPanelMessage::DeploymentHint { text, x, y } => {
                         mode_hint_until = None;
+                        composition = None;
                         panel.show_deployment_hint(text, x, y);
                     }
                     OverlayPanelMessage::Hide => {
                         mode_hint_until = None;
+                        composition = None;
                         panel.hide();
                     }
                 }
@@ -747,10 +761,10 @@ impl PanelRenderer {
         ascii_mode: bool,
         scale: f32,
         screen_width: f32,
-        deployment_hint: Option<&str>,
+        text_hint: Option<&str>,
     ) -> WaylandPanel {
         self.scale = scale;
-        let (pixels, width, height, mut hit_areas) = if let Some(text) = deployment_hint {
+        let (pixels, width, height, mut hit_areas) = if let Some(text) = text_hint {
             let (pixels, width, height) = self.render_text_hint(text);
             (pixels, width, height, PanelHitAreas::default())
         } else if let Some(state) = state {

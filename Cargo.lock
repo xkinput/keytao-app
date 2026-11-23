@@ -1707,6 +1707,7 @@ dependencies = [
  "flate2",
  "fontdb",
  "futures-util",
+ "getrandom 0.4.2",
  "jni",
  "keytao-core",
  "keytao-ime-ipc",

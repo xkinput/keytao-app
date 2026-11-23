@@ -67,6 +67,7 @@ struct KeyTaoImeState: Decodable {
     var accepted: Bool
     var candidatePanel: KeyTaoPanelModel
     var modeHint: KeyTaoModeHintModel
+    var switchHint: String? = nil
 
     var hasComposition: Bool {
         !preedit.isEmpty || !candidatePanel.candidates.isEmpty
@@ -106,6 +107,7 @@ struct KeyTaoImeState: Decodable {
         case accepted
         case candidatePanel
         case modeHint
+        case switchHint
     }
 
     // Decoded field by field so that a runtime which adds or drops a key
@@ -127,6 +129,7 @@ struct KeyTaoImeState: Decodable {
         accepted = Self.decode(container, .accepted, empty.accepted)
         candidatePanel = Self.decode(container, .candidatePanel, empty.candidatePanel)
         modeHint = Self.decode(container, .modeHint, empty.modeHint)
+        switchHint = Self.decode(container, .switchHint, empty.switchHint)
     }
 
     init(

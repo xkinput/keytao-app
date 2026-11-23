@@ -261,6 +261,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         side: .right
     )
     private var availabilityMessage: String?
+    private var switchHintMessage: String?
+    private var switchHintHideWorkItem: DispatchWorkItem?
     private var navigation = KeyTaoKeyboardNavigation()
     private var layerMode: KeyTaoKeyboardLayer { navigation.layer }
     private var shiftState: KeyTaoShiftState {
@@ -511,6 +513,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     func update(state: KeyTaoImeState) {
+        switchHintHideWorkItem?.cancel()
+        switchHintHideWorkItem = nil
+        switchHintMessage = nil
         if candidateSignature(state) != candidateSignature(self.state) {
             candidateMenu = nil
             candidateMenuActionRects = []
@@ -530,6 +535,19 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     func updateAvailability(message: String?) {
         availabilityMessage = message
+        invalidateLayoutAndDisplay()
+    }
+
+    func showSwitchHint(_ message: String) {
+        switchHintHideWorkItem?.cancel()
+        switchHintMessage = message
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.switchHintMessage = nil
+            self?.switchHintHideWorkItem = nil
+            self?.invalidateLayoutAndDisplay()
+        }
+        switchHintHideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
         invalidateLayoutAndDisplay()
     }
 
@@ -2036,8 +2054,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         backspacePreviewRect = barContent == .backspaceHint ? backspacePreviewLayout() : nil
     }
 
+    private var candidateBarMessage: String? {
+        availabilityMessage?.isEmpty == false ? availabilityMessage : switchHintMessage
+    }
+
     private func candidateBarContent() -> KeyTaoCandidateBarContent {
-        let message = availabilityMessage?.isEmpty == false ? availabilityMessage : nil
+        let message = candidateBarMessage
         if candidateMenu != nil { return .candidateMenu }
         if message != nil { return .statusMessage }
         if functionPanelActive { return .functionPanel }
@@ -2242,7 +2264,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         background.uiColor.setFill()
         UIBezierPath(rect: CGRect(x: 0, y: 0, width: bounds.width, height: barHeight)).fill()
         let leftPadding = panelGap * 1.5
-        let message = availabilityMessage?.isEmpty == false ? availabilityMessage : nil
+        let message = candidateBarMessage
         switch content {
         case .candidateMenu:
             if let candidateMenu {

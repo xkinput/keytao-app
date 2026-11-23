@@ -352,10 +352,11 @@ fn prepare_targets(
             keys.push(key.into());
         }
     } else if stage {
-        keys.retain(|candidate| {
-            !(candidate == keytao_core::engine_choice::PACKAGE_KEY
-                && keytao_core::engine_choice::read(control_root, Some(candidate))
-                    == keytao_core::engine_choice::PackageEngine::Libjd)
+        use keytao_core::engine_choice::{self, PackageEngine};
+        keys.retain(|candidate| match engine_choice::read(control_root, Some(candidate)) {
+            PackageEngine::Rime => true,
+            PackageEngine::Libjd => false,
+            PackageEngine::LibjdEngine => !crate::libjd::imported_package_ready(core, candidate),
         });
     }
     let mut stages = Vec::new();

@@ -372,6 +372,12 @@ final class KeyTaoInputController: IMKInputController {
         }
         KeyTaoRuntime.shared.refreshDeploymentHint()
         showDeploymentIndicator(client: client)
+        if let hint = state.switchHint, inputContextGeneration.isCurrent(generation) {
+            showModeIndicator(
+                KeyTaoModeHintModel(asciiMode: state.englishMode, text: hint),
+                client: client
+            )
+        }
     }
 
     private func clearMarkedText(client: IMKTextInput?) {

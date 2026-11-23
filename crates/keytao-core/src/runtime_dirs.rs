@@ -340,7 +340,7 @@ impl RuntimeDirs {
     }
 }
 
-fn package_files_dir(store: &Path, key: &str) -> Result<PathBuf, String> {
+pub(crate) fn package_files_dir(store: &Path, key: &str) -> Result<PathBuf, String> {
     let primary = if key.starts_with("local-") {
         "local"
     } else {

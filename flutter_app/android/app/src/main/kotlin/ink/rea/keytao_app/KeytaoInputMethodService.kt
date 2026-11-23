@@ -3385,6 +3385,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
             currentState = state.withoutTransientCommit()
             keyboardView?.updateState(currentState)
+            state.switchHint?.let { keyboardView?.showMessage(it, durationMs = 750) }
         } finally {
             applyStateDurations.finish(started)
             val keyStarted = pendingKeystrokeStartNs

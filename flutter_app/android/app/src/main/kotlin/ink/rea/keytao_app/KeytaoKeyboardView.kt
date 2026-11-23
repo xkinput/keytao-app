@@ -304,6 +304,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var selectionModeActive = false
     private var schemaReady = true
     private var statusMessage: String? = null
+    private val hideStatusMessage = Runnable {
+        statusMessage = null
+        rebuildInteractiveRects()
+        invalidate()
+    }
     private var deploymentHint: String? = null
     private val visibleDeploymentHint: String?
         get() = deploymentHint?.takeIf { it == "正在部署中" || state.candidatePanel.candidates.isEmpty() }
@@ -694,7 +699,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         state = next
         ViewCompat.setStateDescription(this, visibleDeploymentHint)
         invalidateKeyboardLayoutCache()
-        if (schemaReady) statusMessage = null
+        if (schemaReady) {
+            removeCallbacks(hideStatusMessage)
+            statusMessage = null
+        }
         if (wasExpanded != candidatePanelExpanded) {
             startContentTransition()
             KeytaoRuntimeLog.event("ui", "panel_close", KeytaoRuntimeLog.elapsedMs(started))
@@ -706,6 +714,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun updateAvailability(ready: Boolean, message: String) {
+        removeCallbacks(hideStatusMessage)
         schemaReady = ready
         statusMessage = if (ready) null else message
         if (rimePanelOpen) invalidateExpandedCandidateItemsCache()
@@ -722,8 +731,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun showMessage(message: String) {
+    fun showMessage(message: String, durationMs: Long? = null) {
+        removeCallbacks(hideStatusMessage)
         statusMessage = message
+        durationMs?.let { postDelayed(hideStatusMessage, it) }
         rebuildInteractiveRects()
         invalidate()
     }
@@ -1346,6 +1357,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         verticalVelocityTracker?.recycle()
         verticalVelocityTracker = null
         longPressHandler.removeCallbacks(hideScrollIndicatorRunnable)
+        removeCallbacks(hideStatusMessage)
         clearRecentClipboardSuggestion()
         scrollIndicatorFadeAnimator?.cancel()
         keyPressAnimatorsByIndex.values.toList().forEach(ValueAnimator::cancel)

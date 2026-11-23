@@ -2,6 +2,7 @@ package ink.rea.keytao_app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,9 +12,13 @@ class KeytaoImeStateTest {
         assertFalse(KeytaoImeState().chordComposer)
         assertFalse(KeytaoImeState.fromJson("{}")!!.chordComposer)
         assertTrue(KeytaoImeState.fromJson("{}")!!.modifierTapKeys.isEmpty())
-        val state = KeytaoImeState.fromJson("""{"chordComposer":true,"modifierTapKeys":[65507,65514]}""")!!
+        val state = KeytaoImeState.fromJson(
+            """{"chordComposer":true,"modifierTapKeys":[65507,65514],"switchHint":"等号上屏"}""",
+        )!!
         assertTrue(state.chordComposer)
         assertEquals(listOf(0xffe3, 0xffea), state.modifierTapKeys)
+        assertEquals("等号上屏", state.switchHint)
+        assertNull(state.withoutTransientCommit().switchHint)
     }
 
     @Test

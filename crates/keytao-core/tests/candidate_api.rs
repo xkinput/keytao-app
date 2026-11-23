@@ -335,13 +335,16 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
     let schema = std::fs::read_to_string(&schema_path).unwrap();
     let schema = schema
         .replace("- ascii_composer\n", "- ascii_composer\n    - key_binder\n")
-        .replace("Shift_L: noop", "Shift_L: commit_code");
+        .replace("Shift_L: noop", "Shift_L: commit_code")
+        .replace("engine:\n", "  - name: equal_commit\n    reset: 0\n    states: [等号直出, 等号上屏]\nengine:\n");
     let bindings = "key_binder:
   bindings:
     - { when: always, accept: Control+period, toggle: ascii_mode }
     - { when: always, accept: Control+space, toggle: ascii_mode }
     - { when: always, accept: Shift+space, toggle: ascii_mode }
     - { when: always, accept: Control+Alt+F8, toggle: ascii_mode }
+    - { when: always, accept: Control+equal, toggle: equal_commit }
+    - { when: always, accept: Control+minus, set_option: equal_commit }
     - { when: composing, accept: Control+v, send: Page_Down }
     - { when: paging, accept: Control+j, toggle: ascii_mode }
     - { when: predicting, accept: Control+k, toggle: ascii_mode }
@@ -364,7 +367,7 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
     let session = runtime.create_session().unwrap();
 
     let state = session.state();
-    assert_eq!(state.schema_shortcuts.len(), 5);
+    assert_eq!(state.schema_shortcuts.len(), 7);
     let composing = type_code(&session);
     assert!(!composing.candidates.is_empty());
     assert!(!composing.schema_shortcuts.iter().any(|shortcut| {
@@ -387,6 +390,7 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
             let toggled = session.process_key_result(keysym, mask).unwrap();
             assert!(toggled.accepted);
             assert_eq!(toggled.state.ascii_mode, !before);
+            assert!(toggled.state.switch_hint.is_none());
             for shift in [0xffe1, 0xffe2] {
                 let released = session
                     .process_keys_result(&[(shift, 0), (shift, RIME_RELEASE_MASK)])
@@ -396,6 +400,23 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
             }
         }
     }
+    session.set_ascii_mode(false).unwrap();
+    let toggle = || session.process_key_result(b'='.into(), RIME_MOD_CONTROL).unwrap();
+    let on = toggle();
+    assert!(on.accepted);
+    assert_eq!(on.state.switch_hint.as_deref(), Some("等号上屏"));
+    assert!(on.state.committed.is_none() && on.state.candidates.is_empty());
+    assert!(session.state().switch_hint.is_none());
+    let noop = session.process_key_result(b'-'.into(), RIME_MOD_CONTROL).unwrap();
+    assert!(noop.accepted && noop.state.switch_hint.is_none());
+    let off = session
+        .process_keys_result(&[
+            (b'='.into(), RIME_MOD_CONTROL),
+            (b'='.into(), RIME_MOD_CONTROL | RIME_RELEASE_MASK),
+        ])
+        .unwrap();
+    assert!(off.accepted);
+    assert_eq!(off.state.switch_hint.as_deref(), Some("等号直出"));
     let hotkey = (0xffc5, RIME_MOD_CONTROL | RIME_MOD_SHIFT);
     assert!(state.schema_shortcuts.iter().any(|shortcut| {
         (shortcut.key, shortcut.modifiers) == hotkey && shortcut.applies(&state)

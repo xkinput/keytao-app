@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/app/options.dart' show AppPage;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/input_page.dart';
@@ -14,7 +15,7 @@ import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
-import 'controller_parity_test.dart' show FakeCore, deployedLocal;
+import 'controller_parity_test.dart' show FakeCore, deployedLocal, installedAddon;
 import 'view_fixture.dart';
 
 class _FakeLibjdRelease implements LibjdReleaseDto {
@@ -52,6 +53,8 @@ class _FollowupsCore extends FakeCore {
   String latestLibjdVersion = 'v0.1.0';
   String keytaoEngine = 'rime';
   int libjdDownloads = 0;
+  Completer<int>? libjdImportGate;
+  List<IsolatedPackageDto> isolatedPackages = [];
 
   @override
   Future<bool> crateApiCorePackageMigrationPending() async => migrationPending;
@@ -160,6 +163,42 @@ class _FollowupsCore extends FakeCore {
       installedVersion: release.version,
     );
   }
+
+  @override
+  Future<int> crateApiCoreImportLibjdPackage({required String key}) async {
+    calls.add('importLibjd:$key');
+    events.add(
+      const BridgeEvent(
+        kind: BridgeEventKind.installProgress,
+        installProgress: InstallProgressDto(
+          stage: 'converting',
+          percent: 50,
+          message: '正在转换词库 1/2',
+        ),
+      ),
+    );
+    final skipped = await libjdImportGate!.future;
+    local = LocalSchemaDto(
+      installed: true,
+      deployed: true,
+      installedScheme: key,
+      schemas: [key],
+    );
+    isolatedPackages = [
+      IsolatedPackageDto(
+        packageKey: key,
+        displayName: key,
+        active: true,
+        ready: true,
+        engine: 'libjd_engine',
+      ),
+    ];
+    return skipped;
+  }
+
+  @override
+  Future<List<IsolatedPackageDto>> crateApiCoreIsolatedPackages() async =>
+      isolatedPackages;
 
   @override
   Future<void> crateApiCoreSetPackageEngine({
@@ -461,6 +500,94 @@ void main() {
   );
 
   testWidgets(
+    'ime-jd import shows dictionary progress only on its card and then shows active state',
+    (tester) async {
+      const target = 'xmjd';
+      const other = 'txjx';
+      final api = _FollowupsCore()
+        ..libjdImportGate = Completer<int>()
+        ..customInstalledPackages = const [
+          InstalledPackageDto(
+            schemeKey: 'keytao',
+            active: true,
+            hasPackageZip: true,
+            engine: 'libjd',
+          ),
+          InstalledPackageDto(
+            schemeKey: target,
+            active: false,
+            hasPackageZip: true,
+          ),
+          InstalledPackageDto(
+            schemeKey: other,
+            active: false,
+            hasPackageZip: true,
+          ),
+        ];
+      RustLib.initMock(api: api);
+      final c = AppController(
+        info: const BridgeInfo(
+          platform: BridgePlatform.macOs,
+          appVersion: '1.2.16-alpha.3',
+          userRoot: '/rime',
+        ),
+      )
+        ..local = deployedLocal
+        ..libjd = api.libjd
+        ..installedPackages = api.customInstalledPackages!;
+      addTearDown(() async {
+        c.dispose();
+        await api.events.close();
+        RustLib.dispose();
+      });
+      final ready = c.connectEvents();
+      await tester.pump();
+      await ready;
+
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: c.info.platform,
+          home: FScaffold(
+            child: ListenableBuilder(
+              listenable: c,
+              builder: (_, _) => Column(
+                children: [
+                  for (final key in [target, other])
+                    SchemePackageRow(
+                      key: ValueKey(key),
+                      controller: c,
+                      schemeKey: key,
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      Finder inCard(String key, Finder child) => find.descendant(
+        of: find.byKey(ValueKey(key)),
+        matching: child,
+      );
+      await tester.tap(inCard(target, find.text('导入并使用')));
+      await tester.pump();
+      expect(api.calls, contains('importLibjd:$target'));
+      final progress = find.text('正在转换词库 1/2');
+      expect(inCard(target, progress), findsOneWidget);
+      expect(inCard(other, progress), findsNothing);
+      expect(inCard(target, find.byType(FDeterminateProgress)), findsOneWidget);
+      expect(find.text('使用中'), findsNothing);
+
+      api.libjdImportGate!.complete(0);
+      await tester.pumpAndSettle();
+      expect(inCard(target, find.text('使用中')), findsOneWidget);
+      expect(inCard(target, find.text('切回 Rime')), findsOneWidget);
+      expect(inCard(other, find.text('导入并使用')), findsOneWidget);
+      expect(progress, findsNothing);
+      expect(c.activeSchemeKey, target);
+    },
+  );
+
+  testWidgets(
     'using ime-jd blocks downloading and switching other schemes with toast prompt until switched back to Rime',
     (tester) async {
       final api = _FollowupsCore()..keytaoEngine = 'libjd';
@@ -548,6 +675,17 @@ void main() {
       expect(c.packageError, '请先切换回 Rime 才能使用');
       expect(api.calls.where((call) => call.startsWith('switchPackage:')), isEmpty);
       expect(api.gitImports, isEmpty);
+
+      c.wanxiang = installedAddon;
+      c.selectPage(AppPage.scheme);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('addon-schemes-button')));
+      await tester.pumpAndSettle();
+      final addonImport = find.descendant(
+        of: find.byKey(const ValueKey('addon-wanxiang')),
+        matching: find.widgetWithText(ActionButton, '导入并使用'),
+      );
+      expect(tester.widget<ActionButton>(addonImport).onPress, isNotNull);
 
       // Let toast auto-dismiss timer finish cleanly.
       await tester.pump(const Duration(seconds: 5));

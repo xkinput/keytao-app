@@ -9,6 +9,8 @@ pub enum PackageEngine {
     #[default]
     Rime,
     Libjd,
+    #[serde(rename = "libjd_engine")]
+    LibjdEngine,
 }
 
 impl PackageEngine {
@@ -16,6 +18,7 @@ impl PackageEngine {
         match self {
             Self::Rime => "rime",
             Self::Libjd => "libjd",
+            Self::LibjdEngine => "libjd_engine",
         }
     }
 
@@ -25,12 +28,13 @@ impl PackageEngine {
 }
 
 pub fn read(root: &Path, package: Option<&str>) -> PackageEngine {
-    if package != Some(PACKAGE_KEY) {
+    let Some(package) = package else {
         return PackageEngine::Rime;
-    }
+    };
     crate::runtime_dirs::read_regular_file(&root.join(crate::english_mode::SETTINGS_FILE))
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|settings| serde_json::from_value(settings["engines"][PACKAGE_KEY].clone()).ok())
+        .and_then(|settings| serde_json::from_value(settings["engines"][package].clone()).ok())
+        .filter(|engine| *engine != PackageEngine::Libjd || package == PACKAGE_KEY)
         .unwrap_or_default()
 }
 

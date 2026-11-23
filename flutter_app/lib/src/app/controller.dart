@@ -659,12 +659,21 @@ class AppController extends ChangeNotifier {
     return null;
   }
 
-  bool usesLibjd(String key) =>
-      key == 'keytao' &&
-      libjd?.available == true &&
-      installedPackageFor(key)?.engine == 'libjd';
+  bool usesImportedLibjd(String key) {
+    final isolated = isolatedPackages
+        .where((package) => package.packageKey == key)
+        .firstOrNull;
+    return !isIos &&
+        (isolated?.engine ?? installedPackageFor(key)?.engine) == 'libjd_engine';
+  }
 
-  bool get isUsingLibjd => usesLibjd('keytao');
+  bool usesLibjd(String key) =>
+      usesImportedLibjd(key) ||
+      (key == 'keytao' &&
+          libjd?.available == true &&
+          installedPackageFor(key)?.engine == 'libjd');
+
+  bool get isUsingLibjd => usesLibjd(activeSchemeKey);
 
   bool requireRimeEngine() {
     if (!isUsingLibjd) return true;
@@ -688,6 +697,7 @@ class AppController extends ChangeNotifier {
       version.startsWith('v') ? version.substring(1) : version;
   bool get isInstalling => operation == OperationKind.install;
   bool get isManagingLibjd => operation == OperationKind.libjd;
+  bool get isImportingLibjd => isManagingLibjd && installingSchemeKey != null;
   bool get canCancelDownload =>
       (isInstalling || isManagingLibjd) &&
       installProgress?.stage == 'downloading';
@@ -2100,13 +2110,27 @@ class AppController extends ChangeNotifier {
     return null;
   });
 
-  Future<String?> revertLibjd() => _changeLibjd(() async {
-    await core.setPackageEngine(key: 'keytao', engine: 'rime');
+  Future<String?> importLibjdPackage(String key) => _changeLibjd(() async {
+    installingSchemeKey = key;
+    _startOperation(OperationKind.libjd, '正在准备转换词库…');
+    if (isAndroid) await _requireStorage(redirect: true);
+    final skipped = await core.importLibjdPackage(key: key);
+    if (schemeAssets.containsKey(key) || isLocalScheme(key)) {
+      _manuallySelectedScheme = true;
+      scheme = key;
+      latestRelease = null;
+      schemeRelease = null;
+    }
+    return skipped == 0 ? null : '已导入并使用，跳过 $skipped 条不兼容词条';
+  });
+
+  Future<String?> revertLibjd([String key = 'keytao']) => _changeLibjd(() async {
+    await core.setPackageEngine(key: key, engine: 'rime');
     await _readLocal();
-    if (activeSchemeKey == 'keytao' &&
+    if (activeSchemeKey == key &&
         local?.installed == true &&
         local?.deployed != true) {
-      await _deploy(schemeKey: 'keytao');
+      await _deploy(schemeKey: key);
     }
     return null;
   });
@@ -2119,13 +2143,14 @@ class AppController extends ChangeNotifier {
       } catch (failure) {
         notice = errorText(failure).split('\n').first;
       } finally {
+        installingSchemeKey = null;
         operation = null;
         try {
           await _readInstalledPackages();
           await _readLocal();
           await _readSchemaSwitches();
         } catch (failure) {
-          notice ??= '刷新键道6状态失败';
+          notice ??= '刷新方案状态失败';
         }
         _refreshSchemasWhenIdle = true;
       }
@@ -2469,6 +2494,9 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> activateSchemePackage(String key) async {
+    if (usesImportedLibjd(key)) {
+      return activeSchemeKey != key && await switchPackage(key);
+    }
     if (!requireRimeEngine()) return false;
     var package = installedPackageFor(key);
     final addonStatus = switch (key) {
@@ -2528,7 +2556,10 @@ class AppController extends ChangeNotifier {
   Future<void> _switchSchemePackage(String key, {String? schemaId}) async {
     packageError = null;
     deployingSchemeKey = key;
-    _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
+    _startOperation(
+      OperationKind.deploy,
+      usesLibjd(key) ? '正在切换方案…' : AppStrings.deployingLibrime,
+    );
     try {
       if (isAndroid) await _requireStorage(redirect: true);
       await core.switchPackage(
@@ -2554,11 +2585,16 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> switchPackage(String key, {String? schemaId}) {
-    if (key != 'keytao' && !requireRimeEngine()) return Future.value(false);
+    if (key != 'keytao' && !usesImportedLibjd(key) && !requireRimeEngine()) {
+      return Future.value(false);
+    }
     return run(() => _switchSchemePackage(key, schemaId: schemaId));
   }
 
   Future<bool> selectPackageSchema(String packageKey, String schemaId) {
+    if (usesImportedLibjd(packageKey)) {
+      return switchPackage(packageKey, schemaId: schemaId);
+    }
     if ((packageKey != 'keytao' || schemaId != 'keytao') &&
         !requireRimeEngine()) {
       return Future.value(false);
@@ -3965,6 +4001,9 @@ class AppController extends ChangeNotifier {
       });
 
   Future<bool> selectSchema(String schemaId) {
+    if (usesImportedLibjd(activeSchemeKey)) {
+      return switchPackage(activeSchemeKey, schemaId: schemaId);
+    }
     if (schemaId != 'keytao' && !requireRimeEngine()) {
       return Future.value(false);
     }

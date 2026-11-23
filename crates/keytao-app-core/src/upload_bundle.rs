@@ -158,6 +158,7 @@ fn allowed(name: &str) -> Result<(), CoreError> {
 
 pub(crate) fn yaml(bytes: &[u8], name: &str) -> Result<Value, CoreError> {
     let text = std::str::from_utf8(bytes).map_err(|e| failure(format!("{name}: {e}")))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     // Dictionary rows after the YAML header are tab-separated text, not YAML.
     // Some symbol presets contain literal C0 characters in their symbol strings.
     // Escape those only for dependency inspection; archive bytes stay unchanged.

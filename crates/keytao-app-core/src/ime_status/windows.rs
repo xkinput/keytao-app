@@ -1512,21 +1512,35 @@ pub const LIBJD_CHECK_SUBCOMMAND: &str = "--check-libjd";
 
 #[cfg(windows)]
 pub(crate) fn validate_libjd_library(path: &Path) -> Result<serde_json::Value, String> {
+    run_libjd_check(path, false)?;
+    serde_json::to_value(keytao_core::jd_backend::JdAbiLayout::EXPECTED)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+pub(crate) fn build_libjd_dictionary(path: &Path) -> Result<(), String> {
+    run_libjd_check(path, true)
+}
+
+#[cfg(windows)]
+fn run_libjd_check(path: &Path, build_dictionary: bool) -> Result<(), String> {
     use keytao_core::deploy_child::{DEPLOY_SUBCOMMAND, run_deploy_child_command_with_subcommand};
 
     let executable = windows_server_executable()?;
     let mut command = std::process::Command::new(executable);
     command.arg(LIBJD_CHECK_SUBCOMMAND).arg(path);
+    if build_dictionary {
+        command.arg("--build-dictionary");
+    }
     // Older servers reject the extra arguments instead of starting a second pipe listener.
     run_deploy_child_command_with_subcommand(
         &mut command,
         DEPLOY_SUBCOMMAND,
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(if build_dictionary { 120 } else { 10 }),
         |_| {},
     )
-    .map_err(|error| format!("ime-jd 引擎服务器校验失败：{error}"))?;
-    serde_json::to_value(keytao_core::jd_backend::JdAbiLayout::EXPECTED)
-        .map_err(|error| error.to_string())
+    .map_err(|error| format!("ime-jd 引擎服务器校验失败：{error}"))
+    .map(|_| ())
 }
 
 #[cfg(target_os = "windows")]

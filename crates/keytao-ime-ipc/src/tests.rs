@@ -30,6 +30,7 @@ fn state() -> ImeState {
         committed: Some("提交🐱".into()),
         select_keys: Some("12345".into()),
         ascii_mode: false,
+        switch_hint: Some("等号上屏".into()),
         chord_composer: true,
         schema_shortcuts: serde_json::from_value(serde_json::json!([{
             "key": 0x60,
@@ -159,10 +160,12 @@ fn older_engine_states_default_to_no_chord_composer_or_shortcuts() {
     fields.remove("chord_composer");
     fields.remove("schema_shortcuts");
     fields.remove("modifier_taps");
+    fields.remove("switch_hint");
     let decoded: ImeState = serde_json::from_value(value).unwrap();
     assert!(!decoded.chord_composer);
     assert!(decoded.schema_shortcuts.is_empty());
     assert!(decoded.modifier_taps.is_empty());
+    assert!(decoded.switch_hint.is_none());
 }
 
 #[test]

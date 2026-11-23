@@ -111,6 +111,9 @@ pub struct IsolatedPackageDto {
     pub active: bool,
     pub ready: bool,
     #[serde(default)]
+    #[frb(default = "rime")]
+    pub engine: String,
+    #[serde(default)]
     #[frb(default = [])]
     pub schemas: Vec<SchemaDto>,
 }
