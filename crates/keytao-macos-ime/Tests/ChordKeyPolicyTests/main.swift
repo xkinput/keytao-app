@@ -97,6 +97,25 @@ assert(KeyTaoModifierKeyPolicy.capsLockEvent(previousModifiers: 0x0002, currentM
 assert(KeyTaoModifierKeyPolicy.activationFlags([.capsLock, .option], systemCapsLock: false) == .option)
 assert(KeyTaoModifierKeyPolicy.activationFlags(.option, systemCapsLock: true) == [.capsLock, .option])
 
+var capsFlags: NSEvent.ModifierFlags = []
+for _ in 0..<2 {
+    guard let restored = KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(
+        previousFlags: capsFlags, currentFlags: .capsLock
+    ) else { fatalError("each standalone Caps Lock press switches the input mode") }
+    assert(restored.isEmpty, "a restored lock allows another press without an intervening flagsChanged event")
+    capsFlags = restored
+    assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(previousFlags: capsFlags, currentFlags: []) == nil)
+}
+assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(previousFlags: .capsLock, currentFlags: []) == nil,
+       "releasing a lock already active when KeyTao gained focus must preserve the hardware unlock")
+assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(previousFlags: .capsLock, currentFlags: .capsLock) == nil,
+       "duplicate flags with the hardware lock latched must preserve the normal Caps Lock policy")
+for modifier: NSEvent.ModifierFlags in [.shift, .control, .option, .command, .function] {
+    assert(KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(
+        previousFlags: modifier, currentFlags: [.capsLock, modifier]
+    ) == nil, "combined Caps Lock presses must preserve the normal Caps Lock policy")
+}
+
 var tap = KeyTaoModifierTap()
 func flags(
     _ keyCode: Int, _ previous: NSEvent.ModifierFlags, _ current: NSEvent.ModifierFlags,

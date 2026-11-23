@@ -7,11 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart'
-    show DeployStep, DeployStepState, OperationKind;
+    show AppController, DeployStep, DeployStepState, OperationKind;
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/core.dart'
     show AddonStatusDto, WanxiangGrammarStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/login.dart' show showAccountDialog;
 import 'package:keytao/src/ui/onboarding.dart';
@@ -20,6 +21,7 @@ import 'package:keytao/src/ui/settings.dart' show showCloudPackageTransfer;
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
+import 'controller_parity_test.dart' show FakeCore;
 import 'view_fixture.dart';
 
 const _update = SchemeUpdateDto(
@@ -28,6 +30,19 @@ const _update = SchemeUpdateDto(
   latestVersion: 'v2',
   hasUpdate: true,
 );
+
+class _SchemaSwitchCore extends FakeCore {
+  @override
+  Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => const [
+    SchemaSwitchDto(
+      schemaId: 'JD6',
+      name: 'jffh',
+      states: ['简体', '繁體'],
+      value: 0,
+      options: [],
+    ),
+  ];
+}
 
 class _PackageController extends ViewController {
   _PackageController([super.platform = BridgePlatform.macOs]) {
@@ -245,7 +260,7 @@ Future<void> _pumpAddons(
 
 Future<void> _pumpSchemePage(
   WidgetTester tester,
-  _PackageController controller,
+  AppController controller,
 ) async {
   await tester.pumpWidget(
     KeyTaoTheme(
@@ -1045,6 +1060,43 @@ void main() {
     );
   });
 
+  testWidgets('a usable build keeps its scheme switches while edits wait', (
+    tester,
+  ) async {
+    final core = _SchemaSwitchCore()
+      ..local = const LocalSchemaDto(
+        installed: true,
+        deployed: false,
+        buildAvailable: true,
+        installedScheme: 'local-jd-v3-6-6',
+        schemas: ['JD6'],
+      );
+    RustLib.initMock(api: core);
+    final c = AppController(
+      info: const BridgeInfo(
+        platform: BridgePlatform.macOs,
+        appVersion: 'test',
+        userRoot: '/isolated/packages',
+      ),
+    );
+    addTearDown(() async {
+      c.dispose();
+      await core.events.close();
+      RustLib.dispose();
+    });
+
+    await c.refreshState();
+    expect(c.local?.deployed, isFalse);
+    expect(c.schemaSwitches.map((entry) => entry.name), ['jffh']);
+    _size(tester, const Size(1000, 900));
+    await _pumpSchemePage(tester, c);
+    expect(find.text('方案开关'), findsOneWidget);
+    final setting = tester.widget<SwitchSetting>(
+      find.widgetWithText(SwitchSetting, '繁體'),
+    );
+    expect(setting.onChanged, isNotNull);
+  });
+
   testWidgets('package cards keep their own logo throughout deployment', (
     tester,
   ) async {
@@ -1162,6 +1214,47 @@ void main() {
         expect((image.image as FileImage).file.path, c.activeSchemaLogoPath);
       }
     }
+  });
+
+  testWidgets('a logo replacement keeps its image element mounted', (
+    tester,
+  ) async {
+    final c = _PackageController(BridgePlatform.windows)
+      ..activeSchemaLogoPath = 'assets/logo.png';
+    addTearDown(c.dispose);
+    Future<void> pumpLogo() => tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: SchemaLogo(controller: c, size: 32),
+      ),
+    );
+    await pumpLogo();
+    final logo = find.byType(Image);
+    final element = tester.element(logo);
+    c.activeSchemaLogoPath = File('assets/logo.png').absolute.path;
+    await pumpLogo();
+
+    expect(tester.element(logo), same(element));
+    expect(tester.widget<Image>(logo).gaplessPlayback, isTrue);
+  });
+
+  testWidgets('uninstalled scheme status occupies the version row', (
+    tester,
+  ) async {
+    final c = _PackageController();
+    addTearDown(c.dispose);
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: FScaffold(
+          child: SchemePackageRow(controller: c, schemeKey: 'txjx'),
+        ),
+      ),
+    );
+    expect(
+      tester.getCenter(find.text('未安装')).dy,
+      closeTo(tester.getCenter(find.text('云端')).dy, 1),
+    );
   });
 
   testWidgets('package rows expose only applicable actions', (tester) async {
@@ -1663,6 +1756,14 @@ void main() {
           findsOneWidget,
         );
         final inUse = !overlay && active && deployed;
+        if (!installed) {
+          final source = find.descendant(of: card, matching: find.text('云端'));
+          final status = find.descendant(of: card, matching: find.text('未安装'));
+          expect(
+            tester.getCenter(status).dy,
+            closeTo(tester.getCenter(source).dy, 1),
+          );
+        }
         expect(
           find.descendant(of: card, matching: find.byType(AppBadge)),
           findsNothing,

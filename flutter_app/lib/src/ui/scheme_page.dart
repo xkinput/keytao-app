@@ -446,7 +446,7 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ],
         ),
-        if (c.local?.deployed == true &&
+        if (c.hasUsableBuild &&
             !c.usesLibjd(c.activeSchemeKey) &&
             (c.schemaSwitches.isNotEmpty || c.schemaSwitchError != null))
           HairlineGridCell(child: SchemaSwitchesSection(controller: c)),
@@ -975,6 +975,8 @@ class SchemePackageRow extends StatelessWidget {
                 ? palette.success
                 : palette.muted,
           );
+    final uninstalledInHeader =
+        !compact && package == null && update == null && !deployFailed;
     final metadata = Wrap(
       spacing: 6,
       runSpacing: 4,
@@ -1035,7 +1037,7 @@ class SchemePackageRow extends StatelessWidget {
                   appLogoFallback: false,
                 ),
               Flexible(child: title),
-              ?state,
+              if (!uninstalledInHeader) ?state,
             ],
           );
     return Column(
@@ -1072,6 +1074,7 @@ class SchemePackageRow extends StatelessWidget {
                           fontWeight: inUse ? FontWeight.w600 : FontWeight.w400,
                         ),
                       ),
+                    if (uninstalledInHeader) ?state,
                     if (update != null)
                       Text(
                         '→ ${update.latestVersion}',
@@ -1424,6 +1427,7 @@ Map<String, Widget> _addonCells(
         isolatedPackage?.active == true &&
         (isolatedPackage?.ready == true ||
             (currentPackage == packageKey && c.hasUsableBuild));
+    final uninstalled = !inUse && !installed && info != null;
     final deployKey = overlay && active
         ? currentPackage ?? packageKey
         : packageKey;
@@ -1500,17 +1504,24 @@ Map<String, Widget> _addonCells(
                   EyebrowLabel(inUse ? '在用' : '云端'),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      installed ? info!.version : '',
-                      textAlign: TextAlign.end,
-                      style: context.theme.typography.body.sm.copyWith(
-                        color: inUse
-                            ? palette.successForeground
-                            : palette.muted,
-                        fontSize: 13,
-                        fontWeight: inUse ? FontWeight.w600 : FontWeight.w400,
-                      ),
-                    ),
+                    child: uninstalled
+                        ? Align(
+                            alignment: Alignment.centerRight,
+                            child: StatusPill('未安装', color: palette.muted),
+                          )
+                        : Text(
+                            installed ? info!.version : '',
+                            textAlign: TextAlign.end,
+                            style: context.theme.typography.body.sm.copyWith(
+                              color: inUse
+                                  ? palette.successForeground
+                                  : palette.muted,
+                              fontSize: 13,
+                              fontWeight: inUse
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          ),
                   ),
                 ],
               ),
@@ -1519,12 +1530,10 @@ Map<String, Widget> _addonCells(
                 spacing: 6,
                 children: [
                   Flexible(child: name),
-                  if (!inUse)
+                  if (!inUse && !uninstalled)
                     StatusPill(
                       info == null
                           ? AppStrings.checking
-                          : !installed
-                          ? '未安装'
                           : hasUpdate
                           ? '可更新'
                           : info.deployed

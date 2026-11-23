@@ -78,15 +78,29 @@ fn local_import_skips_protected_and_hidden_entries() {
         fs::write(file, b"must not import").unwrap();
     }
     let mut files = BTreeMap::new();
-    collect(&path, "", &mut files, &mut 0).unwrap();
+    collect(&path, "", &mut files, &mut 0, false).unwrap();
     assert_eq!(files.keys().collect::<Vec<_>>(), [&"example.schema.yaml"]);
+}
+
+#[test]
+fn downloaded_import_skips_trime_assets_before_parsing_theme_customs() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = source(directory.path(), "source");
+    fs::create_dir(path.join("backgrounds")).unwrap();
+    fs::write(path.join("backgrounds/image.png"), b"theme image").unwrap();
+    fs::write(path.join("trime.yaml"), b"theme").unwrap();
+    fs::write(path.join("theme.trime.custom.yaml"), b"\xff").unwrap();
+    let mut files = BTreeMap::new();
+    collect(&path, "", &mut files, &mut 0, true).unwrap();
+    assert_eq!(files.keys().collect::<Vec<_>>(), [&"example.schema.yaml"]);
+    assert!(path.join("theme.trime.custom.yaml").exists());
 }
 
 #[test]
 fn local_import_root_error_names_operation_and_path() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("missing");
-    let error = collect(&missing, "", &mut BTreeMap::new(), &mut 0)
+    let error = collect(&missing, "", &mut BTreeMap::new(), &mut 0, false)
         .unwrap_err()
         .to_string();
     assert!(error.contains("读取目录"), "{error}");
@@ -166,7 +180,7 @@ fn local_import_skips_windows_hidden_and_system_attributes() {
         unsafe { SetFileAttributesW(windows::core::PCWSTR(name.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(flags)) }.unwrap();
     }
     let mut files = BTreeMap::new();
-    collect(&path, "", &mut files, &mut 0).unwrap();
+    collect(&path, "", &mut files, &mut 0, false).unwrap();
     assert_eq!(files.keys().collect::<Vec<_>>(), [&"example.schema.yaml"]);
 }
 

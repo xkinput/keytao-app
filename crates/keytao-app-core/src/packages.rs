@@ -419,7 +419,7 @@ pub(crate) fn store_cloud_archive_reader(
         zip_sha256: digest,
     };
     fs::create_dir_all(&dir)?;
-    store.write_archive(reader, &meta, origin)?;
+    store.write_downloaded_archive(reader, &meta, origin)?;
     core.update_state(|state| {
         state.installed_packages.insert(
             scheme_key.into(),
@@ -1049,7 +1049,11 @@ mod tests {
             b"schema: {schema_id: alpha}\n".to_vec(),
         )];
         let archive = dir.path().join("download.zip");
-        fs::write(&archive, archive_from_files(&files).unwrap()).unwrap();
+        let mut downloaded = files.clone();
+        for path in ["trime.yaml", "trime.custom.yaml", "Skin.Trime.YAML", "backgrounds/image.png"] {
+            downloaded.push((path.into(), b"Trime assets".to_vec()));
+        }
+        fs::write(&archive, archive_from_files(&downloaded).unwrap()).unwrap();
 
         crate::install::install_live_scheme(
             &core,
@@ -1067,6 +1071,7 @@ mod tests {
         assert!(keytao_core::RuntimeDirs::active_package_key(&root).is_none());
         let (stored, meta) = PackageStore::new(&core).read_files("xmjd").unwrap();
         assert_eq!(stored, files);
+        assert_eq!(meta.manifest.keys().collect::<Vec<_>>(), [&files[0].0]);
         assert_eq!(meta.version.as_deref(), Some("v1"));
     }
 

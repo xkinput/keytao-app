@@ -23,7 +23,7 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         fun onLayoutStateChanged(state: KeyboardLayoutState, finished: Boolean)
 
         /** Real bottom avoidance for this window, in pixels. */
-        fun onSystemBottomInsetChanged(insetPx: Int)
+        fun onSystemBottomInsetChanged(insetPx: Int, navigationInsetPx: Int)
     }
 
     var listener: Listener? = null
@@ -36,6 +36,7 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     private var normalHeightPx = 0
     private var safeBottomInsetPx = 0
     private var reportedBottomInsetPx = -1
+    private var reportedNavigationInsetPx = -1
     private var insetsAfterLayoutPending = true
     private var isLandscape = false
     private var dragMode = FloatingDragMode.NONE
@@ -83,9 +84,15 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
             @Suppress("DEPRECATION")
             insets.systemWindowInsetBottom
         }
-        if (bottom != reportedBottomInsetPx) {
+        val navigationBottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+        } else {
+            bottom
+        }
+        if (bottom != reportedBottomInsetPx || navigationBottom != reportedNavigationInsetPx) {
             reportedBottomInsetPx = bottom
-            listener?.onSystemBottomInsetChanged(bottom)
+            reportedNavigationInsetPx = navigationBottom
+            listener?.onSystemBottomInsetChanged(bottom, navigationBottom)
         }
         return super.onApplyWindowInsets(insets)
     }

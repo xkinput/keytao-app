@@ -101,6 +101,7 @@ pub fn vk_to_keysym(vk: u16, lparam: isize, mods: u32) -> Option<u32> {
         VK_ESCAPE => 0xFF1B,  // XK_Escape
         VK_SPACE => 0x0020,   // XK_space
         VK_DELETE => 0xFFFF,  // XK_Delete
+        VK_INSERT => 0xFF63,  // XK_Insert
         VK_CAPITAL => 0xFFE5, // XK_Caps_Lock
 
         // --- Navigation ---
@@ -112,7 +113,7 @@ pub fn vk_to_keysym(vk: u16, lparam: isize, mods: u32) -> Option<u32> {
         VK_END => 0xFF57,        // XK_End
         VK_PRIOR => XK_PAGE_UP,  // XK_Prior (Page Up)
         VK_NEXT => XK_PAGE_DOWN, // XK_Next  (Page Down)
-        VK_F4 => 0xFFC1,         // XK_F4 opens the Rime menu
+        key if (VK_F1.0..=VK_F24.0).contains(&key.0) => 0xffbe + u32::from(key.0 - VK_F1.0),
 
         // Anything else (other function keys, media keys, etc.) — don't intercept
         _ => return None,
@@ -497,6 +498,74 @@ pub fn is_application_shortcut(vk: u16, mods: u32, has_composition: bool) -> boo
         return false;
     }
     true
+}
+
+/// Only options/schema switches declared by the active Rime schema override
+/// the ordinary host shortcut rule. Use the cached snapshot on the TSF test path.
+pub fn schema_shortcut_key(
+    vk: u16,
+    lparam: isize,
+    mods: u32,
+    state: &keytao_core::ImeState,
+) -> Option<(u32, u32)> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let key = VIRTUAL_KEY(vk);
+    let unmodified_non_function = mods & !RIME_MOD_LOCK == 0 && !(VK_F1.0..=VK_F24.0).contains(&vk);
+    if state.schema_shortcuts.is_empty()
+        || key_policy::is_system_reserved_modifier(mods)
+        || is_shift_vk(vk)
+        || is_caps_lock_vk(vk)
+        || (unmodified_non_function && !state.schema_shortcuts.iter().any(|shortcut| {
+            shortcut.is_switcher()
+                && (shortcut.modifiers == 0 || shortcut.modifiers == mods)
+                && !(0xffbe..=0xffd5).contains(&shortcut.key)
+        }))
+    {
+        return None;
+    }
+    let control = mods & RIME_MOD_CONTROL != 0;
+    let alt = mods & RIME_MOD_ALT != 0;
+    let chord = mods & !RIME_MOD_LOCK;
+    if (chord == RIME_MOD_CONTROL && key == VK_SPACE)
+        || (chord == (RIME_MOD_CONTROL | RIME_MOD_SHIFT) && key == VK_ESCAPE)
+        || (alt && matches!(key, VK_F4 | VK_TAB | VK_ESCAPE | VK_SPACE))
+        || (control && alt && (key == VK_DELETE || unsafe {
+            GetKeyState(VK_RMENU.0 as i32) as u16 & 0x8000 != 0
+        }))
+    {
+        return None;
+    }
+
+    let keysym = if is_printable_vk(key) && (control || alt) {
+        match translated_printable_keysym(vk, lparam, true) {
+            PrintableTranslation::Character(keysym) => keysym,
+            PrintableTranslation::DeadKey => return None,
+            PrintableTranslation::Unavailable => fallback_printable_keysym(key, mods)?,
+        }
+    } else {
+        vk_to_keysym(vk, lparam, mods)?
+    };
+    let unshifted = (mods & (RIME_MOD_SHIFT | RIME_MOD_LOCK) != 0)
+        .then(|| {
+            if is_letter_vk(key) {
+                vk_to_keysym(vk, lparam, mods & !(RIME_MOD_SHIFT | RIME_MOD_LOCK))
+            } else {
+                fallback_printable_keysym(key, 0)
+            }
+        })
+        .flatten();
+    for symbol in [Some(keysym), unshifted].into_iter().flatten() {
+        if let Some(shortcut) = state.schema_shortcuts.iter().find(|shortcut| {
+            shortcut.key == symbol
+                && (shortcut.modifiers == mods || shortcut.modifiers == chord)
+                && (!unmodified_non_function || shortcut.is_switcher())
+                && shortcut.applies(state)
+        }) {
+            return Some((shortcut.key, shortcut.modifiers));
+        }
+    }
+    None
 }
 
 /// Returns true for keys the IME may handle, i.e. the keys `OnTestKeyDown`

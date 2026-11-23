@@ -247,6 +247,7 @@ pub fn press_route(keyval: u32, mods: u32, before: &ImeState) -> PressRoute {
         return PressRoute::BypassEmptyComposition;
     }
     if key_policy::is_enter_key(keyval)
+        && !key_policy::is_configured_switcher_hotkey(keyval, mods, before)
         && key_policy::enter_action(before) == key_policy::EnterAction::ForwardToRime
     {
         return PressRoute::Enter;

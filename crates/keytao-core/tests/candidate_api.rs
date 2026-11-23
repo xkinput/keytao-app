@@ -325,6 +325,127 @@ fn panel_arrows_navigate_without_caret_motion_commits_or_wrapping() {
 }
 
 #[test]
+fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
+    use keytao_core::{RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK};
+
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("schema-switch-chords");
+    smoke_fixture::write(&dir).unwrap();
+    let schema_path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+    let schema = std::fs::read_to_string(&schema_path).unwrap();
+    let schema = schema
+        .replace("- ascii_composer\n", "- ascii_composer\n    - key_binder\n")
+        .replace("Shift_L: noop", "Shift_L: commit_code");
+    let bindings = "key_binder:
+  bindings:
+    - { when: always, accept: Control+period, toggle: ascii_mode }
+    - { when: always, accept: Shift+space, toggle: ascii_mode }
+    - { when: always, accept: Control+Alt+F8, toggle: ascii_mode }
+    - { when: composing, accept: Control+v, send: Page_Down }
+    - { when: paging, accept: Control+j, toggle: ascii_mode }
+    - { when: predicting, accept: Control+k, toggle: ascii_mode }
+";
+    std::fs::write(schema_path, format!("{schema}\n{bindings}")).unwrap();
+    std::fs::write(
+        dir.join(format!("{}.custom.yaml", smoke_fixture::SCHEMA_ID)),
+        "patch:\n  ascii_composer/switch_key/Shift_L: noop\n",
+    )
+    .unwrap();
+    let defaults = dir.join("default.custom.yaml");
+    let config = std::fs::read_to_string(&defaults).unwrap();
+    std::fs::write(
+        defaults,
+        format!("{config}  switcher/hotkeys: [Control+Shift+F8]\n"),
+    )
+    .unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+    runtime.init().expect("deploy the switch shortcut fixture");
+    let session = runtime.create_session().unwrap();
+
+    let state = session.state();
+    assert_eq!(state.schema_shortcuts.len(), 4);
+    let composing = type_code(&session);
+    assert!(!composing.candidates.is_empty());
+    assert!(!composing.schema_shortcuts.iter().any(|shortcut| {
+        shortcut.modifiers == RIME_MOD_CONTROL
+            && [b'j', b'k'].into_iter().any(|key| shortcut.key == u32::from(key))
+    }));
+    session.clear_composition();
+    for (keysym, mask) in [
+        (b'.' as u32, RIME_MOD_CONTROL),
+        (0x20, RIME_MOD_SHIFT),
+        (0xffc5, RIME_MOD_CONTROL | RIME_MOD_ALT),
+    ] {
+        assert!(state.schema_shortcuts.iter().any(|shortcut| {
+            (shortcut.key, shortcut.modifiers) == (keysym, mask) && shortcut.applies(&state)
+        }));
+        for before in [false, true] {
+            session.set_ascii_mode(before).unwrap();
+            let toggled = session.process_key_result(keysym, mask).unwrap();
+            assert!(toggled.accepted);
+            assert_eq!(toggled.state.ascii_mode, !before);
+            for shift in [0xffe1, 0xffe2] {
+                let released = session
+                    .process_keys_result(&[(shift, 0), (shift, RIME_RELEASE_MASK)])
+                    .unwrap();
+                assert!(!released.accepted);
+                assert_eq!(released.state.ascii_mode, !before);
+            }
+        }
+    }
+    let hotkey = (0xffc5, RIME_MOD_CONTROL | RIME_MOD_SHIFT);
+    assert!(state.schema_shortcuts.iter().any(|shortcut| {
+        (shortcut.key, shortcut.modifiers) == hotkey && shortcut.applies(&state)
+    }));
+    assert!(session.process_key_result(hotkey.0, hotkey.1).unwrap().accepted);
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
+fn easy_english_keeps_both_shift_keys_disabled_by_the_chinese_schema() {
+    use keytao_core::english_mode::{write_english_mode, EnglishMode};
+    use keytao_core::RIME_RELEASE_MASK;
+
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("easy-english-shift-noop");
+    smoke_fixture::write(&dir).unwrap();
+    let chinese =
+        std::fs::read_to_string(dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID)))
+            .unwrap();
+    std::fs::write(
+        dir.join("easy_en.schema.yaml"),
+        chinese
+            .replace(&format!("schema_id: {}", smoke_fixture::SCHEMA_ID), "schema_id: easy_en")
+            .replace("name: KeyTao Smoke", "name: Easy English")
+            .replace("Shift_L: noop", "Shift_L: commit_code")
+            .replace("Shift_R: noop", "Shift_R: commit_code"),
+    )
+    .unwrap();
+    let defaults = dir.join("default.custom.yaml");
+    let content = std::fs::read_to_string(&defaults).unwrap();
+    std::fs::write(defaults, format!("{content}    - schema: easy_en\n")).unwrap();
+    write_english_mode(&dir, EnglishMode::Schema).unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+    runtime.init().unwrap();
+    let session = runtime.create_session().unwrap();
+    assert_eq!(session.set_english_mode(true).unwrap().schema_id, "easy_en");
+    for shift in [0xffe1, 0xffe2] {
+        let released = session
+            .process_keys_result(&[(shift, 0), (shift, RIME_RELEASE_MASK)])
+            .unwrap();
+        assert_eq!(released.state.schema_id, "easy_en");
+        assert!(!released.accepted);
+    }
+    assert_eq!(
+        session.set_english_mode(false).unwrap().schema_id,
+        smoke_fixture::SCHEMA_ID
+    );
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
 fn a_shift_ascii_toggle_clears_the_host_context_override() {
     let _serialized = serialized();
     let dir = smoke_fixture::scratch_dir("context-ascii-toggle");

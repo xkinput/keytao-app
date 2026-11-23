@@ -988,18 +988,22 @@ fn apply_input_context_state(
     let sensitive = input_context.is_sensitive();
     let retry_due = input_context.needs_retry();
     let keyboard_open = crate::input_context::keyboard_is_open(thread_mgr.as_ref());
-    let previous_context_handles = {
+    let (previous_context_handles, keyboard_open_changed) = {
         let mut st = shared_state.borrow_mut();
         st.input_context = input_context;
-        st.keyboard_open = keyboard_open;
+        let keyboard_open_changed =
+            std::mem::replace(&mut st.keyboard_open, keyboard_open) != keyboard_open;
         if route_changed {
             st.engine_retry_after = None;
             st.reload_retry_after = None;
             st.engine_failures = 0;
         }
         (
-            std::mem::replace(&mut st.input_context_source, context.cloned()),
-            std::mem::replace(&mut st.input_context_document_mgr, document_mgr),
+            (
+                std::mem::replace(&mut st.input_context_source, context.cloned()),
+                std::mem::replace(&mut st.input_context_document_mgr, document_mgr),
+            ),
+            keyboard_open_changed,
         )
     };
     if route_changed {
@@ -1037,6 +1041,10 @@ fn apply_input_context_state(
         retry_due,
     ));
     sync_input_policy(shared_state);
+    if keyboard_open_changed {
+        let english_mode = shared_state.borrow().english_mode;
+        update_language_bar_mode(shared_state, english_mode);
+    }
     sensitive
 }
 
@@ -1152,6 +1160,8 @@ pub(crate) fn set_keyboard_open_state(shared_state: &SharedState, open: bool) {
     if !open {
         reset_input_for_focus_change(shared_state);
     }
+    let english_mode = shared_state.borrow().english_mode;
+    update_language_bar_mode(shared_state, english_mode);
 }
 
 /// Declare the thread compartments a keyboard TIP owns: the keyboard is open
@@ -1351,7 +1361,7 @@ fn unadvise_all(registrations: Vec<CompartmentSinkRegistration>) {
 /// focus. Never remove/re-add a healthy item: only the first INPUTMODE item is
 /// shown by Windows, and another service may own other entries in the manager.
 pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
-    let (thread_mgr, client_id, english_mode, existing) = {
+    let (thread_mgr, client_id, english_mode, keyboard_open, existing) = {
         let mut st = shared_state.borrow_mut();
         if !st.language_bar_enabled || st.language_bar_refreshing {
             return;
@@ -1364,6 +1374,7 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
             thread_mgr,
             st.client_id,
             st.english_mode,
+            st.keyboard_open,
             st.language_bar.clone(),
         )
     };
@@ -1386,6 +1397,7 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
                 client_id,
                 Rc::downgrade(shared_state),
                 english_mode,
+                keyboard_open,
                 show_tray_mode_indicator,
             ) {
                 Ok(item) => item,
@@ -1427,15 +1439,22 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
             item
         }
     };
-    let english_mode = shared_state.borrow().english_mode;
-    language_bar.refresh_mode(english_mode, show_tray_mode_indicator);
+    let (english_mode, keyboard_open) = {
+        let st = shared_state.borrow();
+        (st.english_mode, st.keyboard_open)
+    };
+    language_bar.refresh_mode(english_mode, keyboard_open, show_tray_mode_indicator);
 }
 
 pub(crate) fn update_language_bar_mode(shared_state: &SharedState, english_mode: bool) {
-    let language_bar = shared_state.borrow().language_bar.clone();
+    let (language_bar, keyboard_open) = {
+        let st = shared_state.borrow();
+        (st.language_bar.clone(), st.keyboard_open)
+    };
     if let Some(language_bar) = language_bar {
         language_bar.update_mode(
             english_mode,
+            keyboard_open,
             with_current_theme(|theme| theme.ui.show_tray_mode_indicator),
         );
     }
@@ -1446,6 +1465,7 @@ pub(crate) fn update_language_bar_mode(shared_state: &SharedState, english_mode:
 mod language_bar_lifecycle_tests;
 
 pub(crate) fn set_english_mode_from_language_bar(shared_state: &SharedState, english_mode: bool) {
+    let reopen_keyboard = !english_mode && !shared_state.borrow().keyboard_open;
     reset_input_for_focus_change(shared_state);
     poll_engine_builds(shared_state);
     let session = shared_state.borrow().session();
@@ -1468,6 +1488,14 @@ pub(crate) fn set_english_mode_from_language_bar(shared_state: &SharedState, eng
     }
     if session.is_none() {
         start_engine_warmup(shared_state);
+    }
+    if reopen_keyboard {
+        let (thread_mgr, client_id) = {
+            let st = shared_state.borrow();
+            (st.thread_mgr.clone(), st.client_id)
+        };
+        crate::input_context::set_keyboard_open(thread_mgr.as_ref(), client_id, true);
+        apply_open_close_change(shared_state);
     }
     update_language_bar_mode(shared_state, english_mode);
 }

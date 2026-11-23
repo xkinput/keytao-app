@@ -176,6 +176,8 @@ abstract final class AppStrings {
   static const doubleSpaceHint = '1100ms 内连按两次';
   static const swipeThreshold = '滑动判定阈值';
   static const floatingPortrait = '竖屏悬浮键盘';
+  static const keyboardFlushBottom = '键盘贴底显示';
+  static const keyboardFlushBottomHint = '系统底部键盘辅助栏隐藏时，收起键盘下方的留白。';
   static const floatingLandscape = '横屏悬浮键盘';
   static const oneHandedPortrait = '竖屏单手键盘';
   static const splitLandscape = '横屏分离键盘';

@@ -49,6 +49,8 @@ const MODE_MENU_ITEMS: [(u32, &str); 2] =
 struct LanguageBarModel {
     // The icon must already reflect the current mode when AddItem queries it.
     english_mode: Option<bool>,
+    // A closed TSF keyboard passes keys through without changing the scheme mode.
+    keyboard_closed: bool,
     hidden: bool,
     sink: Option<ITfLangBarItemSink>,
     notification_pending: bool,
@@ -56,6 +58,12 @@ struct LanguageBarModel {
     notification_error: Option<HRESULT>,
     compartment_error: Option<HRESULT>,
     menu_open: bool,
+}
+
+impl LanguageBarModel {
+    fn displays_english(&self) -> bool {
+        self.keyboard_closed || self.english_mode.unwrap_or(false)
+    }
 }
 
 fn dispatch_menu_action(id: u32, launch: impl FnOnce(AppAction) -> Result<()>) -> Result<()> {
@@ -309,7 +317,7 @@ impl ITfLangBarItem_Impl for LanguageBarButton_Impl {
 
     fn GetTooltipString(&self) -> Result<BSTR> {
         guard(|| {
-            let label = if self.model.borrow().english_mode.unwrap_or(false) {
+            let label = if self.model.borrow().displays_english() {
                 "KeyTao English input"
             } else {
                 "KeyTao Chinese input"
@@ -325,7 +333,7 @@ impl ITfLangBarItemButton_Impl for LanguageBarButton_Impl {
             let result = handle_button_click(
                 click,
                 || {
-                    let english_mode = !self.model.borrow().english_mode.unwrap_or(false);
+                    let english_mode = !self.model.borrow().displays_english();
                     if let Some(state) = self.state.upgrade() {
                         set_english_mode_from_language_bar(&state, english_mode);
                     }
@@ -353,7 +361,7 @@ impl ITfLangBarItemButton_Impl for LanguageBarButton_Impl {
 
     fn GetIcon(&self) -> Result<HICON> {
         guard(|| {
-            let english_mode = self.model.borrow().english_mode.unwrap_or(false);
+            let english_mode = self.model.borrow().displays_english();
             let instance = DLL_INSTANCE.get().copied().unwrap_or_default();
             load_mode_icon(HINSTANCE(instance as *mut _), english_mode)
         })
@@ -362,7 +370,7 @@ impl ITfLangBarItemButton_Impl for LanguageBarButton_Impl {
     fn GetText(&self) -> Result<BSTR> {
         guard(|| {
             Ok(BSTR::from(
-                if self.model.borrow().english_mode.unwrap_or(false) {
+                if self.model.borrow().displays_english() {
                     "\u{82f1}"
                 } else {
                     "\u{4e2d}"
@@ -432,12 +440,14 @@ impl LanguageBarItem {
         client_id: u32,
         state: WeakState,
         english_mode: bool,
+        keyboard_open: bool,
         show_tray_mode_indicator: bool,
     ) -> Result<Self> {
         let manager: ITfLangBarItemMgr = thread_mgr.cast()?;
         let model = Rc::new(RefCell::new(LanguageBarModel {
             // AddItem can query the icon before it returns.
             english_mode: Some(english_mode),
+            keyboard_closed: !keyboard_open,
             hidden: !show_tray_mode_indicator,
             sink: None,
             notification_pending: true,
@@ -462,27 +472,42 @@ impl LanguageBarItem {
         })
     }
 
-    pub(crate) fn update_mode(&self, english_mode: bool, show_tray_mode_indicator: bool) {
-        let (changed, visibility_changed) = {
+    pub(crate) fn update_mode(
+        &self,
+        english_mode: bool,
+        keyboard_open: bool,
+        show_tray_mode_indicator: bool,
+    ) {
+        let (mode_changed, display_changed, visibility_changed) = {
             let mut model = self.model.borrow_mut();
+            let previous_display = model.displays_english();
+            let mode_changed = update_cached_mode(&mut model.english_mode, english_mode);
+            model.keyboard_closed = !keyboard_open;
             (
-                update_cached_mode(&mut model.english_mode, english_mode),
+                mode_changed,
+                previous_display != model.displays_english(),
                 std::mem::replace(&mut model.hidden, !show_tray_mode_indicator)
                     != !show_tray_mode_indicator,
             )
         };
-        if changed {
+        if mode_changed {
             self.update_input_mode_compartment(english_mode);
         }
-        if changed || visibility_changed || self.model.borrow().notification_pending {
+        if display_changed || visibility_changed || self.model.borrow().notification_pending {
             notify_model(&self.model);
         }
     }
 
-    pub(crate) fn refresh_mode(&self, english_mode: bool, show_tray_mode_indicator: bool) {
+    pub(crate) fn refresh_mode(
+        &self,
+        english_mode: bool,
+        keyboard_open: bool,
+        show_tray_mode_indicator: bool,
+    ) {
         {
             let mut model = self.model.borrow_mut();
             update_cached_mode(&mut model.english_mode, english_mode);
+            model.keyboard_closed = !keyboard_open;
             model.hidden = !show_tray_mode_indicator;
         }
         // A focus change or a delayed sink attachment needs a fresh snapshot

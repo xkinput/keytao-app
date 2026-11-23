@@ -238,6 +238,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     @Volatile private var editorUpdateGeneration = 0L
     private var rimeOptionsGeneration = 0L
     private var systemBottomInsetDp = -1
+    private var navigationBottomInsetDp = -1
     private val graphemeIterator: BreakIterator by lazy {
         BreakIterator.getCharacterInstance(Locale.ROOT)
     }
@@ -296,8 +297,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 handleKeyboardLayoutStateChanged(state, finished)
             }
 
-            override fun onSystemBottomInsetChanged(insetPx: Int) {
-                handleSystemBottomInsetChanged(insetPx)
+            override fun onSystemBottomInsetChanged(insetPx: Int, navigationInsetPx: Int) {
+                handleSystemBottomInsetChanged(insetPx, navigationInsetPx)
             }
         }
         markPresentationLoad()
@@ -321,7 +322,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardHost = host
         keyboardView = view
         applyKeyboardPresentation(loadPresentationConfig())
-        view.updateSystemBottomInsetDp(systemBottomInsetDp)
         view.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
         refreshVoiceInput()
@@ -826,11 +826,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             )
         }
         val theme = resolvePresentationTheme()
+        val flushBottom = normalized.mode != KeyboardLayoutMode.FLOATING && keyboardLayoutStateStore.flushBottom
+        val safeBottomInset = resolveKeyboardBottomInsetDp(
+            systemBottomInsetDp, navigationBottomInsetDp, config.keyboardBottomInsetDp, flushBottom,
+        )
         keyboardHost?.updatePresentation(
             normalized,
             config.floating.marginDp,
-            normalKeyboardHeightDp(config),
-            androidBottomInsetDp(config).toFloat(),
+            normalKeyboardHeightDp(config) + safeBottomInset,
+            safeBottomInset.toFloat(),
             presentationIsLandscape,
             theme,
         )
@@ -841,6 +845,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
         keyboardView?.updateSettingsConfig(config)
         keyboardView?.updateConfig(presentedConfig)
+        keyboardView?.updateBottomInsetDp(
+            if (normalized.mode == KeyboardLayoutMode.FLOATING) 0 else resolveKeyboardBottomInsetDp(
+                systemBottomInsetDp, navigationBottomInsetDp, presentedConfig.keyboardBottomInsetDp, flushBottom,
+            ),
+        )
         if (clipboardConfigLoaded) {
             val previousLimit = clipboardHistory.limit
             clipboardHistory.updateLimit(config.clipboardHistoryLimit)
@@ -909,17 +918,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun normalKeyboardHeightDp(config: KeytaoAndroidImeConfig): Float {
         val contentHeight = if (emojiSearchQuery != null) config.emojiSearchHeightDp() else config.effectiveKeyboardHeightDp
-        return contentHeight + config.candidateBarHeightDp + androidBottomInsetDp(config)
-    }
-
-    /**
-     * The system inset is the floor; `keyboardBottomInsetDp` is only the user's
-     * extra offset on top of it. Before the first WindowInsets pass we keep the
-     * historical constant so the bottom row is never flush with the screen edge.
-     */
-    private fun androidBottomInsetDp(config: KeytaoAndroidImeConfig): Int {
-        val system = if (systemBottomInsetDp >= 0) systemBottomInsetDp else defaultAndroidBottomInsetDp
-        return max(system, config.keyboardBottomInsetDp)
+        return contentHeight + config.candidateBarHeightDp
     }
 
     override fun onFinishInput() {
@@ -3158,16 +3157,17 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
      * IME windows are not padded for the navigation bar or the gesture handle;
      * the real bottom inset has to come from WindowInsets instead of a constant.
      */
-    private fun handleSystemBottomInsetChanged(insetPx: Int) {
+    private fun handleSystemBottomInsetChanged(insetPx: Int, navigationInsetPx: Int) {
         val density = resources.displayMetrics.density
-        val insetDp = if (density > 0f) (insetPx / density).roundToInt() else 0
-        val clamped = insetDp.coerceIn(0, 96)
-        if (clamped == systemBottomInsetDp) return
-        systemBottomInsetDp = clamped
+        fun insetDp(px: Int) = if (density > 0f) (px / density).roundToInt().coerceIn(0, 96) else 0
+        val systemInset = insetDp(insetPx)
+        val navigationInset = insetDp(navigationInsetPx)
+        if (systemInset == systemBottomInsetDp && navigationInset == navigationBottomInsetDp) return
+        systemBottomInsetDp = systemInset
+        navigationBottomInsetDp = navigationInset
         // The callback arrives inside the traversal that is about to measure us,
         // so re-laying out is deferred to the next frame.
         mainHandler.post {
-            keyboardView?.updateSystemBottomInsetDp(clamped)
             baseKeyboardConfig?.let { applyKeyboardPresentation(it, keyboardLayoutState) }
         }
     }
@@ -3507,7 +3507,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         private const val hostBackspaceTimeoutMs = 300L
         private const val maxBackspaceGestureBatchCount = 96
         private const val recentCommittedUnitLimit = 2048
-        private const val defaultAndroidBottomInsetDp = 48
         private const val rimeOptionChoicePrefix = "choice:"
     }
 

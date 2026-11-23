@@ -897,6 +897,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         // confirms the highlighted candidate or commits the raw code.  Space
         // and the digits are ordinary keys for the same reason.
         let result = if key_policy::is_enter_key(keysym)
+            && !key_policy::is_configured_switcher_hotkey(keysym, effective_mods, &before_state)
             && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
             user_ic.user_data.session.process_enter()

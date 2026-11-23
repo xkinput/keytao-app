@@ -1,6 +1,18 @@
 package ink.rea.keytao_app
 
 import android.content.Context
+import java.io.File
+
+internal fun resolveKeyboardBottomInsetDp(
+    systemInset: Int,
+    navigationInset: Int,
+    configuredInset: Int,
+    flushBottom: Boolean,
+): Int {
+    if (flushBottom && navigationInset == 0) return 0
+    val system = if (systemInset >= 0) systemInset else 48
+    return maxOf(system, configuredInset)
+}
 
 enum class KeyboardLayoutMode(val preferenceValue: String) {
     FULL("full"),
@@ -189,6 +201,20 @@ internal object FloatingHandleInteraction {
 
 class KeytaoKeyboardLayoutStateStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    // The app and the IME run in separate processes with separate preference caches.
+    private val flushBottomFile = File(context.filesDir, "keyboard-flush-bottom")
+
+    var flushBottom: Boolean
+        get() = flushBottomFile.isFile
+        set(enabled) {
+            if (enabled) {
+                check(flushBottomFile.createNewFile() || flushBottomFile.isFile) {
+                    "Could not save the keyboard bottom inset setting"
+                }
+            } else if (flushBottomFile.isFile) {
+                check(flushBottomFile.delete()) { "Could not reset the keyboard bottom inset setting" }
+            }
+        }
 
     fun load(isLandscape: Boolean, fallback: FloatingKeyboardProfile): KeyboardLayoutState {
         val prefix = orientationPrefix(isLandscape)

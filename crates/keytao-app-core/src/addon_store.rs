@@ -45,6 +45,7 @@ pub(crate) struct AddonStore {
     root: PathBuf,
     destination: PathBuf,
     staging: PathBuf,
+    skip_trime_assets: bool,
 }
 
 impl AddonStore {
@@ -94,6 +95,7 @@ impl AddonStore {
             root,
             destination,
             staging,
+            skip_trime_assets: core.env().platform == crate::Platform::Android,
         })
     }
 
@@ -267,7 +269,12 @@ impl AddonStore {
         isolated: bool,
     ) -> Result<(), CoreError> {
         let mut value: serde_json::Value = serde_json::from_slice(manifest)?;
-        let manifest_files = parse_manifest(&value, &self.id).map_err(CoreError::Other)?;
+        let mut manifest_files = parse_manifest(&value, &self.id).map_err(CoreError::Other)?;
+        let skip_trime_assets = isolated && self.skip_trime_assets;
+        if skip_trime_assets {
+            manifest_files.retain(|file| !crate::generic_rime::is_trime_asset(&file.path));
+            value["files"] = serde_json::to_value(&manifest_files)?;
+        }
         if modified.iter().any(|path| path == GRAMMAR) {
             value["grammar"] = serde_json::Value::Null;
             value["includes_grammar"] = false.into();
@@ -280,7 +287,9 @@ impl AddonStore {
         let mut names = BTreeSet::new();
         collect_official(official_files, official_files, &mut names).map_err(CoreError::Other)?;
         for relative in names {
-            if relative == GRAMMAR {
+            if relative == GRAMMAR
+                || (skip_trime_assets && crate::generic_rime::is_trime_asset(&relative))
+            {
                 continue;
             }
             let source = safe_path(official_files, &relative).map_err(CoreError::Other)?;

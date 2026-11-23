@@ -771,10 +771,26 @@ final class KeyTaoInputController: IMKInputController {
                currentModifiers: rimeModifiers(from: newFlags)
            ) {
             modifierTap.clear()
-            guard let session = ensureSession(),
-                  let state = KeyTaoImeState.consuming(keytao_session_process_key_json(
-                      session, capsLock.keyval, capsLock.modifiers
-                  )) else { return false }
+            guard let session = ensureSession() else { return false }
+            if isActive, let unlockedFlags = KeyTaoModifierKeyPolicy.inputModeCapsLockFlags(
+                previousFlags: previousFlags, currentFlags: newFlags
+            ) {
+                switch KeyTaoCapsLockRestore.afterModeKeyPress() {
+                case .restored:
+                    lastModifierFlags = unlockedFlags
+                    toggleEnglishMode(session: session, client: client)
+                    return true
+                case .alreadyUnlocked:
+                    // A newer event already released the lock.
+                    lastModifierFlags = unlockedFlags
+                    return false
+                case .unavailable:
+                    break
+                }
+            }
+            guard let state = KeyTaoImeState.consuming(keytao_session_process_key_json(
+                session, capsLock.keyval, capsLock.modifiers
+            )) else { return false }
             apply(state, to: client)
             if inputContextGeneration.isCurrent(generation) {
                 showModeIndicator(state.modeHint, client: client)
@@ -799,6 +815,21 @@ final class KeyTaoInputController: IMKInputController {
             showModeIndicator(state.modeHint, client: client)
         }
         return handled
+    }
+
+    private func toggleEnglishMode(session: UnsafeMutableRawPointer, client: IMKTextInput?) {
+        let generation = inputContextGeneration.current
+        let toEnglish = !keytao_session_get_english_mode(session)
+        if hasComposition {
+            endComposition(commit: true, client: client)
+        }
+        guard inputContextGeneration.isCurrent(generation),
+              let state = KeyTaoImeState.consuming(keytao_session_set_english_mode_json(session, toEnglish))
+        else { return }
+        apply(state, to: client)
+        if inputContextGeneration.isCurrent(generation) {
+            showModeIndicator(state.modeHint, client: client)
+        }
     }
 
     // MARK: Input menu
@@ -869,6 +900,10 @@ final class KeyTaoInputController: IMKInputController {
         case kVK_Tab:              return 0xff09
         case kVK_F4:               return rimeKeyF4
         default:
+            if let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first?.value,
+               (UInt32(NSF1FunctionKey)...UInt32(NSF35FunctionKey)).contains(scalar) {
+                return 0xffbe + scalar - UInt32(NSF1FunctionKey)
+            }
             return keysym(from: event)
         }
     }

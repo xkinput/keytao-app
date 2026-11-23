@@ -634,6 +634,7 @@ impl App {
         // confirms the highlighted candidate or commits the raw code.  Space
         // and the digits are ordinary keys for the same reason.
         if key_policy::is_enter_key(sym_raw)
+            && !key_policy::is_configured_switcher_hotkey(sym_raw, effective_mods, &before_state)
             && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
             let Some(result) = self.session.process_enter() else {
@@ -696,9 +697,8 @@ impl App {
         // Forward consumed Ctrl shortcuts that the app should still
         // receive (e.g. Ctrl+` for terminal quake toggle). Match the
         // precise list from the original linux.rs implementation.
-        if self
-            .session
-            .should_forward_consumed_shortcut(sym_raw, effective_mods)
+        if !ime_state.is_package_switcher()
+            && self.session.should_forward_consumed_shortcut(sym_raw, effective_mods)
         {
             self.forward_unhandled_key(evdev_keycode, sym_raw);
         } else {

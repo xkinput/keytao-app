@@ -81,6 +81,7 @@ fn collect(
     prefix: &str,
     files: &mut BTreeMap<String, Vec<u8>>,
     size: &mut u64,
+    skip_trime_assets: bool,
 ) -> Result<(), CoreError> {
     let entries = import_io(fs::read_dir(directory), "读取目录", directory)?;
     for entry in entries {
@@ -100,6 +101,9 @@ fn collect(
             continue;
         }
         validate_relative(&relative).map_err(CoreError::Other)?;
+        if skip_trime_assets && crate::generic_rime::is_trime_asset(&relative) {
+            continue;
+        }
         let metadata = import_io(entry.metadata(), "读取文件属性", &path)?;
         #[cfg(windows)]
         {
@@ -117,7 +121,7 @@ fn collect(
             )));
         }
         if kind.is_dir() {
-            collect(&path, &relative, files, size)?;
+            collect(&path, &relative, files, size, skip_trime_assets)?;
         } else if kind.is_file() {
             if files.len() >= 10_000 {
                 return Err(CoreError::Other("方案包文件过多".into()));
@@ -352,7 +356,8 @@ pub(super) fn import_local_scheme_with(
     }
     let mut files = BTreeMap::new();
     let mut total_size = 0;
-    collect(&directory, "", &mut files, &mut total_size)?;
+    let skip_trime_assets = core.env().platform == crate::Platform::Android && options.git.is_some();
+    collect(&directory, "", &mut files, &mut total_size, skip_trime_assets)?;
     collect_orphan_prebuilt_bins(&directory, &mut files, &mut total_size)?;
     let mut schemas: Vec<_> = files
         .keys()

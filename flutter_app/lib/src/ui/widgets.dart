@@ -30,24 +30,44 @@ class SchemaLogo extends StatelessWidget {
             width: size,
             height: size,
             excludeFromSemantics: true,
+            gaplessPlayback: true,
           )
         : const SizedBox.shrink();
-    final key = schemeKey ?? controller.activeSchemeKey;
-    final package = controller.installedPackageFor(key);
-    final path = schemeKey != null
-        ? package?.logoPath ?? controller.remoteSchemeLogoFor(key)
-        : controller.activeSchemaLogoPath ?? package?.logoPath;
-    return path == null
-        ? fallback()
-        : Image.file(
-            File(path),
-            key: ValueKey((path, controller.activeSchemaLogoRevision)),
-            width: size,
-            height: size,
-            excludeFromSemantics: true,
-            errorBuilder: (_, _, _) => fallback(),
-          );
+    final key = schemeKey;
+    final path = key != null
+        ? controller.effectiveSchemeLogoPath(key)
+        : controller.activeSchemaLogoPath ??
+              controller
+                  .installedPackageFor(controller.activeSchemeKey)
+                  ?.logoPath;
+    if (path == null) return fallback();
+    final file = File(path);
+    final version = controller.schemaLogoVersion(path);
+    return Image(
+      image: version == null ? FileImage(file) : _VersionedLogoImage(file, version),
+      width: size,
+      height: size,
+      excludeFromSemantics: true,
+      gaplessPlayback: true,
+      errorBuilder: (_, _, _) => fallback(),
+    );
   }
+}
+
+// Rendered active logos and remote previews can change without changing their path.
+class _VersionedLogoImage extends FileImage {
+  const _VersionedLogoImage(super.file, this.version);
+
+  final Object version;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _VersionedLogoImage &&
+      other.file.path == file.path &&
+      other.version == version;
+
+  @override
+  int get hashCode => Object.hash(file.path, version);
 }
 
 class AppSystemBars extends StatelessWidget {

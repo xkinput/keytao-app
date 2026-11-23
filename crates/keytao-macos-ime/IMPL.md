@@ -293,7 +293,7 @@ Apple 官方 SDK 头文件对这两个接口的坐标契约很明确：
 
 `handleFlagsChanged()` 跟踪左右 Shift、Control 和 Option 的独立轻点。普通按键、组合修饰键、焦点变化或引擎重载会取消待确认的轻点。确认同一物理键在 500 毫秒内抬起时，通过 `keytao_session_process_modifier_tap_json()` 一次交给引擎按下和抬起事件。Rime 据 `ascii_composer/switch_key` 处理，包括未绑定或 `noop` 的键。Command 由系统处理。
 
-`Info.plist` 声明 `TICapsLockLanguageSwitchCapable`。启用系统键盘设置中的 Caps Lock／中英键切换后，macOS 负责在键道和最近使用的拉丁输入源间切换。普通 Caps Lock 状态变化仍按切换前的锁定位传给 Rime。激活输入源时从系统会话读当前锁定位。
+`Info.plist` 将 `TICapsLockLanguageSwitchCapable` 设为 `false`。键道处于活动状态时，单独按中英键（Caps Lock）会复原硬件锁定位，提交正在组字的文本，再通过 `keytao_session_set_english_mode_json()` 切换当前会话的 ASCII 或 Easy English 模式。恢复锁定位只在收到活动输入会话的真实 Caps Lock 开启事件时执行。组合键、已有大写锁定的解锁以及无法复原硬件锁定的情况仍按切换前的锁定位传给 Rime。系统输入源快捷键继续由 macOS 处理。
 
 `ModeIndicatorPanel` 是主题驱动的 nonactivating `NSPanel`，默认 48×36，文案取自通用层 `ModeHintModel.text`（默认 `中` / `英`），默认 0.75 秒后自动隐藏。
 
@@ -304,7 +304,7 @@ Apple 官方 SDK 头文件对这两个接口的坐标契约很明确：
 - `Redeploy KeyTao`：调用 `keytao_reload()`，隐藏候选，刷新 state，并播放 Glass 音效。
 - `Open KeyTao App`：优先打开 bundle id `ink.rea.keytao-app`，否则打开 `/Applications/KeyTao.app`。
 
-Rime 自身的 schema / options 菜单不由 `InputController.menu()` 重新实现。按键路径会把 `F4` 映射为 `XK_F4` / `0xffc1` 送入 librime，候选窗按通用候选模型显示 Rime 生成的菜单候选。
+`F4` 和 Rime 配置中的 `switcher/hotkeys` 经按键路径交由通用层处理。候选窗显示选单，重复按选单热键会循环移动高亮，回车确认，Esc 关闭。
 
 ## App 对接点
 
@@ -410,7 +410,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
 - 候选点击选择。
 - 候选翻页按钮。
 - 候选窗/模式提示按 `client.windowLevel() + 1` 抬升层级。
-- 遵循方案的 Shift、Control、Option 中英绑定，以及 macOS 的 Caps Lock／中英键输入源切换。
+- 遵循方案的 Shift、Control、Option 中英绑定。单独按 macOS 中英键（Caps Lock）时，切换键道内部的中英模式。
 - Shift+字母大写输入兼容。
 - 小键盘 Enter 映射为 `XK_KP_Enter`；无法映射的按键在有 composition 时先提交再放行。
 - 输入法菜单里的 redeploy 和打开主 App。

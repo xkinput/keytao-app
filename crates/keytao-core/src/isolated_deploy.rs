@@ -25,6 +25,18 @@ const DEPLOY_LOCK: &str = ".keytao-package-deploy.lock";
 const MIGRATION_LOCK: &str = ".keytao-migration.lock";
 const MATERIALIZE_LOCK: &str = ".keytao-materialize.lock";
 
+// JD's Lua scripts update these files while typing and learning phrases.
+// shortcut: keep the paths explicit until scheme packages can declare mutable data.
+const LUA_RUNTIME_STATE: &[&str] = &[
+    "JD6_userdata/JD6_overrides.tsv",
+    "JD6_userdata/JD6_usage.tsv",
+    "JD6_userdata/JD6_usage_events.tsv",
+    "lua/kc_count.txt",
+    "lua/TJ/direct_pending.txt",
+    "lua/TJ/stats.txt",
+    "lua/TJ/stats.txt.tmp",
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PackageDeployTarget {
     pub package_key: String,
@@ -889,7 +901,7 @@ fn input_stat_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 
     })
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct InputStat {
     volume: u64,
     file_id: [u8; 16],
@@ -970,7 +982,7 @@ fn input_stat(path: &Path) -> io::Result<InputStat> {
     })
 }
 
-fn input_signature_with<T: Serialize>(
+fn input_signature_with<T: Clone + Serialize>(
     control_root: &Path,
     dirs: &RuntimeDirs,
     domain: &[u8],
@@ -981,18 +993,31 @@ fn input_signature_with<T: Serialize>(
     hash.update(crate::deployment_fingerprint(control_root)?);
     hash.update([0]);
     hash.update(crate::librime_runtime_version().ok_or("librime version is unavailable")?);
-    let roots = [(&dirs.user_data_dir, false), (&dirs.shared_data_dir, true)];
-    let prebuilt = (dirs.prebuilt_data_dir != dirs.shared_data_dir.join("build")
-        && dirs.prebuilt_data_dir.is_dir())
-    .then_some((&dirs.prebuilt_data_dir, true));
-    for (index, (root, shared)) in roots.into_iter().chain(prebuilt).enumerate() {
-        hash.update([index as u8]);
+    let mut collect = |root: &Path, shared| -> Result<BTreeMap<PathBuf, T>, String> {
         let mut files = BTreeMap::new();
         walk_files(root, shared, &mut |relative, path| {
-            files.insert(relative.to_path_buf(), file_value(path)?);
+            if shared || !LUA_RUNTIME_STATE.iter().any(|name| relative == Path::new(name)) {
+                files.insert(relative.to_path_buf(), file_value(path)?);
+            }
             Ok(())
         })
         .map_err(|error| format!("read deployment inputs: {error}"))?;
+        Ok(files)
+    };
+    let shared = collect(&dirs.shared_data_dir, true)?;
+    let mut user = collect(&dirs.user_data_dir, false)?;
+    // Use the packaged template for mutable copies to retain receipts written before they changed.
+    for name in LUA_RUNTIME_STATE {
+        if let Some((path, template)) = shared.get_key_value(Path::new(name)) {
+            user.insert(path.clone(), template.clone());
+        }
+    }
+    let prebuilt = (dirs.prebuilt_data_dir != dirs.shared_data_dir.join("build")
+        && dirs.prebuilt_data_dir.is_dir())
+    .then(|| collect(&dirs.prebuilt_data_dir, true))
+    .transpose()?;
+    for (index, files) in [user, shared].into_iter().chain(prebuilt).enumerate() {
+        hash.update([index as u8]);
         hash.update(serde_json::to_vec(&files).map_err(|error| error.to_string())?);
     }
     Ok(hash.finalize().into())
@@ -1203,6 +1228,14 @@ mod tests {
         )
         .unwrap();
         fs::write(&patch, selection).unwrap();
+        let overrides = "JD6_userdata/JD6_overrides.tsv";
+        fs::create_dir(shared.join("JD6_userdata")).unwrap();
+        fs::create_dir(dirs.user_data_dir.join("JD6_userdata")).unwrap();
+        fs::write(shared.join(overrides), b"template\n").unwrap();
+        fs::write(dirs.user_data_dir.join(overrides), b"template\n").unwrap();
+        fs::create_dir_all(dirs.user_data_dir.join("lua/TJ")).unwrap();
+        let lua_words = dirs.user_data_dir.join("lua/TJ/words.txt");
+        fs::write(&lua_words, b"source words\n").unwrap();
 
         let target = PackageDeployTarget {
             package_key: key.into(),
@@ -1259,6 +1292,33 @@ mod tests {
             fs::write(&source, original).unwrap();
         }
         assert!(crate::schema_install_state(root).deployed, "{key}");
+        assert!(crate::schema_install_state_with_shared(root, &shared).deployed);
+
+        fs::write(dirs.user_data_dir.join(overrides), b"learned phrase\n").unwrap();
+        for path in [
+            "JD6_userdata/JD6_usage.tsv",
+            "JD6_userdata/JD6_usage_events.tsv",
+            "lua/kc_count.txt",
+            "lua/TJ/direct_pending.txt",
+            "lua/TJ/stats.txt",
+            "lua/TJ/stats.txt.tmp",
+        ] {
+            fs::write(dirs.user_data_dir.join(path), b"runtime state\n").unwrap();
+        }
+        assert!(
+            crate::schema_install_state_with_shared(root, &shared).deployed,
+            "learning and typing must not invalidate the published build"
+        );
+        assert_eq!(
+            deploy_package(root, &dirs, None, |_| panic!("runtime state needs no compile")),
+            Ok(DeployStep::Skip)
+        );
+        fs::write(&lua_words, b"edited source words\n").unwrap();
+        assert!(!crate::schema_install_state_with_shared(root, &shared).deployed);
+        fs::write(&lua_words, b"source words\n").unwrap();
+        fs::write(shared.join(overrides), b"new upstream template\n").unwrap();
+        assert!(!crate::schema_install_state_with_shared(root, &shared).deployed);
+        fs::write(shared.join(overrides), b"template\n").unwrap();
         assert!(crate::schema_install_state_with_shared(root, &shared).deployed);
 
         fs::write(

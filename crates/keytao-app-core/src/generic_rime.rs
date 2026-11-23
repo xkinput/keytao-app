@@ -16,6 +16,15 @@ pub(crate) fn ships_with_scheme(name: &str) -> bool {
     name.ends_with(".user.dict.yaml") || name.ends_with("_user.txt") || name == "user_dict.txt"
 }
 
+pub(crate) fn is_trime_asset(relative: &str) -> bool {
+    let top = relative.split('/').next().unwrap_or(relative);
+    let name = relative.rsplit('/').next().unwrap_or(relative).to_ascii_lowercase();
+    top.eq_ignore_ascii_case("backgrounds")
+        || matches!(name.as_str(), "trime.yaml" | "trime.custom.yaml")
+        || name.ends_with(".trime.yaml")
+        || name.ends_with(".trime.custom.yaml")
+}
+
 pub(crate) fn is_excluded_path(relative: &str) -> bool {
     let top = relative.split('/').next().unwrap_or(relative);
     if matches!(

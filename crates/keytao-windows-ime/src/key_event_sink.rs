@@ -55,7 +55,7 @@ use crate::{
     guard,
     key_map::{
         ascii_mode_rejects_key, chord_keysym_for_vk, current_mod_mask, is_application_shortcut,
-        is_caps_lock_vk, is_enter_vk, is_shift_vk, rime_mod_mask_for_vk,
+        is_caps_lock_vk, is_enter_vk, is_shift_vk, rime_mod_mask_for_vk, schema_shortcut_key,
         shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
         vk_to_keysym, RIME_RELEASE_MASK,
     },
@@ -2574,6 +2574,16 @@ fn cached_ime_state(shared_state: &SharedState) -> Option<ImeState> {
     shared_state.borrow().ime_state.clone()
 }
 
+fn poll_pending_key_state(shared_state: &SharedState) {
+    let pending = {
+        let st = shared_state.borrow();
+        st.engine_building || st.reload_in_progress || (st.ime_state.is_none() && st.engine_ready())
+    };
+    if pending {
+        poll_engine_builds(shared_state);
+    }
+}
+
 pub(crate) fn has_visible_state(state: &ImeState) -> bool {
     !state.preedit.is_empty() || !state.candidates.is_empty()
 }
@@ -3021,9 +3031,14 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             // TSF only calls OnKeyDown for keys claimed here, so solo-Shift state
             // has to be maintained in the test callback (windows-1).
             record_shift_press(&state, vk, lparam.0, mods);
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+            poll_pending_key_state(&state);
+            let cached_state = cached_ime_state(&state);
+            let composing = cached_state.as_ref().is_some_and(has_visible_state)
                 || deferred_input_pending(&state, pic);
-            if is_application_shortcut(vk, mods, composing) {
+            let schema_shortcut = cached_state
+                .as_ref()
+                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
+            if schema_shortcut.is_none() && is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
@@ -3034,7 +3049,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             poll_engine_builds(&state);
             let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
                 || deferred_input_pending(&state, pic);
-            if !should_eat_key(vk, composing, mods)
+            if schema_shortcut.is_none()
+                && !should_eat_key(vk, composing, mods)
                 && !cached_ime_state(&state)
                     .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
             {
@@ -3065,7 +3081,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
             let is_composing = cached_state.as_ref().is_some_and(has_visible_state)
                 || deferred_input_pending(&state, pic);
-            let ascii_rejects = !is_composing
+            let schema_shortcut = cached_state
+                .as_ref()
+                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
+            let ascii_rejects = schema_shortcut.is_none() && !is_composing
                 && cached_state.as_ref().map_or(persisted_ascii_mode, |st| st.ascii_mode)
                 && ascii_mode_rejects_key(vk, mods);
             if ascii_rejects { return Ok(BOOL::from(false)); }
@@ -3085,7 +3104,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let chord_key = cached_state
                 .as_ref()
                 .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, st).is_some());
-            let eat = !ascii_rejects && (chord_key || should_eat_key(vk, is_composing, mods));
+            let eat = schema_shortcut.is_some() || chord_key || should_eat_key(vk, is_composing, mods);
             state.borrow_mut().claimed_key = eat.then_some((vk, lparam.0));
             append_key_diagnostic!(
                 "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
@@ -3171,19 +3190,28 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let mods = current_mod_mask();
             let claimed = state.borrow_mut().claimed_key.take() == Some((vk, lparam.0));
             record_shift_press(&state, vk, lparam.0, mods);
+            poll_pending_key_state(&state);
             // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
             // shortcut policy before context inspection, warmup, or Enter's
             // modifier-free process_enter path.
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+            let cached_state = cached_ime_state(&state);
+            let composing = cached_state.as_ref().is_some_and(has_visible_state)
                 || deferred_input_pending(&state, pic);
-            if !claimed && is_application_shortcut(vk, mods, composing) {
+            let schema_shortcut = cached_state
+                .as_ref()
+                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
+            if !claimed && schema_shortcut.is_none() && is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+            let cached_state = cached_ime_state(&state);
+            let schema_shortcut = cached_state
+                .as_ref()
+                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
+            let composing = cached_state.as_ref().is_some_and(has_visible_state)
                 || deferred_input_pending(&state, pic);
             let ascii_mode = {
                 let st = state.borrow();
@@ -3191,10 +3219,16 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     .as_ref()
                     .map_or(st.ascii_mode, |ime| ime.ascii_mode)
             };
-            if !claimed && !composing && ascii_mode && ascii_mode_rejects_key(vk, mods) {
+            if !claimed
+                && schema_shortcut.is_none()
+                && !composing
+                && ascii_mode
+                && ascii_mode_rejects_key(vk, mods)
+            {
                 return Ok(BOOL::from(false));
             }
             if !claimed
+                && schema_shortcut.is_none()
                 && !should_eat_key(vk, composing, mods)
                 && !cached_ime_state(&state)
                     .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
@@ -3212,13 +3246,15 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
 
-            let Some(keysym) = vk_to_keysym(vk, lparam.0, mods) else {
+            let Some((keysym, mods)) = schema_shortcut.or_else(|| {
+                vk_to_keysym(vk, lparam.0, mods).map(|key| (key, rime_mod_mask_for_vk(vk, mods)))
+            }) else {
                 return Ok(BOOL::from(false));
             };
             let key = DeferredKey {
                 keysym,
-                mods: rime_mod_mask_for_vk(vk, mods),
-                enter: is_enter_vk(vk),
+                mods,
+                enter: schema_shortcut.is_none() && is_enter_vk(vk),
                 shift_toggle: false,
             };
             if deferred_input_pending(&state, Some(&context)) {
@@ -3246,6 +3282,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
 
             if !claimed
+                && schema_shortcut.is_none()
                 && should_bypass_empty_composition(vk, mods, &before_state)
                 && chord_keysym_for_vk(vk, lparam.0, mods, &before_state).is_none()
             {

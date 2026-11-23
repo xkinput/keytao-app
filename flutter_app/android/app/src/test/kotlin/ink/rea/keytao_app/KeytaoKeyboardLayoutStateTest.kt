@@ -7,6 +7,14 @@ import org.junit.Test
 
 class KeytaoKeyboardLayoutStateTest {
     @Test
+    fun `flush keyboard removes padding only once the navigation inset is zero`() {
+        assertEquals(48, resolveKeyboardBottomInsetDp(24, 0, 48, false))
+        assertEquals(0, resolveKeyboardBottomInsetDp(24, 0, 48, true))
+        assertEquals(48, resolveKeyboardBottomInsetDp(48, 48, 12, true))
+        assertEquals(48, resolveKeyboardBottomInsetDp(-1, -1, 12, true))
+    }
+
+    @Test
     fun `portrait layout clamps independent floating and one handed geometry`() {
         val state = KeyboardLayoutState(
             mode = KeyboardLayoutMode.FLOATING,

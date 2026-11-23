@@ -64,6 +64,11 @@ class KeytaoAndroidChannel(
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
                 "showInputMethodPicker" -> showInputMethodPicker(reply)
                 "resetKeyboardLayout" -> resetKeyboardLayout(reply)
+                "setKeyboardFlushBottom" -> {
+                    val enabled = requireNotNull(call.argument<Boolean>("enabled"))
+                    KeytaoKeyboardLayoutStateStore(activity).flushBottom = enabled
+                    reply.success()
+                }
                 "pickDirectory" -> pickDirectory(reply)
                 "importLocalSchemeDirectory" -> pickDirectory(reply, importLocalScheme = true)
                 "listFiles" -> listFiles(call, reply)
@@ -119,6 +124,7 @@ class KeytaoAndroidChannel(
         Thread {
             try {
                 KeytaoAndroidImeConfig.resetDefaultKeyboard(activity)
+                KeytaoKeyboardLayoutStateStore(activity).flushBottom = false
                 reply.success()
             } catch (ex: Exception) {
                 reply.error(ex.message ?: "恢复默认键盘失败")
@@ -1143,6 +1149,7 @@ class KeytaoAndroidChannel(
             put("enabled", enabled)
             put("selected", selected)
             put("canShowPicker", enabled)
+            put("keyboardFlushBottom", KeytaoKeyboardLayoutStateStore(activity).flushBottom)
             put("message", message)
         }
     }

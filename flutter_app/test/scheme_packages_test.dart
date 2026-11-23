@@ -596,7 +596,6 @@ void main() {
     expect(controller.installedPackageFor('keytao')!.active, isFalse);
     expect(controller.local!.deployed, isTrue);
     expect(controller.activeSchemaLogoPath, '/isolated/logos/xmjd6.png');
-    expect(controller.activeSchemaLogoRevision, 1);
     expect(controller.busy, isFalse);
     expect(controller.deployingSchemeKey, isNull);
   });

@@ -218,6 +218,19 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     );
     assert_eq!(session.current_schema().unwrap().id, "keytao_c");
     assert!(session.state().preedit.is_empty());
+    let configured_hotkey = (0x60, RIME_MOD_CONTROL | RIME_MOD_SHIFT);
+    let opened = session
+        .process_key_result(configured_hotkey.0, configured_hotkey.1)
+        .unwrap();
+    assert!(opened.accepted && opened.state.is_package_switcher());
+    assert_eq!(opened.state.highlighted_candidate_index, 0);
+    let next = session.process_key_result(key_policy::XK_F4, 0).unwrap();
+    assert!(next.accepted && next.state.is_package_switcher());
+    assert_eq!(next.state.highlighted_candidate_index, 1);
+    let next = session.process_key_result(0x7e, configured_hotkey.1).unwrap();
+    assert!(next.accepted && next.state.is_package_switcher());
+    assert_eq!(next.state.highlighted_candidate_index, 2);
+    session.process_key_result(key_policy::XK_ESCAPE, 0).unwrap();
     runtime.switch_package("first").unwrap();
     runtime.reload_without_deploy().unwrap();
     assert_eq!(session.current_schema().unwrap().id, "keytao_b");
@@ -271,10 +284,10 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     assert!(closed_on_active.accepted);
     assert_eq!(closed_on_active.state.schema_id, "keytao_b");
     let ctrl_grave = [(0xffe3, 0), (0x60, RIME_MOD_CONTROL)];
-    for expected in [switcher_model::SCHEMA_ID, "keytao_b"] {
+    for highlighted in [1, 2] {
         let result = session.process_keys_result(&ctrl_grave).unwrap();
-        assert!(result.accepted);
-        assert_eq!(result.state.schema_id, expected);
+        assert!(result.accepted && result.state.is_package_switcher());
+        assert_eq!(result.state.highlighted_candidate_index, highlighted);
         session
             .process_keys_result(&[
                 (0x60, RIME_MOD_CONTROL | RIME_RELEASE_MASK),
@@ -282,6 +295,7 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
             ])
             .unwrap();
     }
+    session.process_key_result(key_policy::XK_ESCAPE, 0).unwrap();
     let composition = session.process_keys_result(&[(b'a'.into(), 0), (b'a'.into(), 0)]).unwrap();
     assert!(!composition.state.preedit.is_empty());
     let preview = composition.state.commit_preview;

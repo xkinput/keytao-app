@@ -463,7 +463,22 @@ impl<'a> PackageStore<'a> {
         meta: &PackageMeta,
         origin: Option<&str>,
     ) -> Result<(), CoreError> {
-        self.write_archive_with(reader, meta, origin, package_fs::rename)
+        self.write_archive_with(reader, meta, origin, false, package_fs::rename)
+    }
+
+    pub(crate) fn write_downloaded_archive(
+        &self,
+        reader: impl Read + Seek,
+        meta: &PackageMeta,
+        origin: Option<&str>,
+    ) -> Result<(), CoreError> {
+        self.write_archive_with(
+            reader,
+            meta,
+            origin,
+            self.core.env().platform == crate::Platform::Android,
+            package_fs::rename,
+        )
     }
 
     fn write_archive_with(
@@ -471,6 +486,7 @@ impl<'a> PackageStore<'a> {
         reader: impl Read + Seek,
         meta: &PackageMeta,
         origin: Option<&str>,
+        skip_trime_assets: bool,
         rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     ) -> Result<(), CoreError> {
         let destination = self.checked_package_path(&meta.scheme_key)?;
@@ -508,6 +524,9 @@ impl<'a> PackageStore<'a> {
             total = total.saturating_add(entry.size());
             if total > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("Expanded package is too large".into()));
+            }
+            if skip_trime_assets && crate::generic_rime::is_trime_asset(&relative) {
+                continue;
             }
             let parent = target.parent().unwrap();
             fs::create_dir_all(parent).map_err(|error| context("创建目录", parent, error))?;
@@ -550,6 +569,9 @@ impl<'a> PackageStore<'a> {
                 )
             }).transpose()?;
         let mut meta: PackageMeta = serde_json::from_value(serde_json::to_value(meta)?)?;
+        if skip_trime_assets {
+            meta.manifest.retain(|path, _| !crate::generic_rime::is_trime_asset(path));
+        }
         if let Some(previous) = previous.as_ref() {
             meta.engine = previous.meta.engine;
         }
@@ -1501,6 +1523,7 @@ mod tests {
             Cursor::new(&new),
             &metadata("keytao", &new),
             None,
+            false,
             |source, destination| {
                 assert!(source.join("package.json").is_file());
                 assert!(!destination.exists());

@@ -307,7 +307,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var deploymentHint: String? = null
     private val visibleDeploymentHint: String?
         get() = deploymentHint?.takeIf { it == "正在部署中" || state.candidatePanel.candidates.isEmpty() }
-    private var systemBottomInsetDp = -1
+    private var bottomInsetDp = 0
     private var enterLabelOverride: String? = null
     private var editorRequestedLayer: String? = null
     private var inputMethodSwitchingAvailable = false
@@ -581,9 +581,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textRecallAllowed = allowed
     }
 
-    fun updateSystemBottomInsetDp(value: Int) {
-        if (value == systemBottomInsetDp) return
-        systemBottomInsetDp = value
+    fun updateBottomInsetDp(value: Int) {
+        if (value == bottomInsetDp) return
+        bottomInsetDp = value
         invalidateKeyboardLayoutCache()
         requestLayout()
         invalidate()
@@ -944,7 +944,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
         val contentHeight = if (emojiSearchQuery != null) config.emojiSearchHeightDp() else config.effectiveKeyboardHeightDp
-        val desiredHeight = dp(contentHeight + config.candidateBarHeightDp + effectiveKeyboardBottomInsetDp()).toInt()
+        val desiredHeight = dp(contentHeight + config.candidateBarHeightDp + bottomInsetDp).toInt()
         val resolvedHeight = resolveSize(desiredHeight, heightMeasureSpec)
         setMeasuredDimension(width, resolvedHeight)
     }
@@ -4799,9 +4799,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(':')
             append(config.candidateBarHeightDp)
             append(':')
-            append(config.keyboardBottomInsetDp)
-            append(':')
-            append(effectiveKeyboardBottomInsetDp())
+            append(bottomInsetDp)
             append(':')
             append(config.horizontalGapDp)
             append(':')
@@ -5138,17 +5136,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun bottomReservedInset(): Float {
-        val requested = min(dp(effectiveKeyboardBottomInsetDp()), dp(64f))
+        val requested = min(dp(bottomInsetDp), dp(64f))
         val minKeyboardContentHeight = dp(180f)
         val available = (height.toFloat() - keyboardTop() - minKeyboardContentHeight).coerceAtLeast(0f)
         return min(requested, available)
-    }
-
-    /** Same rule as the service: the system inset is the floor, config is extra. */
-    private fun effectiveKeyboardBottomInsetDp(): Int {
-        if (keyboardLayoutMode == KeyboardLayoutMode.FLOATING) return 0
-        val system = if (systemBottomInsetDp >= 0) systemBottomInsetDp else androidSystemBottomInsetDp
-        return max(system, config.keyboardBottomInsetDp)
     }
 
     private fun toggleCandidatePanel() {
@@ -7104,7 +7095,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val expandedCandidateLoadDelayMs = 180L
         private const val hapticLightDurationMs = 8L
         private const val hapticMediumDurationMs = 18L
-        private const val androidSystemBottomInsetDp = 48
         private const val backspacePreviewDurationMs = 2_000L
         private const val emojiPreferencesName = "keytao_ime_emoji"
         private const val recentEmojiPreferenceKey = "recent_emoji"

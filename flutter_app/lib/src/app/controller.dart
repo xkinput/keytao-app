@@ -5,7 +5,6 @@ import 'dart:ui' show Locale, PlatformDispatcher;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 
 import '../platform/android_host.dart';
@@ -335,7 +334,6 @@ class AppController extends ChangeNotifier {
   List<VerifyEntryDto> verification = [];
   LocalSchemaDto? local;
   String? activeSchemaLogoPath;
-  int activeSchemaLogoRevision = 0;
   String? _localSchemaError;
   core.AddonStatusDto? addon;
   Map<String, dynamic>? storage;
@@ -393,29 +391,23 @@ class AppController extends ChangeNotifier {
   final Map<String, DateTime> _remoteSchemeLogoFetchedAt = {};
   final Map<String, bool> _addonLogoInstalledState = {};
   final Set<String> _remoteSchemeLogoInFlight = {};
+  final _schemaLogoVersions = <String, (DateTime, DateTime, int)>{};
 
-  String? remoteSchemeLogoFor(String key) {
-    final package = installedPackageFor(key);
-    if (package?.hasPackageZip == true) {
-      if (package?.logoPath != null) {
-        _remoteSchemeLogos.remove(key);
-        _remoteSchemeLogoFetchedAt.remove(key);
-      }
-      return package?.logoPath;
-    }
-    final fetchedAt = _remoteSchemeLogoFetchedAt[key];
-    if (fetchedAt != null &&
-        DateTime.now().difference(fetchedAt) >= remoteLogoCacheTtl) {
-      _remoteSchemeLogos.remove(key);
-      _remoteSchemeLogoFetchedAt.remove(key);
-      return null;
-    }
-    return _remoteSchemeLogos[key];
-  }
+  Object? schemaLogoVersion(String path) => _schemaLogoVersions[path];
 
   String? effectiveSchemeLogoPath(String key) {
     final package = installedPackageFor(key);
-    return package?.logoPath ?? remoteSchemeLogoFor(key);
+    return package?.logoPath ??
+        (package?.hasPackageZip == true ? null : _remoteSchemeLogos[key]);
+  }
+
+  Future<bool> _readSchemaLogoVersion(String path) async {
+    final stat = await File(path).stat();
+    if (_disposed || stat.type != FileSystemEntityType.file) return false;
+    final version = (stat.modified, stat.changed, stat.size);
+    if (version == _schemaLogoVersions[path]) return false;
+    _schemaLogoVersions[path] = version;
+    return true;
   }
 
   Future<void> ensureRemoteSchemeLogo(
@@ -456,6 +448,8 @@ class AppController extends ChangeNotifier {
         branch: branch ?? package?.git?.branch,
       );
       if (_disposed) return;
+      final imageChanged = path != null && await _readSchemaLogoVersion(path);
+      if (_disposed) return;
       _remoteSchemeLogoFetchedAt[key] = DateTime.now();
       final latestPkg = installedPackageFor(key);
       if (latestPkg?.hasPackageZip == true && latestPkg?.logoPath != null) {
@@ -464,11 +458,7 @@ class AppController extends ChangeNotifier {
       }
       final previous = _remoteSchemeLogos[key];
       _remoteSchemeLogos[key] = path;
-      if (path != null) {
-        await FileImage(File(path)).evict();
-        activeSchemaLogoRevision++;
-      }
-      if (previous != path) {
+      if (previous != path || imageChanged) {
         _changed();
       }
     } catch (_) {
@@ -1379,7 +1369,6 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readLocal() async {
     _localSchemaError = null;
-    activeSchemaLogoPath = null;
     try {
       local = await core.checkLocalSchema();
       deployWarning = local?.deployWarning;
@@ -1414,11 +1403,9 @@ class AppController extends ChangeNotifier {
     await _readSchemas();
     await refreshIsolatedPackages(notify: false);
     await _readSchemaSwitches();
-    activeSchemaLogoPath = await core.activeSchemaLogoPath();
-    if (activeSchemaLogoPath case final path?) {
-      await FileImage(File(path)).evict();
-    }
-    activeSchemaLogoRevision++;
+    final logoPath = await core.activeSchemaLogoPath();
+    if (logoPath != null) await _readSchemaLogoVersion(logoPath);
+    activeSchemaLogoPath = logoPath;
     _watchCurrentSchema();
   }
 
@@ -1499,7 +1486,7 @@ class AppController extends ChangeNotifier {
   Future<void> _readSchemaSwitches() async {
     schemaSwitches = [];
     schemaSwitchError = null;
-    if (local?.deployed == true && !usesLibjd(activeSchemeKey)) {
+    if (hasUsableBuild && !usesLibjd(activeSchemeKey)) {
       try {
         schemaSwitches = await core.getSchemaSwitches();
       } catch (failure) {
@@ -1836,13 +1823,6 @@ class AppController extends ChangeNotifier {
     final request = _schemeUpdatesRequest;
     final packages = await core.listInstalledPackages();
     if (_disposed || request != _schemeUpdatesRequest) return;
-    for (final package in packages) {
-      if (package.logoPath case final path?) {
-        _remoteSchemeLogos.remove(package.schemeKey);
-        _remoteSchemeLogoFetchedAt.remove(package.schemeKey);
-        await FileImage(File(path)).evict();
-      }
-    }
     LibjdStatusDto? libjdStatus;
     if (!isIos && packages.any((package) => package.schemeKey == 'keytao')) {
       try {
@@ -1853,6 +1833,12 @@ class AppController extends ChangeNotifier {
     }
     if (_disposed || request != _schemeUpdatesRequest) return;
     installedPackages = packages;
+    for (final package in packages) {
+      if (package.logoPath != null) {
+        _remoteSchemeLogos.remove(package.schemeKey);
+        _remoteSchemeLogoFetchedAt.remove(package.schemeKey);
+      }
+    }
     libjd = libjdStatus;
     schemeUpdates = [
       for (final update in schemeUpdates)
@@ -3935,12 +3921,20 @@ class AppController extends ChangeNotifier {
 
   Future<bool> saveAndroid(Map<String, Object> patch) => _saveAndroid(patch);
 
+  Future<bool> setKeyboardFlushBottom(bool enabled) => run(() async {
+    await android.setKeyboardFlushBottom(enabled);
+    ime = {...?ime, 'keyboardFlushBottom': enabled};
+  });
+
   Future<bool> _saveAndroid(
     Map<String, Object> patch, {
     bool resetKeyboardLayout = false,
   }) => run(() async {
     if (isAndroid) await _requireStorage();
-    if (isAndroid && resetKeyboardLayout) await android.resetKeyboardLayout();
+    if (isAndroid && resetKeyboardLayout) {
+      await android.resetKeyboardLayout();
+      ime = {...?ime, 'keyboardFlushBottom': false};
+    }
     final current = await core.getAndroidImeInputSettings();
     if (patch['englishMode'] == 'schema') {
       await _readLocal();

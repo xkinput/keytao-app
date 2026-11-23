@@ -2,20 +2,22 @@
 //! Rime or registering a text service in the user's Windows session.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
 };
 
 use windows::{
-    core::{implement, Result, GUID},
+    core::{implement, Interface, Result, GUID},
     Win32::{
         Foundation::{BOOL, E_FAIL, E_NOTIMPL, HWND, RECT},
         UI::TextServices::*,
     },
 };
 
-use super::{new_shared_state, refresh_language_bar, SharedState, WeakState};
+use super::{
+    new_shared_state, refresh_language_bar, set_keyboard_open_state, SharedState, WeakState,
+};
 
 // Unexpected COM calls fail instead of consulting the real Windows thread
 // manager. In particular, this mock does not expose ITfCompartmentMgr.
@@ -30,6 +32,7 @@ macro_rules! unimplemented_methods {
 
 struct RegistrationTrace {
     state: WeakState,
+    button: RefCell<Option<ITfLangBarItemButton>>,
     fail_first_add: Cell<bool>,
     reenter_once: Cell<bool>,
     deactivate_during_add: Cell<bool>,
@@ -104,6 +107,7 @@ impl ITfLangBarItemMgr_Impl for MockThreadMgr_Impl {
         self.trace
             .successful_adds
             .set(self.trace.successful_adds.get() + 1);
+        *self.trace.button.borrow_mut() = Some(item.unwrap().cast()?);
         Ok(())
     }
 
@@ -146,6 +150,7 @@ fn mock_state(fail_first_add: bool, reenter_once: bool) -> (SharedState, Rc<Regi
     let state = new_shared_state();
     let trace = Rc::new(RegistrationTrace {
         state: Rc::downgrade(&state),
+        button: RefCell::new(None),
         fail_first_add: Cell::new(fail_first_add),
         reenter_once: Cell::new(reenter_once),
         deactivate_during_add: Cell::new(false),
@@ -174,6 +179,26 @@ fn assert_engine_is_unloaded(state: &SharedState) {
     assert!(st.runtime.is_none());
     assert!(st.session.is_none());
     assert!(!st.engine_building);
+}
+
+#[test]
+fn system_keyboard_close_shows_english_without_changing_rime_mode() {
+    let (state, trace) = mock_state(false, false);
+    refresh_language_bar(&state);
+    let button = trace.button.borrow().clone().unwrap();
+    let displayed_mode = || unsafe { button.GetText() }.unwrap().to_string();
+
+    assert_eq!(displayed_mode(), "中");
+    set_keyboard_open_state(&state, false);
+    assert_eq!(displayed_mode(), "英");
+    assert!(!state.borrow().english_mode);
+    refresh_language_bar(&state);
+    assert_eq!(displayed_mode(), "英");
+
+    set_keyboard_open_state(&state, true);
+    assert_eq!(displayed_mode(), "中");
+    assert_eq!(trace.successful_adds.get(), 1);
+    assert_engine_is_unloaded(&state);
 }
 
 #[test]

@@ -846,6 +846,15 @@ class _SettingsCardState extends State<SettingsCard> {
         Section(
           title: AppStrings.layout,
           children: [
+            if (c.isAndroid)
+              SwitchSetting(
+                AppStrings.keyboardFlushBottom,
+                hint: AppStrings.keyboardFlushBottomHint,
+                value: c.ime?['keyboardFlushBottom'] == true,
+                onChanged: c.busy || c.ime == null
+                    ? null
+                    : c.setKeyboardFlushBottom,
+              ),
             toggle(
               portraitLabel,
               'floatingPortraitEnabled',

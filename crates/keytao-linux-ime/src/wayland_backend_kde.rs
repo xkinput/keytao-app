@@ -644,6 +644,7 @@ impl App {
         // confirms the highlighted candidate or commits the raw code.  Space
         // and the digits are ordinary keys for the same reason.
         if key_policy::is_enter_key(sym_raw)
+            && !key_policy::is_configured_switcher_hotkey(sym_raw, effective_mods, &before_state)
             && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
             let Some(result) = self.session.process_enter() else {
@@ -678,11 +679,10 @@ impl App {
         if result.accepted {
             self.commit_state_to_context(&ime_state);
             self.update_kimpanel(&ime_state);
+            let forwards_shortcut = !ime_state.is_package_switcher()
+                && self.session.should_forward_consumed_shortcut(sym_raw, effective_mods);
             self.show_panel(ime_state, qh);
-            if self
-                .session
-                .should_forward_consumed_shortcut(sym_raw, effective_mods)
-            {
+            if forwards_shortcut {
                 self.forward_key_press(evdev_keycode);
             } else {
                 // The grab took this key away from KWin, so a held

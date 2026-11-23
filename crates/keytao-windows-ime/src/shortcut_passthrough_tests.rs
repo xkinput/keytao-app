@@ -318,6 +318,69 @@ fn application_shortcuts_pass_through_com_before_context_or_engine_work() {
 }
 
 #[test]
+fn combo_bindings_override_pass_through_but_system_shortcuts_stay_native() {
+    std::thread::spawn(|| {
+        let keyboard = KeyboardStateGuard::save();
+        let mut ime = ImeState::empty();
+        ime.ascii_mode = true;
+        ime.schema_shortcuts = serde_yaml::from_str(
+            "- { key: 32, modifiers: 1, condition: Always }\n\
+             - { key: 65477, modifiers: 12, condition: Always }\n\
+             - { key: 97, modifiers: 5, condition: Always }\n\
+             - { key: 32, modifiers: 4, condition: Always }\n\
+             - { key: 65473, modifiers: 8, condition: Always }\n",
+        )
+        .unwrap();
+        keyboard.set(VK_RMENU, RIME_MOD_CONTROL | RIME_MOD_ALT);
+        assert!(crate::key_map::schema_shortcut_key(
+            VK_F8.0,
+            0,
+            current_mod_mask(),
+            &ime,
+        )
+        .is_none());
+        for (key, mods, should_probe_context) in [
+            (VK_SPACE, RIME_MOD_SHIFT, true),
+            (VK_F8, RIME_MOD_CONTROL | RIME_MOD_ALT, true),
+            (VK_A, RIME_MOD_CONTROL | RIME_MOD_SHIFT, true),
+            (VK_SPACE, RIME_MOD_CONTROL, false),
+            (VK_F4, RIME_MOD_ALT, false),
+            (VK_V, RIME_MOD_CONTROL, false),
+        ] {
+            for test_callback in [true, false] {
+                keyboard.set(key, mods);
+                let (_state, sink) = state_and_sink(ime.clone());
+                let calls = Calls::default();
+                let context: ITfContext = SpyContext {
+                    calls: calls.clone(),
+                    allow_input: false,
+                }
+                .into();
+                let (wparam, lparam) = (WPARAM(key.0.into()), LPARAM(0));
+                let eaten = unsafe {
+                    if test_callback {
+                        sink.OnTestKeyDown(&context, wparam, lparam)
+                    } else {
+                        sink.OnKeyDown(&context, wparam, lparam)
+                    }
+                }
+                .unwrap()
+                .as_bool();
+                assert!(!eaten, "the context spy refuses input");
+                assert_eq!(
+                    !calls.borrow().is_empty(),
+                    should_probe_context,
+                    "vk={}, modifiers={mods}, test={test_callback}",
+                    key.0
+                );
+            }
+        }
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn control_shift_release_order_never_toggles_mode_or_probes_context() {
     std::thread::spawn(|| {
         let keyboard = KeyboardStateGuard::save();

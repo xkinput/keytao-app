@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -705,6 +706,42 @@ void main() {
     },
   );
 
+  test('only a changed logo file invalidates its cached image', () async {
+    final directory = Directory.systemTemp.createTempSync('keytao-test-logos-');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final logo = File('${directory.path}/logo.png')..writeAsStringSync('old');
+    final api = _FollowupsCore()..remoteLogos['rime_ice'] = logo.path;
+    RustLib.initMock(api: api);
+    final c = AppController(
+      info: const BridgeInfo(
+        platform: BridgePlatform.windows,
+        appVersion: '1.2.15',
+        userRoot: '/rime',
+      ),
+    );
+    addTearDown(() async {
+      c.dispose();
+      await api.events.close();
+      RustLib.dispose();
+    });
+
+    var updates = 0;
+    c.addListener(() => updates++);
+    await c.ensureRemoteSchemeLogo('rime_ice', addonInstalled: false);
+    final version = c.schemaLogoVersion(logo.path);
+    expect(version, isNotNull);
+    expect(updates, 1);
+
+    await c.ensureRemoteSchemeLogo('rime_ice', addonInstalled: true);
+    expect(c.schemaLogoVersion(logo.path), version);
+    expect(updates, 1);
+
+    logo.writeAsStringSync('new content');
+    await c.ensureRemoteSchemeLogo('rime_ice', addonInstalled: false);
+    expect(c.schemaLogoVersion(logo.path), isNot(version));
+    expect(updates, 2);
+  });
+
   testWidgets(
     'uninstalled scheme fetches and caches remote .ico logo and automatically switches to real logo once downloaded',
     (tester) async {
@@ -736,6 +773,8 @@ void main() {
       await tester.binding.setSurfaceSize(const Size(1280, 1000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
+      // The logo lookup now includes async filesystem I/O.
+      await tester.runAsync(() => c.ensureRemoteSchemeLogo('txjx'));
       await tester.pumpWidget(
         KeyTaoTheme(
           platform: BridgePlatform.macOs,

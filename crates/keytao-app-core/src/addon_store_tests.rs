@@ -39,6 +39,35 @@ fn put(root: &Path, relative: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn android_downloaded_addon_does_not_publish_trime_assets() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = core(directory.path());
+    let root = directory.path().join("rime");
+    let source = directory.path().join("staging");
+    put(&root, "trime.yaml", b"existing user theme");
+    let entries: &[(&str, &[u8])] = &[
+        ("rime_frost.schema.yaml", b"schema: {schema_id: rime_frost}"),
+        ("trime.yaml", b"theme"),
+        ("example.trime.yaml", b"theme"),
+        ("backgrounds/image.png", b"theme image"),
+    ];
+    for (name, bytes) in entries {
+        put(&source, name, bytes);
+    }
+    let store = AddonStore::new(&core, &root, "rime_frost").unwrap();
+    drop(store.commit_isolated(&source, &manifest_bytes(entries)).unwrap());
+    let installed = isolated_files(&core, "rime_frost").unwrap();
+    assert!(installed.join("rime_frost.schema.yaml").exists());
+    assert!(!installed.join("backgrounds").exists());
+    assert!(!installed.join("trime.yaml").exists());
+    assert!(!installed.join("example.trime.yaml").exists());
+    assert_eq!(fs::read(root.join("trime.yaml")).unwrap(), b"existing user theme");
+    let manifest = store.read_manifest().unwrap().unwrap();
+    let manifest = serde_json::from_slice(&manifest).unwrap();
+    assert_eq!(parse_manifest(&manifest, "rime_frost").unwrap().len(), 1);
+}
+
+#[test]
 fn isolated_addon_publication_preserves_flat_sources_and_restores_failed_update() {
     let directory = tempfile::tempdir().unwrap();
     let core = core(directory.path());

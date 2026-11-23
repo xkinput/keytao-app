@@ -132,6 +132,10 @@ impl EnglishModeController {
             .any(|s| s.id == id && is_english_schema(&s.id, &s.name))
     }
 
+    pub fn chinese_schema(&self) -> Option<&str> {
+        self.chinese_schema.as_deref()
+    }
+
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
     pub fn remember_chinese(&mut self, id: &str, options: &BTreeMap<String, bool>) {
         if !self.is_english_schema(id) {

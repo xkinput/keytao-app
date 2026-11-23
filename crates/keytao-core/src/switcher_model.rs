@@ -1,7 +1,7 @@
 use crate::key_policy::{self, XK_F4};
 use crate::{
     Candidate, DEFAULT_SELECT_KEYS, ImeState, RIME_MOD_CONTROL, RIME_RELEASE_MASK, RuntimeDirs,
-    SchemaInfo, SchemaSwitchSetting, package_build_ready, rime_modifier_mask,
+    SchemaInfo, SchemaShortcut, SchemaSwitchSetting, package_build_ready, rime_modifier_mask,
     runtime_dirs::read_regular_file,
 };
 use serde::{Deserialize, Serialize};
@@ -276,6 +276,7 @@ pub(crate) struct Menu {
     page_size: usize,
     ascii_mode: bool,
     schema_name: String,
+    hotkeys: Vec<SchemaShortcut>,
 }
 
 impl Menu {
@@ -454,12 +455,18 @@ impl Menu {
             page_size,
             ascii_mode: false,
             schema_name: String::new(),
+            hotkeys: Vec::new(),
         })
     }
 
     pub(crate) fn keep_input_mode(&mut self, state: ImeState) {
         self.ascii_mode = state.ascii_mode;
         self.schema_name = state.schema_name;
+        self.hotkeys = state
+            .schema_shortcuts
+            .into_iter()
+            .filter(|key| key.is_switcher())
+            .collect();
     }
 
     pub(crate) fn state(&self) -> ImeState {
@@ -479,6 +486,7 @@ impl Menu {
             schema_id: SCHEMA_ID.into(),
             schema_name: self.schema_name.clone(),
             ascii_mode: self.ascii_mode,
+            schema_shortcuts: self.hotkeys.clone(),
             ..ImeState::empty()
         }
     }
@@ -547,8 +555,11 @@ impl Menu {
     pub(crate) fn key(&mut self, key: u32, mask: u32) -> Decision {
         use CandidateArrowAction::*;
         use key_policy::*;
-        if is_hotkey(key, mask) {
-            return Decision::Close;
+        if is_hotkey(key, mask)
+            || self.hotkeys.iter().any(|hotkey| hotkey.matches_switcher(key, mask))
+        {
+            self.highlighted = (self.highlighted + 1) % self.entries.len();
+            return Decision::Stay;
         }
         if matches!(key, 0xffe1..=0xffe4 | 0xffe9..=0xffec) {
             return Decision::Stay;
@@ -693,7 +704,8 @@ mod tests {
         assert_eq!(first.page, 0);
         assert!(!first.is_last_page);
         assert_eq!(menu.key(XK_RETURN, 0), Decision::Close);
-        assert_eq!(menu.key(XK_F4, 0), Decision::Close);
+        assert_eq!(menu.key(XK_F4, 0), Decision::Stay);
+        assert_eq!(menu.state().highlighted_candidate_index, 1);
         assert_eq!(
             menu.key(b'2'.into(), 0),
             Decision::SelectActiveSchema("easy_en".into())
@@ -728,6 +740,9 @@ mod tests {
             }
         );
         assert_eq!(menu.key(XK_DOWN, 0), Decision::Stay);
+        assert_eq!(menu.key(b'`'.into(), RIME_MOD_CONTROL), Decision::Stay);
+        assert_eq!(menu.state().page, 0);
+        assert_eq!(menu.state().highlighted_candidate_index, 0);
         assert_eq!(menu.key(XK_ESCAPE, 0), Decision::Close);
     }
 

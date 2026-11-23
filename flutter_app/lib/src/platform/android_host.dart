@@ -51,6 +51,8 @@ class AndroidHost {
       _channel.invokeMethod<void>('showInputMethodPicker');
   Future<void> resetKeyboardLayout() =>
       _channel.invokeMethod<void>('resetKeyboardLayout');
+  Future<void> setKeyboardFlushBottom(bool enabled) =>
+      _channel.invokeMethod<void>('setKeyboardFlushBottom', {'enabled': enabled});
   Future<String?> pickDirectory() async =>
       (await _channel.invokeMapMethod<String, dynamic>('pickDirectory'))?['uri']
           as String?;

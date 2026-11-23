@@ -77,6 +77,8 @@ App installs schema/dict/lua/opencc files
 
 桌面“英文模式”与移动端一样可选择 ASCII 或 English 词库。桌面偏好保存到 `keytao-ime.json` 的 `englishMode` 字段，修改后使用现有 reload stamp 通知输入法。`ImeRuntimeSession::set_english_mode()` 在词库模式切换 schema，并保存/恢复中文方案和选项；`ImeState::is_english_mode()` 用于中英指示，原始 `ascii_mode` 仍只表示透传，英文候选方案保持它为 false。移动端已有的 schema 切换继续使用原始 ASCII API。
 
+键道的中英切换在当前输入法会话内生效，并遵循用户选择的英文模式。系统输入源选择器负责在不同输入法之间切换。
+
 Windows 系统搜索等 AppContainer 宿主读取 App 从原始公开发行包生成的只读快照，首次在宿主自己的私有目录后台部署。普通应用的个人词库不会复制或授予沙箱权限。旧安装首次启动 App 时按已安装主方案准备公开包；后续公开包更新通过快照标记通知宿主。DLL 支持 IMMERSIVE/COMLESS 注册，部署与复制不在 TSF 输入线程执行。
 
 Windows、macOS 和 Linux 共享 `ui.embeddedComposition` 开关。开启时在输入框显示预编辑，关闭时交由候选面板显示。Linux Wayland 和 IBus 根据后端的候选面板能力选择显示位置。候选窗口使用 `panel.preeditGap`（默认 10）分隔预编辑与候选行。嵌入模式下自绘候选窗口省略这行预编辑。
@@ -361,7 +363,7 @@ mask = Rime modifier mask
 
 明确不再放行、必须先送 Rime 的：
 
-- **Ctrl / Alt / Option 组合键**。通用层支持 Rime 的热键和 key_binder。Windows TSF 先保留应用快捷键，只向 Rime 传递 Ctrl+grave、Ctrl+Shift+grave、Ctrl+Shift+1..5 和裸 F4；其它组合在两个按键入口直接透传，避免默认 Emacs 绑定覆盖复制/粘贴等操作，以及宿主在 Test 阶段改变快捷键路由。
+- **Ctrl / Alt / Option 组合键**。Windows TSF 根据已生效的 Rime 配置转发 `switcher/hotkeys`，以及 `key_binder` 在 `always`、`composing`、`has_menu` 条件下的 `toggle`、`set_option`、`unset_option` 和 `select` 组合键。`paging` 和 `predicting` 依赖 Rime 的分段标签，继续采用原有的按键透传规则。普通应用快捷键直接透传，避免默认 Emacs 编辑绑定接管复制粘贴。Ctrl+Space、AltGr、Win 和系统窗口快捷键继续由系统处理。
 - **`ascii_mode` 不是 bypass 判据**。英文模式下按键仍需进 `ascii_composer`，否则 Rime 侧的开关键与标点规则失效。macOS 与 Android 的“ascii 模式整段绕过 core”私货已删除。
 
 有 active composition 或 candidates 时，上述按键交给 Rime 或平台候选交互处理。
@@ -378,7 +380,7 @@ mask = Rime modifier mask
 1. Shift key down 不切换模式。
 2. 只有没有混入其它 keyDown 的 solo Shift release 才送入 Rime。
 3. 送入 `Shift_L` 或 `Shift_R` keysym，mask 为 `Release`。
-4. 如果 Rime 不接受，而平台需要兜底，可以调用 `set_ascii_mode(!ascii_mode)`。
+4. 按方案配置处理切换结果。桌面 English 词库模式保留切入前中文方案的单侧 Shift 禁用规则。
 
 平台前端必须区分 solo Shift 和 Shift+letter/number/symbol。Shift+其它按键必须走普通按键路径。
 
