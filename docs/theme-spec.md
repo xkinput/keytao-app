@@ -43,7 +43,7 @@ PC 列：M = macOS，W = Windows，Lp = Linux 自绘面板（`UiCapabilities::fu
 | 内边距 | `pc.panel.paddingX`、`paddingY` | 0–32、0–28 | 10、10 | M W Lp ✓ | 已有 | P0 |
 | 候选间距 | `pc.panel.gap` | 0–24 | 4 | M W Lp ✓ | 已有 | P0 |
 | 编码与候选的间距 | `pc.panel.preeditGap` | 0–48 | 10 | M W Lp ✓ | 已有 | P1 |
-| 尺寸限制 | `pc.panel.minWidth`、`maxWidth`、`maxHeight`、`screenMargin` | 48–480、160–2400、80–1600、0–40 | 见默认文件 | M W Lp ✓ | 已有，`maxWidth` 照常保留（B.4） | P2 |
+| 尺寸限制 | `pc.panel.minWidth`、`maxWidth`、`maxHeight`、`screenMargin` | 0–480、160–2400、80–1600、0–40 | `minWidth` 为 0 时按内容宽度，其他见默认文件 | M W Lp ✓ | 已有，`maxWidth` 照常保留（B.4） | P2 |
 | 面板阴影 | `pc.panel.shadow` | bool | true | M✓ W○ Lp○ | 已有，Windows 未实现 | P1 |
 | 候选字号 | `pc.font.size` | 10–36 | 20 | M W Lp ✓ | 已有（`font.size`） | P0 |
 | 序号、注释、编码字号 | `pc.font.labelSize`、`commentSize`、`preeditSize` | 9–28 | 15、16、15 | M W Lp ✓ | 已有 | P1 |

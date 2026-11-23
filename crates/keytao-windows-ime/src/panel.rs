@@ -362,9 +362,7 @@ impl PanelRenderer {
         let preedit_width = model
             .preedit
             .as_ref()
-            .map(|preedit| {
-                self.text_width(preedit, preedit_size) + panel_pad_left + panel_pad_right
-            })
+            .map(|preedit| self.text_width(preedit, preedit_size))
             .unwrap_or(0.0);
         let (content_width, content_height) = if model.orientation == PanelOrientation::Vertical {
             let max_option_width = option_widths.iter().copied().fold(0.0, f32::max);
@@ -375,7 +373,7 @@ impl PanelRenderer {
                 })
                 + model.candidates.len().saturating_sub(1) as f32 * panel_gap;
             (
-                max_option_width.max(nav_width).max(preedit_width),
+                max_option_width.max(nav_width),
                 preedit_height
                     + candidate_height
                     + if nav_count > 0 {
@@ -392,17 +390,14 @@ impl PanelRenderer {
             } else {
                 0.0
             };
-            (
-                (candidate_width + nav_extra).max(preedit_width),
-                preedit_height + option_height,
-            )
+            (candidate_width + nav_extra, preedit_height + option_height)
         };
         let width = theme
             .panel
             .min_width
-            .max(content_width + panel_pad_left + panel_pad_right)
-            .max(preedit_width)
+            .max(content_width.max(preedit_width) + panel_pad_left + panel_pad_right)
             .ceil()
+            .max(1.0)
             .min(
                 (available_width
                     - resolved_panel_shadow(theme.panel.shadow)

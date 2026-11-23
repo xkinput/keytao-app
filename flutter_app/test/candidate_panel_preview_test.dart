@@ -532,26 +532,13 @@ void main() {
           .toList();
       controller.updateSettings();
       await tester.pumpAndSettle();
+      expect(_pcText('第二词'), findsOneWidget);
       expect(
-        find.byKey(const ValueKey('candidate-preview-text-3')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('candidate-preview-text-11')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('candidate-preview-text-12')),
+        find.byKey(const ValueKey('candidate-preview-text-2')),
         findsNothing,
       );
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('candidate-preview-text-3')),
-            )
-            .data,
-        '',
-      );
+      expect(_pcText('‹'), findsNothing);
+      expect(_pcText('›'), findsNothing);
       expect(_pcText('支'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -563,6 +550,7 @@ void main() {
       final controller = _PreviewController()
         ..updateSettings(orientation: orientation);
       await _pumpSettings(tester, controller);
+      final fullWidth = tester.getSize(_panel).width;
       for (final count in <int?>[
         null,
         ...List.generate(10, (i) => i + 1),
@@ -578,7 +566,10 @@ void main() {
             index < expected ? findsOneWidget : findsNothing,
           );
         }
-        expect(find.text('›'), findsOneWidget);
+        expect(find.text('›'), expected < 10 ? findsOneWidget : findsNothing);
+        if (expected == 1) {
+          expect(tester.getSize(_panel).width, lessThan(fullWidth));
+        }
         expect(tester.takeException(), isNull);
       }
       expect(
@@ -920,6 +911,65 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     }, variant: TargetPlatformVariant.only(entry.value));
   }
+
+  testWidgets('automatic width fits vertical paging and visible preedit', (
+    tester,
+  ) async {
+    _narrowScreen(tester);
+    final controller = ViewController(BridgePlatform.macOs);
+    addTearDown(controller.dispose);
+    final theme = controller.resolveCandidatePanelPreview(
+      colorScheme: UiColorSchemeDto.light,
+      accentColor: '#3B73D9',
+      fontSize: 20,
+      systemDark: false,
+    );
+    final panel = theme['panel'] as Map<String, dynamic>;
+    panel['paddingLeft'] = 11;
+    panel['paddingRight'] = 13;
+    (theme['navigation'] as Map<String, dynamic>)['buttonSize'] = 100;
+    (theme['font'] as Map<String, dynamic>)['preeditSize'] = 152;
+
+    Future<void> pumpPreview({
+      required bool showPreedit,
+      int candidateCount = 1,
+    }) async {
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.macOs,
+          home: FScaffold(
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: CandidatePanelPreview(
+                theme: theme,
+                orientation: PanelOrientationDto.vertical,
+                candidateCount: candidateCount,
+                candidates: const [(text: 'a', comment: '')],
+                showPreedit: showPreedit,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await pumpPreview(showPreedit: false);
+    expect(tester.getSize(_panel).width, closeTo(100 + 24, 0.01));
+
+    await pumpPreview(showPreedit: true);
+    final preeditWidth = tester.getSize(find.text('f')).width;
+    expect(preeditWidth, greaterThan(100));
+    expect(tester.getSize(_panel).width, closeTo(preeditWidth + 24, 0.01));
+
+    await pumpPreview(showPreedit: false, candidateCount: 6);
+    expect(_pcText('›'), findsNothing);
+    expect(tester.getSize(_panel).width, lessThan(100 + 24));
+    expect(
+      tester.getSize(_panel).width,
+      closeTo(tester.getSize(_candidates).width + 24, 0.01),
+    );
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   for (final sample in [
     (

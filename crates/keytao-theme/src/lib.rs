@@ -1046,7 +1046,7 @@ impl ResolvedImeTheme {
                 padding_overrides: [None; 4],
                 gap: 4.0,
                 preedit_gap: 10.0,
-                min_width: 128.0,
+                min_width: 0.0,
                 max_width: 320.0,
                 max_height: 460.0,
                 screen_margin: 8.0,
@@ -1260,7 +1260,7 @@ impl ResolvedImeTheme {
         );
         self.panel.gap = clamp(self.panel.gap, 0.0, 24.0);
         self.panel.preedit_gap = clamp(self.panel.preedit_gap, 0.0, 48.0);
-        self.panel.min_width = clamp(self.panel.min_width, 48.0, 480.0);
+        self.panel.min_width = clamp(self.panel.min_width, 0.0, 480.0);
         self.panel.max_width = clamp(self.panel.max_width, 160.0, 2400.0);
         self.panel.max_height = clamp(self.panel.max_height, 80.0, 1600.0);
         self.panel.screen_margin = clamp(self.panel.screen_margin, 0.0, 40.0);
@@ -2390,7 +2390,7 @@ mod tests {
         assert!(theme.ui.show_tray_mode_indicator);
         assert!(theme.ui.effective_embedded_composition());
         assert_eq!(theme.panel.orientation, PanelOrientation::Horizontal);
-        assert_eq!(theme.panel.min_width, 128.0);
+        assert_eq!(theme.panel.min_width, 0.0);
         assert_eq!(theme.font.size, 20.0);
         assert_eq!(theme.candidate.label_suffix, ".");
         assert_eq!(

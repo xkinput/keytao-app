@@ -169,6 +169,7 @@ class CandidatePanelPreview extends StatelessWidget {
     final gap = _metric(panel, 'gap');
     final inlineGap = _metric(option, 'inlineGap');
     final foreground = _color(option, 'foreground');
+    const preeditText = 'f';
     final preeditStyle = style(
       _metric(font, 'preeditSize'),
       foreground,
@@ -200,12 +201,21 @@ class CandidatePanelPreview extends StatelessWidget {
       ),
     );
 
-    final previewCandidates = List.generate(candidateCount, (index) {
-      final candidate = this.candidates.isEmpty && index < _candidates.length
+    final usesSample = this.candidates.isEmpty;
+    final sourceCount = usesSample
+        ? _candidates.length
+        : this.candidates.length;
+    final visibleCount = math.min(candidateCount, sourceCount);
+    final showPrevious = editorPreview && !vertical;
+    final showNext =
+        editorPreview ||
+        (usesSample
+            ? sourceCount > candidateCount
+            : sourceCount >= candidateCount);
+    final previewCandidates = List.generate(visibleCount, (index) {
+      final candidate = usesSample
           ? (text: _candidates[index], comment: _comments[index])
-          : index < this.candidates.length
-          ? this.candidates[index]
-          : (text: '', comment: '');
+          : this.candidates[index];
       final comment =
           editorPreview &&
               (candidate.comment.isEmpty || candidate.comment == '🚫')
@@ -267,7 +277,7 @@ class CandidatePanelPreview extends StatelessWidget {
           ),
         ),
         switch (highlightPath) {
-          'pc.candidate.foreground' => index == 1 || candidateCount == 1,
+          'pc.candidate.foreground' => index == 1 || visibleCount == 1,
           'pc.candidate.selectedForeground' ||
           'pc.font.size' ||
           'common.font.family' ||
@@ -281,7 +291,7 @@ class CandidatePanelPreview extends StatelessWidget {
           Text(comment, style: commentStyle, textScaler: TextScaler.noScaling),
         ),
         switch (highlightPath) {
-          'pc.candidate.commentColor' => index == 1 || candidateCount == 1,
+          'pc.candidate.commentColor' => index == 1 || visibleCount == 1,
           'pc.candidate.selectedCommentColor' ||
           'pc.font.commentSize' => selected,
           _ => false,
@@ -293,7 +303,7 @@ class CandidatePanelPreview extends StatelessWidget {
           Text(label, style: labelStyle, textScaler: TextScaler.noScaling),
         ),
         switch (highlightPath) {
-          'pc.candidate.labelColor' => index == 1 || candidateCount == 1,
+          'pc.candidate.labelColor' => index == 1 || visibleCount == 1,
           'pc.candidate.selectedLabelColor' ||
           'pc.candidate.labelSuffix' ||
           'pc.font.labelSize' => selected,
@@ -301,9 +311,9 @@ class CandidatePanelPreview extends StatelessWidget {
         },
       );
       final highlightItem = switch (highlightPath) {
-        'pc.candidate.background' => index == 2 || candidateCount == 1,
+        'pc.candidate.background' => index == 2 || visibleCount == 1,
         'pc.candidate.borderColor' ||
-        'pc.candidate.hoverBackground' => index == 1 || candidateCount == 1,
+        'pc.candidate.hoverBackground' => index == 1 || visibleCount == 1,
         'common.accentColor' ||
         'pc.candidate.selectedBackground' ||
         'pc.candidate.selectedBorderColor' ||
@@ -421,20 +431,18 @@ class CandidatePanelPreview extends StatelessWidget {
         if (index > 0) SizedBox(width: gap, height: gap),
         candidates[index],
       ],
-      SizedBox(width: gap, height: gap),
-      if (vertical)
-        Row(mainAxisSize: MainAxisSize.min, children: [arrow('›', '下一页')])
-      else ...[
-        arrow('‹', '上一页'),
-        SizedBox(width: gap),
-        arrow('›', '下一页'),
-      ],
+      if (showPrevious) ...[SizedBox(width: gap), arrow('‹', '上一页')],
+      if (showNext) ...[SizedBox(width: gap, height: gap), arrow('›', '下一页')],
     ];
-    final naturalWidth = vertical
-        ? widths.reduce(math.max)
+    final navCount = (showPrevious ? 1 : 0) + (showNext ? 1 : 0);
+    final candidateWidth = vertical
+        ? math.max(widths.reduce(math.max), showNext ? navSize : 0.0)
         : widths.reduce((a, b) => a + b) +
-              gap * (candidateCount + 1) +
-              navSize * 2;
+              gap * (visibleCount + navCount - 1) +
+              navSize * navCount;
+    final naturalWidth = showPreedit
+        ? math.max(candidateWidth, measure(preeditText, preeditStyle).width)
+        : candidateWidth;
     final candidateList = Flex(
       key: const ValueKey('candidate-preview-candidates'),
       direction: vertical ? Axis.vertical : Axis.horizontal,
@@ -520,8 +528,8 @@ class CandidatePanelPreview extends StatelessWidget {
                               edit(
                                 'pc.font.preeditSize',
                                 Text(
-                                  'f',
-                                  semanticsLabel: '预编辑 f',
+                                  preeditText,
+                                  semanticsLabel: '预编辑 $preeditText',
                                   style: preeditStyle,
                                   textScaler: TextScaler.noScaling,
                                 ),

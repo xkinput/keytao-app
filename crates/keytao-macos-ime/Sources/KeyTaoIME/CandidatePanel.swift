@@ -152,7 +152,11 @@ class CandidatePanel: NSPanel {
             }
 
             if theme.candidate.separatorVisible && position < model.candidates.count - 1 {
-                candidateStack.addArrangedSubview(makeSeparator(theme: theme))
+                let separator = makeSeparator(theme: theme)
+                candidateStack.addArrangedSubview(separator)
+                if orientation == .vertical {
+                    separator.widthAnchor.constraint(equalTo: candidateStack.widthAnchor).isActive = true
+                }
             }
         }
 
@@ -272,7 +276,6 @@ class CandidatePanel: NSPanel {
         separator.layer?.backgroundColor = theme.candidate.separatorColor.cgColor
         if orientation == .vertical {
             separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
-            separator.widthAnchor.constraint(greaterThanOrEqualToConstant: theme.panel.minWidth - theme.panel.paddingLeft - theme.panel.paddingRight).isActive = true
         } else {
             separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
             separator.heightAnchor.constraint(equalToConstant: max(1, theme.candidate.minHeight - theme.candidate.paddingY * 2)).isActive = true
