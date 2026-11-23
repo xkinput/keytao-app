@@ -1,4 +1,4 @@
-use keytao_core::{list_schema_switches, set_schema_switch};
+use keytao_core::{list_schema_switches, release_idle_rime_config, set_schema_switch};
 use librime_sys::{rime_get_api, RimeTraits};
 use std::ffi::{CStr, CString};
 use std::path::Path;
@@ -55,6 +55,7 @@ fn switch_settings_do_not_take_over_a_foreign_librime_initializer() {
         );
         assert!(!app.join(keytao_core::SCHEMA_SWITCH_REQUEST_FILE).exists());
         assert_eq!(list_schema_switches(&other).unwrap_err(), error);
+        assert_eq!(release_idle_rime_config(&app).unwrap_err(), error);
         assert_eq!(
             CStr::from_ptr(api.get_user_data_dir.unwrap()()).to_bytes(),
             foreign_bytes

@@ -905,6 +905,10 @@ pub fn get_schema_switches(
     host: impl ImeHost,
 ) -> Result<Vec<keytao_core::SchemaSwitchSetting>, CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?;
+    let _engine_selection = crate::libjd::lock_engine_selection();
+    if !crate::libjd::input_engine(&root).is_rime() {
+        return Ok(Vec::new());
+    }
     keytao_core::list_schema_switches(&root).map_err(CoreError::Other)
 }
 
@@ -926,6 +930,10 @@ pub fn set_schema_switch(
     value: usize,
 ) -> Result<Vec<keytao_core::SchemaSwitchSetting>, CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?;
+    let _engine_selection = crate::libjd::lock_engine_selection();
+    if !crate::libjd::input_engine(&root).is_rime() {
+        return Err(CoreError::Other("请在 Rime 引擎下修改方案开关".into()));
+    }
     keytao_core::isolated_deploy::with_isolated_package_lock(&root, || {
         let switches = keytao_core::set_schema_switch(&root, schema_id, name, value)?;
         #[cfg(target_os = "windows")]

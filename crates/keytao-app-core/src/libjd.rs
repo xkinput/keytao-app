@@ -8,8 +8,16 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
 };
+
+static ENGINE_SELECTION: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_engine_selection() -> MutexGuard<'static, ()> {
+    ENGINE_SELECTION
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
 
 pub struct LibjdStatus {
     pub available: bool,
@@ -96,6 +104,7 @@ fn activate_imported(core: &Core, root: &Path, key: &str) -> Result<(), CoreErro
 }
 
 pub fn set_input_engine(core: &Core, root: &Path, engine: &str) -> Result<(), CoreError> {
+    let _engine_selection = lock_engine_selection();
     let converted = match engine {
         "rime" => Vec::new(),
         "libjd_engine" => {
@@ -129,6 +138,9 @@ pub fn set_input_engine(core: &Core, root: &Path, engine: &str) -> Result<(), Co
             Ok(())
         },
         || {
+            if engine == PackageEngine::LibjdEngine.as_str() {
+                keytao_core::release_idle_rime_config(root).map_err(CoreError::Other)?;
+            }
             if let Some(key) = target {
                 activate_imported(core, root, key)?;
             } else {
@@ -297,6 +309,69 @@ fn build_dictionary(_: &Path, _: &[u8], _: &Path) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the bundled engine"]
+    fn selecting_ime_jd_releases_the_app_rime_runtime() {
+        use crate::{AppEnv, CoreEvent, EventSink, Platform, ime_host::ImeHost, ime_settings};
+
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit(&self, _: CoreEvent) {}
+        }
+
+        struct Host(PathBuf);
+        impl ImeHost for Host {
+            fn user_root(&self) -> Result<PathBuf, String> {
+                Ok(self.0.clone())
+            }
+
+            fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
+                Ok(None)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let core = Core::new(
+            AppEnv {
+                data_dir: root.into(),
+                cache_dir: root.join("cache"),
+                resource_dir: root.join("resources"),
+                app_version: "test".into(),
+                platform: Platform::MacOs,
+            },
+            Arc::new(Sink),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(
+            root.join("build/default.yaml"),
+            "schema_list:\n  - schema: fixture\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("build/fixture.schema.yaml"),
+            "schema:\n  schema_id: fixture\nswitches:\n  - name: fixture_switch\n    states: [Off, On]\n",
+        )
+        .unwrap();
+        let app_runtime =
+            keytao_core::ImeRuntime::with_dirs(root, keytao_core::default_shared_data_dir());
+        let host = || Host(root.into());
+        assert_eq!(ime_settings::get_schema_switches(host()).unwrap().len(), 1);
+        assert!(app_runtime.is_initialized());
+
+        set_input_engine(&core, root, "libjd_engine").unwrap();
+        assert!(!app_runtime.is_initialized());
+        assert!(ime_settings::get_schema_switches(host()).unwrap().is_empty());
+        assert!(ime_settings::set_schema_switch(host(), "fixture", "fixture_switch", 1).is_err());
+        assert!(!app_runtime.is_initialized());
+
+        set_input_engine(&core, root, "rime").unwrap();
+        assert_eq!(ime_settings::get_schema_switches(host()).unwrap().len(), 1);
+        app_runtime.shutdown().unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]

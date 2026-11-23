@@ -150,23 +150,25 @@ class KeytaoImeEngine(context: Context) {
             if (session != 0L) reload()
             return Readiness.NOT_INSTALLED
         }
-        if (isolated != null && isolated != Readiness.READY) {
-            return if (nativeReady && session != 0L) Readiness.READY else isolated
-        }
         if (isolated == null && !KeytaoAndroidPaths.hasInstalledSchema(root)) {
             if (session != 0L) reload()
             return Readiness.NOT_INSTALLED
         }
         if (!warmupComplete) return Readiness.NOT_DEPLOYED
-        if (isolated == null && !hasDeployedSchema()) {
-            if (nativeReady && session != 0L) return Readiness.READY
-            return if (deploymentBlocksInput()) {
-                Readiness.DEPLOYING
-            } else Readiness.NOT_DEPLOYED
+        val pendingBuild = isolated == Readiness.NOT_DEPLOYED ||
+            (isolated == null && !hasDeployedSchema())
+        // Core retains a usable session during deployment, and handles an
+        // explicit engine switch even when the destination has no build.
+        if (!pendingBuild || (nativeReady && session != 0L)) {
+            reloadIfNeeded()
         }
-        reloadIfNeeded()
         refreshDeploymentHint()
-        return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
+        return when {
+            nativeReady && session != 0L -> Readiness.READY
+            pendingBuild && deploymentBlocksInput() -> Readiness.DEPLOYING
+            pendingBuild -> Readiness.NOT_DEPLOYED
+            else -> Readiness.NATIVE_UNAVAILABLE
+        }
     }
 
     fun deploymentBlocksInput(): Boolean =
@@ -360,7 +362,6 @@ class KeytaoImeEngine(context: Context) {
             if (isolated == Readiness.NOT_INSTALLED) {
                 return initializeRuntime(deploy = false, reinitialize = true)
             }
-            if (isolated != null && isolated != Readiness.READY) return false
             if (!nativeReady || session == 0L || (isolated == null && !KeytaoAndroidPaths.hasInstalledSchema(root))) {
                 return initializeRuntime(deploy = false, reinitialize = true)
             }
@@ -373,10 +374,17 @@ class KeytaoImeEngine(context: Context) {
             // Retain the session under the monitor, then let keys wait in core during prewarm.
             val requestedSignature = reloadStampSignature()
             val ok = KeytaoNativeBridge.reinitialize(snapshot.third.absolutePath, sharedDataDir?.absolutePath)
-            if (ok) KeytaoNativeBridge.prewarm(snapshot.second)
+            val available = ok && KeytaoAndroidPaths.hasDeployedSchema(snapshot.third)
+            if (available) KeytaoNativeBridge.prewarm(snapshot.second)
             synchronized(this) {
                 if (closed || session != snapshot.first) return false
                 if (ok) {
+                    if (!available) {
+                        nativeReady = false
+                        KeytaoNativeBridge.destroySession(session)
+                        session = 0L
+                        lastState = KeytaoImeState.empty(asciiMode = lastState.asciiMode)
+                    }
                     invalidateSchemaNameCache()
                     schemaLogoGeneration++
                     schemaLogoKey = null
@@ -385,7 +393,7 @@ class KeytaoImeEngine(context: Context) {
                 }
                 refreshDeploymentHint()
             }
-            if (ok) completed?.invoke(snapshot.first)
+            if (available) completed?.invoke(snapshot.first)
             return ok
         } finally {
             KeytaoNativeBridge.destroySession(snapshot.second)

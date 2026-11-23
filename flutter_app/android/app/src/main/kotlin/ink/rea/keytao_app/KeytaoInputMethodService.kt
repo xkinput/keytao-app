@@ -230,6 +230,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var lastHardwareStampCheckMs = 0L
     private var reloadStampObserver: FileObserver? = null
     private var reloadStampObservedDir: String? = null
+    private var reloadStampRefreshPending = false
     private val readinessRetry = Runnable {
         scheduleAvailabilityRefresh(pollReloadStamp = true)
     }
@@ -468,10 +469,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             put("phase", "input_view")
             put("finishing_input", finishingInput)
         }
-        if (!finishingInput) {
-            updateReloadStampObserver()
-            scheduleReadinessRetry()
-        }
+        updateReloadStampObserver()
+        if (!finishingInput) scheduleReadinessRetry()
     }
 
     override fun onWindowShown() {
@@ -920,7 +919,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
-        stopReloadStampObserver()
         mainHandler.removeCallbacks(readinessRetry)
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
@@ -946,6 +944,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         currentState = KeytaoImeState.empty(asciiMode = currentState.asciiMode)
         keyboardView?.updateState(currentState)
         super.onFinishInput()
+        updateReloadStampObserver()
         flushSessionHistograms()
         KeytaoRuntimeLog.event("lifecycle", "ime_finish_input", KeytaoRuntimeLog.elapsedMs(started)) {
             put("phase", "input")
@@ -2960,6 +2959,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val theme = if (recovered) runCatching { KeytaoThemeResolver.resolve(this) }.getOrNull() else null
             mainHandler.post {
                 availabilityRefreshPending = false
+                if (reloadStampRefreshPending) {
+                    reloadStampRefreshPending = false
+                    scheduleAvailabilityRefresh()
+                }
                 if (serviceDestroyed || (pollReloadStamp && !shouldPollReloadStamp())) return@post
                 if (stampChanged) {
                     readinessRetryCount = 0
@@ -3018,8 +3021,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             currentInputStarted &&
             resources.configuration.keyboard > Configuration.KEYBOARD_NOKEYS
 
+    private fun shouldObserveReloadStamp(): Boolean =
+        !serviceDestroyed && !inputViewShown && (engine.nativeReady || hardwareKeyboardActive())
+
     private fun updateReloadStampObserver() {
-        if (serviceDestroyed || inputViewShown || !hardwareKeyboardActive()) {
+        if (!shouldObserveReloadStamp()) {
             stopReloadStampObserver()
             return
         }
@@ -3033,8 +3039,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val onEvent: (Int, String?) -> Unit = { _, path ->
             if (path == null || path == "keytao-ime.reload") {
                 mainHandler.post {
-                    if (!serviceDestroyed && hardwareKeyboardActive() && !inputViewShown) {
-                        scheduleAvailabilityRefresh()
+                    if (shouldObserveReloadStamp()) {
+                        if (availabilityRefreshPending) reloadStampRefreshPending = true
+                        else scheduleAvailabilityRefresh()
                     }
                 }
             }

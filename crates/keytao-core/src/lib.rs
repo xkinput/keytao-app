@@ -4853,6 +4853,39 @@ fn with_schema_switch_config<T>(
     action(&runtime.user_data_dir)
 }
 
+/// Release the App's Rime configuration runtime when switching input engines.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub fn release_idle_rime_config(user_dir: &Path) -> Result<(), String> {
+    let _build = PROCESS_RIME
+        .build
+        .acquire()
+        .ok_or("Rime engine build timed out")?;
+    let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+    let Some(dirs) = initialized
+        .as_ref()
+        .filter(|dirs| dirs.user == user_dir)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+    if PROCESS_RIME.using_libjd()
+        || lock_ignore_poison(&PROCESS_RIME.sessions)
+            .iter()
+            .any(|session| session.inner.strong_count() != 0)
+    {
+        return Ok(());
+    }
+    desktop::initialized_user_dir()?;
+    PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs, true)
+}
+
 /// Read the visible F4 switches of the currently deployed schema.
 #[cfg(any(
     target_os = "linux",

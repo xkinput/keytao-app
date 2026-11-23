@@ -794,6 +794,11 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineA
 }
 
 #[cfg(target_os = "android")]
+fn android_prefers_libjd(root: &Path) -> bool {
+    crate::libjd::input_engine(root) == keytao_core::engine_choice::PackageEngine::LibjdEngine
+}
+
+#[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHasDeployedSchema(
     mut env: JNIEnv<'_>,
@@ -804,8 +809,11 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHasDepl
         let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
-        (keytao_core::android_libjd_ready(&user_dir)
-            || keytao_core::schema_build_is_available(&user_dir)) as jboolean
+        if android_prefers_libjd(&user_dir) {
+            keytao_core::android_libjd_ready(&user_dir) as jboolean
+        } else {
+            keytao_core::schema_build_is_available(&user_dir) as jboolean
+        }
     })
 }
 
@@ -820,12 +828,13 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeIsolate
         let Some(root) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
-        if !keytao_core::RuntimeDirs::needs_migration(&root) && keytao_core::android_libjd_ready(&root) {
+        let prefers_libjd = android_prefers_libjd(&root);
+        if prefers_libjd && keytao_core::android_libjd_ready(&root) {
             return 2;
         }
         match keytao_core::isolated_ime_schema_state(&root, &root.join("rime-data")) {
             None => -1,
-            Some(state) if state.deployed => 2,
+            Some(state) if !prefers_libjd && state.deployed => 2,
             Some(state) => jint::from(state.installed),
         }
     })
@@ -1145,22 +1154,24 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
         };
         let user_theme_path = user_dir.join("theme.yaml");
         let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
-        let legacy = keytao_core::RuntimeDirs::needs_migration(&user_dir);
-
         // The runtime knows every session it handed out, so reloading through it
         // drops their engines before librime is finalized. Going around it would
         // leave a session the IME still holds pointing at a torn-down librime.
-        if let Some(runtime) = android_runtime_for(&user_dir, &shared_dir) {
-            if runtime.reload_without_deploy().is_ok() {
-                android_set_user_theme_path(user_theme_path);
-                return 1;
-            }
-            if !legacy || keytao_core::deployment_in_progress(&user_dir) {
-                return 0;
-            }
+        let runtime = android_runtime_for(&user_dir, &shared_dir);
+        if runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.reload_without_deploy().is_ok())
+        {
+            android_set_user_theme_path(user_theme_path);
+            return 1;
         }
 
-        if legacy {
+        let legacy_rime =
+            !android_prefers_libjd(&user_dir) && keytao_core::RuntimeDirs::needs_migration(&user_dir);
+        if runtime.is_some() && (!legacy_rime || keytao_core::deployment_in_progress(&user_dir)) {
+            return 0;
+        }
+        if legacy_rime {
             if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
                 *slot = None;
             }
