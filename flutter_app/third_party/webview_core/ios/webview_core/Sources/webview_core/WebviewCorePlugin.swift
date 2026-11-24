@@ -217,6 +217,7 @@ private final class IOSWebViewPlatformView: NSObject,
   private var registeredChannels: Set<String> = []
   private var progressObservation: NSKeyValueObservation?
   private var urlObservation: NSKeyValueObservation?
+  private var scrollObservation: NSKeyValueObservation?
   private var isDisposed = false
 
   init(
@@ -282,6 +283,9 @@ private final class IOSWebViewPlatformView: NSObject,
         arguments: ["controllerId": self.controllerId, "url": view.url?.absoluteString]
       )
     }
+    scrollObservation = webView.scrollView.observe(\.contentOffset, options: [.new]) {
+      [weak self] _, _ in self?.sendScrollPosition()
+    }
 
     if let initialHtml = creationArgs["initialHtml"] as? String {
       let baseUrlStr = creationArgs["initialBaseUrl"] as? String
@@ -319,6 +323,8 @@ private final class IOSWebViewPlatformView: NSObject,
     progressObservation = nil
     urlObservation?.invalidate()
     urlObservation = nil
+    scrollObservation?.invalidate()
+    scrollObservation = nil
     let controller = webView.configuration.userContentController
     for name in registeredChannels {
       controller.removeScriptMessageHandler(forName: name)
@@ -459,6 +465,22 @@ private final class IOSWebViewPlatformView: NSObject,
       arguments: [
         "controllerId": controllerId,
         "url": webView.url?.absoluteString ?? "",
+      ]
+    )
+    sendScrollPosition()
+  }
+
+  private func sendScrollPosition() {
+    guard !isDisposed else { return }
+    let scrollView = webView.scrollView
+    let offset = scrollView.contentOffset
+    let inset = scrollView.adjustedContentInset
+    plugin?.sendEvent(
+      "onScrollChanged",
+      arguments: [
+        "controllerId": controllerId,
+        "x": Double(offset.x + inset.left),
+        "y": Double(offset.y + inset.top),
       ]
     )
   }

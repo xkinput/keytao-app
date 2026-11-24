@@ -177,13 +177,6 @@ class AboutPage extends StatelessWidget {
                 ),
               ),
             ),
-            SwitchSetting(
-              '显示网站',
-              value: !c.websiteHidden,
-              onChanged: c.canEditWebsiteSettings
-                  ? (visible) => c.saveWebsiteSettings(hidden: !visible)
-                  : null,
-            ),
             ValueRow('Flutter', c.aboutValues['Flutter']!),
             ValueRow(
               AppStrings.librimeVersion,

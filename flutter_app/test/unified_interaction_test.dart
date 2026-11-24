@@ -44,6 +44,12 @@ class _EditingController extends ViewController {
 
 class _ThemePresetApi implements RustLibApi {
   String current = 'default';
+  final motionChanges = <bool>[];
+
+  @override
+  Future<void> crateApiCoreSetReduceMotion({required bool enabled}) async {
+    motionChanges.add(enabled);
+  }
 
   @override
   Future<List<ThemeSummaryDto>> crateApiCoreGetThemeLibrary() async => [
@@ -119,6 +125,53 @@ Future<void> _pump(WidgetTester tester, ViewController c, Size size) async {
 }
 
 void main() {
+  testWidgets(
+    'home motion setting keeps the navigator and honors system preference',
+    (tester) async {
+      final api = _ThemePresetApi();
+      RustLib.initMock(api: api);
+      addTearDown(RustLib.dispose);
+      final c = ViewController(BridgePlatform.ios);
+      await _pump(tester, c, const Size(390, 844));
+      final navigator = find.byType(Navigator);
+      final original = tester.state<NavigatorState>(navigator);
+      bool effective() =>
+          MediaQuery.disableAnimationsOf(tester.element(navigator));
+      final setting = find.ancestor(
+        of: find.text('减少动画'),
+        matching: find.byType(SwitchSetting),
+      );
+      final toggle = find.descendant(
+        of: setting,
+        matching: find.byType(FSwitch),
+      );
+
+      expect(find.text('显示网站'), findsOneWidget);
+      expect(c.reduceMotion, isFalse);
+      expect(effective(), isFalse);
+      await tester.ensureVisible(toggle);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(c.reduceMotion, isTrue);
+      expect(effective(), isTrue);
+      expect(tester.state<NavigatorState>(navigator), same(original));
+
+      final dispatcher = tester.binding.platformDispatcher;
+      dispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(disableAnimations: true);
+      addTearDown(dispatcher.clearAccessibilityFeaturesTestValue);
+      await tester.pumpAndSettle();
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(c.reduceMotion, isFalse);
+      expect(effective(), isTrue);
+      expect(api.motionChanges, [true, false]);
+      expect(tester.state<NavigatorState>(navigator), same(original));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
   testWidgets('applying a keyboard theme on the mobile home keeps app colors', (
     tester,
   ) async {

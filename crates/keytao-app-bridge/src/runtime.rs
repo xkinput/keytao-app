@@ -61,6 +61,7 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
             app_update_prereleases: keytao_app_core::update::includes_prereleases(&state.core),
             website_origin: preferences.website_origin,
             website_hidden: preferences.website_hidden,
+            reduce_motion: preferences.reduce_motion,
         });
     }
     let events = Arc::new(BridgeEvents::default());
@@ -75,6 +76,7 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
         app_update_prereleases: keytao_app_core::update::includes_prereleases(&core),
         website_origin: preferences.website_origin,
         website_hidden: preferences.website_hidden,
+        reduce_motion: preferences.reduce_motion,
     };
     let host = BridgeHost::new(core.clone(), root);
     STATE

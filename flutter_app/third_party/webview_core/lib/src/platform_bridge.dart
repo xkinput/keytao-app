@@ -27,6 +27,9 @@ abstract interface class WebViewPlatformCallbacks {
   /// Invoked when the active URL changes.
   void handleUrlChange(int controllerId, String? url);
 
+  /// Invoked when the main document scrolls on Android or iOS.
+  void handleScrollChanged(int controllerId, Offset offset);
+
   /// Invoked when a load error occurs.
   void handleWebResourceError(int controllerId, WebResourceError error);
 

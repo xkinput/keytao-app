@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1806632633;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1578656988;
 
 // Section: executor
 
@@ -4651,6 +4651,39 @@ fn wire__crate__api__core__set_package_schemas_impl(
         },
     )
 }
+fn wire__crate__api__core__set_reduce_motion_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_reduce_motion",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_enabled = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::set_reduce_motion(api_enabled)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__set_runtime_log_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -5777,6 +5810,7 @@ impl SseDecode for crate::api::types::BridgeInfo {
         let mut var_appUpdatePrereleases = <bool>::sse_decode(deserializer);
         let mut var_websiteOrigin = <Option<String>>::sse_decode(deserializer);
         let mut var_websiteHidden = <bool>::sse_decode(deserializer);
+        let mut var_reduceMotion = <bool>::sse_decode(deserializer);
         return crate::api::types::BridgeInfo {
             platform: var_platform,
             app_version: var_appVersion,
@@ -5784,6 +5818,7 @@ impl SseDecode for crate::api::types::BridgeInfo {
             app_update_prereleases: var_appUpdatePrereleases,
             website_origin: var_websiteOrigin,
             website_hidden: var_websiteHidden,
+            reduce_motion: var_reduceMotion,
         };
     }
 }
@@ -7527,70 +7562,71 @@ fn pde_ffi_dispatcher_primary_impl(
             wire__crate__api__core__set_package_easy_english_impl(port, ptr, rust_vec_len, data_len)
         }
         128 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
-        129 => {
+        129 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
+        130 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        130 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
-        131 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        131 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        132 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        132 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
+        133 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        133 => {
+        134 => {
             wire__crate__api__core__set_user_word_removed_impl(port, ptr, rust_vec_len, data_len)
         }
-        134 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
-        135 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
-        136 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
-        137 => {
+        135 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
+        136 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
+        137 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
+        138 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        138 => {
+        139 => {
             wire__crate__api__core__trash_package_orphans_impl(port, ptr, rust_vec_len, data_len)
         }
-        139 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
-        140 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        141 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        142 => {
+        140 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
+        141 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        142 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        143 => {
             wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        143 => {
+        144 => {
             wire__crate__api__core__wanxiang_grammar_status_impl(port, ptr, rust_vec_len, data_len)
         }
-        144 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        145 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        145 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        146 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        146 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        147 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        147 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        148 => wire__crate__api__core__windows_pending_ime_action_impl(
+        148 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        149 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        149 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        150 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        150 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        151 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -7863,6 +7899,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::BridgeInfo {
             self.app_update_prereleases.into_into_dart().into_dart(),
             self.website_origin.into_into_dart().into_dart(),
             self.website_hidden.into_into_dart().into_dart(),
+            self.reduce_motion.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9388,6 +9425,7 @@ impl SseEncode for crate::api::types::BridgeInfo {
         <bool>::sse_encode(self.app_update_prereleases, serializer);
         <Option<String>>::sse_encode(self.website_origin, serializer);
         <bool>::sse_encode(self.website_hidden, serializer);
+        <bool>::sse_encode(self.reduce_motion, serializer);
     }
 }
 

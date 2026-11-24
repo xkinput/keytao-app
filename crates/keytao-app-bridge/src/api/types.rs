@@ -27,6 +27,8 @@ pub struct BridgeInfo {
     pub website_origin: Option<String>,
     #[frb(default = false)]
     pub website_hidden: bool,
+    #[frb(default = false)]
+    pub reduce_motion: bool,
 }
 
 pub struct SystemFontFamilyDto {

@@ -51,30 +51,42 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
   }
 
   @override
-  Widget build(BuildContext context) => KeyTaoTheme(
-    platform: widget.controller.info.platform,
-    home: AppMenus(
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+    valueListenable: widget.controller.reduceMotionChanges,
+    builder: (context, reduceMotion, child) {
+      final media = MediaQuery.of(context);
+      return MediaQuery(
+        data: media.copyWith(
+          disableAnimations: media.disableAnimations || reduceMotion,
+        ),
+        child: child!,
+      );
+    },
+    child: KeyTaoTheme(
       platform: widget.controller.info.platform,
-      controller: widget.controller,
-      child: AppErrorPresenter(
+      home: AppMenus(
+        platform: widget.controller.info.platform,
         controller: widget.controller,
-        child: _MigrationNoticePresenter(
+        child: AppErrorPresenter(
           controller: widget.controller,
-          child: Builder(
-            builder: (context) => AnimatedSwitcher(
-              duration: MediaQuery.disableAnimationsOf(context)
-                  ? Duration.zero
-                  : const Duration(milliseconds: 240),
-              child: _completed || !widget.controller.hasOnboarding
-                  ? AppShell(controller: widget.controller)
-                  : OnboardingPage(
-                      controller: widget.controller,
-                      onFinished: () {
-                        final c = widget.controller;
-                        if (c.isMobile) c.selectPage(AppPage.scheme);
-                        setState(() => _completed = true);
-                      },
-                    ),
+          child: _MigrationNoticePresenter(
+            controller: widget.controller,
+            child: Builder(
+              builder: (context) => AnimatedSwitcher(
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 240),
+                child: _completed || !widget.controller.hasOnboarding
+                    ? AppShell(controller: widget.controller)
+                    : OnboardingPage(
+                        controller: widget.controller,
+                        onFinished: () {
+                          final c = widget.controller;
+                          if (c.isMobile) c.selectPage(AppPage.scheme);
+                          setState(() => _completed = true);
+                        },
+                      ),
+              ),
             ),
           ),
         ),
@@ -210,9 +222,8 @@ class _MigrationNoticePresenterState extends State<_MigrationNoticePresenter> {
                         if (toaster.mounted) {
                           toaster.show(
                             duration: const Duration(seconds: 5),
-                            builder: (_, _) => const FToast(
-                              title: Text('无法直接打开，已复制备份文件目录'),
-                            ),
+                            builder: (_, _) =>
+                                const FToast(title: Text('无法直接打开，已复制备份文件目录')),
                           );
                         }
                       }
@@ -227,9 +238,7 @@ class _MigrationNoticePresenterState extends State<_MigrationNoticePresenter> {
               mainAxisSize: MainAxisSize.min,
               spacing: 12,
               children: [
-                const Text(
-                  '方案目录已升级为独立隔离结构，原有方案已清空并备份至以下目录，可前往该目录找回备份文件：',
-                ),
+                const Text('方案目录已升级为独立隔离结构，原有方案已清空并备份至以下目录，可前往该目录找回备份文件：'),
                 DecoratedBox(
                   decoration: BoxDecoration(
                     color: AppPalette.of(dialogContext).controlSurface,

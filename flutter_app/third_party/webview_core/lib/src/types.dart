@@ -205,6 +205,7 @@ class NavigationDelegate {
     this.onWebResourceError,
     this.onNavigationRequest,
     this.onUrlChange,
+    this.onScrollChanged,
   });
 
   /// Invoked when page loading progress updates (`0` to `100`).
@@ -224,6 +225,9 @@ class NavigationDelegate {
 
   /// Invoked whenever the active URL changes.
   final UrlChangeCallback? onUrlChange;
+
+  /// Reports the main document's scroll offset in logical pixels on mobile.
+  final ValueChanged<Offset>? onScrollChanged;
 }
 
 /// HTTP cookie descriptor managed through `WebViewCookieManager`.

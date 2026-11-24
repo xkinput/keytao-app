@@ -8,6 +8,9 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
+import 'package:keytao/src/ui/theme.dart';
+import 'package:keytao/src/ui/website_page.dart';
+import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
 
@@ -47,6 +50,120 @@ class _WebsiteController extends ViewController {
 }
 
 void main() {
+  testWidgets('mobile toolbar fits at 320 and reports the active view offset', (
+    tester,
+  ) async {
+    final core = _WebsiteCore();
+    RustLib.initMock(api: core);
+    addTearDown(RustLib.dispose);
+    final controller = ViewController(BridgePlatform.android);
+    final toolbarVisible = ValueNotifier(true);
+    addTearDown(controller.dispose);
+    addTearDown(toolbarVisible.dispose);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 700);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    const channel = MethodChannel('com.infradise.webview_core');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final ids = <int>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'create') {
+        ids.add((call.arguments as Map)['controllerId'] as int);
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    Future<void> event(int id, String name, Map<String, Object?> payload) =>
+        messenger.handlePlatformMessage(
+          channel.name,
+          channel.codec.encodeMethodCall(
+            MethodCall(name, {'controllerId': id, ...payload}),
+          ),
+          null,
+        );
+
+    final offsets = <double>[];
+    final account = find.byKey(const ValueKey('website-account'));
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: BridgePlatform.android,
+        home: FScaffold(
+          child: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(320, 700),
+              padding: EdgeInsets.only(top: 32),
+              disableAnimations: true,
+            ),
+            child: ListenableBuilder(
+              listenable: Listenable.merge([controller, toolbarVisible]),
+              builder: (_, _) => WebsitePage(
+                controller: controller,
+                active: true,
+                mobileAccount: const Icon(
+                  FLucideIcons.user,
+                  key: ValueKey('website-account'),
+                ),
+                mobileToolbarVisible: toolbarVisible.value,
+                onScrollOffset: offsets.add,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final firstId = ids.single;
+    await event(firstId, 'onPageFinished', {'url': 'https://keytao.rea.ink'});
+    await tester.pumpAndSettle();
+    expect(offsets, [0]);
+    final domain = find.byWidgetPredicate(
+      (widget) => widget is FSelect<String>,
+    );
+    final actions = find.byType(FButton);
+    expect(tester.takeException(), isNull);
+    expect(tester.getCenter(domain).dy, tester.getCenter(account).dy);
+    expect(actions, findsNWidgets(3));
+    for (var i = 0; i < 3; i++) {
+      expect(tester.getSize(actions.at(i)), const Size.square(44));
+      expect(tester.getCenter(actions.at(i)).dy, tester.getCenter(account).dy);
+    }
+
+    final page = find.byKey(const PageStorageKey('website'));
+    expect(tester.getRect(page).top, 32);
+    toolbarVisible.value = false;
+    await tester.pump();
+    expect(domain, findsNothing);
+    expect(actions, findsNothing);
+    expect(account, findsNothing);
+    expect(tester.getRect(page).top, 32);
+
+    await event(firstId, 'onScrollChanged', {'x': 0, 'y': 61.5});
+    await event(firstId, 'onScrollChanged', {'x': 0, 'y': 61.5});
+    expect(offsets, [0, 61.5]);
+    await event(firstId, 'onPageStarted', {
+      'url': 'https://keytao.rea.ink/docs',
+    });
+    expect(offsets, [0, 61.5, 0]);
+
+    await controller.saveWebsiteSettings(origin: 'https://keytao.vercel.app');
+    await tester.pump();
+    await tester.pump();
+    final secondId = ids.last;
+    expect(secondId, isNot(firstId));
+    expect(offsets.last, 0);
+    await event(firstId, 'onScrollChanged', {'x': 0, 'y': 190.0});
+    expect(offsets.last, 0);
+    await event(secondId, 'onPageFinished', {
+      'url': 'https://keytao.vercel.app',
+    });
+    await event(secondId, 'onScrollChanged', {'x': 0, 'y': 23.0});
+    expect(offsets.last, 23);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.linux));
+
   testWidgets(
     'website aligns its toolbar and isolates account and domain changes',
     (tester) async {
@@ -104,6 +221,11 @@ void main() {
       );
       expect(creations.single['initialHeaders'], {sessionHeader: 'clear'});
       await finishLoading('https://keytao.rea.ink');
+      await tester.tap(find.byKey(const ValueKey('nav-about')));
+      await tester.pumpAndSettle();
+      await tester.tap(website);
+      await tester.pumpAndSettle();
+      expect(creations, hasLength(1));
       final external = find.ancestor(
         of: find.byWidgetPredicate(
           (widget) => widget is Icon && widget.semanticLabel == '在浏览器中打开',
@@ -146,9 +268,14 @@ void main() {
       expect(creations.last['initialHeaders'], {sessionHeader: 'clear'});
       await finishLoading('https://keytao.vercel.app');
 
-      await tester.tap(find.byKey(const ValueKey('nav-about')));
+      await tester.tap(find.byKey(const ValueKey('nav-ime')));
       await tester.pumpAndSettle();
-      final toggle = find.byType(FSwitch);
+      final toggle = find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) => widget is SwitchSetting && widget.label == '显示网站',
+        ),
+        matching: find.byType(FSwitch),
+      );
       await tester.ensureVisible(toggle);
       await tester.tap(toggle);
       await tester.pumpAndSettle();

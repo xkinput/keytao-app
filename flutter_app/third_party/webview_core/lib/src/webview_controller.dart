@@ -227,6 +227,14 @@ class WebViewController implements WebViewPlatformCallbacks {
   }
 
   @override
+  void handleScrollChanged(int id, Offset offset) {
+    if (_isDisposed || id != controllerId) {
+      return;
+    }
+    _navigationDelegate?.onScrollChanged?.call(offset);
+  }
+
+  @override
   void handleWebResourceError(int id, WebResourceError error) {
     if (_isDisposed || id != controllerId) {
       return;

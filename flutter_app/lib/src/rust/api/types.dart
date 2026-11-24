@@ -354,6 +354,7 @@ class BridgeInfo {
   final bool appUpdatePrereleases;
   final String? websiteOrigin;
   final bool websiteHidden;
+  final bool reduceMotion;
 
   const BridgeInfo({
     required this.platform,
@@ -362,6 +363,7 @@ class BridgeInfo {
     this.appUpdatePrereleases = false,
     this.websiteOrigin,
     this.websiteHidden = false,
+    this.reduceMotion = false,
   });
 
   @override
@@ -371,7 +373,8 @@ class BridgeInfo {
       userRoot.hashCode ^
       appUpdatePrereleases.hashCode ^
       websiteOrigin.hashCode ^
-      websiteHidden.hashCode;
+      websiteHidden.hashCode ^
+      reduceMotion.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -383,7 +386,8 @@ class BridgeInfo {
           userRoot == other.userRoot &&
           appUpdatePrereleases == other.appUpdatePrereleases &&
           websiteOrigin == other.websiteOrigin &&
-          websiteHidden == other.websiteHidden;
+          websiteHidden == other.websiteHidden &&
+          reduceMotion == other.reduceMotion;
 }
 
 enum BridgePlatform { windows, macOs, linux, android, ios }

@@ -9,5 +9,6 @@ The package retains the upstream license, notice, and source. Examples and upstr
 - Limit the Flutter debug-binding check to debug builds. Flutter only sets the debug binding type in assertions, so the original check suppresses native lifecycle events and navigation decisions in profile and release builds.
 - Match the Android Gradle plugin and Kotlin versions used by the KeyTao Android app. The upstream Android Gradle plugin requires a newer Gradle wrapper.
 - Include the WebView2 SDK license and notice in Windows builds with the statically linked loader.
+- Send Android and iOS document scroll offsets through the native event channel for responsive in-app browser controls.
 
 Use the upstream package directly once it supports release navigation callbacks and KeyTao's Android build toolchain.

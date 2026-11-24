@@ -144,6 +144,16 @@ final class IoWebViewBridge extends WebViewPlatformBridge {
         final url = rawArgs['url'] as String?;
         callbacks.handleUrlChange(controllerId, url);
         return null;
+      case 'onScrollChanged':
+        final x = rawArgs['x'];
+        final y = rawArgs['y'];
+        if (x is num && y is num && x.isFinite && y.isFinite) {
+          callbacks.handleScrollChanged(
+            controllerId,
+            Offset(x.toDouble(), y.toDouble()),
+          );
+        }
+        return null;
       case 'onWebResourceError':
         final errorCode = (rawArgs['errorCode'] as num?)?.toInt() ?? -1;
         final description = rawArgs['description'] as String? ?? 'Unknown';

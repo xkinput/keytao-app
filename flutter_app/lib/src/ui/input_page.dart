@@ -62,6 +62,28 @@ class InputPage extends StatelessWidget {
         HairlineGridCell(child: DeploySteps(controller: controller)),
       HairlineGridSection(
         children: [
+          HairlineGridCell(
+            child: Section(
+              title: '应用设置',
+              children: [
+                SwitchSetting(
+                  '显示网站',
+                  value: !controller.websiteHidden,
+                  onChanged: controller.canEditWebsiteSettings
+                      ? (visible) =>
+                            controller.saveWebsiteSettings(hidden: !visible)
+                      : null,
+                ),
+                SwitchSetting(
+                  '减少动画',
+                  value: controller.reduceMotion,
+                  onChanged: controller.canSaveReduceMotion
+                      ? controller.saveReduceMotion
+                      : null,
+                ),
+              ],
+            ),
+          ),
           HairlineGridCell(child: AccountCard(controller: controller)),
           if (controller.operationLogs.any(
             (line) =>
@@ -101,9 +123,10 @@ class InputPage extends StatelessWidget {
                   hint: switch (controller.inputEngineTransition) {
                     true => AppStrings.enablingAlgorithmEngine,
                     false => AppStrings.disablingAlgorithmEngine,
-                    null => controller.info.platform == BridgePlatform.macOs
-                        ? AppStrings.macosAlgorithmEngineHint
-                        : AppStrings.algorithmEngineHint,
+                    null =>
+                      controller.info.platform == BridgePlatform.macOs
+                          ? AppStrings.macosAlgorithmEngineHint
+                          : AppStrings.algorithmEngineHint,
                   },
                   value: controller.inputEngineEnabled,
                   onChanged: controller.busy

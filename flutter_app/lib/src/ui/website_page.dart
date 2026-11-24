@@ -17,10 +17,16 @@ class WebsitePage extends StatefulWidget {
     super.key,
     required this.controller,
     required this.active,
+    this.mobileAccount,
+    this.mobileToolbarVisible = true,
+    this.onScrollOffset,
   });
 
   final AppController controller;
   final bool active;
+  final Widget? mobileAccount;
+  final bool mobileToolbarVisible;
+  final ValueChanged<double>? onScrollOffset;
 
   @override
   State<WebsitePage> createState() => _WebsitePageState();
@@ -41,13 +47,14 @@ class _WebsitePageState extends State<WebsitePage> {
     final controller = widget.controller;
     final origin = controller.websiteOrigin;
     final account = controller.accountUser;
-    return TickerMode(
-      enabled: widget.active,
-      child: _WebsiteBrowser(
-        key: ValueKey((origin, account?.id)),
-        controller: controller,
-        origin: origin,
-      ),
+    return _WebsiteBrowser(
+      key: ValueKey((origin, account?.id)),
+      controller: controller,
+      origin: origin,
+      active: widget.active,
+      mobileAccount: widget.mobileAccount,
+      mobileToolbarVisible: widget.mobileToolbarVisible,
+      onScrollOffset: widget.onScrollOffset,
     );
   }
 }
@@ -57,10 +64,18 @@ class _WebsiteBrowser extends StatefulWidget {
     super.key,
     required this.controller,
     required this.origin,
+    required this.active,
+    required this.mobileAccount,
+    required this.mobileToolbarVisible,
+    required this.onScrollOffset,
   });
 
   final AppController controller;
   final String origin;
+  final bool active;
+  final Widget? mobileAccount;
+  final bool mobileToolbarVisible;
+  final ValueChanged<double>? onScrollOffset;
 
   @override
   State<_WebsiteBrowser> createState() => _WebsiteBrowserState();
@@ -74,6 +89,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   bool _loading = true;
   bool _failed = false;
   bool _initializingSession = true;
+  double _scrollOffset = 0;
 
   @override
   void initState() {
@@ -81,11 +97,19 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
     _startBrowser();
   }
 
+  @override
+  void didUpdateWidget(covariant _WebsiteBrowser oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) _publishScrollAfterFrame(_browser);
+  }
+
   void _startBrowser() {
     final browser = WebViewController();
     _browser = browser;
     _currentUrl = widget.origin;
     _initializingSession = true;
+    _scrollOffset = 0;
+    _publishScrollAfterFrame(browser);
     unawaited(_initialize(browser));
     _trackLoad();
   }
@@ -105,7 +129,16 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
           },
           onPageStarted: (_) {
             if (mounted && !_failed && identical(browser, _browser)) {
+              _updateScroll(0);
               _trackLoad();
+            }
+          },
+          onScrollChanged: (offset) {
+            if (mounted &&
+                !_loading &&
+                !_failed &&
+                identical(browser, _browser)) {
+              _updateScroll(offset.dy);
             }
           },
           onPageFinished: (url) {
@@ -161,6 +194,22 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
       uri.isScheme('https') &&
       uri.host.isNotEmpty &&
       uri.userInfo.isEmpty;
+
+  void _publishScrollAfterFrame(WebViewController browser) {
+    if (widget.onScrollOffset == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.active && identical(browser, _browser)) {
+        widget.onScrollOffset?.call(_scrollOffset);
+      }
+    });
+  }
+
+  void _updateScroll(double offset) {
+    final next = offset < 0 ? 0.0 : offset;
+    if (next == _scrollOffset) return;
+    _scrollOffset = next;
+    if (widget.active) widget.onScrollOffset?.call(next);
+  }
 
   void _trackLoad() {
     if (!_loading) setState(() => _loading = true);
@@ -227,29 +276,33 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
-    return Column(
+    final mobileAccount = widget.mobileAccount;
+    final page = Column(
       key: const PageStorageKey('website'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (controller.appUpdate?.hasUpdate == true)
           AppUpdateBanner(controller: controller),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final wide = constraints.maxWidth >= 720;
-            return Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: wide ? 18 : 16,
-                vertical: 8,
-              ),
-              child: Align(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: wide ? 1392 : 760),
-                  child: _toolbar(controller),
+        if (mobileAccount != null)
+          _mobileToolbar(context, controller, mobileAccount)
+        else
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final wide = constraints.maxWidth >= 720;
+              return Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: wide ? 18 : 16,
+                  vertical: 8,
                 ),
-              ),
-            );
-          },
-        ),
+                child: Align(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: wide ? 1392 : 760),
+                    child: _toolbar(controller),
+                  ),
+                ),
+              );
+            },
+          ),
         if (_loading) const FProgress(),
         Expanded(
           child: _failed
@@ -261,6 +314,35 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
         ),
       ],
     );
+    return mobileAccount == null ? page : SafeArea(bottom: false, child: page);
+  }
+
+  Widget _mobileToolbar(
+    BuildContext context,
+    AppController controller,
+    Widget account,
+  ) {
+    final toolbar = widget.mobileToolbarVisible
+        ? Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              children: [
+                Expanded(child: _domainSelect(controller)),
+                const SizedBox(width: 4),
+                for (final action in _actions(controller))
+                  SizedBox.square(dimension: 44, child: action),
+                SizedBox.square(dimension: 44, child: account),
+              ],
+            ),
+          )
+        : const SizedBox.shrink();
+    if (MediaQuery.disableAnimationsOf(context)) return toolbar;
+    return AnimatedSize(
+      alignment: Alignment.topCenter,
+      duration: const Duration(milliseconds: 160),
+      curve: Curves.easeOutCubic,
+      child: toolbar,
+    );
   }
 
   Widget _toolbar(AppController controller) => Row(
@@ -269,35 +351,38 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
       Expanded(
         child: Align(
           alignment: AlignmentDirectional.centerStart,
-          child: SizedBox(
-            width: 230,
-            child: Semantics(
-              label: '网站域名',
-              child: FSelect<String>(
-                size: FTextFieldSizeVariant.sm,
-                enabled: controller.canEditWebsiteSettings,
-                control: FSelectControl.lifted(
-                  value: widget.origin,
-                  onChange: (origin) {
-                    if (origin != null && origin != widget.origin) {
-                      unawaited(controller.saveWebsiteSettings(origin: origin));
-                    }
-                  },
-                ),
-                items: {
-                  for (final origin in keytaoWebsiteOrigins)
-                    Uri.parse(origin).host: origin,
-                },
-              ),
-            ),
-          ),
+          child: SizedBox(width: 230, child: _domainSelect(controller)),
         ),
       ),
-      _action('返回上一页', FLucideIcons.arrowLeft, _goBack),
-      _action('刷新网站', FLucideIcons.refreshCw, _reload),
-      _action('在浏览器中打开', FLucideIcons.externalLink, () {
-        controller.open(_currentUrl);
-      }),
+      ..._actions(controller),
     ],
   );
+
+  Widget _domainSelect(AppController controller) => Semantics(
+    label: '网站域名',
+    child: FSelect<String>(
+      size: FTextFieldSizeVariant.sm,
+      enabled: controller.canEditWebsiteSettings,
+      control: FSelectControl.lifted(
+        value: widget.origin,
+        onChange: (origin) {
+          if (origin != null && origin != widget.origin) {
+            unawaited(controller.saveWebsiteSettings(origin: origin));
+          }
+        },
+      ),
+      items: {
+        for (final origin in keytaoWebsiteOrigins)
+          Uri.parse(origin).host: origin,
+      },
+    ),
+  );
+
+  List<Widget> _actions(AppController controller) => [
+    _action('返回上一页', FLucideIcons.arrowLeft, _goBack),
+    _action('刷新网站', FLucideIcons.refreshCw, _reload),
+    _action('在浏览器中打开', FLucideIcons.externalLink, () {
+      controller.open(_currentUrl);
+    }),
+  ];
 }

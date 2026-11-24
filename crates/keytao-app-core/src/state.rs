@@ -71,6 +71,18 @@ mod tests {
         assert!(state.installed_packages.is_empty());
         assert!(state.active_scheme.is_none());
         assert_eq!(state.app_update_prereleases, None);
+        assert!(!state.reduce_motion);
+    }
+
+    #[test]
+    fn reduce_motion_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState {
+            reduce_motion: true,
+            ..AppState::default()
+        };
+        state.save(dir.path()).unwrap();
+        assert!(AppState::load(dir.path()).unwrap().reduce_motion);
     }
 
     #[test]
@@ -134,6 +146,7 @@ pub struct AppState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub website_origin: Option<String>,
     pub website_hidden: bool,
+    pub reduce_motion: bool,
     pub dismissed_scheme_updates: BTreeMap<String, String>,
     pub scheme_sync_settings: serde_json::Value,
     pub follow_account_sync: bool,
@@ -157,6 +170,8 @@ struct StoredAppState {
     website_origin: Option<String>,
     #[serde(default)]
     website_hidden: bool,
+    #[serde(default)]
+    reduce_motion: bool,
     #[serde(default)]
     dismissed_scheme_updates: BTreeMap<String, String>,
     #[serde(default)]
@@ -201,6 +216,7 @@ impl From<StoredAppState> for AppState {
             app_update_prereleases: state.app_update_prereleases,
             website_origin: state.website_origin,
             website_hidden: state.website_hidden,
+            reduce_motion: state.reduce_motion,
             dismissed_scheme_updates: state.dismissed_scheme_updates,
             scheme_sync_settings: state.scheme_sync_settings,
             follow_account_sync: state.follow_account_sync,

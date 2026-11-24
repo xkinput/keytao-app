@@ -15,6 +15,8 @@ import 'theme.dart';
 import 'website_page.dart';
 import 'widgets.dart';
 
+const _mobileChromeTopExtent = 8.0;
+
 extension PageIcon on AppPage {
   IconData get icon => switch (this) {
     AppPage.input => FLucideIcons.keyboard,
@@ -62,14 +64,17 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _cloudDialogOpen = false;
+  late AppPage _chromePage = widget.controller.activePage;
+  bool _mobileBarsVisible = true;
+  double? _scrollAnchor;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.controller.setWindowTitle();
-    widget.controller.addListener(_cloudSyncChanged);
-    _cloudSyncChanged();
+    widget.controller.addListener(_controllerChanged);
+    _controllerChanged();
   }
 
   @override
@@ -81,22 +86,27 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didUpdateWidget(covariant AppShell oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
-      oldWidget.controller.removeListener(_cloudSyncChanged);
+      oldWidget.controller.removeListener(_controllerChanged);
       widget.controller.setWindowTitle();
-      widget.controller.addListener(_cloudSyncChanged);
-      _cloudSyncChanged();
+      widget.controller.addListener(_controllerChanged);
+      _controllerChanged();
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    widget.controller.removeListener(_cloudSyncChanged);
+    widget.controller.removeListener(_controllerChanged);
     super.dispose();
   }
 
-  void _cloudSyncChanged() {
+  void _controllerChanged() {
     final c = widget.controller;
+    if (_chromePage != c.activePage) {
+      _chromePage = c.activePage;
+      _mobileBarsVisible = true;
+      _scrollAnchor = null;
+    }
     if (_cloudDialogOpen ||
         c.busy ||
         (c.savingTheme && c.pendingCloudProfile != null) ||
@@ -145,8 +155,29 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         if (confirmed == true) await c.activateSchemePackage(active!);
       }
       _cloudDialogOpen = false;
-      if (mounted) _cloudSyncChanged();
+      if (mounted) _controllerChanged();
     });
+  }
+
+  void _mobileScrolled(AppPage page, double offset) {
+    if (!widget.controller.isMobile ||
+        page != widget.controller.activePage ||
+        !offset.isFinite) {
+      return;
+    }
+    const threshold = 24.0;
+    if (offset <= _mobileChromeTopExtent) {
+      _scrollAnchor = 0;
+      if (!_mobileBarsVisible) setState(() => _mobileBarsVisible = true);
+      return;
+    }
+    final delta = offset - (_scrollAnchor ??= offset);
+    if (_mobileBarsVisible ? delta < 0 : delta > 0) {
+      _scrollAnchor = offset;
+    } else if (delta.abs() >= threshold) {
+      _scrollAnchor = offset;
+      setState(() => _mobileBarsVisible = !_mobileBarsVisible);
+    }
   }
 
   @override
@@ -166,10 +197,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
       final shell = LayoutBuilder(
         builder: (context, constraints) {
-          final wide = constraints.maxWidth >= 720;
+          final wide = !c.isMobile && constraints.maxWidth >= 720;
           final palette = AppPalette.of(context);
           final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
           final availableHeight = constraints.maxHeight - keyboardInset;
+          final hideHeaderForKeyboard =
+              keyboardInset > 0 && availableHeight < 160;
+          final mobileWebsite = c.isMobile && c.activePage == AppPage.website;
+          final showMobileBars = !c.isMobile || _mobileBarsVisible;
+          final reduceMotion = MediaQuery.disableAnimationsOf(context);
           return FScaffold(
             scaffoldStyle: FScaffoldStyleDelta.delta(
               backgroundColor: palette.ground,
@@ -186,74 +222,78 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   : null,
             ),
             childPad: false,
-            header: keyboardInset > 0 && availableHeight < 160
+            header: hideHeaderForKeyboard || mobileWebsite
                 ? null
                 : SafeArea(
                     bottom: false,
-                    child: Padding(
-                      padding: wide
-                          ? const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 12,
-                            )
-                          : const EdgeInsets.fromLTRB(16, 15, 16, 9),
-                      child: Align(
-                        alignment: Alignment.topCenter,
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxWidth: wide ? 1392 : 760,
-                          ),
-                          child: SizedBox(
-                            width: double.infinity,
-                            child: wide
-                                ? Wrap(
-                                    alignment: WrapAlignment.spaceBetween,
-                                    crossAxisAlignment:
-                                        WrapCrossAlignment.center,
-                                    spacing: 16,
-                                    runSpacing: 16,
-                                    children: [
-                                      _DesktopNavigation(
-                                        controller: c,
-                                        onSelect: select,
-                                      ),
-                                      Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          _ShellStatus(controller: c),
-                                          const SizedBox(width: 12),
-                                          _AccountButton(
-                                            controller: c,
-                                            showName: true,
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  )
-                                : Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          c.activePage.title,
-                                          style: context
-                                              .theme
-                                              .typography
-                                              .display
-                                              .xl2
-                                              .copyWith(
-                                                fontSize: 26,
-                                                fontWeight: FontWeight.w700,
-                                                color: palette.ink,
-                                              ),
+                    child: _CollapsibleBar(
+                      visible: showMobileBars,
+                      alignment: Alignment.bottomCenter,
+                      child: Padding(
+                        padding: wide
+                            ? const EdgeInsets.symmetric(
+                                horizontal: 18,
+                                vertical: 12,
+                              )
+                            : const EdgeInsets.symmetric(horizontal: 12),
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: wide ? 1392 : 760,
+                            ),
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: wide
+                                  ? Wrap(
+                                      alignment: WrapAlignment.spaceBetween,
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.center,
+                                      spacing: 16,
+                                      runSpacing: 16,
+                                      children: [
+                                        _DesktopNavigation(
+                                          controller: c,
+                                          onSelect: select,
                                         ),
-                                      ),
-                                      if (c.activePage == AppPage.input) ...[
-                                        _ShellStatus(controller: c),
-                                        const SizedBox(width: 4),
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            _ShellStatus(controller: c),
+                                            const SizedBox(width: 12),
+                                            _AccountButton(
+                                              controller: c,
+                                              showName: true,
+                                            ),
+                                          ],
+                                        ),
                                       ],
-                                      _AccountButton(controller: c),
-                                    ],
-                                  ),
+                                    )
+                                  : Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            c.activePage.title,
+                                            style: context
+                                                .theme
+                                                .typography
+                                                .display
+                                                .xl2
+                                                .copyWith(
+                                                  fontSize: 20,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: palette.ink,
+                                                ),
+                                          ),
+                                        ),
+                                        if (c.activePage == AppPage.input) ...[
+                                          _ShellStatus(controller: c),
+                                          const SizedBox(width: 4),
+                                        ],
+                                        _AccountButton(controller: c),
+                                      ],
+                                    ),
+                            ),
                           ),
                         ),
                       ),
@@ -261,83 +301,100 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   ),
             footer: wide
                 ? null
-                : SafeArea(
-                    top: false,
-                    bottom: false,
-                    child: FBottomNavigationBar(
-                      safeAreaBottom: true,
-                      style: FBottomNavigationBarStyleDelta.delta(
-                        decoration: DecorationDelta.value(
-                          BoxDecoration(
-                            color: palette.surface,
-                            border: Border(
-                              top: BorderSide(color: palette.hairline),
-                            ),
-                          ),
-                        ),
-                        padding: const EdgeInsetsGeometryDelta.value(
-                          EdgeInsets.fromLTRB(4, 6, 4, 10),
-                        ),
-                        itemStyle: FBottomNavigationBarItemStyleDelta.delta(
-                          padding: const EdgeInsetsGeometryDelta.value(
-                            EdgeInsets.symmetric(vertical: 4),
-                          ),
-                          iconStyle: FVariants(
-                            IconThemeData(color: palette.muted, size: 20),
-                            variants: {
-                              [FTappableVariant.selected]: IconThemeData(
-                                color: accent,
-                                size: 20,
+                : ColoredBox(
+                    color: showMobileBars ? palette.surface : palette.ground,
+                    child: SafeArea(
+                      top: false,
+                      child: _CollapsibleBar(
+                        visible: showMobileBars,
+                        alignment: Alignment.topCenter,
+                        child: FBottomNavigationBar(
+                          safeAreaBottom: true,
+                          style: FBottomNavigationBarStyleDelta.delta(
+                            decoration: DecorationDelta.value(
+                              BoxDecoration(
+                                color: palette.surface,
+                                border: Border(
+                                  top: BorderSide(color: palette.hairline),
+                                ),
                               ),
-                            },
-                          ),
-                          textStyle: FVariants(
-                            context.theme.typography.body.sm.copyWith(
-                              fontSize: 12,
-                              height: 1.5,
-                              color: palette.muted,
                             ),
-                            variants: {
-                              [FTappableVariant.selected]: context
-                                  .theme
-                                  .typography
-                                  .body
-                                  .sm
-                                  .copyWith(
-                                    fontSize: 12,
-                                    height: 1.5,
+                            padding: const EdgeInsetsGeometryDelta.value(
+                              EdgeInsets.fromLTRB(4, 1, 4, 2),
+                            ),
+                            itemStyle: FBottomNavigationBarItemStyleDelta.delta(
+                              padding: const EdgeInsetsGeometryDelta.value(
+                                EdgeInsets.symmetric(vertical: 4),
+                              ),
+                              iconStyle: FVariants(
+                                IconThemeData(color: palette.muted, size: 20),
+                                variants: {
+                                  [FTappableVariant.selected]: IconThemeData(
                                     color: accent,
-                                    fontWeight: FontWeight.w600,
+                                    size: 20,
                                   ),
-                            },
+                                },
+                              ),
+                              textStyle: FVariants(
+                                context.theme.typography.body.sm.copyWith(
+                                  fontSize: 12,
+                                  height: 1.2,
+                                  color: palette.muted,
+                                ),
+                                variants: {
+                                  [FTappableVariant.selected]: context
+                                      .theme
+                                      .typography
+                                      .body
+                                      .sm
+                                      .copyWith(
+                                        fontSize: 12,
+                                        height: 1.2,
+                                        color: accent,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                },
+                              ),
+                            ),
                           ),
+                          index: c.activePage.index,
+                          onChange: select,
+                          children: [
+                            for (final page in c.visiblePages)
+                              FBottomNavigationBarItem(
+                                key: ValueKey('nav-${page.id}'),
+                                icon: _navigationIcon(page, c, 20),
+                                label: Text(page.title),
+                              ),
+                          ],
                         ),
                       ),
-                      index: c.activePage.index,
-                      onChange: select,
-                      children: [
-                        for (final page in c.visiblePages)
-                          FBottomNavigationBarItem(
-                            key: ValueKey('nav-${page.id}'),
-                            icon: _navigationIcon(page, c, 20),
-                            label: Text(page.title),
-                          ),
-                      ],
                     ),
                   ),
-            child: IndexedStack(
-              index: c.activePage.index,
-              children: [
-                InputPage(controller: c),
-                SchemePage(controller: c),
-                AboutPage(controller: c),
-                DebugPage(controller: c),
+            child: _PageDeck(
+              activePage: c.activePage,
+              animate: !reduceMotion,
+              nativeWebsiteOverlay: c.isLinux,
+              children: {
+                AppPage.input: InputPage(controller: c),
+                AppPage.scheme: SchemePage(controller: c),
+                AppPage.about: AboutPage(controller: c),
+                AppPage.debug: DebugPage(controller: c),
                 if (!c.websiteHidden)
-                  WebsitePage(
+                  AppPage.website: WebsitePage(
                     controller: c,
                     active: c.activePage == AppPage.website,
+                    mobileAccount: c.isMobile
+                        ? _AccountButton(controller: c)
+                        : null,
+                    mobileToolbarVisible:
+                        showMobileBars && !hideHeaderForKeyboard,
+                    onScrollOffset: c.isMobile
+                        ? (offset) => _mobileScrolled(AppPage.website, offset)
+                        : null,
                   ),
-              ],
+              },
+              onScrollOffset: c.isMobile ? _mobileScrolled : null,
             ),
           );
         },
@@ -347,6 +404,176 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         child: c.isAndroid ? AppSystemBars(child: shell) : shell,
       );
     },
+  );
+}
+
+class _CollapsibleBar extends StatelessWidget {
+  const _CollapsibleBar({
+    required this.visible,
+    required this.alignment,
+    required this.child,
+  });
+
+  final bool visible;
+  final Alignment alignment;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    excluding: !visible,
+    child: ExcludeFocus(
+      excluding: !visible,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: ClipRect(
+          child: AnimatedAlign(
+            alignment: alignment,
+            heightFactor: visible ? 1 : 0,
+            duration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
+            child: child,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _PageDeck extends StatefulWidget {
+  const _PageDeck({
+    required this.activePage,
+    required this.animate,
+    required this.nativeWebsiteOverlay,
+    required this.children,
+    required this.onScrollOffset,
+  });
+
+  final AppPage activePage;
+  final bool animate;
+  final bool nativeWebsiteOverlay;
+  final Map<AppPage, Widget> children;
+  final void Function(AppPage, double)? onScrollOffset;
+
+  @override
+  State<_PageDeck> createState() => _PageDeckState();
+}
+
+class _PageDeckState extends State<_PageDeck>
+    with SingleTickerProviderStateMixin {
+  late final _slide =
+      AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 190),
+        value: 1,
+      )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && _outgoing != null) {
+          setState(() => _outgoing = null);
+        }
+      });
+  AppPage? _outgoing;
+  double _direction = 1;
+
+  @override
+  void didUpdateWidget(covariant _PageDeck oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final switching = widget.activePage != oldWidget.activePage;
+    // The GTK WebView is an independent overlay. Keep it in its final bounds.
+    final switchingNativeWebsite =
+        switching &&
+        widget.nativeWebsiteOverlay &&
+        (oldWidget.activePage == AppPage.website ||
+            widget.activePage == AppPage.website);
+    if (!widget.animate || switchingNativeWebsite) {
+      _outgoing = null;
+      _slide.value = 1;
+    } else if (switching) {
+      _outgoing = oldWidget.activePage;
+      _direction = widget.activePage.index > oldWidget.activePage.index
+          ? 1
+          : -1;
+      _slide.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _slide.dispose();
+    super.dispose();
+  }
+
+  Widget _page(AppPage page, Widget child) {
+    final active = page == widget.activePage;
+    final moving = _outgoing != null;
+    final visible = active || page == _outgoing;
+    final offset = Offset(active ? _direction : -_direction, 0);
+    return Positioned.fill(
+      key: ValueKey(page),
+      child: Visibility(
+        visible: visible,
+        maintainState: true,
+        child: ExcludeSemantics(
+          excluding: !active,
+          child: ExcludeFocus(
+            excluding: !active,
+            child: IgnorePointer(
+              ignoring: !active,
+              child: TickerMode(
+                enabled: visible,
+                child: SlideTransition(
+                  key: ValueKey('page-slide-${page.id}'),
+                  position: moving && visible
+                      ? Tween(
+                              begin: active ? offset : Offset.zero,
+                              end: active ? Offset.zero : offset,
+                            )
+                            .chain(CurveTween(curve: Curves.easeOutCubic))
+                            .animate(_slide)
+                      : const AlwaysStoppedAnimation(Offset.zero),
+                  child: NotificationListener<Notification>(
+                    onNotification: (notification) {
+                      if (!active || widget.onScrollOffset == null) {
+                        return false;
+                      }
+                      final metrics = switch (notification) {
+                        ScrollStartNotification(depth: 0, :final metrics) ||
+                        ScrollUpdateNotification(
+                          depth: 0,
+                          :final metrics,
+                        ) => metrics,
+                        // Resizing can return a short page to the top without
+                        // firing any scroll updates.
+                        ScrollMetricsNotification(depth: 0, :final metrics)
+                            when metrics.extentBefore <=
+                                _mobileChromeTopExtent =>
+                          metrics,
+                        _ => null,
+                      };
+                      if (metrics != null && metrics.axis == Axis.vertical) {
+                        widget.onScrollOffset?.call(page, metrics.extentBefore);
+                      }
+                      return false;
+                    },
+                    child: RepaintBoundary(child: child),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => ClipRect(
+    child: Stack(
+      children: [
+        for (final entry in widget.children.entries)
+          _page(entry.key, entry.value),
+      ],
+    ),
   );
 }
 
@@ -455,14 +682,18 @@ class _AccountButton extends StatelessWidget {
     return FTooltip(
       tipBuilder: (_, _) => Text(label),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 44, maxWidth: 160),
+        constraints: const BoxConstraints(
+          minWidth: 44,
+          minHeight: 44,
+          maxWidth: 160,
+        ),
         child: FButton(
           variant: FButtonVariant.ghost,
           semanticsLabel: label,
           mainAxisSize: MainAxisSize.min,
           style: FButtonStyleDelta.delta(
             contentStyle: FButtonContentStyleDelta.delta(
-              constraints: const BoxConstraints(minHeight: 44),
+              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
               padding: const EdgeInsetsGeometryDelta.value(
                 EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               ),

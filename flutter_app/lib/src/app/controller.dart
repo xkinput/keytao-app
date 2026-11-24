@@ -286,6 +286,11 @@ class AppController extends ChangeNotifier {
   late final _websiteHidden = ValueNotifier(info.websiteHidden);
   ValueListenable<bool> get websiteHiddenChanges => _websiteHidden;
   bool get websiteHidden => _websiteHidden.value;
+  late final _reduceMotion = ValueNotifier(info.reduceMotion);
+  ValueListenable<bool> get reduceMotionChanges => _reduceMotion;
+  bool get reduceMotion => _reduceMotion.value;
+  bool _savingReduceMotion = false;
+  bool get canSaveReduceMotion => !_savingReduceMotion;
   List<AppPage> get visiblePages => websiteHidden
       ? AppPage.values.take(AppPage.website.index).toList()
       : AppPage.values;
@@ -1469,6 +1474,25 @@ class AppController extends ChangeNotifier {
       return false;
     } finally {
       _savingWebsiteSettings = false;
+      _changed();
+    }
+  }
+
+  Future<bool> saveReduceMotion(bool enabled) async {
+    if (_disposed || !canSaveReduceMotion) return false;
+    if (enabled == reduceMotion) return true;
+    _savingReduceMotion = true;
+    _changed();
+    try {
+      await core.setReduceMotion(enabled: enabled);
+      if (_disposed) return false;
+      _reduceMotion.value = enabled;
+      return true;
+    } catch (failure) {
+      if (!_disposed) showToast(errorText(failure));
+      return false;
+    } finally {
+      _savingReduceMotion = false;
       _changed();
     }
   }
@@ -4930,6 +4954,7 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _websiteHidden.dispose();
+    _reduceMotion.dispose();
     _dictionarySyncDebounce?.cancel();
     _dictionaryPullTimer?.cancel();
     _dictionaryPullCooldown?.cancel();

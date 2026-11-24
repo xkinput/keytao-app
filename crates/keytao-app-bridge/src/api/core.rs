@@ -988,6 +988,13 @@ pub fn set_website_settings(origin: String, hidden: bool) -> Result<(), String> 
         .map_err(|error| error.to_string())
 }
 
+pub fn set_reduce_motion(enabled: bool) -> Result<(), String> {
+    runtime::state()?
+        .core
+        .update_state(|state| state.reduce_motion = enabled)
+        .map_err(|error| error.to_string())
+}
+
 pub async fn download_app_update(version: String) -> Result<bool, String> {
     keytao_app_core::update::download_app_update(&runtime::state()?.core, &version).await
 }

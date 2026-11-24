@@ -233,6 +233,7 @@ internal class AndroidWebViewInstance(
 
         val bgColor = (creationArgs["backgroundColor"] as? Number)?.toInt() ?: 0
         webView.setBackgroundColor(bgColor)
+        webView.setOnScrollChangeListener { _, _, _, _, _ -> sendScrollPosition() }
 
         val initialChannels = creationArgs["channelNames"] as? List<*>
         if (initialChannels != null) {
@@ -282,6 +283,7 @@ internal class AndroidWebViewInstance(
                     "onUrlChange",
                     mapOf("controllerId" to controllerId, "url" to safeUrl)
                 )
+                sendScrollPosition()
             }
 
             override fun shouldOverrideUrlLoading(
@@ -375,6 +377,19 @@ internal class AndroidWebViewInstance(
 
     override fun getView(): View = webView
 
+    private fun sendScrollPosition() {
+        if (destroyed) return
+        val density = displayDensity().toDouble()
+        plugin.sendEvent(
+            "onScrollChanged",
+            mapOf(
+                "controllerId" to controllerId,
+                "x" to webView.scrollX / density,
+                "y" to webView.scrollY / density
+            )
+        )
+    }
+
     override fun dispose() {
         plugin.removeInstance(controllerId, this)
         destroy()
@@ -389,6 +404,7 @@ internal class AndroidWebViewInstance(
         registeredChannels.clear()
         (webView.parent as? ViewGroup)?.removeView(webView)
         webView.stopLoading()
+        webView.setOnScrollChangeListener(null)
         webView.webChromeClient = null
         webView.destroy()
     }

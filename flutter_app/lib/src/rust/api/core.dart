@@ -401,6 +401,9 @@ Future<void> setWebsiteSettings({
   hidden: hidden,
 );
 
+Future<void> setReduceMotion({required bool enabled}) =>
+    RustLib.instance.api.crateApiCoreSetReduceMotion(enabled: enabled);
+
 Future<bool> downloadAppUpdate({required String version}) =>
     RustLib.instance.api.crateApiCoreDownloadAppUpdate(version: version);
 

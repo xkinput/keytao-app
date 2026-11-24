@@ -61,13 +61,11 @@ void unifiedGateCases(BridgePlatform platform) {
       } else {
         expect(
           find.byKey(
-            ValueKey(
-              switch (platform) {
-                BridgePlatform.ios => 'setup-enable',
-                BridgePlatform.android => 'setup-storage',
-                _ => 'setup-install',
-              },
-            ),
+            ValueKey(switch (platform) {
+              BridgePlatform.ios => 'setup-enable',
+              BridgePlatform.android => 'setup-storage',
+              _ => 'setup-install',
+            }),
           ),
           findsOneWidget,
         );
@@ -125,13 +123,14 @@ void unifiedGateCases(BridgePlatform platform) {
             find.byType(AppShell),
             showShell ? findsOneWidget : findsNothing,
           );
+          final desktopNavigation = !c.isMobile && width >= 720;
           expect(
             find.byKey(const ValueKey('desktop-navigation')),
-            showShell && width >= 720 ? findsOneWidget : findsNothing,
+            showShell && desktopNavigation ? findsOneWidget : findsNothing,
           );
           expect(
             find.byType(FBottomNavigationBar),
-            showShell && width < 720 ? findsOneWidget : findsNothing,
+            showShell && !desktopNavigation ? findsOneWidget : findsNothing,
           );
           expect(
             find.byType(PlatformMenuBar),
@@ -177,10 +176,15 @@ void unifiedGateCases(BridgePlatform platform) {
                   .descendant(of: input, matching: find.byType(Scrollable))
                   .first,
             );
-            final offset = scroll.position.pixels;
             if (platform == BridgePlatform.android) {
-              expect(offset, greaterThan(0));
+              expect(scroll.position.pixels, greaterThan(0));
             }
+            final schemeTab = find.byKey(const ValueKey('nav-scheme'));
+            if (c.isMobile && schemeTab.hitTestable().evaluate().isEmpty) {
+              await tester.drag(input, const Offset(0, 80));
+              await tester.pumpAndSettle();
+            }
+            final offset = scroll.position.pixels;
             for (final page in [
               AppPage.scheme,
               AppPage.about,
