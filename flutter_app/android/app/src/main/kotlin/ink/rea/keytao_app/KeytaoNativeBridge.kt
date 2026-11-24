@@ -118,19 +118,6 @@ object KeytaoNativeBridge {
         )
     }
 
-    fun mergeLocalDefaultCustom(existing: String?, packageContent: String): MergeResult {
-        check(loaded) { "KeyTao native bridge is unavailable" }
-        val json = runCatching { nativeMergeLocalDefaultCustom(existing, packageContent) }
-            .getOrElse { throw IllegalStateException("Failed to merge local scheme configuration", it) }
-            ?: error("Failed to merge local scheme configuration")
-        val result = JSONObject(json)
-        val userSchemas = result.getJSONArray("userSchemas")
-        return MergeResult(
-            result.getString("mergedContent"),
-            (0 until userSchemas.length()).map { userSchemas.getString(it) },
-        )
-    }
-
     fun prepareProtectedFileInstall(relative: String, existing: ByteArray?): ProtectedFileInstall {
         check(loaded) { "KeyTao native bridge is unavailable" }
         val json = runCatching { nativePrepareProtectedFileInstall(relative, existing) }
@@ -153,11 +140,6 @@ object KeytaoNativeBridge {
         return runCatching { nativeResolveKeyboardJson(defaultKeyboardPath, userKeyboardPath) }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
-    }
-
-    fun engineAvailable(): Boolean {
-        if (!loaded) return false
-        return runCatching { nativeEngineAvailable() }.getOrDefault(false)
     }
 
     fun hasDeployedSchema(userDir: String): Boolean {
@@ -211,16 +193,16 @@ object KeytaoNativeBridge {
         return runCatching { nativeCompleteDeployment(userDir) }.getOrDefault(false)
     }
 
-    fun init(userDir: String, sharedDir: String?, deploy: Boolean): Boolean {
+    fun init(userDir: String, deploy: Boolean): Boolean {
         if (!loaded) return false
-        return runCatching { nativeInit(userDir, sharedDir, deploy) }.getOrDefault(false).also {
+        return runCatching { nativeInit(userDir, deploy) }.getOrDefault(false).also {
             KeytaoRuntimeLog.nativeInitialized()
         }
     }
 
-    fun reinitialize(userDir: String, sharedDir: String?): Boolean {
+    fun reinitialize(userDir: String): Boolean {
         if (!loaded) return false
-        return runCatching { nativeReinitialize(userDir, sharedDir) }.getOrDefault(false).also {
+        return runCatching { nativeReinitialize(userDir) }.getOrDefault(false).also {
             KeytaoRuntimeLog.nativeInitialized()
         }
     }
@@ -480,16 +462,10 @@ object KeytaoNativeBridge {
 
     external fun nativeMergeDefaultCustom(existing: String?, packageContent: String): String?
 
-    external fun nativeMergeLocalDefaultCustom(existing: String?, packageContent: String): String?
-
     external fun nativeResolveKeyboardJson(
         defaultKeyboardPath: String?,
         userKeyboardPath: String?,
     ): String
-
-    external fun nativeRenderSchemaLogos(userDir: String)
-
-    external fun nativeEngineAvailable(): Boolean
 
     private external fun nativeEngineEnabled(userDir: String): Boolean
 
@@ -521,9 +497,9 @@ object KeytaoNativeBridge {
 
     external fun nativeCompleteDeployment(userDir: String): Boolean
 
-    external fun nativeInit(userDir: String, sharedDir: String?, deploy: Boolean): Boolean
+    external fun nativeInit(userDir: String, deploy: Boolean): Boolean
 
-    external fun nativeReinitialize(userDir: String, sharedDir: String?): Boolean
+    external fun nativeReinitialize(userDir: String): Boolean
 
     external fun nativeCreateSession(): Long
 

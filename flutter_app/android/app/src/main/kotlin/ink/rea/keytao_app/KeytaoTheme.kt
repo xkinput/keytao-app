@@ -128,10 +128,18 @@ class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {
     val showComment = candidateBar.getBoolean("showComment")
     val commentBelow = candidateBar.optString("commentPosition") == "below"
 
-    private val keyStyleCache = mutableMapOf<String, KeytaoKeyStyle>()
+    private data class KeyStyleCacheKey(
+        val type: String,
+        val accent: Boolean,
+        val punctuation: Boolean,
+        val selected: Boolean,
+        val shiftOn: Boolean,
+    )
+
+    private val keyStyleCache = mutableMapOf<KeyStyleCacheKey, KeytaoKeyStyle>()
 
     fun keyStyle(type: String, accent: Boolean, punctuation: Boolean, selected: Boolean, shiftOn: Boolean): KeytaoKeyStyle {
-        val cacheKey = "$type:$accent:$punctuation:$selected:$shiftOn"
+        val cacheKey = KeyStyleCacheKey(type, accent, punctuation, selected, shiftOn)
         return keyStyleCache.getOrPut(cacheKey) {
             val style = JSONObject(keyboard.getJSONObject("key").toString())
             fun overlay(source: JSONObject, colorsOnly: Boolean = false) {
@@ -194,7 +202,7 @@ object KeytaoThemeResolver {
         val scheme = systemColorScheme(context)
         val signature = "${fileSignature(userTheme)}|$scheme"
         cachedTheme?.let { if (signature == cachedSignature) return it }
-        val theme = KeytaoImeTheme.fromJson(KeytaoNativeBridge.resolveThemeJson(null, userTheme?.takeIf { it.isFile }?.absolutePath, scheme), context)
+        val theme = KeytaoImeTheme.fromJson(KeytaoNativeBridge.resolveThemeJson(null, userTheme?.absolutePath, scheme), context)
         cachedSignature = signature
         cachedTheme = theme
         return theme

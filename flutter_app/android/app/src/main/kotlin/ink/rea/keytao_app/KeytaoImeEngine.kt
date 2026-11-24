@@ -322,9 +322,16 @@ class KeytaoImeEngine(context: Context) {
     }
 
     fun listSwitcherPackages(): List<KeytaoRimeSwitcherPackage> {
-        val activeSession = session
-        if (!nativeReady || activeSession == 0L) return emptyList()
-        return KeytaoNativeBridge.listSwitcherPackages(activeSession)
+        val retained = synchronized(this) {
+            if (closed || !nativeReady || session == 0L) return emptyList()
+            KeytaoNativeBridge.retainSession(session)
+        }
+        if (retained == 0L) return emptyList()
+        return try {
+            KeytaoNativeBridge.listSwitcherPackages(retained)
+        } finally {
+            KeytaoNativeBridge.destroySession(retained)
+        }
     }
 
     @Synchronized
@@ -410,7 +417,7 @@ class KeytaoImeEngine(context: Context) {
         try {
             // Retain the session under the monitor, then let keys wait in core during prewarm.
             val requestedSignature = reloadStampSignature()
-            val ok = KeytaoNativeBridge.reinitialize(snapshot.third.absolutePath, sharedDataDir?.absolutePath)
+            val ok = KeytaoNativeBridge.reinitialize(snapshot.third.absolutePath)
             val available = ok && KeytaoAndroidPaths.hasDeployedSchema(snapshot.third)
             if (available) KeytaoNativeBridge.prewarm(snapshot.second)
             synchronized(this) {
@@ -542,7 +549,7 @@ class KeytaoImeEngine(context: Context) {
                 session = 0L
                 lastState = KeytaoImeState.empty(asciiMode = lastState.asciiMode)
                 if (reinitialize) {
-                    KeytaoNativeBridge.reinitialize(root.absolutePath, sharedDataDir?.absolutePath)
+                    KeytaoNativeBridge.reinitialize(root.absolutePath)
                 }
                 return false
             }
@@ -556,11 +563,11 @@ class KeytaoImeEngine(context: Context) {
             }
             val requestedSignature = reloadStampSignature()
             val initialized = if (reinitialize) {
-                KeytaoNativeBridge.reinitialize(root.absolutePath, sharedDir.absolutePath)
+                KeytaoNativeBridge.reinitialize(root.absolutePath)
             } else {
-                KeytaoNativeBridge.init(root.absolutePath, sharedDir.absolutePath, deploy)
+                KeytaoNativeBridge.init(root.absolutePath, deploy)
             }
-            if (!KeytaoNativeBridge.engineAvailable() || !initialized) {
+            if (!initialized) {
                 lastState = lastState.withoutTransientCommit()
                 return false
             }
