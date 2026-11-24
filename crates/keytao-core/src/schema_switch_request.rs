@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
+    time::SystemTime,
 };
 
 pub const SCHEMA_SWITCH_REQUEST_FILE: &str = ".keytao-schema-switches.json";
@@ -94,7 +95,11 @@ pub fn read_schema_switch_request(root: &Path) -> Result<SchemaSwitchRequest, St
 }
 
 pub(crate) fn read_at(root: &Path) -> Result<SchemaSwitchRequest, String> {
-    match std::fs::read(root.join(SCHEMA_SWITCH_REQUEST_FILE)) {
+    read_request(&root.join(SCHEMA_SWITCH_REQUEST_FILE))
+}
+
+fn read_request(path: &Path) -> Result<SchemaSwitchRequest, String> {
+    match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|error| format!("read schema switch request: {error}")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -115,9 +120,71 @@ pub fn schema_switch_applied_generation(root: &Path) -> Result<u64, String> {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct RequestMetadata {
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64),
+    #[cfg(windows)]
+    identity: (u64, [u8; 16]),
+}
+
+impl RequestMetadata {
+    fn read(path: &Path) -> io::Result<Self> {
+        #[cfg(windows)]
+        let (metadata, identity) = {
+            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+            use windows::Win32::{
+                Foundation::HANDLE,
+                Storage::FileSystem::{
+                    FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                },
+            };
+
+            let file = std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES.0)
+                .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+                .open(path)?;
+            let metadata = file.metadata()?;
+            let mut info = FILE_ID_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(file.as_raw_handle()),
+                    FileIdInfo,
+                    (&mut info as *mut FILE_ID_INFO).cast(),
+                    std::mem::size_of::<FILE_ID_INFO>() as u32,
+                )
+            }
+            .map_err(io::Error::other)?;
+            (metadata, (info.VolumeSerialNumber, info.FileId.Identifier))
+        };
+        #[cfg(not(windows))]
+        let metadata = std::fs::metadata(path)?;
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        };
+        if !metadata.is_file() {
+            return Err(io::Error::other(
+                "schema switch request is not a regular file",
+            ));
+        }
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified()?,
+            #[cfg(any(unix, windows))]
+            identity,
+        })
+    }
+}
+
 #[derive(Default)]
 struct ProcessSwitchState {
     generations: BTreeMap<PathBuf, u64>,
+    request: Option<(PathBuf, Option<RequestMetadata>, SchemaSwitchRequest)>,
 }
 
 // Keep each host's baseline across librime rebuilds; another host's ack is not ours.
@@ -144,9 +211,34 @@ impl ProcessSwitchState {
     }
 
     fn pending(&mut self, root: &Path) -> Result<Option<SchemaSwitchRequest>, String> {
-        let request = read_at(root)?;
+        let path = root.join(SCHEMA_SWITCH_REQUEST_FILE);
+        let metadata = match RequestMetadata::read(&path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.request = None;
+                self.applied(root)?;
+                return Ok(None);
+            }
+            Err(_) => None,
+        };
+        if metadata.is_none()
+            || !self
+                .request
+                .as_ref()
+                .is_some_and(|(cached_path, cached_metadata, _)| {
+                    cached_path == &path && cached_metadata == &metadata
+                })
+        {
+            self.request = None;
+            let request = read_request(&path)?;
+            let metadata = metadata
+                .filter(|before| RequestMetadata::read(&path).is_ok_and(|after| &after == before));
+            self.request = Some((path, metadata, request));
+        }
         let applied = self.applied(root)?;
-        Ok((request.generation > applied).then_some(request))
+        Ok(self.request.as_ref().and_then(|(_, _, request)| {
+            (request.generation > applied).then(|| request.clone())
+        }))
     }
 
     fn acknowledge(&mut self, root: &Path, generation: u64) -> Result<(), String> {
@@ -402,6 +494,39 @@ mod tests {
 
         let mut fresh = ProcessSwitchState::default();
         assert!(fresh.pending(&root).unwrap().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn same_size_and_mtime_replacement_invalidates_the_request_cache() {
+        let root =
+            std::env::temp_dir().join(format!("keytao-switch-replacement-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(SCHEMA_SWITCH_REQUEST_FILE);
+        let first = br#"{"generation":1,"options":{"mars":true}}"#;
+        let second = br#"{"generation":2,"options":{"mars":true}}"#;
+        std::fs::write(&path, first).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut process = ProcessSwitchState::default();
+        assert_eq!(process.pending(&root).unwrap().unwrap().generation, 1);
+        assert!(process.request.as_ref().unwrap().1.is_some());
+        process.acknowledge(&root, 1).unwrap();
+        assert!(process.pending(&root).unwrap().is_none());
+
+        let replacement = root.join("replacement");
+        std::fs::write(&replacement, second).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.len(), first.len() as u64);
+        assert_eq!(metadata.modified().unwrap(), modified);
+        assert_eq!(process.pending(&root).unwrap().unwrap().generation, 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

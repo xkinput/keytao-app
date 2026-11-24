@@ -19,17 +19,17 @@ fn fixture(name: &str) -> (ImeRuntime, PathBuf) {
         ("keytao_other", "Other Chinese"),
         ("easy_en", "Easy English"),
     ] {
-        std::fs::write(
-            dir.join(format!("{id}.schema.yaml")),
-            schema
-                .replace(smoke_fixture::SCHEMA_ID, id)
-                .replace(
-                    &format!("dictionary: {id}"),
-                    &format!("dictionary: {}", smoke_fixture::SCHEMA_ID),
-                )
-                .replace("KeyTao Smoke", name),
-        )
-        .unwrap();
+        let mut schema = schema
+            .replace(smoke_fixture::SCHEMA_ID, id)
+            .replace(
+                &format!("dictionary: {id}"),
+                &format!("dictionary: {}", smoke_fixture::SCHEMA_ID),
+            )
+            .replace("KeyTao Smoke", name);
+        if id == "keytao_other" {
+            schema = schema.replace("engine:\n", "  - name: other_option\nengine:\n");
+        }
+        std::fs::write(dir.join(format!("{id}.schema.yaml")), schema).unwrap();
     }
     std::fs::write(
         dir.join("default.custom.yaml"),
@@ -118,10 +118,12 @@ fn sessions_and_new_clients_share_language_schema_and_declared_switches() {
     first.select_schema("keytao_other").unwrap();
     first.set_option("full_shape", true).unwrap();
     first.set_option("simplification", true).unwrap();
+    first.set_option("other_option", true).unwrap();
     first.set_option("not_a_schema_switch", true).unwrap();
     assert_eq!(second.state().schema_id, "keytao_other");
     assert!(second.get_option("full_shape"));
     assert!(second.get_option("simplification"));
+    assert!(second.get_option("other_option"));
     assert!(!second.get_option("not_a_schema_switch"));
     let fresh = runtime.create_session().unwrap();
     assert_eq!(fresh.state().schema_id, "keytao_other");

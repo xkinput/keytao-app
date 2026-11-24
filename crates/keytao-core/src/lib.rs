@@ -866,6 +866,7 @@ pub use runtime_libjd::active_libjd_schema;
 /// Operations on a single input session. The runtime owns input policy,
 /// batching across policy changes, and the backend's lifecycle.
 pub(crate) trait ImeBackend: Send + Sync + english_mode::EnglishBackend {
+    fn input_state(&self) -> global_input::InputState;
     fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult;
     fn switcher_hotkeys(&self) -> &[SchemaShortcut] {
         &[]
@@ -3164,6 +3165,7 @@ mod desktop {
         chord_composer: bool,
         shortcuts: Vec<SchemaShortcut>,
         modifier_taps: Vec<u32>,
+        switch_names: Option<Vec<String>>,
     }
 
     /// An active rime input session.
@@ -3385,6 +3387,16 @@ mod desktop {
             }
         }
 
+        fn schema_key_policy(&self, schema_id: &str) -> std::cell::RefMut<'_, SchemaKeyPolicy> {
+            let mut cached = self.schema_keys.borrow_mut();
+            if cached.schema_id != schema_id {
+                *cached = schema_key_policy_locked(schema_id);
+                cached.schema_id = schema_id.into();
+                cached.shortcuts.extend_from_slice(&self.switcher_hotkeys);
+            }
+            cached
+        }
+
         fn switches_before_shortcut(&self, keycode: u32, mask: u32) -> Vec<SchemaSwitchSetting> {
             if mask & RIME_RELEASE_MASK != 0 {
                 return Vec::new();
@@ -3416,6 +3428,29 @@ mod desktop {
     }
 
     impl ImeBackend for RimeBackend {
+        fn input_state(&self) -> global_input::InputState {
+            let _rime = rime_api_lock();
+            let Ok(status) = self.session.status() else {
+                return global_input::InputState::default();
+            };
+            let schema_id = status.schema_id();
+            let mut cached = self.schema_key_policy(schema_id);
+            if cached.switch_names.is_none() {
+                cached.switch_names = try_read_schema_switches_locked(schema_id)
+                    .map(|switches| english_mode::schema_option_names(switches).collect());
+            }
+            global_input::InputState {
+                schema_id: schema_id.into(),
+                ascii_mode: status.is_ascii_mode,
+                options: cached
+                    .switch_names
+                    .iter()
+                    .flatten()
+                    .map(|name| (name.clone(), get_session_option(&self.session, name)))
+                    .collect(),
+            }
+        }
+
         fn switcher_hotkeys(&self) -> &[SchemaShortcut] {
             &self.switcher_hotkeys
         }
@@ -4168,30 +4203,22 @@ mod desktop {
     }
 
     fn read_schema_switches_locked(schema_id: &str) -> Vec<SchemaSwitch> {
-        let Ok(schema_id) = CString::new(schema_id) else {
-            return Vec::new();
-        };
+        try_read_schema_switches_locked(schema_id).unwrap_or_default()
+    }
+
+    fn try_read_schema_switches_locked(schema_id: &str) -> Option<Vec<SchemaSwitch>> {
+        let schema_id = CString::new(schema_id).ok()?;
         unsafe {
             let api = rime_get_api();
-            let Some(schema_open) = rime_api_member!(api, schema_open) else {
-                return Vec::new();
-            };
-            let Some(config_close) = rime_api_member!(api, config_close) else {
-                return Vec::new();
-            };
-            let Some(config_begin_list) = rime_api_member!(api, config_begin_list) else {
-                return Vec::new();
-            };
-            let Some(config_next) = rime_api_member!(api, config_next) else {
-                return Vec::new();
-            };
-            let Some(config_end) = rime_api_member!(api, config_end) else {
-                return Vec::new();
-            };
+            let schema_open = rime_api_member!(api, schema_open)?;
+            let config_close = rime_api_member!(api, config_close)?;
+            let config_begin_list = rime_api_member!(api, config_begin_list)?;
+            let config_next = rime_api_member!(api, config_next)?;
+            let config_end = rime_api_member!(api, config_end)?;
 
             let mut config: RimeConfig = std::mem::zeroed();
             if schema_open(schema_id.as_ptr(), &mut config) == 0 {
-                return Vec::new();
+                return None;
             }
 
             let mut result = Vec::new();
@@ -4219,7 +4246,7 @@ mod desktop {
                 config_end(&mut iterator);
             }
             config_close(&mut config);
-            result
+            Some(result)
         }
     }
 
@@ -4723,12 +4750,7 @@ mod desktop {
             .map(|s| s.schema_name().to_string())
             .unwrap_or_default();
         let (chord_composer, schema_shortcuts, modifier_taps) = {
-            let mut cached = engine.schema_keys.borrow_mut();
-            if cached.schema_id != schema_id {
-                *cached = schema_key_policy_locked(&schema_id);
-                cached.schema_id.clone_from(&schema_id);
-                cached.shortcuts.extend_from_slice(&engine.switcher_hotkeys);
-            }
+            let cached = engine.schema_key_policy(&schema_id);
             (
                 cached.chord_composer,
                 cached.shortcuts.clone(),
