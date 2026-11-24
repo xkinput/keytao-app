@@ -154,7 +154,7 @@ impl<'a> PackageStore<'a> {
         Ok(self.addon_path(id))
     }
 
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(test)]
     pub(crate) fn addon_stage(&self) -> Result<tempfile::TempDir, CoreError> {
         let root = self.staging_root()?;
         Ok(tempfile::tempdir_in(&root).map_err(|error| context("创建临时目录", &root, error))?)

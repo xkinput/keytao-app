@@ -235,14 +235,6 @@ fn generated(relative_lower: &str, path: &Path) -> Result<bool, CoreError> {
 }
 
 /// Moves only selections still present in a fresh report with the displayed fingerprint.
-pub fn trash_selected(
-    core: &Core,
-    root: &Path,
-    selected: &[OrphanFile],
-) -> Result<Vec<String>, CoreError> {
-    trash_with(core, root, selected, &[], None)
-}
-
 pub fn trash_selected_with_backups(
     core: &Core,
     root: &Path,

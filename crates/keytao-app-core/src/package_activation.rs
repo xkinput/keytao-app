@@ -119,7 +119,7 @@ pub(crate) fn user_file(path: &str) -> bool {
         || matches!(path, "squirrel.custom.yaml" | "weasel.custom.yaml")
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 pub(crate) fn addon_ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
     crate::addon_store::ownership(core, root)
 }

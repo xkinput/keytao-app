@@ -638,7 +638,7 @@ pub(crate) fn manifest(core: &Core, root: &Path, id: &str) -> Result<Option<Vec<
     legacy_receipt(root, id, name).map_err(|error| error.to_string())
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 pub(crate) fn ownership(core: &Core, root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
     let _guard = operation();
     if !root.try_exists()? {
@@ -853,7 +853,7 @@ pub(crate) fn take_over_snow(core: &Core, root: &Path) -> Result<Vec<String>, Co
     Ok(logs)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn migrate_inner(core: &Core, root: &Path) -> Result<(), CoreError> {
     if RuntimeDirs::needs_migration(root) {
         migrate_legacy(core, root)?;
@@ -905,7 +905,7 @@ pub(crate) fn unprojected_legacy_addons(
     Ok(addons)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn migrate_legacy(core: &Core, root: &Path) -> Result<(), CoreError> {
     if !root.try_exists()? {
         return Ok(());
