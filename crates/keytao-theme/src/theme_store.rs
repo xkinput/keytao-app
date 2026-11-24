@@ -8,8 +8,8 @@ use crate::{
         THEME_SHARE_FILE_THRESHOLD,
     },
     source::{
-        compile_theme, parse_local_theme_source, parse_theme_source_yaml, resolve_theme_source,
-        resolved_to_flat, ThemeSource,
+        compile_theme, merge, parse_local_theme_source, parse_theme_source_yaml,
+        resolve_theme_source, resolved_to_flat, ThemeSource,
     },
     EffectiveColorScheme, UiColorScheme,
 };
@@ -1436,19 +1436,6 @@ fn difference(old: &Value, new: &Value) -> Value {
         }
     }
     Value::Object(result)
-}
-
-fn merge(target: &mut Value, patch: &Value) {
-    if let Some(patch) = patch.as_object() {
-        if !target.is_object() {
-            *target = json!({});
-        }
-        for (key, value) in patch {
-            merge(&mut target[key], value);
-        }
-    } else {
-        *target = patch.clone();
-    }
 }
 
 fn set_optional(root: &mut Value, path: &[&str], value: Option<Value>) {
