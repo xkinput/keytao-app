@@ -1,4 +1,4 @@
-use super::{AppUpdateInfo, RELEASES, parse_version};
+use super::{AppUpdateInfo, RELEASES, includes_prereleases, parse_version};
 use crate::{
     Core,
     download::{download_with_progress, emit_progress},
@@ -63,10 +63,14 @@ fn package_suffix() -> Option<&'static str> {
     }
 }
 
-fn validate_version(current: &str, requested: &str) -> Result<Version, String> {
+fn validate_version(
+    current: &str,
+    requested: &str,
+    include_prereleases: bool,
+) -> Result<Version, String> {
     let current = parse_version(current).ok_or("无法识别当前 KeyTao 版本")?;
     let requested = Version::parse(requested).map_err(|_| "升级版本号无效")?;
-    if requested <= current || (current.pre.is_empty() && !requested.pre.is_empty()) {
+    if requested <= current || (!include_prereleases && !requested.pre.is_empty()) {
         return Err("升级版本不适用于当前 KeyTao".into());
     }
     Ok(requested)
@@ -207,14 +211,14 @@ fn persist_verified_package(
 }
 
 pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, String> {
-    let version = validate_version(&core.env().app_version, requested)?;
+    let mut package = core.app_update_package.lock().await;
+    let version = validate_version(&core.env().app_version, requested, includes_prereleases(core))?;
     let Some(suffix) = tokio::task::spawn_blocking(package_suffix)
         .await
         .map_err(|error| error.to_string())?
     else {
         return Ok(false);
     };
-    let mut package = core.app_update_package.lock().await;
     let client = client()?;
     let tag = format!("v{version}");
     let filename = format!("keytao-app-{version}-{suffix}");
@@ -274,12 +278,12 @@ pub async fn open_app_update_package(
     requested: &str,
     restart: bool,
 ) -> Result<String, String> {
-    let version = validate_version(&core.env().app_version, requested)?;
+    let package = core.app_update_package.lock().await;
+    let version = validate_version(&core.env().app_version, requested, includes_prereleases(core))?;
     #[cfg(target_os = "linux")]
     if restart && !linux_can_upgrade(&core.env().app_version, requested) {
         return Err("系统包版本排序需要手动安装此升级包".into());
     }
-    let package = core.app_update_package.lock().await;
     let package = package
         .as_ref()
         .filter(|package| package.version == version)
@@ -359,11 +363,14 @@ mod tests {
     }
 
     #[test]
-    fn allows_prerelease_to_stable_but_refuses_downgrades_and_channel_changes() {
-        assert!(validate_version("1.2.16-alpha.5", "1.2.16").is_ok());
-        assert!(validate_version("1.2.16", "1.2.17-alpha.1").is_err());
-        assert!(validate_version("1.2.16", "1.2.16").is_err());
-        assert!(validate_version("1.2.16", "../../file").is_err());
+    fn permits_only_newer_versions_on_the_selected_channel() {
+        assert!(validate_version("1.2.16-alpha.5", "1.2.16", false).is_ok());
+        assert!(validate_version("1.2.16", "1.2.17-alpha.1", true).is_ok());
+        assert!(validate_version("1.2.16", "1.2.17-alpha.1", false).is_err());
+        assert!(validate_version("1.2.16-alpha.5", "1.2.17-alpha.1", false).is_err());
+        assert!(validate_version("1.2.16", "1.2.16-alpha.5", true).is_err());
+        assert!(validate_version("1.2.16", "1.2.16", true).is_err());
+        assert!(validate_version("1.2.16", "../../file", true).is_err());
     }
 
     #[test]

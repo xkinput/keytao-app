@@ -45,6 +45,27 @@ fn state_round_trip() {
     assert!(core.state() == expected);
 }
 
+#[tokio::test]
+async fn app_update_channel_defaults_to_installed_version_and_retains_override() {
+    for (version, include_prereleases) in [("1.2.17", false), ("1.2.18-alpha.1", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = AppEnv {
+            data_dir: dir.path().to_owned(),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: version.into(),
+            platform: Platform::MacOs,
+        };
+        let core = Core::new(env.clone(), Arc::new(NullSink)).unwrap();
+        assert_eq!(update::includes_prereleases(&core), include_prereleases);
+        update::set_app_update_prereleases(&core, !include_prereleases)
+            .await
+            .unwrap();
+        let reopened = Core::new(env, Arc::new(NullSink)).unwrap();
+        assert_eq!(update::includes_prereleases(&reopened), !include_prereleases);
+    }
+}
+
 #[test]
 fn missing_file_returns_default_without_writing() {
     let dir = tempfile::tempdir().unwrap();

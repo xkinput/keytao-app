@@ -70,6 +70,7 @@ mod tests {
         .unwrap();
         assert!(state.installed_packages.is_empty());
         assert!(state.active_scheme.is_none());
+        assert_eq!(state.app_update_prereleases, None);
     }
 
     #[test]
@@ -128,6 +129,8 @@ pub struct AppState {
     pub legacy_imported: bool,
     pub installed_packages: BTreeMap<String, InstalledPackage>,
     pub active_scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_update_prereleases: Option<bool>,
     pub dismissed_scheme_updates: BTreeMap<String, String>,
     pub scheme_sync_settings: serde_json::Value,
     pub follow_account_sync: bool,
@@ -147,6 +150,7 @@ struct StoredAppState {
     legacy_imported: bool,
     installed_packages: Option<BTreeMap<String, InstalledPackage>>,
     active_scheme: Option<String>,
+    app_update_prereleases: Option<bool>,
     #[serde(default)]
     dismissed_scheme_updates: BTreeMap<String, String>,
     #[serde(default)]
@@ -188,6 +192,7 @@ impl From<StoredAppState> for AppState {
             legacy_imported: state.legacy_imported,
             installed_packages,
             active_scheme,
+            app_update_prereleases: state.app_update_prereleases,
             dismissed_scheme_updates: state.dismissed_scheme_updates,
             scheme_sync_settings: state.scheme_sync_settings,
             follow_account_sync: state.follow_account_sync,

@@ -953,6 +953,12 @@ pub async fn check_app_update() -> Result<AppUpdateDto, String> {
     )
 }
 
+pub async fn set_app_update_prereleases(enabled: bool) -> Result<(), String> {
+    keytao_app_core::update::set_app_update_prereleases(&runtime::state()?.core, enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn download_app_update(version: String) -> Result<bool, String> {
     keytao_app_core::update::download_app_update(&runtime::state()?.core, &version).await
 }

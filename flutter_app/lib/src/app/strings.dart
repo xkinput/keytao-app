@@ -284,6 +284,10 @@ abstract final class AppStrings {
   static String currentVersion(String version) => '当前 v$version';
   static String checkAppUpdate(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '检查更新' : 'Check for updates';
+  static String appUpdateChannelSaveFailure(Locale locale, String error) =>
+      locale.languageCode.startsWith('zh')
+      ? '保存更新频道失败：$error'
+      : 'Could not save the update channel: $error';
   static String appUpToDate(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '已是最新版本' : 'Already up to date';
   static String rimeSync(Locale locale) =>

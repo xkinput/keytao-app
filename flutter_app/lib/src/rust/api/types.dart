@@ -320,16 +320,21 @@ class BridgeInfo {
   final BridgePlatform platform;
   final String appVersion;
   final String userRoot;
+  final bool appUpdatePrereleases;
 
   const BridgeInfo({
     required this.platform,
     required this.appVersion,
     required this.userRoot,
+    this.appUpdatePrereleases = false,
   });
 
   @override
   int get hashCode =>
-      platform.hashCode ^ appVersion.hashCode ^ userRoot.hashCode;
+      platform.hashCode ^
+      appVersion.hashCode ^
+      userRoot.hashCode ^
+      appUpdatePrereleases.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -338,7 +343,8 @@ class BridgeInfo {
           runtimeType == other.runtimeType &&
           platform == other.platform &&
           appVersion == other.appVersion &&
-          userRoot == other.userRoot;
+          userRoot == other.userRoot &&
+          appUpdatePrereleases == other.appUpdatePrereleases;
 }
 
 enum BridgePlatform { windows, macOs, linux, android, ios }

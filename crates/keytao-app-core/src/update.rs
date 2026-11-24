@@ -18,6 +18,19 @@ fn parse_version(tag: &str) -> Option<Version> {
     Version::parse(tag.trim_start_matches('v')).ok()
 }
 
+pub fn includes_prereleases(core: &Core) -> bool {
+    core.lock_state()
+        .app_update_prereleases
+        .unwrap_or_else(|| {
+            parse_version(&core.env().app_version).is_some_and(|version| !version.pre.is_empty())
+        })
+}
+
+pub async fn set_app_update_prereleases(core: &Core, enabled: bool) -> Result<(), CoreError> {
+    let _package = core.app_update_package.lock().await;
+    core.update_state(|state| state.app_update_prereleases = Some(enabled))
+}
+
 /// Picks the highest-semver release (tag, html_url) and whether it is newer than `current`.
 /// Unparsable versions never report an update.
 pub(crate) fn pick_update(current: &str, releases: &[(String, String)]) -> (String, bool, String) {
@@ -86,8 +99,9 @@ async fn check_app_update_at(
     client: &Client,
     releases: &str,
     current: &str,
+    include_prereleases: bool,
 ) -> Result<AppUpdateInfo, String> {
-    let entries = if parse_version(current).is_some_and(|v| !v.pre.is_empty()) {
+    let entries = if include_prereleases {
         let older_page = format!("{releases}?page=2");
         let (first, second) = tokio::try_join!(
             fetch_release_page(client, releases),
@@ -122,7 +136,7 @@ pub async fn check_app_update(core: &Core) -> Result<AppUpdateInfo, CoreError> {
         .redirect(Policy::none())
         .build()
         .map_err(|error| CoreError::Other(error.to_string()))?;
-    let result = check_app_update_at(&client, RELEASES, current).await;
+    let result = check_app_update_at(&client, RELEASES, current, includes_prereleases(core)).await;
     match &result {
         Ok(_) => tracing::info!("[check_app_update] done in {}ms", t0.elapsed().as_millis()),
         Err(error) => tracing::warn!(
@@ -150,7 +164,11 @@ mod tests {
         net::TcpListener,
     };
 
-    async fn mock_update(current: &str, routes: &[(&str, &str)]) -> Result<AppUpdateInfo, String> {
+    async fn mock_update(
+        current: &str,
+        include_prereleases: bool,
+        routes: &[(&str, &str)],
+    ) -> Result<AppUpdateInfo, String> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let client = Client::builder()
@@ -175,7 +193,7 @@ mod tests {
                     .unwrap();
             }
         };
-        let query = check_app_update_at(&client, &base, current);
+        let query = check_app_update_at(&client, &base, current, include_prereleases);
         tokio::pin!(query);
         tokio::select! {
             result = &mut query => result,
@@ -185,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn stable_checks_the_latest_release_redirect() {
-        let update = mock_update("1.2.14", &[(
+        let update = mock_update("1.2.14-alpha.1", false, &[(
             "/releases/latest",
             "HTTP/1.1 302 Found\r\nLocation: tag/v1.2.15\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         )]).await.unwrap();
@@ -199,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn alpha_uses_published_releases_from_both_pages() {
-        let update = mock_update("1.2.16-alpha.1", &[
+        let update = mock_update("1.2.15", true, &[
             ("/releases", concat!(
                 "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
                 "<section data-release-anchor=\"release-v1.2.16-alpha.2\">",
@@ -222,6 +240,7 @@ mod tests {
     async fn github_http_errors_are_not_reported_as_no_update() {
         let error = mock_update(
             "1.2.15",
+            false,
             &[(
                 "/releases/latest",
                 "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

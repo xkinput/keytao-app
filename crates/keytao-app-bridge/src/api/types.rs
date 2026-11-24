@@ -17,10 +17,13 @@ pub struct BridgeConfig {
     pub user_root_override: Option<String>,
 }
 
+#[flutter_rust_bridge::frb]
 pub struct BridgeInfo {
     pub platform: BridgePlatform,
     pub app_version: String,
     pub user_root: String,
+    #[frb(default = false)]
+    pub app_update_prereleases: bool,
 }
 
 pub struct SystemFontFamilyDto {

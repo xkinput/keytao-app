@@ -56,6 +56,8 @@ class AboutPage extends StatelessWidget {
     final c = controller;
     final locale = Localizations.localeOf(context);
     final checkUpdateLabel = AppStrings.checkAppUpdate(locale);
+    final chinese = locale.languageCode.startsWith('zh');
+    final updateChannelLabel = chinese ? '更新频道' : 'Update channel';
     return AppPageBody(
       controller: c,
       page: AppPage.about,
@@ -138,6 +140,35 @@ class AboutPage extends StatelessWidget {
                   ),
                   _repositoryButton('KeyTao', repositoryUrl),
                 ],
+              ),
+            ),
+            SettingRow(
+              updateChannelLabel,
+              keepInline: true,
+              child: SizedBox(
+                width: 160,
+                child: Semantics(
+                  label: updateChannelLabel,
+                  enabled: c.canRunAppUpdate,
+                  child: FSelect<bool>(
+                    size: FTextFieldSizeVariant.sm,
+                    enabled: c.canRunAppUpdate,
+                    control: FSelectControl.lifted(
+                      value: c.appUpdatePrereleases,
+                      onChange: (enabled) async {
+                        if (enabled != null &&
+                            await c.setAppUpdatePrereleases(enabled) &&
+                            context.mounted) {
+                          await _checkForUpdates(context, locale);
+                        }
+                      },
+                    ),
+                    items: {
+                      (chinese ? '正式版' : 'Stable'): false,
+                      (chinese ? '预发布版' : 'Pre-release'): true,
+                    },
+                  ),
+                ),
               ),
             ),
             ValueRow('Flutter', c.aboutValues['Flutter']!),

@@ -57,6 +57,7 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
             platform: config.platform,
             app_version: current.app_version.clone(),
             user_root: current_root.to_string_lossy().into_owned(),
+            app_update_prereleases: keytao_app_core::update::includes_prereleases(&state.core),
         });
     }
     let events = Arc::new(BridgeEvents::default());
@@ -67,6 +68,7 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
         platform: config.platform,
         app_version: config.app_version,
         user_root: root.to_string_lossy().into_owned(),
+        app_update_prereleases: keytao_app_core::update::includes_prereleases(&core),
     };
     let host = BridgeHost::new(core.clone(), root);
     STATE

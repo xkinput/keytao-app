@@ -379,6 +379,9 @@ Future<ReleaseInfoDto> fetchLatestRelease() =>
 Future<AppUpdateDto> checkAppUpdate() =>
     RustLib.instance.api.crateApiCoreCheckAppUpdate();
 
+Future<void> setAppUpdatePrereleases({required bool enabled}) =>
+    RustLib.instance.api.crateApiCoreSetAppUpdatePrereleases(enabled: enabled);
+
 Future<bool> downloadAppUpdate({required String version}) =>
     RustLib.instance.api.crateApiCoreDownloadAppUpdate(version: version);
 

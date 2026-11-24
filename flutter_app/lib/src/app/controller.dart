@@ -270,6 +270,8 @@ class AppController extends ChangeNotifier {
   bool releaseLoading = false;
   bool logsLoading = false;
   bool onboardingCompleted = false;
+  late bool _appUpdatePrereleases = info.appUpdatePrereleases;
+  bool get appUpdatePrereleases => _appUpdatePrereleases;
   AppUpdateDto? appUpdate;
   bool checkingAppUpdate = false;
   String? appUpdateError;
@@ -1878,6 +1880,38 @@ class AppController extends ChangeNotifier {
       _managingWindowsIme = false;
       _changed();
       unawaited(_handleWindowsAction());
+    }
+  }
+
+  Future<bool> setAppUpdatePrereleases(bool enabled) async {
+    if (_disposed || !canRunAppUpdate || appUpdatePrereleases == enabled) {
+      return false;
+    }
+    appUpdateBusy = true;
+    _changed();
+    try {
+      await core.setAppUpdatePrereleases(enabled: enabled);
+      if (_disposed) return false;
+      _appUpdatePrereleases = enabled;
+      appUpdate = null;
+      appUpdateError = null;
+      appUpdateActionError = null;
+      _appUpdateDownloadedVersion = null;
+      _appUpdateMissingPackageVersion = null;
+      return true;
+    } catch (failure) {
+      if (!_disposed) {
+        showToast(
+          AppStrings.appUpdateChannelSaveFailure(
+            PlatformDispatcher.instance.locale,
+            errorText(failure),
+          ),
+        );
+      }
+      return false;
+    } finally {
+      appUpdateBusy = false;
+      _changed();
     }
   }
 
@@ -4503,7 +4537,9 @@ class AppController extends ChangeNotifier {
           return true;
         case AppUpdateAction.openLink:
           await _open(
-            isAndroid && _androidAppUpdateSource == 'play'
+            isAndroid &&
+                    _androidAppUpdateSource == 'play' &&
+                    !version.contains('-')
                 ? 'https://play.google.com/store/apps/details?id=ink.rea.keytao_app'
                 : update.releaseUrl,
           );

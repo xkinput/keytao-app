@@ -12,14 +12,26 @@ import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
 class _AboutCore implements RustLibApi {
-  final update = Completer<AppUpdateDto>();
+  var update = Completer<AppUpdateDto>();
   final download = Completer<bool>();
   final events = StreamController<BridgeEvent>();
   final downloads = <String>[];
   final installerCalls = <({String version, bool restart})>[];
+  final checkedChannels = <bool>[];
+  bool _prereleases = false;
 
   @override
-  Future<AppUpdateDto> crateApiCoreCheckAppUpdate() => update.future;
+  Future<AppUpdateDto> crateApiCoreCheckAppUpdate() {
+    checkedChannels.add(_prereleases);
+    return update.future;
+  }
+
+  @override
+  Future<void> crateApiCoreSetAppUpdatePrereleases({
+    required bool enabled,
+  }) async {
+    _prereleases = enabled;
+  }
 
   @override
   Stream<BridgeEvent> crateApiCoreCoreEvents() async* {
@@ -148,6 +160,33 @@ void main() {
     expect(controller.takePendingToast(), '已是最新版本');
     expect(find.byType(FCircularProgress), findsNothing);
     await tester.pump(const Duration(milliseconds: 300));
+
+    core.update = Completer<AppUpdateDto>()
+      ..complete(
+        const AppUpdateDto(
+          currentVersion: '1',
+          latestVersion: '2.0.0-alpha.1',
+          hasUpdate: true,
+          releaseUrl: 'https://example.com/releases/2.0.0-alpha.1',
+          installMode: 'package',
+        ),
+      );
+    final channel = find.byWidgetPredicate((widget) => widget is FSelect<bool>);
+    await tester.ensureVisible(channel);
+    expect(find.text('正式版'), findsOneWidget);
+    await tester.tap(channel);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('预发布版'));
+    await tester.pumpAndSettle();
+    expect(core.checkedChannels, [false, true]);
+    expect(controller.appUpdatePrereleases, isTrue);
+    expect(
+      find.descendant(
+        of: find.byType(AppDialog),
+        matching: find.text('v2.0.0-alpha.1'),
+      ),
+      findsOneWidget,
+    );
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -229,7 +268,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  test('Play builds open Google Play without downloading an APK', () async {
+  test('Play builds open the appropriate update link without an APK', () async {
     final core = _AboutCore();
     RustLib.initMock(api: core);
     addTearDown(RustLib.dispose);
@@ -256,9 +295,27 @@ void main() {
 
     expect(controller.appUpdateAction, AppUpdateAction.openLink);
     expect(await controller.openAppUpdate(), isTrue);
-    expect(core.downloads, isEmpty);
+
+    const prereleaseUrl =
+        'https://github.com/xkinput/keytao-app/releases/tag/v2.1.0-alpha.1';
+    expect(await controller.setAppUpdatePrereleases(true), isTrue);
+    core.update = Completer<AppUpdateDto>()
+      ..complete(
+        const AppUpdateDto(
+          currentVersion: '1',
+          latestVersion: '2.1.0-alpha.1',
+          hasUpdate: true,
+          releaseUrl: prereleaseUrl,
+          installMode: 'package',
+        ),
+      );
+    await controller.checkAppUpdateNow();
+    expect(controller.appUpdateAction, AppUpdateAction.openLink);
+    expect(await controller.openAppUpdate(), isTrue);
     expect(android.openedUrls, [
       'https://play.google.com/store/apps/details?id=ink.rea.keytao_app',
+      prereleaseUrl,
     ]);
+    expect(core.downloads, isEmpty);
   });
 }
