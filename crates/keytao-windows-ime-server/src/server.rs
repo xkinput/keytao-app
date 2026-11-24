@@ -311,6 +311,7 @@ fn installed_process(
 
 type Runtime = crate::runtime_state::Runtime<InProcEngine>;
 
+const SESSION_WAIT_BUDGET: Duration = Duration::from_secs(29);
 static MAINTENANCE_LOCK: Mutex<()> = Mutex::new(());
 
 fn ensure_deploy_job() -> Result<(), String> {
@@ -798,29 +799,49 @@ struct ClientSession {
     initial_generation: Option<u64>,
 }
 
+fn create_session(
+    runtime: &Mutex<Runtime>,
+    deadline: Instant,
+) -> Result<(InProcEngine, u64, String), EngineError> {
+    let result = loop {
+        let current = runtime.try_lock_until(deadline).ok_or(EngineError::Busy)?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(EngineError::Busy);
+        }
+        if current.deploying && current.ready {
+            // Staging keeps the live engine available to new sessions too.
+            break current.session();
+        }
+        drop(current);
+        let poll_until = deadline.min(now + KEY_WAIT_BUDGET);
+        let Some(_maintenance) = MAINTENANCE_LOCK.try_lock_until(poll_until) else {
+            continue;
+        };
+        if Instant::now() >= deadline {
+            return Err(EngineError::Busy);
+        }
+        refresh(runtime).map_err(EngineError::Failed)?;
+        let current = runtime.try_lock_until(deadline).ok_or(EngineError::Busy)?;
+        if Instant::now() >= deadline {
+            return Err(EngineError::Busy);
+        }
+        break current.session();
+    };
+    result.map_err(EngineError::Failed)
+}
+
 fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runtime>) -> Response {
     match request {
         Request::CreateSession => {
-            let result = loop {
-                let current = runtime.lock();
-                if current.deploying && current.ready {
-                    // Staging keeps the live engine available to new sessions too.
-                    break current.session();
-                }
-                drop(current);
-                let Some(_maintenance) = MAINTENANCE_LOCK.try_lock_for(KEY_WAIT_BUDGET) else {
-                    continue;
-                };
-                break refresh(runtime).and_then(|_| runtime.lock().session());
-            };
-            match result {
+            match create_session(runtime, Instant::now() + SESSION_WAIT_BUDGET) {
                 Ok((engine, generation, schema_id)) => {
                     session.engine = Some(engine);
                     session.generation = Some(generation);
                     session.initial_generation = Some(generation);
                     Response::Handle { schema_id }
                 }
-                Err(error) => Response::Err(EngineError::Failed(error)),
+                Err(error) => Response::Err(error),
             }
         }
         Request::DropSession => {
@@ -928,6 +949,19 @@ mod tests {
                 Response::Err(EngineError::NotReady)
             ));
         }
+    }
+
+    #[test]
+    fn create_session_returns_busy_during_unready_deployment() {
+        let _maintenance = MAINTENANCE_LOCK.lock();
+        let runtime = Mutex::new(Runtime {
+            deploying: true,
+            ..Runtime::default()
+        });
+        assert!(matches!(
+            create_session(&runtime, Instant::now() + Duration::from_millis(10)),
+            Err(EngineError::Busy)
+        ));
     }
 
     #[test]

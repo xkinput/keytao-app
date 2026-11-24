@@ -75,7 +75,7 @@ Shift 释放今天会连续调两次 engine（press + `RIME_RELEASE_MASK`，key_
 ### 2.3 Pipe 名与 ACL
 
 - 名字：`\\.\pipe\KeyTao.Ime.<UserSID>.<SessionId>.v1`。`\\.\pipe\` 是机器全局的，所以名字必须带 SID 和 session。AppContainer 客户端也用这个全局路径，不用 AC 命名空间。大版本号放在名字里。
-- DACL/SACL：`D:(A;;GRGW;;;<UserSID>)(A;;GRGW;;;S-1-15-2-1)S:(ML;;NW;;;LW)`。第一版不加 LPAC（`S-1-15-2-2`），见开放问题。
+- Owner/DACL/SACL：`O:<UserSID>D:(A;;GRGW;;;<UserSID>)(A;;GRGW;;;S-1-15-2-1)S:(ML;;NW;;;LW)`。第一版不加 LPAC（`S-1-15-2-2`），见开放问题。
 - 不写 Everyone/Authenticated Users。
 - UIPI 不拦 pipe，提权（High IL）的宿主可以正常连接。
 

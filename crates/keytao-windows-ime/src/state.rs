@@ -6,9 +6,9 @@ use keytao_core::{
     DeploymentState, ImeState, InputContextPolicy,
 };
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use windows::{
     core::Interface,
@@ -26,6 +26,7 @@ use windows::{
 
 use crate::{
     candidate_ui::CandidateUiManager,
+    candidate_win::value_signature,
     engine_backend::{stamp_changed, EngineHandle, ImeEngineBackend},
     engine_status,
     globals::DllActivityGuard,
@@ -57,7 +58,8 @@ static HOST_EXECUTABLE_BASENAME: OnceLock<Option<String>> = OnceLock::new();
 
 struct ThemeCache {
     resolver: keytao_theme::ThemeResolver,
-    theme: keytao_theme::ResolvedImeTheme,
+    theme: Arc<keytao_theme::ResolvedImeTheme>,
+    signature: u64,
     checked_at: Instant,
 }
 
@@ -164,6 +166,7 @@ pub struct TsfState {
     reload_retry_after: Option<Instant>,
     reload_stamp_checked_at: Option<Instant>,
     reload_stamp_changed: bool,
+    deployment_loaded_checked_at: Option<Instant>,
     input_engine_enabled_checked_at: Option<Instant>,
     input_engine_enabled: bool,
     pub(crate) modifier_tap_press: Option<(u32, Instant)>,
@@ -332,6 +335,7 @@ impl TsfState {
             reload_retry_after: None,
             reload_stamp_checked_at: None,
             reload_stamp_changed: false,
+            deployment_loaded_checked_at: None,
             input_engine_enabled_checked_at: None,
             input_engine_enabled: true,
             modifier_tap_press: None,
@@ -421,9 +425,19 @@ impl TsfState {
         self.deployment_loaded();
     }
 
-    pub(crate) fn deployment_loaded(&mut self) {
-        if let Some(root) = default_user_data_dir() {
-            self.deployment_state.loaded(&root);
+    fn deployment_loaded(&mut self) {
+        self.deployment_loaded_checked_at = Some(Instant::now());
+        if let Some(root) = user_data_dir() {
+            self.deployment_state.loaded(root);
+        }
+    }
+
+    pub(crate) fn deployment_loaded_cached(&mut self) {
+        if self
+            .deployment_loaded_checked_at
+            .is_none_or(|checked_at| checked_at.elapsed() >= RELOAD_STAMP_POLL_INTERVAL)
+        {
+            self.deployment_loaded();
         }
     }
 
@@ -616,11 +630,16 @@ pub(crate) fn embedded_composition() -> bool {
     with_current_theme(|theme| theme.ui.effective_embedded_composition())
 }
 
-pub(crate) fn current_theme() -> keytao_theme::ResolvedImeTheme {
-    with_current_theme(Clone::clone)
+pub(crate) fn current_theme() -> (Arc<keytao_theme::ResolvedImeTheme>, u64) {
+    let cache = current_theme_cache();
+    (Arc::clone(&cache.theme), cache.signature)
 }
 
-fn with_current_theme<R>(read: impl FnOnce(&keytao_theme::ResolvedImeTheme) -> R) -> R {
+pub(crate) fn with_current_theme<R>(read: impl FnOnce(&keytao_theme::ResolvedImeTheme) -> R) -> R {
+    read(&current_theme_cache().theme)
+}
+
+fn current_theme_cache() -> MutexGuard<'static, ThemeCache> {
     let cache = THEME_CACHE.get_or_init(|| {
         let theme_path = keytao_theme::default_user_theme_path()
             .map(|path| path.display().to_string())
@@ -633,7 +652,8 @@ fn with_current_theme<R>(read: impl FnOnce(&keytao_theme::ResolvedImeTheme) -> R
         ));
         Mutex::new(ThemeCache {
             resolver,
-            theme,
+            signature: value_signature(&theme),
+            theme: Arc::new(theme),
             checked_at: Instant::now(),
         })
     });
@@ -642,9 +662,11 @@ fn with_current_theme<R>(read: impl FnOnce(&keytao_theme::ResolvedImeTheme) -> R
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if cache.checked_at.elapsed() >= THEME_POLL_INTERVAL {
         cache.checked_at = Instant::now();
-        cache.theme = cache.resolver.current();
+        let theme = cache.resolver.current();
+        cache.signature = value_signature(&theme);
+        cache.theme = Arc::new(theme);
     }
-    read(&cache.theme)
+    cache
 }
 
 /// Resolve the theme once before a TSF document write can synchronously call
@@ -1589,7 +1611,7 @@ pub(crate) fn update_ime_windows(
         } else {
             allow
         }
-    }) && (!current_theme().ui.hide_candidate_panel
+    }) && (!with_current_theme(|theme| theme.ui.hide_candidate_panel)
         || ime_state.is_package_switcher()
         || deployment_hint.is_some());
     {
@@ -1676,14 +1698,19 @@ fn should_start_caret_reprobe(armed: bool, source: Option<CaretSource>, visible:
     !armed && visible && should_arm_caret_reprobe(source)
 }
 
+pub(crate) fn user_data_dir() -> Option<&'static Path> {
+    static USER_DATA_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    USER_DATA_DIR.get_or_init(default_user_data_dir).as_deref()
+}
+
 pub(crate) fn deployment_key_pressed(
     shared_state: &SharedState,
     context: Option<&ITfContext>,
 ) -> bool {
     let input_generation = {
         let mut st = shared_state.borrow_mut();
-        if let Some(root) = default_user_data_dir() {
-            st.deployment_state.key_pressed(&root);
+        if let Some(root) = user_data_dir() {
+            st.deployment_state.key_pressed(root);
         }
         if let Some(context) = context {
             st.key_context = Some(context.clone());
@@ -1712,8 +1739,8 @@ pub(crate) fn poll_deployment_hint(shared_state: &SharedState) {
 pub(crate) fn refresh_deployment_hint(shared_state: &SharedState) {
     let (has_hint, changed, context, has_candidates) = {
         let mut st = shared_state.borrow_mut();
-        let hint = default_user_data_dir().and_then(|root| {
-            keytao_core::DeploymentState::display_hint(&root, st.deployment_state.hint(&root))
+        let hint = user_data_dir().and_then(|root| {
+            keytao_core::DeploymentState::display_hint(root, st.deployment_state.hint(root))
         });
         let changed = st.deployment_hint != hint;
         st.deployment_hint = hint;
@@ -2188,6 +2215,17 @@ mod tests {
         Arc,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn deployment_loaded_check_is_throttled() {
+        let mut state = super::TsfState::new();
+        let checked_at = Instant::now() + Duration::from_secs(60);
+        state.deployment_loaded_checked_at = Some(checked_at);
+
+        state.deployment_loaded_cached();
+
+        assert_eq!(state.deployment_loaded_checked_at, Some(checked_at));
+    }
 
     struct FocusStateEngine {
         clear_calls: AtomicUsize,

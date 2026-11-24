@@ -23,7 +23,7 @@ mod deferred_keys;
 mod display_attribute;
 mod edit_session;
 pub mod engine_backend;
-pub mod engine_config;
+use keytao_ime_ipc::engine_config;
 mod engine_host;
 mod engine_pipe;
 pub mod engine_status;
@@ -40,12 +40,20 @@ mod solo_shift;
 mod state;
 mod text_service;
 
+use std::path::PathBuf;
 use windows::{
     core::{Interface, Result, GUID, HRESULT},
     Win32::{
-        Foundation::{BOOL, E_POINTER, E_UNEXPECTED, HMODULE, S_FALSE, S_OK},
-        System::Com::IClassFactory,
+        Foundation::{
+            BOOL, E_POINTER, E_UNEXPECTED, HANDLE, HMODULE, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
+        },
+        System::Com::{
+            CoInitializeEx, CoTaskMemFree, CoUninitialize, IClassFactory, COINIT_MULTITHREADED,
+        },
         System::LibraryLoader::DisableThreadLibraryCalls,
+        UI::Shell::{
+            FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_FORCE_PACKAGE_REDIRECTION,
+        },
     },
 };
 
@@ -120,13 +128,50 @@ pub extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> B
     .map_or(BOOL::from(false), |_| BOOL::from(true))
 }
 
-fn init_runtime_log() {
-    if let Some(user_dir) = keytao_core::default_user_data_dir() {
-        // The writer outlives COM objects. Pin before starting it, and keep
-        // thread creation and user-directory lookup outside DllMain's loader lock.
-        if globals::pin_module().is_ok() {
-            keytao_core::runtime_log::init(&user_dir, "windows-ime");
+fn appcontainer_log_root() -> Option<PathBuf> {
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if initialized.is_err() && initialized != RPC_E_CHANGED_MODE {
+            return None;
         }
+        let path = SHGetKnownFolderPath(
+            &FOLDERID_LocalAppData,
+            KF_FLAG_FORCE_PACKAGE_REDIRECTION,
+            HANDLE::default(),
+        )
+        .ok()
+        .and_then(|value| {
+            let text = value.to_string();
+            CoTaskMemFree(Some(value.0.cast()));
+            text.ok()
+        });
+        if initialized.is_ok() {
+            CoUninitialize();
+        }
+        path.map(|path| PathBuf::from(path).join("KeyTao"))
+    }
+}
+
+fn init_runtime_log() {
+    use keytao_core::runtime_log::{init_with_settings_path, SETTINGS_FILE};
+
+    // Keep thread creation and user-directory lookup outside DllMain's loader lock.
+    let (user_dir, settings_path) = if matches!(appcontainer::is_appcontainer(), Ok(true)) {
+        let (Some(private_root), Ok(public_root)) =
+            (appcontainer_log_root(), appcontainer::public_schema_root())
+        else {
+            return;
+        };
+        (private_root, Some(public_root.join(SETTINGS_FILE)))
+    } else {
+        let Some(user_dir) = keytao_core::default_user_data_dir() else {
+            return;
+        };
+        (user_dir, None)
+    };
+    // The writer outlives COM objects. Pin before starting it.
+    if globals::pin_module().is_ok() {
+        init_with_settings_path(&user_dir, "windows-ime", settings_path.as_deref());
     }
 }
 

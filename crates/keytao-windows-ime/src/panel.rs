@@ -247,7 +247,7 @@ impl PanelRenderer {
         self.render_with_pointer(
             model,
             scale,
-            theme,
+            &theme,
             available_width,
             preedit_caret,
             None,
@@ -260,13 +260,13 @@ impl PanelRenderer {
         &self,
         model: &CandidatePanelModel,
         scale: f32,
-        theme: ResolvedImeTheme,
+        theme: &ResolvedImeTheme,
         available_width: f32,
         preedit_caret: Option<usize>,
         hovered: Option<PanelClick>,
         pressed: Option<PanelClick>,
     ) -> RenderedPanel {
-        let mut theme = scaled_candidate_panel(&theme);
+        let mut theme = scaled_candidate_panel(theme);
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
         let font_size = theme.font.size;
         let label_size = theme.font.label_size;

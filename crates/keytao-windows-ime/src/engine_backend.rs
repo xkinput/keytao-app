@@ -123,7 +123,15 @@ pub(crate) fn build_backend(private: bool) -> Result<
             Ok(handle) => {
                 return Ok((Arc::new(pipe), handle, None, None));
             }
-            Err(_) if !allow_in_process => return Err("server unavailable".into()),
+            Err(error) if !allow_in_process => {
+                keytao_core::rt_log!(
+                    keytao_core::runtime_log::Level::Info,
+                    "ipc",
+                    "pipe_build_failed",
+                    msg = error
+                );
+                return Err("server unavailable".into());
+            }
             Err(error) => keytao_core::rt_log!(
                 keytao_core::runtime_log::Level::Info,
                 "ipc",

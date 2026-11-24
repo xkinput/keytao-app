@@ -20,8 +20,17 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T>
     }
     let mut payload = vec![0; length];
     reader.read_exact(&mut payload)?;
-    serde_json::from_slice(&payload)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    // JSON errors can quote frame contents when their messages are logged.
+    serde_json::from_slice(&payload).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid IPC JSON at line {} column {}",
+                error.line(),
+                error.column()
+            ),
+        )
+    })
 }
 
 /// Reject oversized payloads before writing any bytes to the connection.
@@ -53,4 +62,18 @@ pub fn read_response<R: Read>(reader: &mut R, expected_seq: u64) -> io::Result<R
         ));
     }
     Ok(response.message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_errors_exclude_frame_contents() {
+        let mut frame = Vec::new();
+        write_frame(&mut frame, &"private input").unwrap();
+        let error = read_frame::<_, u32>(&mut frame.as_slice()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!error.to_string().contains("private input"));
+    }
 }
