@@ -67,10 +67,10 @@ use crate::{
         diagnostics_enabled, embedded_composition, fallback_focus_window, flush_pending_ime_ui,
         hide_candidate_window, host_is_uiless, input_is_blocked, layout_sink_context,
         poll_engine_builds, post_pending_ime_ui, prime_theme_resolver, refresh_engine_for_focus,
-        refresh_input_context, reset_input_for_focus_change, retry_input_context_if_unknown,
-        start_engine_warmup, start_reload_if_needed, store_layout_sink, sync_input_policy,
-        update_ime_windows, update_language_bar_mode, CaretPosition, LayoutSinkRegistration,
-        SharedState, TsfState, WeakState,
+        refresh_input_context, reset_input_for_focus_change, start_engine_warmup,
+        start_reload_if_needed, store_layout_sink, sync_input_policy, update_ime_windows,
+        update_language_bar_mode, CaretPosition, LayoutSinkRegistration, SharedState, TsfState,
+        WeakState,
     },
 };
 
@@ -3094,10 +3094,6 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             {
                 return Ok(BOOL::from(false));
             }
-            // An unanswered probe counts as blocked, so the retry has to run before
-            // the check that consumes it: TSF skips `OnKeyDown` for a key this
-            // callback declines, and a stale `Unknown` would never be revisited.
-            retry_input_context_if_unknown(&state, pic);
             if input_is_blocked(&state, pic) {
                 // The host may have revoked the keyboard while a composition was up
                 // and `OnKeyDown` will not run to clean it away.
@@ -3281,7 +3277,6 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             }
             let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
 
-            retry_input_context_if_unknown(&state, Some(&context));
             if input_is_blocked(&state, Some(&context)) {
                 reset_input_for_focus_change(&state);
                 return Ok(BOOL::from(false));

@@ -14,6 +14,7 @@ use windows::{
     core::Interface,
     Win32::{
         Foundation::HWND,
+        System::Threading::GetCurrentProcess,
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
             ITfComposition, ITfContext, ITfDocumentMgr, ITfKeyEventSink, ITfSource,
@@ -52,6 +53,7 @@ const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const INPUT_CONTEXT_SYNC_BACKOFF: Duration = Duration::from_secs(1);
 const THEME_POLL_INTERVAL: Duration = Duration::from_millis(250);
 static THEME_CACHE: OnceLock<Mutex<ThemeCache>> = OnceLock::new();
+static HOST_EXECUTABLE_BASENAME: OnceLock<Option<String>> = OnceLock::new();
 
 struct ThemeCache {
     resolver: keytao_theme::ThemeResolver,
@@ -594,7 +596,15 @@ pub type SharedState = Rc<RefCell<TsfState>>;
 pub type WeakState = Weak<RefCell<TsfState>>;
 
 pub fn new_shared_state() -> SharedState {
+    HOST_EXECUTABLE_BASENAME.get_or_init(|| {
+        let image = crate::pipe_security::process_image(unsafe { GetCurrentProcess() }).ok()?;
+        Some(image.file_name()?.to_string_lossy().into_owned())
+    });
     Rc::new(RefCell::new(TsfState::new()))
+}
+
+pub(crate) fn host_executable_basename() -> Option<&'static str> {
+    HOST_EXECUTABLE_BASENAME.get().and_then(Option::as_deref)
 }
 
 pub(crate) fn diagnostics_enabled() -> bool {
@@ -1039,6 +1049,7 @@ fn apply_input_context_state(
             Level::Info,
             "input",
             "context_policy",
+            host_exe = host_executable_basename(),
             keyboard_disabled = input_context.keyboard_disabled.diagnostic_name(),
             empty_context = input_context.empty_context.diagnostic_name(),
             input_scope = password_diagnostic,
@@ -1062,29 +1073,39 @@ fn apply_input_context_state(
     sensitive
 }
 
-/// Inspect the context again when the last attempt could not answer.
+/// Inspect the context again when the last attempt could not answer or a
+/// host cleared either restriction without notifying the compartment sinks.
 ///
 /// Runs from the key callbacks. `ContextProbe::Unknown` fails closed, while a
 /// password `ProbeFailed` keeps a known answer or allows input until the retry;
 /// hosts routinely refuse a synchronous read session while the document is
 /// locked, so neither result may become permanent.
-pub(crate) fn retry_input_context_if_unknown(
-    shared_state: &SharedState,
-    context: Option<&ITfContext>,
-) {
+fn refresh_input_context_for_key(shared_state: &SharedState, context: Option<&ITfContext>) {
     let thread_mgr = shared_state.borrow().thread_mgr.clone();
     let context = crate::input_context::resolve_context(thread_mgr.as_ref(), context);
     let changed_context = !input_context_matches(shared_state, context.as_ref());
-    let due = {
+    let (cached_disabled, due) = {
         let st = shared_state.borrow();
         let context_identity = context.as_ref().map(|context| context.as_raw() as usize);
-        changed_context
-            || (st.input_context.needs_retry()
+        let cached_disabled =
+            st.input_context.block_reason() == Some(InputBlockReason::ContextDisabled);
+        (
+            cached_disabled,
+            (cached_disabled || st.input_context.needs_retry())
                 && st
                     .input_context_retry
-                    .due(context_identity, st.client_id, Instant::now()))
+                    .due(context_identity, st.client_id, Instant::now()),
+        )
     };
-    if !due {
+    // These reads need no edit session. A restricted or unreadable answer
+    // stays blocked without probing the input scope on each key.
+    let refresh = changed_context
+        || (due
+            && (!cached_disabled
+                || context.as_ref().is_some_and(|context| {
+                    crate::input_context::context_block_reason(None, Some(context)).is_none()
+                })));
+    if !refresh {
         return;
     }
     // A different context must never inherit either a clear or a restricted
@@ -1244,7 +1265,7 @@ pub(crate) fn apply_conversion_mode_change(shared_state: &SharedState) {
 pub(crate) fn input_is_blocked(shared_state: &SharedState, context: Option<&ITfContext>) -> bool {
     // OnKeyUp and candidate clicks do not all pass through OnTestKeyDown.
     // Validate their supplied context too before consulting any cached policy.
-    retry_input_context_if_unknown(shared_state, context);
+    refresh_input_context_for_key(shared_state, context);
     let reason = input_block_reason(shared_state, context);
     if let Some(reason) = reason {
         append_input_blocked_diagnostic(reason, context);

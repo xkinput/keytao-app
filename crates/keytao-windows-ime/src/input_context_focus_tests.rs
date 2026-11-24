@@ -38,7 +38,7 @@ impl ITfCompartment_Impl for Compartment_Impl {
 }
 
 struct ContextData {
-    disabled: bool,
+    restricted_compartment: Cell<Option<GUID>>,
     property_result: Cell<HRESULT>,
     reads: Cell<usize>,
     document: RefCell<Option<ITfDocumentMgr>>,
@@ -91,9 +91,9 @@ impl ITfCompartmentMgr_Impl for Context_Impl {
         if guid.is_null() {
             return Err(E_FAIL.into());
         }
-        let disabled = unsafe { *guid } == GUID_COMPARTMENT_KEYBOARD_DISABLED && self.data.disabled;
+        let restricted = self.data.restricted_compartment.get() == Some(unsafe { *guid });
         Ok(Compartment {
-            value: i32::from(disabled),
+            value: i32::from(restricted),
         }
         .into())
     }
@@ -133,7 +133,9 @@ impl Editor {
         let top = Rc::new(RefCell::new(None));
         let document: ITfDocumentMgr = Document { top: top.clone() }.into();
         let data = Rc::new(ContextData {
-            disabled,
+            restricted_compartment: Cell::new(
+                disabled.then_some(GUID_COMPARTMENT_KEYBOARD_DISABLED),
+            ),
             property_result: Cell::new(S_FALSE),
             reads: Cell::new(0),
             document: RefCell::new(Some(document.clone())),
@@ -224,6 +226,37 @@ fn supplied_context_replaces_both_clear_and_restricted_cached_policy() {
             }
         );
     }
+}
+
+#[test]
+fn same_context_recovers_when_it_becomes_editable_without_a_notification() {
+    for compartment in [
+        GUID_COMPARTMENT_EMPTYCONTEXT,
+        GUID_COMPARTMENT_KEYBOARD_DISABLED,
+    ] {
+        let editor = Editor::new(false);
+        editor.data.restricted_compartment.set(Some(compartment));
+        let (state, _sink) = fixture(&editor);
+        assert!(state::input_is_blocked(&state, Some(&editor.context)));
+        // A context that is still disabled does not need another read session.
+        assert_eq!(editor.data.reads.get(), 1);
+
+        editor.data.restricted_compartment.set(None);
+        assert!(!state::input_is_blocked(&state, Some(&editor.context)));
+        assert!(!state.borrow().input_context.is_sensitive());
+        assert_eq!(editor.data.reads.get(), 2);
+    }
+}
+
+#[test]
+fn reenabled_context_is_still_blocked_if_its_scope_is_unknown() {
+    let editor = Editor::new(true);
+    let (state, _sink) = fixture(&editor);
+    editor.data.restricted_compartment.set(None);
+    editor.data.property_result.set(E_FAIL);
+
+    assert!(state::input_is_blocked(&state, Some(&editor.context)));
+    assert_eq!(state.borrow().input_context.password, ContextProbe::Unknown);
 }
 
 #[test]

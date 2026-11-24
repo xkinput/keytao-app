@@ -24,12 +24,12 @@ use crate::{
     state::{
         append_diagnostic, apply_context_compartment_change, apply_conversion_mode_change,
         apply_open_close_change, clear_compartment_sinks, clear_context_compartment_sinks,
-        context_compartment_sinks_cover, hide_ime_windows, input_context_matches,
-        input_document_matches, new_shared_state, publish_initial_compartments,
-        refresh_engine_for_focus, refresh_input_context, refresh_language_bar,
-        reset_input_for_focus_change, same_com_object, start_engine_warmup, store_compartment_sink,
-        store_context_compartment_sinks, terminate_input_now, CompartmentSinkRegistration,
-        SharedState, WeakState,
+        context_compartment_sinks_cover, hide_ime_windows, host_executable_basename,
+        input_context_matches, input_document_matches, new_shared_state,
+        publish_initial_compartments, refresh_engine_for_focus, refresh_input_context,
+        refresh_language_bar, reset_input_for_focus_change, same_com_object, start_engine_warmup,
+        store_compartment_sink, store_context_compartment_sinks, terminate_input_now,
+        CompartmentSinkRegistration, SharedState, WeakState,
     },
 };
 
@@ -237,6 +237,7 @@ fn activate_service(
         keytao_core::runtime_log::Level::Info,
         "lifecycle",
         "tsf_activated",
+        host_exe = host_executable_basename(),
         activation_flags = activation_flags,
         thread_manager_flags = thread_mgr_flags
     );
@@ -396,6 +397,12 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
             keytao_core::runtime_log::drain_key_stats();
             tracing::info!("KeyTao TSF deactivated");
+            keytao_core::rt_log!(
+                keytao_core::runtime_log::Level::Info,
+                "lifecycle",
+                "tsf_deactivated",
+                host_exe = host_executable_basename(),
+            );
             append_diagnostic("TSF deactivated");
             Ok(())
         })
