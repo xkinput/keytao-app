@@ -1040,8 +1040,6 @@ mod desktop {
         }};
     }
 
-    pub mod userdb_migration;
-
     #[cfg(test)]
     mod api_member_tests {
         use super::{
@@ -4873,15 +4871,6 @@ mod desktop {
         }
     }
 }
-
-#[cfg(any(
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "android",
-    target_os = "ios"
-))]
-pub use desktop::userdb_migration::with_userdb_migration;
 
 #[cfg(any(
     target_os = "linux",

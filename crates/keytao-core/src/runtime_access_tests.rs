@@ -100,6 +100,7 @@ fn disabled_runtime_releases_its_backend_and_reuses_sessions_when_enabled() {
     assert_eq!(paused_session.state().schema_id, schema);
     assert!(session.process_key_result(b'a'.into(), 0).is_some_and(|result| result.accepted));
     runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
