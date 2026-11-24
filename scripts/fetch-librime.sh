@@ -9,7 +9,7 @@ PLATFORM_DESTINATION=""
 WINDOWS_ARCH="x64"
 WINDOWS_TOOLSET="msvc"
 USER_AGENT="keytao-librime-fetch"
-CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-all-errors)
+CURL_RETRY_ARGS=(--retry 6 --retry-all-errors --retry-max-time 120)
 PLATFORMS=()
 OPENCC_PORTABLE_VERSION="${OPENCC_PORTABLE_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$OPENCC_PORTABLE_VERSION")}"
 
@@ -137,12 +137,9 @@ expand_platforms() {
     printf '%s\n' "${normalized[@]}" | awk '!seen[$0]++'
 }
 
-github_api() {
-    local headers=(-H "User-Agent: $USER_AGENT")
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        headers+=(-H "Authorization: Bearer $GITHUB_TOKEN")
-    fi
-    curl -fsSL "${CURL_RETRY_ARGS[@]}" "${headers[@]}" "$1"
+github_request() {
+    curl -fsSL "${CURL_RETRY_ARGS[@]}" -H "User-Agent: $USER_AGENT" -H @- "$@" \
+        <<< "${GITHUB_TOKEN:+Authorization: Bearer $GITHUB_TOKEN}"
 }
 
 ensure_release_json() {
@@ -151,9 +148,9 @@ ensure_release_json() {
     fi
     RELEASE_JSON="$(mktemp "${TMPDIR:-/tmp}/keytao-librime-release.XXXXXX")"
     if [ "$VERSION" = "latest" ]; then
-        github_api "https://api.github.com/repos/rime/librime/releases/latest" > "$RELEASE_JSON"
+        github_request "https://api.github.com/repos/rime/librime/releases/latest" -o "$RELEASE_JSON"
     else
-        github_api "https://api.github.com/repos/rime/librime/releases/tags/$VERSION" > "$RELEASE_JSON"
+        github_request "https://api.github.com/repos/rime/librime/releases/tags/$VERSION" -o "$RELEASE_JSON"
     fi
 }
 
@@ -232,7 +229,7 @@ download_raw_file() {
     echo "Downloading $(basename "$file")"
     local tmp="$file.tmp"
     rm -f "$tmp"
-    curl -fsSL "${CURL_RETRY_ARGS[@]}" -H "User-Agent: $USER_AGENT" "$url" -o "$tmp"
+    github_request "$url" -o "$tmp"
     mv "$tmp" "$file"
 }
 
@@ -240,9 +237,9 @@ opencc_portable_asset() {
     local release_json
     release_json="$(mktemp "${TMPDIR:-/tmp}/keytao-opencc-release.XXXXXX")"
     if [ "$OPENCC_PORTABLE_VERSION" = "latest" ]; then
-        github_api "https://api.github.com/repos/BYVoid/OpenCC/releases/latest" > "$release_json"
+        github_request "https://api.github.com/repos/BYVoid/OpenCC/releases/latest" -o "$release_json"
     else
-        github_api "https://api.github.com/repos/BYVoid/OpenCC/releases/tags/$OPENCC_PORTABLE_VERSION" > "$release_json"
+        github_request "https://api.github.com/repos/BYVoid/OpenCC/releases/tags/$OPENCC_PORTABLE_VERSION" -o "$release_json"
     fi
     python3 - "$release_json" <<'PY'
 import json
