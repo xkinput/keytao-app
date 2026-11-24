@@ -104,6 +104,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     )
     private var currentTheme: KeyTaoImeTheme = .fallback
     private var currentThemeCacheKey: String?
+    private var rimeOptionsReloadStamp: String?
     private var lastPresentationLandscape: Bool?
     private var currentState = KeyTaoImeState.empty
     private var bypassAsciiActive = false
@@ -560,7 +561,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private func performCommand(_ command: KeyTaoKeyCommand) {
         refreshInputDocumentIfNeeded()
         defer { releaseMemoryIfNeeded() }
-        if runtimeReleased && command.requiresInstalledSchema {
+        if runtimeReleased && (command.requiresInstalledSchema || command.type == KeyTaoCommandType.rimeMenu) {
             startRuntimeIfNeeded()
         }
         // The runtime is still coming up on the startup queue. Queue the key
@@ -628,14 +629,31 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.reset:
             apply(engine.reset())
         case KeyTaoCommandType.rimeMenu:
+            guard inputAvailable else {
+                keyboardView?.update(rimeOptions: .empty)
+                keyboardView?.updateSchemeOperationProgress(engine.schemeOperationProgress())
+                return
+            }
             if currentState.isPackageSwitcher {
                 apply(engine.processKey(rimeKeyEscape))
             }
             refreshRimeOptions()
         case KeyTaoCommandType.rimeSchema:
-            selectRimeSchema(command.value, packageKey: command.fallbackValue)
+            if let view = keyboardView, view.isRimeMenuOpen {
+                let generation = inputContextGeneration
+                let document = currentDocumentIdentifier()
+                view.selectRimeSchemaAfterFrame(command) { [weak self] in
+                    guard let self, self.keyboardVisible, self.inputAvailable,
+                          self.inputContextIsCurrent(generation, documentIdentifier: document) else { return }
+                    self.selectRimeSchema(command.value, packageKey: command.fallbackValue)
+                }
+            } else {
+                selectRimeSchema(command.value, packageKey: command.fallbackValue)
+            }
         case KeyTaoCommandType.rimeOption:
-            setRimeOption(command.value, action: command.fallbackValue)
+            if keyboardView?.rimeSchemaSelectionPending != true {
+                setRimeOption(command.value, action: command.fallbackValue)
+            }
         case KeyTaoCommandType.openPage:
             openContainingApp(page: command.value)
         case KeyTaoCommandType.edit:
@@ -1573,6 +1591,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func refreshRimeOptions() {
+        let optionsOpen = keyboardView?.isRimeMenuOpen == true
+        let progress = optionsOpen ? engine.schemeOperationProgress() : nil
+        if optionsOpen { rimeOptionsReloadStamp = engine.loadedReloadStampSignature() }
         let schemas = engine.listSchemas()
         let currentSchema = engine.currentSchema()
         englishSchemaID = keyTaoEnglishSchemaID(schemas: schemas.map { ($0.id, $0.name) })
@@ -1599,8 +1620,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             englishSchemaID: usesEnglishSchema ? englishSchemaID : nil,
             switches: switches,
             options: optionStates,
-            packages: keyboardView?.isRimeMenuOpen == true ? engine.listSwitcherPackages() : []
+            packages: optionsOpen ? engine.listSwitcherPackages() : []
         ))
+        if optionsOpen {
+            keyboardView?.updateSchemeOperationProgress(progress)
+        }
     }
 
     private func handleEditAction(_ action: String, value: String?) {
@@ -2286,6 +2310,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private func reloadIfNeeded() {
         refreshAlgorithmControl()
         guard engine.reloadIfNeeded() else {
+            if inputAvailable, keyboardView?.isRimeMenuOpen == true,
+               engine.loadedReloadStampSignature() != rimeOptionsReloadStamp {
+                refreshRimeOptions()
+            }
             return
         }
         refreshEngineCapabilities()
@@ -2308,7 +2336,22 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             eventMask: [.write, .rename, .delete, .revoke],
             queue: .main
         )
-        source.setEventHandler { [weak self] in self?.refreshAlgorithmControl() }
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            if self.keyboardVisible, self.keyboardView?.isRimeMenuOpen == true {
+                self.reloadIfNeeded()
+                let progress = self.engine.schemeOperationProgress()
+                let schemeWorkFinished = self.keyboardView?.updateSchemeOperationProgress(progress) == true
+                if schemeWorkFinished, self.inputAvailable {
+                    self.refreshRimeOptions()
+                } else if progress == nil, self.engine.algorithmEnabled, !self.engine.nativeReady, !self.runtimeStarting,
+                   self.engine.hasDeployedSchema() {
+                    self.startRuntimeIfNeeded()
+                }
+            } else {
+                self.refreshAlgorithmControl()
+            }
+        }
         source.setCancelHandler { close(descriptor) }
         engineControlWatcher = source
         source.resume()
@@ -2965,6 +3008,7 @@ private extension KeyTaoKeyCommand {
     var requiresInstalledSchema: Bool {
         switch type {
         case KeyTaoCommandType.openPage,
+            KeyTaoCommandType.rimeMenu,
             KeyTaoCommandType.backspace,
             KeyTaoCommandType.backspaceGesture,
             KeyTaoCommandType.keyboardPicker,

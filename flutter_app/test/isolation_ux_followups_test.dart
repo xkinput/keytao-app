@@ -38,6 +38,7 @@ class _FollowupsCore extends FakeCore {
   Completer<String>? previewGate;
   String previewWord = '键道';
   List<IsolatedPackageDto> isolatedPackages = [];
+  int simplificationValue = 0;
 
   @override
   Future<bool> crateApiCorePackageMigrationPending() async => migrationPending;
@@ -255,12 +256,12 @@ class _FollowupsCore extends FakeCore {
       isolatedPackages;
 
   @override
-  Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => const [
+  Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => [
     SchemaSwitchDto(
       schemaId: 'keytao',
       name: 'simplification',
       states: ['简体', '繁体'],
-      value: 0,
+      value: simplificationValue,
       options: [],
     ),
   ];
@@ -371,6 +372,37 @@ class _AppTestController extends ViewController {
 }
 
 void main() {
+  test('live IME marker refreshes schema switches in an open App', () async {
+    final dir = await Directory.systemTemp.createTemp('keytao-switch-watch-');
+    final api = _FollowupsCore();
+    RustLib.initMock(api: api);
+    final c = AppController(
+      info: BridgeInfo(
+        platform: BridgePlatform.macOs,
+        appVersion: '1.2.18-alpha.4',
+        userRoot: dir.path,
+      ),
+    );
+    addTearDown(() async {
+      c.dispose();
+      await api.events.close();
+      RustLib.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await c.refreshState(), isTrue);
+    expect(c.schemaSwitches.single.value, 0);
+    final changed = Completer<void>();
+    c.addListener(() {
+      if (!changed.isCompleted && c.schemaSwitches.singleOrNull?.value == 1) {
+        changed.complete();
+      }
+    });
+    api.simplificationValue = 1;
+    final temp = await File('${dir.path}/.switches.tmp').writeAsString('{}');
+    await temp.rename('${dir.path}/.keytao-live-switches.json');
+    await changed.future.timeout(const Duration(seconds: 5));
+  });
+
   testWidgets(
     'orphan dialog supports one-click select all and deleting kept backups',
     (tester) async {

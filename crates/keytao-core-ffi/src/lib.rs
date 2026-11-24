@@ -695,6 +695,17 @@ pub extern "C" fn keytao_reload_stamp_path_at(user_dir: *const c_char) -> *mut c
     })
 }
 
+/// Report the stamp the current runtime has applied, including option-only changes.
+#[no_mangle]
+pub extern "C" fn keytao_loaded_reload_stamp_signature() -> *mut c_char {
+    guard("keytao_loaded_reload_stamp_signature", std::ptr::null_mut(), || {
+        loaded_deployment()
+            .and_then(|(_, signature)| signature)
+            .as_deref()
+            .map_or(std::ptr::null_mut(), to_cstring)
+    })
+}
+
 /// The pending reload request, without marking it as seen: the stamp path and
 /// the signature that differs from what is loaded.
 fn stamp_changed_peek() -> Option<(PathBuf, String)> {
@@ -764,6 +775,18 @@ pub extern "C" fn keytao_deployment_in_progress_at(user_dir: *const c_char) -> b
     guard("keytao_deployment_in_progress_at", false, || {
         c_string_arg(user_dir, "user_dir")
             .is_ok_and(|root| keytao_core::deployment_in_progress(Path::new(&root)))
+    })
+}
+
+/// Read the scheme name and work stage for a keyboard options panel.
+#[no_mangle]
+pub extern "C" fn keytao_scheme_operation_progress_at(user_dir: *const c_char) -> *mut c_char {
+    guard("keytao_scheme_operation_progress_at", std::ptr::null_mut(), || {
+        c_string_arg(user_dir, "user_dir")
+            .ok()
+            .and_then(|root| keytao_core::scheme_operation_progress_message(Path::new(&root)))
+            .as_deref()
+            .map_or(std::ptr::null_mut(), to_cstring)
     })
 }
 
@@ -2409,6 +2432,7 @@ mod tests {
         *lock_ignore_poison(&RELOAD_SIGNAL) = Some(ReloadSignal::new(&dir));
 
         assert!(stamp_changed_peek().is_none(), "nothing was deployed yet");
+        assert!(keytao_loaded_reload_stamp_signature().is_null());
 
         ReloadStamp::write(&dir).unwrap();
         let (path, _) = stamp_changed_peek().expect("a written stamp is a reload request");
@@ -2417,8 +2441,12 @@ mod tests {
         // reload_now()'s order: snapshot, reload, commit the snapshot. A second
         // deployment finishes while that reload is still running.
         let (path, loading) = begin_reload().unwrap();
+        let applied = loading.clone().unwrap();
         std::fs::write(&path, "deployed again\n").unwrap();
         mark_deployment_loaded(&path, loading);
+        let signature = keytao_loaded_reload_stamp_signature();
+        assert_eq!(c_string_arg(signature, "signature").unwrap(), applied);
+        keytao_free_string(signature);
 
         let (_, pending) =
             stamp_changed_peek().expect("the deployment that landed mid-reload is still pending");

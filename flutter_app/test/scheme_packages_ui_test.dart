@@ -2260,6 +2260,77 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('mobile scheme cards and switches fit two narrow columns', (
+    tester,
+  ) async {
+    final c = _PackageController(BridgePlatform.android)
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: 'keytao',
+          source: 'cloud',
+          active: true,
+          inUse: true,
+          hasPackageZip: true,
+        ),
+        InstalledPackageDto(
+          schemeKey: 'local-custom',
+          source: 'local',
+          displayName: 'Very long local scheme display name',
+          active: false,
+          hasPackageZip: true,
+        ),
+        InstalledPackageDto(
+          schemeKey: 'local-second',
+          source: 'local',
+          displayName: 'Second local scheme',
+          active: false,
+          hasPackageZip: true,
+        ),
+      ]
+      ..schemaSwitches = const [
+        SchemaSwitchDto(
+          schemaId: 'keytao',
+          name: 'example',
+          states: ['关闭', '较长的方案开关名字'],
+          value: 0,
+          options: [],
+        ),
+        SchemaSwitchDto(
+          schemaId: 'keytao',
+          name: 'choice',
+          states: ['较长的第一项选择', '较长的第二项选择'],
+          value: 0,
+          options: ['first', 'second'],
+        ),
+      ];
+    addTearDown(c.dispose);
+    _size(tester, const Size(320, 850));
+    await _pumpSchemePage(tester, c);
+
+    Finder card(String key) => find.byKey(ValueKey('scheme-package-$key'));
+    void expectSameRow(Finder left, Finder right) {
+      final first = tester.getRect(left);
+      final second = tester.getRect(right);
+      expect(first.top, closeTo(second.top, .1));
+      expect(first.right, lessThanOrEqualTo(second.left));
+    }
+
+    final active = card('keytao');
+    expectSameRow(active, card('xmjd'));
+    expectSameRow(card('local-custom'), card('local-second'));
+    expectSameRow(find.byType(SwitchSetting), find.byType(ChoiceSetting<int>));
+    final activeCell = find.ancestor(
+      of: active,
+      matching: find.byType(HairlineGridCell),
+    );
+    expect(tester.widget<HairlineGridCell>(activeCell).color, isNull);
+    final activeLabel = find.descendant(of: active, matching: find.text('使用中'));
+    expect(activeLabel, findsOneWidget);
+    expect(tester.getSize(activeLabel).width, lessThan(60));
+    expect(find.widgetWithText(ActionButton, '使用中'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('scheme sections separate local packages and deployment', (
     tester,
   ) async {

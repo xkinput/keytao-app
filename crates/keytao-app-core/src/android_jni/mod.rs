@@ -926,6 +926,21 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploym
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSchemeOperationProgress(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeSchemeOperationProgress", std::ptr::null_mut(), || {
+        optional_jni_path(&mut env, user_dir)
+            .and_then(|root| keytao_core::scheme_operation_progress_message(&root))
+            .as_deref()
+            .map_or(std::ptr::null_mut(), |message| jni_string(&mut env, message))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeploymentBlocksInput(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

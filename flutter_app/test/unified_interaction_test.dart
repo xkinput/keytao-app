@@ -5,8 +5,11 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/settings/android_settings.dart';
 import 'package:keytao/src/ui/color_picker.dart';
+import 'package:keytao/src/ui/theme.dart';
+import 'package:keytao/src/ui/theme_library.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
@@ -39,6 +42,56 @@ class _EditingController extends ViewController {
   }
 }
 
+class _ThemePresetApi implements RustLibApi {
+  String current = 'default';
+
+  @override
+  Future<List<ThemeSummaryDto>> crateApiCoreGetThemeLibrary() async => [
+    for (final (id, name) in [('default', '默认'), ('mint', '薄荷')])
+      ThemeSummaryDto(
+        id: id,
+        name: name,
+        builtIn: true,
+        current: id == current,
+        light: const ThemePreviewColorsDto(
+          background: '#FFFFFFFF',
+          foreground: '#101010FF',
+          accent: '#178E73FF',
+        ),
+        dark: const ThemePreviewColorsDto(
+          background: '#101010FF',
+          foreground: '#FFFFFFFF',
+          accent: '#178E73FF',
+        ),
+      ),
+  ];
+
+  @override
+  Future<void> crateApiCoreApplyTheme({required String id}) async {
+    current = id;
+  }
+
+  @override
+  Future<ImeUiSettingsDto> crateApiCoreGetImeUiSettings() async =>
+      const ImeUiSettingsDto(
+        colorScheme: UiColorSchemeDto.dark,
+        effectiveColorScheme: EffectiveColorSchemeDto.dark,
+        orientation: PanelOrientationDto.horizontal,
+        embeddedComposition: false,
+        hideCandidatePanel: false,
+        showTrayModeIndicator: true,
+        effectiveEmbeddedComposition: false,
+        accentColor: '#178E73',
+        fontSize: 18,
+        backgroundColor: '',
+        themeExists: true,
+        message: '',
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 Future<void> _pump(WidgetTester tester, ViewController c, Size size) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
@@ -66,6 +119,27 @@ Future<void> _pump(WidgetTester tester, ViewController c, Size size) async {
 }
 
 void main() {
+  testWidgets('applying a keyboard theme on the mobile home keeps app colors', (
+    tester,
+  ) async {
+    final api = _ThemePresetApi();
+    RustLib.initMock(api: api);
+    addTearDown(RustLib.dispose);
+    final controller = ViewController(BridgePlatform.ios);
+    await _pump(tester, controller, const Size(390, 844));
+    final library = find.byType(ThemeLibrarySection);
+    final mint = find.descendant(of: library, matching: find.text('薄荷'));
+    await tester.ensureVisible(mint);
+    await tester.tap(mint);
+    await tester.pumpAndSettle();
+    expect(api.current, 'mint');
+    expect(controller.uiSettings?.accentColor, '#178E73');
+    final context = tester.element(library);
+    expect(ChromeAccent.of(context), ChromeAccent.defaultColor);
+    expect(Theme.of(context).brightness, Brightness.light);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   for (final size in [const Size(400, 860), const Size(1000, 760)]) {
     testWidgets('changelog and operation log dialogs at $size', (tester) async {
       final c = ViewController(BridgePlatform.macOs)

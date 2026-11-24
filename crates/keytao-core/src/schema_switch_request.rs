@@ -1,12 +1,84 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    io::Read,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
 };
 
 pub const SCHEMA_SWITCH_REQUEST_FILE: &str = ".keytao-schema-switches.json";
 pub const SCHEMA_SWITCH_APPLIED_FILE: &str = ".keytao-schema-switches.applied";
+const LIVE_SWITCHES_FILE: &str = ".keytao-live-switches.json";
+const MAX_LIVE_SWITCH_BYTES: u64 = 128 * 1024;
+
+#[derive(Serialize, Deserialize)]
+struct LiveSwitches {
+    staging_dir: PathBuf,
+    generation: u64,
+    state: crate::global_input::InputState,
+}
+
+pub(crate) fn live_state(
+    root: &Path,
+    dirs: &crate::RuntimeDirs,
+    schema_id: &str,
+    generation: u64,
+) -> Option<crate::global_input::InputState> {
+    let bytes = read_live_bytes(&root.join(LIVE_SWITCHES_FILE))?;
+    let live: LiveSwitches = serde_json::from_slice(&bytes).ok()?;
+    (live.staging_dir == dirs.staging_dir
+        && live.state.schema_id == schema_id
+        && live.generation == generation)
+        .then_some(live.state)
+}
+
+fn read_live_bytes(path: &Path) -> Option<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_LIVE_SWITCH_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_LIVE_SWITCH_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_LIVE_SWITCH_BYTES).then_some(bytes)
+}
+
+pub(crate) fn publish_live_state(
+    root: &Path,
+    dirs: &crate::RuntimeDirs,
+    state: &crate::global_input::InputState,
+) {
+    if state.schema_id.is_empty() || state.is_switcher() {
+        return;
+    }
+    let result = (|| -> Result<(), String> {
+        let schema_root = &dirs.user_data_dir;
+        let generation = read_at(schema_root)?.generation;
+        if generation > crate::lock_ignore_poison(&PROCESS_SWITCH_STATE).applied(schema_root)? {
+            return Ok(());
+        }
+        let data = serde_json::to_vec(&LiveSwitches {
+            staging_dir: dirs.staging_dir.clone(),
+            generation,
+            state: state.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        if data.len() as u64 > MAX_LIVE_SWITCH_BYTES {
+            return Err("live schema switches exceed the state size limit".into());
+        }
+        let path = root.join(LIVE_SWITCHES_FILE);
+        if read_live_bytes(&path).as_deref() != Some(data.as_slice()) {
+            write_file_atomic(&path, &data).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        crate::rt_log!(crate::Level::Info, "error", "publish_live_switches", msg = error);
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaSwitchRequest {
@@ -61,14 +133,19 @@ pub(crate) fn acknowledge(root: &Path, generation: u64) -> Result<(), String> {
 }
 
 impl ProcessSwitchState {
-    fn pending(&mut self, root: &Path) -> Result<Option<SchemaSwitchRequest>, String> {
-        let request = read_at(root)?;
-        let applied = match self.generations.entry(root.to_path_buf()) {
+    fn applied(&mut self, root: &Path) -> Result<u64, String> {
+        let generation = match self.generations.entry(root.to_path_buf()) {
             std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::btree_map::Entry::Vacant(entry) => {
                 *entry.insert(schema_switch_applied_generation(root)?)
             }
         };
+        Ok(generation)
+    }
+
+    fn pending(&mut self, root: &Path) -> Result<Option<SchemaSwitchRequest>, String> {
+        let request = read_at(root)?;
+        let applied = self.applied(root)?;
         Ok((request.generation > applied).then_some(request))
     }
 

@@ -11,6 +11,7 @@ import 'color_picker.dart';
 import 'system_font_picker.dart';
 import 'theme.dart';
 import 'theme_editor.dart';
+import 'theme_library.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -228,6 +229,7 @@ class SettingsCard extends StatefulWidget {
 
 class _SettingsCardState extends State<SettingsCard> {
   AppController get controller => widget.controller;
+  int _themeLibraryRevision = 0;
   Timer? _previewTimer;
   ImeUiSettingsDto? _previewSource;
   UiColorSchemeDto? _previewScheme;
@@ -441,6 +443,7 @@ class _SettingsCardState extends State<SettingsCard> {
                 _separated(_candidatePageSize()),
               ]),
               _settingsCell('外观', [
+                _themeLibrary(),
                 BigTextRadioGroup<UiColorSchemeDto>(
                   label: '配色方案',
                   value: s.colorScheme,
@@ -464,12 +467,7 @@ class _SettingsCardState extends State<SettingsCard> {
                         : (value) => _savePreview(fontSize: value),
                   ),
                 ],
-                ActionButton(
-                  '编辑主题',
-                  onPress: c.busy
-                      ? null
-                      : () => showThemeEditorDialog(context, controller: c),
-                ),
+                ActionButton('编辑主题', onPress: c.busy ? null : _editTheme),
               ]),
             ],
           ),
@@ -494,6 +492,17 @@ class _SettingsCardState extends State<SettingsCard> {
     ),
     child: child,
   );
+
+  Widget _themeLibrary() => ThemeLibrarySection(
+    key: ValueKey(_themeLibraryRevision),
+    controller: controller,
+    quickSwitch: true,
+  );
+
+  Future<void> _editTheme() async {
+    await showThemeEditorDialog(context, controller: controller);
+    if (mounted) setState(() => _themeLibraryRevision++);
+  }
 
   List<Widget> _appearanceControls() {
     final c = controller;
@@ -557,7 +566,8 @@ class _SettingsCardState extends State<SettingsCard> {
         ? null
         : _previewRadius ?? s?.cornerRadius;
     final backgroundColor = _previewBackground ?? s?.backgroundColor ?? '';
-    final colorScheme = _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto;
+    final colorScheme =
+        _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto;
     final preview = CandidatePanelPreview(
       fontCatalog: SystemFontCatalog.forController(c),
       key: ValueKey((colorScheme, orientation)),
@@ -681,13 +691,9 @@ class _SettingsCardState extends State<SettingsCard> {
           Section(
             title: '外观',
             children: [
+              _themeLibrary(),
               ..._appearanceControls(),
-              ActionButton(
-                '编辑主题',
-                onPress: c.busy
-                    ? null
-                    : () => showThemeEditorDialog(context, controller: c),
-              ),
+              ActionButton('编辑主题', onPress: c.busy ? null : _editTheme),
             ],
           ),
         Semantics(
@@ -1203,9 +1209,10 @@ class SchemaSwitchesSection extends StatelessWidget {
         title: '方案开关',
         icon: FLucideIcons.slidersHorizontal,
         children:
-            MediaQuery.sizeOf(context).width >= 720 &&
-                constraints.hasBoundedWidth &&
-                constraints.maxWidth >= 640
+            constraints.hasBoundedWidth &&
+                (c.isMobile ||
+                    (MediaQuery.sizeOf(context).width >= 720 &&
+                        constraints.maxWidth >= 640))
             ? [
                 for (var index = 0; index < switches.length; index += 2)
                   Table(
@@ -1220,12 +1227,16 @@ class SchemaSwitchesSection extends StatelessWidget {
                       TableRow(
                         children: [
                           HairlineGridCell(
-                            padding: const EdgeInsets.only(right: 16),
+                            padding: EdgeInsets.only(
+                              right: c.isMobile ? 8 : 16,
+                            ),
                             child: switches[index],
                           ),
                           if (index + 1 < switches.length)
                             HairlineGridCell(
-                              padding: const EdgeInsets.only(left: 16),
+                              padding: EdgeInsets.only(
+                                left: c.isMobile ? 8 : 16,
+                              ),
                               child: switches[index + 1],
                             )
                           else

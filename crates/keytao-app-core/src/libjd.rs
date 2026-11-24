@@ -180,6 +180,11 @@ pub async fn import_package(
     let key = key.to_owned();
     let schema_id = schema_id.map(str::to_owned);
     tokio::task::spawn_blocking(move || {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let _progress = keytao_core::SchemeConversionProgress::start(
+            &root,
+            crate::runtime_materialize::package_name(&core, &key),
+        );
         emit_progress(&core, "converting", 0, "正在准备转换词库…");
         let converted = crate::libjd_dictionary::convert(
             &core,

@@ -10,8 +10,8 @@ mod deployment_log;
 mod deployment_state;
 pub use deployment_state::{
     current_deploy_progress, deployment_in_progress, deployment_progress_message,
-    mark_deployment_failed, track_usable_input_session, DeployProgress, DeployStep,
-    DeploymentState,
+    mark_deployment_failed, scheme_operation_progress_message, track_usable_input_session,
+    DeployProgress, DeployStep, DeploymentState, SchemeConversionProgress,
 };
 #[cfg(test)]
 mod deployment_state_tests;
@@ -4260,10 +4260,12 @@ mod desktop {
     }
 
     pub(super) fn list_switch_settings(
-        user_dir: &Path,
+        control_root: &Path,
+        dirs: &RuntimeDirs,
         schema_id: &str,
     ) -> Result<Vec<SchemaSwitchSetting>, String> {
         let _rime = rime_api_lock();
+        let user_dir = &dirs.user_data_dir;
         let user: Value = match std::fs::read(user_dir.join("user.yaml")) {
             Ok(bytes) => serde_yaml::from_slice(&bytes)
                 .map_err(|error| format!("read Rime user config: {error}"))?,
@@ -4271,11 +4273,15 @@ mod desktop {
             Err(error) => return Err(format!("read Rime user config: {error}")),
         };
         let request = schema_switch_request::read_at(user_dir)?;
+        let live = schema_switch_request::live_state(control_root, dirs, schema_id, request.generation);
         let pending = request.generation > schema_switch_applied_generation(user_dir)?;
         Ok(visible_switch_settings(
             schema_id,
             read_schema_switches_locked(schema_id),
             |name, has_reset| {
+                if let Some(value) = live.as_ref().and_then(|state| state.option(name)) {
+                    return Some(value);
+                }
                 if has_reset {
                     request.options.get(name).copied()
                 } else {
@@ -4289,12 +4295,13 @@ mod desktop {
     }
 
     pub(super) fn set_switch_setting(
-        user_dir: &Path,
+        control_root: &Path,
+        dirs: &RuntimeDirs,
         schema_id: &str,
         switch_name: &str,
         value: usize,
     ) -> Result<Vec<SchemaSwitchSetting>, String> {
-        let switches = list_switch_settings(user_dir, schema_id)?;
+        let switches = list_switch_settings(control_root, dirs, schema_id)?;
         let switch = switches
             .iter()
             .find(|switch| switch.name == switch_name)
@@ -4312,8 +4319,15 @@ mod desktop {
                 .map(|(index, name)| (name.clone(), index == value))
                 .collect()
         };
-        schema_switch_request::merge(user_dir, values)?;
-        list_switch_settings(user_dir, schema_id)
+        let previous = schema_switch_request::read_at(&dirs.user_data_dir)?;
+        let live = schema_switch_request::live_state(control_root, dirs, schema_id, previous.generation);
+        // Do not replay an old App preference over a newer F4 change to another switch.
+        let carry_forward = previous.options.into_keys().filter_map(|name| {
+            let enabled = live.as_ref()?.option(&name)?;
+            Some((name, enabled))
+        });
+        schema_switch_request::merge(&dirs.user_data_dir, carry_forward.chain(values))?;
+        list_switch_settings(control_root, dirs, schema_id)
     }
 
     // RimeSetOption changes only the context. Update the IME's shared user
@@ -4872,7 +4886,7 @@ pub(crate) use desktop::RimeBackend;
 ))]
 fn with_schema_switch_config<T>(
     user_dir: &Path,
-    action: impl FnOnce(&Path) -> Result<T, String>,
+    action: impl FnOnce(&RuntimeDirs) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
     let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
@@ -4890,7 +4904,7 @@ fn with_schema_switch_config<T>(
     PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs, changed)?;
     desktop::setup_switch_config(user_dir, &runtime)?;
     *initialized = Some(dirs);
-    action(&runtime.user_data_dir)
+    action(&runtime)
 }
 
 /// Release the App's Rime configuration runtime when switching input engines.
@@ -4949,8 +4963,8 @@ pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>,
     {
         return Ok(Vec::new());
     }
-    with_schema_switch_config(user_dir, |schema_root| {
-        desktop::list_switch_settings(schema_root, &schema_id)
+    with_schema_switch_config(user_dir, |dirs| {
+        desktop::list_switch_settings(user_dir, dirs, &schema_id)
     })
 }
 
@@ -4977,8 +4991,8 @@ pub fn set_schema_switch(
     {
         return Err("Rime schema is no longer deployed or selected".into());
     }
-    with_schema_switch_config(user_dir, |schema_root| {
-        desktop::set_switch_setting(schema_root, schema_id, switch_name, value)
+    with_schema_switch_config(user_dir, |dirs| {
+        desktop::set_switch_setting(user_dir, dirs, schema_id, switch_name, value)
     })
 }
 
@@ -6071,6 +6085,9 @@ impl ProcessRimeState {
         if request.is_none() {
             return Ok(());
         }
+        let active_schema = request
+            .and_then(|request| request.schema_id.clone())
+            .or_else(|| current_schema_id_from_dir(root));
         let schema_root = desktop::loaded_schema_root(root);
         let schema_root = schema_root.as_path();
         let sessions = lock_ignore_poison(&self.sessions);
@@ -6096,25 +6113,41 @@ impl ProcessRimeState {
             Ok(())
         };
         let mut applied = false;
+        let mut live = None;
         for session in sessions.iter().filter_map(WeakRuntimeSession::upgrade) {
             let mut inner = lock_ignore_poison(&session.inner);
             if !inner.ime_host || inner.user_data_dir != root {
                 continue;
             }
             ImeRuntimeSession::rebuild_engine(&mut inner, root)?;
-            if let Some(engine) = inner.engine.as_deref() {
+            let ImeRuntimeSessionInner {
+                engine,
+                applied_input_version,
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                pending_schema_id,
+                ..
+            } = &mut *inner;
+            if let Some(engine) = engine.as_deref() {
                 apply(engine)?;
                 #[cfg(any(target_os = "android", target_os = "ios"))]
                 if let Some(id) = request.and_then(|request| request.schema_id.as_deref()) {
                     if engine.is_composing() {
-                        inner.pending_schema_id = Some(id.to_owned());
+                        *pending_schema_id = Some(id.to_owned());
                     } else {
                         engine.select_schema(id)?;
                         engine.apply_reset_switch_request(schema_root)?;
                         publish_current_schema(schema_root, id);
                     }
                 }
-                inner.applied_input_version = 0;
+                if session.policy.current() == InputContextPolicy::default()
+                    && session.context_ascii_mode.load(Ordering::Acquire) == 0
+                {
+                    let state = global_input::InputState::read(engine);
+                    if Some(&state.schema_id) == active_schema.as_ref() {
+                        live = Some(state);
+                    }
+                }
+                *applied_input_version = 0;
                 applied = true;
             }
         }
@@ -6126,11 +6159,18 @@ impl ProcessRimeState {
                 engine.apply_reset_switch_request(schema_root)?;
                 publish_current_schema(schema_root, id);
             }
+            let state = global_input::InputState::read(engine);
+            if Some(&state.schema_id) == active_schema.as_ref() {
+                live = Some(state);
+            }
             applied = true;
         }
         if applied {
             if let Some(request) = request {
                 schema_switch_request::acknowledge(schema_root, request.generation)?;
+                if let Some(state) = live {
+                    self.publish_live_switches(root, schema_root, &state);
+                }
             }
         }
         Ok(())
@@ -6139,6 +6179,12 @@ impl ProcessRimeState {
     fn apply_pending_switch_request(&self, root: &Path) -> Result<(), String> {
         let request = RimeBackend::prepare_switch_request(root)?;
         self.apply_switch_request(root, None, request.as_ref())
+    }
+
+    fn publish_live_switches(&self, root: &Path, schema_root: &Path, state: &global_input::InputState) {
+        if let Some(dirs) = desktop::loaded_runtime().filter(|dirs| dirs.user_data_dir == schema_root) {
+            schema_switch_request::publish_live_state(root, &dirs, state);
+        }
     }
 
     /// Tear librime down when it is up for different directories, so that the
@@ -6601,20 +6647,20 @@ impl ImeRuntime {
         }) {
             return Ok(false);
         }
-        self.reload_without_deploy_inner().map(|()| true)
+        self.reload_without_deploy_inner()
     }
 
-    fn reload_without_deploy_inner(&self) -> Result<(), String> {
+    fn reload_without_deploy_inner(&self) -> Result<bool, String> {
         let _build = PROCESS_RIME
             .build
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
         if self.stop_if_disabled(&dirs)? {
-            return Ok(());
+            return Ok(true);
         }
         if self.activate_libjd(&dirs, true)? {
-            return Ok(());
+            return Ok(true);
         }
         if deployment_in_progress(&dirs.user) {
             return Err("Rime deployment is busy".into());
@@ -6648,7 +6694,7 @@ impl ImeRuntime {
                     return Err("Rime deployment is busy".into());
                 }
                 PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs, true)?;
-                return Ok(());
+                return Ok(true);
             }
             if schema_state.schemas.is_empty() {
                 if runtime.active_package_key.is_some() {
@@ -6661,7 +6707,7 @@ impl ImeRuntime {
                     PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
                     PROCESS_RIME.finalize_backend()?;
                 }
-                return Ok(());
+                return Ok(true);
             }
             if !schema_state.deployed {
                 return Err(
@@ -6685,7 +6731,7 @@ impl ImeRuntime {
             {
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 if self.apply_pending_user_data_sync(&dirs.user, &runtime.user_data_dir)? {
-                    return Ok(());
+                    return Ok(true);
                 }
                 let schema_root = desktop::loaded_schema_root(&dirs.user);
                 let request = schema_switch_request::read_at(&schema_root)?;
@@ -6694,11 +6740,10 @@ impl ImeRuntime {
                     .is_some_and(|stamp| {
                         stamp.starts_with(&format!("schema:{}:", request.generation))
                     });
-                if request.schema_id.is_some()
-                    && (schema_stamp
-                        || schema_switch_request::pending_for_process(&schema_root)?.is_some())
-                {
-                    return self.apply_pending_switch_request(&dirs.user);
+                if schema_stamp || (request.schema_id.is_some()
+                    && schema_switch_request::pending_for_process(&schema_root)?.is_some()) {
+                    self.apply_pending_switch_request(&dirs.user)?;
+                    return Ok(request.schema_id.is_some());
                 }
             }
             if package_changed {
@@ -6716,7 +6761,7 @@ impl ImeRuntime {
                     .map(|_| ())
             });
             drop(barrier);
-            result
+            result.map(|()| true)
         })();
         if let Some(started) = started {
             crate::rt_log!(
@@ -8124,7 +8169,7 @@ impl ImeRuntimeSession {
             && schema_switch_request::pending_for_process(&schema_root)
                 .ok()
                 .flatten()
-                .is_some_and(|request| request.schema_id.is_some())
+                .is_some()
         {
             if let Ok(_barrier) = PROCESS_RIME.reload_barrier.try_write() {
                 if !rebuild {
@@ -8184,6 +8229,7 @@ impl ImeRuntimeSession {
             ..
         } = &mut *inner;
         let engine = engine.as_deref()?;
+        let first_input = last_input_state.is_none();
         if clear_composition {
             engine.discard_composition();
         }
@@ -8221,7 +8267,10 @@ impl ImeRuntimeSession {
                 );
                 if let Some(before) = before {
                     let after = global_input::InputState::read(engine);
-                    global.publish(&before, &after);
+                    let changed = global.publish(&before, &after);
+                    if (changed || first_input) && policy.learning && !libjd {
+                        PROCESS_RIME.publish_live_switches(&self.dirs.user, &schema_root, global.state());
+                    }
                     if !after.is_switcher() {
                         *last_input_state = Some(after.clone());
                     }
@@ -8260,6 +8309,13 @@ impl ImeRuntimeSession {
                 if before.schema_id != after.schema_id {
                     *pending_schema_id = None;
                     publish_current_schema(&schema_root, &after.schema_id);
+                }
+                if policy == InputContextPolicy::default()
+                    && context_ascii_mode == 0
+                    && !libjd
+                    && (first_input || before != after)
+                {
+                    PROCESS_RIME.publish_live_switches(&self.dirs.user, &schema_root, &after);
                 }
                 *last_input_state = Some(after);
             }
@@ -10558,8 +10614,8 @@ impl ReloadStamp {
     pub fn write_schema(user_data_dir: &Path) -> Result<PathBuf, String> {
         let dirs = RuntimeDirs::resolve(user_data_dir, user_data_dir)?;
         let request = schema_switch_request::read_at(&dirs.user_data_dir)?;
-        if request.schema_id.is_none() {
-            return Err("no schema selection request".into());
+        if request.schema_id.is_none() && request.options.is_empty() {
+            return Err("no schema switch request".into());
         }
         let stamp = Self::path(user_data_dir);
         let now = std::time::SystemTime::now()

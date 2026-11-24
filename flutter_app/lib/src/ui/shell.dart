@@ -147,7 +147,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      final accent = parseAccentColor(c.uiSettings?.accentColor ?? '#3B73D9');
+      final customAccent = c.uiSettings?.accentColor;
+      final accent = c.isMobile || customAccent == null
+          ? ChromeAccent.defaultColor
+          : parseAccentColor(customAccent);
       void select(int index) {
         if (index == c.activePage.index) return;
         FocusScope.of(context).unfocus();

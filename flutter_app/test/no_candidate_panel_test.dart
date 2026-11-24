@@ -117,12 +117,8 @@ void main() {
         final hidden = find.text('隐藏');
         final editor = find.widgetWithText(ActionButton, '编辑主题');
 
-        if (entry.key == BridgePlatform.linux) {
-          expect(embedded, findsNothing);
-        } else {
-          expect(tester.widget<SwitchSetting>(embedded).value, isFalse);
-          expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
-        }
+        expect(tester.widget<SwitchSetting>(embedded).value, isFalse);
+        expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
         expect(font, findsOneWidget);
         expect(find.byType(AccentPicker), findsOneWidget);
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
@@ -149,12 +145,8 @@ void main() {
         );
         expect(controller.savedOrientations, isEmpty);
         expect(controller.uiSettings!.embeddedComposition, isFalse);
-        if (entry.key == BridgePlatform.linux) {
-          expect(embedded, findsNothing);
-        } else {
-          expect(tester.widget<SwitchSetting>(embedded).value, isTrue);
-          expect(tester.widget<SwitchSetting>(embedded).onChanged, isNull);
-        }
+        expect(tester.widget<SwitchSetting>(embedded).value, isTrue);
+        expect(tester.widget<SwitchSetting>(embedded).onChanged, isNull);
         expect(font, findsNothing);
         expect(find.byType(AccentPicker), findsNothing);
         expect(find.byType(CandidatePanelPreview), findsNothing);
@@ -184,12 +176,8 @@ void main() {
           PanelOrientationDto.horizontal,
         );
         expect(controller.uiSettings!.embeddedComposition, isFalse);
-        if (entry.key == BridgePlatform.linux) {
-          expect(embedded, findsNothing);
-        } else {
-          expect(tester.widget<SwitchSetting>(embedded).value, isFalse);
-          expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
-        }
+        expect(tester.widget<SwitchSetting>(embedded).value, isFalse);
+        expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
         expect(font, findsOneWidget);
         expect(find.byType(AccentPicker), findsOneWidget);
         expect(find.byType(CandidatePanelPreview), findsOneWidget);

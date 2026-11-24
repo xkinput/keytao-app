@@ -40,6 +40,7 @@ void _showAddonSchemes(BuildContext context, AppController c) {
             child: HairlineGridSection(
               key: const ValueKey('addon-schemes'),
               minCellWidth: 180,
+              columnCount: c.isMobile ? 2 : null,
               children: [
                 for (final entry in addons.entries)
                   if (!_homeAddonKeys.contains(entry.key)) entry.value,
@@ -52,7 +53,7 @@ void _showAddonSchemes(BuildContext context, AppController c) {
                       !addons.containsKey(key) &&
                       !c.isLocalScheme(key))
                     HairlineGridCell(
-                      padding: const EdgeInsets.all(12),
+                      padding: EdgeInsets.all(c.isMobile ? 8 : 12),
                       child: SchemePackageRow(
                         controller: c,
                         schemeKey: key,
@@ -203,6 +204,7 @@ class _SchemePageState extends State<SchemePage> {
       for (final package in c.installedPackages) package.schemeKey,
     };
     final desktop = MediaQuery.sizeOf(context).width >= 720;
+    final mobile = c.isMobile;
     final palette = AppPalette.of(context);
     final cloudKeys = [
       for (final key in _homeSchemeKeys)
@@ -287,8 +289,12 @@ class _SchemePageState extends State<SchemePage> {
             final cells = <Widget>[
               for (final key in cloudKeys)
                 HairlineGridCell(
-                  color: key == activeKey ? palette.surface : null,
-                  padding: desktop ? const EdgeInsets.all(20) : null,
+                  color: !mobile && key == activeKey ? palette.surface : null,
+                  padding: mobile
+                      ? const EdgeInsets.all(8)
+                      : desktop
+                      ? const EdgeInsets.all(20)
+                      : null,
                   child: _package(key),
                 ),
               for (final key in _homeAddonKeys) addons[key]!,
@@ -299,7 +305,8 @@ class _SchemePageState extends State<SchemePage> {
                     cells.length,
                   )
                 : 1;
-            final collapsible = columns > 1 && cells.length > columns * 2;
+            final collapsible =
+                !mobile && columns > 1 && cells.length > columns * 2;
             final visibleCount = columns * 2 - 1;
             final hiddenCount = cells.length - visibleCount;
             if (collapsible && !_schemesExpanded) {
@@ -318,6 +325,7 @@ class _SchemePageState extends State<SchemePage> {
             return HairlineGridSection(
               key: const ValueKey('cloud-schemes'),
               minCellWidth: minCellWidth,
+              columnCount: mobile ? 2 : null,
               children: [
                 ...cells,
                 if (collapsible) _schemeGridToggle(hiddenCount),
@@ -327,6 +335,7 @@ class _SchemePageState extends State<SchemePage> {
         ),
         HairlineGridSection(
           minCellWidth: 360,
+          columnCount: mobile ? 1 : null,
           children: [
             HairlineGridCell(
               child: Section(
@@ -340,13 +349,16 @@ class _SchemePageState extends State<SchemePage> {
                 children: [
                   HairlineGridSection(
                     minCellWidth: 320,
+                    columnCount: mobile ? 2 : null,
                     children: [
                       for (final key in localKeys)
                         HairlineGridCell(
-                          color: key == activeKey ? palette.surface : null,
+                          color: !mobile && key == activeKey
+                              ? palette.surface
+                              : null,
                           padding: EdgeInsets.symmetric(
-                            horizontal: desktop ? 20 : 12,
-                            vertical: 16,
+                            horizontal: mobile ? 8 : (desktop ? 20 : 12),
+                            vertical: mobile ? 8 : 16,
                           ),
                           child: _package(key),
                         ),
@@ -552,6 +564,7 @@ class SchemePackageRow extends StatelessWidget {
     final c = controller;
     final palette = AppPalette.of(context);
     final desktop = MediaQuery.sizeOf(context).width >= 720;
+    final mobile = c.isMobile;
     final package = c.installedPackageFor(schemeKey);
     final isLocal = package?.source == 'local';
     final update = c.schemeUpdateFor(schemeKey);
@@ -613,6 +626,8 @@ class SchemePackageRow extends StatelessWidget {
             icon: FLucideIcons.download,
             onPress: c.busy ? null : () => c.installSchemePackage(schemeKey),
           )
+        else if (mobile && inUse)
+          const _InUseLabel()
         else if (package != null && (active || package.hasPackageZip))
           ActionButton(
             inUse
@@ -861,8 +876,10 @@ class SchemePackageRow extends StatelessWidget {
                 ? schemes['xmjd']!
                 : name,
             semanticsLabel: name,
+            maxLines: mobile ? 2 : null,
+            overflow: mobile ? TextOverflow.ellipsis : null,
             style: context.theme.typography.body.sm.copyWith(
-              fontSize: compact
+              fontSize: compact || mobile
                   ? 16
                   : desktop
                   ? 22
@@ -956,12 +973,12 @@ class SchemePackageRow extends StatelessWidget {
               if (hasLogo)
                 SchemaLogo(
                   controller: c,
-                  size: desktop ? 32 : 30,
+                  size: mobile ? 24 : (desktop ? 32 : 30),
                   schemeKey: schemeKey,
                   appLogoFallback: false,
                 ),
               Flexible(child: title),
-              if (!uninstalledInHeader) ?state,
+              if (!mobile && !uninstalledInHeader) ?state,
             ],
           );
     return Column(
@@ -972,7 +989,7 @@ class SchemePackageRow extends StatelessWidget {
           Row(
             children: [
               EyebrowLabel(
-                inUse
+                inUse && !mobile
                     ? '在用'
                     : package?.git != null
                     ? 'Git'
@@ -991,11 +1008,13 @@ class SchemePackageRow extends StatelessWidget {
                       Text(
                         package!.version!,
                         style: context.theme.typography.body.sm.copyWith(
-                          color: inUse
+                          color: inUse && !mobile
                               ? palette.successForeground
                               : palette.muted,
-                          fontSize: 13,
-                          fontWeight: inUse ? FontWeight.w600 : FontWeight.w400,
+                          fontSize: mobile ? 12 : 13,
+                          fontWeight: inUse && !mobile
+                              ? FontWeight.w600
+                              : FontWeight.w400,
                         ),
                       ),
                     if (uninstalledInHeader) ?state,
@@ -1004,7 +1023,7 @@ class SchemePackageRow extends StatelessWidget {
                         '→ ${update.latestVersion}',
                         style: context.theme.typography.body.sm.copyWith(
                           color: palette.muted,
-                          fontSize: 13,
+                          fontSize: mobile ? 12 : 13,
                         ),
                       ),
                   ],
@@ -1012,9 +1031,11 @@ class SchemePackageRow extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: mobile ? 4 : 10),
         ],
         heading,
+        if (mobile && !compact && !uninstalledInHeader && state != null)
+          Align(alignment: Alignment.centerLeft, child: state),
         if (c.packageDeployError(schemeKey) case final error?) ...[
           const SizedBox(height: 8),
           ErrorMessage(error),
@@ -1032,12 +1053,12 @@ class SchemePackageRow extends StatelessWidget {
             options: const {'xmjd': '顶功', 'xmjd-feiding': '非顶'},
             onChanged: c.busy ? null : c.selectScheme,
           ),
-        ] else if (!compact && (desktop || !active)) ...[
+        ] else if (!compact && !mobile && (desktop || !active)) ...[
           const SizedBox(height: 10),
           const SizedBox(height: 44),
         ],
-        const SizedBox(height: 10),
-        if (!compact && !desktop && active && !showSource)
+        SizedBox(height: mobile ? 6 : 10),
+        if (!compact && !desktop && !mobile && active && !showSource)
           Row(
             spacing: 8,
             children: [
@@ -1071,6 +1092,19 @@ class SchemePackageRow extends StatelessWidget {
       ],
     );
   }
+}
+
+class _InUseLabel extends StatelessWidget {
+  const _InUseLabel();
+
+  @override
+  Widget build(BuildContext context) => Text(
+    '使用中',
+    style: context.theme.typography.body.xs.copyWith(
+      color: AppPalette.of(context).muted,
+      fontWeight: FontWeight.w600,
+    ),
+  );
 }
 
 class _SchemeSource extends StatelessWidget {
@@ -1290,6 +1324,7 @@ class AddonCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) => HairlineGridSection(
     minCellWidth: 320,
+    columnCount: controller.isMobile ? 2 : null,
     children: _addonCells(context, controller).values.toList(),
   );
 }
@@ -1348,8 +1383,11 @@ Map<String, Widget> _addonCells(
         deployLabel == AppStrings.deploying;
     final cardError = c.packageDeployError(packageKey) ?? error;
     final palette = AppPalette.of(context);
+    final mobile = c.isMobile;
     final titleStyle = context.theme.typography.body.sm.copyWith(
-      fontSize: compact
+      fontSize: mobile
+          ? 16
+          : compact
           ? 18
           : MediaQuery.sizeOf(context).width >= 720
           ? 22
@@ -1368,12 +1406,12 @@ Map<String, Widget> _addonCells(
     final hasAddonLogo = c.effectiveSchemeLogoPath(packageKey) != null;
     final titleText = Text(
       title,
-      maxLines: cloudCard ? 1 : null,
-      overflow: cloudCard ? TextOverflow.ellipsis : null,
-      strutStyle: cloudCard
+      maxLines: mobile ? 2 : (cloudCard ? 1 : null),
+      overflow: cloudCard || mobile ? TextOverflow.ellipsis : null,
+      strutStyle: cloudCard && !mobile
           ? StrutStyle.fromTextStyle(titleStyle, forceStrutHeight: true)
           : null,
-      style: cloudCard && title.length > 10
+      style: cloudCard && !mobile && title.length > 10
           ? titleStyle.copyWith(fontSize: 18)
           : titleStyle,
     );
@@ -1384,7 +1422,7 @@ Map<String, Widget> _addonCells(
             children: [
               SchemaLogo(
                 controller: c,
-                size: cloudCard
+                size: cloudCard && !mobile
                     ? (MediaQuery.sizeOf(context).width >= 720 ? 32 : 30)
                     : 24,
                 schemeKey: packageKey,
@@ -1396,7 +1434,9 @@ Map<String, Widget> _addonCells(
         : titleText;
     return HairlineGridCell(
       key: ValueKey(key),
-      padding: compact
+      padding: mobile
+          ? const EdgeInsets.all(8)
+          : compact
           ? const EdgeInsets.all(12)
           : cloudCard && MediaQuery.sizeOf(context).width >= 720
           ? const EdgeInsets.all(20)
@@ -1408,7 +1448,7 @@ Map<String, Widget> _addonCells(
             if (cloudCard) ...[
               Row(
                 children: [
-                  EyebrowLabel(inUse ? '在用' : '云端'),
+                  EyebrowLabel(inUse && !mobile ? '在用' : '云端'),
                   const SizedBox(width: 8),
                   Expanded(
                     child: uninstalled
@@ -1420,11 +1460,11 @@ Map<String, Widget> _addonCells(
                             installed ? info!.version : '',
                             textAlign: TextAlign.end,
                             style: context.theme.typography.body.sm.copyWith(
-                              color: inUse
+                              color: inUse && !mobile
                                   ? palette.successForeground
                                   : palette.muted,
-                              fontSize: 13,
-                              fontWeight: inUse
+                              fontSize: mobile ? 12 : 13,
+                              fontWeight: inUse && !mobile
                                   ? FontWeight.w600
                                   : FontWeight.w400,
                             ),
@@ -1432,7 +1472,7 @@ Map<String, Widget> _addonCells(
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
+              SizedBox(height: mobile ? 4 : 10),
               Row(
                 spacing: 6,
                 children: [
@@ -1459,9 +1499,7 @@ Map<String, Widget> _addonCells(
                     ),
                 ],
               ),
-              const SizedBox(height: 10),
-              const SizedBox(height: 44),
-              const SizedBox(height: 10),
+              SizedBox(height: mobile ? 6 : 64),
             ] else ...[
               name,
               const SizedBox(height: 4),
@@ -1501,7 +1539,9 @@ Map<String, Widget> _addonCells(
                     tooltip: overlay ? null : tooltip,
                     onPress: install,
                   ),
-                if (!overlay && (installed || deployLabel != null))
+                if (!overlay && inUse && mobile && deployLabel == null)
+                  const _InUseLabel()
+                else if (!overlay && (installed || deployLabel != null))
                   ActionButton(
                     deployLabel ?? (inUse ? '使用中' : '使用'),
                     primary: !inUse,

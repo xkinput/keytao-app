@@ -1185,9 +1185,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 KeyCommandTypes.RIME_SCHEMA -> {
                     val schemaId = command.value.orEmpty()
                     val packageKey = command.fallbackValue
-                    if (packageKey == null) selectRimeSchema(schemaId) else selectRimePackageSchema(packageKey, schemaId)
+                    val select = {
+                        if (packageKey == null) selectRimeSchema(schemaId) else selectRimePackageSchema(packageKey, schemaId)
+                    }
+                    val view = keyboardView
+                    if (view?.rimePanelOpen == true) {
+                        val generation = editorUpdateGeneration
+                        view.selectRimeSchemaAfterFrame(command) {
+                            if (view === keyboardView && generation == editorUpdateGeneration && inputViewShown && inputAvailable) select()
+                        }
+                    } else select()
                 }
-                KeyCommandTypes.RIME_OPTION -> setRimeOption(
+                KeyCommandTypes.RIME_OPTION -> if (keyboardView?.rimeSchemaSelectionPending != true) setRimeOption(
                     command.value.orEmpty(),
                     command.fallbackValue,
                 )
@@ -2274,6 +2283,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val refreshPackages = inBackground && keyboardView?.rimePanelOpen == true
         val visiblePackages = keyboardView?.visibleRimeSwitcherPackages.orEmpty()
         val refresh = {
+            val schemeProgress = if (refreshPackages) engine.schemeOperationProgress() else null
             val schemas = engine.listSchemas()
             val currentSchema = engine.currentSchema()
             val resolvedEnglishSchemaId = resolveEnglishSchemaId(schemas.map { it.id to it.name })
@@ -2310,6 +2320,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 keyboardView?.updateRimeOptions(
                     options.copy(englishSchemaId = if (usesEnglishSchema()) englishSchemaId else null)
                 )
+                if (refreshPackages) keyboardView?.updateSchemeOperationProgress(schemeProgress)
             }
             if (inBackground) mainHandler.post { publish() } else publish()
         }
@@ -2944,11 +2955,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val retryReadiness = retryableReadiness &&
             (lastReadiness == Readiness.DEPLOYING || readinessRetryCount < 30)
         if (pollReloadStamp && retryReadiness) readinessRetryCount++
+        val optionsView = keyboardView?.takeIf { inputViewShown && it.rimePanelOpen }
+        val optionsGeneration = rimeOptionsGeneration
         engine.runInBackground {
             val signature = runCatching { engine.reloadStampSignature() }.getOrNull()
             val stampChanged = signature != lastReloadStampSignature
             lastReloadStampSignature = signature
             engine.refreshDeploymentHint()
+            val schemeProgress = if (optionsView != null) engine.schemeOperationProgress() else null
             val readiness = if (!pollReloadStamp || retryReadiness || stampChanged) {
                 runCatching { engine.refreshReadiness() }.getOrDefault(Readiness.NATIVE_UNAVAILABLE)
             } else null
@@ -2984,6 +2998,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 theme?.let { keyboardView?.updateTheme(it) }
                 if (config != null && theme != null) presentationLoadedWithoutRoot = false
                 keyboardView?.updateDeploymentHint(engine.deploymentHint)
+                val schemeWorkFinished = optionsView != null && optionsView === keyboardView &&
+                    optionsGeneration == rimeOptionsGeneration && inputViewShown &&
+                    optionsView.updateSchemeOperationProgress(schemeProgress)
                 if (readiness != null && (!pollReloadStamp || readiness != Readiness.READY ||
                         readiness != lastReadiness || stampChanged)) {
                     if (engine.nativeReady && !editorUpdatePending && resumedState != null) {
@@ -2991,7 +3008,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                         keyboardView?.updateState(currentState)
                     }
                     applyReadiness(readiness)
-                } else scheduleReadinessRetry()
+                } else {
+                    if (schemeWorkFinished && inputAvailable) refreshRimeOptions(inBackground = true)
+                    scheduleReadinessRetry()
+                }
                 // The first view may have loaded defaults after this refresh was scheduled.
                 if (!reloadPresentation && presentationLoadedWithoutRoot && rootAvailable) {
                     scheduleAvailabilityRefresh()

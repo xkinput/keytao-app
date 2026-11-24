@@ -400,6 +400,7 @@ class AppController extends ChangeNotifier {
   (String, String, String?)? _candidatePreviewTarget;
   List<SchemaSwitchDto> schemaSwitches = [];
   String? schemaSwitchError;
+  int _schemaSwitchesRequest = 0;
   List<SchemaDto> schemas = [];
   String? currentSchemaId;
   String? deployingSchemeKey;
@@ -562,6 +563,7 @@ class AppController extends ChangeNotifier {
   StreamSubscription<BridgeEvent>? _events;
   StreamSubscription<InstallProgressDto>? _androidProgress;
   StreamSubscription<FileSystemEvent>? _currentSchemaEvents;
+  Timer? _schemaSwitchPoll;
 
   bool get canInstall =>
       !busy && !releaseLoading && downloadUrl?.isNotEmpty == true;
@@ -1407,7 +1409,10 @@ class AppController extends ChangeNotifier {
         unawaited(refreshLogs());
       }
     }
-    if (page == AppPage.scheme) unawaited(refreshSchemeUpdates());
+    if (page == AppPage.scheme) {
+      unawaited(refreshSchemeUpdates());
+      unawaited(_refreshLiveSchemaSwitches());
+    }
     if (page == AppPage.input) {
       unawaited(refreshSchemas());
       unawaited(refreshCandidatePreview());
@@ -1512,16 +1517,24 @@ class AppController extends ChangeNotifier {
       rimeIceError ??= errorText(failure);
     }
     await refreshIsolatedPackages(notify: false);
+    _watchCurrentSchema();
     await _readSchemas();
     await _readSchemaSwitches();
     final logoPath = await core.activeSchemaLogoPath();
     if (logoPath != null) await _readSchemaLogoVersion(logoPath);
     activeSchemaLogoPath = logoPath;
-    _watchCurrentSchema();
   }
 
   void _watchCurrentSchema() {
-    if (_disposed || _currentSchemaEvents != null) return;
+    if (_disposed ||
+        _currentSchemaEvents != null ||
+        _schemaSwitchPoll != null) {
+      return;
+    }
+    if (!FileSystemEntity.isWatchSupported) {
+      _pollSchemaSwitches();
+      return;
+    }
     try {
       _currentSchemaEvents = Directory(info.userRoot)
           .watch(
@@ -1532,24 +1545,70 @@ class AppController extends ChangeNotifier {
           )
           .listen(
             (event) {
+              if (!_foreground) return;
               final separator = Platform.pathSeparator;
               bool schemaChanged(String? path) =>
                   path?.endsWith('$separator.keytao-current-schema') == true ||
                   path?.endsWith('${separator}keytao-ime.reload') == true;
-              if (_foreground &&
-                  (schemaChanged(event.path) ||
-                      (event is FileSystemMoveEvent &&
-                          schemaChanged(event.destination)))) {
+              final destination = event is FileSystemMoveEvent
+                  ? event.destination
+                  : null;
+              if (schemaChanged(event.path) || schemaChanged(destination)) {
                 unawaited(refreshSchemas());
+              } else if (event.path.endsWith(_liveSwitchesPath) ||
+                  destination?.endsWith(_liveSwitchesPath) == true) {
+                unawaited(_refreshLiveSchemaSwitches());
               }
             },
-            onError: (Object _) => _currentSchemaEvents = null,
+            onError: (Object _) {
+              _currentSchemaEvents = null;
+              _pollSchemaSwitches();
+            },
             cancelOnError: true,
           );
     } on FileSystemException {
-      // Resume refresh remains available when the directory cannot be watched.
+      _pollSchemaSwitches();
     } on UnsupportedError {
-      // Some platforms cannot watch shared input-method directories.
+      _pollSchemaSwitches();
+    }
+  }
+
+  String get _liveSwitchesPath =>
+      '${Platform.pathSeparator}.keytao-live-switches.json';
+
+  void _pollSchemaSwitches() {
+    if (_disposed || _schemaSwitchPoll != null) return;
+    final marker = File('${info.userRoot}$_liveSwitchesPath');
+    DateTime? lastModified;
+    _schemaSwitchPoll = Timer.periodic(const Duration(seconds: 1), (_) async {
+      if (!_foreground || activePage != AppPage.scheme) return;
+      final stat = await marker.stat();
+      if (_disposed || !_foreground || stat.type != FileSystemEntityType.file) {
+        return;
+      }
+      if (lastModified != stat.modified) {
+        lastModified = stat.modified;
+        await _refreshLiveSchemaSwitches();
+      }
+    });
+  }
+
+  Future<void> _refreshLiveSchemaSwitches() async {
+    if (_disposed || !_foreground) return;
+    if (busy) {
+      _refreshSchemasWhenIdle = true;
+      return;
+    }
+    try {
+      final previous = _activePreviewTarget;
+      await _readSchemas();
+      await _readSchemaSwitches();
+      if (previous != _activePreviewTarget) {
+        unawaited(refreshCandidatePreview());
+      }
+      _changed();
+    } catch (failure) {
+      debugPrint('Live schema refresh failed: ${errorText(failure)}');
     }
   }
 
@@ -1579,6 +1638,7 @@ class AppController extends ChangeNotifier {
       await _readInstalledPackages();
       await refreshIsolatedPackages(notify: false);
       await _readSchemas();
+      await _readSchemaSwitches();
       if (previous != _activePreviewTarget ||
           previousEngineEnabled != inputEngineEnabled) {
         unawaited(refreshCandidatePreview());
@@ -1602,16 +1662,20 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _readSchemaSwitches() async {
-    schemaSwitches = [];
-    schemaSwitchError = null;
+    final request = ++_schemaSwitchesRequest;
+    List<SchemaSwitchDto> switches = [];
+    String? loadError;
     if (hasUsableBuild && !usesLibjd(activeSchemeKey)) {
       try {
-        schemaSwitches = await core.getSchemaSwitches();
+        switches = await core.getSchemaSwitches();
       } catch (failure) {
-        schemaSwitchError = AppStrings.schemaSwitchUnavailable;
+        loadError = AppStrings.schemaSwitchUnavailable;
         debugPrint('Schema switch refresh failed: ${errorText(failure)}');
       }
     }
+    if (_disposed || request != _schemaSwitchesRequest) return;
+    schemaSwitches = switches;
+    schemaSwitchError = loadError;
   }
 
   Future<void> refreshIosKeyboardStatus() async {
@@ -4157,6 +4221,7 @@ class AppController extends ChangeNotifier {
   Future<bool> saveSchemaSwitch(SchemaSwitchDto entry, int value) =>
       run(() async {
         if (isAndroid) await _requireStorage();
+        ++_schemaSwitchesRequest;
         try {
           schemaSwitches = await core.setSchemaSwitch(
             schemaId: entry.schemaId,
@@ -4788,6 +4853,7 @@ class AppController extends ChangeNotifier {
     _dictionaryPullTimer?.cancel();
     _dictionaryPullCooldown?.cancel();
     _userWordsDeployDebounce?.cancel();
+    _schemaSwitchPoll?.cancel();
     _schemeSyncDebounce?.cancel();
     if (isWindows && _events != null) {
       _windowsChannel.setMethodCallHandler(null);

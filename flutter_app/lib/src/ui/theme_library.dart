@@ -12,8 +12,13 @@ import 'theme.dart';
 import 'widgets.dart';
 
 class ThemeLibrarySection extends StatefulWidget {
-  const ThemeLibrarySection({super.key, required this.controller});
+  const ThemeLibrarySection({
+    super.key,
+    required this.controller,
+    this.quickSwitch = false,
+  });
   final AppController controller;
+  final bool quickSwitch;
 
   @override
   State<ThemeLibrarySection> createState() => _ThemeLibrarySectionState();
@@ -295,49 +300,62 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     spacing: 4,
     children: [
-      Row(
-        children: [
-          const Expanded(child: EyebrowLabel('主题库')),
-          _action(
-            '粘贴导入',
-            FLucideIcons.clipboardPaste,
-            _enabled ? _paste : null,
-          ),
-          _action(
-            '复制分享串',
-            FLucideIcons.copy,
-            _enabled && _current != null
-                ? () => _export(_current!.id, copy: true)
-                : null,
-          ),
-          _action(
-            '导出文件',
-            FLucideIcons.download,
-            _enabled && _current != null ? () => _export(_current!.id) : null,
-          ),
-          _action('导入文件', FLucideIcons.upload, _enabled ? _openFile : null),
-        ],
-      ),
-      if (_current case final theme?)
+      if (widget.quickSwitch)
+        const EyebrowLabel('主题')
+      else ...[
         Row(
           children: [
-            Expanded(
-              child: Text(
-                theme.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+            const Expanded(child: EyebrowLabel('主题库')),
+            _action(
+              '粘贴导入',
+              FLucideIcons.clipboardPaste,
+              _enabled ? _paste : null,
             ),
-            if (!theme.builtIn)
-              _action(
-                '重命名',
-                FLucideIcons.pencil,
-                _enabled ? () => _rename(theme) : null,
-              ),
+            _action(
+              '复制分享串',
+              FLucideIcons.copy,
+              _enabled && _current != null
+                  ? () => _export(_current!.id, copy: true)
+                  : null,
+            ),
+            _action(
+              '导出文件',
+              FLucideIcons.download,
+              _enabled && _current != null ? () => _export(_current!.id) : null,
+            ),
+            _action('导入文件', FLucideIcons.upload, _enabled ? _openFile : null),
           ],
         ),
+        if (_current case final theme?)
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  theme.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (!theme.builtIn)
+                _action(
+                  '重命名',
+                  FLucideIcons.pencil,
+                  _enabled ? () => _rename(theme) : null,
+                ),
+            ],
+          ),
+      ],
       if (_loading || _working) const FProgress(),
-      if (_themes.isNotEmpty)
+      if (widget.quickSwitch)
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final theme in _themes)
+              SizedBox(width: 144, height: 64, child: _card(context, theme)),
+          ],
+        )
+      else if (_themes.isNotEmpty)
         SizedBox(
           height: 64,
           child: SingleChildScrollView(
@@ -391,6 +409,9 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
             borderRadius: BorderRadius.circular(8),
           ),
           child: Column(
+            mainAxisAlignment: widget.quickSwitch
+                ? MainAxisAlignment.center
+                : MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
@@ -404,7 +425,10 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.only(left: 6),
+                padding: EdgeInsets.only(
+                  left: 6,
+                  right: widget.quickSwitch ? 6 : 0,
+                ),
                 child: Row(
                   spacing: 4,
                   children: [
@@ -422,46 +446,47 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                         color: ChromeAccent.of(context),
                         semanticLabel: '当前主题',
                       ),
-                    FPopoverMenu(
-                      menuAnchor: Alignment.topRight,
-                      childAnchor: Alignment.bottomRight,
-                      menuBuilder: (_, popover, _) => [
-                        FItemGroup(
-                          enabled: _enabled,
-                          children: [
-                            FItem(
-                              title: const Text('复制'),
-                              onPress: () {
-                                popover.hide();
-                                _duplicate(theme);
-                              },
-                            ),
-                            FItem(
-                              title: const Text('导出'),
-                              onPress: () {
-                                popover.hide();
-                                _export(theme.id);
-                              },
-                            ),
-                            FItem(
-                              title: const Text('删除'),
-                              enabled: !theme.builtIn,
-                              onPress: theme.builtIn
-                                  ? null
-                                  : () {
-                                      popover.hide();
-                                      _delete(theme);
-                                    },
-                            ),
-                          ],
+                    if (!widget.quickSwitch)
+                      FPopoverMenu(
+                        menuAnchor: Alignment.topRight,
+                        childAnchor: Alignment.bottomRight,
+                        menuBuilder: (_, popover, _) => [
+                          FItemGroup(
+                            enabled: _enabled,
+                            children: [
+                              FItem(
+                                title: const Text('复制'),
+                                onPress: () {
+                                  popover.hide();
+                                  _duplicate(theme);
+                                },
+                              ),
+                              FItem(
+                                title: const Text('导出'),
+                                onPress: () {
+                                  popover.hide();
+                                  _export(theme.id);
+                                },
+                              ),
+                              FItem(
+                                title: const Text('删除'),
+                                enabled: !theme.builtIn,
+                                onPress: theme.builtIn
+                                    ? null
+                                    : () {
+                                        popover.hide();
+                                        _delete(theme);
+                                      },
+                              ),
+                            ],
+                          ),
+                        ],
+                        builder: (_, popover, _) => _action(
+                          '${theme.name} 主题操作',
+                          FLucideIcons.ellipsis,
+                          _enabled ? popover.toggle : null,
                         ),
-                      ],
-                      builder: (_, popover, _) => _action(
-                        '${theme.name} 主题操作',
-                        FLucideIcons.ellipsis,
-                        _enabled ? popover.toggle : null,
                       ),
-                    ),
                   ],
                 ),
               ),

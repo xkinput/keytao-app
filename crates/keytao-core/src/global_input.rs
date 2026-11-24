@@ -1,11 +1,12 @@
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::english_mode::EnglishModeController;
 use crate::{ImeBackend, SchemaSwitchRequest};
+use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use std::path::PathBuf;
 use std::{collections::BTreeMap, path::Path};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct InputState {
     pub schema_id: String,
     ascii_mode: bool,
@@ -24,6 +25,14 @@ impl InputState {
 
     pub fn is_switcher(&self) -> bool {
         self.schema_id == ".default"
+    }
+
+    pub fn option(&self, name: &str) -> Option<bool> {
+        if name == "ascii_mode" {
+            Some(self.ascii_mode)
+        } else {
+            self.options.get(name).copied()
+        }
     }
 
     pub fn restore(&self, engine: &dyn ImeBackend, root: &Path) -> Result<(), String> {
@@ -144,9 +153,9 @@ impl GlobalInput {
         Ok(())
     }
 
-    pub fn publish(&mut self, before: &InputState, after: &InputState) {
+    pub fn publish(&mut self, before: &InputState, after: &InputState) -> bool {
         if after.is_switcher() {
-            return;
+            return false;
         }
         let previous = self.state.clone();
         if before.schema_id != after.schema_id {
@@ -171,7 +180,13 @@ impl GlobalInput {
                 crate::publish_current_schema(&self.root, &self.state.schema_id);
             }
             self.version += 1;
+            return true;
         }
+        false
+    }
+
+    pub fn state(&self) -> &InputState {
+        &self.state
     }
 
     pub fn matches(&self, state: &InputState) -> bool {

@@ -43,6 +43,56 @@ fn fixture(name: &str) -> (ImeRuntime, PathBuf) {
 }
 
 #[test]
+fn f4_options_and_app_requests_share_live_values_without_reloading_rime() {
+    let _serial = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
+    let (runtime, dir) = fixture("live-schema-switches");
+    let session = runtime.create_session().unwrap();
+    let full_shape = || {
+        keytao_core::list_schema_switches(&dir)
+            .unwrap()
+            .into_iter()
+            .find(|switch| switch.name == "full_shape")
+            .unwrap()
+            .value
+    };
+    assert_eq!(full_shape(), 0);
+    keytao_core::set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "full_shape", 0).unwrap();
+    keytao_core::ReloadStamp::write_schema(&dir).unwrap();
+    runtime.reload_without_deploy_changed().unwrap();
+    let menu = session
+        .process_key_result(keytao_core::key_policy::XK_F4, 0)
+        .unwrap();
+    let half_shape = menu
+        .state
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "Half")
+        .unwrap();
+    session.select_candidate_on_page(half_shape).unwrap();
+    assert!(session.get_option("full_shape"));
+    assert_eq!(full_shape(), 1);
+
+    let generation = runtime.generation();
+    for key in smoke_fixture::CODE.chars() {
+        session.process_key_result(key as u32, 0).unwrap();
+    }
+    let preedit = session.state().preedit;
+    assert!(!preedit.is_empty());
+    keytao_core::set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "simplification", 1).unwrap();
+    keytao_core::ReloadStamp::write_schema(&dir).unwrap();
+    assert_eq!(full_shape(), 1);
+    assert!(!runtime.reload_without_deploy_changed().unwrap());
+    assert_eq!(runtime.generation(), generation);
+    assert_eq!(session.state().preedit, preedit);
+    assert!(session.get_option("simplification"));
+    assert!(session.get_option("full_shape"));
+    assert_eq!(full_shape(), 1);
+    drop(session);
+    runtime.shutdown().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn sessions_and_new_clients_share_language_schema_and_declared_switches() {
     let _serial = LIBRIME.lock().unwrap_or_else(|error| error.into_inner());
     let (runtime, dir) = fixture("global-input-propagation");

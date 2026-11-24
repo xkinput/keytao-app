@@ -291,6 +291,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             ?? state.asciiMode
     }
     private var rimeOptionsLoading = false
+    private var schemeOperationProgress: String?
+    private var rimeSchemaSelection: (token: UUID, message: String)?
     private var expandedCandidates: [KeyTaoCandidate] = []
     private var expandedCandidatesLoading = false
     private var clipboardItemsLoading = false
@@ -578,6 +580,48 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     var isRimeMenuOpen: Bool { functionPanelActive && functionPanelMode == .rime }
+
+    var rimeSchemaSelectionPending: Bool { rimeSchemaSelection != nil }
+
+    private var rimeProgress: String? { schemeOperationProgress ?? rimeSchemaSelection?.message }
+
+    @discardableResult
+    func updateSchemeOperationProgress(_ message: String?) -> Bool {
+        guard isRimeMenuOpen, schemeOperationProgress != message else { return false }
+        schemeOperationProgress = message
+        refreshRimeProgress()
+        return message == nil
+    }
+
+    func selectRimeSchemaAfterFrame(_ command: KeyTaoKeyCommand, select: @escaping () -> Void) {
+        guard !rimeSchemaSelectionPending else { return }
+        let schemas = command.fallbackValue.flatMap { key in
+            rimeOptionsState.packages.first { $0.packageKey == key }?.schemas
+        } ?? rimeOptionsState.schemas
+        let id = command.value ?? ""
+        let name = schemas.first { $0.id == id }?.name
+            ?? (rimeOptionsState.currentSchema?.id == id ? rimeOptionsState.currentSchema?.name : nil)
+            ?? id
+        let token = UUID()
+        rimeSchemaSelection = (token, "\(name) 切换中")
+        refreshRimeProgress()
+        // Render before switching the engine on the keyboard's input thread.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(32)) { [weak self] in
+            guard let self, self.isRimeMenuOpen, self.rimeSchemaSelection?.token == token else { return }
+            select()
+            self.rimeSchemaSelection = nil
+            self.refreshRimeProgress()
+        }
+    }
+
+    private func refreshRimeProgress() {
+        expandedCandidateItemsCacheSignature = ""
+        if let message = rimeProgress {
+            resetExpandedCandidateScroll()
+            UIAccessibility.post(notification: .announcement, argument: message)
+        }
+        invalidateLayoutAndDisplay()
+    }
 
     /// Controls that need a librime entry point the running build does not
     /// export are dropped instead of being drawn and then synthesizing a key
@@ -2597,7 +2641,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             )
         }
 
-        if expandedCandidatesLoading || clipboardItemsLoading || rimeOptionsLoading {
+        if expandedCandidatesLoading || clipboardItemsLoading || rimeOptionsLoading || (isRimeMenuOpen && rimeProgress != nil) {
             let width: CGFloat = 44
             let rect = CGRect(
                 x: (bounds.width - width) / 2,
@@ -3249,13 +3293,13 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawRimeEmptyState(_ item: CandidateDrawItem, rect: CGRect) {
-        drawText(
+        drawTruncatedText(
             item.label,
             in: rect,
             color: theme.mobile.candidateBar.commentColor.uiColor,
             size: candidateLabelSize(),
-            weight: theme.font.weight,
-            alignment: .center
+            alignment: .center,
+            lineBreakMode: .byTruncatingMiddle
         )
     }
 
@@ -4146,11 +4190,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         in rect: CGRect,
         color: UIColor,
         size: CGFloat,
-        alignment: NSTextAlignment
+        alignment: NSTextAlignment,
+        lineBreakMode: NSLineBreakMode = .byTruncatingTail
     ) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = alignment
-        paragraph.lineBreakMode = .byTruncatingTail
+        paragraph.lineBreakMode = lineBreakMode
         let font = themedFont(size: size, weight: theme.font.weight)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -5023,7 +5068,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func rimePanelItems() -> [CandidateDrawItem] {
         if functionPanelActive && functionPanelMode == .rime {
-            if rimeOptionsLoading && rimeOptionsState == .empty {
+            if rimeOptionsLoading && rimeOptionsState == .empty && rimeProgress == nil {
                 return []
             }
             var schemas = rimeOptionsState.schemas
@@ -5044,6 +5089,14 @@ final class KeyTaoIOSKeyboardView: UIView {
                     style: .section
                 ),
             ]
+            if let message = rimeProgress {
+                items.append(CandidateDrawItem(
+                    identifierIndex: -2001, selectIndex: -2001,
+                    label: message, text: "", comment: nil,
+                    selected: false, global: false, command: nil, style: .empty
+                ))
+            }
+            if rimeOptionsLoading && rimeOptionsState == .empty { return items }
             items.append(contentsOf: schemas.enumerated().map { index, schema in
                 CandidateDrawItem(
                     identifierIndex: -2100 - index,
@@ -5827,6 +5880,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         cancelPendingAccentPreview()
         rimeOptionsState = .empty
         rimeOptionsLoading = functionPanelActive && functionPanelMode == .rime
+        schemeOperationProgress = nil
+        rimeSchemaSelection = nil
         clipboardClearConfirmationPending = false
         expandedCandidates = []
         cancelExpandedCandidateRequest()
@@ -6248,7 +6303,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func functionPanelTitle() -> String {
         switch functionPanelMode {
         case .rime:
-            return "Rime 选项"
+            return "选项"
         case .clipboard:
             return "剪贴板"
         case .settings:
@@ -6279,7 +6334,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return "正在读取剪贴板"
         }
         if rimeOptionsLoading && functionPanelMode == .rime {
-            return "正在加载 Rime 选项"
+            return "正在加载输入方案和选项"
         }
         if expandedCandidatesLoading {
             return functionPanelActive ? "正在加载功能" : "正在加载候选"

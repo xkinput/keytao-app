@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HINT_DURATION: Duration = Duration::from_millis(1500);
 const HINT_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const PROGRESS_FILE: &str = ".keytao-deploy-progress.json";
+const CONVERSION_PROGRESS_FILE: &str = ".keytao-conversion-progress.json";
 static LOADED_BUILD: Mutex<Option<(PathBuf, Option<String>, u64)>> = Mutex::new(None);
 static USABLE_SESSIONS: Mutex<Vec<(PathBuf, Option<u64>, Weak<()>)>> = Mutex::new(Vec::new());
 static DEPLOYING: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
@@ -93,17 +94,64 @@ pub(crate) fn clear_deploy_progress(root: &Path) {
 }
 
 pub fn current_deploy_progress(root: &Path) -> Option<DeployProgress> {
-    let path = root.join(PROGRESS_FILE);
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.len() > 64 * 1024 {
-        return None;
-    }
-    let published: PublishedProgress = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let published: PublishedProgress =
+        serde_json::from_slice(&read_progress_file(&root.join(PROGRESS_FILE))?).ok()?;
     sentinel_in_progress(Some(&published.owner)).then_some(published.progress)
 }
 
 pub fn deployment_progress_message(root: &Path) -> Option<String> {
     current_deploy_progress(root).map(|progress| progress.message())
+}
+
+#[derive(Deserialize, Serialize)]
+struct ConversionProgress {
+    owner: String,
+    package_name: String,
+}
+
+/// Publish conversion separately from deployment, which can restrict typing.
+pub struct SchemeConversionProgress {
+    path: PathBuf,
+    content: Vec<u8>,
+}
+
+impl SchemeConversionProgress {
+    pub fn start(root: &Path, package_name: String) -> Option<Self> {
+        let path = root.join(CONVERSION_PROGRESS_FILE);
+        let started = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_nanos();
+        let content = serde_json::to_vec(&ConversionProgress {
+            owner: format!("{started}/{}", std::process::id()),
+            package_name,
+        })
+        .ok()?;
+        crate::write_file_atomic(&path, &content).ok()?;
+        Some(Self { path, content })
+    }
+}
+
+impl Drop for SchemeConversionProgress {
+    fn drop(&mut self) {
+        if read_progress_file(&self.path).as_deref() == Some(self.content.as_slice()) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn read_progress_file(path: &Path) -> Option<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
+pub fn scheme_operation_progress_message(root: &Path) -> Option<String> {
+    if let Some(progress) = current_deploy_progress(root) {
+        return Some(format!("{} 部署中", progress.package_name));
+    }
+    let progress: ConversionProgress =
+        serde_json::from_slice(&read_progress_file(&root.join(CONVERSION_PROGRESS_FILE))?).ok()?;
+    sentinel_in_progress(Some(&progress.owner)).then(|| format!("{} 转换中", progress.package_name))
 }
 
 pub fn cached_deployment_in_progress(root: &Path) -> bool {

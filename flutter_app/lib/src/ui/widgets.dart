@@ -246,20 +246,25 @@ class HairlineGridSection extends StatelessWidget {
     super.key,
     required this.children,
     this.minCellWidth = 320,
-  }) : assert(minCellWidth > 0);
+    this.columnCount,
+  }) : assert(minCellWidth > 0),
+       assert(columnCount == null || columnCount > 0);
   final List<Widget> children;
   final double minCellWidth;
+  final int? columnCount;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       if (children.isEmpty) return const SizedBox.shrink();
-      final columns =
-          MediaQuery.sizeOf(context).width >= 720 && constraints.hasBoundedWidth
-          ? (constraints.maxWidth / minCellWidth).floor().clamp(
-              1,
-              children.length,
-            )
+      final columns = constraints.hasBoundedWidth
+          ? columnCount ??
+                (MediaQuery.sizeOf(context).width >= 720
+                    ? (constraints.maxWidth / minCellWidth).floor().clamp(
+                        1,
+                        children.length,
+                      )
+                    : 1)
           : 1;
       final border = BorderSide(color: AppPalette.of(context).hairline);
       return Table(

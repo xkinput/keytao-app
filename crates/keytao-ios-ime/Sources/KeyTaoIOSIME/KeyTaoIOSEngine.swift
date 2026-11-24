@@ -948,6 +948,14 @@ final class KeyTaoIOSEngine {
         return stable
     }
 
+    func schemeOperationProgress() -> String? {
+        userRoot.path.withCString { ownedCString(keytao_scheme_operation_progress_at($0)) }
+    }
+
+    func loadedReloadStampSignature() -> String? {
+        ownedCString(keytao_loaded_reload_stamp_signature())
+    }
+
     func getOption(_ optionName: String) -> Bool {
         guard let session else {
             return false

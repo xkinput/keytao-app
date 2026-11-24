@@ -938,7 +938,7 @@ pub fn set_schema_switch(
         let switches = keytao_core::set_schema_switch(&root, schema_id, name, value)?;
         #[cfg(target_os = "windows")]
         host.publish_schema_switches()?;
-        host.write_reload_stamp(&root)?;
+        keytao_core::ReloadStamp::write_schema(&root)?;
         Ok(switches)
     })
     .map_err(CoreError::Other)

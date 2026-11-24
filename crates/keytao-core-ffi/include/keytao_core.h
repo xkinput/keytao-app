@@ -126,6 +126,11 @@ bool keytao_reload(void);
 char *keytao_reload_stamp_path_at(const char *user_dir);
 
 /**
+ * Report the stamp the current runtime has applied, including option-only changes.
+ */
+char *keytao_loaded_reload_stamp_signature(void);
+
+/**
  * Reload when the app requested one, returning true only if a reload actually
  * ran. Cheap enough for a timer, but not for the key path: it stats a file.
  */
@@ -142,6 +147,11 @@ bool keytao_deployment_blocks_input(void);
  * Whether the deployment sentinel belongs to a live deployer. This reads the filesystem.
  */
 bool keytao_deployment_in_progress_at(const char *user_dir);
+
+/**
+ * Read the scheme name and work stage for a keyboard options panel.
+ */
+char *keytao_scheme_operation_progress_at(const char *user_dir);
 
 /**
  * Read the shared deployment hint off the key thread. Free with keytao_free_string().

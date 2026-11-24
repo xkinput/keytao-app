@@ -356,6 +356,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             ?.let { rimeOptionsState.currentSchema?.id == it }
             ?: state.asciiMode
     private var rimeOptionsLoading = false
+    private var schemeOperationProgress: String? = null
+    private var rimeSchemaSelection: Pair<KeyCommand, String>? = null
     private var candidateExpandPressed = false
     private var expandedTouchActive = false
     private var expandedDragging = false
@@ -618,6 +620,49 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     internal val visibleRimeSwitcherPackages: List<KeytaoRimeSwitcherPackage>
         get() = rimeOptionsState.packages
 
+    internal val rimeSchemaSelectionPending: Boolean get() = rimeSchemaSelection != null
+
+    private val rimeProgress: String?
+        get() = if (rimePanelOpen) schemeOperationProgress ?: rimeSchemaSelection?.second else null
+
+    internal fun updateSchemeOperationProgress(message: String?): Boolean {
+        if (!rimePanelOpen || schemeOperationProgress == message) return false
+        schemeOperationProgress = message
+        refreshRimeProgress()
+        return message == null
+    }
+
+    internal fun selectRimeSchemaAfterFrame(command: KeyCommand, select: () -> Unit) {
+        if (rimeSchemaSelectionPending) return
+        val schemas = command.fallbackValue?.let { key ->
+            rimeOptionsState.packages.firstOrNull { it.key == key }?.schemas
+        } ?: rimeOptionsState.schemas
+        val name = schemas.firstOrNull { it.id == command.value }?.name
+            ?: rimeOptionsState.currentSchema?.takeIf { it.id == command.value }?.name
+            ?: command.value.orEmpty()
+        rimeSchemaSelection = command to "$name 切换中"
+        refreshRimeProgress()
+        postOnAnimation {
+            post {
+                if (!rimePanelOpen || rimeSchemaSelection?.first !== command) return@post
+                try {
+                    select()
+                } finally {
+                    rimeSchemaSelection = null
+                    refreshRimeProgress()
+                }
+            }
+        }
+    }
+
+    private fun refreshRimeProgress() {
+        ViewCompat.setStateDescription(this, rimeProgress ?: visibleDeploymentHint)
+        invalidateExpandedCandidateItemsCache()
+        if (rimeProgress != null) resetExpandedCandidateScroll()
+        rebuildInteractiveRects()
+        invalidate()
+    }
+
     /**
      * What the current editor asked for: the Enter key caption it declared through
      * `imeOptions`/`actionLabel`, and the layer its `inputType` implies.
@@ -697,7 +742,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             resetExpandedCandidateScroll()
         }
         state = next
-        ViewCompat.setStateDescription(this, visibleDeploymentHint)
+        ViewCompat.setStateDescription(this, rimeProgress ?: visibleDeploymentHint)
         invalidateKeyboardLayoutCache()
         if (schemaReady) {
             removeCallbacks(hideStatusMessage)
@@ -725,7 +770,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     fun updateDeploymentHint(message: String?) {
         if (deploymentHint == message) return
         deploymentHint = message
-        ViewCompat.setStateDescription(this, visibleDeploymentHint)
+        ViewCompat.setStateDescription(this, rimeProgress ?: visibleDeploymentHint)
         if (rimePanelOpen) invalidateExpandedCandidateItemsCache()
         rebuildInteractiveRects()
         invalidate()
@@ -2260,7 +2305,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun rimePanelItems(): List<CandidateDrawItem> {
         if (rimePanelOpen) {
-            if (rimeOptionsLoading) {
+            if (rimeOptionsLoading && rimeProgress == null) {
                 return emptyList()
             }
             val current = rimeOptionsState.currentSchema
@@ -2272,6 +2317,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     style = PanelItemStyle.SECTION,
                 )
             )
+            rimeProgress?.let { message ->
+                items.add(CandidateDrawItem(index = -2001, label = message, text = "", style = PanelItemStyle.EMPTY))
+            }
+            if (rimeOptionsLoading) return items
             fun addSchema(schema: KeytaoRimeSchema, packageKey: String? = null) {
                 items.add(
                     CandidateDrawItem(
@@ -3227,7 +3276,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(candidateLabelSizeSp())
         textPaint.color = theme.commentColor.toArgb()
-        canvas.drawText(item.label, rect.centerX(), rect.centerY() + textBaselineOffset(textPaint), textPaint)
+        val label = TextUtils.ellipsize(item.label, textPaint, rect.width(), TextUtils.TruncateAt.MIDDLE).toString()
+        canvas.drawText(label, rect.centerX(), rect.centerY() + textBaselineOffset(textPaint), textPaint)
     }
 
     private fun drawRimeSectionHeader(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
@@ -3606,7 +3656,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.drawText(functionPanelTitle(), width / 2f, barHeight / 2f + textBaselineOffset(textPaint), textPaint)
         }
 
-        if (expandedCandidatesLoading || clipboardItemsLoading || (rimePanelOpen && rimeOptionsLoading)) {
+        if (expandedCandidatesLoading || clipboardItemsLoading || (rimePanelOpen && (rimeOptionsLoading || rimeProgress != null))) {
             paint.style = Paint.Style.FILL
             paint.color = theme.selectedLabelColor.toArgb()
             val indicatorWidth = dp(44f)
@@ -5092,7 +5142,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun functionPanelTitle(): String {
         return when (functionPanelMode) {
-            FunctionPanelMode.RIME -> "Rime 选项"
+            FunctionPanelMode.RIME -> "选项"
             FunctionPanelMode.CLIPBOARD -> "剪贴板"
             FunctionPanelMode.SETTINGS -> if (settingsColorPickerOpen) "自定义颜色" else "键盘设置"
             FunctionPanelMode.PHRASES -> "短语"
@@ -5203,6 +5253,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         navigate(expanded = false, panel = null)
         rimeOptionsState = KeytaoRimeOptionsState.EMPTY
         rimeOptionsLoading = false
+        schemeOperationProgress = null
+        rimeSchemaSelection = null
+        ViewCompat.setStateDescription(this, visibleDeploymentHint)
         clipboardClearConfirmationPending = false
         clipboardOrigin = null
         recentClipboardSuggestion = null
@@ -5237,6 +5290,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = mode == FunctionPanelMode.CLIPBOARD
         rimeOptionsLoading = mode == FunctionPanelMode.RIME
+        schemeOperationProgress = null
+        rimeSchemaSelection = null
         if (rimeOptionsLoading) {
             rimeOptionsState = KeytaoRimeOptionsState.EMPTY
         }

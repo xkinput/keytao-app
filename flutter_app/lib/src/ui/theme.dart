@@ -76,9 +76,11 @@ class ChromeAccent extends InheritedTheme {
 
   final Color color;
 
+  static const defaultColor = Color(0xFF3B73D9);
+
   static Color of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<ChromeAccent>()?.color ??
-      const Color(0xFF3B73D9);
+      defaultColor;
 
   @override
   bool updateShouldNotify(ChromeAccent oldWidget) => color != oldWidget.color;

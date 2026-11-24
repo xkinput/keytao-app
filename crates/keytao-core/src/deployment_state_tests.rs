@@ -46,6 +46,44 @@ fn compiled_schema(dir: &Path) {
 }
 
 #[test]
+fn mobile_scheme_progress_names_target_and_clears_after_work() {
+    use super::deployment_state::{clear_deploy_progress, write_deploy_progress};
+    use super::{
+        scheme_operation_progress_message, DeployProgress, DeployStep, SchemeConversionProgress,
+    };
+
+    let root = installed_schema();
+    assert_eq!(scheme_operation_progress_message(&root), None);
+    let older = SchemeConversionProgress::start(&root, "键道6".into()).unwrap();
+    let current = SchemeConversionProgress::start(&root, "星猫键道".into()).unwrap();
+    drop(older);
+    assert!(!deployment_in_progress(&root));
+    assert_eq!(
+        scheme_operation_progress_message(&root).as_deref(),
+        Some("星猫键道 转换中")
+    );
+    write_deploy_progress(
+        &root,
+        &DeployProgress::flat("xmjd", "星猫键道", DeployStep::Compile, "编译中"),
+    )
+    .unwrap();
+    assert_eq!(
+        scheme_operation_progress_message(&root).as_deref(),
+        Some("星猫键道 部署中")
+    );
+    clear_deploy_progress(&root);
+    drop(current);
+    assert_eq!(scheme_operation_progress_message(&root), None);
+    fs::write(
+        root.join(".keytao-conversion-progress.json"),
+        r#"{"owner":"1/0","package_name":"已退出"}"#,
+    )
+    .unwrap();
+    assert_eq!(scheme_operation_progress_message(&root), None);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn only_transient_deployment_hints_yield_to_real_candidates() {
     for hint in ["部署成功", "部署失败"] {
         assert_eq!(DeploymentState::visible_hint(Some(hint), false), Some(hint));

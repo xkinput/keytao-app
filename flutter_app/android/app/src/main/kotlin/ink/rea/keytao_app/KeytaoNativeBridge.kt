@@ -184,6 +184,9 @@ object KeytaoNativeBridge {
     fun deploymentProgressMessage(userDir: String): String? =
         if (loaded) runCatching { nativeDeploymentProgressMessage(userDir) }.getOrNull() else null
 
+    fun schemeOperationProgress(userDir: String): String? =
+        if (loaded) runCatching { nativeSchemeOperationProgress(userDir) }.getOrNull() else null
+
     fun deploymentKeyPressed(userDir: String): String? =
         if (loaded) runCatching { nativeDeploymentKeyPressed(userDir) }.getOrNull() else null
 
@@ -502,6 +505,8 @@ object KeytaoNativeBridge {
     external fun nativeDeploymentHint(userDir: String): String?
 
     external fun nativeDeploymentProgressMessage(userDir: String): String?
+
+    private external fun nativeSchemeOperationProgress(userDir: String): String?
 
     external fun nativeDeploymentKeyPressed(userDir: String): String?
 

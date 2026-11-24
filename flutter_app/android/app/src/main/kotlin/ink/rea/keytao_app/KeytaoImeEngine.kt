@@ -212,6 +212,9 @@ class KeytaoImeEngine(context: Context) {
         }
     }
 
+    fun schemeOperationProgress(): String? =
+        userDir?.let { KeytaoNativeBridge.schemeOperationProgress(it.absolutePath) }
+
     fun deploymentKeyPressed() {
         synchronized(deploymentHintLock) {
             if (algorithmEnabled) {
