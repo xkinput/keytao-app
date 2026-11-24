@@ -350,9 +350,12 @@ done
 
 echo "==> Signing macOS IME bundle..."
 ENTITLEMENTS="$SCRIPT_DIR/dev.entitlements.plist"
-if [ -n "${KEYTAO_BUNDLED_LIBJD_DIR:-}" ]; then
+if [[ -n "${KEYTAO_BUNDLED_LIBJD_DIR:-}" ]]; then
     cp "$KEYTAO_BUNDLED_LIBJD_DIR/libjd-engine.dylib" "$APP/Contents/Frameworks/"
     cp "$KEYTAO_BUNDLED_LIBJD_DIR/libjd-engine-LICENSE.txt" "$KEYTAO_BUNDLED_LIBJD_DIR/libjd-engine-SOURCE.txt" "$APP/Contents/Resources/"
+else
+    python3 "$WORKSPACE_DIR/scripts/bundle-libjd-engine.py" macos-universal \
+        "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 fi
 
 APPLE_DEV_CERT=""

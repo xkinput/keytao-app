@@ -34,35 +34,62 @@ pub fn engine_library_for_executable(executable: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "android")]
+static ANDROID_CLASS_LOADER_LIBRARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+const ANDROID_ENGINE_LIBRARY_NAME: &str = "libjd-engine.so";
+
+#[cfg(target_os = "android")]
+pub fn set_android_bundled_engine_library(path: PathBuf) {
+    if path.is_absolute()
+        && path.file_name() == Some(std::ffi::OsStr::new(ANDROID_ENGINE_LIBRARY_NAME))
+    {
+        let _ = ANDROID_CLASS_LOADER_LIBRARY.set(path);
+    }
+}
+
+#[cfg(target_os = "android")]
 fn android_bundled_engine_library() -> Option<PathBuf> {
-    use std::{ffi::CStr, mem::MaybeUninit, os::unix::ffi::OsStrExt, sync::OnceLock};
-    static LIBRARY: OnceLock<Option<PathBuf>> = OnceLock::new();
-    LIBRARY
-        .get_or_init(|| {
-            if !cfg!(any(target_arch = "arm", target_arch = "aarch64", target_arch = "x86_64")) {
-                return None;
-            }
-            let mut info = MaybeUninit::<libc::Dl_info>::uninit();
-            let address = android_bundled_engine_library as *const () as *const libc::c_void;
-            if unsafe { libc::dladdr(address, info.as_mut_ptr()) } == 0 {
-                return None;
-            }
-            let filename = unsafe { info.assume_init() }.dli_fname;
-            if filename.is_null() {
-                return None;
-            }
-            let filename = unsafe { CStr::from_ptr(filename) }.to_bytes();
-            let library = Path::new(std::ffi::OsStr::from_bytes(filename))
-                .parent()?
-                .join("libjd-engine.so");
-            if !library.is_absolute() {
-                return None;
-            }
-            // An unextracted JNI library has a linker path inside the signed APK.
-            unsafe { libloading::Library::new(&library) }.ok()?;
-            Some(library)
-        })
-        .clone()
+    static LIBRARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(path) = LIBRARY.get() {
+        return Some(path.clone());
+    }
+
+    // The Android class loader knows which APK or split delivered the library.
+    // Native-only callers can still look beside their packaged bridge.
+    let open = |path: PathBuf| {
+        if !path.is_absolute() {
+            return None;
+        }
+        unsafe { crate::jd_backend::JdBackend::validate_library(&path) }.ok()?;
+        Some(path)
+    };
+    let path = ANDROID_CLASS_LOADER_LIBRARY
+        .get()
+        .cloned()
+        .and_then(open)
+        .or_else(|| android_bridge_sibling_library().and_then(open))?;
+    let _ = LIBRARY.set(path.clone());
+    Some(path)
+}
+
+#[cfg(target_os = "android")]
+fn android_bridge_sibling_library() -> Option<PathBuf> {
+    use std::{ffi::CStr, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let mut info = MaybeUninit::<libc::Dl_info>::uninit();
+    let address = android_bridge_sibling_library as *const () as *const libc::c_void;
+    if unsafe { libc::dladdr(address, info.as_mut_ptr()) } == 0 {
+        return None;
+    }
+    let filename = unsafe { info.assume_init() }.dli_fname;
+    if filename.is_null() {
+        return None;
+    }
+    let filename = unsafe { CStr::from_ptr(filename) }.to_bytes();
+    Path::new(std::ffi::OsStr::from_bytes(filename))
+        .parent()
+        .map(|parent| parent.join(ANDROID_ENGINE_LIBRARY_NAME))
 }
 
 fn dir_or_missing(path: &Path) -> bool {

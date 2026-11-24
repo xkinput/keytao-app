@@ -33,6 +33,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeConfigu
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     data_dir: JString<'_>,
+    library_path: JString<'_>,
 ) {
     android_jni_guard("nativeConfigureLibjd", (), || {
         let Some(data_dir) = optional_jni_path(&mut env, data_dir).filter(|path| path.is_absolute())
@@ -40,6 +41,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeConfigu
             return;
         };
         keytao_core::set_android_libjd_data_root(data_dir);
+        if let Some(path) = optional_jni_path(&mut env, library_path) {
+            keytao_core::libjd::set_android_bundled_engine_library(path);
+        }
     });
 }
 

@@ -33,6 +33,11 @@ ASSETS = {
     "android-x86_64": ("so.tar.xz", "0bdd44d2b1389d07f268a9fe310e67b988a1836cd2f6d41f70b59880c322e62c"),
     "ios-arm64": ("a.tar.xz", "cddfc647f540d1cfd99257c297369fd220ddfee287be78e3ddc6179bc2f14b56"),
 }
+ANDROID_TARGETS = {
+    "armeabi-v7a": "android-arm",
+    "arm64-v8a": "android-arm64",
+    "x86_64": "android-x86_64",
+}
 CACHE = Path(__file__).resolve().parents[1] / "target" / "libjd-engine-cache"
 
 
@@ -111,7 +116,10 @@ def main():
     parser.add_argument("target", choices=[*ASSETS, "macos-universal", "android"])
     parser.add_argument("libraries", type=Path)
     parser.add_argument("notices", type=Path)
+    parser.add_argument("--android-abi", action="append", choices=ANDROID_TARGETS)
     args = parser.parse_args()
+    if args.android_abi and args.target != "android":
+        parser.error("--android-abi requires the android target")
     license_text = verified_download(LICENSE, LICENSE_SHA256)
 
     if args.target == "macos-universal":
@@ -125,9 +133,12 @@ def main():
             subprocess.run(["lipo", "-create", *slices, "-output", output], check=True)
             subprocess.run(["install_name_tool", "-id", "@rpath/libjd-engine.dylib", output], check=True)
     elif args.target == "android":
-        stage_android_arm(args.libraries / "armeabi-v7a")
-        stage_library("android-arm64", args.libraries / "arm64-v8a")
-        stage_library("android-x86_64", args.libraries / "x86_64")
+        for abi in dict.fromkeys(args.android_abi or ANDROID_TARGETS):
+            directory = args.libraries / abi
+            if abi == "armeabi-v7a":
+                stage_android_arm(directory)
+            else:
+                stage_library(ANDROID_TARGETS[abi], directory)
     else:
         stage_library(args.target, args.libraries)
 

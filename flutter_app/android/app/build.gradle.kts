@@ -17,8 +17,24 @@ val repoRoot = rootProject.projectDir.resolve("../..").canonicalFile
 val androidRuntimeScript = repoRoot.resolve("scripts/android-librime-runtime.sh")
 val runtimeAssetsDir = layout.buildDirectory.dir("generated/keytao/assets")
 val bundleLibjdEngine = repoRoot.resolve("scripts/bundle-libjd-engine.py")
-val libjdJniDir = layout.buildDirectory.dir("generated/keytao/libjd-engine/jniLibs")
-val libjdNoticesDir = layout.buildDirectory.dir("generated/keytao/libjd-engine/assets")
+val flutterAndroidAbis = mapOf(
+    "android-arm" to "armeabi-v7a",
+    "android-arm64" to "arm64-v8a",
+    "android-x64" to "x86_64",
+)
+val libjdAbis = providers.gradleProperty("target-platform")
+    .orElse(flutterAndroidAbis.keys.joinToString(","))
+    .get()
+    .split(",")
+    .map { platform ->
+        flutterAndroidAbis[platform] ?: throw GradleException("Invalid Android target platform: $platform")
+    }
+    .distinct()
+    .sorted()
+// Keep JNI source sets isolated when alternating between single-ABI and release builds.
+val libjdBundleDir = "generated/keytao/libjd-engine/${libjdAbis.joinToString("_")}"
+val libjdJniDir = layout.buildDirectory.dir("$libjdBundleDir/jniLibs")
+val libjdNoticesDir = layout.buildDirectory.dir("$libjdBundleDir/assets")
 val googlePlayDistribution = providers.gradleProperty("keytaoGooglePlayDistribution")
     .orElse("false")
     .get()
@@ -123,6 +139,7 @@ tasks.register<Exec>("syncKeytaoAndroidAssets") {
 
 tasks.register<Exec>("bundleKeytaoLibjdEngine") {
     inputs.files(bundleLibjdEngine)
+    inputs.property("androidAbis", libjdAbis)
     outputs.dirs(libjdJniDir, libjdNoticesDir)
     commandLine(
         "python3",
@@ -130,6 +147,7 @@ tasks.register<Exec>("bundleKeytaoLibjdEngine") {
         "android",
         libjdJniDir.get().asFile.absolutePath,
         libjdNoticesDir.get().asFile.absolutePath,
+        *libjdAbis.map { "--android-abi=$it" }.toTypedArray(),
     )
 }
 

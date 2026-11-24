@@ -1,6 +1,7 @@
 package ink.rea.keytao_app
 
 import android.util.Log
+import dalvik.system.BaseDexClassLoader
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,10 +24,12 @@ object KeytaoNativeBridge {
     }.getOrDefault(false)
 
     fun configureLibjd(dataDir: String) {
-        if (loaded) nativeConfigureLibjd(dataDir)
+        if (!loaded) return
+        val loader = javaClass.classLoader as? BaseDexClassLoader
+        nativeConfigureLibjd(dataDir, loader?.findLibrary("jd-engine"))
     }
 
-    private external fun nativeConfigureLibjd(dataDir: String)
+    private external fun nativeConfigureLibjd(dataDir: String, libraryPath: String?)
 
     inline fun rtLog(
         level: Int,

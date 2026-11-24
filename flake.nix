@@ -82,6 +82,28 @@
         };
       in
       let
+        # Keep these pins in sync with scripts/bundle-libjd-engine.py.
+        libjdVersion = "v0.14.0";
+        libjdRepo = "https://github.com/hronro/ime-jd";
+        libjdLinux = {
+          x86_64-linux = {
+            arch = "x86_64";
+            hash = "sha256-r/t+vd+4n7Fsv7sEJHN5oMkrZf2Bxvp8p3/r4CHNRqg=";
+          };
+          aarch64-linux = {
+            arch = "arm64";
+            hash = "sha256-zrolbWwChL/14oVkPc8/GmgpOHjLF6x49Tp8jrtXtlE=";
+          };
+        }.${system};
+        libjdArchive = pkgs.fetchurl {
+          url = "${libjdRepo}/releases/download/${libjdVersion}/libjd-engine-${libjdVersion}-linux-${libjdLinux.arch}.so.tar.xz";
+          inherit (libjdLinux) hash;
+        };
+        libjdLicense = pkgs.fetchurl {
+          url = "https://raw.githubusercontent.com/hronro/ime-jd/${libjdVersion}/LICENSE";
+          hash = "sha256-OXLcl0T2SZ8Pmy2/dmlvKuetivmyPd5m1q+Gyd+zaYY=";
+        };
+
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
           pname = "keytao-linux-ime";
           inherit version;
@@ -96,6 +118,7 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             llvmPackages.libclang
+            xz
           ];
           buildInputs = with pkgs; [
             librime
@@ -113,6 +136,15 @@
           # KDE Settings → Virtual Keyboard.  X-KDE-Wayland-VirtualKeyboard=true tells
           # KWin to spawn the process with a private WAYLAND_SOCKET fd.
           postInstall = ''
+            mkdir -p "$out/bin/runtime/lib"
+            tar -xJOf "${libjdArchive}" libjd.so > "$out/bin/runtime/lib/libjd-engine.so"
+            install -m644 "${libjdLicense}" "$out/bin/runtime/libjd-engine-LICENSE.txt"
+            cat > "$out/bin/runtime/libjd-engine-SOURCE.txt" <<'EOF'
+            libjd-engine ${libjdVersion} (GPL-3.0)
+            Upstream source: ${libjdRepo}/tree/${libjdVersion}
+            Upstream release: ${libjdRepo}/releases/tag/${libjdVersion}
+            EOF
+
             install -Dm644 \
               crates/keytao-linux-ime/keytao-wayland-launcher.desktop \
               $out/share/applications/keytao-wayland-launcher.desktop

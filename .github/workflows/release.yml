@@ -445,7 +445,10 @@ jobs:
             files="$(unzip -Z1 "$apk")"
             grep -Fx 'assets/libjd-engine-LICENSE.txt' <<< "$files"
             grep -Fx 'assets/libjd-engine-SOURCE.txt' <<< "$files"
-            grep -Fx "lib/$abi/libjd-engine.so" <<< "$files"
+            if [[ "$(grep -E '^lib/[^/]+/libjd-engine\.so$' <<< "$files")" != "lib/$abi/libjd-engine.so" ]]; then
+              echo "::error::Expected only lib/$abi/libjd-engine.so in $apk"
+              exit 1
+            fi
             cp "$apk" "dist/release-upload/keytao-app-${VERSION}-android-${arch}-release.apk"
           done
 
