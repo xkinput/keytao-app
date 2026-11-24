@@ -163,7 +163,7 @@ pub(crate) fn package_libjd_ready(root: &Path, key: Option<&str>) -> bool {
     package_libjd_ready_in_store(root, None, key)
 }
 
-pub(crate) fn active_libjd_schema(root: &Path) -> Option<SchemaInfo> {
+pub fn active_libjd_schema(root: &Path) -> Option<SchemaInfo> {
     package_libjd_schema_in_store(root, None, engine_choice::active_package(root).as_deref())
 }
 

@@ -851,6 +851,8 @@ pub mod jd_backend;
 mod runtime_libjd;
 #[cfg(target_os = "android")]
 pub use runtime_libjd::{android_libjd_enabled, android_libjd_ready, set_android_libjd_data_root};
+#[cfg(target_os = "ios")]
+pub use runtime_libjd::active_libjd_schema;
 
 // ── Native desktop engine (guarded at the module level) ──────────────────────
 

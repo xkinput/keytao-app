@@ -739,12 +739,32 @@ pub extern "C" fn keytao_isolated_schema_state_at(
         let user_dir = Path::new(&user_dir);
         let shared_dir = optional_path_arg(shared_dir);
         let shared_dir = shared_dir.as_deref().unwrap_or(user_dir);
-        match keytao_core::isolated_ime_schema_state(user_dir, shared_dir) {
-            None => -1,
-            Some(state) if state.deployed => 2,
-            Some(state) => i32::from(state.installed),
-        }
+        #[cfg(target_os = "ios")]
+        let selected_libjd_ready = (keytao_core::engine_choice::preferred(user_dir)
+            == keytao_core::engine_choice::PackageEngine::LibjdEngine)
+            .then(|| keytao_core::active_libjd_schema(user_dir).is_some());
+        #[cfg(not(target_os = "ios"))]
+        let selected_libjd_ready = None;
+        isolated_keyboard_schema_state(selected_libjd_ready, || {
+            keytao_core::isolated_ime_schema_state(user_dir, shared_dir)
+        })
     })
+}
+
+fn isolated_keyboard_schema_state(
+    selected_libjd_ready: Option<bool>,
+    rime_state: impl FnOnce() -> Option<keytao_core::SchemaInstallState>,
+) -> i32 {
+    if selected_libjd_ready == Some(true) {
+        return 2;
+    }
+    let allow_rime = selected_libjd_ready.is_none();
+    match rime_state() {
+        None if allow_rime => -1,
+        None => 0,
+        Some(state) if allow_rime && state.deployed => 2,
+        Some(state) => i32::from(state.installed),
+    }
 }
 
 fn deployment_root() -> Option<PathBuf> {
@@ -1918,6 +1938,22 @@ mod smoke_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_keyboard_readiness_uses_the_selected_engine() {
+        let rime_ready = || {
+            Some(keytao_core::SchemaInstallState {
+                installed: true,
+                deployed: true,
+                schemas: vec!["example".into()],
+            })
+        };
+        assert_eq!(isolated_keyboard_schema_state(Some(true), || None), 2);
+        assert_eq!(isolated_keyboard_schema_state(Some(false), rime_ready), 1);
+        assert_eq!(isolated_keyboard_schema_state(Some(false), || None), 0);
+        assert_eq!(isolated_keyboard_schema_state(None, rime_ready), 2);
+        assert_eq!(isolated_keyboard_schema_state(None, || None), -1);
+    }
 
     #[test]
     fn theme_json_ffi_resolves_desktop_scale_and_preserves_mobile_values() {
