@@ -1728,23 +1728,18 @@ mod tests {
                     &root_for_repair,
                     "keytao",
                     crate::packages::RepairMode::BackUpRuntime,
-                    |key| {
-                        let core = core_for_repair.clone();
-                        let root = root_for_repair.clone();
-                        let clean = clean_zip.clone();
-                        async move {
-                            assert_eq!(key, "keytao");
-                            crate::packages::store_cloud_archive(
-                                &core,
-                                "keytao",
-                                Some("v2-clean"),
-                                "official",
-                                None,
-                                &clean,
-                                &root,
-                            )?;
-                            Ok(())
-                        }
+                    async |core, root, key| {
+                        assert_eq!(key, "keytao");
+                        crate::packages::store_cloud_archive(
+                            core,
+                            &key,
+                            Some("v2-clean"),
+                            "official",
+                            None,
+                            &clean_zip,
+                            root,
+                        )?;
+                        Ok(())
                     },
                 )
                 .await

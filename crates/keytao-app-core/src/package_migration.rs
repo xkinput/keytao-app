@@ -328,11 +328,11 @@ fn non_colliding_destination(preferred: &Path) -> Result<PathBuf, CoreError> {
     }
 }
 
-fn move_path(from: &Path, to: &Path) -> Result<(), CoreError> {
+pub(crate) fn move_path(from: &Path, to: &Path) -> Result<(), CoreError> {
     match crate::package_fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(_) => {
-            copy_recursive(from, to)?;
+            copy_recursive(from, to, false)?;
             let meta = fs::symlink_metadata(from)?;
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 crate::package_fs::remove_dir_all(from)?;
@@ -344,22 +344,28 @@ fn move_path(from: &Path, to: &Path) -> Result<(), CoreError> {
     }
 }
 
-fn copy_recursive(from: &Path, to: &Path) -> Result<(), CoreError> {
+pub(crate) fn copy_repair_backup(from: &Path, to: &Path) -> Result<(), CoreError> {
+    copy_recursive(from, to, true)
+}
+
+fn copy_recursive(from: &Path, to: &Path, reject_special_files: bool) -> Result<(), CoreError> {
     let meta = fs::symlink_metadata(from)?;
-    if meta.file_type().is_symlink() {
-        return Ok(());
-    }
     if meta.is_dir() {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
-            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()), reject_special_files)?;
         }
     } else if meta.is_file() {
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::copy(from, to)?;
+    } else if reject_special_files {
+        return Err(CoreError::Other(format!(
+            "无法跨文件系统备份符号链接或特殊文件：{}",
+            from.display()
+        )));
     }
     Ok(())
 }

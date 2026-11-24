@@ -750,7 +750,7 @@ pub async fn repair_scheme_package(
         .unwrap_or(&package_key);
     #[cfg(not(target_os = "android"))]
     let _ = &android_deploy;
-    if was_active {
+    let redeploy = if was_active {
         keytao_app_core::deploy::switch_package_with_schema(
             &state.core,
             &root,
@@ -759,7 +759,7 @@ pub async fn repair_scheme_package(
             #[cfg(target_os = "android")]
             android_deploy,
         )
-        .await?;
+        .await
     } else {
         keytao_app_core::deploy::deploy_package(
             &state.core,
@@ -768,8 +768,12 @@ pub async fn repair_scheme_package(
             #[cfg(target_os = "android")]
             android_deploy,
         )
-        .await?;
-    }
+        .await
+    };
+    redeploy.map_err(|error| match &backup {
+        Some(path) => format!("{error}；修复备份目录：{path}"),
+        None => error,
+    })?;
     Ok(backup)
 }
 

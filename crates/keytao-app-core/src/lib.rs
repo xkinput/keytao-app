@@ -112,6 +112,14 @@ pub struct Core {
 
 impl Core {
     pub fn new(env: AppEnv, sink: Arc<dyn EventSink>) -> Result<Arc<Core>, CoreError> {
+        Self::new_with_download_cancel(env, sink, tokio::sync::watch::channel(0).0)
+    }
+
+    fn new_with_download_cancel(
+        env: AppEnv,
+        sink: Arc<dyn EventSink>,
+        download_cancel: tokio::sync::watch::Sender<u64>,
+    ) -> Result<Arc<Core>, CoreError> {
         let (state, recovered_state_file) = match AppState::load(&env.data_dir) {
             Ok(state) => (state, None),
             Err(CoreError::Parse(_)) => {
@@ -138,7 +146,7 @@ impl Core {
             env,
             sink,
             state: Mutex::new(state),
-            download_cancel: tokio::sync::watch::channel(0).0,
+            download_cancel,
             app_update_package: tokio::sync::Mutex::new(None),
             recovered_state_file,
             pending_package: Mutex::new(()),

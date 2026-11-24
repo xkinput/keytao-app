@@ -536,7 +536,8 @@ fn unique_migration_dir(root: &Path, prefix: &str) -> Result<PathBuf, String> {
         .unwrap_or_default()
         .as_millis();
     let base = safe_path(root, "migrations")?;
-    fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&base)
+        .map_err(|error| crate::package_fs::context("创建备份目录", &base, error).to_string())?;
     for attempt in 0u32..100 {
         let suffix = if attempt == 0 {
             format!("{prefix}-{ts}")
@@ -544,12 +545,15 @@ fn unique_migration_dir(root: &Path, prefix: &str) -> Result<PathBuf, String> {
             format!("{prefix}-{ts}-{attempt}")
         };
         let candidate = safe_path(&base, &suffix)?;
-        if !candidate.try_exists().map_err(|error| error.to_string())? {
-            fs::create_dir_all(&candidate).map_err(|error| error.to_string())?;
-            return Ok(candidate);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(crate::package_fs::context("创建备份目录", &candidate, error).to_string());
+            }
         }
     }
-    Err("无法创建备份目录".into())
+    Err(format!("无法在 {} 创建 {prefix} 备份目录", base.display()))
 }
 
 fn strip_ephemeral_runtime_artifacts(dir: &Path) {
@@ -654,13 +658,18 @@ fn cleanup_runtime_on_removal(root: &Path, scheme_key: &str) -> Result<Option<Pa
     Ok(Some(backup_root))
 }
 
-fn clear_active_package_unlocked(root: &Path, keys: &[&str]) -> Result<(), String> {
+type ActiveManifestBackup = (PathBuf, Option<Vec<u8>>);
+
+fn clear_active_package_unlocked(
+    root: &Path,
+    keys: &[&str],
+) -> Result<Option<ActiveManifestBackup>, String> {
     use keytao_core::RuntimeDirs;
     let Some(current) = RuntimeDirs::active_package_key(root) else {
-        return Ok(());
+        return Ok(None);
     };
     if !keys.contains(&current.as_str()) {
-        return Ok(());
+        return Ok(None);
     }
     let path = safe_path(root, "scheme-packages/active-manifest.json")?;
     let previous = match fs::read(&path) {
@@ -680,7 +689,92 @@ fn clear_active_package_unlocked(root: &Path, keys: &[&str]) -> Result<(), Strin
     }
     fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
-    crate::scheme_files::write_file_atomic(&path, &bytes).map_err(|error| error.to_string())
+    crate::scheme_files::write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
+    Ok(Some((path, previous)))
+}
+
+struct RepairMove {
+    source: PathBuf,
+    saved: PathBuf,
+    parking: Option<tempfile::TempDir>,
+}
+
+fn rename_repair_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    crate::package_fs::retry_windows(|| fs::rename(from, to)).map_err(|error| {
+        crate::package_fs::context(&format!("重命名 {} →", from.display()), to, error)
+    })
+}
+
+impl RepairMove {
+    fn restore(self) -> std::io::Result<()> {
+        let result = rename_repair_path(&self.saved, &self.source);
+        if result.is_err()
+            && let Some(parking) = self.parking
+        {
+            let _ = parking.keep();
+        }
+        result
+    }
+}
+
+fn backup_repair_path(
+    source: PathBuf,
+    target: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<RepairMove, CoreError> {
+    fs::create_dir_all(target.parent().unwrap())?;
+    match rename(&source, target) {
+        Ok(()) => Ok(RepairMove {
+            source,
+            saved: target.to_owned(),
+            parking: None,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            // Keep the intact original on its filesystem until the repair commits.
+            let parking = tempfile::tempdir_in(source.parent().unwrap())?;
+            let saved = parking.path().join("original");
+            crate::package_migration::copy_repair_backup(&source, target)?;
+            rename_repair_path(&source, &saved)?;
+            Ok(RepairMove {
+                source,
+                saved,
+                parking: Some(parking),
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn prune_stale_repair_stages(cache: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+    let Ok(entries) = fs::read_dir(cache) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(".repair-")
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || !entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > MAX_AGE)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let lease_path = path.join("lease");
+        let lease = match fs::symlink_metadata(&lease_path) {
+            Ok(meta) if meta.is_file() => match fs::File::options().write(true).open(lease_path) {
+                Ok(lease) if keytao_core::lock_file(&lease, false).is_ok() => Some(lease),
+                _ => continue,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            _ => continue,
+        };
+        drop(lease);
+        let _ = crate::package_fs::remove_dir_all(&path);
+    }
 }
 
 pub async fn repair_package_for_redeploy(
@@ -721,9 +815,12 @@ async fn repair_package_with_mode(
                 .filter(|variant| !variant.is_empty())
         })
         .flatten();
-    repair_package_for_redeploy_with(core, root, package_key, mode, |key| {
-        let variant = wanxiang_variant.clone();
-        async move {
+    repair_package_for_redeploy_with(
+        core,
+        root,
+        package_key,
+        mode,
+        async move |core, root, key| {
             if crate::scheme::is_local_scheme_key(&key) {
                 sync_git_scheme(core, root, &key).await?;
                 return Ok(());
@@ -736,7 +833,8 @@ async fn repair_package_with_mode(
                         crate::rime_ice::reinstall_store_only(core, root).await
                     }
                     crate::wanxiang::SCHEMA_ID => {
-                        crate::wanxiang::reinstall_store_only(core, root, variant.as_deref()).await
+                        crate::wanxiang::reinstall_store_only(core, root, wanxiang_variant.as_deref())
+                            .await
                     }
                     crate::rime_mint::SCHEMA_ID => {
                         crate::rime_mint::reinstall_store_only(core, root).await
@@ -760,34 +858,33 @@ async fn repair_package_with_mode(
                 }
                 Err(err) => Err(err),
             }
-        }
-    })
+        },
+    )
     .await
 }
 
-pub(crate) async fn repair_package_for_redeploy_with<Download, DownloadFuture>(
+pub(crate) async fn repair_package_for_redeploy_with(
     core: &Core,
     root: &Path,
     package_key: &str,
     mode: RepairMode,
-    download_fresh: Download,
-) -> Result<Option<String>, CoreError>
-where
-    Download: FnOnce(String) -> DownloadFuture,
-    DownloadFuture: std::future::Future<Output = Result<(), CoreError>>,
-{
+    download_fresh: impl AsyncFnOnce(&Core, &Path, String) -> Result<(), CoreError>,
+) -> Result<Option<String>, CoreError> {
     let key = package_key.strip_prefix("builtin/").unwrap_or(package_key);
     validate_relative(key).map_err(CoreError::Other)?;
     crate::deploy::ensure_not_using_libjd(core, root)?;
-    crate::package_migration::ensure_before_write(core, root).await?;
+    let is_local = crate::scheme::is_local_scheme_key(key);
+    if is_local || matches!(mode, RepairMode::SourceOnly) {
+        crate::package_migration::ensure_before_write(core, root).await?;
+    }
     let store = PackageStore::new(core);
 
-    if crate::scheme::is_local_scheme_key(key) {
+    if is_local {
         let meta = store.read_meta(key)?.ok_or_else(|| {
             CoreError::Other(format!("用户方案 {key} 缺少导入包，请重新导入"))
         })?;
         if meta.git.is_some() {
-            download_fresh(key.to_owned()).await?;
+            download_fresh(core, root, key.to_owned()).await?;
         } else {
             store.read_files(key).map_err(|error| {
                 CoreError::Other(format!("用户方案 {key} 无法读取导入包，请重新导入：{error}"))
@@ -798,72 +895,194 @@ where
 
     let is_addon =
         crate::addon_store::IDS.contains(&key) && key != crate::rime_snow::SCHEMA_ID;
-    let is_cloud_scheme =
-        crate::scheme::validate_scheme_key(key).is_ok() && !crate::scheme::is_local_scheme_key(key);
+    let is_cloud_scheme = crate::scheme::validate_scheme_key(key).is_ok();
     if !is_addon && !is_cloud_scheme {
         return Err(CoreError::Other(format!("不支持自动修复方案包：{key}")));
     }
     if matches!(mode, RepairMode::SourceOnly) {
-        download_fresh(key.to_owned()).await?;
+        download_fresh(core, root, key.to_owned()).await?;
         return Ok(None);
     }
 
-    let backup_dir = keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
-        let backup_root = unique_migration_dir(root, &format!("repair-{key}"))?;
-        let runtime = safe_path(root, &format!("runtime/{key}"))?;
-        if move_into_backup(&runtime, &backup_root.join("runtime").join(key))? {
-            strip_ephemeral_runtime_artifacts(&backup_root.join("runtime").join(key));
-        }
-        if package_key == "builtin/keytao" {
-            let builtin_rt = safe_path(root, "runtime/builtin/keytao")?;
-            if move_into_backup(&builtin_rt, &backup_root.join("runtime/builtin/keytao"))? {
-                strip_ephemeral_runtime_artifacts(&backup_root.join("runtime/builtin/keytao"));
-            }
-        }
-        let proj_ns = if is_addon { "addons" } else { "cloud" };
-        let projected = safe_path(root, &format!("scheme-packages/{proj_ns}/{key}"))?;
-        move_into_backup(&projected, &backup_root.join("projected").join(key))?;
-        clear_active_package_unlocked(root, &[key, package_key])?;
+    // Legacy layout migration has its own backups and must precede the repair transaction.
+    crate::package_migration::ensure_before_write(core, root).await?;
 
-        if is_addon {
+    // A downloader can fail after publishing, so keep its store and state isolated.
+    let cache = safe_path(root, "cache").map_err(CoreError::Other)?;
+    fs::create_dir_all(&cache)?;
+    prune_stale_repair_stages(&cache);
+    let stage = tempfile::Builder::new().prefix(".repair-").tempdir_in(cache)?;
+    let stage_lease = fs::File::create(stage.path().join("lease"))?;
+    keytao_core::lock_file(&stage_lease, false)?;
+    let mut env = core.env().clone();
+    env.data_dir = stage.path().join("data");
+    env.cache_dir = stage.path().join("cache");
+    let staged_core =
+        Core::new_with_download_cancel(env, core.sink.clone(), core.download_cancel.clone())?;
+    let staged_root = stage.path().join("user");
+    fs::create_dir(&staged_root)?;
+    download_fresh(&staged_core, &staged_root, key.to_owned()).await?;
+
+    let backup_root = keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
+        let _store_guard = core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let staged_store = PackageStore::new(&staged_core);
+        let (fresh, destination, namespace) = if is_addon {
+            (
+                staged_store.checked_addon_path(key),
+                store.checked_addon_path(key),
+                "addon-store",
+            )
+        } else {
+            (
+                staged_store.checked_package_path(key),
+                store.checked_package_path(key),
+                "package-store",
+            )
+        };
+        let fresh = fresh.map_err(|error| error.to_string())?;
+        let destination = destination.map_err(|error| error.to_string())?;
+        let installed = staged_core.state().installed_packages.remove(key);
+        if !fresh.is_dir() || (!is_addon && installed.is_none()) {
+            return Err(format!("重新下载后缺少方案包：{key}"));
+        }
+        let parent = destination.parent().unwrap();
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let promotion = tempfile::tempdir_in(parent).map_err(|error| error.to_string())?;
+        let prepared = promotion.path().join("package");
+        // The user root and the package store may be on separate filesystems.
+        crate::package_migration::move_path(&fresh, &prepared).map_err(|error| error.to_string())?;
+
+        // Take care of store paths first because they can be on a different filesystem.
+        let mut sources = vec![(destination.clone(), format!("{namespace}/{key}"))];
+        if key == crate::rime_snow::SCHEMA_ID {
             let addon_dir = store
                 .checked_addon_path(key)
                 .map_err(|error| error.to_string())?;
-            move_into_backup(&addon_dir, &backup_root.join("addon-store").join(key))?;
-        } else {
-            if key == crate::rime_snow::SCHEMA_ID {
-                let addon_dir = store
-                    .checked_addon_path(key)
-                    .map_err(|error| error.to_string())?;
-                move_into_backup(&addon_dir, &backup_root.join("addon-store").join(key))?;
-            }
-            let pkg_dir = store
-                .checked_package_path(key)
-                .map_err(|error| error.to_string())?;
-            move_into_backup(&pkg_dir, &backup_root.join("package-store").join(key))?;
-            core.update_state(|state| {
-                state.installed_packages.remove(key);
-                if state.active_scheme.as_deref() == Some(key) {
-                    state.active_scheme = None;
+            sources.push((addon_dir, format!("addon-store/{key}")));
+        }
+        let runtime = format!("runtime/{key}");
+        sources.push((safe_path(root, &runtime)?, runtime.clone()));
+        let builtin_runtime = "runtime/builtin/keytao";
+        if package_key == "builtin/keytao" {
+            sources.push((safe_path(root, builtin_runtime)?, builtin_runtime.into()));
+        }
+        let proj_ns = if is_addon { "addons" } else { "cloud" };
+        let projected = safe_path(root, &format!("scheme-packages/{proj_ns}/{key}"))?;
+        sources.push((projected, format!("projected/{key}")));
+
+        let mut backup_root = None;
+        let mut moves = Vec::new();
+        let mut published = false;
+        let mut active_manifest = None;
+        let result = (|| -> Result<(), String> {
+            for (source, relative) in sources {
+                if !source.try_exists().map_err(|error| {
+                    crate::package_fs::context("读取文件属性", &source, error).to_string()
+                })? {
+                    continue;
                 }
+                let backup = match &backup_root {
+                    Some(path) => path,
+                    None => backup_root.insert(unique_migration_dir(root, &format!("repair-{key}"))?),
+                };
+                let target = backup.join(relative);
+                let moved = backup_repair_path(source.clone(), &target, rename_repair_path)
+                    .map_err(|error| {
+                        format!("备份 {} → {} 失败：{error}", source.display(), target.display())
+                    })?;
+                moves.push(moved);
+            }
+            crate::package_store::publish_directory(&destination, &prepared, |from, to| {
+                crate::package_fs::rename(from, to)?;
+                published = true;
+                Ok(())
             })
             .map_err(|error| error.to_string())?;
+
+            active_manifest = clear_active_package_unlocked(root, &[key, package_key])
+                .map_err(|error| format!("清除活动方案清单失败：{error}"))?;
+            if let Some(installed) = installed {
+                core.update_state(|state| {
+                    state.installed_packages.insert(key.into(), installed);
+                    state.scheme_cloud_ids.remove(key);
+                    if state.active_scheme.as_deref() == Some(key) {
+                        state.active_scheme = None;
+                    }
+                })
+                .map_err(|error| format!("保存修复后的应用状态失败：{error}"))?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let mut rollback_errors = Vec::new();
+            if let Some((path, previous)) = active_manifest {
+                let restored = match previous {
+                    Some(bytes) => crate::scheme_files::write_file_atomic(&path, &bytes),
+                    None => crate::package_fs::remove_file(&path),
+                };
+                if let Err(error) = restored {
+                    rollback_errors.push(error.to_string());
+                }
+            }
+            if published {
+                let restored = destination.try_exists().and_then(|exists| {
+                    if exists {
+                        crate::package_fs::rename(&destination, &prepared)
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(error) = restored {
+                    rollback_errors.push(error.to_string());
+                }
+            }
+            for moved in moves.into_iter().rev() {
+                if let Err(error) = moved.restore() {
+                    rollback_errors.push(error.to_string());
+                }
+            }
+            if rollback_errors.is_empty() {
+                if let Some(path) = &backup_root
+                    && let Err(cleanup) = crate::package_fs::remove_dir_all(path)
+                {
+                    return Err(format!("{error}；已恢复原有方案和运行数据；{cleanup}"));
+                }
+                return Err(format!("{error}；已恢复原有方案和运行数据"));
+            }
+            return Err(format!(
+                "{error}；修复回滚失败：{}",
+                rollback_errors.join("；")
+            ));
         }
 
-        if !dir_has_any_file(&backup_root) {
-            let _ = crate::package_fs::remove_dir_all(&backup_root);
-            Ok(None)
-        } else {
-            Ok(Some(backup_root.to_string_lossy().into_owned()))
+        if let Some(path) = &backup_root {
+            strip_ephemeral_runtime_artifacts(&path.join(runtime));
+            if package_key == "builtin/keytao" {
+                strip_ephemeral_runtime_artifacts(&path.join(builtin_runtime));
+            }
         }
+        Ok(backup_root)
     })
     .map_err(CoreError::Other)?;
 
     #[cfg(target_os = "windows")]
     crate::windows_public_schemas::remove_isolated_package_cache(key);
 
-    download_fresh(key.to_owned()).await?;
-    Ok(backup_dir)
+    if !is_addon {
+        crate::user_words::remember_reconciliation(core, key, root, false);
+    }
+    Ok(backup_root.and_then(|path| {
+        if dir_has_any_file(&path) {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            let _ = crate::package_fs::remove_dir_all(&path);
+            None
+        }
+    }))
 }
 
 pub(crate) fn clear_active_package(root: &Path, key: &str) -> Result<(), CoreError> {

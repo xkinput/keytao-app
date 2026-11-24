@@ -149,6 +149,57 @@ async fn removing_local_scheme_never_retains_or_backs_up_modified_files() {
 }
 
 #[tokio::test]
+async fn repair_download_failure_preserves_installed_and_active_package() {
+    let (_directory, host) = fixture();
+    let root = &host.root;
+    let store = PackageStore::new(&host.core);
+    let package = store.package_path("keytao");
+    let (original_files, original_meta) = store.read_files("keytao").unwrap();
+    host.core
+        .update_state(|state| state.active_scheme = Some("keytao".into()))
+        .unwrap();
+    let original_state = host.core.state();
+    let original_active = RuntimeDirs::active_package_key(root);
+    let runtime_words = root.join("runtime/keytao/keytao.userdb/words");
+    let projected = root.join("scheme-packages/cloud/keytao");
+    fs::create_dir_all(&projected).unwrap();
+    let projected_file = projected.join("last-good");
+    fs::write(&projected_file, b"last projected source").unwrap();
+
+    for publish_before_error in [false, true] {
+        let error = repair_package_for_redeploy_with(
+            &host.core,
+            root,
+            "keytao",
+            RepairMode::BackUpRuntime,
+            async |core, root, key| {
+                if publish_before_error {
+                    let archive = archive_from_files(&original_files)?;
+                    store_cloud_archive(core, &key, Some("v2"), "official", None, &archive, root)?;
+                }
+                Err(CoreError::Other("fixture download failed".into()))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("fixture download failed"));
+        assert!(package.is_dir(), "the original package directory disappeared");
+        let (files, meta) = store.read_files("keytao").unwrap();
+        assert_eq!(files, original_files);
+        assert_eq!(meta.zip_sha256, original_meta.zip_sha256);
+        assert_eq!(meta.version, original_meta.version);
+        let state = host.core.state();
+        assert_eq!(state.installed_packages, original_state.installed_packages);
+        assert_eq!(state.active_scheme, original_state.active_scheme);
+        assert_eq!(RuntimeDirs::active_package_key(root), original_active);
+        assert_eq!(fs::read(&runtime_words).unwrap(), b"learned content");
+        assert_eq!(fs::read(&projected_file).unwrap(), b"last projected source");
+        assert!(!root.join("migrations").exists());
+    }
+}
+
+#[tokio::test]
 async fn repair_package_backs_up_cloud_files() {
     let (_directory, host) = fixture();
     fs::write(
@@ -167,24 +218,181 @@ async fn repair_package_backs_up_cloud_files() {
         &host.root,
         "keytao",
         RepairMode::BackUpRuntime,
-        |key| {
-            let core = host.core.clone();
-            let root = host.root.clone();
-            let bytes = clean_archive.clone();
-            async move {
-                assert_eq!(key, "keytao");
-                store_cloud_archive(&core, "keytao", Some("v2"), "official", None, &bytes, &root)?;
-                Ok(())
-            }
+        async |core, root, key| {
+            assert_eq!(key, "keytao");
+            store_cloud_archive(core, &key, Some("v2"), "official", None, &clean_archive, root)?;
+            Ok(())
         },
     )
     .await
+    .unwrap()
     .unwrap();
-    assert!(backup.is_some());
+    let backup = Path::new(&backup);
+    assert!(backup.is_dir());
+    assert_eq!(
+        fs::read(backup.join("runtime/keytao/keytao.userdb/words")).unwrap(),
+        b"learned content"
+    );
+    let (_, old_meta) =
+        PackageStore::read_files_at(&backup.join("package-store/keytao"), "keytao").unwrap();
+    assert_eq!(old_meta.version.as_deref(), Some("v1"));
     assert!(!host.root.join("runtime/keytao").exists());
+    assert_eq!(host.core.state().installed_packages["keytao"].version.as_deref(), Some("v2"));
     let (stored, meta) = PackageStore::new(&host.core).read_files("keytao").unwrap();
     assert_eq!(meta.version.as_deref(), Some("v2"));
     assert_eq!(stored.len(), 1);
+}
+
+#[tokio::test]
+async fn repair_error_after_download_restores_previous_package_and_runtime() {
+    assert_repair_rolls_back_after_download(true).await;
+}
+
+#[tokio::test]
+async fn repair_state_save_failure_restores_previous_package_and_active_manifest() {
+    assert_repair_rolls_back_after_download(false).await;
+}
+
+async fn assert_repair_rolls_back_after_download(corrupt_manifest: bool) {
+    let (_directory, host) = fixture();
+    let root = &host.root;
+    let store = PackageStore::new(&host.core);
+    let (original_files, original_meta) = store.read_files("keytao").unwrap();
+    host.core
+        .update_state(|state| {
+            state.active_scheme = Some("keytao".into());
+            state.scheme_cloud_ids.insert("keytao".into(), "fixture-id".into());
+        })
+        .unwrap();
+    let original_state = host.core.state();
+    let state_path = host.core.env().data_dir.join("app-state.json");
+    let persisted_state = fs::read(&state_path).unwrap();
+    let saved_state_path = state_path.with_extension("json.fixture");
+    let archive = archive_from_files(&[(
+        "keytao.schema.yaml".into(),
+        b"schema: {schema_id: keytao, name: Fresh}\n".to_vec(),
+    )])
+    .unwrap();
+    let projected = root.join("scheme-packages/cloud/keytao");
+    fs::create_dir_all(&projected).unwrap();
+    let projected_file = projected.join("last-good");
+    fs::write(&projected_file, b"last projected source").unwrap();
+    let active_manifest = root.join("scheme-packages/active-manifest.json");
+    let (manifest_contents, expected_error): (&[u8], _) = if corrupt_manifest {
+        (b"{", "EOF".into())
+    } else {
+        fs::rename(&state_path, &saved_state_path).unwrap();
+        fs::create_dir(&state_path).unwrap();
+        let error = host.core.update_state(|state| state.active_scheme = None).unwrap_err();
+        (br#"{"active_package":"keytao","runtime_migration_version":1}"#, error.to_string())
+    };
+    fs::write(&active_manifest, manifest_contents).unwrap();
+
+    let error = repair_package_for_redeploy_with(
+        &host.core,
+        root,
+        "keytao",
+        RepairMode::BackUpRuntime,
+        async |core, root, key| {
+            store_cloud_archive(core, &key, Some("v2"), "official", None, &archive, root)?;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains(&expected_error), "{error}");
+    assert_eq!(
+        fs::read(root.join("runtime/keytao/keytao.userdb/words")).unwrap(),
+        b"learned content"
+    );
+    assert_eq!(fs::read(projected_file).unwrap(), b"last projected source");
+    let (files, meta) = store.read_files("keytao").unwrap();
+    assert_eq!(files, original_files);
+    assert_eq!(meta.zip_sha256, original_meta.zip_sha256);
+    assert_eq!(meta.version, original_meta.version);
+    let state = host.core.state();
+    assert_eq!(state.installed_packages, original_state.installed_packages);
+    assert_eq!(state.active_scheme, original_state.active_scheme);
+    assert_eq!(state.scheme_cloud_ids, original_state.scheme_cloud_ids);
+    if !corrupt_manifest {
+        fs::remove_dir(&state_path).unwrap();
+        fs::rename(saved_state_path, &state_path).unwrap();
+    }
+    assert_eq!(fs::read(state_path).unwrap(), persisted_state);
+    assert_eq!(fs::read(active_manifest).unwrap(), manifest_contents);
+    let migrations = root.join("migrations");
+    assert!(!migrations.exists() || fs::read_dir(migrations).unwrap().next().is_none());
+}
+
+#[test]
+fn repair_cross_filesystem_backup_keeps_original_for_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("store/keytao");
+    let backup = directory.path().join("migrations/repair/package-store/keytao");
+    let relative = "files/keytao.schema.yaml";
+    fs::create_dir_all(source.join("files")).unwrap();
+    fs::write(source.join(relative), b"original package").unwrap();
+
+    let moved = backup_repair_path(source.clone(), &backup, |from, to| {
+        assert_eq!(from, source);
+        assert_eq!(to, backup);
+        Err(std::io::ErrorKind::CrossesDevices.into())
+    })
+    .unwrap();
+
+    assert!(!source.exists());
+    assert_eq!(fs::read(backup.join(relative)).unwrap(), b"original package");
+    fs::write(backup.join(relative), b"changed backup").unwrap();
+    moved.restore().unwrap();
+    assert_eq!(fs::read(source.join(relative)).unwrap(), b"original package");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repair_removes_only_stale_staging_directories() {
+    let (_directory, host) = fixture();
+    let cache = host.root.join("cache");
+    let stale = cache.join(".repair-stale");
+    let recent = cache.join(".repair-recent");
+    let in_use = cache.join(".repair-in-use");
+    let unrelated = cache.join("unrelated");
+    let symlink = cache.join(".repair-link");
+    let regular = cache.join(".repair-file");
+    for path in [&stale, &recent, &in_use, &unrelated] {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("contents"), b"fixture").unwrap();
+    }
+    fs::write(stale.join("lease"), b"").unwrap();
+    let lease = fs::File::create(in_use.join("lease")).unwrap();
+    keytao_core::lock_file(&lease, false).unwrap();
+    fs::write(&regular, b"fixture").unwrap();
+    std::os::unix::fs::symlink(&unrelated, &symlink).unwrap();
+    for path in [&stale, &in_use, &unrelated, &regular] {
+        fs::File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+            .unwrap();
+    }
+
+    let error = repair_package_for_redeploy_with(
+        &host.core,
+        &host.root,
+        "keytao",
+        RepairMode::BackUpRuntime,
+        async |_, _, _| {
+            assert!(!stale.exists());
+            Err(CoreError::Other("fixture download failed".into()))
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("fixture download failed"));
+    for path in [&recent, &in_use, &unrelated, &symlink] {
+        assert_eq!(fs::read(path.join("contents")).unwrap(), b"fixture");
+    }
+    assert_eq!(fs::read(regular).unwrap(), b"fixture");
+    drop(lease);
 }
 
 #[tokio::test]
@@ -196,20 +404,15 @@ async fn automatic_cloud_repair_leaves_active_runtime_in_place() {
         &host.root,
         "keytao",
         RepairMode::SourceOnly,
-        |key| {
-            let root = &host.root;
-            let core = &host.core;
-            let learned = &learned;
-            async move {
-                assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some("keytao"));
-                assert_eq!(fs::read(learned).unwrap(), b"learned content");
-                let archive = archive_from_files(&[(
-                    "keytao.schema.yaml".into(),
-                    b"schema: {schema_id: keytao, name: Updated}\n".to_vec(),
-                )])?;
-                store_cloud_archive(core, &key, Some("v2"), "official", None, &archive, root)?;
-                Ok(())
-            }
+        async |core, root, key| {
+            assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some("keytao"));
+            assert_eq!(fs::read(&learned).unwrap(), b"learned content");
+            let archive = archive_from_files(&[(
+                "keytao.schema.yaml".into(),
+                b"schema: {schema_id: keytao, name: Updated}\n".to_vec(),
+            )])?;
+            store_cloud_archive(core, &key, Some("v2"), "official", None, &archive, root)?;
+            Ok(())
         },
     )
     .await
@@ -271,25 +474,22 @@ async fn local_git_repair_preserves_live_runtime_on_download_success_and_failure
             &host.root,
             &key,
             RepairMode::SourceOnly,
-            |key| {
-                let core = host.core.clone();
-                async move {
-                    if !download_succeeds {
-                        return Err(CoreError::Other("fixture download failed".into()));
-                    }
-                    fs::write(&schema, b"schema: {schema_id: fixture, name: Updated}\n")?;
-                    local_import::import_local_scheme_with(
-                        &core,
-                        &source,
-                        "Fixture",
-                        Some(&key),
-                        local_import::LocalImportOptions {
-                            version_override: Some("v2"),
-                            ..Default::default()
-                        },
-                    )?;
-                    Ok(())
+            async |core, _, key| {
+                if !download_succeeds {
+                    return Err(CoreError::Other("fixture download failed".into()));
                 }
+                fs::write(&schema, b"schema: {schema_id: fixture, name: Updated}\n")?;
+                local_import::import_local_scheme_with(
+                    core,
+                    &source,
+                    "Fixture",
+                    Some(&key),
+                    local_import::LocalImportOptions {
+                        version_override: Some("v2"),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
             },
         )
         .await;
