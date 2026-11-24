@@ -14,7 +14,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::BTreeMap, fs, path::Path};
 
-use crate::{assign, clamp, PartialTheme};
+use crate::{assign, clamp};
 
 pub const DEFAULT_MOBILE_LAYOUT_YAML: &str = include_str!("../default-keyboard.yaml");
 
@@ -228,7 +228,11 @@ fn parse_mobile_layout_yaml(content: &str) -> Option<PartialMobileLayout> {
     if let Ok(file) = serde_yaml::from_str::<MobileLayoutFile>(content) {
         return file.into_layout();
     }
-    serde_yaml::from_str::<PartialTheme>(content)
+    #[derive(Deserialize)]
+    struct LegacyThemeLayout {
+        keyboard: Option<PartialMobileLayout>,
+    }
+    serde_yaml::from_str::<LegacyThemeLayout>(content)
         .ok()
         .and_then(|theme| theme.keyboard)
 }

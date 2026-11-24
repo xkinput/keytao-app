@@ -28,8 +28,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mobile_layout::PartialMobileLayout;
-
 /// Compatibility aliases for call sites that still use the pre-split names.
 /// New code should use the [`mobile_layout`] module directly.
 pub use mobile_layout::{
@@ -566,46 +564,58 @@ impl ThemeResolver {
     }
 
     pub fn current(&self) -> ResolvedImeTheme {
+        self.current_with_system_probe(resolver_system_effective_color_scheme)
+    }
+
+    fn current_with_system_probe(
+        &self,
+        probe: impl FnOnce() -> EffectiveColorScheme,
+    ) -> ResolvedImeTheme {
+        self.current_with_known_system_scheme(self.system_scheme)
+            .unwrap_or_else(|| {
+                self.current_with_known_system_scheme(Some(probe()))
+                    .expect("system color scheme is known")
+            })
+    }
+
+    fn current_with_known_system_scheme(
+        &self,
+        system_scheme: Option<EffectiveColorScheme>,
+    ) -> Option<ResolvedImeTheme> {
         let Ok(mut cache) = self.cache.lock() else {
-            return resolve_theme_from_paths_with_system_scheme(
-                self.default_theme_path.as_deref(),
-                self.user_theme_path.as_deref(),
-                self.system_scheme
-                    .unwrap_or_else(cached_system_effective_color_scheme),
-            );
+            return Some(self.resolve(system_scheme?));
         };
-        let mut system_scheme = match cache.theme.ui.color_scheme {
-            UiColorScheme::Auto => self
-                .system_scheme
-                .unwrap_or_else(cached_system_effective_color_scheme),
+        let mut scheme = match cache.theme.ui.color_scheme {
+            UiColorScheme::Auto => system_scheme?,
             UiColorScheme::Light => EffectiveColorScheme::Light,
             UiColorScheme::Dark => EffectiveColorScheme::Dark,
         };
-        let mut signature = self.signature(system_scheme);
+        let mut signature = self.signature(scheme);
         if cache.signature == signature {
-            return cache.theme.clone();
+            return Some(cache.theme.clone());
         }
-        let mut theme = resolve_theme_from_paths_with_system_scheme(
-            self.default_theme_path.as_deref(),
-            self.user_theme_path.as_deref(),
-            system_scheme,
-        );
+        let mut theme = self.resolve(scheme);
         if theme.ui.color_scheme == UiColorScheme::Auto
             && cache.theme.ui.color_scheme != UiColorScheme::Auto
         {
-            system_scheme = self
-                .system_scheme
-                .unwrap_or_else(cached_system_effective_color_scheme);
-            signature = self.signature(system_scheme);
-            theme = resolve_theme_from_paths_with_system_scheme(
-                self.default_theme_path.as_deref(),
-                self.user_theme_path.as_deref(),
-                system_scheme,
-            );
+            let actual_scheme = system_scheme?;
+            if scheme != actual_scheme {
+                scheme = actual_scheme;
+                signature = self.signature(scheme);
+                theme = self.resolve(scheme);
+            }
         }
         cache.signature = signature;
         cache.theme = theme.clone();
-        theme
+        Some(theme)
+    }
+
+    fn resolve(&self, scheme: EffectiveColorScheme) -> ResolvedImeTheme {
+        resolve_theme_from_paths_with_system_scheme(
+            self.default_theme_path.as_deref(),
+            self.user_theme_path.as_deref(),
+            scheme,
+        )
     }
 
     fn signature(&self, system_scheme: EffectiveColorScheme) -> String {
@@ -711,7 +721,9 @@ pub fn resolve_theme_from_paths_with_system_scheme(
 
 /// Scale candidate spacing and secondary fonts from the default candidate size.
 pub fn scaled_candidate_panel(theme: &ResolvedImeTheme) -> ResolvedImeTheme {
-    let scale = theme.font.size / ResolvedImeTheme::default().font.size;
+    static DEFAULT_FONT_SIZE: OnceLock<f32> = OnceLock::new();
+    let default_size = DEFAULT_FONT_SIZE.get_or_init(|| ResolvedImeTheme::default().font.size);
+    let scale = theme.font.size / *default_size;
     let mut theme = theme.clone();
     theme.font.label_size *= scale;
     theme.font.comment_size *= scale;
@@ -810,20 +822,34 @@ fn resolve_theme_with_pending_settings(
     system_scheme: EffectiveColorScheme,
     pending_settings: Option<PartialTheme>,
 ) -> ResolvedImeTheme {
+    let overlays = [default_theme_path, user_theme_path]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|content| source::parse_compilation_base_yaml(&content).ok())
+        .map(|(value, _)| value);
+    resolve_runtime_theme(overlays, system_scheme, pending_settings)
+}
+
+fn resolve_runtime_theme(
+    overlays: impl IntoIterator<Item = serde_yaml::Value>,
+    system_scheme: EffectiveColorScheme,
+    pending_settings: Option<PartialTheme>,
+) -> ResolvedImeTheme {
     let mut partials = Vec::new();
     let mut compiled = None;
     if let Ok(partial) = serde_yaml::from_str::<PartialTheme>(DEFAULT_THEME_YAML) {
         partials.push(partial);
     }
-    for path in [default_theme_path, user_theme_path].into_iter().flatten() {
-        let Ok(content) = fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok((value, _)) = source::parse_compilation_base_yaml(&content) else {
-            continue;
-        };
-        let Ok(partial) = serde_yaml::from_value::<PartialTheme>(value.clone()) else {
-            continue;
+    for mut value in overlays {
+        let partial = match PartialTheme::deserialize(&value) {
+            Ok(partial) => partial,
+            Err(_) => {
+                repair_theme_fields(&mut value, &|value| {
+                    PartialTheme::deserialize(value).is_ok()
+                });
+                PartialTheme::deserialize(&value).expect("repaired theme mapping")
+            }
         };
         if value.get("themeHash").is_some() {
             if let Ok(value) = serde_json::to_value(value) {
@@ -841,6 +867,32 @@ fn resolve_theme_with_pending_settings(
     theme
 }
 
+fn repair_theme_fields(
+    value: &mut serde_yaml::Value,
+    validate: &dyn Fn(&serde_yaml::Value) -> bool,
+) {
+    let Some(mapping) = value.as_mapping_mut() else {
+        return;
+    };
+    let mut kept = serde_yaml::Mapping::new();
+    for (key, mut field) in std::mem::take(mapping) {
+        let validate_field = |field: &serde_yaml::Value| {
+            let mut candidate = kept.clone();
+            candidate.insert(key.clone(), field.clone());
+            validate(&serde_yaml::Value::Mapping(candidate))
+        };
+        if !validate_field(&field) {
+            repair_theme_fields(&mut field, &validate_field);
+            if !validate_field(&field) {
+                eprintln!("Warning: invalid theme field {key:?}; ignoring it");
+                continue;
+            }
+        }
+        kept.insert(key, field);
+    }
+    *mapping = kept;
+}
+
 fn restore_compiled_theme(theme: &mut ResolvedImeTheme, compiled: &serde_json::Value) {
     let variant = if theme.ui.effective_color_scheme == EffectiveColorScheme::Dark {
         "dark"
@@ -848,21 +900,22 @@ fn restore_compiled_theme(theme: &mut ResolvedImeTheme, compiled: &serde_json::V
         "light"
     };
     if let Some(metadata) = compiled.get("resolvedUi").and_then(|v| v.get(variant)) {
-        theme.ui.accent_color = compiled["ui"]
-            .get("accentColor")
-            .or_else(|| metadata.get("accentColor"))
-            .and_then(|v| v.as_str())
-            .and_then(parse_color);
-        theme.ui.corner_radius = compiled["ui"]
-            .get("cornerRadius")
-            .or_else(|| metadata.get("cornerRadius"))
-            .and_then(|v| v.as_f64())
-            .map(|v| v as f32);
-        theme.ui.background_color = compiled["ui"]
-            .get("backgroundColor")
-            .or_else(|| metadata.get("backgroundColor"))
-            .and_then(|v| v.as_str())
-            .and_then(parse_color);
+        let layers = [&compiled["ui"], metadata];
+        let parse_compiled_color = |value: &serde_json::Value| value.as_str().and_then(parse_color);
+        assign(
+            &mut theme.ui.accent_color,
+            compiled_ui_value(layers, "accentColor", parse_compiled_color),
+        );
+        assign(
+            &mut theme.ui.corner_radius,
+            compiled_ui_value(layers, "cornerRadius", |value| {
+                value.as_f64().map(|v| v as f32).filter(|v| v.is_finite())
+            }),
+        );
+        assign(
+            &mut theme.ui.background_color,
+            compiled_ui_value(layers, "backgroundColor", parse_compiled_color),
+        );
         if let Some(scheme) = metadata
             .get("effectiveColorScheme")
             .and_then(|v| v.as_str())
@@ -886,17 +939,34 @@ fn restore_compiled_theme(theme: &mut ResolvedImeTheme, compiled: &serde_json::V
     }
 }
 
+fn compiled_ui_value<T>(
+    layers: [&serde_json::Value; 2],
+    key: &str,
+    parse: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Option<Option<T>> {
+    layers
+        .into_iter()
+        .filter_map(|layer| layer.get(key))
+        .find_map(|value| {
+            if value.is_null()
+                || (key == "backgroundColor"
+                    && value.as_str().is_some_and(|color| color.trim().is_empty()))
+            {
+                Some(None)
+            } else {
+                parse(value).map(Some)
+            }
+        })
+}
+
 pub(crate) fn resolve_compiled_theme_yaml(
     yaml: &str,
     scheme: EffectiveColorScheme,
 ) -> ResolvedImeTheme {
-    let mut theme = resolve_legacy_theme_yaml(yaml, scheme);
-    if let Ok(compiled) = serde_yaml::from_str::<serde_json::Value>(yaml) {
-        if compiled.get("themeHash").is_some() {
-            restore_compiled_theme(&mut theme, &compiled);
-        }
-    }
-    theme
+    let overlay = source::parse_compilation_base_yaml(yaml)
+        .ok()
+        .map(|(value, _)| value);
+    resolve_runtime_theme(overlay, scheme, None)
 }
 
 /// The frozen v2 resolver used to prove migration equivalence without disk I/O.
@@ -1320,10 +1390,6 @@ struct PartialTheme {
     navigation: Option<PartialNavigationTheme>,
     #[serde(alias = "mode_hint")]
     mode_hint: Option<PartialModeHintTheme>,
-    /// Legacy `theme.yaml` documents may still carry the mobile keyboard
-    /// layout here. It never reaches [`ResolvedImeTheme`]; it is only read back
-    /// by [`mobile_layout::resolve_mobile_layout_from_paths`].
-    keyboard: Option<PartialMobileLayout>,
     light: Option<PartialThemeVariant>,
     #[serde(alias = "night")]
     dark: Option<PartialThemeVariant>,
@@ -1649,9 +1715,13 @@ where
     D: Deserializer<'de>,
 {
     let value = serde_yaml::Value::deserialize(deserializer)?;
-    Ok(Some(value.as_f64().and_then(|value| {
-        normalize_corner_radius(value as f32).ok()
-    })))
+    if value.is_null() {
+        return Ok(Some(None));
+    }
+    Ok(value
+        .as_f64()
+        .and_then(|value| normalize_corner_radius(value as f32).ok())
+        .map(Some))
 }
 
 fn optional_background_color<'de, D>(deserializer: D) -> Result<Option<Option<RgbaColor>>, D::Error>
@@ -1659,12 +1729,18 @@ where
     D: Deserializer<'de>,
 {
     let value = serde_yaml::Value::deserialize(deserializer)?;
-    Ok(Some(value.as_str().and_then(|value| {
-        let hex = value.trim().strip_prefix('#')?;
-        (hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .then(|| parse_color(value))
-            .flatten()
-    })))
+    if value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()) {
+        return Ok(Some(None));
+    }
+    Ok(value
+        .as_str()
+        .and_then(|value| {
+            let hex = value.trim().strip_prefix('#')?;
+            (hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then(|| parse_color(value))
+                .flatten()
+        })
+        .map(Some))
 }
 
 fn parse_color(value: &str) -> Option<RgbaColor> {
@@ -1739,6 +1815,63 @@ struct SystemSchemeCache {
     scheme: EffectiveColorScheme,
 }
 
+fn resolver_system_effective_color_scheme() -> EffectiveColorScheme {
+    #[cfg(target_os = "linux")]
+    {
+        static CACHE: OnceLock<Mutex<AsyncSystemSchemeCache>> = OnceLock::new();
+        configured_system_effective_color_scheme().unwrap_or_else(|| {
+            background_system_effective_color_scheme(
+                CACHE.get_or_init(Default::default),
+                detect_system_effective_color_scheme,
+            )
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    cached_system_effective_color_scheme()
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+struct AsyncSystemSchemeCache {
+    value: Option<SystemSchemeCache>,
+    refreshing: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn background_system_effective_color_scheme(
+    cache: &'static Mutex<AsyncSystemSchemeCache>,
+    probe: impl FnOnce() -> EffectiveColorScheme + Send + 'static,
+) -> EffectiveColorScheme {
+    let mut state = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let scheme = state
+        .value
+        .map_or(EffectiveColorScheme::Light, |entry| entry.scheme);
+    if !state.refreshing
+        && !state
+            .value
+            .is_some_and(|entry| entry.checked_at.elapsed() < Duration::from_secs(1))
+    {
+        state.refreshing = true;
+        let worker = std::thread::Builder::new().spawn(move || {
+            let scheme = probe();
+            let mut state = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.value = Some(SystemSchemeCache {
+                checked_at: Instant::now(),
+                scheme,
+            });
+            state.refreshing = false;
+        });
+        if worker.is_err() {
+            state.refreshing = false;
+        }
+    }
+    scheme
+}
+
 fn cached_system_effective_color_scheme() -> EffectiveColorScheme {
     static CACHE: OnceLock<Mutex<Option<SystemSchemeCache>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
@@ -1760,10 +1893,8 @@ fn cached_system_effective_color_scheme() -> EffectiveColorScheme {
 }
 
 fn detect_system_effective_color_scheme() -> EffectiveColorScheme {
-    if let Ok(value) = std::env::var("KEYTAO_IME_SYSTEM_COLOR_SCHEME") {
-        if let Some(scheme) = parse_effective_color_scheme(&value) {
-            return scheme;
-        }
+    if let Some(scheme) = configured_system_effective_color_scheme() {
+        return scheme;
     }
 
     #[cfg(target_os = "macos")]
@@ -1792,11 +1923,6 @@ fn detect_system_effective_color_scheme() -> EffectiveColorScheme {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(value) = std::env::var("GTK_THEME") {
-            if value.to_ascii_lowercase().contains("dark") {
-                return EffectiveColorScheme::Dark;
-            }
-        }
         if let Some(scheme) = command_output_scheme(
             "gsettings",
             &["get", "org.gnome.desktop.interface", "color-scheme"],
@@ -1816,6 +1942,19 @@ fn detect_system_effective_color_scheme() -> EffectiveColorScheme {
     }
 
     EffectiveColorScheme::Light
+}
+
+fn configured_system_effective_color_scheme() -> Option<EffectiveColorScheme> {
+    let explicit = std::env::var("KEYTAO_IME_SYSTEM_COLOR_SCHEME")
+        .ok()
+        .and_then(|value| parse_effective_color_scheme(&value));
+    #[cfg(target_os = "linux")]
+    if explicit.is_none()
+        && std::env::var("GTK_THEME").is_ok_and(|value| value.to_ascii_lowercase().contains("dark"))
+    {
+        return Some(EffectiveColorScheme::Dark);
+    }
+    explicit
 }
 
 fn parse_effective_color_scheme(value: &str) -> Option<EffectiveColorScheme> {
@@ -2519,6 +2658,53 @@ mod tests {
     }
 
     #[test]
+    fn invalid_theme_leaves_keep_other_overrides() {
+        let path = writer_test_theme_path("invalid-leaves");
+        let defaults = path.with_file_name("defaults.yaml");
+        fs::write(
+            &defaults,
+            "ui:\n  cornerRadius: 19\n  backgroundColor: '#111111'\ncandidate:\n  foreground: '#123456'\n",
+        )
+        .unwrap();
+        let overlays = "ui:\n  cornerRadius: wrong\n  backgroundColor: '#12345'\n\
+                        font:\n  size: 26\npanel:\n  orientation: vertical\n\
+                        candidate:\n  foreground: '#12345'\n  paddingX: 17\n\
+                        dark:\n  candidate:\n    labelColor: '#abcdef'\n    inlineGap: wrong\n\
+                        keyboard:\n  rows:\n    - [{ label: 1, value: 1 }]\n";
+        fs::write(&path, overlays).unwrap();
+
+        let theme = resolve_theme_from_paths_with_system_scheme(
+            Some(&defaults),
+            Some(&path),
+            EffectiveColorScheme::Dark,
+        );
+        let layout = resolve_keyboard_from_paths(None, Some(&path));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+        assert_eq!(layout.rows[0][0].label, "1");
+        assert_eq!(theme.ui.corner_radius, Some(19.0));
+        assert_eq!(theme.ui.background_color, parse_color("#111111"));
+        assert_eq!(theme.font.size, 26.0);
+        assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
+        assert_eq!(theme.candidate.foreground, rgba(0x12, 0x34, 0x56, 0xff));
+        assert_eq!(theme.candidate.padding_x, 17.0);
+        assert_eq!(theme.candidate.label_color, rgba(0xab, 0xcd, 0xef, 0xff));
+        let default =
+            resolve_theme_from_paths_with_system_scheme(None, None, EffectiveColorScheme::Dark);
+        assert_eq!(theme.candidate.inline_gap, default.candidate.inline_gap);
+
+        let compiled = resolve_compiled_theme_yaml(
+            &format!(
+                "themeHash: test\nresolvedUi:\n  dark:\n    cornerRadius: 24\n    backgroundColor: '#11223344'\n{overlays}"
+            ),
+            EffectiveColorScheme::Dark,
+        );
+        assert_eq!(compiled.ui.corner_radius, Some(24.0));
+        assert_eq!(compiled.ui.background_color, parse_color("#11223344"));
+        assert_eq!(compiled.candidate.padding_x, 17.0);
+    }
+
+    #[test]
     fn user_overlay_merges_and_clamps() {
         let mut theme = ResolvedImeTheme::default();
         let partial = serde_yaml::from_str::<PartialTheme>(
@@ -2587,6 +2773,34 @@ mod tests {
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
         assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Dark);
         assert_eq!(theme.candidate.foreground, rgba(0x0a, 0x0b, 0x0c, 0xff));
+    }
+
+    #[test]
+    fn resolver_does_not_wait_for_a_slow_system_scheme_probe() {
+        static CACHE: OnceLock<Mutex<AsyncSystemSchemeCache>> = OnceLock::new();
+        let cache = CACHE.get_or_init(Default::default);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (scheme_tx, scheme_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let resolver = ThemeResolver::new(None, None);
+            let theme = resolver.current_with_system_probe(|| {
+                assert!(resolver.cache.try_lock().is_ok());
+                background_system_effective_color_scheme(cache, move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    EffectiveColorScheme::Dark
+                })
+            });
+            scheme_tx.send(theme.ui.effective_color_scheme).unwrap();
+        });
+
+        let timeout = Duration::from_secs(5);
+        started_rx.recv_timeout(timeout).unwrap();
+        let initial_scheme = scheme_rx.recv_timeout(timeout);
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
+        assert_eq!(initial_scheme.unwrap(), EffectiveColorScheme::Light);
     }
 
     #[test]
