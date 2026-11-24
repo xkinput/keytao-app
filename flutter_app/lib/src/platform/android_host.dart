@@ -53,19 +53,8 @@ class AndroidHost {
       _channel.invokeMethod<void>('resetKeyboardLayout');
   Future<void> setKeyboardFlushBottom(bool enabled) =>
       _channel.invokeMethod<void>('setKeyboardFlushBottom', {'enabled': enabled});
-  Future<String?> pickDirectory() async =>
-      (await _channel.invokeMapMethod<String, dynamic>('pickDirectory'))?['uri']
-          as String?;
   Future<Map<String, dynamic>?> importLocalSchemeDirectory() =>
       _channel.invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
-  Future<Map<String, dynamic>> listFiles(String treeUri) =>
-      _map('listFiles', {'treeUri': treeUri});
-  Future<Map<String, dynamic>> readLocalSchemas(String treeUri) =>
-      _map('readLocalSchemas', {'treeUri': treeUri});
-  Future<Map<String, dynamic>> smartExtractZip(
-    String zipPath,
-    String treeUri,
-  ) => _map('smartExtractZip', {'zipPath': zipPath, 'treeUri': treeUri});
   Future<Map<String, dynamic>> smartExtractZipToPrivate(String zipPath) =>
       _map('smartExtractZipToPrivate', {'zipPath': zipPath});
   Future<Map<String, dynamic>> deployImeData() => _map('deployImeData');

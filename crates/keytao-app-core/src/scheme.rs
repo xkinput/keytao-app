@@ -1,4 +1,4 @@
-use crate::{Core, CoreError, scheme_files::parse_schema_list, scheme_types::*};
+use crate::{Core, CoreError, scheme_types::*};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 const API_BASE: &str = "https://keytao.rea.ink";
@@ -234,34 +234,6 @@ pub async fn fetch_scheme_release(
     }
     .await;
     result.map_err(CoreError::Other)
-}
-
-pub fn list_dir(_core: &Core, path: String) -> Result<Vec<FileItem>, CoreError> {
-    let result: Result<_, String> = (|| {
-        let entries = std::fs::read_dir(&path).map_err(|e| format!("读取目录失败: {e}"))?;
-        let mut items: Vec<FileItem> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| FileItem {
-                name: e.file_name().to_string_lossy().into_owned(),
-                is_dir: e.file_type().map(|t| t.is_dir()).unwrap_or(false),
-            })
-            .collect();
-        items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        });
-        Ok(items)
-    })();
-    result.map_err(CoreError::Other)
-}
-
-pub fn read_local_schemas(_core: &Core, path: String) -> Result<Vec<String>, CoreError> {
-    let base = std::path::Path::new(&path);
-    let content = std::fs::read_to_string(base.join("default.custom.yaml"))
-        .or_else(|_| std::fs::read_to_string(base.join("default-custom.yaml")))
-        .unwrap_or_default();
-    Ok(parse_schema_list(&content))
 }
 
 pub fn check_local_schema(core: &Core, dir: Option<PathBuf>) -> Result<LocalSchemaInfo, CoreError> {

@@ -608,24 +608,6 @@ enum EffectiveColorSchemeDto { light, dark }
 
 enum EnglishModeDto { ascii, schema }
 
-class FileItemDto {
-  final String name;
-  final bool isDir;
-
-  const FileItemDto({required this.name, required this.isDir});
-
-  @override
-  int get hashCode => name.hashCode ^ isDir.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is FileItemDto &&
-          runtimeType == other.runtimeType &&
-          name == other.name &&
-          isDir == other.isDir;
-}
-
 class GitSchemeConfigDto {
   final String repoUrl;
   final String mode;
@@ -997,27 +979,6 @@ class LocalSchemaDto {
           installedSchemeVersion == other.installedSchemeVersion &&
           easyEnglishEnabled == other.easyEnglishEnabled &&
           deployWarning == other.deployWarning;
-}
-
-class LocalSchemasDto {
-  final bool hasDefaultCustom;
-  final List<String> schemas;
-
-  const LocalSchemasDto({
-    required this.hasDefaultCustom,
-    required this.schemas,
-  });
-
-  @override
-  int get hashCode => hasDefaultCustom.hashCode ^ schemas.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is LocalSchemasDto &&
-          runtimeType == other.runtimeType &&
-          hasDefaultCustom == other.hasDefaultCustom &&
-          schemas == other.schemas;
 }
 
 class MacosImeStatusDto {

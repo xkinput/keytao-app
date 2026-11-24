@@ -3,6 +3,7 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import 'candidate_panel_preview.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -151,7 +152,7 @@ class AccentPicker extends StatelessWidget {
     var resolvedColor = '#3B73D9';
     if (background && value == null) {
       final settings = controller.uiSettings!;
-      final theme = controller.resolveCandidatePanelPreview(
+      final theme = controller.cachedCandidatePanelPreview(
         colorScheme: settings.colorScheme,
         accentColor: settings.accentColor,
         cornerRadius: settings.cornerRadius,

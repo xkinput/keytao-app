@@ -575,7 +575,7 @@ class _SettingsCardState extends State<SettingsCard> {
     final preview = CandidatePanelPreview(
       fontCatalog: SystemFontCatalog.forController(c),
       key: ValueKey((colorScheme, orientation)),
-      theme: c.resolveCandidatePanelPreview(
+      theme: c.cachedCandidatePanelPreview(
         colorScheme: colorScheme,
         accentColor: accent,
         cornerRadius: cornerRadius,

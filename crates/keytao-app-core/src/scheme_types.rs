@@ -39,12 +39,6 @@ pub struct SchemeReleaseInfo {
 }
 
 #[derive(Serialize, Clone)]
-pub struct FileItem {
-    pub name: String,
-    pub is_dir: bool,
-}
-
-#[derive(Serialize, Clone)]
 pub struct VerifyEntry {
     pub path: String,
     pub ok: bool,

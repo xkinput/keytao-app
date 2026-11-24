@@ -37,6 +37,7 @@ void main() {
       expect(local.deployed, isFalse);
       expect(local.version, isNull);
       expect(local.schemas, isEmpty);
+      expect(await Directory(config.userRootOverride!).exists(), isFalse);
 
       // Ready is a subscription handshake, not the CoreEvent being tested.
       final ready = Completer<void>();
@@ -55,18 +56,17 @@ void main() {
         unawaited(subscription.cancel());
       });
       await ready.future.timeout(const Duration(seconds: 10));
-      // Core rejects this scheme key before constructing or sending an HTTP request.
+      // The downloader emits progress before the malformed URL blocks the request.
       await expectLater(
-        installLatestScheme(scheme: 'invalid-offline-test-scheme'),
-        throwsA(predicate((error) => error.toString().contains('不支持的方案'))),
+        installSchemeFromUrl(url: 'invalid-offline-test-url', schemeKey: 'keytao'),
+        throwsA(predicate((error) => error.toString().contains('下载失败'))),
       );
       final event = await progress.future.timeout(const Duration(seconds: 10));
-      expect(event.installProgress!.stage, 'fetching');
+      expect(event.installProgress!.stage, 'downloading');
       expect(event.installProgress!.percent, 0);
       expect(event.installProgress!.message, isNotEmpty);
       expect(event.deployProgress, isNull);
       expect(event.windowsImeStatus, isNull);
-      expect(await Directory(config.userRootOverride!).exists(), isFalse);
       expect(await Directory(config.cacheDir).exists(), isFalse);
 
       await completeOnboarding();

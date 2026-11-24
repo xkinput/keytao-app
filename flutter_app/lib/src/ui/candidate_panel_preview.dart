@@ -2,9 +2,69 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../app/controller.dart';
 import '../rust/api/types.dart';
 import 'mobile_keyboard_preview.dart';
 import 'system_font_picker.dart';
+
+final _candidatePanelPreviews = Expando<_CandidatePanelPreviewCache>();
+
+class _CandidatePanelPreviewCache {
+  _CandidatePanelPreviewCache(AppController controller) {
+    var savingTheme = controller.savingTheme;
+    var settings = controller.uiSettings;
+    controller.addListener(() {
+      if ((savingTheme && !controller.savingTheme) ||
+          !identical(settings, controller.uiSettings)) {
+        themes.clear();
+      }
+      savingTheme = controller.savingTheme;
+      settings = controller.uiSettings;
+    });
+  }
+
+  final themes =
+      <
+        (UiColorSchemeDto, String, double?, String, double, bool),
+        Map<String, dynamic>
+      >{};
+}
+
+extension CandidatePanelPreviewCache on AppController {
+  Map<String, dynamic> cachedCandidatePanelPreview({
+    required UiColorSchemeDto colorScheme,
+    required String accentColor,
+    required double? cornerRadius,
+    required String backgroundColor,
+    required double fontSize,
+    required bool systemDark,
+  }) {
+    final themes =
+        (_candidatePanelPreviews[this] ??= _CandidatePanelPreviewCache(
+          this,
+        )).themes;
+    final key = (
+      colorScheme,
+      accentColor,
+      cornerRadius,
+      backgroundColor,
+      fontSize,
+      systemDark,
+    );
+    final theme =
+        themes.remove(key) ??
+        resolveCandidatePanelPreview(
+          colorScheme: colorScheme,
+          accentColor: accentColor,
+          cornerRadius: cornerRadius,
+          backgroundColor: backgroundColor,
+          fontSize: fontSize,
+          systemDark: systemDark,
+        );
+    if (themes.length == 2) themes.remove(themes.keys.first);
+    return themes[key] = theme;
+  }
+}
 
 Widget themePreviewEditTarget(
   Widget child,

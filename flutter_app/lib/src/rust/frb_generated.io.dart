@@ -166,9 +166,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_32(dynamic raw);
 
   @protected
-  FileItemDto dco_decode_file_item_dto(dynamic raw);
-
-  @protected
   GitSchemeConfigDto dco_decode_git_scheme_config_dto(dynamic raw);
 
   @protected
@@ -203,9 +200,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
-
-  @protected
-  List<FileItemDto> dco_decode_list_file_item_dto(dynamic raw);
 
   @protected
   List<InstalledPackageDto> dco_decode_list_installed_package_dto(dynamic raw);
@@ -270,9 +264,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   LocalSchemaDto dco_decode_local_schema_dto(dynamic raw);
-
-  @protected
-  LocalSchemasDto dco_decode_local_schemas_dto(dynamic raw);
 
   @protected
   MacosImeStatusDto dco_decode_macos_ime_status_dto(dynamic raw);
@@ -637,9 +628,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
-  FileItemDto sse_decode_file_item_dto(SseDeserializer deserializer);
-
-  @protected
   GitSchemeConfigDto sse_decode_git_scheme_config_dto(
     SseDeserializer deserializer,
   );
@@ -684,9 +672,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
-
-  @protected
-  List<FileItemDto> sse_decode_list_file_item_dto(SseDeserializer deserializer);
 
   @protected
   List<InstalledPackageDto> sse_decode_list_installed_package_dto(
@@ -769,9 +754,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   LocalSchemaDto sse_decode_local_schema_dto(SseDeserializer deserializer);
-
-  @protected
-  LocalSchemasDto sse_decode_local_schemas_dto(SseDeserializer deserializer);
 
   @protected
   MacosImeStatusDto sse_decode_macos_ime_status_dto(
@@ -1241,9 +1223,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
-  void sse_encode_file_item_dto(FileItemDto self, SseSerializer serializer);
-
-  @protected
   void sse_encode_git_scheme_config_dto(
     GitSchemeConfigDto self,
     SseSerializer serializer,
@@ -1302,12 +1281,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_list_file_item_dto(
-    List<FileItemDto> self,
-    SseSerializer serializer,
-  );
 
   @protected
   void sse_encode_list_installed_package_dto(
@@ -1414,12 +1387,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_local_schema_dto(
     LocalSchemaDto self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_local_schemas_dto(
-    LocalSchemasDto self,
     SseSerializer serializer,
   );
 

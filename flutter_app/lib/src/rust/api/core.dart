@@ -379,11 +379,6 @@ Future<String> accountSubmitWords({required String previewJson}) => RustLib
 Future<SchemeReleaseDto> fetchSchemeRelease({required String scheme}) =>
     RustLib.instance.api.crateApiCoreFetchSchemeRelease(scheme: scheme);
 
-/// Fetches the latest release for the same scheme key accepted by Core,
-/// downloads it, then installs into the host root. Does not deploy the IME.
-Future<InstallResultDto> installLatestScheme({required String scheme}) =>
-    RustLib.instance.api.crateApiCoreInstallLatestScheme(scheme: scheme);
-
 Future<ReleaseInfoDto> fetchLatestRelease() =>
     RustLib.instance.api.crateApiCoreFetchLatestRelease();
 
@@ -415,42 +410,8 @@ Future<String> openAppUpdatePackage({
   restart: restart,
 );
 
-/// Reads a filesystem directory. Android SAF tree URIs use the readLocalSchemas
-/// platform channel instead. Both Core-supported custom-config filenames count.
-Future<LocalSchemasDto> readLocalSchemas({required String dir}) =>
-    RustLib.instance.api.crateApiCoreReadLocalSchemas(dir: dir);
-
-/// Returns Core's directory-first, name-sorted entries. SAF uses listFiles.
-Future<List<FileItemDto>> listDir({required String dir}) =>
-    RustLib.instance.api.crateApiCoreListDir(dir: dir);
-
 Future<void> cancelSchemeDownload() =>
     RustLib.instance.api.crateApiCoreCancelSchemeDownload();
-
-/// Downloads and smart-installs into the selected filesystem directory without
-/// deploying. Android SAF uses download_scheme_archive and smartExtractZip.
-Future<InstallResultDto> installSchemeToDir({
-  required String url,
-  required String dir,
-  required String schemeKey,
-  String? version,
-}) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(
-  url: url,
-  dir: dir,
-  schemeKey: schemeKey,
-  version: version,
-);
-
-/// Android SAF sequence: confirm storage permission, pickDirectory,
-/// then listFiles/readLocalSchemas through the platform channel. Download here,
-/// call smartExtractZip(zipPath, treeUri) with its progress handler, and pass
-/// jsonEncode(result) to finish_android_install for the DTO and done event.
-/// Always call remove_downloaded_archive in Dart's finally block. Do not deploy
-/// or copy into the private/live root. Download progress uses core_events.
-/// Dart must serialize this entire sequence with all other installations:
-/// Core's fixed cache filename is protected only during each Rust call.
-Future<String> downloadSchemeArchive({required String url}) =>
-    RustLib.instance.api.crateApiCoreDownloadSchemeArchive(url: url);
 
 /// Cleans up the download after extraction and package recording. Resolves
 /// parent directories and rejects symlink files before deleting inside cache.
