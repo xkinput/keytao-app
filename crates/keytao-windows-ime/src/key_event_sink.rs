@@ -63,13 +63,13 @@ use crate::{
     solo_shift::{modifier_tap_matches, modifier_tap_should_apply, record_modifier_tap},
     state::{
         append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
-        clear_input_for_blocked_context, clear_layout_sink, current_theme, defer_ime_ui_hide,
-        diagnostics_enabled, embedded_composition, fallback_focus_window, flush_pending_ime_ui,
-        hide_candidate_window, host_is_uiless, input_is_blocked, layout_sink_context,
-        poll_engine_builds, post_pending_ime_ui, prime_theme_resolver, refresh_engine_for_focus,
-        refresh_input_context, reset_input_for_focus_change, start_engine_warmup,
-        start_reload_if_needed, store_layout_sink, sync_input_policy, update_ime_windows,
-        update_language_bar_mode, CaretPosition, LayoutSinkRegistration, SharedState, TsfState,
+        clear_input_for_blocked_context, clear_layout_sink, defer_ime_ui_hide, diagnostics_enabled,
+        embedded_composition, fallback_focus_window, flush_pending_ime_ui, hide_candidate_window,
+        host_is_uiless, input_is_blocked, layout_sink_context, poll_engine_builds,
+        post_pending_ime_ui, prime_theme_resolver, refresh_engine_for_focus, refresh_input_context,
+        reset_input_for_focus_change, start_engine_warmup, start_reload_if_needed,
+        store_layout_sink, sync_input_policy, update_ime_windows, update_language_bar_mode,
+        with_current_theme, CaretPosition, LayoutSinkRegistration, SharedState, TsfState,
         WeakState,
     },
 };
@@ -1991,7 +1991,7 @@ fn apply_ime_state(
         _dll_guard: DllActivityGuard::new(),
     };
     let comp_sink_iface: ITfCompositionSink = comp_sink_obj.into();
-    let hide_candidate_panel = current_theme().ui.hide_candidate_panel;
+    let hide_candidate_panel = with_current_theme(|theme| theme.ui.hide_candidate_panel);
     let (display_attribute_atom, uiless) = {
         let st = shared_state.borrow();
         (
@@ -2759,17 +2759,20 @@ fn process_deferred_key(
     if key.enter {
         return runtime_session(state)?.process_enter();
     }
-    let theme = current_theme();
-    let panel_layout = if theme.ui.hide_candidate_panel && !before.is_package_switcher() {
-        key_policy::CandidatePanelLayout::Hidden
-    } else {
-        match theme.panel.orientation {
-            keytao_theme::PanelOrientation::Horizontal => {
-                key_policy::CandidatePanelLayout::Horizontal
+    let panel_layout = with_current_theme(|theme| {
+        if theme.ui.hide_candidate_panel && !before.is_package_switcher() {
+            key_policy::CandidatePanelLayout::Hidden
+        } else {
+            match theme.panel.orientation {
+                keytao_theme::PanelOrientation::Horizontal => {
+                    key_policy::CandidatePanelLayout::Horizontal
+                }
+                keytao_theme::PanelOrientation::Vertical => {
+                    key_policy::CandidatePanelLayout::Vertical
+                }
             }
-            keytao_theme::PanelOrientation::Vertical => key_policy::CandidatePanelLayout::Vertical,
         }
-    };
+    });
     let keysym = key_policy::candidate_arrow_key(key.keysym, key.mods, before, panel_layout);
     process_key_result(state, keysym, key.mods)
 }
@@ -3074,23 +3077,32 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 record_modifier_press(&state, keysym, lparam.0, mods);
                 return Ok(BOOL::from(false));
             }
-            let cached_state = cached_ime_state(&state);
-            let composing = cached_state.as_ref().is_some_and(has_visible_state)
-                || deferred_input_pending(&state, pic);
-            let schema_shortcut = cached_state
-                .as_ref()
-                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
+            let (composing, schema_shortcut) = {
+                let st = state.borrow();
+                let ime_state = st.ime_state.as_ref();
+                (
+                    ime_state.is_some_and(has_visible_state) || deferred_input_pending(&state, pic),
+                    ime_state.and_then(|ime| schema_shortcut_key(vk, lparam.0, mods, ime)),
+                )
+            };
             if schema_shortcut.is_none() && is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             prime_theme_resolver();
             poll_engine_builds(&state);
-            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st))
+            let composing = state
+                .borrow()
+                .ime_state
+                .as_ref()
+                .is_some_and(has_visible_state)
                 || deferred_input_pending(&state, pic);
             if schema_shortcut.is_none()
                 && !should_eat_key(vk, composing, mods)
-                && !cached_ime_state(&state)
-                    .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
+                && !state
+                    .borrow()
+                    .ime_state
+                    .as_ref()
+                    .is_some_and(|ime| chord_keysym_for_vk(vk, lparam.0, mods, ime).is_some())
             {
                 return Ok(BOOL::from(false));
             }
@@ -3103,25 +3115,26 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             if !crate::state::deployment_key_pressed(&state, pic) {
                 return Ok(BOOL::from(false));
             }
-            let (engine_ready, reload_needed, cached_state, persisted_ascii_mode) = {
+            let (engine_ready, reload_needed, visible, schema_shortcut, ascii_mode) = {
                 let mut st = state.borrow_mut();
                 let reload_needed = st.reload_needed_cached();
+                let ime_state = st.ime_state.as_ref();
                 (
                     st.engine_ready(),
                     reload_needed,
-                    st.ime_state.clone(),
-                    st.ascii_mode,
+                    ime_state.is_some_and(has_visible_state),
+                    ime_state.and_then(|ime| schema_shortcut_key(vk, lparam.0, mods, ime)),
+                    ime_state.map_or(st.ascii_mode, |ime| ime.ascii_mode),
                 )
             };
-            let is_composing = cached_state.as_ref().is_some_and(has_visible_state)
-                || deferred_input_pending(&state, pic);
-            let schema_shortcut = cached_state
-                .as_ref()
-                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
-            let ascii_rejects = schema_shortcut.is_none() && !is_composing
-                && cached_state.as_ref().map_or(persisted_ascii_mode, |st| st.ascii_mode)
+            let is_composing = visible || deferred_input_pending(&state, pic);
+            let ascii_rejects = schema_shortcut.is_none()
+                && !is_composing
+                && ascii_mode
                 && ascii_mode_rejects_key(vk, mods);
-            if ascii_rejects { return Ok(BOOL::from(false)); }
+            if ascii_rejects {
+                return Ok(BOOL::from(false));
+            }
             if !engine_ready || reload_needed {
                 if !engine_ready {
                     start_engine_warmup(&state);
@@ -3135,9 +3148,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 state.borrow_mut().claimed_key = eat.then_some((vk, lparam.0));
                 return Ok(BOOL::from(eat));
             }
-            let chord_key = cached_state
+            let chord_key = state
+                .borrow()
+                .ime_state
                 .as_ref()
-                .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, st).is_some());
+                .is_some_and(|ime| chord_keysym_for_vk(vk, lparam.0, mods, ime).is_some());
             let eat = schema_shortcut.is_some() || chord_key || should_eat_key(vk, is_composing, mods);
             state.borrow_mut().claimed_key = eat.then_some((vk, lparam.0));
             append_key_diagnostic!(
@@ -3168,9 +3183,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     state.borrow_mut().modifier_tap_press = None;
                     return Ok(BOOL::from(false));
                 }
-            } else if !cached_ime_state(&state).is_some_and(|st| {
+            } else if !state.borrow().ime_state.as_ref().is_some_and(|st| {
                 st.chord_composer
-                    && chord_keysym_for_vk(vk, lparam.0, current_mod_mask(), &st).is_some()
+                    && chord_keysym_for_vk(vk, lparam.0, current_mod_mask(), st).is_some()
             }) {
                 return Ok(BOOL::from(false));
             }
@@ -3237,27 +3252,26 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
             // shortcut policy before context inspection, warmup, or Enter's
             // modifier-free process_enter path.
-            let cached_state = cached_ime_state(&state);
-            let composing = cached_state.as_ref().is_some_and(has_visible_state)
-                || deferred_input_pending(&state, pic);
-            let schema_shortcut = cached_state
-                .as_ref()
-                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
+            let (composing, schema_shortcut) = {
+                let st = state.borrow();
+                let ime_state = st.ime_state.as_ref();
+                (
+                    ime_state.is_some_and(has_visible_state) || deferred_input_pending(&state, pic),
+                    ime_state.and_then(|ime| schema_shortcut_key(vk, lparam.0, mods, ime)),
+                )
+            };
             if !claimed && schema_shortcut.is_none() && is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             poll_engine_builds(&state);
-            let cached_state = cached_ime_state(&state);
-            let schema_shortcut = cached_state
-                .as_ref()
-                .and_then(|st| schema_shortcut_key(vk, lparam.0, mods, st));
-            let composing = cached_state.as_ref().is_some_and(has_visible_state)
-                || deferred_input_pending(&state, pic);
-            let ascii_mode = {
+            let (schema_shortcut, composing, ascii_mode) = {
                 let st = state.borrow();
-                st.ime_state
-                    .as_ref()
-                    .map_or(st.ascii_mode, |ime| ime.ascii_mode)
+                let ime_state = st.ime_state.as_ref();
+                (
+                    ime_state.and_then(|ime| schema_shortcut_key(vk, lparam.0, mods, ime)),
+                    ime_state.is_some_and(has_visible_state) || deferred_input_pending(&state, pic),
+                    ime_state.map_or(st.ascii_mode, |ime| ime.ascii_mode),
+                )
             };
             if !claimed
                 && schema_shortcut.is_none()
@@ -3270,8 +3284,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             if !claimed
                 && schema_shortcut.is_none()
                 && !should_eat_key(vk, composing, mods)
-                && !cached_ime_state(&state)
-                    .is_some_and(|st| chord_keysym_for_vk(vk, lparam.0, mods, &st).is_some())
+                && !state
+                    .borrow()
+                    .ime_state
+                    .as_ref()
+                    .is_some_and(|ime| chord_keysym_for_vk(vk, lparam.0, mods, ime).is_some())
             {
                 return Ok(BOOL::from(false));
             }
@@ -3350,7 +3367,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 }
             };
             state.borrow_mut().deferred_keys.reset();
-            state.borrow_mut().deployment_loaded();
+            state.borrow_mut().deployment_loaded_cached();
             complete_unhandled_key(keysym, mods, &mut result);
             let ime_state = result.state;
 
@@ -3408,13 +3425,16 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 }
                 (keysym, 0)
             } else {
-                let Some(before_state) =
-                    cached_ime_state(&state).filter(|st| st.chord_composer && !st.ascii_mode)
+                let st = state.borrow();
+                let Some(before_state) = st
+                    .ime_state
+                    .as_ref()
+                    .filter(|ime| ime.chord_composer && !ime.ascii_mode)
                 else {
                     return Ok(BOOL::from(false));
                 };
                 let mods = current_mod_mask();
-                let Some(keysym) = chord_keysym_for_vk(vk, lparam.0, mods, &before_state) else {
+                let Some(keysym) = chord_keysym_for_vk(vk, lparam.0, mods, before_state) else {
                     return Ok(BOOL::from(false));
                 };
                 (keysym, mods)
@@ -3482,7 +3502,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 crate::state::refresh_deployment_hint(&state);
                 return Ok(BOOL::from(consumed));
             };
-            state.borrow_mut().deployment_loaded();
+            state.borrow_mut().deployment_loaded_cached();
             append_key_diagnostic!(
                 "OnKeyUp modifier_tap={is_modifier_tap} accepted={} ascii={}->{}",
                 result.accepted,

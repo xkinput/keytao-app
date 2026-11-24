@@ -104,6 +104,16 @@ fn activate_service(
     client_id: u32,
     activation_flags: u32,
 ) -> Result<()> {
+    fn reset_activation(state: &SharedState) {
+        let mut st = state.borrow_mut();
+        st.thread_mgr = None;
+        st.client_id = 0;
+        st.activation_flags = 0;
+        st.thread_mgr_flags = 0;
+        st.display_attribute_atom = None;
+        st.converted_display_attribute_atom = None;
+    }
+
     let thread_mgr = thread_mgr.ok_or(windows::core::Error::from(
         windows::Win32::Foundation::E_INVALIDARG,
     ))?;
@@ -141,14 +151,7 @@ fn activate_service(
     let advise_result =
         unsafe { keystroke_mgr.AdviseKeyEventSink(client_id, &key_sink_iface, BOOL::from(true)) };
     if let Err(error) = advise_result {
-        let mut st = state.borrow_mut();
-        st.thread_mgr = None;
-        st.client_id = 0;
-        st.activation_flags = 0;
-        st.thread_mgr_flags = 0;
-        st.display_attribute_atom = None;
-        st.converted_display_attribute_atom = None;
-        drop(st);
+        reset_activation(state);
         append_diagnostic(format!("AdviseKeyEventSink failed: {error}"));
         return Err(error);
     }
@@ -164,12 +167,7 @@ fn activate_service(
             unsafe {
                 let _ = keystroke_mgr.UnadviseKeyEventSink(client_id);
             }
-            let mut st = state.borrow_mut();
-            st.thread_mgr = None;
-            st.client_id = 0;
-            st.activation_flags = 0;
-            st.thread_mgr_flags = 0;
-            drop(st);
+            reset_activation(state);
             append_diagnostic(format!("Query ITfSource failed: {error}"));
             return Err(error);
         }
@@ -181,12 +179,7 @@ fn activate_service(
                 unsafe {
                     let _ = keystroke_mgr.UnadviseKeyEventSink(client_id);
                 }
-                let mut st = state.borrow_mut();
-                st.thread_mgr = None;
-                st.client_id = 0;
-                st.activation_flags = 0;
-                st.thread_mgr_flags = 0;
-                drop(st);
+                reset_activation(state);
                 append_diagnostic(format!("Advise ThreadMgrEventSink failed: {error}"));
                 return Err(error);
             }
@@ -205,14 +198,7 @@ fn activate_service(
                     let _ = source.UnadviseSink(thread_sink_cookie);
                     let _ = keystroke_mgr.UnadviseKeyEventSink(client_id);
                 }
-                let mut st = state.borrow_mut();
-                st.thread_mgr = None;
-                st.client_id = 0;
-                st.activation_flags = 0;
-                st.thread_mgr_flags = 0;
-                st.display_attribute_atom = None;
-                st.converted_display_attribute_atom = None;
-                drop(st);
+                reset_activation(state);
                 append_diagnostic(format!("Advise ThreadFocusSink failed: {error}"));
                 return Err(error);
             }

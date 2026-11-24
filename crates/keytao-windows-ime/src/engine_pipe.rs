@@ -43,6 +43,7 @@ use windows::{
 use crate::engine_backend::{EngineHandle, ImeEngineBackend};
 use crate::engine_config::is_descendant;
 use crate::pipe_security::{keytao_runtime_root, process_image, OwnedHandle};
+use crate::state::user_data_dir;
 
 #[path = "generation_activity.rs"]
 mod generation_activity;
@@ -82,8 +83,7 @@ impl Shared {
         if matches!(schema_id, "" | ".default" | keytao_core::switcher_model::SCHEMA_ID) {
             *usable = None;
         } else if usable.is_none() {
-            *usable = keytao_core::default_user_data_dir()
-                .map(|root| keytao_core::track_usable_input_session(&root));
+            *usable = user_data_dir().map(keytao_core::track_usable_input_session);
         }
     }
 

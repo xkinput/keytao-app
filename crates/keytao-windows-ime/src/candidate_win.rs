@@ -15,6 +15,7 @@ use std::{
     fmt::{self, Debug, Write},
     hash::Hasher,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -62,7 +63,7 @@ use crate::{
     guard,
     key_event_sink::{handle_panel_click, PanelClick},
     panel::{candidate_panel_model, PanelRenderer},
-    state::{append_diagnostic, current_theme, diagnostics_enabled, WeakState},
+    state::{append_diagnostic, current_theme, diagnostics_enabled, with_current_theme, WeakState},
 };
 
 const CLASS_NAME: &str = "KeyTaoCandidate\0";
@@ -85,7 +86,7 @@ struct PanelUploadSignature {
 
 // Hash all fields of the derived model/theme Debug output without allocating
 // a formatted string. These signatures are only compared within this process.
-fn value_signature(value: &impl Debug) -> u64 {
+pub(crate) fn value_signature(value: &impl Debug) -> u64 {
     struct SignatureWriter(DefaultHasher);
     impl Write for SignatureWriter {
         fn write_str(&mut self, value: &str) -> fmt::Result {
@@ -214,7 +215,7 @@ struct ClickTarget {
 
 struct CachedPanel {
     model: CandidatePanelModel,
-    theme: ResolvedImeTheme,
+    theme: Arc<ResolvedImeTheme>,
     scale: f32,
     available_width: f32,
     preedit_caret: Option<usize>,
@@ -715,7 +716,7 @@ impl CandidateWindow {
             self.hide();
             return false;
         }
-        let theme = current_theme();
+        let (theme, theme_signature) = current_theme();
         if !self.ensure_window(owner_hwnd, state)
             || !self.ensure_renderer(theme.font.effective_family.as_deref())
         {
@@ -752,7 +753,7 @@ impl CandidateWindow {
             model: value_signature(&(&model, available_width, preedit_caret, hovered, pressed)),
             position: (0, 0),
             scale: scale.to_bits(),
-            theme: value_signature(&theme),
+            theme: theme_signature,
         };
         // Input-pane COM calls can reenter the host after ensure_window().
         // Recheck before the cached-upload fast path trusts our visible flag.
@@ -782,7 +783,7 @@ impl CandidateWindow {
         let rendered = renderer.render_with_pointer(
             &model,
             scale,
-            theme.clone(),
+            &theme,
             available_width,
             preedit_caret,
             hovered,
@@ -889,7 +890,7 @@ impl CandidateWindow {
         let rendered = renderer.render_with_pointer(
             &cached.model,
             cached.scale,
-            cached.theme.clone(),
+            &cached.theme,
             cached.available_width,
             cached.preedit_caret,
             target.hovered.get(),
@@ -915,7 +916,7 @@ impl CandidateWindow {
         owner_hwnd: HWND,
         state: &WeakState,
     ) {
-        let theme = current_theme();
+        let theme = with_current_theme(Clone::clone);
         if !self.ensure_window(owner_hwnd, state)
             || !self.ensure_renderer(theme.font.effective_family.as_deref())
         {
