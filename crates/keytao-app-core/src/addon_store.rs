@@ -755,10 +755,10 @@ pub(crate) fn migrate_snow_package(core: &Core) -> Result<(), CoreError> {
     if !destination.try_exists()? {
         return Ok(());
     }
-    validate_directory(&destination, crate::rime_snow::SCHEMA_ID)?;
-    let stored = read_stored(&destination, crate::rime_snow::SCHEMA_ID)?;
     let key = crate::rime_snow::SCHEMA_ID;
     if !store.metadata_path(key).try_exists()? {
+        validate_directory(&destination, key)?;
+        let stored = read_stored(&destination, key)?;
         let source = safe_path(&destination, "files").map_err(CoreError::Other)?;
         let mut files = stored
             .files

@@ -49,6 +49,7 @@ patch:
 const MAX_FILES: usize = 4096;
 const MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+const STAGE_PREFIX: &str = ".keytao-wanxiang-stage-";
 static OPERATION: Mutex<()> = Mutex::const_new(());
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
@@ -726,6 +727,70 @@ struct Change {
     replacement_hash: Option<String>,
 }
 
+#[cfg(unix)]
+fn stage_owner_exited(pid: u32) -> bool {
+    libc::pid_t::try_from(pid).is_ok_and(|pid| {
+        pid > 0
+            && unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    })
+}
+
+#[cfg(windows)]
+fn stage_owner_exited(pid: u32) -> bool {
+    use windows::Win32::{
+        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    unsafe {
+        let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => handle,
+            Err(error) => return error.code() == ERROR_INVALID_PARAMETER.to_hresult(),
+        };
+        let mut code = 0;
+        let exited = GetExitCodeProcess(handle, &mut code).is_ok() && code != STILL_ACTIVE.0 as u32;
+        let _ = CloseHandle(handle);
+        exited
+    }
+}
+
+fn reclaim_abandoned_work(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some((pid, serial)) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(STAGE_PREFIX))
+            .and_then(|name| name.split_once('-'))
+        else {
+            continue;
+        };
+        let Ok(owner) = pid.parse::<u32>() else {
+            continue;
+        };
+        if owner == 0
+            || pid != owner.to_string()
+            || !serial.parse::<u64>().is_ok_and(|id| serial == id.to_string())
+            || !stage_owner_exited(owner)
+        {
+            continue;
+        }
+        let path = entry.path();
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir() && !is_link(&meta))
+            && ["backup", "source-projection"].into_iter().all(|name| {
+                fs::symlink_metadata(path.join(name))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            })
+            && let Err(error) = fs::remove_dir_all(&path)
+        {
+            tracing::warn!(path = %path.display(), %error, "failed to reclaim abandoned add-on staging directory");
+        }
+    }
+}
+
 /// Must survive until deployment succeeds. An unfinished receipt restores the
 /// old source files, including on async command cancellation/unwinding.
 pub struct InstallReceipt {
@@ -758,9 +823,10 @@ impl InstallReceipt {
             .map_err(|_| "附加方案安装或卸载正在进行中")?;
         fs::create_dir_all(root).map_err(|e| format!("创建用户目录失败：{e}"))?;
         let root = root.canonicalize().map_err(|e| e.to_string())?;
+        reclaim_abandoned_work(&root);
         let work = loop {
             let path = root.join(format!(
-                ".keytao-wanxiang-stage-{}-{}",
+                "{STAGE_PREFIX}{}-{}",
                 std::process::id(),
                 NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
             ));
@@ -1053,7 +1119,7 @@ impl InstallReceipt {
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .starts_with(".keytao-wanxiang-stage-")
+                .starts_with(STAGE_PREFIX)
         {
             return Err("万象临时目录不在用户目录内".into());
         }
@@ -1823,7 +1889,7 @@ pub async fn manage_grammar(
             GRAMMAR_FILE
         };
         let download = if installed && !safe_target(&root, grammar_file)?.is_file() {
-            Some(download_grammar(core, &root, &mut cancel).await?)
+            Some(download_grammar(core, &receipt.work, &mut cancel).await?)
         } else {
             None
         };

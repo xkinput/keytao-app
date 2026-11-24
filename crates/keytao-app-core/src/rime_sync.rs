@@ -5,6 +5,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +269,13 @@ pub fn save_settings(
 }
 
 pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
+    sync_user_data_with_timeout(host, Duration::from_secs(120)).await
+}
+
+async fn sync_user_data_with_timeout(
+    host: impl ImeHost,
+    completion_timeout: Duration,
+) -> Result<(), String> {
     let root = host.user_root()?;
     let settings = read_settings(&root)?;
     if validate_installation_id(&settings.installation_id)? != settings.installation_id {
@@ -281,7 +289,9 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
             return Err(error);
         }
     }
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let started_at = tokio::time::Instant::now();
+    let start_deadline = started_at + Duration::from_secs(20);
+    let completion_deadline = started_at + completion_timeout;
     let mut process_id = None;
     loop {
         match keytao_core::read_user_data_sync_result(&request_root) {
@@ -304,18 +314,26 @@ pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
             }
             _ => {}
         }
+        let now = tokio::time::Instant::now();
         if let Some(process_id) = process_id {
             if !process_alive(process_id) {
                 return Err("IME exited before completing user data sync".into());
             }
-        } else if tokio::time::Instant::now() >= deadline
+        } else if now >= start_deadline
             && keytao_core::cancel_user_data_sync(&request_root, generation)?
         {
             return Err(
                 "IME did not start syncing within 20 seconds; make sure it is running".into(),
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if now >= completion_deadline {
+            return Err(
+                "Timed out waiting for IME to complete Rime user data sync; \
+                 check that the sync directory is available"
+                    .into(),
+            );
+        }
+        tokio::time::sleep_until((now + Duration::from_millis(100)).min(completion_deadline)).await;
     }
 }
 
@@ -583,6 +601,31 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(result.ok && result.finished_at != 0);
+        }
+
+        #[tokio::test]
+        async fn sync_times_out_when_a_live_ime_never_completes() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("build")).unwrap();
+            save_settings(root.path(), "device", "").unwrap();
+            let host = MockHost {
+                root: root.path().to_owned(),
+                process_id: Some(std::process::id()),
+                finish_after: None,
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                sync_user_data_with_timeout(host, Duration::from_millis(20)),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.contains("Timed out waiting for IME to complete"));
+            let result = keytao_core::read_user_data_sync_result(root.path())
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.process_id, std::process::id());
+            assert_eq!(result.finished_at, 0);
         }
 
         #[tokio::test]

@@ -468,6 +468,24 @@ fn legacy_snow_fixture(root: &Path) -> crate::scheme_host::tests::AddonHost {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
+#[test]
+fn snow_package_listing_ignores_modified_legacy_source_after_migration() {
+    let _serial = wanxiang::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let host = legacy_snow_fixture(root.path());
+    let store = crate::package_store::PackageStore::new(&host.core);
+    let legacy_schema = store.addon_path(SNOW.id).join("files/snow_jiandao.schema.yaml");
+    let mut bytes = fs::read(&legacy_schema).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&legacy_schema, bytes).unwrap();
+
+    let installed = crate::packages::list_installed_packages(&host.core).unwrap();
+    assert!(installed.iter().any(|package| package.scheme_key == SNOW.id));
+}
+
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
 #[tokio::test]
 async fn snow_builtin_migration_keeps_newer_package_and_prevents_reinstall_after_removal() {
     let _serial = wanxiang::TEST_SERIAL

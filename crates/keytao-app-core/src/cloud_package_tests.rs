@@ -961,8 +961,13 @@ async fn logout_while_storage_download_is_running_prevents_local_account_referen
     let downloaded = bytes.clone();
     let storage = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = [0; 4096];
-        stream.read(&mut request).await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        while !request.ends_with(b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "request ended prematurely");
+            request.extend_from_slice(&buffer[..count]);
+        }
         download_core.clear_auth().unwrap();
         stream
             .write_all(

@@ -9,15 +9,18 @@ struct ReleaseCache {
     release: ReleaseInfo,
 }
 
-pub fn build_client(core: &Core) -> Result<reqwest::Client, String> {
-    client_builder(core).build().map_err(|e| e.to_string())
+pub(crate) fn client_builder(core: &Core) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
+        .user_agent(format!("keytao-app/{}", core.env().app_version))
+        .connect_timeout(std::time::Duration::from_secs(8));
+    // Loopback HTTP fixtures must bypass the host's system proxy.
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    builder
 }
 
-pub(crate) fn client_builder(core: &Core) -> reqwest::ClientBuilder {
-    let version = core.env().app_version.clone();
-    reqwest::Client::builder()
-        .user_agent(format!("keytao-app/{version}"))
-        .connect_timeout(std::time::Duration::from_secs(8))
+pub fn build_client(core: &Core) -> Result<reqwest::Client, String> {
+    client_builder(core).build().map_err(|e| e.to_string())
 }
 
 fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
