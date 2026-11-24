@@ -117,6 +117,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
     private var clipboardHistory = KeyTaoClipboardHistory()
     private var clipboardHistoryLoaded = false
+    private var clipboardHistoryNeedsSave = false
     private var clipboardSuppression: (text: String, changeCount: Int)?
     private var clipboardMedia: [ClipboardMedia] = []
     private var clipboardLastReadChangeCount: Int?
@@ -242,7 +243,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         keyboardView = view
         refreshRuntimeLogCollection()
         view.update(hapticsAvailable: hasFullAccess)
-        applyKeyboardPresentation(config: config, force: true)
+        applyKeyboardPresentation(config: config)
         applyHostTraits()
         startRuntimeIfNeeded()
     }
@@ -277,7 +278,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         keyboardView?.update(hapticsAvailable: hasFullAccess)
         keyboardView?.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
         let config = engine.loadConfig()
-        applyKeyboardPresentation(config: config, force: true)
+        applyKeyboardPresentation(config: config)
         updateThemeForCurrentAppearance(systemColorScheme: systemColorScheme)
         applyHostTraits()
         startRuntimeIfNeeded()
@@ -686,7 +687,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     func keyboardViewEmojiSearchModeDidChange(_ view: KeyTaoIOSKeyboardView) {
         guard let config = baseKeyboardConfig else { return }
-        applyKeyboardPresentation(config: config, force: true)
+        applyKeyboardPresentation(config: config)
     }
 
     /// The layout drops paging keys when the runtime cannot turn a page
@@ -949,7 +950,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                 next = applySetting(to: next, key: settingKey, value: String(describing: settingValue)) ?? next
             }
             baseKeyboardConfig = next
-            applyKeyboardPresentation(config: next, force: true)
+            applyKeyboardPresentation(config: next)
             let configWritten = engine.persistSettings(patch: patch)
             let themeWritten = engine.persistThemeUi(colorScheme: "auto", accentHex: "", resetAppearance: true)
             engine.releaseCaches()
@@ -959,7 +960,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
         guard let patchValue = settingPatch(key: key, value: value) else { return }
         if let current = baseKeyboardConfig {
-            applyKeyboardPresentation(config: current, force: true)
+            applyKeyboardPresentation(config: current)
         }
         if !engine.persistSettings(patch: [key: patchValue]) {
             showMessage("设置保存失败")
@@ -1904,21 +1905,23 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func loadClipboardHistoryIfNeeded() {
-        clipboardHistory.setLimit(clipboardConfigLoaded ? clipboardConfig.clipboardHistoryLimit : nil)
+        if clipboardHistory.setLimit(clipboardConfigLoaded ? clipboardConfig.clipboardHistoryLimit : nil) {
+            reconcileClipboardMedia()
+            persistClipboardHistory()
+        }
         guard !clipboardHistoryLoaded, let file = clipboardHistoryFile else { return }
         guard FileManager.default.fileExists(atPath: file.path) else {
             clipboardHistoryLoaded = true
             return
         }
         do {
-            let saved = try KeyTaoClipboardHistory(contentsOf: file, limit: 200)
-            for record in saved.records {
-                if record.text != nil {
-                    clipboardHistory.upsert(record)
-                    continue
-                }
-                guard record.key.hasPrefix("media:"), let mime = record.mime else { continue }
+            let saved = try KeyTaoClipboardHistory.readRecords(contentsOf: file)
+            var loadedMediaIDs = Set<String>()
+            let records = saved.filter { record in
+                if record.text != nil { return true }
+                guard record.key.hasPrefix("media:"), let mime = record.mime else { return false }
                 let id = String(record.key.dropFirst("media:".count))
+                if loadedMediaIDs.contains(id) { return true }
                 let url = file.deletingLastPathComponent().appendingPathComponent(id)
                 let components = id.split(separator: ".")
                 let digest = components.first.map(String.init) ?? ""
@@ -1928,29 +1931,34 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                       let type = UTType(filenameExtension: url.pathExtension) ?? UTType(mimeType: mime),
                       let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
                       let size = attributes[.size] as? NSNumber,
-                      size.intValue > 0, size.intValue <= Self.clipboardMediaMaxBytes else { continue }
-                let preview = Self.clipboardThumbnail(file: url, mime: mime)
+                      size.intValue > 0, size.intValue <= Self.clipboardMediaMaxBytes else { return false }
                 clipboardMedia.append(ClipboardMedia(
                     id: id, file: url, pasteboardType: type.identifier, mime: mime,
                     name: record.name ?? "剪贴板文件", size: size.intValue,
-                    width: preview.width, height: preview.height, timestamp: record.timestamp, thumb: preview.image
+                    width: record.width, height: record.height, timestamp: record.timestamp, thumb: nil
                 ))
-                clipboardHistory.upsert(record)
+                loadedMediaIDs.insert(id)
+                return true
             }
+            clipboardHistory = KeyTaoClipboardHistory(records: clipboardHistory.records + records, limit: clipboardHistory.limit)
             reconcileClipboardMedia()
             clipboardHistoryLoaded = true
-            persistClipboardHistory()
+            if clipboardHistory.records != saved {
+                persistClipboardHistory()
+            }
         } catch {
             keyTaoKeyboardLog.error("Clipboard history could not be loaded")
         }
     }
 
     private func persistClipboardHistory() {
+        clipboardHistoryNeedsSave = true
         guard clipboardHistoryLoaded, let file = clipboardHistoryFile else { return }
         do {
             let data = try clipboardHistory.encoded()
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            clipboardHistoryNeedsSave = false
         } catch {
             showMessage("剪贴板历史保存失败")
         }
@@ -2024,9 +2032,17 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             copiedAt: clipboardObservedAt
         )
         if clipboardCaptureAllowed {
-            clipboardHistory.upsert(KeyTaoClipboardRecord(key: text, text: text, timestamp: clipboardObservedAt))
-            reconcileClipboardMedia()
-            persistClipboardHistory()
+            let alreadyRecorded = clipboardLastReadChangeCount == expectedChangeCount &&
+                clipboardHistory.records.contains {
+                    $0.key == text && $0.text == text && $0.timestamp == clipboardObservedAt
+                }
+            if !alreadyRecorded {
+                clipboardHistory.upsert(KeyTaoClipboardRecord(key: text, text: text, timestamp: clipboardObservedAt))
+                reconcileClipboardMedia()
+            }
+            if !alreadyRecorded || clipboardHistoryNeedsSave {
+                persistClipboardHistory()
+            }
         }
         return true
     }
@@ -2262,14 +2278,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private func refreshInputAvailability() {
         refreshEngineCapabilities()
         let message: String
-        let installed = engine.algorithmEnabled && engine.hasInstalledSchema()
-        let deployed = installed && engine.hasDeployedSchema()
-        let ready = installed && deployed && engine.nativeReady
+        let (installed, deployed, deploying) = engine.algorithmEnabled ? engine.schemaAvailability() : (false, false, false)
+        let ready = deployed && engine.nativeReady
         if !engine.algorithmEnabled {
             message = "算法引擎已关闭"
         } else if ready {
             message = ""
-        } else if engine.isDeploying() {
+        } else if deploying {
             message = "正在部署方案…"
         } else if !installed && !hasFullAccess {
             message = "请在系统设置中允许 KeyTao 完全访问"
@@ -2320,10 +2335,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         currentState = engine.state().withoutTransientCommit()
         let systemColorScheme = currentSystemColorScheme()
         updateThemeForCurrentAppearance(systemColorScheme: systemColorScheme)
-        applyKeyboardPresentation(
-            config: engine.loadConfig(),
-            force: true
-        )
+        applyKeyboardPresentation(config: engine.loadConfig())
         if keyboardView?.isRimeMenuOpen == true { refreshRimeOptions() }
     }
 
@@ -2469,10 +2481,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard force || lastPresentationLandscape != isLandscape else {
             return
         }
-        applyKeyboardPresentation(config: config, force: true)
+        applyKeyboardPresentation(config: config)
     }
 
-    private func applyKeyboardPresentation(config: KeyTaoIOSImeConfig, force: Bool = false) {
+    private func applyKeyboardPresentation(config: KeyTaoIOSImeConfig) {
         guard let keyboardView else {
             return
         }
@@ -2487,16 +2499,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let isLandscape = currentInterfaceIsLandscape()
         let fallbackProfile = config.floating.profile(isLandscape: isLandscape)
         let state = layoutStateStore.load(isLandscape: isLandscape, fallback: fallbackProfile)
-        let presentation = keyboardLayoutPresentation(state: state, isLandscape: isLandscape)
-        if !force, lastPresentationLandscape == isLandscape,
-           layoutState == state,
-           layoutPresentation == presentation,
-           keyboardView.currentConfig() == presentedKeyboardConfig(config, state: state, presentation: presentation) {
-            return
-        }
         lastPresentationLandscape = isLandscape
-        layoutState = state
-        layoutPresentation = presentation
         applyKeyboardPresentation(config: config, state: state)
     }
 
@@ -2966,16 +2969,6 @@ struct KeyTaoHostTraits: Equatable {
             return "继续"
         default:
             return nil
-        }
-    }
-
-    /// Shift state the host expects at the start of a fresh composition.
-    var wantsAutoShift: Bool {
-        switch autocapitalizationType {
-        case .words, .sentences, .allCharacters:
-            return true
-        default:
-            return false
         }
     }
 }

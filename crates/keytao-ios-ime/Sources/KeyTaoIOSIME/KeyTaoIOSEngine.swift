@@ -263,28 +263,25 @@ enum KeyTaoIOSPaths {
         userRoot.appendingPathComponent("ios_ime.json")
     }
 
-    private static func isolatedSchemaState(userRoot: URL) -> Int32? {
+    static func schemaAvailability(
+        userRoot: URL,
+        sharedDir: URL? = nil
+    ) -> (installed: Bool, deployed: Bool, legacyDeploying: Bool?) {
         let state = userRoot.path.withCString { user in
-            guard let shared = sharedDataDir(userRoot: userRoot) else {
+            guard let shared = sharedDir ?? sharedDataDir(userRoot: userRoot) else {
                 return keytao_isolated_schema_state_at(user, nil)
             }
             return shared.path.withCString { keytao_isolated_schema_state_at(user, $0) }
         }
-        return state >= 0 ? state : nil
-    }
+        if state >= 0 { return (state > 0, state == 2, nil) }
 
-    static func hasInstalledSchema(userRoot: URL) -> Bool {
-        if let state = isolatedSchemaState(userRoot: userRoot) { return state > 0 }
-        let schemas = configuredSchemas(userRoot: userRoot)
-        return !schemas.isEmpty && schemas.allSatisfy {
-            FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
-        }
-    }
-
-    static func hasDeployedSchema(userRoot: URL) -> Bool {
-        if let state = isolatedSchemaState(userRoot: userRoot) { return state == 2 }
         let schemas = configuredSchemas(userRoot: userRoot)
         let build = userRoot.appendingPathComponent("build", isDirectory: true)
+        let deploying = FileManager.default.fileExists(atPath: build.appendingPathComponent(".keytao-deploying").path)
+        let installed = !schemas.isEmpty && schemas.allSatisfy {
+            FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
+        }
+        guard installed, !deploying else { return (installed, false, deploying) }
         let bundle = Bundle.main
         let coreVersion = bundle.url(forResource: "keytao-core-version", withExtension: nil)
             .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
@@ -294,27 +291,17 @@ enum KeyTaoIOSPaths {
         let sharedStamp = try? String(
             contentsOf: userRoot.appendingPathComponent("rime-data/.bundled-version"), encoding: .utf8
         )
-        return KeyTaoIOSDeploymentState.isCurrent(
-                marker: try? Data(contentsOf: build.appendingPathComponent(".keytao-deployed")),
-                coreVersion: coreVersion,
-                bundleStamp: bundleStamp,
-                sharedStamp: sharedStamp,
-                schemas: schemas,
-                deploying: isDeploying(userRoot: userRoot)
-            )
-            && schemas.allSatisfy {
-                FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
-            }
-            && schemas.allSatisfy {
-                FileManager.default.fileExists(atPath: build.appendingPathComponent("\($0).schema.yaml").path)
-            }
-    }
-
-    static func isDeploying(userRoot: URL) -> Bool {
-        if isolatedSchemaState(userRoot: userRoot) != nil {
-            return userRoot.path.withCString { keytao_deployment_in_progress_at($0) }
+        let deployed = KeyTaoIOSDeploymentState.isCurrent(
+            marker: try? Data(contentsOf: build.appendingPathComponent(".keytao-deployed")),
+            coreVersion: coreVersion,
+            bundleStamp: bundleStamp,
+            sharedStamp: sharedStamp,
+            schemas: schemas,
+            deploying: deploying
+        ) && schemas.allSatisfy {
+            FileManager.default.fileExists(atPath: build.appendingPathComponent("\($0).schema.yaml").path)
         }
-        return FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("build/.keytao-deploying").path)
+        return (installed, deployed, deploying)
     }
 
     private static func configuredSchemas(userRoot: URL) -> [String] {
@@ -404,6 +391,7 @@ final class KeyTaoIOSEngine {
     private var schemaLogoGeneration: UInt64 = 0
     private var schemaLogoKey: SchemaLogoKey?
     private var schemaLogoRequest: SchemaLogoKey?
+    private var schemaLogoLastCheckUptime: TimeInterval = 0
     private(set) var schemaLogoImage: UIImage?
     var onSchemaLogoChanged: ((UIImage?) -> Void)?
     private var session: UnsafeMutableRawPointer?
@@ -445,20 +433,6 @@ final class KeyTaoIOSEngine {
 
     deinit {
         close()
-    }
-
-    func ensureReady() -> Bool {
-        guard algorithmEnabled else { return false }
-        if nativeReady {
-            return true
-        }
-        guard KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot) else {
-            return false
-        }
-        guard KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot) else {
-            return false
-        }
-        return initializeRuntime()
     }
 
     /// Keyboard extensions are launched on demand by the host and must show an
@@ -534,9 +508,8 @@ final class KeyTaoIOSEngine {
             }
         }
         guard readAlgorithmEnabled(userRoot: userRoot),
-              KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot),
-              KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot),
-              let sharedDir = KeyTaoIOSPaths.sharedDataDir(userRoot: userRoot) else {
+              let sharedDir = KeyTaoIOSPaths.sharedDataDir(userRoot: userRoot),
+              KeyTaoIOSPaths.schemaAvailability(userRoot: userRoot, sharedDir: sharedDir).deployed else {
             return nil
         }
         let initStarted = KeyTaoLog.now()
@@ -565,13 +538,6 @@ final class KeyTaoIOSEngine {
         guard Self.readAlgorithmEnabled(userRoot: userRoot) else {
             if let prepared { keytao_destroy_session(prepared) }
             return false
-        }
-        if nativeReady {
-            // A synchronous ensureReady() won the race; drop the spare session.
-            if let prepared {
-                keytao_destroy_session(prepared)
-            }
-            return true
         }
         guard let prepared else {
             nativeReady = false
@@ -611,16 +577,16 @@ final class KeyTaoIOSEngine {
         return true
     }
 
-    func hasInstalledSchema() -> Bool {
-        KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot)
+    func schemaAvailability() -> (installed: Bool, deployed: Bool, deploying: Bool) {
+        let availability = KeyTaoIOSPaths.schemaAvailability(userRoot: userRoot)
+        let deploying = !(nativeReady && availability.deployed) && (
+            availability.legacyDeploying ?? userRoot.path.withCString { keytao_deployment_in_progress_at($0) }
+        )
+        return (availability.installed, availability.deployed, deploying)
     }
 
     func hasDeployedSchema() -> Bool {
-        KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot)
-    }
-
-    func isDeploying() -> Bool {
-        KeyTaoIOSPaths.isDeploying(userRoot: userRoot)
+        KeyTaoIOSPaths.schemaAvailability(userRoot: userRoot).deployed
     }
 
     private static func readAlgorithmEnabled(userRoot: URL) -> Bool {
@@ -1073,28 +1039,6 @@ final class KeyTaoIOSEngine {
         return stable
     }
 
-    func reload() -> Bool {
-        refreshRuntimeLogCollection()
-        let started = KeyTaoLog.now()
-        var reloaded = false
-        defer {
-            KeyTaoLog.event("rime", "reload", duration: (KeyTaoLog.now() - started) * 1000) {
-                ["ok": reloaded]
-            }
-        }
-        if !nativeReady && !ensureReady() {
-            return false
-        }
-        let ok = keytao_reload()
-        reloaded = ok
-        if ok {
-            schemaLogoGeneration &+= 1
-            refreshCapabilities()
-            lastState = state().withoutTransientCommit()
-        }
-        return ok
-    }
-
     /// Stamp detection lives in the common layer (`ReloadStamp`), so the
     /// signature the containing app reports and the one the keyboard compares
     /// come from the same function.
@@ -1143,11 +1087,6 @@ final class KeyTaoIOSEngine {
         refreshCapabilities()
     }
 
-    private func initializeRuntime() -> Bool {
-        defer { refreshRuntimeLogCollection() }
-        return installPreparedSession(Self.prepareRuntime(userRoot: userRoot))
-    }
-
     /// Re-reads the `KEYTAO_CAP_*` mask for whatever session is installed now.
     /// Called on every session install, drop and reload, so no caller ever has
     /// to reason about which handle a cached mask belonged to.
@@ -1192,6 +1131,11 @@ final class KeyTaoIOSEngine {
         guard !id.isEmpty, !id.hasPrefix(".") else { return }
         let key = SchemaLogoKey(id: id, modificationTime: nil, generation: schemaLogoGeneration)
         guard schemaLogoRequest != key else { return }
+        if schemaLogoKey?.id == id, schemaLogoKey?.generation == key.generation,
+           KeyTaoLog.now() - schemaLogoLastCheckUptime < 1 {
+            schemaLogoRequest = nil
+            return
+        }
         schemaLogoRequest = key
         let cachedKey = schemaLogoKey
         let cachedImage = schemaLogoImage
@@ -1201,6 +1145,7 @@ final class KeyTaoIOSEngine {
             DispatchQueue.main.async {
                 guard let self, self.schemaLogoRequest == key, self.schemaLogoGeneration == key.generation else { return }
                 self.schemaLogoRequest = nil
+                self.schemaLogoLastCheckUptime = KeyTaoLog.now()
                 let loadedKey = SchemaLogoKey(id: key.id, modificationTime: modificationTime, generation: key.generation)
                 guard self.schemaLogoKey != loadedKey else { return }
                 self.schemaLogoKey = loadedKey

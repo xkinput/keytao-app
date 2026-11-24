@@ -337,7 +337,7 @@ iOS 由于不能在键盘 view 外绘制候选窗，候选栏固定在键盘顶�
 `KeyTaoIOSEngine.capabilities` 把两者合成一个缓存值：
 
 - 还没有 session 时用 `KeyTaoEngineCapabilities.current`（ABI 级）。**不能**直接用 session 版本，否则运行库在后台启动的那几帧里掩码是 0，布局会先把翻页键丢掉、session 就绪后再长回来，出现闪烁。
-- `installPreparedSession()` / `initializeRuntime()` 装上 session 后立刻 `refreshCapabilities()` 改用 session 掩码；`close()` 和 reload（`reload()` / `reloadIfNeeded()`）同样刷新，因此 session 重建、runtime 换代都不会留下属于旧 handle 的缓存。
+- `installPreparedSession()` 装上 session 后立刻 `refreshCapabilities()` 改用 session 掩码；`close()` 和 `reloadIfNeeded()` 同样刷新，因此 session 重建、runtime 换代都不会留下属于旧 handle 的缓存。
 
 `KeyTaoKeyboardViewController.refreshEngineCapabilities()` 在 `refreshInputAvailability()`（冷启动、每次 `viewWillAppear`）和 `reloadIfNeeded()` 里读这个值，变化时 `KeyTaoIOSKeyboardView.update(engineCapabilities:)` 推给 view 并重排。
 
