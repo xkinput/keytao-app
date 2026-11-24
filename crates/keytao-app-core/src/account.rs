@@ -113,6 +113,16 @@ impl<'a> ApiClient<'a> {
         body: Option<Value>,
     ) -> Result<Value, CoreError> {
         let client = build_client(self.core).map_err(CoreError::Other)?;
+        self.request_with_client(&client, method, path, body).await
+    }
+
+    async fn request_with_client(
+        &self,
+        client: &reqwest::Client,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, CoreError> {
         for attempt in 0..2 {
             let token = self.token()?;
             throttle(self.api_base).await;
@@ -631,6 +641,59 @@ pub async fn keytao_me(core: &Core, token: String) -> Result<AppAuthUser, CoreEr
 
 pub async fn get_account_stats(core: &Core) -> Result<AccountStats, CoreError> {
     get_account_stats_at(core, API_BASE).await
+}
+
+pub async fn issue_website_session(
+    core: &Core,
+    origin: &str,
+    account_id: i64,
+) -> Result<String, CoreError> {
+    issue_website_session_at(core, API_BASE, origin, account_id).await
+}
+
+async fn issue_website_session_at(
+    core: &Core,
+    api_base: &str,
+    origin: &str,
+    account_id: i64,
+) -> Result<String, CoreError> {
+    if !matches!(origin, "https://keytao.rea.ink" | "https://keytao.vercel.app") {
+        return Err(CoreError::Permission("无效的 KeyTao 网站地址".into()));
+    }
+    let api = ApiClient::new(core, api_base);
+    if api.account_id != Some(account_id) {
+        return Err(CoreError::Permission("登录账号已变化".into()));
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(format!("keytao-app/{}", core.env().app_version))
+        .connect_timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| CoreError::Network(error.to_string()))?;
+    let response = api
+        .request_with_client(
+            &client,
+            reqwest::Method::POST,
+            "/api/auth/app-webview-session",
+            Some(serde_json::json!({ "origin": origin })),
+        )
+        .await?;
+    let app_token = api.token()?;
+    response["grant"]
+        .as_str()
+        .filter(|grant| {
+            *grant != app_token
+                && grant.len() <= 4096
+                && grant.split('.').count() == 3
+                && grant.split('.').all(|part| {
+                    !part.is_empty()
+                        && part.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                        })
+                })
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| CoreError::Other("网站登录授权格式不正确".into()))
 }
 
 async fn get_account_stats_at(core: &Core, api_base: &str) -> Result<AccountStats, CoreError> {

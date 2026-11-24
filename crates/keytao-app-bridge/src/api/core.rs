@@ -790,6 +790,12 @@ pub async fn get_account_stats() -> Result<AccountStatsDto, String> {
     )
 }
 
+pub async fn issue_website_session(origin: String, account_id: i64) -> Result<String, String> {
+    keytao_app_core::account::issue_website_session(&runtime::state()?.core, &origin, account_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn account_login(name: String, password: String) -> Result<AccountUserDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;

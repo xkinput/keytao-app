@@ -77,6 +77,30 @@ async fn respond_after(
 }
 
 #[tokio::test]
+async fn website_grant_is_requested_for_the_selected_site_and_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    core.import_legacy_state(Some("app.bearer.only".into()), Some(json!({"id":7})), false)
+        .unwrap();
+    let origin = "https://keytao.vercel.app";
+    let (url, server) = respond("200 OK", r#"{"grant":"web.view-grant.signature"}"#).await;
+    assert_eq!(
+        issue_website_session_at(&core, &url, origin, 7).await.unwrap(),
+        "web.view-grant.signature"
+    );
+    let request = server.await.unwrap();
+    assert!(request.starts_with("POST /api/auth/app-webview-session HTTP/1.1\r\n"));
+    assert!(request.contains("\r\nauthorization: Bearer app.bearer.only\r\n"));
+    assert!(request.ends_with(r#"{"origin":"https://keytao.vercel.app"}"#));
+    assert!(issue_website_session_at(&core, &url, origin, 8).await.is_err());
+    assert!(issue_website_session_at(&core, &url, "https://outside.invalid", 7).await.is_err());
+
+    let (url, server) = respond("200 OK", r#"{"grant":"app.bearer.only"}"#).await;
+    assert!(issue_website_session_at(&core, &url, origin, 7).await.is_err());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn account_stats_use_the_signed_in_user_and_website_counts() {
     let dir = tempfile::tempdir().unwrap();
     let core = open_core(dir.path());

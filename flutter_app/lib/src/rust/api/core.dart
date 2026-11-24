@@ -333,6 +333,14 @@ Future<AccountUserDto?> accountSession() =>
 Future<AccountStatsDto> getAccountStats() =>
     RustLib.instance.api.crateApiCoreGetAccountStats();
 
+Future<String> issueWebsiteSession({
+  required String origin,
+  required PlatformInt64 accountId,
+}) => RustLib.instance.api.crateApiCoreIssueWebsiteSession(
+  origin: origin,
+  accountId: accountId,
+);
+
 Future<AccountUserDto> accountLogin({
   required String name,
   required String password,
