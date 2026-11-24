@@ -2,7 +2,8 @@ use crate::{
     Core, CoreError,
     ime_host::ImeHost,
     ime_paths::path_string,
-    scheme::{api_error_message, build_client},
+    scheme::{api_error_message, client_builder},
+    user_words::UserWord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -72,6 +73,13 @@ pub struct UserDictionaryDeletionConfirmation {
 
 pub(crate) const API_BASE: &str = "https://keytao.rea.ink";
 
+fn account_client_builder(core: &Core) -> reqwest::ClientBuilder {
+    let builder = client_builder(core);
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    builder
+}
+
 async fn throttle(api_base: &str) {
     static REQUESTS: OnceLock<tokio::sync::Mutex<HashMap<String, Instant>>> = OnceLock::new();
     let mut requests = REQUESTS.get_or_init(Default::default).lock().await;
@@ -112,7 +120,9 @@ impl<'a> ApiClient<'a> {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, CoreError> {
-        let client = build_client(self.core).map_err(CoreError::Other)?;
+        let client = account_client_builder(self.core)
+            .build()
+            .map_err(|error| CoreError::Other(error.to_string()))?;
         self.request_with_client(&client, method, path, body).await
     }
 
@@ -175,9 +185,7 @@ impl<'a> ApiClient<'a> {
     }
 
     pub(crate) async fn download_url(&self, path: &str) -> Result<String, CoreError> {
-        let client = reqwest::Client::builder()
-            .user_agent(format!("keytao-app/{}", self.core.env().app_version))
-            .connect_timeout(Duration::from_secs(8))
+        let client = account_client_builder(self.core)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| CoreError::Other(error.to_string()))?;
@@ -220,67 +228,67 @@ impl<'a> ApiClient<'a> {
     }
 
     async fn refresh(&self, token: &str) -> Result<(), CoreError> {
-        if token_timing(token).is_none_or(|timing| {
-            timing.exp <= now_seconds() || timing.id <= 0 || Some(timing.id) != self.account_id
-        }) {
+        let Some(timing) = token_timing(token).filter(|timing| {
+            timing.exp > now_seconds() && timing.id > 0 && Some(timing.id) == self.account_id
+        }) else {
+            clear_token(self.core, token)?;
+            return Err(CoreError::Permission("登录已过期，请重新登录".into()));
+        };
+        let client = account_client_builder(self.core)
+            .build()
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        throttle(self.api_base).await;
+        if self.token()? != token {
+            return Err(CoreError::Permission("登录状态已更改".into()));
+        }
+        if timing.exp <= now_seconds() {
             clear_token(self.core, token)?;
             return Err(CoreError::Permission("登录已过期，请重新登录".into()));
         }
-        let result = async {
-            let client = build_client(self.core).map_err(CoreError::Other)?;
-            throttle(self.api_base).await;
-            if self.token()? != token {
-                return Err(CoreError::Permission("登录状态已更改".into()));
+        let response = client
+            .post(format!("{}/api/auth/refresh", self.api_base))
+            .bearer_auth(token)
+            .timeout(Duration::from_secs(12))
+            .send()
+            .await
+            .map_err(|error| CoreError::Network(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = api_error_message(response, "刷新登录失败").await;
+            if matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) {
+                clear_token(self.core, token)?;
             }
-            if token_timing(token).is_none_or(|timing| {
-                timing.exp <= now_seconds() || timing.id <= 0 || Some(timing.id) != self.account_id
-            }) {
-                return Err(CoreError::Permission("登录已过期，请重新登录".into()));
-            }
-            let response = client
-                .post(format!("{}/api/auth/refresh", self.api_base))
-                .bearer_auth(token)
-                .timeout(Duration::from_secs(12))
-                .send()
-                .await
-                .map_err(|error| CoreError::Network(error.to_string()))?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(CoreError::Other(format!(
-                    "HTTP {}: {}",
-                    status.as_u16(),
-                    api_error_message(response, "刷新登录失败").await
-                )));
-            }
-            let value: Value = response
-                .json()
-                .await
-                .map_err(|error| CoreError::Other(format!("解析登录响应失败: {error}")))?;
-            let refreshed = value["token"]
-                .as_str()
-                .filter(|token| {
-                    token.len() <= 4096
-                        && token_timing(token).is_some_and(|timing| {
-                            timing.exp > now_seconds()
-                                && timing.iat <= timing.exp
-                                && timing.id > 0
-                                && Some(timing.id) == self.account_id
-                        })
+            return Err(CoreError::Other(format!(
+                "HTTP {}: {message}",
+                status.as_u16()
+            )));
+        }
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|error| CoreError::Other(format!("解析登录响应失败: {error}")))?;
+        let Some(refreshed) = value["token"].as_str().filter(|token| {
+            token.len() <= 4096
+                && token_timing(token).is_some_and(|timing| {
+                    timing.exp > now_seconds()
+                        && timing.iat <= timing.exp
+                        && timing.id > 0
+                        && Some(timing.id) == self.account_id
                 })
-                .ok_or_else(|| CoreError::Other("刷新登录响应格式不正确".into()))?;
-            self.core.update_state(|state| {
-                if state.auth_token.as_deref() == Some(token) {
-                    state.auth_token = Some(refreshed.into());
-                }
-            })?;
-            self.token()?;
-            Ok(())
-        }
-        .await;
-        if result.is_err() {
+        }) else {
             clear_token(self.core, token)?;
-        }
-        result
+            return Err(CoreError::Other("刷新登录响应格式不正确".into()));
+        };
+        self.core.update_state(|state| {
+            if state.auth_token.as_deref() == Some(token) {
+                state.auth_token = Some(refreshed.into());
+            }
+        })?;
+        self.token()?;
+        Ok(())
     }
 }
 
@@ -582,7 +590,9 @@ async fn keytao_login_at(
             return Err("用户名和密码不能为空".into());
         }
 
-        let client = build_client(core)?;
+        let client = account_client_builder(core)
+            .build()
+            .map_err(|error| error.to_string())?;
         throttle(api_base).await;
         let response = client
             .post(format!("{api_base}/api/auth/login"))
@@ -600,17 +610,13 @@ async fn keytao_login_at(
             .json::<AppAuthSession>()
             .await
             .map_err(|e| format!("解析登录响应失败: {e}"))?;
-        if let Err(error) = serde_json::to_value(&session.user)
-            .map_err(CoreError::from)
-            .and_then(|user| {
-                core.update_state(|state| {
-                    state.auth_token = Some(session.token.clone());
-                    state.user = Some(user);
-                })
-            })
-        {
-            tracing::warn!(%error, "Failed to persist login session");
-        }
+        let user = serde_json::to_value(&session.user)
+            .map_err(|error| format!("登录成功但无法保存登录状态: {error}"))?;
+        core.update_state(|state| {
+            state.auth_token = Some(session.token.clone());
+            state.user = Some(user);
+        })
+        .map_err(|error| format!("登录成功但无法保存登录状态: {error}"))?;
         Ok(session)
     }
     .await;
@@ -664,9 +670,7 @@ async fn issue_website_session_at(
     if api.account_id != Some(account_id) {
         return Err(CoreError::Permission("登录账号已变化".into()));
     }
-    let client = reqwest::Client::builder()
-        .user_agent(format!("keytao-app/{}", core.env().app_version))
-        .connect_timeout(Duration::from_secs(8))
+    let client = account_client_builder(core)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| CoreError::Network(error.to_string()))?;
@@ -737,7 +741,9 @@ async fn keytao_me_at(
         return Err(CoreError::Other("未登录".into()));
     }
 
-    let client = build_client(core).map_err(CoreError::Other)?;
+    let client = account_client_builder(core)
+        .build()
+        .map_err(|error| CoreError::Other(error.to_string()))?;
     let response = client
         .get(format!("{api_base}/api/auth/me"))
         .bearer_auth(token)
@@ -1205,59 +1211,30 @@ async fn sync_user_dictionary_at(
                 .unwrap_or_else(|error| error.into_inner());
             // Hold the edit lock from the content check through dictionary and base writes.
             let current = std::fs::read(&dictionary)?;
-            if current != snapshot
-                || crate::user_words::read_user_word_removals(&root)? != marker_snapshot
-            {
+            let markers = crate::user_words::read_user_word_removals(&root)?;
+            if current != snapshot || markers != marker_snapshot {
                 return Err(CoreError::Other(
                     "User dictionary changed during sync; retry the sync".into(),
                 ));
             }
             let import_table_patched =
                 ensure_user_dictionary_imports(&root).map_err(CoreError::Other)?;
-            for entry in local.iter().rev().filter(|entry| {
+            let deletes = local.iter().filter(|entry| {
                 !resulting.contains(&(entry.word.clone(), entry.code.clone(), entry.remove))
-            }) {
-                if entry.remove {
-                    crate::user_words::set_user_word_removed_locked(
-                        core,
-                        &mut state,
-                        "keytao",
-                        &root,
-                        &entry.word,
-                        &entry.code,
-                        false,
-                    )?;
-                } else {
-                    crate::user_words::delete_user_word_locked(
-                        core,
-                        &mut state,
-                        "keytao",
-                        &root,
-                        entry.id,
-                        &entry.word,
-                        &entry.code,
-                    )?;
-                }
-            }
-            for (key, entries) in &remote_by_key {
-                if !local_set.contains(key) && resulting.contains(key) {
-                    if key.2 {
-                        crate::user_words::set_user_word_removed_locked(
-                            core, &mut state, "keytao", &root, &key.0, &key.1, true,
-                        )?;
-                    } else {
-                        crate::user_words::add_user_word_locked(
-                            core,
-                            &mut state,
-                            "keytao",
-                            &root,
-                            &key.0,
-                            &key.1,
-                            Some(entries[0].weight.to_string()),
-                        )?;
-                    }
-                }
-            }
+            });
+            let adds = remote_by_key
+                .iter()
+                .filter(|(key, _)| !local_set.contains(*key) && resulting.contains(*key))
+                .map(|((word, code, remove), entries)| UserWord {
+                    id: 0,
+                    word: word.clone(),
+                    code: code.clone(),
+                    weight: (!remove).then(|| entries[0].weight.to_string()),
+                    remove: *remove,
+                });
+            crate::user_words::apply_batch_locked(
+                core, &mut state, &root, &current, markers, deletes, adds,
+            )?;
             let reload_stamp_path = host
                 .write_reload_stamp(&root)
                 .map_err(CoreError::Other)?
@@ -1285,7 +1262,11 @@ async fn sync_user_dictionary_at(
                 .user_words
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let current = std::fs::read(&dictionary).ok();
+            let current = std::fs::read(&dictionary)
+                .inspect_err(|read_error| {
+                    tracing::warn!(%read_error, "Failed to read user dictionary after sync failure");
+                })
+                .ok();
             let instance = std::str::from_utf8(&snapshot)
                 .ok()
                 .and_then(dictionary_instance);

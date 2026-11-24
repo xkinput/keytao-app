@@ -259,16 +259,60 @@ async fn login_storage_failure_does_not_publish_a_partial_session() {
         }
         let before = core.state();
         std::fs::create_dir(dir.path().join("app-state.json")).unwrap();
-        let expected = json!({"token":"new-token","user":{"id":9,"name":null,"nickname":null,"email":null}});
-        let (url, server) = respond("200 OK", &expected.to_string()).await;
-        let session = keytao_login_at(&core, "alice".into(), "password".into(), &url)
+        let body = r#"{"token":"new-token","user":{"id":9}}"#;
+        let (url, server) = respond("200 OK", body).await;
+        let error = keytao_login_at(&core, "alice".into(), "password".into(), &url)
             .await
+            .err()
             .unwrap();
         server.await.unwrap();
-        assert_eq!(serde_json::to_value(session).unwrap(), expected);
+        assert!(error.to_string().contains("登录成功但无法保存登录状态"));
         assert!(core.state() == before);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
+}
+
+#[tokio::test]
+async fn startup_refresh_preserves_session_until_token_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    let now = now_seconds();
+    let token = super::account_sync_tests::jwt(now - 172800, now + 432000);
+    core.import_legacy_state(Some(token), Some(json!({"id":7})), false)
+        .unwrap();
+    let before = core.state();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    assert!(matches!(
+        startup_refresh_at(&core, &url).await,
+        Err(CoreError::Network(_))
+    ));
+    assert!(core.state() == before);
+    assert!(open_core(dir.path()).state() == before);
+
+    for (status, body, expected) in [
+        ("502 Bad Gateway", r#"{"error":"fixture"}"#, "HTTP 502:"),
+        ("200 OK", "{", "解析登录响应失败:"),
+    ] {
+        let (url, server) = respond(status, body).await;
+        let error = startup_refresh_at(&core, &url).await.unwrap_err();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/auth/refresh HTTP/1.1\r\n"));
+        assert!(error.to_string().starts_with(expected), "{error}");
+        assert!(core.state() == before);
+        assert!(open_core(dir.path()).state() == before);
+    }
+
+    let (url, server) = respond("403 Forbidden", r#"{"error":"fixture"}"#).await;
+    assert!(startup_refresh_at(&core, &url).await.is_err());
+    server.await.unwrap();
+    assert!(core.state().auth_token.is_none());
+    assert!(core.state().user.is_none());
+    let stored = open_core(dir.path()).state();
+    assert!(stored.auth_token.is_none());
+    assert!(stored.user.is_none());
 }
 
 #[tokio::test]

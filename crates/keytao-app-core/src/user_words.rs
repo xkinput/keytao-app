@@ -671,6 +671,17 @@ pub(crate) fn read_user_word_removals(root: &Path) -> Result<Vec<UserWord>, Core
 
 pub(crate) fn write_user_word_removals(root: &Path, entries: &[UserWord]) -> Result<(), CoreError> {
     let path = removals_path(root)?;
+    prepare_user_word_removals(root, &path, entries)?
+        .persist(&path)
+        .map_err(|error| CoreError::Io(error.error))?;
+    Ok(())
+}
+
+fn prepare_user_word_removals(
+    root: &Path,
+    path: &Path,
+    entries: &[UserWord],
+) -> Result<tempfile::NamedTempFile, CoreError> {
     let mut removals = BTreeSet::new();
     for entry in entries {
         validate_input(&entry.word, &entry.code, None)?;
@@ -681,7 +692,7 @@ pub(crate) fn write_user_word_removals(root: &Path, entries: &[UserWord]) -> Res
     }
     fs::create_dir_all(root)?;
     let mut temporary = tempfile::NamedTempFile::new_in(root)?;
-    if let Ok(metadata) = fs::metadata(&path) {
+    if let Ok(metadata) = fs::metadata(path) {
         temporary
             .as_file()
             .set_permissions(metadata.permissions())?;
@@ -690,10 +701,7 @@ pub(crate) fn write_user_word_removals(root: &Path, entries: &[UserWord]) -> Res
         writeln!(temporary, "{word}\t{code}")?;
     }
     temporary.as_file().sync_all()?;
-    temporary
-        .persist(&path)
-        .map_err(|error| CoreError::Io(error.error))?;
-    Ok(())
+    Ok(temporary)
 }
 
 pub fn set_user_word_removed(
@@ -835,6 +843,7 @@ impl Dictionary {
         word: &str,
         code: &str,
         weight: Option<&str>,
+        newline: &str,
     ) -> Result<String, CoreError> {
         let mut fields: Vec<String> = original
             .map(|line| line_body(line).split('\t').map(String::from).collect())
@@ -860,7 +869,7 @@ impl Dictionary {
                     ""
                 }
             })
-            .unwrap_or_else(|| self.newline());
+            .unwrap_or(newline);
         let row = fields.join("\t");
         if row.trim_start().starts_with('#') {
             return Err(CoreError::Other(
@@ -870,7 +879,7 @@ impl Dictionary {
         Ok(format!("{row}{ending}"))
     }
 
-    fn newline(&self) -> &str {
+    fn newline(&self) -> &'static str {
         if self.lines.iter().any(|line| line.ends_with("\r\n")) {
             "\r\n"
         } else {
@@ -878,7 +887,33 @@ impl Dictionary {
         }
     }
 
+    fn append(
+        &mut self,
+        word: &str,
+        code: &str,
+        weight: Option<&str>,
+        newline: &str,
+    ) -> Result<(), CoreError> {
+        let row = self.row(None, word, code, weight, newline)?;
+        if self.lines.last().is_some_and(|line| !line.ends_with('\n')) {
+            self.lines.push(newline.into());
+        }
+        if self.data_start == 0 || line_body(&self.lines[self.data_start - 1]).trim() != "..." {
+            self.lines.push(format!("...{newline}"));
+            self.data_start = self.lines.len();
+        }
+        self.lines.push(row);
+        Ok(())
+    }
+
     fn write(&self, path: &Path) -> Result<(), CoreError> {
+        self.prepare_write(path)?
+            .persist(path)
+            .map_err(|error| CoreError::Io(error.error))?;
+        Ok(())
+    }
+
+    fn prepare_write(&self, path: &Path) -> Result<tempfile::NamedTempFile, CoreError> {
         let parent = path
             .parent()
             .ok_or_else(|| CoreError::Other("Dictionary has no parent directory".into()))?;
@@ -900,10 +935,7 @@ impl Dictionary {
             temporary.write_all(line.as_bytes())?;
         }
         temporary.as_file().sync_all()?;
-        temporary
-            .persist(path)
-            .map_err(|error| CoreError::Io(error.error))?;
-        Ok(())
+        Ok(temporary)
     }
 }
 
@@ -931,6 +963,95 @@ pub(crate) fn read_user_words_locked(
         entries.extend(read_user_word_removals(root)?);
     }
     Ok((content, entries))
+}
+
+pub(crate) fn apply_batch_locked<'a>(
+    core: &Core,
+    state: &mut UserWordsState,
+    root: &Path,
+    current: &[u8],
+    mut markers: Vec<UserWord>,
+    deletes: impl Iterator<Item = &'a UserWord>,
+    adds: impl Iterator<Item = UserWord>,
+) -> Result<(), CoreError> {
+    let (marker_deletes, word_deletes): (Vec<_>, Vec<_>) = deletes.partition(|entry| entry.remove);
+    let (marker_adds, word_adds): (Vec<_>, Vec<_>) = adds.partition(|entry| entry.remove);
+    if marker_deletes.is_empty()
+        && marker_adds.is_empty()
+        && word_deletes.is_empty()
+        && word_adds.is_empty()
+    {
+        return Ok(());
+    }
+    let package = package_data(state, core, "keytao")?;
+    let path = user_path(core, &package, root, false)?;
+    let words = if word_deletes.is_empty() && word_adds.is_empty() {
+        None
+    } else {
+        let mut dictionary = if path == root.join(crate::account::USER_DICTIONARY) {
+            Dictionary::parse(current)?
+        } else {
+            Dictionary::parse(&fs::read(&path)?)?
+        };
+        let mut entries: HashMap<_, _> = dictionary
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.id, (entry.word, entry.code)))
+            .collect();
+        let mut deleted = HashSet::new();
+        for entry in word_deletes {
+            if !entries
+                .remove(&entry.id)
+                .is_some_and(|(word, code)| word == entry.word && code == entry.code)
+            {
+                return Err(CoreError::Other("Stale user word; reload the list".into()));
+            }
+            deleted.insert(entry.id as usize);
+        }
+        let mut line_id = 0;
+        dictionary.lines.retain(|_| {
+            let keep = !deleted.contains(&line_id);
+            line_id += 1;
+            keep
+        });
+        let newline = dictionary.newline();
+        let mut existing: HashSet<_> = entries.into_values().collect();
+        let mut changed = !deleted.is_empty();
+        for entry in word_adds {
+            let weight = entry.weight.as_deref();
+            validate_input(&entry.word, &entry.code, weight)?;
+            if existing.insert((entry.word.clone(), entry.code.clone())) {
+                dictionary.append(&entry.word, &entry.code, weight, newline)?;
+                changed = true;
+            }
+        }
+        changed
+            .then(|| dictionary.prepare_write(&path))
+            .transpose()?
+    };
+    let markers = if marker_deletes.is_empty() && marker_adds.is_empty() {
+        None
+    } else {
+        let path = removals_path(root)?;
+        let deleted: HashSet<_> = marker_deletes
+            .into_iter()
+            .map(|entry| (entry.word.as_str(), entry.code.as_str()))
+            .collect();
+        markers.retain(|entry| !deleted.contains(&(entry.word.as_str(), entry.code.as_str())));
+        markers.extend(marker_adds);
+        Some((prepare_user_word_removals(root, &path, &markers)?, path))
+    };
+    if let Some(words) = words {
+        words
+            .persist(&path)
+            .map_err(|error| CoreError::Io(error.error))?;
+    }
+    if let Some((markers, path)) = markers {
+        markers
+            .persist(&path)
+            .map_err(|error| CoreError::Io(error.error))?;
+    }
+    Ok(())
 }
 
 pub fn add_user_word(
@@ -973,22 +1094,7 @@ pub(crate) fn add_user_word_locked(
             already_exists: true,
         });
     }
-    let row = dictionary.row(None, word, code, weight.as_deref())?;
-    let needs_separator = dictionary.data_start == 0
-        || line_body(&dictionary.lines[dictionary.data_start - 1]).trim() != "...";
-    if dictionary
-        .lines
-        .last()
-        .is_some_and(|line| !line.ends_with('\n'))
-    {
-        dictionary.lines.push(dictionary.newline().into());
-    }
-    if needs_separator {
-        dictionary
-            .lines
-            .push(format!("...{}", dictionary.newline()));
-    }
-    dictionary.lines.push(row);
+    dictionary.append(word, code, weight.as_deref(), dictionary.newline())?;
     dictionary.write(&path)?;
     Ok(UserWordMutation {
         already_exists: false,
@@ -1026,6 +1132,7 @@ pub fn update_user_word(
         word,
         code,
         weight.as_deref(),
+        "",
     )?;
     dictionary.write(&path)?;
     Ok(UserWordMutation {
