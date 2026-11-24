@@ -17,6 +17,8 @@ REPOSITORY = "https://github.com/hronro/ime-jd"
 RELEASE = f"{REPOSITORY}/releases/download/{VERSION}"
 LICENSE = f"https://raw.githubusercontent.com/hronro/ime-jd/{VERSION}/LICENSE"
 LICENSE_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+SOURCE_COMMIT = "5452e0d576ddbbcfed2ba5595442ad0a1db5f68b"
+SOURCE_SHA256 = "9d64498dd993f13eba7d65ab8539725494bf9e3b7e5745c40df65fedf4d8fe21"
 MAX_FILE_BYTES = 4 * 1024 * 1024
 
 # SHA-256 properties from GitHub's release asset metadata for v0.14.0.
@@ -29,6 +31,7 @@ ASSETS = {
     "linux-x86_64": ("so.tar.xz", "affb7ebddfb89fb16cbfbb04247379a0c92b65fd81c6fa7ca77febe021cd46a8"),
     "android-arm64": ("so.tar.xz", "796b4e618213a11adc364aad88afe51043298d24c3218383990c5cb42d32e619"),
     "android-x86_64": ("so.tar.xz", "0bdd44d2b1389d07f268a9fe310e67b988a1836cd2f6d41f70b59880c322e62c"),
+    "ios-arm64": ("a.tar.xz", "cddfc647f540d1cfd99257c297369fd220ddfee287be78e3ddc6179bc2f14b56"),
 }
 CACHE = Path(__file__).resolve().parents[1] / "target" / "libjd-engine-cache"
 
@@ -76,6 +79,33 @@ def stage_library(target, directory):
     return output
 
 
+def stage_android_arm(directory):
+    # Upstream publishes 64-bit Android binaries; use the same engine-only
+    # build from the pinned source for KeyTao's armeabi-v7a APK.
+    source = verified_download(
+        f"https://codeload.github.com/hronro/ime-jd/tar.gz/{SOURCE_COMMIT}", SOURCE_SHA256
+    )
+    with TemporaryDirectory() as temp:
+        root = Path(temp)
+        with tarfile.open(fileobj=io.BytesIO(source), mode="r:gz") as archive:
+            archive.extractall(root, filter="data")
+        try:
+            subprocess.run(
+                ["zig", "build", "-Dtarget=arm-linux-androideabi", "-Dcpu=baseline",
+                 "-Doptimize=fast", "-Dbuiltin_dict=false", "--prefix", root / "build"],
+                cwd=root / f"ime-jd-{SOURCE_COMMIT}" / "core",
+                check=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError("Zig 0.17 is required to build Android armeabi-v7a libjd-engine") from error
+        library = (root / "build/lib/libjd.so").read_bytes()
+        if len(library) > MAX_FILE_BYTES:
+            raise ValueError("Unexpected size for Android armeabi-v7a libjd-engine")
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "libjd-engine.so").write_bytes(library)
+        print(f"Built libjd-engine {VERSION} for Android armeabi-v7a")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", choices=[*ASSETS, "macos-universal", "android"])
@@ -95,6 +125,7 @@ def main():
             subprocess.run(["lipo", "-create", *slices, "-output", output], check=True)
             subprocess.run(["install_name_tool", "-id", "@rpath/libjd-engine.dylib", output], check=True)
     elif args.target == "android":
+        stage_android_arm(args.libraries / "armeabi-v7a")
         stage_library("android-arm64", args.libraries / "arm64-v8a")
         stage_library("android-x86_64", args.libraries / "x86_64")
     else:

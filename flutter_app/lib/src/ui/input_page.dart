@@ -96,6 +96,26 @@ class InputPage extends StatelessWidget {
                   WindowsImeCard(controller: controller),
                 if (controller.isLinux) LinuxImeCard(controller: controller),
                 if (controller.isIos) IosImeCard(controller: controller),
+                SwitchSetting(
+                  AppStrings.algorithmEngine,
+                  hint: AppStrings.algorithmEngineHint,
+                  value: controller.inputEngineEnabled,
+                  onChanged: controller.busy
+                      ? null
+                      : controller.setInputEngineEnabled,
+                ),
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: ActionButton(
+                    controller.isDeploying
+                        ? AppStrings.deploying
+                        : AppStrings.redeploy,
+                    onPress:
+                        controller.busy || !controller.activeSchemeDownloaded
+                        ? null
+                        : controller.deploy,
+                  ),
+                ),
                 ValueRow('版本', controller.info.appVersion),
                 if (!controller.isMobile &&
                     controller.uiSettings?.themePath != null)

@@ -57,6 +57,9 @@ dpkg-deb -R "$DEB" "$WORK_DIR/deb"
 python3 "$PROJECT_DIR/packaging/linux/check.py" "$WORK_DIR/deb" "$WORK_DIR/rpm"
 for format in deb rpm; do
   app="$WORK_DIR/$format/usr/lib/KeyTao"
+  for entry in lib/libjd-engine.so libjd-engine-LICENSE.txt libjd-engine-SOURCE.txt; do
+    [[ -s "$app/runtime/$entry" ]] || fail "$format: missing libjd-engine bundle entry $entry"
+  done
   rime_lib="$app/runtime/lib/librime.so.1"
   rime_strings="$(strings "$rime_lib")"
   grep -Fxq -- "$LIBRIME_VERSION" <<< "$rime_strings" || fail "$format: wrong librime version (expected $LIBRIME_VERSION)"

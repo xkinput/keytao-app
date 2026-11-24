@@ -345,6 +345,7 @@ class AppController extends ChangeNotifier {
   final _packageDeployProgress = <String, DeployProgressDto?>{};
   LibjdStatusDto? libjd;
   String inputEngine = 'rime';
+  bool inputEngineEnabled = true;
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
@@ -705,12 +706,11 @@ class AppController extends ChangeNotifier {
     final isolated = isolatedPackages
         .where((package) => package.packageKey == key)
         .firstOrNull;
-    return !isIos &&
-        (isolated?.engine ?? installedPackageFor(key)?.engine) ==
-            'libjd_engine';
+    return (isolated?.engine ?? installedPackageFor(key)?.engine) ==
+        'libjd_engine';
   }
 
-  bool get prefersLibjd => !isIos && inputEngine == 'libjd_engine';
+  bool get prefersLibjd => inputEngine == 'libjd_engine';
   bool get hasConvertedSchemes =>
       isolatedPackages.any(
         (package) => usesImportedLibjd(package.packageKey),
@@ -1446,13 +1446,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readLocal() async {
     _localSchemaError = null;
-    if (!isIos) {
-      try {
-        inputEngine = await core.inputEngine();
-      } catch (failure) {
-        debugPrint('Input engine refresh failed: ${errorText(failure)}');
-      }
+    try {
+      inputEngine = await core.inputEngine();
+    } catch (failure) {
+      debugPrint('Input engine refresh failed: ${errorText(failure)}');
     }
+    await _readInputEngineEnabled();
     try {
       local = await core.checkLocalSchema();
       deployWarning = local?.deployWarning;
@@ -1545,12 +1544,15 @@ class AppController extends ChangeNotifier {
     }
     try {
       final previous = _activePreviewTarget;
+      final previousEngineEnabled = inputEngineEnabled;
+      await _readInputEngineEnabled();
       local = await core.checkLocalSchema();
       deployWarning = local?.deployWarning;
       await _readInstalledPackages();
       await refreshIsolatedPackages(notify: false);
       await _readSchemas();
-      if (previous != _activePreviewTarget) {
+      if (previous != _activePreviewTarget ||
+          previousEngineEnabled != inputEngineEnabled) {
         unawaited(refreshCandidatePreview());
       }
       _changed();
@@ -1776,6 +1778,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _deployIosUpgradeIfNeeded() async {
     if (!isIos ||
+        prefersLibjd ||
         packageMigrationFailed ||
         local?.installed != true ||
         local?.deployed == true) {
@@ -1917,12 +1920,10 @@ class AppController extends ChangeNotifier {
     final packages = await core.listInstalledPackages();
     if (_disposed || request != _schemeUpdatesRequest) return;
     LibjdStatusDto? libjdStatus;
-    if (!isIos) {
-      try {
-        libjdStatus = await core.libjdStatus();
-      } catch (failure) {
-        debugPrint('ime-jd status refresh failed: ${errorText(failure)}');
-      }
+    try {
+      libjdStatus = await core.libjdStatus();
+    } catch (failure) {
+      debugPrint('ime-jd status refresh failed: ${errorText(failure)}');
     }
     if (_disposed || request != _schemeUpdatesRequest) return;
     installedPackages = packages;
@@ -2854,6 +2855,27 @@ class AppController extends ChangeNotifier {
   Future<bool> deploy({int? imeActionId, String? schemeKey}) =>
       run(() => _deploy(imeActionId: imeActionId, schemeKey: schemeKey));
 
+  Future<void> _readInputEngineEnabled() async {
+    try {
+      inputEngineEnabled = await core.inputEngineEnabled();
+    } catch (failure) {
+      debugPrint('Input engine state refresh failed: ${errorText(failure)}');
+    }
+  }
+
+  Future<bool> setInputEngineEnabled(bool enabled) => run(() async {
+    if (isAndroid) await _requireStorage();
+    try {
+      await core.setInputEngineEnabled(enabled: enabled);
+      inputEngineEnabled = enabled;
+    } catch (_) {
+      await _readInputEngineEnabled();
+      rethrow;
+    } finally {
+      unawaited(refreshCandidatePreview());
+    }
+  });
+
   Future<void> _deploy({int? imeActionId, String? schemeKey}) async {
     _pendingCloudPackageUploads.clear();
     _packageDeployProgress.clear();
@@ -2864,7 +2886,10 @@ class AppController extends ChangeNotifier {
             .map((package) => package.schemeKey)
               .firstOrNull ??
         (activeSchemeDownloaded ? activeSchemeKey : null);
-    _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
+    final deploying = prefersLibjd
+        ? AppStrings.deployingLibjd
+        : AppStrings.deployingLibrime;
+    _startOperation(OperationKind.deploy, deploying);
     deploySteps.clear();
     try {
       if (!activeSchemeDownloaded) {
@@ -2874,11 +2899,11 @@ class AppController extends ChangeNotifier {
               : AppStrings.localCheckFailure(_localSchemaError!),
         );
       }
-      _deployStep(AppStrings.deployingLibrime, DeployStepState.neutral);
+      _deployStep(deploying, DeployStepState.neutral);
       final String message;
       String? warning;
-      if (isAndroid) {
-        await _requireStorage();
+      if (isAndroid) await _requireStorage();
+      if (isAndroid && !prefersLibjd) {
         Map<String, dynamic>? result;
         await core.deployAndroid(
           androidDeploy: () async {
@@ -2898,7 +2923,7 @@ class AppController extends ChangeNotifier {
         message = result?['message'] as String? ?? AppStrings.deployDone;
         warning = result?['warning'] as String?;
       } else {
-        final result = imeActionId == null
+        final result = imeActionId == null || prefersLibjd
             ? await core.deployDefault()
             : await core.windowsRedeployImeAction(id: imeActionId);
         if (!result.success) throw StateError(result.message);
@@ -2906,7 +2931,7 @@ class AppController extends ChangeNotifier {
         warning = result.warning;
       }
       await _readState();
-      if (!hasPackageDeployProgress && local?.deployed != true) {
+      if (!prefersLibjd && !hasPackageDeployProgress && local?.deployed != true) {
         throw StateError(AppStrings.deployCheckFailed);
       }
       final effectiveWarning =
@@ -4129,6 +4154,13 @@ class AppController extends ChangeNotifier {
     var request = 0;
     while (!_disposed && request != _candidatePreviewRequest) {
       request = _candidatePreviewRequest;
+      if (!inputEngineEnabled) {
+        candidatePreviewCandidates = [];
+        candidatePreviewPageSize = null;
+        _candidatePreviewTarget = null;
+        _changed();
+        break;
+      }
       final size = candidatePageSize;
       final target = _activePreviewTarget;
       try {

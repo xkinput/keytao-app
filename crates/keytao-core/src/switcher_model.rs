@@ -252,12 +252,15 @@ enum Entry {
         next_value: usize,
         text: String,
     },
+    FoldedSwitches(String),
 }
 
 impl Entry {
     fn candidate(&self) -> Candidate {
         let text = match self {
-            Self::ActiveSchema { text, .. } | Self::Switch { text, .. } => text.clone(),
+            Self::ActiveSchema { text, .. }
+            | Self::Switch { text, .. }
+            | Self::FoldedSwitches(text) => text.clone(),
             Self::InactiveSchema { text, ready, .. } => {
                 if *ready {
                     text.clone()
@@ -275,6 +278,7 @@ impl Entry {
 
 pub(crate) struct Menu {
     entries: Vec<Entry>,
+    folded_switches: Vec<Entry>,
     active_schema_id: String,
     highlighted: usize,
     page_size: usize,
@@ -287,20 +291,18 @@ impl Menu {
     pub(crate) fn load(
         root: &Path,
         shared: &Path,
-        active_schema_id: &str,
+        state: ImeState,
         active_schemas: Vec<SchemaInfo>,
         active_switches: Vec<SchemaSwitchSetting>,
-        force_open: bool,
         libjd_active: bool,
     ) -> Option<Self> {
         let page_size = configured_page_size(root);
         Self::open(
             !RuntimeDirs::needs_migration(root),
-            active_schema_id,
+            state,
             active_schemas,
             active_switches,
             page_size,
-            force_open,
             || {
                 let mut packages = packages(root, shared, installed_packages(root));
                 if libjd_active {
@@ -313,27 +315,23 @@ impl Menu {
 
     fn open(
         enabled: bool,
-        active_schema_id: &str,
+        state: ImeState,
         active_schemas: Vec<SchemaInfo>,
         active_switches: Vec<SchemaSwitchSetting>,
         page_size: usize,
-        force_open: bool,
         load_packages: impl FnOnce() -> Vec<Package>,
     ) -> Option<Self> {
-        if !enabled {
+        if !enabled || state.schema_id.is_empty() {
             return None;
         }
         let packages = load_packages();
-        if packages.is_empty() && !force_open {
-            return None;
-        }
 
         let active_package_name = packages
             .iter()
             .find(|pkg| pkg.active)
             .map(|pkg| pkg.display_name.clone())
             .unwrap_or_default();
-        let effective_active_schemas = if !active_schemas.is_empty() {
+        let mut effective_active_schemas = if !active_schemas.is_empty() {
             active_schemas
         } else {
             packages
@@ -342,6 +340,24 @@ impl Menu {
                 .map(|pkg| pkg.schemas.clone())
                 .unwrap_or_default()
         };
+        if let Some(index) = effective_active_schemas
+            .iter()
+            .position(|schema| schema.id == state.schema_id)
+        {
+            effective_active_schemas[..=index].rotate_right(1);
+        } else {
+            effective_active_schemas.insert(
+                0,
+                SchemaInfo {
+                    id: state.schema_id.clone(),
+                    name: if state.schema_name.is_empty() {
+                        state.schema_id.clone()
+                    } else {
+                        state.schema_name.clone()
+                    },
+                },
+            );
+        }
 
         #[derive(Clone)]
         struct RawSchema {
@@ -419,55 +435,61 @@ impl Menu {
             }
         }
 
+        let mut switches = Vec::new();
+        let mut labels = Vec::new();
         for switch in active_switches {
             if switch.states.len() < 2 || switch.value >= switch.states.len() {
                 continue;
             }
-            let next_value = (switch.value + 1) % switch.states.len();
-            let text = format!(
-                "{} → {}",
-                switch.states[switch.value], switch.states[next_value]
-            );
-            entries.push(Entry::Switch {
-                name: switch.name,
-                options: switch.options,
-                next_value,
-                text,
-            });
+            labels.push(switch.states[switch.value].clone());
+            if switch.options.is_empty() {
+                let next_value = (switch.value + 1) % switch.states.len();
+                switches.push(Entry::Switch {
+                    name: switch.name,
+                    options: switch.options,
+                    next_value,
+                    text: format!(
+                        "{} → {}",
+                        switch.states[switch.value], switch.states[next_value]
+                    ),
+                });
+            } else {
+                for (next_value, label) in switch.states.into_iter().enumerate() {
+                    switches.push(Entry::Switch {
+                        name: switch.name.clone(),
+                        options: switch.options.clone(),
+                        next_value,
+                        text: if next_value == switch.value {
+                            format!("{label} ✓")
+                        } else {
+                            label
+                        },
+                    });
+                }
+            }
         }
-
-        if entries.is_empty() {
-            return None;
-        }
-        let highlighted = entries
-            .iter()
-            .position(|entry| {
-                matches!(
-                    entry,
-                    Entry::ActiveSchema { schema_id, .. } if schema_id == active_schema_id
-                )
-            })
-            .unwrap_or(0);
+        let folded_switches = if labels.len() > 1 {
+            entries.insert(1, Entry::FoldedSwitches(labels.join("／")));
+            switches
+        } else {
+            entries.splice(1..1, switches);
+            Vec::new()
+        };
         let page_size = page_size.clamp(1, DEFAULT_SELECT_KEYS.len());
         Some(Self {
             entries,
-            active_schema_id: active_schema_id.to_owned(),
-            highlighted,
+            folded_switches,
+            active_schema_id: state.schema_id,
+            highlighted: 0,
             page_size,
-            ascii_mode: false,
-            schema_name: String::new(),
-            hotkeys: Vec::new(),
+            ascii_mode: state.ascii_mode,
+            schema_name: state.schema_name,
+            hotkeys: state
+                .schema_shortcuts
+                .into_iter()
+                .filter(|key| key.is_switcher())
+                .collect(),
         })
-    }
-
-    pub(crate) fn keep_input_mode(&mut self, state: ImeState) {
-        self.ascii_mode = state.ascii_mode;
-        self.schema_name = state.schema_name;
-        self.hotkeys = state
-            .schema_shortcuts
-            .into_iter()
-            .filter(|key| key.is_switcher())
-            .collect();
     }
 
     pub(crate) fn state(&self) -> ImeState {
@@ -521,7 +543,12 @@ impl Menu {
         }
     }
 
-    pub(crate) fn select(&self, index: usize) -> Decision {
+    pub(crate) fn select(&mut self, index: usize) -> Decision {
+        if index < 2 && !self.folded_switches.is_empty() {
+            self.entries.splice(1..2, self.folded_switches.drain(..));
+            self.highlighted = index;
+            return Decision::Stay;
+        }
         match self.entries.get(index) {
             Some(Entry::ActiveSchema { schema_id, .. }) => {
                 if schema_id.is_empty() || schema_id == &self.active_schema_id {
@@ -617,21 +644,24 @@ fn configured_page_size(root: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use key_policy::{XK_DOWN, XK_ESCAPE, XK_PAGE_DOWN, XK_RETURN};
+    use key_policy::{XK_ESCAPE, XK_PAGE_DOWN, XK_PAGE_UP, XK_RETURN};
 
     #[test]
-    fn flat_menu_lists_active_schemas_inactive_schemas_and_active_switches_only() {
+    fn current_schema_and_folded_switches_precede_other_schemas() {
         let mut menu = Menu::open(
             true,
-            "xmjd6",
+            ImeState {
+                schema_id: "xmjd6".into(),
+                ..ImeState::empty()
+            },
             vec![
-                SchemaInfo {
-                    id: "xmjd6".into(),
-                    name: "🌟🐈".into(),
-                },
                 SchemaInfo {
                     id: "easy_en".into(),
                     name: "English".into(),
+                },
+                SchemaInfo {
+                    id: "xmjd6".into(),
+                    name: "🌟🐈".into(),
                 },
             ],
             vec![
@@ -651,7 +681,6 @@ mod tests {
                 },
             ],
             DEFAULT_PAGE_SIZE,
-            false,
             || {
                 vec![
                     Package {
@@ -700,51 +729,90 @@ mod tests {
                 .iter()
                 .map(|c| c.text.as_str())
                 .collect::<Vec<_>>(),
-            ["🌟🐈", "English", "雾凇拼音 未部署", "键道6", "键道6单字"]
+            ["🌟🐈", "中文／全角", "English", "雾凇拼音 未部署", "键道6"]
         );
         assert_eq!(first.page, 0);
+        assert_eq!(first.highlighted_candidate_index, 0);
         assert!(!first.is_last_page);
-        assert_eq!(menu.key(XK_RETURN, 0), Decision::Close);
         assert_eq!(menu.key(XK_F4, 0), Decision::Stay);
         assert_eq!(menu.state().highlighted_candidate_index, 1);
+        assert_eq!(menu.key(b'`'.into(), RIME_MOD_CONTROL), Decision::Stay);
+        assert_eq!(menu.state().highlighted_candidate_index, 2);
         assert_eq!(
-            menu.key(b'2'.into(), 0),
+            menu.key(b'3'.into(), 0),
             Decision::SelectActiveSchema("easy_en".into())
         );
-        assert_eq!(menu.key(b'3'.into(), 0), Decision::Stay);
+        assert_eq!(menu.key(b'4'.into(), 0), Decision::Stay);
+        assert_eq!(menu.key(XK_PAGE_DOWN, 0), Decision::Stay);
+        let second = menu.state();
+        assert_eq!(second.page, 1);
+        assert!(second.is_last_page);
+        assert_eq!(second.candidates[0].text, "键道6单字");
         assert_eq!(
-            menu.key(b'5'.into(), 0),
+            menu.key(XK_RETURN, 0),
             Decision::SwitchPackage {
                 package_key: "keytao".into(),
                 schema_id: Some("keytao-dz".into()),
             }
         );
-
-        assert_eq!(menu.key(XK_PAGE_DOWN, 0), Decision::Stay);
-        let second = menu.state();
-        assert_eq!(second.page, 1);
-        assert!(second.is_last_page);
+        assert_eq!(menu.key(XK_PAGE_UP, 0), Decision::Stay);
+        assert_eq!(menu.key(b'2'.into(), 0), Decision::Stay);
+        let unfolded = menu.state();
+        assert_eq!(unfolded.highlighted_candidate_index, 1);
         assert_eq!(
-            second
+            unfolded
                 .candidates
                 .iter()
                 .map(|c| c.text.as_str())
                 .collect::<Vec<_>>(),
-            ["中文 → 西文", "全角 → 半角"]
+            ["🌟🐈", "中文 → 西文", "全角 → 半角", "English", "雾凇拼音 未部署"]
         );
         assert_eq!(
-            menu.key(b'1'.into(), 0),
+            menu.key(XK_RETURN, 0),
             Decision::ToggleSwitch {
                 name: "ascii_mode".into(),
                 options: Vec::new(),
                 next_value: 1,
             }
         );
-        assert_eq!(menu.key(XK_DOWN, 0), Decision::Stay);
-        assert_eq!(menu.key(b'`'.into(), RIME_MOD_CONTROL), Decision::Stay);
-        assert_eq!(menu.state().page, 0);
-        assert_eq!(menu.state().highlighted_candidate_index, 0);
         assert_eq!(menu.key(XK_ESCAPE, 0), Decision::Close);
+    }
+
+    #[test]
+    fn single_switch_is_directly_selectable_without_managed_packages() {
+        let mut menu = Menu::open(
+            true,
+            ImeState {
+                schema_id: "imported".into(),
+                schema_name: "Imported".into(),
+                ascii_mode: true,
+                ..ImeState::empty()
+            },
+            Vec::new(),
+            vec![SchemaSwitchSetting {
+                schema_id: "imported".into(),
+                name: "ascii_mode".into(),
+                states: vec!["中文".into(), "西文".into()],
+                value: 1,
+                options: Vec::new(),
+            }],
+            DEFAULT_PAGE_SIZE,
+            Vec::new,
+        )
+        .unwrap();
+        let state = menu.state();
+        assert!(state.ascii_mode);
+        assert_eq!(state.candidates[0].text, "Imported");
+        assert_eq!(state.candidates[1].text, "西文 → 中文");
+        assert_eq!(menu.key(XK_RETURN, 0), Decision::Close);
+        assert_eq!(
+            menu.select(1),
+            Decision::ToggleSwitch {
+                name: "ascii_mode".into(),
+                options: Vec::new(),
+                next_value: 0,
+            }
+        );
     }
 
     #[test]
@@ -755,11 +823,13 @@ mod tests {
         assert!(
             Menu::open(
                 false,
-                "keytao",
+                ImeState {
+                    schema_id: "keytao".into(),
+                    ..ImeState::empty()
+                },
                 Vec::new(),
                 Vec::new(),
                 DEFAULT_PAGE_SIZE,
-                false,
                 || panic!("loaded while disabled")
             )
             .is_none()
@@ -772,14 +842,16 @@ mod tests {
 
         let mut menu = Menu::open(
             true,
-            "keytao",
+            ImeState {
+                schema_id: "keytao".into(),
+                ..ImeState::empty()
+            },
             vec![SchemaInfo {
                 id: "keytao".into(),
                 name: "键道6".into(),
             }],
             Vec::new(),
             DEFAULT_PAGE_SIZE,
-            false,
             || {
                 vec![Package {
                     package_key: "keytao".into(),

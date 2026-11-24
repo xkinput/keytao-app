@@ -243,6 +243,21 @@ pub fn materialize_all_installed_packages(
     Ok(())
 }
 
+#[cfg(target_os = "ios")]
+pub(crate) fn materialize_installed_package(
+    core: &Core,
+    root: &Path,
+    bundled: &Path,
+    key: &str,
+) -> Result<(), CoreError> {
+    for target in prepare_targets(core, root, bundled, false, Some(key), None)?.0 {
+        if let Some(error) = target.materialize_error {
+            return Err(CoreError::Other(error));
+        }
+    }
+    Ok(())
+}
+
 /// Prepare isolated librime inputs for the installed packages when isolation is enabled.
 /// `bundled` is the platform's resolved bundled rime-data directory.
 pub(crate) fn prepare_deploy_targets(

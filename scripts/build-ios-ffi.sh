@@ -115,6 +115,10 @@ build_one() {
     rustup target add "$target" >/dev/null
     (
         cd "$PROJECT_DIR"
+        if [[ "$target" == aarch64-apple-ios ]]; then
+            export KEYTAO_IOS_LIBJD_DIR="$PROJECT_DIR/target/keytao-ios-libjd"
+            python3 scripts/bundle-libjd-engine.py ios-arm64 "$KEYTAO_IOS_LIBJD_DIR" "$KEYTAO_IOS_LIBJD_DIR"
+        fi
         KEYTAO_IOS_RIME_ROOT="$runtime" \
         RIME_INCLUDE_DIR="$runtime/include" \
         RIME_LIB_DIR="$runtime/lib" \

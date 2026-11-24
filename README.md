@@ -12,7 +12,7 @@ KeyTao 是支持 librime 与 libjd 的跨平台输入法。
 - 支持导入通用 Rime 方案。
 - 内置下载万象拼音、雾凇拼音、Easy English。
 - 支持 macOS、Windows、Linux、Android、iOS 五端。
-- macOS、Windows、Linux 和 Android 发行包内置 [libjd-engine](https://github.com/hronro/ime-jd)，可在首页切换输入引擎。
+- macOS、Windows、Linux、Android 和 iOS 发行包内置 [libjd-engine](https://github.com/hronro/ime-jd)，可在首页切换输入引擎。
 
 | 平台 | 系统输入法形态 | Release 产物 |
 | --- | --- | --- |
@@ -38,6 +38,12 @@ KeyTao 是支持 librime 与 libjd 的跨平台输入法。
 - 使用 **ime-jd** 时，在首页切换引擎，在方案页将兼容方案的词库转换后即可使用。
 
 附加方案 Easy English 随 App 离线提供，安装后与键道方案一起部署。
+
+在「输入法」页可以重新部署当前方案，或关闭、开启算法引擎。桌面版也支持在终端调用安装后的 App 可执行文件。
+
+- Linux 在桌面会话的终端运行 `keytao-app`，macOS 用 `/Applications/KeyTao.app/Contents/MacOS/KeyTao`，Windows 用安装目录里的 `keytao-app.exe`。
+- 加 `--deploy` 重新部署当前引擎，或用 `--disable-engine`、`--enable-engine` 切换开关。Android 和 iOS 在 App 内操作。
+- Windows 交互式 PowerShell 可用 `(Start-Process .\keytao-app.exe -ArgumentList '--deploy' -Wait -PassThru).ExitCode` 等待完成并读取退出码。
 
 | 平台 | 用户数据目录 |
 | --- | --- |
@@ -142,6 +148,8 @@ DYLD_FALLBACK_LIBRARY_PATH=$RIME_LIB_DIR cargo test
 | iOS | `scripts/build-ios-librime.sh --target aarch64-apple-ios && scripts/build-flutter-ios.sh` | `flutter_app/build/ios/ipa/keytao-app-<version>-ios-arm64-unsigned.ipa` |
 
 各平台发行包都自带 librime、OpenCC 数据和基础 `rime-data`，App 与系统输入法使用同一套 runtime。Linux 在 `ubuntu:24.04` 中通过 `scripts/build-linux-librime.sh` 从源码构建 [版本文件](scripts/librime-versions.env) 固定的 librime，Lua 合并进单个 stripped `librime.so.1`，不使用 Ubuntu apt 的 librime。升级后 daemon 会在独立子进程中重新部署已有方案，成功后自动重载。平台细节：macOS 见 [crates/keytao-macos-ime/README.md](crates/keytao-macos-ime/README.md#构建与排查)，Linux 见 [packaging/linux/README.md](packaging/linux/README.md)，Windows 见 [packaging/windows/README.md](packaging/windows/README.md)。
+
+Android 构建需要 Zig 0.17 生成 `armeabi-v7a` 的 libjd-engine，其余 Android ABI 使用校验过的上游二进制。iOS 设备包将上游 libjd-engine 静态链接到 App 和键盘扩展。
 
 ## 发版流程
 

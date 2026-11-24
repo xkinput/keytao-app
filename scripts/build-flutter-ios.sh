@@ -45,6 +45,8 @@ if [ "$BUILD_FFI" = true ]; then
 fi
 test -f "$PROJECT_DIR/target/keytao-ios-runtime/iphoneos-arm64/lib/libkeytao_core_ffi.a" || \
     die "missing staged keyboard FFI; run scripts/build-ios-ffi.sh --target aarch64-apple-ios --release"
+test -f "$PROJECT_DIR/target/keytao-ios-libjd/libjd-engine.a" || \
+    die "missing staged libjd-engine; run scripts/build-ios-ffi.sh --target aarch64-apple-ios --release"
 
 (
     cd "$PROJECT_DIR/flutter_app"
@@ -67,9 +69,18 @@ plist_value() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Info.plist"; }
 for bundle in "$APP" "$KEYBOARD"; do
     [ "$(plist_value "$bundle" CFBundleShortVersionString)" = "${VERSION%%-*}" ] || die "wrong bundle version"
     [ "$(plist_value "$bundle" CFBundleVersion)" = "$BUILD_NUMBER" ] || die "wrong build number"
+    [[ -s "$bundle/libjd-engine-LICENSE.txt" && -s "$bundle/libjd-engine-SOURCE.txt" ]] || \
+        die "missing libjd-engine notices: $bundle"
     if codesign -d "$bundle" >/dev/null 2>&1; then
         die "expected unsigned bundle: $bundle"
     fi
+done
+for executable in "$KEYBOARD/KeyTaoKeyboard" "$APP/Frameworks/keytao_app_bridge.framework/keytao_app_bridge"; do
+    # Rust's release cdylib can strip the private C symbols. This string is
+    # present only in the static loader, whose direct calls require libjd.
+    strings="$(strings "$executable")"
+    grep -Fq 'unrecognized bundled iOS libjd ABI' <<<"$strings" || \
+        die "libjd-engine is not linked in $executable"
 done
 
 mkdir -p "$OUTPUT_DIR"

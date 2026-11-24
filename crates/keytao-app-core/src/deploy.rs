@@ -878,6 +878,9 @@ pub async fn preview_candidates(
         return Err("Candidate page size must be between 1 and 10".into());
     }
     let root = host.user_root()?;
+    if !keytao_core::engine_choice::is_enabled(&root) {
+        return Err("算法引擎已关闭".into());
+    }
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     if keytao_core::default_user_data_dir().as_ref() != Some(&root) {
         return Err("Desktop candidate previews require the default user root".into());
@@ -886,7 +889,8 @@ pub async fn preview_candidates(
         target_os = "linux",
         target_os = "windows",
         target_os = "macos",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     ))]
     if crate::libjd::input_engine(&root) == keytao_core::engine_choice::PackageEngine::LibjdEngine {
         use keytao_core::{jd_backend::JdBackend, libjd};

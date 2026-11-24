@@ -124,6 +124,7 @@ fn isolated_rime_runtime_exposes_keytao_installation_branding() {
 #[cfg(target_os = "macos")]
 #[test]
 fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
+    use keytao_core::key_policy::{self, CandidatePanelLayout::*, *};
     use keytao_core::libjd;
 
     let _serialized = serialized();
@@ -179,7 +180,7 @@ fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
         std::fs::write(&blob, b"invalid dictionary").unwrap();
         std::fs::write(
             &settings,
-            br#"{"engine":"libjd_engine","engines":{"keytao":"libjd_engine"}}"#,
+            br#"{"engine":"libjd_engine","engines":{"keytao":"libjd_engine"},"candidatePageSize":2}"#,
         )
         .unwrap();
         let failed_reload = runtime.reload_without_deploy();
@@ -190,7 +191,11 @@ fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
         assert!(failed_reload.is_err());
 
         unsafe {
-            keytao_core::jd_backend::JdBackend::build_dictionary(&library, b"converted\ta\n", &blob)
+            keytao_core::jd_backend::JdBackend::build_dictionary(
+                &library,
+                b"converted\ta\nconverted2\ta\nconverted3\ta\n",
+                &blob,
+            )
         }
         .unwrap();
         runtime.reload_without_deploy().unwrap();
@@ -213,6 +218,24 @@ fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
         );
         let typed = session.process_key_result(b'a'.into(), 0).unwrap().state;
         assert_eq!(typed.candidates[0].text, "converted");
+        for (panel, previous, next) in [(Vertical, XK_UP, XK_DOWN), (Horizontal, XK_LEFT, XK_RIGHT)] {
+            session.highlight_candidate_on_page(1).unwrap();
+            let press = |key| {
+                let before = session.state();
+                let mapped = key_policy::candidate_arrow_key(key, 0, &before, panel);
+                let result = session.process_key_result(mapped, 0).unwrap();
+                assert!(result.accepted);
+                assert_eq!(result.state.preedit, before.preedit);
+                assert!(result.state.committed.is_none());
+                result.state
+            };
+            let first_on_next_page = press(next);
+            assert_eq!(first_on_next_page.page, 1);
+            assert_eq!(first_on_next_page.highlighted_candidate_index, 0);
+            let last_on_previous_page = press(previous);
+            assert_eq!(last_on_previous_page.page, 0);
+            assert_eq!(last_on_previous_page.highlighted_candidate_index, 1);
+        }
         let jd_generation = runtime.generation();
         let good_blob = std::fs::read(&blob).unwrap();
         std::fs::write(&blob, b"invalid dictionary").unwrap();
@@ -430,16 +453,21 @@ fn panel_arrows_navigate_without_caret_motion_commits_or_wrapping() {
         session
             .highlight_candidate_on_page(smoke_fixture::PAGE_SIZE - 1)
             .unwrap();
-        let last = press(next);
-        assert_eq!(last.page, 0);
+        let first_on_next_page = press(next);
+        assert_eq!(first_on_next_page.page, 1);
+        assert_eq!(first_on_next_page.highlighted_candidate_index, 0);
+        let last_on_previous_page = press(previous);
+        assert_eq!(last_on_previous_page.page, 0);
         assert_eq!(
-            last.highlighted_candidate_index,
+            last_on_previous_page.highlighted_candidate_index,
             smoke_fixture::PAGE_SIZE - 1
         );
-        press(next_page);
+        assert_eq!(press(next).page, 1);
         let last_index = session.state().candidates.len() - 1;
         session.highlight_candidate_on_page(last_index).unwrap();
-        assert_eq!(press(next).highlighted_candidate_index, last_index);
+        let last = press(next);
+        assert_eq!(last.page, 1);
+        assert_eq!(last.highlighted_candidate_index, last_index);
 
         type_code(&session);
         let highlighted = press(next);

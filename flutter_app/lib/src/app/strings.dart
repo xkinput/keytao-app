@@ -95,6 +95,8 @@ abstract final class AppStrings {
   static const deployed = '已部署';
   static const unknownVersion = '未知版本';
   static const redeploy = '重新部署';
+  static const algorithmEngine = '算法引擎';
+  static const algorithmEngineHint = '关闭后暂停组字与候选，重新开启即可恢复。';
   static const uninstall = '卸载';
   static const checkingPermission = '检测权限…';
   static const installing = '安装中…';
@@ -103,6 +105,7 @@ abstract final class AppStrings {
   static const packageDeployQueued = '等待部署';
   static const deploy = '部署';
   static const deployingLibrime = '正在部署 librime…';
+  static const deployingLibjd = '正在重新部署 ime-jd 词库…';
   static const deployCurrent = '部署当前方案';
   static const installFirst = '请先安装方案';
   static const installKeytaoFirst = '请先安装键道方案';

@@ -63,6 +63,40 @@ fn native_fixture(name: &str) -> Option<(ImeRuntime, PathBuf)> {
 }
 
 #[test]
+fn disabled_runtime_releases_its_backend_and_reuses_sessions_when_enabled() {
+    let Some((runtime, dir)) =
+        native_fixture("disabled_runtime_releases_its_backend_and_reuses_sessions_when_enabled")
+    else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    let schema = session.state().schema_id;
+    assert!(!schema.is_empty());
+
+    let mut reload = ReloadStampGate::new(&dir);
+    engine_choice::set_enabled(&dir, false).unwrap();
+    assert!(reload.pending().is_some());
+    runtime.reload_without_deploy().unwrap();
+    assert!(!runtime.is_initialized());
+    assert!(session.state().schema_id.is_empty());
+    assert!(!session.process_key_result(b'a'.into(), 0).is_some_and(|result| result.accepted));
+    runtime.init_without_deploy().unwrap();
+    let paused_session = runtime.create_session().unwrap();
+    assert!(paused_session.state().schema_id.is_empty());
+    assert!(!runtime.prewarm(Some(&paused_session)).unwrap());
+    reload.commit(reload.pending().unwrap());
+
+    engine_choice::set_enabled(&dir, true).unwrap();
+    assert!(reload.pending().is_some());
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(session.state().schema_id, schema);
+    assert_eq!(paused_session.state().schema_id, schema);
+    assert!(session.process_key_result(b'a'.into(), 0).is_some_and(|result| result.accepted));
+    runtime.shutdown().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     let Some((runtime, root)) =
         native_fixture("package_stamp_reloads_live_sessions_and_preserves_each_schema")
@@ -224,6 +258,7 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
         .unwrap();
     assert!(opened.accepted && opened.state.is_package_switcher());
     assert_eq!(opened.state.highlighted_candidate_index, 0);
+    assert_eq!(opened.state.candidates[1].text, "中文／中文标点");
     let next = session.process_key_result(key_policy::XK_F4, 0).unwrap();
     assert!(next.accepted && next.state.is_package_switcher());
     assert_eq!(next.state.highlighted_candidate_index, 1);
@@ -243,7 +278,7 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     assert!(menu.accepted);
     assert_eq!(menu.state.schema_id, switcher_model::SCHEMA_ID);
     assert!(menu.state.is_package_switcher());
-    assert_eq!(menu.state.highlighted_candidate_index, 1);
+    assert_eq!(menu.state.highlighted_candidate_index, 0);
     assert!(!should_bypass_empty_composition(XK_UP, 0, &menu.state));
     assert!(!should_bypass_empty_composition(XK_DOWN, 0, &menu.state));
     assert!(!should_bypass_empty_composition(XK_RETURN, 0, &menu.state));
@@ -254,19 +289,6 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
             .iter()
             .all(|c| !c.text.ends_with(" 未部署"))
     );
-    let moved_up = session
-        .process_key_result(
-            candidate_arrow_key(
-                XK_UP,
-                0,
-                &session.state(),
-                CandidatePanelLayout::Horizontal,
-            ),
-            0,
-        )
-        .unwrap();
-    assert!(moved_up.accepted);
-    assert_eq!(moved_up.state.highlighted_candidate_index, 0);
     let moved_down = session
         .process_key_result(
             candidate_arrow_key(
@@ -280,13 +302,33 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
         .unwrap();
     assert!(moved_down.accepted);
     assert_eq!(moved_down.state.highlighted_candidate_index, 1);
-    let closed_on_active = session.process_enter().unwrap();
-    assert!(closed_on_active.accepted);
-    assert_eq!(closed_on_active.state.schema_id, "keytao_b");
+    let moved_up = session
+        .process_key_result(
+            candidate_arrow_key(
+                XK_UP,
+                0,
+                &session.state(),
+                CandidatePanelLayout::Horizontal,
+            ),
+            0,
+        )
+        .unwrap();
+    assert!(moved_up.accepted);
+    assert_eq!(moved_up.state.highlighted_candidate_index, 0);
+    let expanded = session.process_enter().unwrap();
+    assert!(expanded.accepted && expanded.state.is_package_switcher());
+    assert_eq!(expanded.state.candidates[1].text, "中文 → 西文");
+    assert_eq!(expanded.state.candidates[2].text, "西文标点");
+    assert_eq!(expanded.state.candidates[3].text, "中文标点 ✓");
+    let selected = session.select_candidate_on_page(2).unwrap();
+    assert_eq!(selected.schema_id, "keytao_b");
+    assert!(session.get_option("punctuation_ascii"));
+    assert!(!session.get_option("punctuation_cjk"));
     let ctrl_grave = [(0xffe3, 0), (0x60, RIME_MOD_CONTROL)];
-    for highlighted in [1, 2] {
+    for highlighted in [0, 1, 2] {
         let result = session.process_keys_result(&ctrl_grave).unwrap();
         assert!(result.accepted && result.state.is_package_switcher());
+        assert_eq!(result.state.candidates[1].text, "中文／西文标点");
         assert_eq!(result.state.highlighted_candidate_index, highlighted);
         session
             .process_keys_result(&[
@@ -302,7 +344,7 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     assert!(!preview.is_empty());
     session.process_key_result(XK_F4, 0).unwrap();
     isolated_deploy::with_isolated_package_lock(&root, || {
-        let rejected = session.select_candidate_on_page(3).unwrap();
+        let rejected = session.select_candidate_on_page(4).unwrap();
         assert_eq!(rejected.preedit, composition.state.preedit);
         assert!(rejected.committed.is_none());
         assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("first"));
@@ -310,7 +352,7 @@ fn package_stamp_reloads_live_sessions_and_preserves_each_schema() {
     }).unwrap();
     session.process_key_result(XK_F4, 0).unwrap();
     let generation = runtime.generation();
-    let switched = session.select_candidate_on_page(3).unwrap();
+    let switched = session.select_candidate_on_page(4).unwrap();
     assert_eq!(RuntimeDirs::active_package_key(&root).as_deref(), Some("rime_ice"));
     assert_eq!(switched.schema_id, "keytao_d");
     assert_eq!(switched.committed.as_deref(), Some(preview.as_str()));

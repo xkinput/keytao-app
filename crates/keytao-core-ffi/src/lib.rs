@@ -1336,6 +1336,36 @@ fn write_theme_appearance(
     .is_ok()
 }
 
+/// Fit measured candidate widths into a horizontal row.
+///
+/// # Safety
+/// The two input arrays and the output array must be valid for `count` floats.
+#[no_mangle]
+pub unsafe extern "C" fn keytao_fit_candidate_widths(
+    natural: *const f32,
+    minimum: *const f32,
+    count: usize,
+    selected: usize,
+    available: f32,
+    output: *mut f32,
+) -> bool {
+    guard("keytao_fit_candidate_widths", false, || {
+        if count == 0 {
+            return true;
+        }
+        if natural.is_null() || minimum.is_null() || output.is_null()
+            || count > isize::MAX as usize / std::mem::size_of::<f32>()
+        {
+            return false;
+        }
+        let natural = unsafe { std::slice::from_raw_parts(natural, count) };
+        let minimum = unsafe { std::slice::from_raw_parts(minimum, count) };
+        let widths = keytao_theme::panel_hit::fit_candidate_widths(natural, minimum, selected, available);
+        unsafe { std::ptr::copy_nonoverlapping(widths.as_ptr(), output, count) };
+        true
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn keytao_default_keyboard_yaml() -> *mut c_char {
     guard("keytao_default_keyboard_yaml", std::ptr::null_mut(), || {

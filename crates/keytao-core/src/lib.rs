@@ -844,7 +844,7 @@ fn update_neutral_grammar(user_dir: &Path, enabled: bool) {
 pub mod engine_choice;
 pub mod libjd;
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android", target_os = "ios"))]
 pub mod jd_backend;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android", target_os = "ios"))]
@@ -5966,7 +5966,6 @@ struct RimeDataDirs {
 struct ProcessRimeState {
     /// The directories librime is initialized for, `None` while it is down.
     initialized: Mutex<Option<RimeDataDirs>>,
-    #[cfg(not(target_os = "ios"))]
     libjd: Mutex<Option<runtime_libjd::ActiveJd>>,
     /// Bumped whenever librime was torn down; a session whose generation is
     /// behind rebuilds its engine before its next call.
@@ -5995,7 +5994,6 @@ struct ProcessRimeState {
 ))]
 static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     initialized: Mutex::new(None),
-    #[cfg(not(target_os = "ios"))]
     libjd: Mutex::new(None),
     generation: AtomicU64::new(0),
     reload_barrier: RwLock::new(()),
@@ -6417,6 +6415,14 @@ impl ImeRuntime {
         PROCESS_RIME.finalize_backend()
     }
 
+    fn stop_if_disabled(&self, dirs: &RimeDataDirs) -> Result<bool, String> {
+        if engine_choice::is_enabled(&dirs.user) {
+            return Ok(false);
+        }
+        self.shutdown()?;
+        Ok(true)
+    }
+
     /// Initialize and deploy. Idempotent per process: librime can only run for
     /// one pair of directories, so a second runtime asking for the ones it is
     /// already running for is a no-op instead of a second deployment.
@@ -6484,6 +6490,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.stop_if_disabled(&dirs)? {
+            return Ok(());
+        }
         if self.activate_libjd(&dirs, false)? {
             return Ok(());
         }
@@ -6584,6 +6593,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.stop_if_disabled(&dirs)? {
+            return Ok(());
+        }
         if self.activate_libjd(&dirs, true)? {
             return Ok(());
         }
@@ -6725,6 +6737,9 @@ impl ImeRuntime {
         let mut generation = initial_generation;
         let mut changed = Vec::new();
         let result = (|| {
+            if self.stop_if_disabled(&dirs)? {
+                return Ok(self.generation() != initial_generation);
+            }
             if deployment_in_progress(&dirs.user) {
                 return Err("Rime deployment is busy".into());
             }
@@ -6812,6 +6827,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.stop_if_disabled(&dirs)? {
+            return Ok(());
+        }
         if self.activate_libjd(&dirs, true)? {
             return Ok(());
         }
@@ -6895,13 +6913,17 @@ impl ImeRuntime {
                 .build
                 .acquire()
                 .ok_or("Rime engine build timed out")?;
+            let disabled = self.stop_if_disabled(&dirs)?;
             // Pin the read barrier before releasing the directory check, so
             // teardown cannot race creation or block peers behind this session.
             let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)
                 .ok_or("librime initialization or reload is busy")?;
             let has_backend = initialized.as_ref() == Some(&dirs);
-            // Frontends keep a session handle while ime-jd is waiting for its first scheme.
-            if !has_backend && !(initialized.is_none() && self.libjd_requested(&dirs.user)) {
+            // Frontends keep a session while the engine is off or ime-jd is waiting for a scheme.
+            if !has_backend
+                && !disabled
+                && !(initialized.is_none() && self.libjd_requested(&dirs.user))
+            {
                 return Err("librime is running for other data directories".into());
             }
             let barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)
@@ -7191,7 +7213,6 @@ impl ImeRuntimeSession {
         }
         if self.has_package_hotkey(&[(key, mask)]) {
             let libjd_active = PROCESS_RIME.using_libjd();
-            let force_open = libjd_active || key == switcher_model::OPEN_PACKAGE_MENU;
             let opened = self.with_engine_and_policy(|engine, policy| {
                 let state = engine.state();
                 if !policy.composing || state.schema_id == ".default" {
@@ -7199,16 +7220,14 @@ impl ImeRuntimeSession {
                 }
                 let active_schemas = engine.list_schemas();
                 let active_switches = engine.active_switches();
-                let mut menu = switcher_model::Menu::load(
+                let menu = switcher_model::Menu::load(
                     &self.dirs.user,
                     Path::new(&self.dirs.shared),
-                    &state.schema_id,
+                    state,
                     active_schemas,
                     active_switches,
-                    force_open,
                     libjd_active,
                 )?;
-                menu.keep_input_mode(state);
                 let state = menu.state();
                 lock_ignore_poison(&self.pending).package_menu = Some(menu);
                 Some(KeyProcessResult {
@@ -7417,6 +7436,28 @@ impl ImeRuntimeSession {
                                     }
                                     NextCandidate if index + 1 < state.candidates.len() => {
                                         engine.highlight_candidate_on_page(index + 1)
+                                    }
+                                    PreviousCandidate | NextCandidate
+                                        if (action == PreviousCandidate && state.page > 0)
+                                            || (action == NextCandidate && !state.is_last_page) =>
+                                    {
+                                        let backward = action == PreviousCandidate;
+                                        let page = engine.change_page(backward);
+                                        let target = if backward {
+                                            page.candidates.len().saturating_sub(1)
+                                        } else {
+                                            0
+                                        };
+                                        // Native paging may preserve the page-local offset.
+                                        if page.page != state.page
+                                            && page.committed.is_none()
+                                            && !page.candidates.is_empty()
+                                            && page.highlighted_candidate_index != target
+                                        {
+                                            engine.highlight_candidate_on_page(target)
+                                        } else {
+                                            page
+                                        }
                                     }
                                     PreviousPage if state.page > 0 => engine.change_page(true),
                                     NextPage if !state.is_last_page => engine.change_page(false),

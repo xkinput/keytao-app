@@ -47,6 +47,7 @@ type Context = *mut c_void;
 const MAX_DICTIONARY_BYTES: usize = 512 * 1024 * 1024;
 
 enum JdInit {
+    #[cfg(any(not(keytao_ios_libjd), test))]
     Legacy(unsafe extern "C" fn(*const c_void, usize) -> Context),
     Dictionary(unsafe extern "C" fn(*const c_void, usize, *const c_void, usize) -> Context),
 }
@@ -313,6 +314,7 @@ impl JdBackend {
         crate::write_file_atomic(output, blob.as_bytes()).map_err(|error| error.to_string())
     }
 
+    #[cfg(not(keytao_ios_libjd))]
     unsafe fn load_library(path: &Path) -> Result<Arc<JdLibrary>, String> {
         if !path.is_absolute() {
             return Err("libjd library path must be absolute".into());
@@ -371,6 +373,78 @@ impl JdBackend {
                 _library: Some(library),
             }))
         }
+    }
+
+    #[cfg(keytao_ios_libjd)]
+    unsafe fn load_library(path: &Path) -> Result<Arc<JdLibrary>, String> {
+        // On iOS the engine is linked into the signed bundle, never loaded
+        // from a user file. Its path identity comes from bundled_engine_library.
+        if crate::libjd::bundled_engine_library().as_deref() != Some(path) {
+            return Err("invalid bundled iOS libjd path".into());
+        }
+        unsafe extern "C" {
+            fn jd_abi_layout(query: c_uint) -> c_uint;
+            fn jd_init(
+                dict: *const c_void,
+                len: usize,
+                user_dict: *const c_void,
+                user_len: usize,
+            ) -> Context;
+            fn jd_deinit(ctx: Context);
+            fn jd_state_ptr(ctx: Context) -> *const RawState;
+            fn jd_press_key(ctx: Context, key: c_char);
+            fn jd_backspace(ctx: Context);
+            fn jd_reset(ctx: Context);
+            fn jd_set_anchor(ctx: Context, index: c_uint);
+            fn jd_read_range(
+                ctx: Context,
+                start: c_uint,
+                count: c_uint,
+                output: *mut RawCandidate,
+                capacity: c_uint,
+            ) -> c_uint;
+            fn jd_dict_blob_bound(text: *const c_char, len: usize) -> usize;
+            fn jd_dict_build(
+                text: *const c_char,
+                len: usize,
+                hash: u64,
+                output: *mut c_void,
+                capacity: usize,
+                used: *mut usize,
+                report: *mut c_void,
+            ) -> c_uint;
+            fn jd_dict_check(blob: *const c_void, len: usize, info: *mut c_void) -> c_uint;
+        }
+        if unsafe {
+            jd_abi_layout(13) != 16_777_215
+                || jd_abi_layout(14) != 1023
+                || jd_abi_layout(5) != 32
+                || jd_abi_layout(16) != 0
+        } {
+            return Err("unrecognized bundled iOS libjd ABI".into());
+        }
+        Ok(Arc::new(JdLibrary {
+            api: JdApi {
+                #[cfg(test)]
+                layout: jd_abi_layout,
+                init: JdInit::Dictionary(jd_init),
+                dictionary: Some(DictionaryApi {
+                    bound: jd_dict_blob_bound,
+                    build: jd_dict_build,
+                    check: jd_dict_check,
+                    embedded: false,
+                }),
+                deinit: jd_deinit,
+                state: jd_state_ptr,
+                press_key: jd_press_key,
+                backspace: jd_backspace,
+                reset: jd_reset,
+                set_anchor: jd_set_anchor,
+                read_range: jd_read_range,
+            },
+            layout: JdAbiLayout::check(jd_abi_layout)?,
+            _library: None,
+        }))
     }
 
     fn built_in_schema() -> SchemaInfo {
@@ -449,6 +523,7 @@ impl JdBackend {
     }
 }
 
+#[cfg(not(keytao_ios_libjd))]
 fn symbol_error(error: libloading::Error) -> String {
     format!("resolve libjd symbol: {error}")
 }
@@ -477,7 +552,9 @@ impl Session {
     ) -> Result<Self, String> {
         let ctx = NonNull::new(unsafe {
             match (&library.api.init, dictionary.as_deref()) {
+                #[cfg(any(not(keytao_ios_libjd), test))]
                 (JdInit::Legacy(init), None) => init(ptr::null(), 0),
+                #[cfg(any(not(keytao_ios_libjd), test))]
                 (JdInit::Legacy(_), Some(_)) => {
                     return Err("ime-jd does not support custom dictionaries".into())
                 }

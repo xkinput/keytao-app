@@ -1,4 +1,5 @@
 import Cocoa
+import CKeytaoCore
 
 /// A lightweight floating panel that displays Rime candidates.
 /// Positioned just below the cursor of the active text field.
@@ -128,8 +129,7 @@ class CandidatePanel: NSPanel {
 
         let alignsFirstRow = orientation == .horizontal && theme.candidate.commentPosition == .below
             && model.candidates.contains { !($0.comment ?? "").isEmpty }
-        var firstOption: CandidateOptionView?
-        for (position, candidate) in model.candidates.enumerated() {
+        let options = model.candidates.map { candidate in
             let option = CandidateOptionView(
                 label: candidate.label,
                 text: candidate.text,
@@ -141,27 +141,54 @@ class CandidatePanel: NSPanel {
             option.target = self
             option.tag = candidate.index
             option.action = #selector(candidateClicked(_:))
-            candidateStack.addArrangedSubview(option)
-            option.widthAnchor.constraint(lessThanOrEqualTo: candidateStack.widthAnchor).isActive = true
-            if alignsFirstRow {
-                if let firstOption {
-                    option.heightAnchor.constraint(equalTo: firstOption.heightAnchor).isActive = true
-                } else {
-                    firstOption = option
-                }
+            return option
+        }
+        let navigation = navigationButtons(model.navigation, theme: theme)
+        let separatorCount = theme.candidate.separatorVisible ? max(0, options.count - 1) : 0
+        let selected = model.candidates.firstIndex(where: \.selected) ?? 0
+        var rowWidths: (fitted: [Float], minimum: [Float])?
+        if orientation == .horizontal && !options.isEmpty {
+            let navigationWidth = navigation.reduce(CGFloat(0)) { $0 + $1.fittingSize.width }
+            let gaps = max(0, options.count + separatorCount + navigation.count - 1)
+            let available = maxWidth - theme.panel.paddingLeft - theme.panel.paddingRight
+                - navigationWidth - CGFloat(separatorCount) - CGFloat(gaps) * theme.panel.gap
+            let natural = options.map { Float($0.intrinsicContentSize.width) }
+            let minimum = options.enumerated().map { position, option in
+                Float(option.minimumWidth(nearSelection: abs(position - selected) <= 1))
             }
+            var fitted = Array(repeating: Float(0), count: options.count)
+            if keytao_fit_candidate_widths(natural, minimum, UInt(options.count), UInt(selected), Float(available), &fitted) {
+                rowWidths = (fitted, minimum)
+            }
+        }
 
-            if theme.candidate.separatorVisible && position < model.candidates.count - 1 {
+        var firstOption: CandidateOptionView?
+        for (position, option) in options.enumerated() {
+            if let rowWidths {
+                let width = rowWidths.fitted[position]
+                guard width > 0 else { continue }
+                option.fitWidth(
+                    CGFloat(width), minimum: CGFloat(rowWidths.minimum[position]),
+                    nearSelection: abs(position - selected) <= 1
+                )
+            }
+            if theme.candidate.separatorVisible && firstOption != nil {
                 let separator = makeSeparator(theme: theme)
                 candidateStack.addArrangedSubview(separator)
                 if orientation == .vertical {
                     separator.widthAnchor.constraint(equalTo: candidateStack.widthAnchor).isActive = true
                 }
             }
+            candidateStack.addArrangedSubview(option)
+            option.widthAnchor.constraint(lessThanOrEqualTo: candidateStack.widthAnchor).isActive = true
+            if let firstOption, alignsFirstRow {
+                option.heightAnchor.constraint(equalTo: firstOption.heightAnchor).isActive = true
+            }
+            firstOption = firstOption ?? option
         }
 
-        if model.navigation.canGoPrevious || model.navigation.canGoNext {
-            addNavigation(navigation: model.navigation, theme: theme)
+        if !navigation.isEmpty {
+            addNavigation(navigation, theme: theme)
         }
 
         contentView?.layoutSubtreeIfNeeded()
@@ -239,27 +266,26 @@ class CandidatePanel: NSPanel {
 
     // MARK: - View factories
 
-    private func addNavigation(navigation: KeyTaoPanelNavigation, theme: ImeTheme) {
+    private func navigationButtons(_ navigation: KeyTaoPanelNavigation, theme: ImeTheme) -> [CandidateNavigationButton] {
+        var buttons: [CandidateNavigationButton] = []
+        if navigation.canGoPrevious {
+            buttons.append(makeNavButton(symbol: "‹", action: #selector(prevPage(_:)), theme: theme))
+        }
+        if navigation.canGoNext {
+            buttons.append(makeNavButton(symbol: "›", action: #selector(nextPage(_:)), theme: theme))
+        }
+        return buttons
+    }
+
+    private func addNavigation(_ buttons: [CandidateNavigationButton], theme: ImeTheme) {
         if orientation == .vertical {
-            let row = NSStackView()
+            let row = NSStackView(views: buttons)
             row.orientation = .horizontal
             row.alignment = .centerY
             row.spacing = theme.panel.gap
-            if navigation.canGoPrevious {
-                row.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage(_:)), theme: theme))
-            }
-            if navigation.canGoNext {
-                row.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage(_:)), theme: theme))
-            }
             candidateStack.addArrangedSubview(row)
-            return
-        }
-
-        if navigation.canGoPrevious {
-            candidateStack.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage(_:)), theme: theme))
-        }
-        if navigation.canGoNext {
-            candidateStack.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage(_:)), theme: theme))
+        } else {
+            buttons.forEach(candidateStack.addArrangedSubview)
         }
     }
 
@@ -381,6 +407,26 @@ private final class CandidateOptionView: NSControl {
                 theme.candidate.minHeight
             )
         )
+    }
+
+    func minimumWidth(nearSelection: Bool) -> CGFloat {
+        let prefix = nearSelection ? String(textField.stringValue.prefix(1)) : ""
+        let font = textField.font ?? .systemFont(ofSize: theme.font.size)
+        let textWidth = ((prefix + "…") as NSString).size(withAttributes: [.font: font]).width
+        return ceil(labelField.intrinsicContentSize.width + theme.candidate.inlineGap
+            + textWidth + theme.candidate.paddingX * 2)
+    }
+
+    func fitWidth(_ width: CGFloat, minimum: CGFloat, nearSelection: Bool) {
+        if !nearSelection && width <= minimum && width < intrinsicContentSize.width {
+            textField.stringValue = "…"
+            commentField.isHidden = true
+            invalidateIntrinsicContentSize()
+        }
+        if width < minimum {
+            labelField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        }
+        widthAnchor.constraint(equalToConstant: width).isActive = true
     }
 
     override func updateTrackingAreas() {

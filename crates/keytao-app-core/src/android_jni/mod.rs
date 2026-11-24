@@ -1166,8 +1166,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
             return 1;
         }
 
-        let legacy_rime =
-            !android_prefers_libjd(&user_dir) && keytao_core::RuntimeDirs::needs_migration(&user_dir);
+        let legacy_rime = keytao_core::engine_choice::is_enabled(&user_dir)
+            && !android_prefers_libjd(&user_dir)
+            && keytao_core::RuntimeDirs::needs_migration(&user_dir);
         if runtime.is_some() && (!legacy_rime || keytao_core::deployment_in_progress(&user_dir)) {
             return 0;
         }

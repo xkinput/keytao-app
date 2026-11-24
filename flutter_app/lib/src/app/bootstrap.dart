@@ -7,6 +7,40 @@ import '../rust/api/types.dart';
 import '../rust/frb_generated.dart';
 import 'controller.dart';
 
+const _desktopCommands = {'--deploy', '--disable-engine', '--enable-engine'};
+
+Future<int?> runDesktopCommand(List<String> args) async {
+  if (Platform.isAndroid ||
+      Platform.isIOS ||
+      !args.any(_desktopCommands.contains)) {
+    return null;
+  }
+  if (args.length != 1) {
+    stderr.writeln(
+      'Usage: keytao-app --deploy | --disable-engine | --enable-engine',
+    );
+    return 64;
+  }
+  try {
+    await RustLib.init();
+    await core.initCore(config: await bridgeConfig(hostPlatform()));
+    if (args.single == '--deploy') {
+      final result = await core.deployDefault();
+      if (!result.success) throw StateError(result.message);
+      stdout.writeln(result.message);
+      if (result.warning case final warning?) stderr.writeln(warning);
+    } else {
+      final enabled = args.single == '--enable-engine';
+      await core.setInputEngineEnabled(enabled: enabled);
+      stdout.writeln(enabled ? 'Input engine enabled.' : 'Input engine disabled.');
+    }
+    return 0;
+  } catch (failure) {
+    stderr.writeln(errorText(failure));
+    return 1;
+  }
+}
+
 // iOS build names must be numeric, so its build passes the full version here.
 const appVersion = String.fromEnvironment(
   'KEYTAO_VERSION',

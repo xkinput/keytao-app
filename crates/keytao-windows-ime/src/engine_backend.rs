@@ -177,6 +177,7 @@ struct InProcState {
     reload_stamp_path: Option<PathBuf>,
     reload_stamp_signature: Option<String>,
     reload_stamp_cache: ReloadStampCache,
+    public_engine_enabled: Option<bool>,
     rime_dll: Option<Arc<LoadedRimeDll>>,
 }
 
@@ -242,6 +243,7 @@ impl InProcEngine {
                 reload_stamp_path: inner.reload_stamp_path.clone(),
                 reload_stamp_signature: inner.reload_stamp_signature.clone(),
                 reload_stamp_cache: inner.reload_stamp_cache.clone(),
+                public_engine_enabled: inner.public_engine_enabled,
                 rime_dll: inner.rime_dll.clone(),
             }),
             ..Self::default()
@@ -298,6 +300,10 @@ impl InProcEngine {
             || ReloadStamp::signature_at(&reload_stamp_path),
             |data| data.reload_stamp_signature.clone(),
         );
+        let public_engine_enabled = sandbox
+            .as_ref()
+            .map(|_| copy_public_engine_state(&reload_stamp_path, &control_root))
+            .transpose()?;
         let runtime = ImeRuntime::with_dirs(&control_root, shared).with_ime_host();
         let runtime = if server && read_engine_mode() == crate::engine_config::EngineMode::Pipe {
             runtime.with_libjd_server()
@@ -320,6 +326,7 @@ impl InProcEngine {
             reload_stamp_path: Some(reload_stamp_path),
             reload_stamp_signature,
             reload_stamp_cache: ReloadStampCache::default(),
+            public_engine_enabled,
             rime_dll,
         })
     }
@@ -377,6 +384,7 @@ impl InProcEngine {
                 }
             }
         }
+        let public_engine_enabled = copy_public_engine_state(&path, &user_dir)?;
         if stale && runtime.is_initialized() {
             runtime.reload_without_deploy()?;
         } else {
@@ -396,9 +404,19 @@ impl InProcEngine {
             reload_stamp_signature,
             reload_stamp_path: Some(path),
             reload_stamp_cache: ReloadStampCache::default(),
+            public_engine_enabled: Some(public_engine_enabled),
             rime_dll,
         })
     }
+}
+
+fn copy_public_engine_state(pointer: &Path, user: &Path) -> Result<bool, String> {
+    use keytao_core::engine_choice;
+    let enabled = pointer.parent().is_none_or(engine_choice::is_enabled);
+    if engine_choice::is_enabled(user) != enabled {
+        engine_choice::set_enabled(user, enabled)?;
+    }
+    Ok(enabled)
 }
 
 fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
@@ -569,8 +587,17 @@ impl ImeEngineBackend for InProcEngine {
             reload_stamp_path,
             reload_stamp_signature,
             reload_stamp_cache,
+            public_engine_enabled,
             ..
         } = &mut *inner;
+        if public_engine_enabled.is_some_and(|enabled| {
+            reload_stamp_path
+                .as_deref()
+                .and_then(Path::parent)
+                .is_some_and(|root| keytao_core::engine_choice::is_enabled(root) != enabled)
+        }) {
+            return true;
+        }
         let Some(current) = reload_stamp_path
             .as_deref()
             .and_then(|path| reload_stamp_cache.signature_at(path))

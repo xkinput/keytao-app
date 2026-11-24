@@ -60,6 +60,10 @@ for source in "${required[@]}"; do
 done
 
 mkdir -p "$RESOURCES_DIR"
+LIBJD_ENGINE_DIR="$REPO_DIR/target/keytao-ios-libjd"
+if [[ "$runtime" == iphoneos-arm64 && -f "$LIBJD_ENGINE_DIR/libjd-engine.a" ]]; then
+    cp "$LIBJD_ENGINE_DIR/libjd-engine-LICENSE.txt" "$LIBJD_ENGINE_DIR/libjd-engine-SOURCE.txt" "$RESOURCES_DIR/"
+fi
 rm -rf "$RESOURCES_DIR/rime-data" "$RESOURCES_DIR/addon-schemas"
 ditto "$RIME_DATA_DIR" "$RESOURCES_DIR/rime-data"
 printf '%s' "$core_version" > "$RESOURCES_DIR/keytao-core-version"

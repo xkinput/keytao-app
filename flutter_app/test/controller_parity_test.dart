@@ -119,6 +119,7 @@ class FakeCore implements RustLibApi {
   String? deployFailure;
   String? deployWarning;
   EnglishModeDto english = EnglishModeDto.schema;
+  bool inputEngineEnabled = true;
   int onboardingWrites = 0;
 
   Future<void> emitAddonDeployProgress() async {
@@ -155,6 +156,12 @@ class FakeCore implements RustLibApi {
   Future<LocalSchemaDto> crateApiCoreCheckLocalSchema() async => local;
   @override
   Future<String> crateApiCoreInputEngine() async => 'rime';
+  @override
+  Future<bool> crateApiCoreInputEngineEnabled() async => inputEngineEnabled;
+  @override
+  Future<void> crateApiCoreSetInputEngineEnabled({required bool enabled}) async {
+    inputEngineEnabled = enabled;
+  }
   @override
   Future<LibjdStatusDto> crateApiCoreLibjdStatus() async =>
       const LibjdStatusDto(available: false);
@@ -562,6 +569,19 @@ void main() {
     await core.events.close();
     await android.progress.close();
     RustLib.dispose();
+  });
+
+  test('algorithm toggle preserves the preferred engine and clears preview', () async {
+    controller.dispose();
+    controller = create(mobile: false)
+      ..inputEngine = 'libjd_engine'
+      ..candidatePreviewCandidates = [(text: '候选', comment: '')];
+    expect(await controller.setInputEngineEnabled(false), isTrue);
+    expect(core.inputEngineEnabled, isFalse);
+    expect(controller.candidatePreviewCandidates, isEmpty);
+    expect(controller.prefersLibjd, isTrue);
+    expect(await controller.setInputEngineEnabled(true), isTrue);
+    expect(core.inputEngineEnabled, isTrue);
   });
 
   test('every managed scheme uses the download action label', () {

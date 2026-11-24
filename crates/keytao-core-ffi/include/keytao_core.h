@@ -310,6 +310,19 @@ bool keytao_write_theme_appearance(const char *path,
                                    float corner_radius,
                                    const char *background_hex);
 
+/**
+ * Fit measured candidate widths into a horizontal row.
+ *
+ * # Safety
+ * The two input arrays and the output array must be valid for `count` floats.
+ */
+bool keytao_fit_candidate_widths(const float *natural,
+                                 const float *minimum,
+                                 uintptr_t count,
+                                 uintptr_t selected,
+                                 float available,
+                                 float *output);
+
 char *keytao_default_keyboard_yaml(void);
 
 char *keytao_resolve_keyboard_json(const char *default_keyboard_path,

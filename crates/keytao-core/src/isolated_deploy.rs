@@ -328,7 +328,8 @@ fn switch_package(
         target_os = "macos",
         target_os = "linux",
         target_os = "windows",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     ))]
     if libjd_only {
         use crate::jd_backend::{JdBackend, DEFAULT_PAGE_SIZE};

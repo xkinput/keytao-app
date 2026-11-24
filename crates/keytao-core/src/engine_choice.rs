@@ -1,7 +1,37 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{fs, path::Path};
 
 pub const PACKAGE_KEY: &str = "keytao";
+pub const ENABLED_FILE: &str = ".keytao-engine-enabled";
+
+pub fn is_enabled(root: &Path) -> bool {
+    crate::runtime_dirs::read_regular_file(&root.join(ENABLED_FILE)).as_deref() != Some(b"0\n")
+}
+
+pub fn set_enabled(root: &Path, enabled: bool) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".keytao-engine-enabled.lock"))
+        .map_err(|error| error.to_string())?;
+    crate::lock_file(&lock, true).map_err(|error| error.to_string())?;
+
+    let path = root.join(ENABLED_FILE);
+    let previous = crate::runtime_dirs::read_regular_file(&path);
+    crate::write_file_atomic(&path, if enabled { b"1\n" } else { b"0\n" })
+        .map_err(|error| format!("save input engine state: {error}"))?;
+    if let Err(error) = crate::ReloadStamp::write(root) {
+        match previous {
+            Some(bytes) => crate::write_file_atomic(&path, &bytes),
+            None => fs::remove_file(&path),
+        }
+        .map_err(|restore| format!("{error}; restore input engine state: {restore}"))?;
+        return Err(error);
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,6 +115,24 @@ pub fn active_package(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_state_is_unchanged_when_reload_cannot_be_signalled() {
+        let root = std::env::temp_dir().join(format!("keytao-engine-state-{}", std::process::id()));
+        let stamp = crate::ReloadStamp::path(&root);
+        fs::create_dir_all(&stamp).unwrap();
+        assert!(set_enabled(&root, false).is_err());
+        assert!(is_enabled(&root));
+        assert!(!root.join(ENABLED_FILE).exists());
+
+        fs::remove_dir(&stamp).unwrap();
+        set_enabled(&root, false).unwrap();
+        fs::remove_file(&stamp).unwrap();
+        fs::create_dir(&stamp).unwrap();
+        assert!(set_enabled(&root, true).is_err());
+        assert!(!is_enabled(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn global_preference_and_per_package_conversion_stay_independent() {

@@ -4,6 +4,7 @@
 //! for both X11 XCB image upload and Wayland wl_shm.
 
 use std::{
+    borrow::Cow,
     collections::HashSet,
     path::Path as StdPath,
     process::Command,
@@ -20,7 +21,7 @@ use keytao_theme::{
 };
 use tiny_skia::*;
 
-use crate::panel_hit::{layout, PanelGeometry, PanelHitAreas, PanelRect};
+use crate::panel_hit::{fit_candidate_widths, layout, PanelGeometry, PanelHitAreas, PanelRect};
 use x11rb::{
     connection::Connection as _,
     protocol::xproto::{
@@ -888,7 +889,7 @@ impl PanelRenderer {
             .as_ref()
             .map(|_| preedit_size + self.s(theme.panel.preedit_gap))
             .unwrap_or(0.0);
-        let (option_widths, mut stacked): (Vec<_>, Vec<_>) = model
+        let (natural_widths, mut stacked): (Vec<_>, Vec<_>) = model
             .candidates
             .iter()
             .map(|candidate| {
@@ -967,6 +968,53 @@ impl PanelRenderer {
         } else {
             nav_count as f32 * nav_button + nav_count.saturating_sub(1) as f32 * panel_gap
         };
+        let max_width = (screen_width
+            - self.s(theme.panel.screen_margin).ceil() * 2.0
+            - self.shadow_inset(theme.panel.shadow) as f32 * 2.0)
+            .floor()
+            .max(1.0);
+        let row_width = (max_width - panel_pad_left - panel_pad_right).max(0.0);
+        let candidate_count = model.candidates.len();
+        let option_widths = if model.orientation == PanelOrientation::Horizontal {
+            let gaps = candidate_count.saturating_sub(1) + if nav_count > 0 { 2 } else { 0 };
+            let available = (row_width - nav_width - gaps as f32 * panel_gap).max(0.0);
+            if natural_widths.iter().sum::<f32>() <= available {
+                natural_widths.clone()
+            } else {
+                let selected = state
+                    .highlighted_candidate_index
+                    .min(candidate_count.saturating_sub(1));
+                let ellipsis_width = self.text_bounds(self.ellipsis(), font_size).2;
+                let minimum_widths: Vec<_> = model
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        let word_x = stacked[index].map_or_else(
+                            || self.text_width(&candidate.label, label_size) + inline_gap,
+                            |option| option.word_x,
+                        );
+                        let leading_width = if index.abs_diff(selected) <= 1 {
+                            candidate.text.chars().next().map_or(0.0, |ch| {
+                                self.layout_glyph(ch, font_size)
+                                    .map_or(font_size * 0.5, |glyph| glyph.advance)
+                            })
+                        } else {
+                            0.0
+                        };
+                        option_pad_x * 2.0 + word_x + leading_width + ellipsis_width
+                    })
+                    .collect();
+                fit_candidate_widths(&natural_widths, &minimum_widths, selected, available)
+            }
+        } else {
+            natural_widths
+                .iter()
+                .map(|width| width.min(row_width))
+                .collect()
+        };
+        let visible_count = option_widths.iter().filter(|&&width| width > 0.0).count();
+        let last_visible = option_widths.iter().rposition(|&width| width > 0.0);
         let preedit_width = model
             .preedit
             .as_ref()
@@ -991,9 +1039,9 @@ impl PanelRenderer {
             )
         } else {
             let candidate_width = option_widths.iter().sum::<f32>()
-                + model.candidates.len().saturating_sub(1) as f32 * panel_gap;
+                + visible_count.saturating_sub(1) as f32 * panel_gap;
             let nav_extra = if nav_count > 0 {
-                panel_gap + nav_width
+                panel_gap * if visible_count == 0 { 1.0 } else { 2.0 } + nav_width
             } else {
                 0.0
             };
@@ -1004,13 +1052,7 @@ impl PanelRenderer {
             .max(content_width.max(preedit_width) + panel_pad_left + panel_pad_right)
             .ceil()
             .max(1.0)
-            .min(
-                (screen_width
-                    - self.s(theme.panel.screen_margin).ceil() * 2.0
-                    - self.shadow_inset(theme.panel.shadow) as f32 * 2.0)
-                    .floor()
-                    .max(1.0),
-            ) as u32;
+            .min(max_width) as u32;
         let height = (content_height + panel_pad_top + panel_pad_bottom)
             .min(self.s(theme.panel.max_height))
             .ceil()
@@ -1079,6 +1121,9 @@ impl PanelRenderer {
             .zip(areas.candidates.iter())
             .enumerate()
         {
+            if rect.width <= 0.0 {
+                continue;
+            }
             self.draw_candidate_option(
                 &mut pm,
                 candidate,
@@ -1089,8 +1134,9 @@ impl PanelRenderer {
                 comment_size,
                 &theme,
                 align_stacked_row,
+                rect.width < natural_widths[index],
             );
-            if theme.candidate.separator_visible && index + 1 < model.candidates.len() {
+            if theme.candidate.separator_visible && last_visible.is_some_and(|last| index < last) {
                 let (x, y, width, height) = if model.orientation == PanelOrientation::Vertical {
                     (
                         rect.x,
@@ -1137,10 +1183,8 @@ impl PanelRenderer {
             .chain(areas.previous_page.iter_mut())
             .chain(areas.next_page.iter_mut())
         {
-            if below {
-                rect.width = rect.width.min((width as f32 - rect.x).max(0.0));
-                rect.height = rect.height.min((height as f32 - rect.y).max(0.0));
-            }
+            rect.width = rect.width.min((width as f32 - rect.x).max(0.0));
+            rect.height = rect.height.min((height as f32 - rect.y).max(0.0));
             rect.x += inset;
             rect.y += inset;
         }
@@ -1237,6 +1281,7 @@ impl PanelRenderer {
         comment_size: f32,
         theme: &keytao_theme::ResolvedImeTheme,
         align_stacked_row: bool,
+        constrained: bool,
     ) {
         let PanelRect {
             x,
@@ -1304,31 +1349,36 @@ impl PanelRenderer {
         } else {
             candidate_theme.comment_color
         };
-        self.draw_text(
-            pm,
-            &candidate.label,
-            label_x,
-            baseline,
-            bgra(label_color),
-            label_size,
-        );
-        self.draw_text(
-            pm,
-            &candidate.text,
-            text_x,
-            baseline,
-            bgra(text_color),
-            font_size,
-        );
+        let right = x + width - option_pad_x;
+        let label = if constrained {
+            self.fit_line(&candidate.label, label_size, right - label_x)
+        } else {
+            Cow::Borrowed(candidate.label.as_str())
+        };
+        let text = if constrained {
+            self.fit_line(&candidate.text, font_size, right - text_x)
+        } else {
+            Cow::Borrowed(candidate.text.as_str())
+        };
+        self.draw_text(pm, &label, label_x, baseline, bgra(label_color), label_size);
+        self.draw_text(pm, &text, text_x, baseline, bgra(text_color), font_size);
         if let Some(comment) = candidate.comment.as_ref() {
             let comment_x = if stacked.is_some() {
                 text_x
             } else {
-                text_x + self.text_width(&candidate.text, font_size) + inline_gap
+                if text != candidate.text {
+                    return;
+                }
+                text_x + self.text_width(&text, font_size) + inline_gap
+            };
+            let comment = if constrained {
+                self.fit_line(comment, comment_size, right - comment_x)
+            } else {
+                Cow::Borrowed(comment.as_str())
             };
             self.draw_text(
                 pm,
-                comment,
+                &comment,
                 comment_x,
                 comment_baseline,
                 bgra(comment_color),
@@ -1354,6 +1404,49 @@ impl PanelRenderer {
             bgra(theme.navigation.foreground),
             font_size,
         );
+    }
+
+    fn ellipsis(&self) -> &'static str {
+        if self.face_for_char('…').is_some() {
+            "…"
+        } else {
+            "..."
+        }
+    }
+
+    fn fit_line<'a>(&self, text: &'a str, size: f32, width: f32) -> Cow<'a, str> {
+        if width <= 0.0 {
+            return Cow::Borrowed("");
+        }
+        let ellipsis = self.ellipsis();
+        let ellipsis_width = self.text_bounds(ellipsis, size).2;
+        let mut pen = 0.0;
+        let mut prefix = 0;
+        for (index, ch) in text.char_indices() {
+            if !is_zero_width_selector(ch) {
+                let (advance, right) =
+                    self.layout_glyph(ch, size)
+                        .map_or((size * 0.5, size * 0.5), |layout| {
+                            let right = layout.glyph.bitmap_left() as f32 * layout.scale
+                                + layout.width as f32;
+                            (layout.advance, right.max(layout.advance))
+                        });
+                if pen + right > width {
+                    if ellipsis_width > width {
+                        return Cow::Borrowed("");
+                    }
+                    let mut fitted = String::with_capacity(prefix + ellipsis.len());
+                    fitted.push_str(&text[..prefix]);
+                    fitted.push_str(ellipsis);
+                    return Cow::Owned(fitted);
+                }
+                pen += advance;
+            }
+            if pen + ellipsis_width <= width {
+                prefix = index + ch.len_utf8();
+            }
+        }
+        Cow::Borrowed(text)
     }
 
     fn s(&self, value: f32) -> f32 {
@@ -1813,6 +1906,49 @@ mod tests {
             visible_colors > 2,
             "candidate panel text rendered no visible pixels"
         );
+    }
+
+    #[test]
+    fn long_horizontal_candidates_keep_neighbors_and_paging_clickable() {
+        let Some(mut renderer) = load_font().and_then(PanelRenderer::new) else {
+            eprintln!("skipping candidate overflow test: no CJK font found");
+            return;
+        };
+        let mut state = ImeState::empty();
+        state.candidates = (0..5)
+            .map(|_| Candidate {
+                text: "超长候选文字".repeat(20),
+                comment: None,
+            })
+            .collect();
+        state.highlighted_candidate_index = 3;
+        state.is_last_page = false;
+        let mut theme = keytao_theme::ResolvedImeTheme::default();
+        theme.panel.shadow = false;
+        theme.panel.orientation = PanelOrientation::Horizontal;
+        let (_, width, _, areas) = renderer.render_themed(&state, 480.0, &theme, true);
+        for index in 2..=4 {
+            let rect = areas.candidates[index];
+            assert!(rect.width > areas.candidates[0].width);
+            assert!(rect.x + rect.width <= width as f32);
+            assert_eq!(
+                areas.click_at(
+                    f64::from(rect.x + rect.width * 0.5),
+                    f64::from(rect.y + rect.height * 0.5),
+                ),
+                Some(crate::panel_hit::PanelClick::Candidate(index)),
+            );
+        }
+        let next = areas.next_page.unwrap();
+        assert!(next.width > 0.0 && next.x + next.width <= width as f32);
+        assert_eq!(
+            areas.click_at(f64::from(next.x + 1.0), f64::from(next.y + 1.0)),
+            Some(crate::panel_hit::PanelClick::NextPage),
+        );
+
+        let text = renderer.fit_line(&state.candidates[3].text, theme.font.size, 100.0);
+        assert!(text.ends_with(renderer.ellipsis()));
+        assert!(renderer.text_bounds(&text, theme.font.size).2 <= 100.0);
     }
 
     #[test]

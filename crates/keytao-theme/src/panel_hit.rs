@@ -68,6 +68,70 @@ pub struct PanelGeometry<'a> {
     pub can_go_next: bool,
 }
 
+/// Allocate measured row widths, including each item's own padding. The available
+/// width excludes the panel chrome, gaps and page buttons. Keep indices intact.
+pub fn fit_candidate_widths(
+    natural: &[f32],
+    minimum: &[f32],
+    selected: usize,
+    available: f32,
+) -> Vec<f32> {
+    assert_eq!(natural.len(), minimum.len());
+    let available = available.max(0.0);
+    if natural.iter().sum::<f32>() <= available {
+        return natural.to_vec();
+    }
+    let selected = selected.min(natural.len() - 1);
+    let mut widths: Vec<_> = natural.iter().zip(minimum).map(|(natural, minimum)| {
+        minimum.min(*natural)
+    }).collect();
+    let mut distant: Vec<_> = (0..widths.len())
+        .filter(|index| index.abs_diff(selected) > 1)
+        .collect();
+    distant.sort_by_key(|index| index.abs_diff(selected));
+    let mut used = widths.iter().sum::<f32>();
+    for index in distant.iter().rev().copied() {
+        if used <= available {
+            break;
+        }
+        used -= widths[index];
+        widths[index] = 0.0;
+    }
+    if used > available {
+        for width in &mut widths {
+            *width *= available / used;
+        }
+        return widths;
+    }
+
+    // Share the remaining text room among the highlighted item and its two
+    // neighbors, reclaiming the share of any short item that already fits.
+    let mut nearby: Vec<_> = (selected.saturating_sub(1)..=(selected + 1).min(natural.len() - 1))
+        .map(|index| (index, if index == selected { 2.0 } else { 1.0 }))
+        .collect();
+    nearby.sort_by(|&(left, left_weight), &(right, right_weight)| {
+        ((natural[left] - widths[left]) / left_weight)
+            .total_cmp(&((natural[right] - widths[right]) / right_weight))
+    });
+    let mut remaining = available - used;
+    let mut weight = nearby.iter().map(|(_, weight)| weight).sum::<f32>();
+    for (index, share) in nearby {
+        let added = (remaining * share / weight).min(natural[index] - widths[index]);
+        widths[index] += added;
+        remaining = (remaining - added).max(0.0);
+        weight -= share;
+    }
+    for index in distant {
+        if widths[index] == 0.0 {
+            continue;
+        }
+        let added = remaining.min(natural[index] - widths[index]);
+        widths[index] += added;
+        remaining -= added;
+    }
+    widths
+}
+
 /// The single source of candidate and paging-button positions: the renderer
 /// draws into these rects and the backends hit-test against them.
 pub fn layout(g: &PanelGeometry) -> PanelHitAreas {
@@ -87,7 +151,7 @@ pub fn layout(g: &PanelGeometry) -> PanelHitAreas {
         });
         if g.vertical {
             y += height + g.gap;
-        } else {
+        } else if width > 0.0 {
             x += width + g.gap;
         }
     }
@@ -113,6 +177,24 @@ pub fn layout(g: &PanelGeometry) -> PanelHitAreas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflowing_candidates_allocate_room_around_the_highlight() {
+        let natural = [900.0, 130.0, 900.0, 120.0, 800.0];
+        let minimum = [26.0, 42.0, 42.0, 42.0, 26.0];
+        assert_eq!(fit_candidate_widths(&natural, &minimum, 2, 4000.0), natural);
+        let fitted = fit_candidate_widths(&natural, &minimum, 2, 260.0);
+        assert!(fitted[2] > fitted[1] && fitted[1] > fitted[0]);
+        assert!(fitted[3] > fitted[4]);
+        assert_eq!((fitted[0], fitted[4]), (26.0, 26.0));
+        assert!((fitted.iter().sum::<f32>() - 260.0).abs() < 0.01);
+
+        let narrow = fit_candidate_widths(&natural, &minimum, 2, 126.0);
+        assert_eq!(narrow, [0.0, 42.0, 42.0, 42.0, 0.0]);
+        let hit = horizontal(&narrow, 1.0, true);
+        assert_eq!(hit.click_at(11.0, 10.0), Some(PanelClick::Candidate(1)));
+        assert_eq!(hit.click_at(57.0, 10.0), Some(PanelClick::Candidate(2)));
+    }
 
     /// Mirrors how `PanelRenderer::render` scales theme metrics (`s()`).
     fn horizontal(widths: &[f32], scale: f32, next: bool) -> PanelHitAreas {

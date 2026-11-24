@@ -648,6 +648,34 @@ pub fn input_engine() -> Result<String, String> {
     Ok(keytao_app_core::libjd::input_engine(&root).as_str().into())
 }
 
+pub fn input_engine_enabled() -> Result<bool, String> {
+    let root = runtime::state()?.host.user_root()?;
+    Ok(keytao_core::engine_choice::is_enabled(&root))
+}
+
+pub async fn set_input_engine_enabled(enabled: bool) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    #[cfg(target_os = "windows")]
+    let _engine_guard =
+        keytao_app_core::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+    let root = state.host.user_root()?;
+    #[cfg(target_os = "windows")]
+    let previous = keytao_core::engine_choice::is_enabled(&root);
+    keytao_core::engine_choice::set_enabled(&root, enabled)?;
+    #[cfg(target_os = "windows")]
+    if let Err(error) =
+        keytao_app_core::windows_public_schemas::publish_engine_enabled(&root, enabled)
+    {
+        if previous != enabled && keytao_core::engine_choice::is_enabled(&root) == enabled {
+            keytao_core::engine_choice::set_enabled(&root, previous)
+                .map_err(|restore| format!("{error}; restore input engine state: {restore}"))?;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub async fn set_input_engine(engine: String) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -1182,8 +1210,30 @@ pub async fn finish_android_install(
     }
 }
 
-/// Android deployment belongs to the deployImeData platform channel.
+/// Android Rime deployment belongs to the deployImeData platform channel.
 pub async fn deploy_default() -> Result<DeployResultDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    use keytao_core::engine_choice::{self, PackageEngine};
+    if keytao_app_core::libjd::input_engine(&root) == PackageEngine::LibjdEngine {
+        let key = engine_choice::active_package(&root).ok_or("当前没有可重新部署的 ime-jd 方案")?;
+        let (_, schema) = keytao_core::libjd::imported_dictionary(&state.core.env().data_dir, &key)
+            .ok_or("请先转换此方案的词库")?;
+        let skipped = keytao_app_core::libjd::import_package(
+            &state.core,
+            &root,
+            &key,
+            Some(&schema.id),
+        )
+        .await
+        .map_err(format_libjd_error)?;
+        return Ok(DeployResultDto {
+            success: true,
+            message: "已重新部署 ime-jd 词库".into(),
+            warning: (skipped > 0).then(|| format!("跳过 {skipped} 条不兼容词条")),
+        });
+    }
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
@@ -1191,8 +1241,6 @@ pub async fn deploy_default() -> Result<DeployResultDto, String> {
         target_os = "ios"
     ))]
     {
-        let state = runtime::state()?;
-        let _guard = state.install_lock.lock().await;
         runtime::dto(state.host.deploy_default().await?)
     }
     #[cfg(not(any(

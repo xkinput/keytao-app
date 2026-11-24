@@ -852,6 +852,21 @@ pub(crate) fn is_default_user_root(root: &Path) -> bool {
     keytao_core::default_user_data_dir().is_some_and(|default| same_directory(&default, root))
 }
 
+#[cfg(target_os = "windows")]
+pub fn publish_engine_enabled(root: &Path, enabled: bool) -> Result<(), String> {
+    if !is_default_user_root(root) {
+        return Ok(());
+    }
+    let public = public_root()?;
+    std::fs::create_dir_all(&public).map_err(|error| error.to_string())?;
+    grant_appcontainer_read(&public, false)?;
+    keytao_core::write_file_atomic(
+        &public.join(keytao_core::engine_choice::ENABLED_FILE),
+        if enabled { b"1\n" } else { b"0\n" },
+    )
+    .map_err(|error| format!("publish input engine state: {error}"))
+}
+
 fn same_directory(left: &Path, right: &Path) -> bool {
     left.canonicalize()
         .ok()

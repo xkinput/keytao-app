@@ -718,7 +718,8 @@ void main() {
       expect(find.descendant(of: engineSelector, matching: find.text('Rime')),
           findsOneWidget);
       expect(find.text('已部署'), findsNothing);
-      expect(find.text('重新部署'), findsNothing);
+      expect(find.widgetWithText(ActionButton, '重新部署'), findsOneWidget);
+      expect(find.widgetWithText(SwitchSetting, '算法引擎'), findsOneWidget);
       expect(find.text('切换引擎'), findsNothing);
       expect(find.text('切换方案'), findsNothing);
       await c.refreshCandidatePreview();

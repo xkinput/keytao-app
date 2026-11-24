@@ -295,6 +295,12 @@ Future<LibjdStatusDto> libjdStatus() =>
 
 Future<String> inputEngine() => RustLib.instance.api.crateApiCoreInputEngine();
 
+Future<bool> inputEngineEnabled() =>
+    RustLib.instance.api.crateApiCoreInputEngineEnabled();
+
+Future<void> setInputEngineEnabled({required bool enabled}) =>
+    RustLib.instance.api.crateApiCoreSetInputEngineEnabled(enabled: enabled);
+
 Future<void> setInputEngine({required String engine}) =>
     RustLib.instance.api.crateApiCoreSetInputEngine(engine: engine);
 
@@ -453,7 +459,7 @@ Future<InstallResultDto> finishAndroidInstall({
   version: version,
 );
 
-/// Android deployment belongs to the deployImeData platform channel.
+/// Android Rime deployment belongs to the deployImeData platform channel.
 Future<DeployResultDto> deployDefault() =>
     RustLib.instance.api.crateApiCoreDeployDefault();
 

@@ -211,7 +211,7 @@ pub async fn import_package(
             &stage.path().join("schema.json"),
             &serde_json::to_vec(&schema)?,
         )?;
-        publish_dictionary(&destination, stage.path(), || {
+        let activate = || {
             emit_progress(&core, "converting", 98, "正在切换方案…");
             update_settings(
                 &root,
@@ -222,7 +222,28 @@ pub async fn import_package(
                 },
                 || activate_imported(&core, &root, &key),
             )
+        };
+        #[cfg(target_os = "ios")]
+        publish_dictionary(&destination, stage.path(), || {
+            // Both the private store and the App Group projection must be
+            // ready before a running keyboard observes the reload stamp.
+            let bundled = crate::deploy::deploy_shared_data_dir(&core, &root);
+            crate::runtime_materialize::materialize_installed_package(&core, &root, &bundled, &key)?;
+            let shared = libjd::projected_dictionary_directory(&root, &key)
+                .ok_or_else(|| CoreError::Other("键盘共享词库目录无效".into()))?;
+            let shared_stage = tempfile::tempdir_in(shared.parent().unwrap())?;
+            for name in ["dictionary.bin", "schema.json"] {
+                let source = destination.join(name);
+                let file = shared_stage.path().join(name);
+                if fs::hard_link(&source, &file).is_err() {
+                    fs::copy(source, &file)?;
+                    fs::File::open(file)?.sync_all()?;
+                }
+            }
+            publish_dictionary(&shared, shared_stage.path(), activate)
         })?;
+        #[cfg(not(target_os = "ios"))]
+        publish_dictionary(&destination, stage.path(), activate)?;
         emit_progress(&core, "done", 100, "已转换词库");
         Ok(converted.skipped)
     })
@@ -283,7 +304,7 @@ fn build_dictionary(_: &Path, text: &[u8], stage: &Path) -> Result<(), CoreError
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", target_os = "ios"))]
 fn build_dictionary(library: &Path, text: &[u8], stage: &Path) -> Result<(), CoreError> {
     // The library is a verified build-time dependency located in the application bundle.
     unsafe {
@@ -300,7 +321,8 @@ fn build_dictionary(library: &Path, text: &[u8], stage: &Path) -> Result<(), Cor
     windows,
     target_os = "macos",
     target_os = "linux",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 )))]
 fn build_dictionary(_: &Path, _: &[u8], _: &Path) -> Result<(), CoreError> {
     Err(CoreError::Unsupported("当前平台不支持 ime-jd".into()))

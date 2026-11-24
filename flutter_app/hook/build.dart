@@ -94,8 +94,14 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
       final root = '${vendor}macos-universal';
       return _Rime(sdk(root), dependencies: dependencies);
     case OS.iOS:
+      final libjd = Directory.fromUri(
+        Uri.directory(vendor).resolve('../../target/keytao-ios-libjd/'),
+      );
+      final archive = File.fromUri(libjd.uri.resolve('libjd-engine.a'));
+      if (archive.existsSync()) dependencies.add(archive.uri);
       return _Rime({
         'KEYTAO_IOS_RIME_ROOT': '${vendor}ios',
+        if (archive.existsSync()) 'KEYTAO_IOS_LIBJD_DIR': libjd.path,
         'OPENCC_VERSION': ?[
           for (final target in [
             'iphoneos-arm64',

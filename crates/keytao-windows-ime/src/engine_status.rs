@@ -15,6 +15,7 @@ pub(crate) fn retry_delay(failures: u32) -> Duration {
 
 pub fn write_status(user_dir: &Path, error: Option<&str>, schema: Option<&str>) -> io::Result<()> {
     fs::create_dir_all(user_dir)?;
+    let schema = schema.filter(|schema| !schema.is_empty());
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

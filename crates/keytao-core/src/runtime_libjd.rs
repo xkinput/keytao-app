@@ -1,12 +1,10 @@
 use super::*;
 
-#[cfg(not(target_os = "ios"))]
 pub(super) struct ActiveJd {
     source: jd_backend::PreparedJd,
     first_session: Option<jd_backend::JdBackend>,
 }
 
-#[cfg(not(target_os = "ios"))]
 impl ActiveJd {
     fn new(backend: jd_backend::JdBackend) -> Self {
         Self {
@@ -25,17 +23,11 @@ impl ActiveJd {
 
 impl ProcessRimeState {
     pub(super) fn using_libjd(&self) -> bool {
-        #[cfg(not(target_os = "ios"))]
-        return lock_ignore_poison(&self.libjd).is_some();
-        #[cfg(target_os = "ios")]
-        false
+        lock_ignore_poison(&self.libjd).is_some()
     }
 
     pub(super) fn clear_libjd(&self) -> bool {
-        #[cfg(not(target_os = "ios"))]
-        return lock_ignore_poison(&self.libjd).take().is_some();
-        #[cfg(target_os = "ios")]
-        false
+        lock_ignore_poison(&self.libjd).take().is_some()
     }
 
     pub(super) fn finalize_backend(&self) -> Result<(), String> {
@@ -44,7 +36,6 @@ impl ProcessRimeState {
     }
 
     pub(super) fn create_backend(&self, root: &Path) -> Result<Box<dyn ImeBackend>, String> {
-        #[cfg(not(target_os = "ios"))]
         if let Some(backend) = lock_ignore_poison(&self.libjd).as_mut() {
             return Ok(Box::new(backend.new_session()?));
         }
@@ -61,12 +52,6 @@ impl ProcessRimeState {
 }
 
 impl ImeRuntime {
-    #[cfg(target_os = "ios")]
-    pub(super) fn libjd_requested(&self, _: &Path) -> bool {
-        false
-    }
-
-    #[cfg(not(target_os = "ios"))]
     pub(super) fn libjd_requested(&self, root: &Path) -> bool {
         if !self.0.ime_host {
             return false;
@@ -83,12 +68,6 @@ impl ImeRuntime {
             && libjd::bundled_engine_library().is_some()
     }
 
-    #[cfg(target_os = "ios")]
-    pub(super) fn activate_libjd(&self, _: &RimeDataDirs, _: bool) -> Result<bool, String> {
-        Ok(false)
-    }
-
-    #[cfg(not(target_os = "ios"))]
     pub(super) fn activate_libjd(&self, dirs: &RimeDataDirs, reload: bool) -> Result<bool, String> {
         use engine_choice::PackageEngine;
         if !self.libjd_requested(&dirs.user) {
@@ -205,7 +184,8 @@ pub(crate) fn package_libjd_schema_in_store(
         target_os = "macos",
         target_os = "linux",
         target_os = "windows",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     ))]
     {
         if engine_choice::read(root, key) != engine_choice::PackageEngine::LibjdEngine {
@@ -218,7 +198,8 @@ pub(crate) fn package_libjd_schema_in_store(
         target_os = "macos",
         target_os = "linux",
         target_os = "windows",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     )))]
     {
         let _ = (root, data_root, key);

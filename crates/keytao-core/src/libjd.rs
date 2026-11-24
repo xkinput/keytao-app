@@ -7,8 +7,12 @@ pub const MAX_DICTIONARY_TEXT_BYTES: usize = 64 * 1024 * 1024;
 pub const BUNDLED_ENGINE_VERSION: &str = "v0.14.0";
 
 pub fn bundled_engine_library() -> Option<PathBuf> {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     return engine_library_for_executable(&std::env::current_exe().ok()?);
+    #[cfg(target_os = "ios")]
+    return cfg!(keytao_ios_libjd)
+        .then(|| std::env::current_exe().ok())
+        .flatten();
     #[cfg(target_os = "android")]
     android_bundled_engine_library()
 }
@@ -35,7 +39,7 @@ fn android_bundled_engine_library() -> Option<PathBuf> {
     static LIBRARY: OnceLock<Option<PathBuf>> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
-            if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+            if !cfg!(any(target_arch = "arm", target_arch = "aarch64", target_arch = "x86_64")) {
                 return None;
             }
             let mut info = MaybeUninit::<libc::Dl_info>::uninit();
@@ -85,6 +89,12 @@ fn small_text(path: &Path, limit: u64) -> Option<String> {
 pub fn dictionary_directory(data: &Path, key: &str) -> Option<PathBuf> {
     installed_package_directory(data, key)?;
     stable_dictionary_directory(data, key)
+}
+
+#[cfg(any(target_os = "ios", test))]
+pub fn projected_dictionary_directory(root: &Path, key: &str) -> Option<PathBuf> {
+    let path = installed_package_directory(root, key)?.join("libjd-dictionary");
+    dir_or_missing(&path).then_some(path)
 }
 
 fn stable_dictionary_directory(data: &Path, key: &str) -> Option<PathBuf> {
@@ -162,6 +172,8 @@ mod tests {
             .unwrap();
         };
         let legacy = package.join("libjd-dictionary");
+        assert_eq!(projected_dictionary_directory(&root, "example"), Some(legacy.clone()));
+        assert_eq!(projected_dictionary_directory(&root, "../example"), None);
         write_dictionary(&legacy, "legacy");
         assert_eq!(
             imported_dictionary(&root, "example").unwrap().1.id,
