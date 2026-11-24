@@ -181,8 +181,6 @@ object KeytaoAndroidPaths {
         return if (nativePath != null) File(nativePath) else File(root, reloadStampFileName)
     }
 
-    fun rimeDataDir(context: Context): File = File(userRoot(context), "rime-data")
-
     fun hasInstalledSchema(root: File): Boolean {
         val schemas = configuredSchemas(root)
         return schemas.isNotEmpty() && schemas.all { File(root, "$it.schema.yaml").isFile }

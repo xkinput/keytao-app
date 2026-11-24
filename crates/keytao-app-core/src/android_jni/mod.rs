@@ -9,7 +9,7 @@ use jni::{
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
 #[cfg(target_os = "android")]
@@ -185,53 +185,20 @@ static ANDROID_DEPLOYMENT_STATE: std::sync::LazyLock<Mutex<keytao_core::Deployme
     std::sync::LazyLock::new(|| Mutex::new(keytao_core::DeploymentState::default()));
 
 #[cfg(target_os = "android")]
-static ANDROID_IME_USER_THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-#[cfg(target_os = "android")]
-struct AndroidThemeResolverState {
-    default_theme_path: Option<PathBuf>,
+struct AndroidImeThemeSource {
     user_theme_path: Option<PathBuf>,
     system_scheme: keytao_theme::EffectiveColorScheme,
-    resolver: keytao_theme::ThemeResolver,
 }
 
 #[cfg(target_os = "android")]
-impl AndroidThemeResolverState {
-    fn new(
-        default_theme_path: Option<PathBuf>,
-        user_theme_path: Option<PathBuf>,
-        system_scheme: keytao_theme::EffectiveColorScheme,
-    ) -> Self {
-        Self {
-            resolver: keytao_theme::ThemeResolver::with_system_scheme(
-                default_theme_path.clone(),
-                user_theme_path.clone(),
-                Some(system_scheme),
-            ),
-            default_theme_path,
-            user_theme_path,
-            system_scheme,
-        }
-    }
-
-    fn matches(
-        &self,
-        default_theme_path: &Option<PathBuf>,
-        user_theme_path: &Option<PathBuf>,
-        system_scheme: keytao_theme::EffectiveColorScheme,
-    ) -> bool {
-        self.default_theme_path == *default_theme_path
-            && self.user_theme_path == *user_theme_path
-            && self.system_scheme == system_scheme
-    }
-}
+static ANDROID_IME_THEME_SOURCE: Mutex<AndroidImeThemeSource> = Mutex::new(AndroidImeThemeSource {
+    user_theme_path: None,
+    system_scheme: keytao_theme::EffectiveColorScheme::Light,
+});
 
 #[cfg(target_os = "android")]
-static ANDROID_IME_SYSTEM_COLOR_SCHEME: Mutex<keytao_theme::EffectiveColorScheme> =
-    Mutex::new(keytao_theme::EffectiveColorScheme::Light);
-
-#[cfg(target_os = "android")]
-static ANDROID_IME_THEME_RESOLVER: Mutex<Option<AndroidThemeResolverState>> = Mutex::new(None);
+static ANDROID_IME_THEME: LazyLock<Mutex<Arc<keytao_theme::ResolvedImeTheme>>> =
+    LazyLock::new(|| Mutex::new(Arc::new(keytao_theme::ResolvedImeTheme::default())));
 
 #[cfg(target_os = "android")]
 #[derive(Serialize)]
@@ -313,46 +280,48 @@ fn android_candidates_json(candidates: Vec<keytao_core::Candidate>) -> String {
 }
 
 #[cfg(target_os = "android")]
-fn android_current_theme() -> keytao_theme::ResolvedImeTheme {
-    let user_path = ANDROID_IME_USER_THEME_PATH
-        .lock()
-        .ok()
-        .and_then(|path| path.clone())
-        .filter(|path| path.is_file());
-    let system_scheme = ANDROID_IME_SYSTEM_COLOR_SCHEME
-        .lock()
-        .map(|scheme| *scheme)
-        .unwrap_or(keytao_theme::EffectiveColorScheme::Light);
-    android_cached_theme(None, user_path, system_scheme)
+fn android_current_theme() -> Arc<keytao_theme::ResolvedImeTheme> {
+    Arc::clone(
+        &ANDROID_IME_THEME
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    )
 }
 
 #[cfg(target_os = "android")]
-fn android_cached_theme(
-    default_theme_path: Option<PathBuf>,
-    user_theme_path: Option<PathBuf>,
+fn android_refresh_ime_theme(
+    user_theme_path: Option<&Path>,
     system_scheme: keytao_theme::EffectiveColorScheme,
-) -> keytao_theme::ResolvedImeTheme {
-    let Ok(mut slot) = ANDROID_IME_THEME_RESOLVER.lock() else {
-        return keytao_theme::resolve_theme_from_paths_with_system_scheme(
-            default_theme_path.as_deref(),
-            user_theme_path.as_deref(),
-            system_scheme,
-        );
-    };
-    let needs_resolver = slot
-        .as_ref()
-        .map(|state| !state.matches(&default_theme_path, &user_theme_path, system_scheme))
-        .unwrap_or(true);
-    if needs_resolver {
-        *slot = Some(AndroidThemeResolverState::new(
-            default_theme_path,
-            user_theme_path,
-            system_scheme,
-        ));
+) -> Arc<keytao_theme::ResolvedImeTheme> {
+    let theme = Arc::new(keytao_theme::resolve_theme_from_paths_with_system_scheme(
+        None,
+        user_theme_path,
+        system_scheme,
+    ));
+    *ANDROID_IME_THEME
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Arc::clone(&theme);
+    theme
+}
+
+#[cfg(target_os = "android")]
+fn android_refresh_presentation_theme(
+    user_theme_path: Option<&Path>,
+    system_scheme: keytao_theme::EffectiveColorScheme,
+) -> Option<Arc<keytao_theme::ResolvedImeTheme>> {
+    let mut source = ANDROID_IME_THEME_SOURCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if source
+        .user_theme_path
+        .as_deref()
+        .is_some_and(|path| Some(path) != user_theme_path)
+    {
+        return None;
     }
-    slot.as_ref()
-        .map(|state| state.resolver.current())
-        .unwrap_or_default()
+    let theme = android_refresh_ime_theme(user_theme_path, system_scheme);
+    source.system_scheme = system_scheme;
+    Some(theme)
 }
 
 #[cfg(target_os = "android")]
@@ -360,16 +329,33 @@ fn android_result_json(result: keytao_core::KeyProcessResult) -> String {
     android_state_json(result.state, result.accepted)
 }
 
-/// Point the cached theme at this user directory and drop the resolver built
-/// for the previous one.
 #[cfg(target_os = "android")]
 fn android_set_user_theme_path(path: PathBuf) {
-    if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
-        *theme_path = Some(path);
-    }
-    if let Ok(mut resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
-        *resolver = None;
-    }
+    let mut source = ANDROID_IME_THEME_SOURCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    android_refresh_ime_theme(Some(&path), source.system_scheme);
+    source.user_theme_path = Some(path);
+}
+
+#[cfg(test)]
+#[test]
+fn ime_theme_stays_cached_until_presentation_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("theme.yaml");
+    std::fs::write(&path, "candidate:\n  labelSuffix: ')'\n").unwrap();
+    android_set_user_theme_path(path.clone());
+    let initial = android_current_theme();
+    assert_eq!(initial.candidate.label_suffix, ")");
+
+    std::fs::remove_file(&path).unwrap();
+    let scheme = keytao_theme::EffectiveColorScheme::Light;
+    assert!(android_refresh_presentation_theme(None, scheme).is_none());
+    assert!(Arc::ptr_eq(&initial, &android_current_theme()));
+
+    let refreshed = android_refresh_presentation_theme(Some(&path), scheme).unwrap();
+    assert_eq!(refreshed.candidate.label_suffix, ".");
+    assert!(Arc::ptr_eq(&refreshed, &android_current_theme()));
 }
 
 #[cfg(target_os = "android")]
@@ -534,12 +520,17 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
     android_jni_guard("nativeResolveThemeJson", std::ptr::null_mut(), || {
         let default_path = optional_jni_path(&mut env, default_theme_path);
         let user_path = optional_jni_path(&mut env, user_theme_path);
-        let system_scheme = optional_jni_effective_color_scheme(&mut env, system_color_scheme)
-            .unwrap_or(keytao_theme::EffectiveColorScheme::Light);
-        if let Ok(mut current) = ANDROID_IME_SYSTEM_COLOR_SCHEME.lock() {
-            *current = system_scheme;
-        }
-        let theme = android_cached_theme(default_path, user_path, system_scheme);
+        let system_scheme = optional_jni_effective_color_scheme(&mut env, system_color_scheme);
+        let theme = system_scheme
+            .filter(|_| default_path.is_none())
+            .and_then(|scheme| android_refresh_presentation_theme(user_path.as_deref(), scheme))
+            .unwrap_or_else(|| {
+                Arc::new(keytao_theme::resolve_theme_from_paths_with_system_scheme(
+                    default_path.as_deref(),
+                    user_path.as_deref(),
+                    system_scheme.unwrap_or(keytao_theme::EffectiveColorScheme::Light),
+                ))
+            });
         match keytao_theme::resolved_theme_json(&theme) {
             Ok(json) => jni_string(&mut env, &json),
             Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
@@ -638,9 +629,6 @@ fn write_android_theme_appearance(
     {
         return 0;
     }
-    if let Ok(mut resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
-        *resolver = None;
-    }
     1
 }
 
@@ -713,37 +701,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMergeDe
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMergeLocalDefaultCustom(
-    mut env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    existing: JString<'_>,
-    package_content: JString<'_>,
-) -> jstring {
-    android_jni_guard(
-        "nativeMergeLocalDefaultCustom",
-        std::ptr::null_mut(),
-        || {
-            let has_existing = !existing.is_null();
-            let existing = optional_jni_raw_text(&mut env, existing);
-            if has_existing && existing.is_none() {
-                return std::ptr::null_mut();
-            }
-            let Some(package) = optional_jni_raw_text(&mut env, package_content) else {
-                return std::ptr::null_mut();
-            };
-            let Ok((merged, schemas)) =
-                crate::install::merge_local_default_custom(existing.as_deref(), &package)
-            else {
-                return std::ptr::null_mut();
-            };
-            let json = serde_json::json!({"mergedContent": merged, "userSchemas": schemas});
-            jni_string(&mut env, &json.to_string())
-        },
-    )
-}
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepareRimeLuaInstall(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -786,15 +743,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
             Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
         }
     })
-}
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineAvailable(
-    _env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-) -> jboolean {
-    android_jni_guard("nativeEngineAvailable", 0, || 1)
 }
 
 #[cfg(target_os = "android")]
@@ -1167,7 +1115,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
-    _shared_dir: JString<'_>,
     deploy: jboolean,
 ) -> jboolean {
     android_jni_guard("nativeInit", 0, || {
@@ -1200,7 +1147,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
-    _shared_dir: JString<'_>,
 ) -> jboolean {
     android_jni_guard("nativeReinitialize", 0, || {
         let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
@@ -1864,21 +1810,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeUtf16Of
             return 0;
         };
         keytao_core::utf16_offset_from_chars(&text, char_offset.max(0) as usize) as jint
-    })
-}
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeRenderSchemaLogos(
-    mut env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    user_dir: JString<'_>,
-) {
-    android_jni_guard("nativeRenderSchemaLogos", (), || {
-        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
-            return;
-        };
-        crate::deploy::render_user_schema_logos(&user_dir);
     })
 }
 

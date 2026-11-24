@@ -311,7 +311,7 @@ data class KeytaoAndroidImeConfig(
                 KeytaoRuntimeLog.event("error", "config_rows_empty") { put("layer", layer) }
             }
             val config = migrateToolbarCustomization(userConfig, userJson, parsed)
-            cachedSignature = "${fileSignature(userConfig)}|${fileSignature(userKeyboardFile)}"
+            cachedSignature = signature
             cachedConfig = config
             return config
         }

@@ -175,7 +175,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val longPressCommand: KeyCommand? = null,
         val drawingRect: RectF = rect,
     )
-    private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
+    private data class KeyboardLayoutCache(
+        val signature: String,
+        val rows: List<List<KeySpec>>,
+        val keys: List<KeyRect>,
+        val categorizedSymbols: Boolean,
+    )
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS }
     private enum class PanelItemStyle {
         DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY, MEDIA,
@@ -262,6 +267,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             voiceLevelRedrawAtMs = 0L
         }
         this.voiceState = voiceState
+        accessibilityTargetCache = null
         refreshAccessibilityNodes()
         invalidate()
     }
@@ -299,7 +305,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private val navigation = KeyboardNavigationState()
     private var shiftState: KeyboardShiftState
         get() = navigation.shift
-        set(value) { navigation.shift = value }
+        set(value) {
+            if (navigation.shift == value) return
+            navigation.shift = value
+            accessibilityTargetCache = null
+        }
     private val keyboardLayer: String get() = navigation.layer
     private var selectionModeActive = false
     private var schemaReady = true
@@ -385,7 +395,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private val candidateWidthCache = mutableMapOf<String, Float>()
     private var expandedCandidateItemsCacheSignature = ""
     private var expandedCandidateItemsCache: List<CandidateDrawItem> = emptyList()
-    private var keyboardLayoutCache = KeyboardLayoutCache("", emptyList())
+    private var keyboardLayoutCache: KeyboardLayoutCache? = null
+    private var interactiveRectsDirty = true
     private var candidateDownX = 0f
     private var candidateDownY = 0f
     private var candidateDownScrollX = 0f
@@ -514,6 +525,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val keyboardOutline = Path()
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
     }
@@ -533,12 +545,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         config = next
         candidateWidthCache.clear()
-        invalidateKeyboardLayoutCache()
         invalidateExpandedCandidateItemsCache()
-        resetKeyboardScroll()
         resetCandidateTouch()
         resetCandidateScroll()
         toolbarScrollX = 0f
+        resetKeyboardScroll()
         requestLayout()
         invalidate()
     }
@@ -688,8 +699,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         theme = next
         accentPreviewColor = null
         candidateWidthCache.clear()
-        invalidateKeyboardLayoutCache()
         invalidateExpandedCandidateItemsCache()
+        invalidateKeyboardLayoutCache()
+        updateKeyboardOutline()
         invalidateOutline()
         invalidate()
     }
@@ -742,18 +754,19 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             resetExpandedCandidateScroll()
         }
         state = next
+        interactiveRectsDirty = true
         ViewCompat.setStateDescription(this, rimeProgress ?: visibleDeploymentHint)
-        invalidateKeyboardLayoutCache()
         if (schemaReady) {
             removeCallbacks(hideStatusMessage)
             statusMessage = null
         }
+        if (next.hasComposition || next.candidatePanel.candidates.isNotEmpty()) {
+            recentClipboardSuggestion = null
+        }
+        rebuildInteractiveRects()
         if (wasExpanded != candidatePanelExpanded) {
             startContentTransition()
             KeytaoRuntimeLog.event("ui", "panel_close", KeytaoRuntimeLog.elapsedMs(started))
-        }
-        if (next.hasComposition || next.candidatePanel.candidates.isNotEmpty()) {
-            recentClipboardSuggestion = null
         }
         invalidate()
     }
@@ -886,6 +899,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val wasOnSymbols = keyboardLayer == "symbols"
         navigation.navigate(nextLayer, nextPanel, reset)
         if (restore != null) navigation.restoreFrom(restore)
+        interactiveRectsDirty = true
         if (shiftState != KeyboardShiftState.ONCE) lastShiftTapTimeMs = 0L
         if (reset || wasOnSymbols != (keyboardLayer == "symbols")) toolbarScrollX = 0f
         if (reset) {
@@ -1007,11 +1021,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        updateKeyboardOutline()
         invalidateKeyboardLayoutCache()
         coerceCandidateScroll()
         coerceToolbarScroll()
         coerceExpandedCandidateScroll()
         rebuildInteractiveRects()
+    }
+
+    private fun updateKeyboardOutline() {
+        val radius = dp(theme.panelCornerRadiusDp)
+        keyboardOutline.rewind()
+        keyboardOutline.addRoundRect(0f, 0f, width.toFloat(), height.toFloat(), radius, radius, Path.Direction.CW)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -1022,11 +1043,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawBackground(canvas)
             val contentClip = canvas.save()
             if (keyboardLayoutMode != KeyboardLayoutMode.FULL) {
-                val outline = Path().apply {
-                    addRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()),
-                        dp(theme.panelCornerRadiusDp), dp(theme.panelCornerRadiusDp), Path.Direction.CW)
-                }
-                canvas.clipPath(outline)
+                canvas.clipPath(keyboardOutline)
             }
             drawCandidateBar(canvas)
             if (candidatePanelExpanded) {
@@ -1074,10 +1091,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun rebuildInteractiveRects() {
         if (width <= 0 || height <= 0) return
+        textPaint.typeface = theme.typeface
         if (usesFullHeightSymbolKeyboard() && config.rowsForLayer(keyboardLayer).isEmpty()) {
             val emptyLayer = keyboardLayer
             navigate(layer = "letters")
-            keyboardLayoutCache = KeyboardLayoutCache("", emptyList())
+            keyboardLayoutCache = null
             post {
                 KeytaoRuntimeLog.event("error", "config_rows_empty") {
                     put("layer", emptyLayer)
@@ -1137,6 +1155,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (candidatePanelExpanded) {
             rebuildExpandedCandidateLayout()
         }
+        interactiveRectsDirty = false
+        accessibilityTargetCache = null
     }
 
     private fun candidateBarContent(): CandidateBarContent {
@@ -1226,6 +1246,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
     }.getOrNull()
     private var accessibilityNodeSignature: String? = null
+    private var accessibilityTargetCache: Map<Int, AccessibilityTarget>? = null
 
     init {
         ViewCompat.setAccessibilityDelegate(this, accessibilityHelper)
@@ -1241,12 +1262,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val signature = buildString {
             append(keyboardLayer).append('|')
             append(shiftState).append('|')
+            append(isEnglishMode).append('|')
             append(selectionModeActive).append('|')
             append(navigation.panel).append('|')
+            append(enterLabelOverride).append('|')
+            append(hasActiveComposition()).append('|')
             append(voiceRecognitionAvailable).append('|')
             append(voicePrivacyAllowed).append('|')
             append(voicePermanentlyDenied).append('|')
             append(voiceState).append('|')
+            append(width).append('x').append(height).append('|')
             append(config.keyboardHeightScale).append('|')
             append(keyRects.size).append('|')
             append(candidateRects.size).append('|')
@@ -1259,10 +1284,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         if (signature == accessibilityNodeSignature) return
         accessibilityNodeSignature = signature
+        accessibilityTargetCache = null
         accessibilityHelper.invalidateRoot()
     }
 
-    private fun accessibilityTargets(): List<AccessibilityTarget> {
+    private fun accessibilityTargets(): Map<Int, AccessibilityTarget> =
+        accessibilityTargetCache ?: buildAccessibilityTargets().associateBy(AccessibilityTarget::id).also {
+            accessibilityTargetCache = it
+        }
+
+    private fun buildAccessibilityTargets(): List<AccessibilityTarget> {
         if (voiceState != KeytaoVoiceInput.State.IDLE) {
             return listOf(
                 AccessibilityTarget(accessibilityVoiceCloseNodeId, "停止语音输入", voiceCloseRect()) {
@@ -1333,7 +1364,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     accessibilityKeyNodeBase + index,
                     label,
                     key.rect,
-                    selected = isActiveKey(key.spec),
+                    selected = isActiveKey(command),
                     checked = if (command.type == KeyCommandTypes.SHIFT) shiftState == KeyboardShiftState.LOCKED else null,
                 ) { activateKey(key) }
             )
@@ -1343,11 +1374,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private inner class KeyboardAccessibilityHelper : ExploreByTouchHelper(this@KeytaoKeyboardView) {
         override fun getVirtualViewAt(x: Float, y: Float): Int {
-            return accessibilityTargets().firstOrNull { it.rect.contains(x, y) }?.id ?: HOST_ID
+            return accessibilityTargets().values.firstOrNull { it.rect.contains(x, y) }?.id ?: HOST_ID
         }
 
         override fun getVisibleVirtualViews(virtualViewIds: MutableList<Int>) {
-            accessibilityTargets().forEach { virtualViewIds.add(it.id) }
+            virtualViewIds.addAll(accessibilityTargets().keys)
         }
 
         @Suppress("DEPRECATION")
@@ -1355,7 +1386,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             virtualViewId: Int,
             node: AccessibilityNodeInfoCompat,
         ) {
-            val target = accessibilityTargets().firstOrNull { it.id == virtualViewId }
+            val target = accessibilityTargets()[virtualViewId]
             if (target == null) {
                 node.contentDescription = ""
                 node.setBoundsInParent(Rect(0, 0, 1, 1))
@@ -1387,7 +1418,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             arguments: Bundle?,
         ): Boolean {
             if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
-            val target = accessibilityTargets().firstOrNull { it.id == virtualViewId } ?: return false
+            val target = accessibilityTargets()[virtualViewId] ?: return false
             listener?.onUserInteraction()
             target.activate()
             return true
@@ -1451,7 +1482,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN && voiceLongPressSuppressed)
             listener?.onUserInteraction()
         }
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && interactiveRectsDirty) {
             val started = touchDownRebuildDurations.start()
             try {
                 rebuildInteractiveRects()
@@ -4037,7 +4068,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val layout = keyRects
         val top = keyboardTop()
         drawContentLayer(canvas, top) {
-            if (usesCategorizedSymbolKeyboard(activeRows())) {
+            if (usesCategorizedSymbolKeyboard()) {
                 canvas.save()
                 canvas.clipRect(0f, keyboardScrollViewportTop, width.toFloat(), keyboardScrollViewportBottom)
                 for ((index, keyRect) in layout.withIndex()) {
@@ -4084,15 +4115,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (pressProgress > 0f) {
             keyRect.offset(0f, dp(1f) * pressProgress)
         }
-        val style = resolvedKeyStyle(key)
+        val command = actionForMode(key)
+        val style = resolvedKeyStyle(key, command)
         textPaint.typeface = style.typeface
         drawKeyShadow(canvas, keyRect, style)
 
         paint.style = Paint.Style.FILL
-        paint.color = keySurfaceColor(key, pressProgress)
+        paint.color = keySurfaceColor(style, pressProgress)
         canvas.drawRoundRect(keyRect, dp(style.cornerRadius), dp(style.cornerRadius), paint)
         drawKeyOutline(canvas, keyRect, style)
-        drawShiftStateDecoration(canvas, key, keyRect)
+        if (command.type == KeyCommandTypes.SHIFT) drawShiftStateDecoration(canvas, keyRect, style)
 
         val label = displayLabel(key)
         if (config.mnemonicHintsEnabled && keyboardLayer == "letters" &&
@@ -4100,7 +4132,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         ) {
             val mnemonic = KeytaoMnemonicHints.forKey(key)
             if (mnemonic != null && (mnemonic.topText != null || mnemonic.bottomLines.isNotEmpty())) {
-                drawMnemonicKeyContent(canvas, key, keyRect, label, mnemonic, pressProgress)
+                drawMnemonicKeyContent(canvas, keyRect, label, mnemonic, style, pressProgress)
                 return
             }
         }
@@ -4112,7 +4144,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             labelSize -= dp(1f)
             textPaint.textSize = labelSize
         }
-        textPaint.color = keyForegroundColor(key, pressProgress)
+        textPaint.color = keyForegroundColor(style, pressProgress)
         canvas.drawText(label, keyRect.centerX(), keyRect.centerY() + textBaselineOffset(textPaint), textPaint)
 
         val voiceHint = isVoiceInputOffered(key)
@@ -4129,13 +4161,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawMnemonicKeyContent(
         canvas: Canvas,
-        key: KeySpec,
         rect: RectF,
         label: String,
         mnemonic: KeytaoMnemonicHints.Hint,
+        style: KeytaoKeyStyle,
         pressProgress: Float,
     ) {
-        val style = resolvedKeyStyle(key)
         val inset = min(dp(3f), min(rect.width(), rect.height()) * 0.1f)
         val content = RectF(rect).apply { inset(inset, inset) }
         val labelBottom = content.top + content.height() * 0.54f
@@ -4149,7 +4180,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             labelHeight / (labelMetrics.bottom - labelMetrics.top).coerceAtLeast(1f),
         )
         textPaint.textSize *= labelScale
-        textPaint.color = keyForegroundColor(key, pressProgress)
+        textPaint.color = keyForegroundColor(style, pressProgress)
         val fittedLabelMetrics = textPaint.fontMetrics
         canvas.drawText(
             label,
@@ -4226,14 +4257,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawKeyShadow(canvas, keyRect, style)
 
             paint.style = Paint.Style.FILL
-            paint.color = keySurfaceColor(key, itemPressProgress)
+            paint.color = keySurfaceColor(style, itemPressProgress)
             canvas.drawRoundRect(keyRect, dp(style.cornerRadius), dp(style.cornerRadius), paint)
             drawKeyOutline(canvas, keyRect, style)
 
             val label = stackLabelForMode(item)
             val maxLabelWidth = keyRect.width() - dp(10f)
             textPaint.textAlign = Paint.Align.CENTER
-            textPaint.color = keyForegroundColor(key, itemPressProgress)
+            textPaint.color = keyForegroundColor(style, itemPressProgress)
             var labelSize = sp(keyLabelSizeSp(label) * style.fontScale)
             textPaint.textSize = labelSize
             while (labelSize > sp(12f) && textPaint.measureText(label) > maxLabelWidth) {
@@ -4244,14 +4275,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
-    private fun keySurfaceColor(key: KeySpec, pressProgress: Float): Int {
-        val style = resolvedKeyStyle(key)
+    private fun keySurfaceColor(style: KeytaoKeyStyle, pressProgress: Float): Int {
         return (if (pressProgress > 0f) style.pressedBackground else style.background).toArgb()
     }
 
-    private fun drawShiftStateDecoration(canvas: Canvas, key: KeySpec, rect: RectF) {
-        if (actionForMode(key).type != KeyCommandTypes.SHIFT || shiftState == KeyboardShiftState.OFF) return
-        val style = resolvedKeyStyle(key)
+    private fun drawShiftStateDecoration(canvas: Canvas, rect: RectF, style: KeytaoKeyStyle) {
+        if (shiftState == KeyboardShiftState.OFF) return
         paint.color = style.borderColor.toArgb()
         if (shiftState == KeyboardShiftState.ONCE) {
             if (style.borderWidth <= 0f) return
@@ -4622,8 +4651,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return shiftState != KeyboardShiftState.OFF
     }
 
-    private fun isActiveKey(key: KeySpec): Boolean {
-        val command = actionForMode(key)
+    private fun isActiveKey(command: KeyCommand): Boolean {
         return when (command.type) {
             KeyCommandTypes.SHIFT -> isShiftActive()
             KeyCommandTypes.KEYBOARD_MODE -> command.value != "back" &&
@@ -4736,15 +4764,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun keyboardLayout(): List<KeyRect> {
         val signature = keyboardLayoutSignature()
-        if (signature == keyboardLayoutCache.signature) {
-            return keyboardLayoutCache.keys
+        val rows = activeRows()
+        val cached = keyboardLayoutCache
+        if (cached != null && signature == cached.signature && rows == cached.rows) {
+            return cached.keys
         }
 
         val top = keyboardTop()
         val bottom = keyboardBottom()
         val horizontalGap = keyboardHorizontalGap()
         val verticalGapFloor = keyboardVerticalGap()
-        val rows = activeRows()
         val rowCount = rows.size.coerceAtLeast(1)
         val availableHeight = (bottom - top).coerceAtLeast(0f)
         val nextRects = mutableListOf<KeyRect>()
@@ -4809,7 +4838,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             return y
         }
 
-        if (usesCategorizedSymbolKeyboard(rows)) {
+        val categorizedSymbols = usesFullHeightSymbolKeyboard() && rows.size >= 3
+        if (categorizedSymbols) {
             val targetVisibleRows = min(5, rowCount)
             val rowHeight = min(
                 ((availableHeight - verticalGapFloor * (targetVisibleRows + 1)) / targetVisibleRows)
@@ -4861,7 +4891,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             appendRows(rows, 0, top + verticalGap, rowHeight, verticalGap, sticky = false)
         }
 
-        keyboardLayoutCache = KeyboardLayoutCache(signature, nextRects)
+        keyboardLayoutCache = KeyboardLayoutCache(signature, rows, nextRects, categorizedSymbols)
         return nextRects
     }
 
@@ -4873,6 +4903,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append('|')
             append(keyboardLayer)
             append('|')
+            append(candidatePanelExpanded).append(':')
+            append(functionPanelActive).append(':')
+            append(isEnglishMode).append(':')
+            append(emojiSearchQuery != null).append(':')
+            append(resources.displayMetrics.density).append('|')
             append(config.keyboardHeightDp)
             append(':')
             append(config.keyboardHeightScale)
@@ -4899,14 +4934,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(':')
             append(commentSizeSp)
             append('|')
-            append(activeRows().hashCode())
-            append('|')
             append(keyboardVisualScrollY().roundToInt())
         }
     }
 
     private fun invalidateKeyboardLayoutCache() {
-        keyboardLayoutCache = KeyboardLayoutCache("", emptyList())
+        keyboardLayoutCache = null
+        interactiveRectsDirty = true
         rebuildInteractiveRects()
     }
 
@@ -5194,8 +5228,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }.getOrDefault(emptyList())
     }
 
-    private fun usesCategorizedSymbolKeyboard(rows: List<List<KeySpec>> = activeRows()): Boolean {
-        return usesFullHeightSymbolKeyboard() && rows.size >= 3
+    private fun usesCategorizedSymbolKeyboard(): Boolean {
+        return usesFullHeightSymbolKeyboard() && keyboardLayoutCache?.categorizedSymbols == true
     }
 
     private fun expandedCandidatePanelHeight(): Float {
@@ -6886,11 +6920,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return abs(x - touch.downX) <= horizontalLimit
     }
 
-    private fun resolvedKeyStyle(key: KeySpec): KeytaoKeyStyle = theme.keyStyle(
-        actionForMode(key).type,
+    private fun resolvedKeyStyle(key: KeySpec, command: KeyCommand = actionForMode(key)): KeytaoKeyStyle = theme.keyStyle(
+        command.type,
         key.style == "accent",
         isSoftAccentPunctuationKey(key),
-        isActiveKey(key),
+        isActiveKey(command),
         isShiftActive(),
     )
 
@@ -6918,10 +6952,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keyBackgroundColor(key: KeySpec? = null): Int =
-        (key?.let(::resolvedKeyStyle) ?: theme.key).background.toArgb()
+        (key?.let { resolvedKeyStyle(it) } ?: theme.key).background.toArgb()
 
-    private fun keyForegroundColor(key: KeySpec, pressProgress: Float = 0f): Int {
-        val style = resolvedKeyStyle(key)
+    private fun keyForegroundColor(style: KeytaoKeyStyle, pressProgress: Float): Int {
         return (if (pressProgress > 0f) style.pressedForeground else style.foreground).toArgb()
     }
 
