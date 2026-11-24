@@ -4070,7 +4070,7 @@ mod desktop {
             let has_chord = processors
                 .iter()
                 .any(|processor| processor.split('@').next() == Some("chord_composer"));
-            let shortcuts = if processors
+            let mut shortcuts = if processors
                 .iter()
                 .any(|processor| processor.split('@').next() == Some("key_binder"))
             {
@@ -4078,6 +4078,17 @@ mod desktop {
             } else {
                 Vec::new()
             };
+            if processors
+                .iter()
+                .any(|processor| processor.split('@').next() == Some("lua_processor"))
+            {
+                // Lua candidate actions declare their keys outside key_binder.
+                for path in ["pinned_candidate/hotkey", "candidate_remove/hotkey"] {
+                    if let Some(key) = config_string_locked(config, path) {
+                        shortcuts.extend(SchemaShortcut::parse(&key, "has_menu"));
+                    }
+                }
+            }
             let modifier_taps = if processors
                 .iter()
                 .any(|processor| processor.split('@').next() == Some("ascii_composer"))
@@ -6329,6 +6340,9 @@ impl ImeRuntime {
         let mut applied = try_lock_ignore_poison(&PROCESS_RIME.package_reload)
             .ok_or("Rime package reload is busy")?;
         let dirs = self.data_dirs()?;
+        if !engine_choice::is_enabled(&dirs.user) {
+            return Err("The input engine is disabled".into());
+        }
         if deployment_in_progress(&dirs.user) {
             return Err("Rime deployment is busy".into());
         }
@@ -6432,6 +6446,9 @@ impl ImeRuntime {
             .acquire()
             .ok_or("Rime engine build timed out")?;
         let dirs = self.data_dirs()?;
+        if self.0.ime_host && self.stop_if_disabled(&dirs)? {
+            return Ok(());
+        }
         if self.activate_libjd(&dirs, false)? {
             return Ok(());
         }
@@ -7056,7 +7073,10 @@ impl ImeRuntimeSession {
 
     fn with_package_menu<T>(&self, action: impl FnOnce(&mut switcher_model::Menu) -> T) -> Option<T> {
         let mut pending = lock_ignore_poison(&self.pending);
-        if self.input_policy().composing {
+        if pending.package_menu.is_some()
+            && self.input_policy().composing
+            && engine_choice::is_enabled(&self.dirs.user)
+        {
             pending.package_menu.as_mut().map(action)
         } else {
             pending.package_menu = None;
@@ -7074,7 +7094,8 @@ impl ImeRuntimeSession {
     ) -> Option<KeyProcessResult> {
         let decision = {
             let mut pending = lock_ignore_poison(&self.pending);
-            if !self.input_policy().composing {
+            pending.package_menu.as_ref()?;
+            if !self.input_policy().composing || !engine_choice::is_enabled(&self.dirs.user) {
                 pending.package_menu = None;
                 return None;
             }
@@ -7090,6 +7111,7 @@ impl ImeRuntimeSession {
     pub fn should_forward_consumed_shortcut(&self, key: u32, mask: u32) -> bool {
         key_policy::should_forward_consumed_shortcut(key, mask)
             && !(switcher_model::is_hotkey(key, mask)
+                && engine_choice::is_enabled(&self.dirs.user)
                 && !RuntimeDirs::needs_migration(&self.dirs.user))
     }
 
@@ -7105,7 +7127,7 @@ impl ImeRuntimeSession {
                                 .any(|hotkey| hotkey.matches_switcher(key, mask))
                         })
                 })
-        })
+        }) && engine_choice::is_enabled(&self.dirs.user)
     }
 
     /// Called on the prewarm worker, without engine locks. Frontends can post
@@ -7685,6 +7707,7 @@ impl ImeRuntimeSession {
     fn can_use_mobile_package_switcher(&self) -> bool {
         self.policy.current().composing
             && try_lock_ignore_poison(&self.inner).is_some_and(|inner| inner.ime_host)
+            && engine_choice::is_enabled(&self.dirs.user)
     }
 
     pub fn current_schema(&self) -> Option<SchemaInfo> {

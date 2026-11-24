@@ -53,22 +53,28 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
         {
             return Err("Core is already initialized; restart the process to change config".into());
         }
+        let preferences = state.core.state();
         return Ok(BridgeInfo {
             platform: config.platform,
             app_version: current.app_version.clone(),
             user_root: current_root.to_string_lossy().into_owned(),
             app_update_prereleases: keytao_app_core::update::includes_prereleases(&state.core),
+            website_origin: preferences.website_origin,
+            website_hidden: preferences.website_hidden,
         });
     }
     let events = Arc::new(BridgeEvents::default());
     let core = Core::new(env, events.clone()).map_err(|error| error.to_string())?;
     core.initialize_onboarding(Some(root.clone()))
         .map_err(|error| error.to_string())?;
+    let preferences = core.state();
     let info = BridgeInfo {
         platform: config.platform,
         app_version: config.app_version,
         user_root: root.to_string_lossy().into_owned(),
         app_update_prereleases: keytao_app_core::update::includes_prereleases(&core),
+        website_origin: preferences.website_origin,
+        website_hidden: preferences.website_hidden,
     };
     let host = BridgeHost::new(core.clone(), root);
     STATE

@@ -656,24 +656,23 @@ pub fn input_engine_enabled() -> Result<bool, String> {
 pub async fn set_input_engine_enabled(enabled: bool) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    #[cfg(target_os = "windows")]
-    let _engine_guard =
-        keytao_app_core::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
     let root = state.host.user_root()?;
-    #[cfg(target_os = "windows")]
-    let previous = keytao_core::engine_choice::is_enabled(&root);
-    keytao_core::engine_choice::set_enabled(&root, enabled)?;
-    #[cfg(target_os = "windows")]
-    if let Err(error) =
-        keytao_app_core::windows_public_schemas::publish_engine_enabled(&root, enabled)
+    #[cfg(target_os = "macos")]
     {
-        if previous != enabled && keytao_core::engine_choice::is_enabled(&root) == enabled {
-            keytao_core::engine_choice::set_enabled(&root, previous)
-                .map_err(|restore| format!("{error}; restore input engine state: {restore}"))?;
-        }
-        return Err(error);
+        keytao_app_core::ime_status::macos::set_input_engine_enabled(&root, enabled).await
     }
-    Ok(())
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(move || {
+            keytao_app_core::ime_status::windows::set_input_engine_enabled(&root, enabled)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        keytao_core::engine_choice::set_enabled(&root, enabled)
+    }
 }
 
 pub async fn set_input_engine(engine: String) -> Result<(), String> {
@@ -781,6 +780,14 @@ pub fn account_session() -> Result<Option<AccountUserDto>, String> {
         (Some(_), Some(user)) => Ok(Some(runtime::dto(user)?)),
         _ => Ok(None),
     }
+}
+
+pub async fn get_account_stats() -> Result<AccountStatsDto, String> {
+    runtime::dto(
+        keytao_app_core::account::get_account_stats(&runtime::state()?.core)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 pub async fn account_login(name: String, password: String) -> Result<AccountUserDto, String> {
@@ -956,6 +963,22 @@ pub async fn check_app_update() -> Result<AppUpdateDto, String> {
 pub async fn set_app_update_prereleases(enabled: bool) -> Result<(), String> {
     keytao_app_core::update::set_app_update_prereleases(&runtime::state()?.core, enabled)
         .await
+        .map_err(|error| error.to_string())
+}
+
+pub fn set_website_settings(origin: String, hidden: bool) -> Result<(), String> {
+    if !matches!(
+        origin.as_str(),
+        "https://keytao.rea.ink" | "https://keytao.vercel.app"
+    ) {
+        return Err("Unsupported KeyTao website origin".into());
+    }
+    runtime::state()?
+        .core
+        .update_state(|state| {
+            state.website_origin = Some(origin);
+            state.website_hidden = hidden;
+        })
         .map_err(|error| error.to_string())
 }
 

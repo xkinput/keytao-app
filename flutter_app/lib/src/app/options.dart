@@ -94,6 +94,10 @@ const logLevels = {
   RuntimeLogLevelDto.info: 'info',
   RuntimeLogLevelDto.verbose: 'verbose',
 };
+const keytaoWebsiteOrigins = [
+  'https://keytao.rea.ink',
+  'https://keytao.vercel.app',
+];
 const candidateFontMin = 10.0;
 const candidateFontMax = 36.0;
 const candidateFontDivisions = 26;
@@ -102,7 +106,8 @@ enum AppPage {
   input('ime', AppStrings.ime),
   scheme('scheme', AppStrings.scheme),
   about('about', AppStrings.about),
-  debug('debug', AppStrings.debug);
+  debug('debug', AppStrings.debug),
+  website('website', 'KeyTao 网站');
 
   const AppPage(this.id, this.title);
   final String id;

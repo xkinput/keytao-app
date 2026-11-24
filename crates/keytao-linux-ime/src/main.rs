@@ -222,15 +222,27 @@ fn install_reload_watcher(
                 let Some(requested) = gate.pending() else {
                     continue;
                 };
+                let enabled = gate
+                    .path()
+                    .parent()
+                    .is_none_or(keytao_core::engine_choice::is_enabled);
+                let was_enabled = reload_bus::engine_enabled();
+                if !enabled && !was_enabled {
+                    gate.commit(requested);
+                    continue;
+                }
 
                 tracing::info!("reload stamp changed: {}", gate.path().display());
                 let _activity = hot_update::activity();
                 match engine.reload_without_deploy_changed() {
                     Ok(reloaded) => {
                         gate.commit(requested);
-                        if reloaded {
-                            tracing::info!("input engine reloaded after stamp change");
+                        reload_bus::set_engine_enabled(enabled);
+                        if reloaded || enabled != was_enabled {
+                            tracing::info!(enabled, "input engine changed after stamp change");
                             reload_bus::notify();
+                        }
+                        if enabled && reloaded {
                             if let Err(error) = engine.prewarm(None) {
                                 tracing::warn!("cannot prewarm reloaded input sessions: {error}");
                             }
@@ -364,9 +376,11 @@ fn main() {
             }
         };
         // Preserve any engine switch requested while the process initializes.
-        let reload_gate = keytao_core::default_user_data_dir()
-            .as_deref()
-            .map(keytao_core::ReloadStampGate::new);
+        let reload_gate = keytao_core::default_user_data_dir().as_deref().map(|root| {
+            let gate = keytao_core::ReloadStampGate::new(root);
+            reload_bus::set_engine_enabled(keytao_core::engine_choice::is_enabled(root));
+            gate
+        });
         let engine = engine::CoreEngine::new().with_ime_host();
         if let Err(e) = engine.init_without_deploy() {
             tracing::error!("input engine init failed: {e}");

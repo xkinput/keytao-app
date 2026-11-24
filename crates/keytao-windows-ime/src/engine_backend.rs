@@ -9,7 +9,7 @@ use keytao_core::{
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use windows::{
     core::PCWSTR,
@@ -38,6 +38,22 @@ pub(crate) fn stamp_changed(path: Option<&Path>, signature: Option<&str>) -> boo
         return false;
     };
     signature != Some(current.as_str())
+}
+
+fn input_engine_control_root() -> Option<&'static Path> {
+    static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        if crate::appcontainer::is_appcontainer().ok()? {
+            crate::appcontainer::public_schema_root().ok()
+        } else {
+            default_user_data_dir()
+        }
+    })
+    .as_deref()
+}
+
+pub(crate) fn input_engine_enabled() -> bool {
+    input_engine_control_root().is_none_or(keytao_core::engine_choice::is_enabled)
 }
 
 pub struct EngineHandle {
@@ -78,6 +94,16 @@ pub(crate) fn build_backend(private: bool) -> Result<
     String,
 > {
     let mode = read_engine_mode();
+    if let Some(root) = input_engine_control_root()
+        .filter(|root| !keytao_core::engine_choice::is_enabled(root))
+    {
+        let paused = InProcEngine::paused(root);
+        let (path, signature) = paused.reload_stamp();
+        let handle = EngineHandle {
+            schema_id: String::new(),
+        };
+        return Ok((Arc::new(paused), handle, path, signature));
+    }
     if private {
         if mode == crate::engine_config::EngineMode::InProc {
             return Err("private input requires the Windows IME service mode".into());
@@ -177,11 +203,25 @@ struct InProcState {
     reload_stamp_path: Option<PathBuf>,
     reload_stamp_signature: Option<String>,
     reload_stamp_cache: ReloadStampCache,
-    public_engine_enabled: Option<bool>,
+    control_engine_enabled: Option<bool>,
     rime_dll: Option<Arc<LoadedRimeDll>>,
 }
 
 impl InProcEngine {
+    fn paused(root: &Path) -> Self {
+        let stamp = ReloadStamp::path(root);
+        let signature = ReloadStamp::signature_at(&stamp);
+        Self {
+            inner: Mutex::new(InProcState {
+                control_engine_enabled: Some(false),
+                reload_stamp_path: Some(stamp),
+                reload_stamp_signature: signature,
+                ..InProcState::default()
+            }),
+            ..Self::default()
+        }
+    }
+
     fn no_learning() -> Self {
         Self {
             no_learning: true,
@@ -214,6 +254,14 @@ impl InProcEngine {
         Ok(rebuilt)
     }
 
+    pub fn shutdown_server(&self) -> Result<(), String> {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(runtime) = &inner.runtime {
+            runtime.shutdown()?;
+        }
+        Ok(())
+    }
+
     /// Release mapped dictionaries before the child invalidates their files on Windows.
     pub fn prepare_server_deploy(&self) -> Result<(), String> {
         let _inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -243,7 +291,7 @@ impl InProcEngine {
                 reload_stamp_path: inner.reload_stamp_path.clone(),
                 reload_stamp_signature: inner.reload_stamp_signature.clone(),
                 reload_stamp_cache: inner.reload_stamp_cache.clone(),
-                public_engine_enabled: inner.public_engine_enabled,
+                control_engine_enabled: inner.control_engine_enabled,
                 rime_dll: inner.rime_dll.clone(),
             }),
             ..Self::default()
@@ -280,6 +328,11 @@ impl InProcEngine {
 
     fn try_build_engine(sandboxed: bool, server: bool) -> Result<InProcState, String> {
         let _init_guard = EngineInitGuard::acquire(sandboxed)?;
+        if server && default_user_data_dir().as_deref()
+            .is_some_and(|root| !keytao_core::engine_choice::is_enabled(root))
+        {
+            return Err("input engine is disabled".into());
+        }
         let shared = server_shared_data_dir();
         let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
         let sandbox = if sandboxed {
@@ -300,10 +353,11 @@ impl InProcEngine {
             || ReloadStamp::signature_at(&reload_stamp_path),
             |data| data.reload_stamp_signature.clone(),
         );
-        let public_engine_enabled = sandbox
-            .as_ref()
-            .map(|_| copy_public_engine_state(&reload_stamp_path, &control_root))
-            .transpose()?;
+        let control_engine_enabled = if sandbox.is_some() {
+            copy_public_engine_state(&reload_stamp_path, &control_root)?
+        } else {
+            keytao_core::engine_choice::is_enabled(&control_root)
+        };
         let runtime = ImeRuntime::with_dirs(&control_root, shared).with_ime_host();
         let runtime = if server && read_engine_mode() == crate::engine_config::EngineMode::Pipe {
             runtime.with_libjd_server()
@@ -326,7 +380,7 @@ impl InProcEngine {
             reload_stamp_path: Some(reload_stamp_path),
             reload_stamp_signature,
             reload_stamp_cache: ReloadStampCache::default(),
-            public_engine_enabled,
+            control_engine_enabled: Some(control_engine_enabled),
             rime_dll,
         })
     }
@@ -404,7 +458,7 @@ impl InProcEngine {
             reload_stamp_signature,
             reload_stamp_path: Some(path),
             reload_stamp_cache: ReloadStampCache::default(),
-            public_engine_enabled: Some(public_engine_enabled),
+            control_engine_enabled: Some(public_engine_enabled),
             rime_dll,
         })
     }
@@ -482,6 +536,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paused_backend_passes_keys_through_and_can_reload_after_enable() {
+        let root = tempfile::tempdir().unwrap();
+        keytao_core::engine_choice::set_enabled(root.path(), false).unwrap();
+        let engine = InProcEngine::paused(root.path());
+        assert!(engine.session().is_none());
+        assert!(engine.process_key(u32::from(b'a'), 0).is_none());
+        assert!(!engine.reload_needed());
+
+        keytao_core::engine_choice::set_enabled(root.path(), true).unwrap();
+        assert!(engine.reload_needed());
+    }
+
+    #[test]
     fn no_learning_copies_prebuilt_and_disables_every_translator() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
@@ -550,6 +617,9 @@ fn start_pipe_retry(engine: &Arc<InProcEngine>) -> Result<(), String> {
                 let Some(engine) = engine.upgrade() else {
                     return;
                 };
+                if !input_engine_enabled() {
+                    return;
+                }
                 if pipe.build().is_ok() {
                     pipe.drop_session();
                     engine.pipe_ready.store(true, Ordering::Release);
@@ -587,10 +657,10 @@ impl ImeEngineBackend for InProcEngine {
             reload_stamp_path,
             reload_stamp_signature,
             reload_stamp_cache,
-            public_engine_enabled,
+            control_engine_enabled,
             ..
         } = &mut *inner;
-        if public_engine_enabled.is_some_and(|enabled| {
+        if control_engine_enabled.is_some_and(|enabled| {
             reload_stamp_path
                 .as_deref()
                 .and_then(Path::parent)
@@ -622,13 +692,43 @@ impl ImeEngineBackend for InProcEngine {
     }
 
     fn drop_session(&self) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.session = None;
-        inner.runtime = None;
-        inner.rime_dll = None;
+        let retired = std::mem::take(&mut *self.inner.lock().unwrap_or_else(|p| p.into_inner()));
+        let Some(root) = retired
+            .reload_stamp_path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|root| !keytao_core::engine_choice::is_enabled(root))
+            .map(Path::to_path_buf)
+        else {
+            return;
+        };
+        if retired.runtime.is_none() {
+            return;
+        }
+        let dll_guard = crate::globals::DllActivityGuard::new();
+        let result = std::thread::Builder::new()
+            .name("keytao-ime-release-disabled".into())
+            .spawn(move || {
+                let result = (|| {
+                    let sandboxed = crate::appcontainer::is_appcontainer()
+                        .map_err(|error| error.to_string())?;
+                    let _init_guard = EngineInitGuard::acquire(sandboxed)?;
+                    if let Some(runtime) = &retired.runtime {
+                        if !keytao_core::engine_choice::is_enabled(&root) {
+                            runtime.shutdown()?;
+                        }
+                    }
+                    Ok::<_, String>(())
+                })();
+                if let Err(error) = result {
+                    tracing::warn!(%error, "could not release disabled input engine");
+                }
+                drop(retired);
+                drop(dll_guard);
+            });
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not start disabled input engine release");
+        }
     }
 
     fn process_key(&self, keysym: u32, mods: u32) -> Option<KeyProcessResult> {

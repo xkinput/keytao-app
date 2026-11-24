@@ -239,7 +239,9 @@ void main() {
     ),
   ]) {
     for (final page
-        in compact ? AppPage.values : [AppPage.input, AppPage.scheme]) {
+        in compact
+            ? AppPage.values.where((page) => page != AppPage.website)
+            : [AppPage.input, AppPage.scheme]) {
       for (final brightness
           in compact ? [Brightness.light] : Brightness.values) {
         final name = '${device.name}-${page.id}-${brightness.name}';

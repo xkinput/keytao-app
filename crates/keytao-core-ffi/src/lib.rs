@@ -454,6 +454,16 @@ pub extern "C" fn keytao_run_deploy_child() -> bool {
     })
 }
 
+/// Read the enabled flag before an IME creates its process-wide runtime.
+#[no_mangle]
+pub extern "C" fn keytao_engine_enabled_at(user_dir: *const c_char) -> bool {
+    guard("keytao_engine_enabled_at", true, || {
+        c_string_arg(user_dir, "user_dir")
+            .map(|user_dir| keytao_core::engine_choice::is_enabled(Path::new(&user_dir)))
+            .unwrap_or(true)
+    })
+}
+
 /// Initialize the Rime runtime. Must be called once before any other function.
 /// Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
 /// Returns true on success.

@@ -219,6 +219,12 @@ object KeytaoNativeBridge {
         }
     }
 
+    fun engineEnabled(userDir: String): Boolean =
+        !loaded || runCatching { nativeEngineEnabled(userDir) }.getOrDefault(true)
+
+    fun suspendEngine(userDir: String): Boolean =
+        loaded && runCatching { nativeSuspendEngine(userDir) }.getOrDefault(false)
+
     fun createSession(): Long {
         if (!loaded) return 0L
         return runCatching { nativeCreateSession() }.getOrDefault(0L)
@@ -478,6 +484,10 @@ object KeytaoNativeBridge {
     external fun nativeRenderSchemaLogos(userDir: String)
 
     external fun nativeEngineAvailable(): Boolean
+
+    private external fun nativeEngineEnabled(userDir: String): Boolean
+
+    private external fun nativeSuspendEngine(userDir: String): Boolean
 
     external fun nativeDeployPackages(userDir: String): String?
 

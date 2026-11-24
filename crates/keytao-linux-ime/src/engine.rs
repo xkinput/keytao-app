@@ -32,6 +32,9 @@ impl Default for DeploymentHint {
 
 impl DeploymentHint {
     pub fn key_pressed(&self) -> Option<&'static str> {
+        if !crate::reload_bus::engine_enabled() {
+            return None;
+        }
         let root = self.root.as_ref()?;
         let mut state = self
             .state
@@ -42,6 +45,9 @@ impl DeploymentHint {
     }
 
     pub fn hint(&self) -> Option<&'static str> {
+        if !crate::reload_bus::engine_enabled() {
+            return None;
+        }
         let root = self.root.as_ref()?;
         self.state
             .lock()

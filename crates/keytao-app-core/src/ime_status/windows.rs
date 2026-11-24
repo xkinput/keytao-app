@@ -315,6 +315,44 @@ impl Drop for WindowsImeEngineInitGuard {
 }
 
 #[cfg(target_os = "windows")]
+pub fn set_input_engine_enabled(root: &Path, enabled: bool) -> Result<(), String> {
+    use keytao_core::engine_choice;
+
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let control = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".keytao-windows-engine-control.lock"))
+        .map_err(|error| error.to_string())?;
+    keytao_core::lock_file(&control, true).map_err(|error| error.to_string())?;
+
+    let previous = {
+        let _init = WindowsImeEngineInitGuard::acquire()?;
+        let previous = engine_choice::is_enabled(root);
+        engine_choice::set_enabled(root, enabled)?;
+        if let Err(error) = crate::windows_public_schemas::publish_engine_enabled(root, enabled) {
+            if previous != enabled && engine_choice::is_enabled(root) == enabled {
+                engine_choice::set_enabled(root, previous)
+                    .map_err(|restore| format!("{error}; restore input engine state: {restore}"))?;
+            }
+            return Err(error);
+        }
+        previous
+    };
+    if !crate::windows_public_schemas::is_default_user_root(root) {
+        return Ok(());
+    }
+    let result = server::reconcile_input_engine_enabled(enabled);
+    if result.is_err() && enabled && !previous {
+        let _init = WindowsImeEngineInitGuard::acquire()?;
+        engine_choice::set_enabled(root, false)?;
+        crate::windows_public_schemas::publish_engine_enabled(root, false)?;
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
 struct WindowsComApartment(bool);
 
 #[cfg(target_os = "windows")]

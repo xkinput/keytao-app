@@ -1,4 +1,4 @@
-//! Fan-out for "librime was reloaded".
+//! Fan-out when the input engine reloads or changes enabled state.
 //!
 //! `ImeRuntimeSession` rebuilds its engine lazily, so a backend that is idle
 //! when the App finishes a deployment keeps showing whatever the old
@@ -11,10 +11,31 @@
 
 use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    sync::{Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard, OnceLock,
+    },
 };
+use tokio::sync::watch;
 
 static SUBSCRIBERS: Mutex<Vec<RawFd>> = Mutex::new(Vec::new());
+static ASYNC_SUBSCRIBERS: OnceLock<watch::Sender<()>> = OnceLock::new();
+static ENGINE_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn engine_enabled() -> bool {
+    ENGINE_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn set_engine_enabled(enabled: bool) {
+    ENGINE_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// IBus already runs inside Tokio and can await reloads without one fd per context.
+pub fn subscribe_async() -> watch::Receiver<()> {
+    ASYNC_SUBSCRIBERS
+        .get_or_init(|| watch::channel(()).0)
+        .subscribe()
+}
 
 fn subscribers() -> MutexGuard<'static, Vec<RawFd>> {
     SUBSCRIBERS
@@ -77,6 +98,9 @@ pub fn subscribe() -> Option<ReloadSignal> {
 
 /// Wake every subscriber.  Called from the reload watcher thread.
 pub fn notify() {
+    if let Some(sender) = ASYNC_SUBSCRIBERS.get() {
+        sender.send_replace(());
+    }
     let value: u64 = 1;
     for fd in subscribers().iter() {
         let written = unsafe {
@@ -92,5 +116,28 @@ pub fn notify() {
                 std::io::Error::last_os_error()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{notify, subscribe, subscribe_async};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn reload_wakes_polling_and_dbus_frontends() {
+        let polling = subscribe().expect("eventfd");
+        let mut dbus = subscribe_async();
+        assert!(!polling.take());
+        assert!(!dbus.has_changed().unwrap());
+
+        notify();
+        assert!(polling.take());
+        assert!(!polling.take());
+        tokio::time::timeout(Duration::from_secs(1), dbus.changed())
+            .await
+            .expect("reload notification")
+            .expect("open reload bus");
+        assert!(!dbus.has_changed().unwrap());
     }
 }

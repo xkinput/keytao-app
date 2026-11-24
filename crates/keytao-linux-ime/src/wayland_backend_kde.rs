@@ -283,6 +283,8 @@ impl App {
     fn handle_reload(&mut self) {
         tracing::info!("KDE Wayland IME: clearing composition after librime reload");
         self.key_repeat.cancel();
+        self.control_alt_tap.clear();
+        self.deployment.reset();
         self.session.clear_composition();
         self.clear_context_preedit();
         self.clear_kimpanel();
@@ -613,7 +615,7 @@ impl App {
         // A new press always supersedes whatever was repeating.
         self.key_repeat.cancel();
 
-        if !self.active {
+        if !self.active || !reload_bus::engine_enabled() {
             self.forward_key_press(evdev_keycode);
             return;
         }
@@ -729,7 +731,7 @@ impl App {
     /// A primary click on the panel: the same session calls and client updates
     /// as a number-key selection or a page key.
     fn handle_panel_click(&mut self, click: PanelClick, qh: &QueueHandle<Self>) {
-        if !self.active || !self.session.input_policy().composing {
+        if !self.active || !reload_bus::engine_enabled() || !self.session.input_policy().composing {
             return;
         }
         let state = match click {
@@ -746,8 +748,9 @@ impl App {
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>, started: Instant) {
         self.key_repeat.cancel_for(evdev_keycode);
+        let composing = reload_bus::engine_enabled() && self.session.input_policy().composing;
         let sym_raw = key_sym(self.xkb_base_state.as_ref(), evdev_keycode);
-        if is_shift_key(sym_raw) && self.session.input_policy().composing {
+        if is_shift_key(sym_raw) && composing {
             if let Some(result) = self
                 .session
                 .process_key_result(sym_raw, shift_key_modifiers(self.mods | RIME_RELEASE_MASK))
@@ -758,7 +761,7 @@ impl App {
                 self.show_panel(result.state, qh);
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             }
-        } else if self.active && self.session.input_policy().composing {
+        } else if self.active && composing {
             let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
             let tap_mods = ControlAltTap::xkb_modifiers(sym, self.mods, self.xkb_state.as_ref());
             if let Some(result) = self.control_alt_tap.release(sym, tap_mods, &self.session) {

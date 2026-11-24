@@ -8,10 +8,11 @@ WORK_DIR="$(mktemp -d /tmp/keytao-linux.XXXXXX)"
 trap 'chown -R "$UID_GID" /out/deb /out/rpm 2>/dev/null || true' EXIT
 # Keep Flutter native assets and Cargo outputs away from concurrent host builds.
 tar -C /app --exclude=target --exclude=build --exclude=.build --exclude=.gradle \
-  --exclude=.dart_tool --exclude=ephemeral \
+  --exclude=.dart_tool --exclude=.swiftpm --exclude=ephemeral \
   -cf - Cargo.toml Cargo.lock .cargo crates \
   packaging/icons \
   flutter_app/pubspec.yaml flutter_app/pubspec.lock flutter_app/lib \
+  flutter_app/third_party/webview_core \
   flutter_app/assets flutter_app/hook flutter_app/linux packaging/linux scripts \
   | tar -C "$WORK_DIR" -xf -
 cd "$WORK_DIR"

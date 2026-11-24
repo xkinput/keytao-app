@@ -97,6 +97,9 @@ abstract final class AppStrings {
   static const redeploy = '重新部署';
   static const algorithmEngine = '算法引擎';
   static const algorithmEngineHint = '关闭后暂停组字与候选，重新开启即可恢复。';
+  static const macosAlgorithmEngineHint = '关闭后退出 KeyTao 输入法，开启后可在系统菜单重新选择。';
+  static const enablingAlgorithmEngine = '正在开启算法引擎…';
+  static const disablingAlgorithmEngine = '正在关闭算法引擎…';
   static const uninstall = '卸载';
   static const checkingPermission = '检测权限…';
   static const installing = '安装中…';
@@ -233,7 +236,6 @@ abstract final class AppStrings {
   static const clear = '清空';
   static const keytaoVersion = 'KeyTao IM 版本';
   static const librimeVersion = 'librime 版本';
-  static const librimeLuaVersion = 'librime-lua';
   static const openccVersion = 'OpenCC 版本';
   static const platform = '平台';
   static const keytaoDirectory = '键道目录';

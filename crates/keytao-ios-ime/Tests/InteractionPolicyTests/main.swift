@@ -40,7 +40,8 @@ do {
     let methods = try [
         "private func installPreparedSession(", "private func sessionConfigurationSignature(",
         "private func fileSignature(", "func releaseIdleSession(", "func close(",
-        "func selectSchema(", "func setOption(",
+        "func selectSchema(", "func setOption(", "private static func readAlgorithmEnabled(",
+        "func refreshAlgorithmEnabled(", "func suspendAlgorithm(",
     ].map(engineMethod).joined(separator: "\n")
     guard let suspendedDeclaration = source.split(separator: "\n").first(where: { $0.contains("private var suspendedSession:") }) else {
         throw NSError(domain: "EngineHarness", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing suspended session declaration"])
@@ -96,6 +97,12 @@ do {
     func keytao_reload_stamp_path_at(_ root: UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>? {
         strdup(URL(fileURLWithPath: String(cString: root)).appendingPathComponent("canonical-reload").path)
     }
+    func keytao_engine_enabled_at(_ root: UnsafePointer<CChar>) -> Bool {
+        let marker = URL(fileURLWithPath: String(cString: root)).appendingPathComponent("engine-enabled")
+        return (try? String(contentsOf: marker, encoding: .utf8)) != "0"
+    }
+    var reloadCalls = 0
+    func keytao_reload() -> Bool { reloadCalls += 1; return true }
     func ownedCString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
         guard let pointer else { return nil }
         defer { free(pointer) }
@@ -106,6 +113,9 @@ do {
         let userRoot: URL
         var session: UnsafeMutableRawPointer?
         var nativeReady = false
+        var algorithmEnabled = true
+        var algorithmGeneration: UInt64 = 0
+        let startupQueue = DispatchQueue(label: "engine-harness.startup")
         var startupInFlight = false
         var lastState = KeyTaoImeState.empty
         var schemaLogoGeneration: UInt64 = 0
@@ -194,6 +204,16 @@ do {
     require(restored.nativeReady && !restored.hasSnapshot, "successful restoration consumes the snapshot")
     require(restored.state().schemaID == "old" && restored.state().options["switch_on"] == true && restored.state().options["switch_off"] == false && restored.state().options["ascii_mode"] == true, "unchanged configuration restores the schema and options")
     require(Native.sessions.count == 1 && restored.capabilitySession == restored.session, "successful restoration replaces and destroys the fresh spare")
+    let marker = restored.userRoot.appendingPathComponent("engine-enabled")
+    try Data("0".utf8).write(to: marker)
+    require(restored.refreshAlgorithmEnabled() && !restored.algorithmEnabled, "the live keyboard observes disable")
+    restored.suspendAlgorithm()
+    restored.startupQueue.sync {}
+    require(!restored.nativeReady && Native.sessions.isEmpty && reloadCalls == 1, "disable destroys the session and releases the backend")
+    require(!restored.resume() && Native.sessions.isEmpty, "a prepared session cannot be installed while disabled")
+    try Data("1".utf8).write(to: marker)
+    require(restored.refreshAlgorithmEnabled() && restored.algorithmEnabled, "the keyboard observes re-enable")
+    require(restored.resume() && restored.state().schemaID == "app-default", "re-enable starts the current configured schema")
     print("engine session restore harness passed (\(checks) checks)")
     """#
     let harnessFile = harnessDirectory.appendingPathComponent("main.swift")

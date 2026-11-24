@@ -3,6 +3,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import CryptoKit
 import CKeytaoCore
+import Darwin
 import os
 
 private let rimeKeySpace: UInt32 = 0x0020
@@ -145,6 +146,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var runtimeStarting = false
     private var runtimeReleased = false
     private var runtimeResumeFailed = false
+    private var keyboardVisible = false
+    private var engineControlWatcher: DispatchSourceFileSystemObject?
     private var memoryReclamation = KeyTaoMemoryReclamationPolicy()
     private var hiddenMemoryReleaseWorkItem: DispatchWorkItem?
     private var queuedCommands: [KeyTaoKeyCommand] = []
@@ -166,6 +169,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     deinit {
         hiddenMemoryReleaseWorkItem?.cancel()
+        engineControlWatcher?.cancel()
         if let clipboardChangeObserver { NotificationCenter.default.removeObserver(clipboardChangeObserver) }
         clipboardMediaLifetime.cancel()
     }
@@ -253,6 +257,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             KeyTaoLog.memorySnapshot("view_will_appear")
         }
         super.viewWillAppear(animated)
+        keyboardVisible = true
+        watchAlgorithmControl()
         hiddenMemoryReleaseWorkItem?.cancel()
         hiddenMemoryReleaseWorkItem = nil
         releaseMemoryIfNeeded()
@@ -285,6 +291,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             flushRuntimeMetrics()
         }
         super.viewWillDisappear(animated)
+        keyboardVisible = false
         if let clipboardChangeObserver { NotificationCenter.default.removeObserver(clipboardChangeObserver) }
         clipboardChangeObserver = nil
         keyboardView?.clearActiveTouches()
@@ -561,14 +568,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         // every cold start would land in the host as latin letters. Once text
         // is pending, later deletes, direct text and document edits must wait
         // behind it rather than changing the host before those keys arrive.
-        if runtimeStarting && (command.requiresInstalledSchema
+        if engine.algorithmEnabled && runtimeStarting && (command.requiresInstalledSchema
             || (!queuedCommands.isEmpty && command.editsHostDocument)) {
             if queuedCommands.count < Self.queuedCommandLimit {
                 queuedCommands.append(command)
             }
             return
         }
-        if !inputAvailable && command.requiresInstalledSchema {
+        let directsWhileDisabled = !engine.algorithmEnabled
+            && [KeyTaoCommandType.enter, KeyTaoCommandType.space].contains(command.type)
+        if !inputAvailable && command.requiresInstalledSchema && !directsWhileDisabled {
             if runtimeResumeFailed {
                 showMessage(unavailableMessage)
                 return
@@ -1415,7 +1424,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             commitDirect(isEnglishMode ? ". " : "。")
             return
         }
-        if hostTraits.bypassesRime {
+        if !engine.algorithmEnabled || hostTraits.bypassesRime {
             commitDirect(" ")
             return
         }
@@ -2164,6 +2173,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// of a cold keyboard start, so they run off the main thread and the UI
     /// shows a loading hint until they land.
     private func startRuntimeIfNeeded() {
+        guard engine.algorithmEnabled else {
+            refreshInputAvailability()
+            return
+        }
         if engine.nativeReady {
             refreshInputAvailability()
             return
@@ -2180,7 +2193,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                 return
             }
             self.runtimeStarting = false
-            self.runtimeResumeFailed = resuming && !ready
+            self.refreshAlgorithmControl()
+            self.runtimeResumeFailed = self.engine.algorithmEnabled && resuming && !ready
             self.refreshRuntimeLogCollection()
             self.refreshInputAvailability()
             self.applyInputPolicyForHost()
@@ -2224,10 +2238,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private func refreshInputAvailability() {
         refreshEngineCapabilities()
         let message: String
-        let installed = engine.hasInstalledSchema()
-        let deployed = engine.hasDeployedSchema()
+        let installed = engine.algorithmEnabled && engine.hasInstalledSchema()
+        let deployed = installed && engine.hasDeployedSchema()
         let ready = installed && deployed && engine.nativeReady
-        if ready {
+        if !engine.algorithmEnabled {
+            message = "算法引擎已关闭"
+        } else if ready {
             message = ""
         } else if engine.isDeploying() {
             message = "正在部署方案…"
@@ -2249,6 +2265,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             refreshRimeOptions()
         } else {
             currentState = .empty
+            if !engine.algorithmEnabled { currentState.asciiMode = true }
             keyboardView?.updateAvailability(message: unavailableMessage)
         }
         keyboardView?.update(state: currentState)
@@ -2267,6 +2284,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func reloadIfNeeded() {
+        refreshAlgorithmControl()
         guard engine.reloadIfNeeded() else {
             return
         }
@@ -2279,6 +2297,44 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             force: true
         )
         if keyboardView?.isRimeMenuOpen == true { refreshRimeOptions() }
+    }
+
+    private func watchAlgorithmControl() {
+        guard engineControlWatcher == nil else { return }
+        let descriptor = open(engine.userRoot.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .rename, .delete, .revoke],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in self?.refreshAlgorithmControl() }
+        source.setCancelHandler { close(descriptor) }
+        engineControlWatcher = source
+        source.resume()
+    }
+
+    private func refreshAlgorithmControl() {
+        guard engine.refreshAlgorithmEnabled() else { return }
+        if engine.algorithmEnabled {
+            if keyboardVisible { startRuntimeIfNeeded() }
+            return
+        }
+        if keyboardVisible {
+            if refreshInputDocumentIfNeeded() { _ = commitPendingComposition() }
+            resetInputContextCaches(resetNavigation: true)
+        }
+        candidateQueue.sync {}
+        engine.suspendAlgorithm()
+        runtimeReleased = false
+        runtimeResumeFailed = false
+        bypassAsciiActive = false
+        englishSchemaID = nil
+        currentRimeSchemaID = nil
+        lastChineseSchemaID = nil
+        chineseSwitchSnapshot = [:]
+        keyboardView?.update(rimeOptions: .empty)
+        refreshInputAvailability()
     }
 
     // MARK: - Host traits

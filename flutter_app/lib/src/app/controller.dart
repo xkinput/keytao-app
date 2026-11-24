@@ -16,6 +16,7 @@ import 'options.dart'
     show
         AppPage,
         defaultDownloadSource,
+        keytaoWebsiteOrigins,
         schemeAssets,
         schemeDisplayName,
         schemeRepositoryUrls,
@@ -265,6 +266,15 @@ class AppController extends ChangeNotifier {
   int _releaseRequest = 0;
   int _schemeUpdatesRequest = 0;
   AppPage activePage = AppPage.input;
+  late String websiteOrigin = keytaoWebsiteOrigins.contains(info.websiteOrigin)
+      ? info.websiteOrigin!
+      : keytaoWebsiteOrigins.first;
+  late final _websiteHidden = ValueNotifier(info.websiteHidden);
+  ValueListenable<bool> get websiteHiddenChanges => _websiteHidden;
+  bool get websiteHidden => _websiteHidden.value;
+  List<AppPage> get visiblePages => websiteHidden
+      ? AppPage.values.take(AppPage.website.index).toList()
+      : AppPage.values;
   OperationKind? operation;
   bool checkingStorage = false;
   bool releaseLoading = false;
@@ -348,6 +358,7 @@ class AppController extends ChangeNotifier {
   LibjdStatusDto? libjd;
   String inputEngine = 'rime';
   bool inputEngineEnabled = true;
+  bool? inputEngineTransition;
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
@@ -1383,7 +1394,9 @@ class AppController extends ChangeNotifier {
   }
 
   void selectPage(AppPage page) {
-    if (activePage == page) return;
+    if (activePage == page || (page == AppPage.website && websiteHidden)) {
+      return;
+    }
     activePage = page;
     unawaited(setWindowTitle());
     if (page == AppPage.debug) {
@@ -1401,6 +1414,19 @@ class AppController extends ChangeNotifier {
     }
     _changed();
   }
+
+  Future<bool> saveWebsiteSettings({String? origin, bool? hidden}) =>
+      run(() async {
+        final nextOrigin = origin ?? websiteOrigin;
+        final nextHidden = hidden ?? websiteHidden;
+        await core.setWebsiteSettings(origin: nextOrigin, hidden: nextHidden);
+        if (_disposed) return;
+        websiteOrigin = nextOrigin;
+        _websiteHidden.value = nextHidden;
+        if (websiteHidden && activePage == AppPage.website) {
+          selectPage(AppPage.input);
+        }
+      });
 
   Future<bool> run(
     Future<void> Function() action, {
@@ -2898,14 +2924,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> setInputEngineEnabled(bool enabled) => run(() async {
-    if (isAndroid) await _requireStorage();
+    inputEngineTransition = enabled;
+    _changed();
     try {
+      if (isAndroid) await _requireStorage();
       await core.setInputEngineEnabled(enabled: enabled);
       inputEngineEnabled = enabled;
     } catch (_) {
       await _readInputEngineEnabled();
       rethrow;
     } finally {
+      inputEngineTransition = null;
       unawaited(refreshCandidatePreview());
     }
   });
@@ -4754,6 +4783,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _websiteHidden.dispose();
     _dictionarySyncDebounce?.cancel();
     _dictionaryPullTimer?.cancel();
     _dictionaryPullCooldown?.cancel();

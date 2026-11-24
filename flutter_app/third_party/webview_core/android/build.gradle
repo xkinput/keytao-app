@@ -1,0 +1,66 @@
+buildscript {
+    ext.kotlin_version = "2.4.0"
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:9.1.0"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+plugins {
+    id "com.android.library"
+}
+
+// AGP 9.0+ compiles Kotlin sources natively via Built-in Kotlin when
+// `android.builtInKotlin` is enabled (the AGP 9+ default). On AGP < 9.0
+// (e.g. AGP 8.x) or when `android.builtInKotlin=false`, conditionally apply
+// `org.jetbrains.kotlin.android` via `pluginManager` if not already applied.
+def agpMajorVersion = project.extensions
+    .findByType(com.android.build.api.variant.AndroidComponentsExtension)
+    ?.pluginVersion
+    ?.major ?: 8
+def builtInKotlinProp = project.findProperty("android.builtInKotlin")
+def isBuiltInKotlin = agpMajorVersion >= 9 &&
+    (builtInKotlinProp == null ? true : builtInKotlinProp.toString().toBoolean())
+if (!isBuiltInKotlin && !pluginManager.hasPlugin("org.jetbrains.kotlin.android")) {
+    pluginManager.apply("org.jetbrains.kotlin.android")
+}
+
+group = "com.infradise.webview_core"
+version = "1.1.0"
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+android {
+    namespace = "com.infradise.webview_core"
+    compileSdk = 36
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+    }
+
+    defaultConfig {
+        minSdk = 24
+    }
+}
+
+if (project.extensions.findByName("kotlin")?.hasProperty("compilerOptions")) {
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
+    }
+}

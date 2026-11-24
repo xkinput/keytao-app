@@ -301,6 +301,8 @@ impl KeyTaoHandler {
     fn handle_reload(&mut self) {
         tracing::info!("XIM: hiding candidates after librime reload");
         self.reload_epoch = self.reload_epoch.wrapping_add(1);
+        self.panel_owner = None;
+        self.deployment.reset();
         self.hide_panel();
         self.deployment_text = None;
         self.deployment_input_state = None;
@@ -805,6 +807,15 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
         xev: &x11rb::protocol::xproto::KeyPressEvent,
     ) -> Result<bool, ServerError> {
+        if user_ic.user_data.state_epoch != self.reload_epoch {
+            user_ic.user_data.state_epoch = self.reload_epoch;
+            user_ic.user_data.last_state = None;
+            user_ic.user_data.control_alt_tap.clear();
+        }
+        if !reload_bus::engine_enabled() {
+            return Ok(false);
+        }
+
         let started = Instant::now();
         // Convert the X11 hardware keycode to a keysym using the keyboard mapping
         // fetched at init time.  xev.detail is the raw X11 keycode and the Shift

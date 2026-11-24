@@ -35,11 +35,11 @@ RPM="$BUNDLE_DIR/rpm/keytao-app-$VERSION-linux-$ASSET_ARCH.rpm"
 [[ $(dpkg-deb -f "$DEB" Architecture) == "$DEB_ARCH" ]] || fail 'Wrong deb architecture'
 [[ $(dpkg-deb -f "$DEB" Maintainer) == 'Rea <hi@rea.ink>' ]] || fail 'Wrong deb maintainer'
 depends="$(dpkg-deb -f "$DEB" Depends)"
-[[ "$depends" == *libgtk-3-* && "$depends" != *webkit* && "$depends" != *librime* ]] || fail "Wrong deb dependencies: $depends"
+[[ "$depends" == *libgtk-3-* && "$depends" == *libwebkit2gtk-4.1-0* && "$depends" != *librime* ]] || fail "Wrong deb dependencies: $depends"
 RPM_VERSION="${VERSION//-/_}"
 [[ $(rpm -qp --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}' "$RPM") == "key-tao $RPM_VERSION 1 $RPM_ARCH" ]] || fail 'Wrong rpm identity'
 requires="$(rpm -qp --requires "$RPM")"
-[[ "$requires" == *gtk3* && "$requires" != *webkit* ]] || fail 'Wrong rpm dependencies'
+[[ "$requires" == *gtk3* && "$requires" == *libwebkit2gtk-4.1.so.0* ]] || fail 'Wrong rpm dependencies'
 [[ -z $(rpm -qp --scripts "$RPM") ]] || fail 'Unexpected rpm scriptlets'
 # rpm.vercmp parses '-' as the version-release separator; the old Tauri rpm
 # stored '1.2.1-alpha.88' as the plain Version tag, which rpm compares segment

@@ -63,6 +63,11 @@ fn local_app_data(flags: KNOWN_FOLDER_FLAG) -> Result<PathBuf> {
     }
 }
 
+pub(crate) fn public_schema_root() -> Result<PathBuf> {
+    local_app_data(KF_FLAG_NO_PACKAGE_REDIRECTION | KF_FLAG_DONT_VERIFY)
+        .map(|desktop| desktop.join("KeyTao/appcontainer-schemas"))
+}
+
 pub(crate) struct SandboxData {
     pub(crate) user_dir: PathBuf,
     cache_dir: PathBuf,

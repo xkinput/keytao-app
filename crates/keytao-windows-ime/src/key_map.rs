@@ -520,7 +520,7 @@ pub fn is_application_shortcut(vk: u16, mods: u32, has_composition: bool) -> boo
     true
 }
 
-/// Only options/schema switches declared by the active Rime schema override
+/// Only shortcuts declared by the active Rime schema override
 /// the ordinary host shortcut rule. Use the cached snapshot on the TSF test path.
 pub fn schema_shortcut_key(
     vk: u16,

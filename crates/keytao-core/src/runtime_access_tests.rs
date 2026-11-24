@@ -76,10 +76,17 @@ fn disabled_runtime_releases_its_backend_and_reuses_sessions_when_enabled() {
     let mut reload = ReloadStampGate::new(&dir);
     engine_choice::set_enabled(&dir, false).unwrap();
     assert!(reload.pending().is_some());
+    runtime.init().unwrap();
+    assert!(!runtime.is_initialized());
     runtime.reload_without_deploy().unwrap();
     assert!(!runtime.is_initialized());
     assert!(session.state().schema_id.is_empty());
     assert!(!session.process_key_result(b'a'.into(), 0).is_some_and(|result| result.accepted));
+    for (key, mask) in [(key_policy::XK_F4, 0), (0x60, RIME_MOD_CONTROL)] {
+        assert!(session.process_key_result(key, mask).is_none());
+    }
+    assert!(session.should_forward_consumed_shortcut(0x60, RIME_MOD_CONTROL));
+    assert!(session.list_switcher_packages().is_empty());
     runtime.init_without_deploy().unwrap();
     let paused_session = runtime.create_session().unwrap();
     assert!(paused_session.state().schema_id.is_empty());

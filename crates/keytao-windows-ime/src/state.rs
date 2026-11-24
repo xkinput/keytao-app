@@ -162,6 +162,8 @@ pub struct TsfState {
     reload_retry_after: Option<Instant>,
     reload_stamp_checked_at: Option<Instant>,
     reload_stamp_changed: bool,
+    input_engine_enabled_checked_at: Option<Instant>,
+    input_engine_enabled: bool,
     pub(crate) modifier_tap_press: Option<(u32, Instant)>,
     session_reset_pending: bool,
     focus_state_refresh_pending: bool,
@@ -328,6 +330,8 @@ impl TsfState {
             reload_retry_after: None,
             reload_stamp_checked_at: None,
             reload_stamp_changed: false,
+            input_engine_enabled_checked_at: None,
+            input_engine_enabled: true,
             modifier_tap_press: None,
             session_reset_pending: false,
             focus_state_refresh_pending: false,
@@ -520,6 +524,18 @@ impl TsfState {
     pub(crate) fn invalidate_reload_stamp_cache(&mut self) {
         self.reload_stamp_checked_at = None;
         self.reload_stamp_changed = false;
+        self.input_engine_enabled_checked_at = None;
+    }
+
+    pub(crate) fn input_engine_enabled_cached(&mut self) -> bool {
+        let now = Instant::now();
+        if self.input_engine_enabled_checked_at
+            .is_none_or(|checked| now.duration_since(checked) >= RELOAD_STAMP_POLL_INTERVAL)
+        {
+            self.input_engine_enabled = crate::engine_backend::input_engine_enabled();
+            self.input_engine_enabled_checked_at = Some(now);
+        }
+        self.input_engine_enabled
     }
 
     pub(crate) fn finish_reload(&mut self, bundle: Result<EngineBundle, String>) {

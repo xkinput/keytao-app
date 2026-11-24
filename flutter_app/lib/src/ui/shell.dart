@@ -12,6 +12,7 @@ import 'input_page.dart';
 import 'login.dart';
 import 'scheme_page.dart';
 import 'theme.dart';
+import 'website_page.dart';
 import 'widgets.dart';
 
 extension PageIcon on AppPage {
@@ -20,6 +21,7 @@ extension PageIcon on AppPage {
     AppPage.scheme => FLucideIcons.download,
     AppPage.about => FLucideIcons.info,
     AppPage.debug => FLucideIcons.scrollText,
+    AppPage.website => FLucideIcons.globe,
   };
 }
 
@@ -304,11 +306,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       index: c.activePage.index,
                       onChange: select,
                       children: [
-                        for (final page in AppPage.values)
+                        for (final page in c.visiblePages)
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
                             icon: _navigationIcon(page, c, 20),
-                            label: Text(page.title, semanticsLabel: page.title),
+                            label: Text(
+                              page == AppPage.website ? '网站' : page.title,
+                              semanticsLabel: page.title,
+                            ),
                           ),
                       ],
                     ),
@@ -320,6 +325,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 SchemePage(controller: c),
                 AboutPage(controller: c),
                 DebugPage(controller: c),
+                if (!c.websiteHidden)
+                  WebsitePage(
+                    controller: c,
+                    active: c.activePage == AppPage.website,
+                  ),
               ],
             ),
           );
@@ -358,7 +368,7 @@ class _DesktopNavigation extends StatelessWidget {
             spacing: 4,
             runSpacing: 4,
             children: [
-              for (final page in AppPage.values)
+              for (final page in controller.visiblePages)
                 FTappable(
                   key: ValueKey('nav-${page.id}'),
                   semanticsButton: false,
@@ -433,42 +443,45 @@ class _AccountButton extends StatelessWidget {
   final bool showName;
 
   @override
-  Widget build(BuildContext context) => FTooltip(
-    tipBuilder: (_, _) => const Text('账号'),
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 44, maxWidth: 160),
-      child: FButton(
-        variant: FButtonVariant.ghost,
-        semanticsLabel: '账号',
-        mainAxisSize: MainAxisSize.min,
-        style: FButtonStyleDelta.delta(
-          contentStyle: FButtonContentStyleDelta.delta(
-            constraints: const BoxConstraints(minHeight: 44),
-            padding: const EdgeInsetsGeometryDelta.value(
-              EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            ),
-            textStyle: FVariants.all(
-              context.theme.typography.body.sm.copyWith(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: AppPalette.of(context).ink,
+  Widget build(BuildContext context) {
+    final label = controller.accountUser == null ? '账号' : '我的';
+    return FTooltip(
+      tipBuilder: (_, _) => Text(label),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44, maxWidth: 160),
+        child: FButton(
+          variant: FButtonVariant.ghost,
+          semanticsLabel: label,
+          mainAxisSize: MainAxisSize.min,
+          style: FButtonStyleDelta.delta(
+            contentStyle: FButtonContentStyleDelta.delta(
+              constraints: const BoxConstraints(minHeight: 44),
+              padding: const EdgeInsetsGeometryDelta.value(
+                EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              ),
+              textStyle: FVariants.all(
+                context.theme.typography.body.sm.copyWith(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: AppPalette.of(context).ink,
+                ),
               ),
             ),
           ),
+          onPress: () => showAccountDialog(context, controller),
+          prefix: const Icon(FLucideIcons.user, size: 18),
+          child: showName
+              ? Flexible(
+                  child: Text(
+                    controller.accountName ?? label,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                )
+              : const SizedBox.shrink(),
         ),
-        onPress: () => showAccountDialog(context, controller),
-        prefix: const Icon(FLucideIcons.user, size: 18),
-        child: showName
-            ? Flexible(
-                child: Text(
-                  controller.accountName ?? '账号',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              )
-            : const SizedBox.shrink(),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _ShellStatus extends StatelessWidget {

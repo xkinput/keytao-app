@@ -96,10 +96,13 @@ pub(super) fn start_watchdog() {
 }
 
 fn ensure_started() -> Result<(), String> {
-    if !server_enabled() {
+    if !server_enabled() || !input_engine_enabled() {
         return Ok(());
     }
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
+    if !input_engine_enabled() {
+        return Ok(());
+    }
     let server = installed_server_exe()?;
     {
         let mut last_run_value = LAST_RUN_VALUE
@@ -134,6 +137,104 @@ fn ensure_started() -> Result<(), String> {
         return Ok(());
     }
     start_server(&server, &mut last_start, &ServerLauncher::prepare()?)
+}
+
+fn input_engine_enabled() -> bool {
+    keytao_core::default_user_data_dir()
+        .as_deref()
+        .is_none_or(keytao_core::engine_choice::is_enabled)
+}
+
+pub(super) fn reconcile_input_engine_enabled(enabled: bool) -> Result<(), String> {
+    if enabled {
+        if !server_enabled() {
+            return Ok(());
+        }
+        // The App can enable composition before the input method is installed.
+        if installed_runtime_dir().is_some() {
+            ensure_started()?;
+            wait_for_started_server()?;
+            start_watchdog();
+        }
+        return Ok(());
+    }
+    let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
+    let name = pipe_name()?;
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        match open_pipe(&name) {
+            Ok(file) => {
+                let peer = match verified_server(&file) {
+                    Ok(peer) => peer,
+                    Err(error)
+                        if matches!(open_pipe(&name), Err(probe) if probe.kind() == io::ErrorKind::NotFound) =>
+                    {
+                        tracing::debug!(%error, "IME server exited during shutdown");
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let request = (|| {
+                    unsafe {
+                        SetNamedPipeHandleState(
+                            HANDLE(file.as_raw_handle()),
+                            Some(&PIPE_NOWAIT),
+                            None,
+                            None,
+                        )
+                    }
+                    .map_err(|error| error.to_string())?;
+                    let mut pipe = DeadlinePipe {
+                        file,
+                        deadline,
+                        bytes_read: 0,
+                    };
+                    hello(&mut pipe).map_err(|error| error.reason)?;
+                    request_shutdown(&mut pipe)
+                })();
+                let exited =
+                    unsafe { WaitForSingleObject(peer.process.0, START_TIMEOUT.as_millis() as u32) }
+                        == WAIT_OBJECT_0;
+                if !exited {
+                    request?;
+                    return Err("IME server did not exit after shutdown".into());
+                }
+                *last_start = None;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                *last_start = None;
+                return Ok(());
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                if Instant::now() >= deadline {
+                    return Err("IME server pipe remains busy during shutdown".into());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("connect to IME server for shutdown: {error}")),
+        }
+    }
+}
+
+fn wait_for_started_server() -> Result<(), String> {
+    let name = pipe_name()?;
+    let expected = installed_server_exe()?;
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        match open_pipe(&name) {
+            Ok(file) if same_path(&server_image(&file)?, &expected) => return Ok(()),
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {}
+            Err(error) => return Err(format!("connect to the started IME server: {error}")),
+        }
+        if Instant::now() >= deadline {
+            return Err("IME server did not become ready".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 struct ServerLauncher {
@@ -542,8 +643,10 @@ fn verified_server(file: &File) -> Result<VerifiedServer, String> {
             )
             .map_err(|error| format!("open IME server process: {error}"))?,
         );
-        if process_session(pid)? != process_session(std::process::id())? {
-            return Err("IME server session does not match".into());
+        if process_session(pid)? != process_session(std::process::id())?
+            || process_sid(process.0)? != process_sid(GetCurrentProcess())?
+        {
+            return Err("IME server user or session does not match".into());
         }
         let mut image = vec![0u16; 32768];
         let mut size = image.len() as u32;
@@ -602,12 +705,12 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
     }
 }
 
-/// False permits a standalone deploy child only in InProc mode with no server pipe.
+/// False permits a standalone deploy child only when no live server should run.
 pub(super) fn deploy_if_available(
     plan: Option<&str>,
     progress: impl FnMut(&keytao_core::DeployProgress),
 ) -> Result<bool, String> {
-    if !server_enabled() {
+    if !server_enabled() || !input_engine_enabled() {
         super::server_recovery::require_absent_server(open_pipe(&pipe_name()?).map(|_| ()))?;
         return Ok(false);
     }
@@ -641,6 +744,9 @@ fn connect_for_deploy(
         match open_pipe(name) {
             Ok(file) => break file,
             Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND.0 as i32) => {
+                if !input_engine_enabled() {
+                    return Ok(None);
+                }
                 if !started {
                     let launcher = launcher.as_ref().map_err(Clone::clone)?;
                     start_server(&installed_server_exe()?, last_start, launcher)?;
@@ -705,6 +811,21 @@ fn hello(pipe: &mut DeadlinePipe) -> Result<(), HelloFailure> {
     }
 }
 
+fn request_shutdown(pipe: &mut DeadlinePipe) -> Result<(), String> {
+    write_frame(
+        pipe,
+        &RequestEnvelope {
+            seq: 2,
+            message: Request::Shutdown,
+        },
+    )
+    .map_err(|error| format!("send IME server shutdown: {error}"))?;
+    match read_response(pipe, 2).map_err(|error| format!("read IME server shutdown: {error}"))? {
+        Response::Ok => Ok(()),
+        response => Err(format!("IME server rejected shutdown: {response:?}")),
+    }
+}
+
 fn replace_before_deploy(
     connection: ServerConnection,
     authenticated: bool,
@@ -715,20 +836,7 @@ fn replace_before_deploy(
     if authenticated {
         // Shutdown waits behind another caller's deploy; a timeout must not become a forced kill.
         pipe.deadline = Instant::now() + DEPLOY_TIMEOUT;
-        write_frame(
-            &mut pipe,
-            &RequestEnvelope {
-                seq: 2,
-                message: Request::Shutdown,
-            },
-        )
-        .map_err(|error| format!("send IME server shutdown: {error}"))?;
-        match read_response(&mut pipe, 2)
-            .map_err(|error| format!("read IME server shutdown: {error}"))?
-        {
-            Response::Ok => {}
-            response => return Err(format!("IME server rejected shutdown: {response:?}")),
-        }
+        request_shutdown(&mut pipe)?;
     } else {
         // Recovery permits termination only for a stale image or EOF before any Hello reply.
         // Holding the original process handle prevents PID reuse before the terminate handle opens.

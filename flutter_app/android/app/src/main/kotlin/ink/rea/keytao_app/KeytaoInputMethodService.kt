@@ -1158,7 +1158,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (inputKey && privacyMode.allowsComposing && !directInputEditor &&
             deferDeploymentKey { onKeyCommand(command) }
         ) return
-        if (!inputAvailable && command.requiresInstalledSchema()) {
+        val directEnter = lastReadiness == Readiness.ENGINE_DISABLED && command.type == KeyCommandTypes.ENTER
+        if (!inputAvailable && command.requiresInstalledSchema() && !directEnter) {
             showUnavailableMessage()
             return
         }
@@ -2939,6 +2940,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (pollReloadStamp && !shouldPollReloadStamp()) return
         availabilityRefreshPending = true
         val reloadPresentation = presentationLoadedWithoutRoot
+        val resumingAlgorithm = lastReadiness == Readiness.ENGINE_DISABLED
         val retryReadiness = retryableReadiness &&
             (lastReadiness == Readiness.DEPLOYING || readinessRetryCount < 30)
         if (pollReloadStamp && retryReadiness) readinessRetryCount++
@@ -2949,6 +2951,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             engine.refreshDeploymentHint()
             val readiness = if (!pollReloadStamp || retryReadiness || stampChanged) {
                 runCatching { engine.refreshReadiness() }.getOrDefault(Readiness.NATIVE_UNAVAILABLE)
+            } else null
+            val resumedState = if (resumingAlgorithm && readiness == Readiness.READY) {
+                engine.state().withoutTransientCommit()
             } else null
             val rootAvailable = readiness != null && readiness != Readiness.STORAGE_NOT_READY &&
                 readiness != Readiness.PERMISSION_MISSING
@@ -2981,6 +2986,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 keyboardView?.updateDeploymentHint(engine.deploymentHint)
                 if (readiness != null && (!pollReloadStamp || readiness != Readiness.READY ||
                         readiness != lastReadiness || stampChanged)) {
+                    if (engine.nativeReady && !editorUpdatePending && resumedState != null) {
+                        currentState = resumedState
+                        keyboardView?.updateState(currentState)
+                    }
                     applyReadiness(readiness)
                 } else scheduleReadinessRetry()
                 // The first view may have loaded defaults after this refresh was scheduled.
@@ -2995,6 +3004,20 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val readiness = if (snapshot == Readiness.READY && !engine.nativeReady) {
             Readiness.NATIVE_UNAVAILABLE
         } else snapshot
+        if (readiness == Readiness.ENGINE_DISABLED && lastReadiness != readiness) {
+            resetDeploymentInput()
+            if (composing) currentInputConnection?.finishComposingText()
+            composing = false
+            currentState = KeytaoImeState.empty(asciiMode = true)
+            rimeOptionsGeneration++
+            englishSchemaId = null
+            currentRimeSchemaId = null
+            lastChineseSchemaId = null
+            chineseSwitchSnapshot = emptyMap()
+            if (keyboardView?.rimePanelOpen == true) keyboardView?.closeOverlayPanel()
+            keyboardView?.updateRimeOptions(KeytaoRimeOptionsState.EMPTY)
+            keyboardView?.updateState(currentState)
+        }
         lastReadiness = readiness
         val message = when (readiness) {
             Readiness.STORAGE_NOT_READY -> preparingMessage
@@ -3003,6 +3026,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
             Readiness.DEPLOYING -> ""
+            Readiness.ENGINE_DISABLED -> "算法引擎已关闭"
             Readiness.NATIVE_UNAVAILABLE -> "RIME 运行库未就绪，请重新安装 KeyTao"
             Readiness.READY -> ""
         }

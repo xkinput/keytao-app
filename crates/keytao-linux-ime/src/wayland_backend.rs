@@ -551,14 +551,32 @@ impl App {
     }
 
     /// Drop the UI built from the dictionaries a reload just replaced.
-    fn handle_reload(&mut self) {
+    fn handle_reload(&mut self, qh: &QueueHandle<Self>) {
         tracing::info!("Wayland IME: clearing composition after librime reload");
         self.key_repeat.cancel();
+        self.control_alt_tap.clear();
+        self.deployment.reset();
         self.session.clear_composition();
         self.clear_client_preedit();
         self.mode_hint_until = None;
         self.hide_panel_popup();
         self.deployment_text = None;
+
+        // Without a virtual keyboard a grab cannot replay physical shortcuts.
+        if !reload_bus::engine_enabled() && self.virtual_keyboard.is_none() {
+            if let Some(grab) = self.keyboard_grab.take() {
+                grab.release();
+            }
+        } else if self.keyboard_grab.is_none()
+            && (self.pending_active == Some(true)
+                || (self.active
+                    && self.pending_active != Some(false)
+                    && self.deactivate_deadline.is_none()))
+        {
+            if let Some(input_method) = &self.input_method {
+                self.keyboard_grab = Some(input_method.grab_keyboard(qh, ()));
+            }
+        }
     }
 
     fn handle_key_event(
@@ -586,7 +604,10 @@ impl App {
         if !self.active {
             let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
             let base_sym = key_sym(self.xkb_base_state.as_ref(), evdev_keycode);
-            if is_shift_key(base_sym) && self.session.input_policy().composing {
+            if is_shift_key(base_sym)
+                && reload_bus::engine_enabled()
+                && self.session.input_policy().composing
+            {
                 let _ = self
                     .session
                     .process_key_result(base_sym, shift_key_modifiers(self.mods));
@@ -596,7 +617,7 @@ impl App {
         }
 
         // Password and PIN fields: nothing reaches librime and nothing is drawn.
-        if !self.session.input_policy().composing {
+        if !reload_bus::engine_enabled() || !self.session.input_policy().composing {
             self.forward_unhandled_key(
                 evdev_keycode,
                 key_sym(self.xkb_state.as_ref(), evdev_keycode),
@@ -741,6 +762,7 @@ impl App {
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>, started: Instant) {
         self.key_repeat.cancel_for(evdev_keycode);
+        let composing = reload_bus::engine_enabled() && self.session.input_policy().composing;
         // Modifier detection must use the pristine state: at release time the
         // Shift key is still depressed in the live state, which resolves it to
         // its level-2 keysym (Caps_Lock) and breaks `is_shift_key`.
@@ -749,9 +771,9 @@ impl App {
             "key release: keycode={} sym={sym_raw:#x} is_shift={} composing={}",
             evdev_keycode + 8,
             is_shift_key(sym_raw),
-            self.session.input_policy().composing
+            composing
         );
-        if is_shift_key(sym_raw) && self.session.input_policy().composing {
+        if is_shift_key(sym_raw) && composing {
             match self
                 .session
                 .process_key_result(sym_raw, shift_key_modifiers(self.mods | RIME_RELEASE_MASK))
@@ -768,7 +790,7 @@ impl App {
                 }
                 None => tracing::debug!("shift release: process_key_result returned None"),
             }
-        } else if self.active && self.session.input_policy().composing {
+        } else if self.active && composing {
             let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
             let tap_mods = ControlAltTap::xkb_modifiers(sym, self.mods, self.xkb_state.as_ref());
             if let Some(result) = self.control_alt_tap.release(sym, tap_mods, &self.session) {
@@ -804,7 +826,7 @@ impl App {
     /// A primary click on the panel: the same session calls and client updates
     /// as a number-key selection or a page key.
     fn handle_panel_click(&mut self, click: PanelClick, qh: &QueueHandle<Self>) {
-        if !self.active || !self.session.input_policy().composing {
+        if !self.active || !reload_bus::engine_enabled() || !self.session.input_policy().composing {
             return;
         }
         let state = match click {
@@ -977,7 +999,9 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 // activate resets the content type together with everything
                 // else the previous text input had set.
                 state.pending_content_type = Some(DEFAULT_CONTENT_TYPE);
-                if state.keyboard_grab.is_none() {
+                if state.keyboard_grab.is_none()
+                    && (reload_bus::engine_enabled() || state.virtual_keyboard.is_some())
+                {
                     state.keyboard_grab = Some(proxy.grab_keyboard(qh, ()));
                 }
                 tracing::debug!("IME activate pending until done");
@@ -1078,12 +1102,15 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
 impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
     fn event(
         state: &mut Self,
-        _proxy: &ZwpInputMethodKeyboardGrabV2,
+        proxy: &ZwpInputMethodKeyboardGrabV2,
         event: zwp_input_method_keyboard_grab_v2::Event,
         _: &(),
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        if state.keyboard_grab.as_ref() != Some(proxy) {
+            return;
+        }
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Keymap { format, fd, size } => {
                 tracing::debug!("keyboard grab: keymap received format={format:?} size={size}");
@@ -1520,7 +1547,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
         if let Some(signal) = &reload_signal {
             if signal.take() {
                 activity.get_or_insert_with(crate::hot_update::activity);
-                app.handle_reload();
+                app.handle_reload(&qh);
             }
         }
         if pfds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {

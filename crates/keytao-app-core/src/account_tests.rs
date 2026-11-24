@@ -77,6 +77,55 @@ async fn respond_after(
 }
 
 #[tokio::test]
+async fn account_stats_use_the_signed_in_user_and_website_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    core.import_legacy_state(Some("stats-token".into()), Some(json!({"id":7})), false)
+        .unwrap();
+    let (url, server) = respond(
+        "200 OK",
+        r#"{"batchesCount":9,"pullRequestsCount":27,"batchesByStatus":{"Published":3},"recentBatches":[]}"#,
+    )
+    .await;
+    let stats = get_account_stats_at(&core, &url).await.unwrap();
+    assert_eq!(stats.batches_count, 9);
+    assert_eq!(stats.pull_requests_count, 27);
+    assert_eq!(stats.submitted_batches, 0);
+    assert_eq!(stats.published_batches, 3);
+    let request = server.await.unwrap().to_ascii_lowercase();
+    assert!(request.starts_with("get /api/user/stats http/1.1\r\n"));
+    assert!(request.contains("\r\nauthorization: bearer stats-token\r\n"));
+}
+
+#[tokio::test]
+async fn account_stats_discard_a_response_after_switching_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    core.import_legacy_state(Some("old-token".into()), Some(json!({"id":7})), false)
+        .unwrap();
+    let switching_core = core.clone();
+    let (url, server) = respond_after(
+        "200 OK",
+        r#"{"batchesCount":9,"pullRequestsCount":27,"batchesByStatus":{"Published":3}}"#,
+        move || {
+            switching_core
+                .update_state(|state| {
+                    state.auth_token = Some("new-token".into());
+                    state.user = Some(json!({"id":8}));
+                })
+                .unwrap();
+        },
+    )
+    .await;
+    assert!(matches!(
+        get_account_stats_at(&core, &url).await,
+        Err(CoreError::Permission(_))
+    ));
+    server.await.unwrap();
+    assert_eq!(account_id(&core), Some(8));
+}
+
+#[tokio::test]
 async fn failed_auth_responses_preserve_the_stored_session() {
     let dir = tempfile::tempdir().unwrap();
     let core = open_core(dir.path());

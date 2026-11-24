@@ -17,6 +17,8 @@ dependencies:
   flutter_rust_bridge_hooks: 2.13.0
   forui: 0.27.2
   hooks: ^2.0.2
+  webview_core:
+    path: third_party/webview_core
 
 dev_dependencies:
   flutter_test:
@@ -27,3 +29,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/logo.png
+    - third_party/webview_core/NOTICE

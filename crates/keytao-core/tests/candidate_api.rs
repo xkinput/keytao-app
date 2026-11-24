@@ -246,6 +246,18 @@ fn runtime_uses_bundled_engine_only_for_converted_schemes_in_ime_jd_mode() {
         assert_eq!(retained.candidates[0].text, "converted");
         std::fs::write(&blob, good_blob).unwrap();
 
+        keytao_core::engine_choice::set_enabled(&dir, false).unwrap();
+        runtime.reload_without_deploy().unwrap();
+        assert!(!runtime.is_initialized());
+        assert!(session.peek_state().candidates.is_empty());
+        assert!(session.process_key_result(b'a'.into(), 0).is_none());
+        runtime.init().unwrap();
+        assert!(!runtime.is_initialized());
+        keytao_core::engine_choice::set_enabled(&dir, true).unwrap();
+        runtime.reload_without_deploy().unwrap();
+        let resumed = session.process_key_result(b'a'.into(), 0).unwrap();
+        assert_eq!(resumed.state.candidates[0].text, "converted");
+
         std::fs::write(
             &settings,
             br#"{"engine":"rime","engines":{"keytao":"libjd_engine"}}"#,
@@ -595,6 +607,94 @@ fn configured_switch_chords_are_advertised_and_noop_shift_preserves_mode() {
     assert!(session.process_key_result(hotkey.0, hotkey.1).unwrap().accepted);
     drop(session);
     cleanup(&dir);
+}
+
+#[test]
+fn lua_candidate_shortcuts_follow_deployed_settings_only_when_candidates_are_visible() {
+    use keytao_core::{key_policy, RIME_MOD_CONTROL, RIME_RELEASE_MASK};
+
+    let _serialized = serialized();
+    for hide in [b'q', b'o'] {
+        let dir = smoke_fixture::scratch_dir("lua-candidate-shortcuts");
+        smoke_fixture::write(&dir).unwrap();
+        let schema_path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+        let schema = std::fs::read_to_string(&schema_path)
+            .unwrap()
+            .replace("- key_binder", "- lua_processor@*candidate_shortcut");
+        std::fs::write(schema_path, schema).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.custom.yaml", smoke_fixture::SCHEMA_ID)),
+            format!(
+                "patch:\n  pinned_candidate/hotkey: Control+p\n  candidate_remove/hotkey: Control+{}\n",
+                char::from(hide)
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir(dir.join("lua")).unwrap();
+        std::fs::write(
+            dir.join("lua/candidate_shortcut.lua"),
+            r#"
+return {
+    init = function(env)
+        local config = env.engine.schema.config
+        env.pin = KeyEvent(config:get_string("pinned_candidate/hotkey"))
+        env.hide = KeyEvent(config:get_string("candidate_remove/hotkey"))
+    end,
+    func = function(key, env)
+        local context = env.engine.context
+        if context:has_menu() and (key:eq(env.pin) or key:eq(env.hide)) then
+            context:clear()
+            return 1
+        end
+        return 2
+    end
+}
+"#,
+        )
+        .unwrap();
+        let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+        runtime.init().unwrap();
+        let session = runtime.create_session().unwrap();
+        for key in [b'p', hide] {
+            let idle = session.state();
+            assert!(!key_policy::is_configured_schema_shortcut(
+                key.into(),
+                RIME_MOD_CONTROL,
+                &idle,
+            ));
+            let mut composing = type_code(&session);
+            assert!(!composing.candidates.is_empty());
+            assert!(key_policy::is_configured_schema_shortcut(
+                key.into(),
+                RIME_MOD_CONTROL,
+                &composing,
+            ));
+            assert!(!key_policy::is_configured_schema_shortcut(
+                b'v'.into(),
+                RIME_MOD_CONTROL,
+                &composing,
+            ));
+            assert!(!key_policy::is_configured_schema_shortcut(
+                key.into(),
+                RIME_MOD_CONTROL | RIME_RELEASE_MASK,
+                &composing,
+            ));
+            composing.ascii_mode = true;
+            assert!(!key_policy::is_configured_schema_shortcut(
+                key.into(),
+                RIME_MOD_CONTROL,
+                &composing,
+            ));
+            if keytao_core::librime_lua_available() {
+                let result = session.process_key_result(key.into(), RIME_MOD_CONTROL).unwrap();
+                assert!(result.accepted);
+                assert!(result.state.candidates.is_empty());
+            }
+            session.clear_composition();
+        }
+        drop(session);
+        cleanup(&dir);
+    }
 }
 
 #[test]

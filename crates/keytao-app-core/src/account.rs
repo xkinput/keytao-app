@@ -36,6 +36,14 @@ pub struct AppAuthSession {
     pub user: AppAuthUser,
 }
 
+#[derive(Serialize)]
+pub struct AccountStats {
+    pub batches_count: u32,
+    pub pull_requests_count: u32,
+    pub submitted_batches: u32,
+    pub published_batches: u32,
+}
+
 #[derive(Serialize, Clone)]
 pub struct UserDictionarySyncResult {
     pub file_name: String,
@@ -619,6 +627,41 @@ pub async fn keytao_me(core: &Core, token: String) -> Result<AppAuthUser, CoreEr
         return Ok(user);
     }
     keytao_me_at(core, token, API_BASE).await
+}
+
+pub async fn get_account_stats(core: &Core) -> Result<AccountStats, CoreError> {
+    get_account_stats_at(core, API_BASE).await
+}
+
+async fn get_account_stats_at(core: &Core, api_base: &str) -> Result<AccountStats, CoreError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct UserStatsResponse {
+        batches_count: u32,
+        pull_requests_count: u32,
+        batches_by_status: BTreeMap<String, u32>,
+    }
+
+    let api = ApiClient::new(core, api_base);
+    let stats: UserStatsResponse = serde_json::from_value(
+        api.request(reqwest::Method::GET, "/api/user/stats", None)
+            .await?,
+    )?;
+    api.token()?;
+    Ok(AccountStats {
+        batches_count: stats.batches_count,
+        pull_requests_count: stats.pull_requests_count,
+        submitted_batches: stats
+            .batches_by_status
+            .get("Submitted")
+            .copied()
+            .unwrap_or(0),
+        published_batches: stats
+            .batches_by_status
+            .get("Published")
+            .copied()
+            .unwrap_or(0),
+    })
 }
 
 async fn keytao_me_at(

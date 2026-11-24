@@ -3,6 +3,8 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/strings.dart';
+import '../rust/api/core.dart' as core;
+import '../rust/api/types.dart';
 import 'widgets.dart';
 
 Future<void>? _activeAccountDialog;
@@ -52,7 +54,10 @@ class _LoginDialogState extends State<_LoginDialog> {
   Future<void> _submit() async {
     if (widget.controller.loggingIn) return;
     final success = await widget.controller.login(_name.text, _password.text);
-    if (mounted && success) Navigator.pop(context);
+    if (mounted && success) {
+      _password.clear();
+      FocusManager.instance.primaryFocus?.unfocus();
+    }
   }
 
   Future<void> _logout() async {
@@ -67,17 +72,34 @@ class _LoginDialogState extends State<_LoginDialog> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      if (c.accountUser != null) {
+      if (c.accountUser case final user?) {
         return AppDialog(
-          title: '账号',
+          title: '我的',
           animation: widget.animation,
           actions: [
             ActionButton(
               '退出登录',
               onPress: c.busy || c.loggingIn ? null : _logout,
             ),
+            ActionButton(
+              AppStrings.close,
+              onPress: () => Navigator.pop(context),
+            ),
           ],
-          child: SizedBox(width: 360, child: Text(c.accountName ?? '账号')),
+          child: SizedBox(
+            width: 360,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 14,
+              children: [
+                ValueRow(
+                  user.nickname == null ? '账号' : '昵称',
+                  c.accountName ?? '未设置',
+                ),
+                _AccountStats(key: ValueKey(user.id), controller: c),
+              ],
+            ),
+          ),
         );
       }
       return PopScope(
@@ -128,6 +150,61 @@ class _LoginDialogState extends State<_LoginDialog> {
             ),
           ),
         ),
+      );
+    },
+  );
+}
+
+class _AccountStats extends StatefulWidget {
+  const _AccountStats({super.key, required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<_AccountStats> createState() => _AccountStatsState();
+}
+
+class _AccountStatsState extends State<_AccountStats> {
+  late Future<AccountStatsDto> _stats = _load();
+
+  Future<AccountStatsDto> _load() async {
+    try {
+      return await core.getAccountStats();
+    } catch (_) {
+      if (mounted) {
+        await widget.controller.reloadAccountSession(checkSchemeProfile: false);
+      }
+      rethrow;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<AccountStatsDto>(
+    future: _stats,
+    builder: (context, snapshot) {
+      final stats = snapshot.data;
+      return Section(
+        title: '数据统计',
+        children: [
+          if (snapshot.connectionState != ConnectionState.done)
+            Semantics(label: '正在加载数据统计', child: const FProgress())
+          else if (stats == null)
+            Row(
+              children: [
+                const Expanded(child: ErrorMessage('统计加载失败')),
+                ActionButton(
+                  '重试',
+                  onPress: () => setState(() => _stats = _load()),
+                ),
+              ],
+            )
+          else ...[
+            ValueRow('提交批次', '${stats.batchesCount}'),
+            ValueRow('修改提议', '${stats.pullRequestsCount}'),
+            ValueRow('待审核批次', '${stats.submittedBatches}'),
+            ValueRow('已发布批次', '${stats.publishedBatches}'),
+          ],
+        ],
       );
     },
   );

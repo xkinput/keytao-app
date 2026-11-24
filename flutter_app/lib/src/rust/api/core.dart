@@ -330,6 +330,9 @@ Future<String?> repairSchemePackage({
 Future<AccountUserDto?> accountSession() =>
     RustLib.instance.api.crateApiCoreAccountSession();
 
+Future<AccountStatsDto> getAccountStats() =>
+    RustLib.instance.api.crateApiCoreGetAccountStats();
+
 Future<AccountUserDto> accountLogin({
   required String name,
   required String password,
@@ -381,6 +384,14 @@ Future<AppUpdateDto> checkAppUpdate() =>
 
 Future<void> setAppUpdatePrereleases({required bool enabled}) =>
     RustLib.instance.api.crateApiCoreSetAppUpdatePrereleases(enabled: enabled);
+
+Future<void> setWebsiteSettings({
+  required String origin,
+  required bool hidden,
+}) => RustLib.instance.api.crateApiCoreSetWebsiteSettings(
+  origin: origin,
+  hidden: hidden,
+);
 
 Future<bool> downloadAppUpdate({required String version}) =>
     RustLib.instance.api.crateApiCoreDownloadAppUpdate(version: version);

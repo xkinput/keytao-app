@@ -34,6 +34,8 @@ fn state_round_trip() {
         installed_packages: Default::default(),
         active_scheme: None,
         dismissed_scheme_updates: Default::default(),
+        website_origin: Some("https://keytao.vercel.app".into()),
+        website_hidden: true,
         ..Default::default()
     };
     core.update_state(|state| *state = expected.clone())

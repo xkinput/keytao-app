@@ -30,10 +30,10 @@ reloads after success.
 ## Dependencies
 
 - deb: `libegl1, libgl1, procps` plus the owning packages of every external
-  library the bundle links, computed with `ldd`/`dpkg-query` in
-  `build-packages.sh`.
+  library the bundle links, including WebKitGTK 4.1 for the website tab. The
+  build computes these dependencies with `ldd`/`dpkg-query` in `build-packages.sh`.
 - rpm: `gtk3, libEGL.so.1()(64bit), libGL.so.1()(64bit), procps-ng` (see
-  `key-tao.spec`).
+  `key-tao.spec`), plus linked libraries including WebKitGTK 4.1.
 
 ## Versions
 

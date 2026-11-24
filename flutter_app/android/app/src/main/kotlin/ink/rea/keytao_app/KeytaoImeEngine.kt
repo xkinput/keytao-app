@@ -17,6 +17,7 @@ enum class Readiness {
     NOT_INSTALLED,
     NOT_DEPLOYED,
     DEPLOYING,
+    ENGINE_DISABLED,
     NATIVE_UNAVAILABLE,
     READY,
 }
@@ -41,6 +42,8 @@ class KeytaoImeEngine(context: Context) {
     /** A failed resolution is retried; only the shared external root is cached. */
     val userDir: File? get() = KeytaoAndroidPaths.userRootOrNull(appContext)
     private var warmupComplete = false
+    @Volatile private var algorithmEnabled = true
+    private var suspendedRoot: String? = null
     @Volatile private var session: Long = 0L
     @Volatile private var closed = false
     private val deploymentHintLock = Any()
@@ -112,6 +115,8 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun ensureReady(): Boolean {
+        val root = userDir ?: return false
+        if (closed || suspendIfDisabled(root)) return false
         if (nativeReady && session != 0L) return true
         warmUpIfStorageReady()
         if (!warmupComplete) return false
@@ -135,6 +140,7 @@ class KeytaoImeEngine(context: Context) {
                 else -> Readiness.STORAGE_NOT_READY
             }
         }
+        if (suspendIfDisabled(root)) return Readiness.ENGINE_DISABLED
         refreshDeploymentHint()
         warmUpIfStorageReady()
         if (KeytaoAndroidPaths.isDeploymentInProgress(root)) {
@@ -171,18 +177,46 @@ class KeytaoImeEngine(context: Context) {
         }
     }
 
+    @Synchronized
+    private fun suspendIfDisabled(root: File): Boolean {
+        val path = root.absolutePath
+        algorithmEnabled = KeytaoNativeBridge.engineEnabled(path)
+        if (algorithmEnabled) {
+            suspendedRoot = null
+            return false
+        }
+        if (suspendedRoot == path) return true
+        nativeReady = false
+        KeytaoNativeBridge.destroySession(session)
+        session = 0L
+        lastState = KeytaoImeState.empty(asciiMode = true)
+        invalidateSchemaNameCache()
+        schemaLogoGeneration++
+        schemaLogoKey = null
+        schemaLogoRequest = null
+        schemaLogo = null
+        onSchemaLogoChanged?.invoke()
+        resetDeploymentInput()
+        if (KeytaoNativeBridge.suspendEngine(path)) suspendedRoot = path
+        return true
+    }
+
     fun deploymentBlocksInput(): Boolean =
-        userDir?.let { KeytaoNativeBridge.deploymentBlocksInput(it.absolutePath) } ?: false
+        algorithmEnabled && userDir?.let { KeytaoNativeBridge.deploymentBlocksInput(it.absolutePath) } == true
 
     fun refreshDeploymentHint() {
         synchronized(deploymentHintLock) {
-            deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentHint(it.absolutePath) }
+            deploymentHint = if (algorithmEnabled) {
+                userDir?.let { KeytaoNativeBridge.deploymentHint(it.absolutePath) }
+            } else null
         }
     }
 
     fun deploymentKeyPressed() {
         synchronized(deploymentHintLock) {
-            deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentKeyPressed(it.absolutePath) }
+            if (algorithmEnabled) {
+                deploymentHint = userDir?.let { KeytaoNativeBridge.deploymentKeyPressed(it.absolutePath) }
+            }
         }
     }
 
@@ -357,7 +391,7 @@ class KeytaoImeEngine(context: Context) {
     fun reload(): Boolean {
         val snapshot = synchronized(this) {
             val root = userDir ?: return false
-            if (closed || KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
+            if (closed || suspendIfDisabled(root) || KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
             val isolated = KeytaoNativeBridge.isolatedSchemaState(root.absolutePath)
             if (isolated == Readiness.NOT_INSTALLED) {
                 return initializeRuntime(deploy = false, reinitialize = true)
@@ -527,6 +561,7 @@ class KeytaoImeEngine(context: Context) {
                 lastState = lastState.withoutTransientCommit()
                 return false
             }
+            if (!deploy && suspendIfDisabled(root)) return false
             val sessionStarted = System.nanoTime()
             session = KeytaoNativeBridge.createSession()
             val sessionCreated = session != 0L

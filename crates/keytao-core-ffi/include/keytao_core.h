@@ -94,6 +94,11 @@ void keytao_run_preview_child_main(void);
 bool keytao_run_deploy_child(void);
 
 /**
+ * Read the enabled flag before an IME creates its process-wide runtime.
+ */
+bool keytao_engine_enabled_at(const char *user_dir);
+
+/**
  * Initialize the Rime runtime. Must be called once before any other function.
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.

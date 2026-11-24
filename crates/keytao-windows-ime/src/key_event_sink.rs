@@ -2583,6 +2583,30 @@ fn cached_ime_state(shared_state: &SharedState) -> Option<ImeState> {
     shared_state.borrow().ime_state.clone()
 }
 
+fn input_engine_paused(shared_state: &SharedState) -> bool {
+    let (has_input, should_reload) = {
+        let mut state = shared_state.borrow_mut();
+        if state.input_engine_enabled_cached() {
+            return false;
+        }
+        state.modifier_tap_press = None;
+        state.claimed_key = None;
+        let has_input = state.composition.is_some()
+            || state.panel_anchor.is_some()
+            || state.deferred_context.is_some()
+            || state.pending_ime_apply.is_some()
+            || state.ime_state.as_ref().is_some_and(has_visible_state);
+        (has_input, state.reload_needed_cached())
+    };
+    if has_input {
+        reset_input_for_focus_change(shared_state);
+    }
+    if should_reload {
+        start_reload_if_needed(shared_state);
+    }
+    true
+}
+
 fn poll_pending_key_state(shared_state: &SharedState) {
     let pending = {
         let st = shared_state.borrow();
@@ -3034,6 +3058,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
+            if input_engine_paused(&state) {
+                return Ok(BOOL::from(false));
+            }
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
             state.borrow_mut().claimed_key = None;
@@ -3135,6 +3162,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
+            if input_engine_paused(&state) {
+                return Ok(BOOL::from(false));
+            }
             let vk = (wparam.0 & 0xFFFF) as u16;
             let modifier = modifier_tap_keysym(vk, lparam.0);
             if let Some(keysym) = modifier {
@@ -3193,6 +3223,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
+            if input_engine_paused(&state) {
+                return Ok(BOOL::from(false));
+            }
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
             let claimed = state.borrow_mut().claimed_key.take() == Some((vk, lparam.0));
@@ -3367,6 +3400,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
+            if input_engine_paused(&state) {
+                return Ok(BOOL::from(false));
+            }
             let vk = (wparam.0 & 0xFFFF) as u16;
             let modifier = modifier_tap_keysym(vk, lparam.0);
             let is_modifier_tap = modifier.is_some();

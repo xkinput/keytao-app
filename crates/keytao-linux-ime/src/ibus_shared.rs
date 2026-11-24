@@ -23,7 +23,7 @@ use keytao_theme::{
 };
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use zbus::zvariant;
 
@@ -38,6 +38,7 @@ pub struct IbusDeploymentHint {
     cursor_y: Arc<AtomicI32>,
     normal_state: Mutex<Option<PanelComposition>>,
     publication: tokio::sync::Mutex<()>,
+    reload_task: OnceLock<tokio::task::AbortHandle>,
 }
 
 #[derive(Clone)]
@@ -67,7 +68,29 @@ impl IbusDeploymentHint {
             cursor_y,
             normal_state: Mutex::new(None),
             publication: tokio::sync::Mutex::new(()),
+            reload_task: OnceLock::new(),
         })
+    }
+
+    pub fn watch_reload<F, R>(self: &Arc<Self>, mut on_reload: F)
+    where
+        F: FnMut(zbus::object_server::SignalContext<'static>) -> R + Send + 'static,
+        R: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut reload = crate::reload_bus::subscribe_async();
+        let this = Arc::downgrade(self);
+        self.reload_task.get_or_init(|| {
+            tokio::spawn(async move {
+                while reload.changed().await.is_ok() {
+                    let Some(context) = this.upgrade().and_then(|this| this.context.clone())
+                    else {
+                        break;
+                    };
+                    on_reload(context).await;
+                }
+            })
+            .abort_handle()
+        });
     }
 
     pub async fn reset(&self) {
@@ -194,6 +217,14 @@ impl IbusDeploymentHint {
                 None => crate::panel::OverlayPanelMessage::Hide,
             };
             let _ = overlay.send(message);
+        }
+    }
+}
+
+impl Drop for IbusDeploymentHint {
+    fn drop(&mut self) {
+        if let Some(task) = self.reload_task.get() {
+            task.abort();
         }
     }
 }

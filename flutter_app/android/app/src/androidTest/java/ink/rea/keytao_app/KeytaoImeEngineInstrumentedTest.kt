@@ -31,6 +31,34 @@ import java.util.concurrent.atomic.AtomicReference
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class KeytaoImeEngineInstrumentedTest {
     @Test
+    fun disablingLiveEngineDropsSessionAndReloadsWhenEnabled() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue(KeytaoSchemaFixture.install(context, allowSynthetic = true) != KeytaoSchemaFixture.Source.NONE)
+        val engine = KeytaoImeEngine(context)
+        val root = requireNotNull(engine.userDir)
+        val marker = File(root, ".keytao-engine-enabled")
+        try {
+            assertTrue(engine.deployNow())
+            val schema = engine.state().schemaId
+            assertTrue(schema.isNotEmpty())
+            marker.writeText("0\n")
+
+            assertEquals(Readiness.ENGINE_DISABLED, engine.refreshReadiness())
+            assertFalse(engine.nativeReady)
+            assertFalse(engine.ensureReady())
+            assertFalse(engine.processKey('a'.code, 0).accepted)
+            assertTrue(engine.state().asciiMode)
+
+            marker.writeText("1\n")
+            assertEquals(Readiness.READY, engine.refreshReadiness())
+            assertEquals(schema, engine.state().schemaId)
+        } finally {
+            marker.delete()
+            engine.close()
+        }
+    }
+
+    @Test
     fun loadedSessionKeepsComposingDuringDeployment() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         assertTrue(KeytaoSchemaFixture.install(context, allowSynthetic = true) != KeytaoSchemaFixture.Source.NONE)

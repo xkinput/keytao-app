@@ -9,6 +9,37 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
+class AccountStatsDto {
+  final int batchesCount;
+  final int pullRequestsCount;
+  final int submittedBatches;
+  final int publishedBatches;
+
+  const AccountStatsDto({
+    required this.batchesCount,
+    required this.pullRequestsCount,
+    required this.submittedBatches,
+    required this.publishedBatches,
+  });
+
+  @override
+  int get hashCode =>
+      batchesCount.hashCode ^
+      pullRequestsCount.hashCode ^
+      submittedBatches.hashCode ^
+      publishedBatches.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AccountStatsDto &&
+          runtimeType == other.runtimeType &&
+          batchesCount == other.batchesCount &&
+          pullRequestsCount == other.pullRequestsCount &&
+          submittedBatches == other.submittedBatches &&
+          publishedBatches == other.publishedBatches;
+}
+
 class AccountUserDto {
   final PlatformInt64 id;
   final String? name;
@@ -321,12 +352,16 @@ class BridgeInfo {
   final String appVersion;
   final String userRoot;
   final bool appUpdatePrereleases;
+  final String? websiteOrigin;
+  final bool websiteHidden;
 
   const BridgeInfo({
     required this.platform,
     required this.appVersion,
     required this.userRoot,
     this.appUpdatePrereleases = false,
+    this.websiteOrigin,
+    this.websiteHidden = false,
   });
 
   @override
@@ -334,7 +369,9 @@ class BridgeInfo {
       platform.hashCode ^
       appVersion.hashCode ^
       userRoot.hashCode ^
-      appUpdatePrereleases.hashCode;
+      appUpdatePrereleases.hashCode ^
+      websiteOrigin.hashCode ^
+      websiteHidden.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -344,7 +381,9 @@ class BridgeInfo {
           platform == other.platform &&
           appVersion == other.appVersion &&
           userRoot == other.userRoot &&
-          appUpdatePrereleases == other.appUpdatePrereleases;
+          appUpdatePrereleases == other.appUpdatePrereleases &&
+          websiteOrigin == other.websiteOrigin &&
+          websiteHidden == other.websiteHidden;
 }
 
 enum BridgePlatform { windows, macOs, linux, android, ios }

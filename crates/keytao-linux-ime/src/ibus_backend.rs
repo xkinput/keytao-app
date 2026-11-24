@@ -332,6 +332,9 @@ impl InputContext {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> crate::hot_update::KeyReply {
         let activity = crate::hot_update::activity();
+        if !crate::reload_bus::engine_enabled() {
+            return crate::hot_update::KeyReply::new(false, activity);
+        }
         let started = Instant::now();
         if state & keytao_core::RIME_RELEASE_MASK == 0 && self.session.input_policy().composing {
             self.deployment.key_pressed().await;
@@ -514,13 +517,20 @@ impl IBusBus {
                 path.clone(),
                 InputContextService {
                     session,
-                    deployment,
+                    deployment: deployment.clone(),
                     kimpanel_ctxt: self.kimpanel_ctxt.clone(),
                     x11_panel_tx: self.x11_panel_tx.clone(),
                 },
             )
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        deployment.watch_reload(|ctxt| async move {
+            let server = ctxt.connection().object_server();
+            if let Ok(context) = server.interface::<_, InputContext>(ctxt.path()).await {
+                // Serialize reset with key replies that may still be publishing.
+                context.get_mut().await.reset(ctxt.clone()).await;
+            }
+        });
 
         Ok(path)
     }

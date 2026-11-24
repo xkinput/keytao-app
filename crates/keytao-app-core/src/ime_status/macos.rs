@@ -1,7 +1,7 @@
 use crate::Core;
 use serde::Serialize;
 #[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 pub fn macos_app_shared_data_dir(core: &Core) -> Option<String> {
@@ -45,6 +45,84 @@ pub struct MacosImeStatus {
 #[cfg(target_os = "macos")]
 fn macos_ime_app_path() -> PathBuf {
     PathBuf::from("/Library/Input Methods/KeyTao.app")
+}
+
+#[cfg(target_os = "macos")]
+pub async fn set_input_engine_enabled(root: &Path, enabled: bool) -> Result<(), String> {
+    use keytao_core::engine_choice;
+    use std::time::Duration;
+    use tokio::process::Command;
+
+    let lock_root = root.to_owned();
+    let _control = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&lock_root).map_err(|error| error.to_string())?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_root.join(".keytao-macos-engine-control.lock"))
+            .map_err(|error| error.to_string())?;
+        keytao_core::lock_file(&file, true).map_err(|error| error.to_string())?;
+        Ok::<_, String>(file)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let app = macos_ime_app_path();
+    let helper = app.join("Contents/MacOS/KeyTaoIME");
+    let supports_shutdown = if helper.is_file() {
+        let capability = Command::new("/usr/bin/plutil")
+            .args(["-extract", "KeyTaoSupportsInputMethodShutdown", "raw"])
+            .arg(app.join("Contents/Info.plist"))
+            .output()
+            .await
+            .map_err(|error| error.to_string())?;
+        capability.status.success() && capability.stdout.trim_ascii() == b"true"
+    } else {
+        false
+    };
+
+    let previously_enabled = engine_choice::is_enabled(root);
+    engine_choice::set_enabled(root, enabled)?;
+    if !supports_shutdown {
+        return Ok(());
+    }
+
+    let command = if enabled {
+        "--enable-input-source"
+    } else {
+        "--stop-input-method"
+    };
+    let result = match tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new(helper)
+            .arg(command)
+            .arg(root)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => {
+            let detail = if output.stderr.trim_ascii().is_empty() {
+                &output.stdout
+            } else {
+                &output.stderr
+            };
+            Err(format!(
+                "macOS 输入法操作失败（{}）{}",
+                output.status,
+                String::from_utf8_lossy(detail).trim()
+            ))
+        }
+        Ok(Err(error)) => Err(format!("无法启动 macOS 输入法助手：{error}")),
+        Err(_) => Err("macOS 输入法操作超时".into()),
+    };
+    if result.is_err() && enabled && !previously_enabled {
+        engine_choice::set_enabled(root, false)?;
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]

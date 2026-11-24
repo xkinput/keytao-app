@@ -26,6 +26,11 @@ func resolveUserDataDir(home: String) -> String {
     return (home as NSString).appendingPathComponent("Library/keytao")
 }
 
+func inputEngineEnabled() -> Bool {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return resolveUserDataDir(home: home).withCString { keytao_engine_enabled_at($0) }
+}
+
 func hasKeyTaoSchema(at path: String) -> Bool {
     let fileManager = FileManager.default
     return fileManager.fileExists(atPath: (path as NSString).appendingPathComponent("keytao.schema.yaml")) ||
@@ -103,6 +108,7 @@ final class KeyTaoRuntime {
     private var started = false
 
     private var lastInitializationAttempt: Date?
+    private var shutdownScheduled = false
     private var watchSource: DispatchSourceFileSystemObject?
     private var migrationWatchSource: DispatchSourceFileSystemObject?
     private var deploymentWatchSource: DispatchSourceFileSystemObject?
@@ -149,6 +155,7 @@ final class KeyTaoRuntime {
 
     func requestPrewarm() {
         queue.async {
+            guard !self.stopIfDisabled() else { return }
             if keytao_prewarm() {
                 self.postDidReload()
             }
@@ -159,6 +166,10 @@ final class KeyTaoRuntime {
     /// wrote no stamp.
     func reloadNow(completion: @escaping (Bool) -> Void) {
         queue.async {
+            guard !self.stopIfDisabled() else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             let defaultUserDir = (home as NSString).appendingPathComponent("Library/keytao")
             guard resolveUserDataDir(home: home) == defaultUserDir else {
@@ -195,7 +206,7 @@ final class KeyTaoRuntime {
     }
 
     private func initializeIfNeeded() {
-        if keytao_is_initialized() {
+        if stopIfDisabled() || keytao_is_initialized() {
             return
         }
         if let last = lastInitializationAttempt,
@@ -210,6 +221,7 @@ final class KeyTaoRuntime {
     }
 
     private func consumeReloadRequest() {
+        guard !stopIfDisabled() else { return }
         guard keytao_is_initialized() else {
             initializeIfNeeded()
             return
@@ -217,6 +229,39 @@ final class KeyTaoRuntime {
         if keytao_reload_if_stamp_changed() {
             _ = keytao_prewarm()
             postDidReload()
+        }
+    }
+
+    private func stopIfDisabled() -> Bool {
+        guard !inputEngineEnabled() else { return false }
+        guard !shutdownScheduled else { return true }
+        shutdownScheduled = true
+        DispatchQueue.main.async {
+            guard !inputEngineEnabled() else {
+                self.resumeAfterCancelledShutdown()
+                return
+            }
+            KeyTaoInputController.prepareForShutdown()
+            self.queue.async {
+                _ = keytao_reload()
+                keytao_log_flush(200)
+                DispatchQueue.main.async {
+                    if inputEngineEnabled() {
+                        KeyTaoInputController.resumeAfterCancelledShutdown()
+                        self.resumeAfterCancelledShutdown()
+                    } else {
+                        NSApp.terminate(nil)
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private func resumeAfterCancelledShutdown() {
+        queue.async {
+            self.shutdownScheduled = false
+            self.consumeReloadRequest()
         }
     }
 

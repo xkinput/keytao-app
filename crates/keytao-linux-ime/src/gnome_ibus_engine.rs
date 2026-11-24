@@ -232,12 +232,19 @@ impl IBusFactory {
                 path.clone(),
                 IBusEngineService {
                     session,
-                    deployment,
+                    deployment: deployment.clone(),
                     x11_panel_tx: self.x11_panel_tx.clone(),
                 },
             )
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        deployment.watch_reload(|ctxt| async move {
+            let server = ctxt.connection().object_server();
+            if let Ok(engine) = server.interface::<_, IBusEngine>(ctxt.path()).await {
+                // Serialize reset with key replies that may still be publishing.
+                engine.get_mut().await.reset(ctxt.clone()).await;
+            }
+        });
         zvariant::OwnedObjectPath::try_from(path)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
@@ -504,6 +511,9 @@ impl IBusEngine {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> crate::hot_update::KeyReply {
         let activity = crate::hot_update::activity();
+        if !crate::reload_bus::engine_enabled() {
+            return crate::hot_update::KeyReply::new(false, activity);
+        }
         let started = Instant::now();
         if state & keytao_core::RIME_RELEASE_MASK == 0 && self.session.input_policy().composing {
             self.deployment.key_pressed().await;

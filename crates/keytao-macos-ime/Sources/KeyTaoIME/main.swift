@@ -22,14 +22,24 @@ if let subcommand = CommandLine.arguments.dropFirst().first,
 }
 
 let installer = KeyTaoInputSourceInstaller()
+let profile = resolveUserDataDir(home: FileManager.default.homeDirectoryForCurrentUser.path)
 if CommandLine.arguments.count > 1 {
   switch CommandLine.arguments[1] {
   case "--register-input-source":
     installer.register()
     exit(0)
   case "--enable-input-source":
-    installer.enablePrimary()
-    exit(0)
+    guard let root = CommandLine.arguments.dropFirst(2).first else {
+      installer.enablePrimary()
+      exit(EXIT_SUCCESS)
+    }
+    guard installer.managesSystemProfile(root) else { exit(EXIT_SUCCESS) }
+    guard inputEngineEnabled() else { exit(EXIT_FAILURE) }
+    exit(installer.enablePrimary() ? EXIT_SUCCESS : EXIT_FAILURE)
+  case "--stop-input-method":
+    let root = CommandLine.arguments.dropFirst(2).first ?? profile
+    guard installer.managesSystemProfile(root) else { exit(EXIT_SUCCESS) }
+    exit(installer.stopInputMethod() ? EXIT_SUCCESS : EXIT_FAILURE)
   case "--select-input-source":
     installer.selectPrimary()
     exit(0)
@@ -42,6 +52,13 @@ if CommandLine.arguments.count > 1 {
   default:
     break
   }
+}
+
+guard inputEngineEnabled() else {
+  if installer.managesSystemProfile(profile) {
+    _ = installer.disableKeyTaoSources()
+  }
+  exit(EXIT_SUCCESS)
 }
 
 let connectionName =

@@ -37,6 +37,8 @@
 
     <key>InputMethodConnectionName</key>
     <string>KeyTao_Connection</string>
+    <key>KeyTaoSupportsInputMethodShutdown</key>
+    <true/>
     <key>InputMethodServerControllerClass</key>
     <string>KeyTaoIME.KeyTaoInputController</string>
     <key>InputMethodServerDelegateClass</key>

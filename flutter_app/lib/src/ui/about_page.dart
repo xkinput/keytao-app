@@ -171,6 +171,13 @@ class AboutPage extends StatelessWidget {
                 ),
               ),
             ),
+            SwitchSetting(
+              '显示 KeyTao 网站',
+              value: !c.websiteHidden,
+              onChanged: c.busy
+                  ? null
+                  : (visible) => c.saveWebsiteSettings(hidden: !visible),
+            ),
             ValueRow('Flutter', c.aboutValues['Flutter']!),
             ValueRow(
               AppStrings.librimeVersion,
@@ -189,10 +196,6 @@ class AboutPage extends StatelessWidget {
                   AppController.libjdRepositoryUrl,
                 ),
               ),
-            ValueRow(
-              AppStrings.librimeLuaVersion,
-              c.versions?.librimeLuaVersion ?? '—',
-            ),
             ValueRow(
               AppStrings.openccVersion,
               c.versions?.openccVersion ?? '—',

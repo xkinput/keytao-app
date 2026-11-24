@@ -39,10 +39,12 @@ KeyTao 是支持 librime 与 libjd 的跨平台输入法。
 
 附加方案 Easy English 随 App 离线提供，安装后与键道方案一起部署。
 
-在「输入法」页可以重新部署当前方案，或关闭、开启算法引擎。桌面版也支持在终端调用安装后的 App 可执行文件。
+在「输入法」页可以重新部署当前方案，或关闭、开启 Rime 和 ime-jd 共用的「算法引擎」开关。桌面版也支持在终端调用安装后的 App 可执行文件。
 
 - Linux 在桌面会话的终端运行 `keytao-app`，macOS 用 `/Applications/KeyTao.app/Contents/MacOS/KeyTao`，Windows 用安装目录里的 `keytao-app.exe`。
 - 加 `--deploy` 重新部署当前引擎，或用 `--disable-engine`、`--enable-engine` 切换开关。Android 和 iOS 在 App 内操作。
+- macOS 关闭时会暂时停用 KeyTao 输入源并退出输入法进程。开启后可从系统输入法菜单重新选择 KeyTao。
+- Windows 使用独立引擎服务时，关闭会停止服务进程。Windows 的进程内模式、Linux、Android 和 iOS 会释放算法资源，输入组件继续由系统托管。
 - Windows 交互式 PowerShell 可用 `(Start-Process .\keytao-app.exe -ArgumentList '--deploy' -Wait -PassThru).ExitCode` 等待完成并读取退出码。
 
 | 平台 | 用户数据目录 |

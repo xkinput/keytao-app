@@ -143,10 +143,12 @@ void unifiedGateCases(BridgePlatform platform) {
               'scheme',
               'about',
               'debug',
+              'website',
             ]);
             expect(AppPage.about.shortcutDigit, 3);
             expect(AppPage.debug.shortcutDigit, 4);
             expect(find.byKey(const ValueKey('nav-extension')), findsNothing);
+            expect(find.byKey(const ValueKey('nav-website')), findsOneWidget);
             if (platform == BridgePlatform.windows) {
               expect(find.text(AppStrings.windowsIme), findsOneWidget);
               expect(
@@ -179,7 +181,12 @@ void unifiedGateCases(BridgePlatform platform) {
             if (platform == BridgePlatform.android) {
               expect(offset, greaterThan(0));
             }
-            for (final page in [...AppPage.values.skip(1), AppPage.input]) {
+            for (final page in [
+              AppPage.scheme,
+              AppPage.about,
+              AppPage.debug,
+              AppPage.input,
+            ]) {
               await tester.tap(find.byKey(ValueKey('nav-${page.id}')));
               await tester.pumpAndSettle();
               expect(c.activePage, page);
@@ -211,6 +218,7 @@ void unifiedGateCases(BridgePlatform platform) {
                   '${page.shortcutDigit}',
                 );
                 expect((item.shortcut as CharacterActivator).meta, isTrue);
+                if (page == AppPage.website) continue;
                 item.onSelected!();
                 await tester.pumpAndSettle();
                 expect(c.activePage, page);

@@ -24,6 +24,9 @@ pub struct BridgeInfo {
     pub user_root: String,
     #[frb(default = false)]
     pub app_update_prereleases: bool,
+    pub website_origin: Option<String>,
+    #[frb(default = false)]
+    pub website_hidden: bool,
 }
 
 pub struct SystemFontFamilyDto {
@@ -620,6 +623,14 @@ pub struct AccountUserDto {
     pub name: Option<String>,
     pub nickname: Option<String>,
     pub email: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AccountStatsDto {
+    pub batches_count: u32,
+    pub pull_requests_count: u32,
+    pub submitted_batches: u32,
+    pub published_batches: u32,
 }
 
 pub struct UserDictionarySyncDto {

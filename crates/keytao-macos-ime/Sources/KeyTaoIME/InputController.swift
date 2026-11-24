@@ -22,6 +22,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private static let controllers = NSHashTable<KeyTaoInputController>.weakObjects()
     private static var keyHandlingDepth = 0
+    private static var shuttingDown = false
 
     private var session: UnsafeMutableRawPointer?
     private var candidatePanel: CandidatePanel?
@@ -46,6 +47,21 @@ final class KeyTaoInputController: IMKInputController {
     private let inputContextGeneration = KeyTaoInputContextGeneration()
 
     // MARK: Lifecycle
+
+    static func prepareForShutdown() {
+        shuttingDown = true
+        for controller in controllers.allObjects {
+            if controller.hasComposition || controller.hasMarkedText {
+                controller.endComposition(commit: true, client: controller.client())
+            }
+            controller.hidePalettes()
+        }
+        keytao_log_drain_key_stats()
+    }
+
+    static func resumeAfterCancelledShutdown() {
+        shuttingDown = false
+    }
 
     override init!(server: IMKServer!, delegate: Any!, client: Any!) {
         super.init(server: server, delegate: delegate, client: client)
@@ -150,6 +166,7 @@ final class KeyTaoInputController: IMKInputController {
 
     /// Called for key events in the client app. Return true only when librime consumes it.
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
+        guard !Self.shuttingDown else { return false }
         Self.keyHandlingDepth += 1
         defer { Self.keyHandlingDepth -= 1 }
         guard let event else { return false }

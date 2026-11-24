@@ -131,6 +131,9 @@ pub struct AppState {
     pub active_scheme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_update_prereleases: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website_origin: Option<String>,
+    pub website_hidden: bool,
     pub dismissed_scheme_updates: BTreeMap<String, String>,
     pub scheme_sync_settings: serde_json::Value,
     pub follow_account_sync: bool,
@@ -151,6 +154,9 @@ struct StoredAppState {
     installed_packages: Option<BTreeMap<String, InstalledPackage>>,
     active_scheme: Option<String>,
     app_update_prereleases: Option<bool>,
+    website_origin: Option<String>,
+    #[serde(default)]
+    website_hidden: bool,
     #[serde(default)]
     dismissed_scheme_updates: BTreeMap<String, String>,
     #[serde(default)]
@@ -193,6 +199,8 @@ impl From<StoredAppState> for AppState {
             installed_packages,
             active_scheme,
             app_update_prereleases: state.app_update_prereleases,
+            website_origin: state.website_origin,
+            website_hidden: state.website_hidden,
             dismissed_scheme_updates: state.dismissed_scheme_updates,
             scheme_sync_settings: state.scheme_sync_settings,
             follow_account_sync: state.follow_account_sync,

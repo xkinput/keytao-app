@@ -794,6 +794,41 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineA
 }
 
 #[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineEnabled(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeEngineEnabled", 1, || {
+        optional_jni_path(&mut env, user_dir)
+            .is_none_or(|root| keytao_core::engine_choice::is_enabled(&root))
+            .into()
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSuspendEngine(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeSuspendEngine", 0, || {
+        let Some(root) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        if keytao_core::engine_choice::is_enabled(&root) {
+            return 0;
+        }
+        let shared = root.join("rime-data").to_string_lossy().into_owned();
+        android_runtime_for(&root, &shared)
+            .is_none_or(|runtime| runtime.shutdown().is_ok())
+            .into()
+    })
+}
+
+#[cfg(target_os = "android")]
 fn android_prefers_libjd(root: &Path) -> bool {
     crate::libjd::input_engine(root) == keytao_core::engine_choice::PackageEngine::LibjdEngine
 }

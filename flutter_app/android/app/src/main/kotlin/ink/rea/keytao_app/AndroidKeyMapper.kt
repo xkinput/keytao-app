@@ -195,7 +195,8 @@ object AndroidKeyMapper {
         if (!hardwareKeyboardActive) return false
         return when (readiness) {
             Readiness.DEPLOYING -> true
-            Readiness.READY, Readiness.PERMISSION_MISSING, Readiness.UNWRITABLE, Readiness.NOT_INSTALLED -> false
+            Readiness.READY, Readiness.ENGINE_DISABLED, Readiness.PERMISSION_MISSING,
+            Readiness.UNWRITABLE, Readiness.NOT_INSTALLED -> false
             else -> retryCount < 30
         }
     }

@@ -174,6 +174,15 @@ class AndroidKeyMapperTest {
                 retryCount = 0,
             ),
         )
+        assertFalse(
+            AndroidKeyMapper.shouldScheduleReloadStampTimer(
+                serviceDestroyed = false,
+                inputViewShown = false,
+                hardwareKeyboardActive = true,
+                readiness = Readiness.ENGINE_DISABLED,
+                retryCount = 0,
+            ),
+        )
         assertTrue(
             AndroidKeyMapper.shouldScheduleReloadStampTimer(
                 serviceDestroyed = false,

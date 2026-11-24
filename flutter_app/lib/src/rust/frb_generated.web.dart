@@ -46,6 +46,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AccountStatsDto dco_decode_account_stats_dto(dynamic raw);
+
+  @protected
   AccountUserDto dco_decode_account_user_dto(dynamic raw);
 
   @protected
@@ -484,6 +487,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  AccountStatsDto sse_decode_account_stats_dto(SseDeserializer deserializer);
 
   @protected
   AccountUserDto sse_decode_account_user_dto(SseDeserializer deserializer);
@@ -1043,6 +1049,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_account_stats_dto(
+    AccountStatsDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_account_user_dto(

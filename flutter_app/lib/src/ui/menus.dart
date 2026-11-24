@@ -18,7 +18,15 @@ class AppMenus extends StatelessWidget {
   final BridgePlatform platform;
   final AppController? controller;
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => controller == null
+      ? _buildMenus()
+      : ListenableBuilder(
+          listenable: controller!.websiteHiddenChanges,
+          builder: (_, _) => _buildMenus(),
+        );
+
+  Widget _buildMenus() {
+    final pages = controller?.visiblePages ?? AppPage.values;
     if (platform != BridgePlatform.macOs) {
       if (platform == BridgePlatform.android ||
           platform == BridgePlatform.ios) {
@@ -26,7 +34,7 @@ class AppMenus extends StatelessWidget {
       }
       return CallbackShortcuts(
         bindings: {
-          for (final page in AppPage.values)
+          for (final page in pages)
             CharacterActivator('${page.shortcutDigit}', control: true): () =>
                 controller?.selectPage(page),
         },
@@ -72,7 +80,7 @@ class AppMenus extends StatelessWidget {
         PlatformMenu(
           label: '显示',
           menus: [
-            for (final page in AppPage.values)
+            for (final page in pages)
               PlatformMenuItem(
                 label: page.title,
                 shortcut: CharacterActivator(

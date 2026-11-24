@@ -98,7 +98,13 @@ class InputPage extends StatelessWidget {
                 if (controller.isIos) IosImeCard(controller: controller),
                 SwitchSetting(
                   AppStrings.algorithmEngine,
-                  hint: AppStrings.algorithmEngineHint,
+                  hint: switch (controller.inputEngineTransition) {
+                    true => AppStrings.enablingAlgorithmEngine,
+                    false => AppStrings.disablingAlgorithmEngine,
+                    null => controller.info.platform == BridgePlatform.macOs
+                        ? AppStrings.macosAlgorithmEngineHint
+                        : AppStrings.algorithmEngineHint,
+                  },
                   value: controller.inputEngineEnabled,
                   onChanged: controller.busy
                       ? null

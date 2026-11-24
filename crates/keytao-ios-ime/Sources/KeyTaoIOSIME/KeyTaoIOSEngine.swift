@@ -419,11 +419,13 @@ final class KeyTaoIOSEngine {
     private(set) var clipboardConfigLoaded = false
     private let startupQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.startup", qos: .userInitiated)
     private var startupInFlight = false
+    private var algorithmGeneration: UInt64 = 0
     private var startupCompletions: [(Bool) -> Void] = []
     private var reloadCheckHistogram = KeyTaoDurationHistogram()
     private var runtimeMetricsEnabled = true
 
     private(set) var nativeReady = false
+    private(set) var algorithmEnabled: Bool
 
     /// What the librime behind the current session can do.
     ///
@@ -438,6 +440,7 @@ final class KeyTaoIOSEngine {
 
     init(userRoot: URL = KeyTaoIOSPaths.userRoot()) {
         self.userRoot = userRoot
+        self.algorithmEnabled = Self.readAlgorithmEnabled(userRoot: userRoot)
     }
 
     deinit {
@@ -445,6 +448,7 @@ final class KeyTaoIOSEngine {
     }
 
     func ensureReady() -> Bool {
+        guard algorithmEnabled else { return false }
         if nativeReady {
             return true
         }
@@ -464,6 +468,10 @@ final class KeyTaoIOSEngine {
     /// every other member of this class is read and written.
     func ensureReadyAsync(_ completion: @escaping (Bool) -> Void) {
         let started = KeyTaoLog.now()
+        guard algorithmEnabled else {
+            completion(false)
+            return
+        }
         if nativeReady {
             KeyTaoLog.event("rime", "ensure_ready_async", duration: (KeyTaoLog.now() - started) * 1000) {
                 ["ok": true, "cached": true]
@@ -477,6 +485,7 @@ final class KeyTaoIOSEngine {
         }
         startupInFlight = true
         let userRoot = self.userRoot
+        let generation = algorithmGeneration
         startupQueue.async { [weak self] in
             let prepared = Self.prepareRuntime(userRoot: userRoot)
             DispatchQueue.main.async {
@@ -489,7 +498,20 @@ final class KeyTaoIOSEngine {
                     }
                     return
                 }
-                let ready = self.installPreparedSession(prepared)
+                let ready: Bool
+                if generation != self.algorithmGeneration {
+                    if let prepared { keytao_destroy_session(prepared) }
+                    self.startupInFlight = false
+                    if self.algorithmEnabled {
+                        let pending = self.startupCompletions
+                        self.startupCompletions = []
+                        for completion in pending { self.ensureReadyAsync(completion) }
+                        return
+                    }
+                    ready = false
+                } else {
+                    ready = self.installPreparedSession(prepared)
+                }
                 self.startupInFlight = false
                 KeyTaoLog.event("rime", "ensure_ready_async", duration: (KeyTaoLog.now() - started) * 1000) {
                     ["ok": ready, "cancelled": false]
@@ -511,7 +533,8 @@ final class KeyTaoIOSEngine {
                 ["ok": ready]
             }
         }
-        guard KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot),
+        guard readAlgorithmEnabled(userRoot: userRoot),
+              KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot),
               KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot),
               let sharedDir = KeyTaoIOSPaths.sharedDataDir(userRoot: userRoot) else {
             return nil
@@ -539,6 +562,10 @@ final class KeyTaoIOSEngine {
 
     private func installPreparedSession(_ prepared: UnsafeMutableRawPointer?) -> Bool {
         refreshRuntimeLogCollection()
+        guard Self.readAlgorithmEnabled(userRoot: userRoot) else {
+            if let prepared { keytao_destroy_session(prepared) }
+            return false
+        }
         if nativeReady {
             // A synchronous ensureReady() won the race; drop the spare session.
             if let prepared {
@@ -594,6 +621,31 @@ final class KeyTaoIOSEngine {
 
     func isDeploying() -> Bool {
         KeyTaoIOSPaths.isDeploying(userRoot: userRoot)
+    }
+
+    private static func readAlgorithmEnabled(userRoot: URL) -> Bool {
+        userRoot.path.withCString { keytao_engine_enabled_at($0) }
+    }
+
+    @discardableResult
+    func refreshAlgorithmEnabled() -> Bool {
+        let enabled = Self.readAlgorithmEnabled(userRoot: userRoot)
+        guard enabled != algorithmEnabled else { return false }
+        algorithmEnabled = enabled
+        algorithmGeneration &+= 1
+        return true
+    }
+
+    func suspendAlgorithm() {
+        close()
+        suspendedSession = nil
+        lastState = .empty
+        let userRoot = self.userRoot
+        startupQueue.async {
+            if !Self.readAlgorithmEnabled(userRoot: userRoot) {
+                _ = keytao_reload()
+            }
+        }
     }
 
     /// Shared App Group files are written by the containing app while the
@@ -1043,7 +1095,7 @@ final class KeyTaoIOSEngine {
         defer {
             if let started { reloadCheckHistogram.record((KeyTaoLog.now() - started) * 1000) }
         }
-        guard nativeReady else {
+        guard algorithmEnabled, nativeReady else {
             return false
         }
         guard keytao_reload_if_stamp_changed() else {

@@ -117,11 +117,18 @@ fn create_pipe(name: &str, sid: &str, first: bool) -> windows::core::Result<Owne
     Ok(OwnedHandle(handle))
 }
 
-fn acquire_listener(name: &str, identity: &Identity) -> Result<Option<OwnedHandle>, String> {
+fn acquire_listener(
+    name: &str,
+    identity: &Identity,
+    root: &Path,
+) -> Result<Option<OwnedHandle>, String> {
     match create_pipe(name, &identity.sid, true) {
         Ok(listener) => return Ok(Some(listener)),
         Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => {}
         Err(error) => return Err(format!("create exclusive IME pipe: {error}")),
+    }
+    if !keytao_core::engine_choice::is_enabled(root) {
+        return Ok(None);
     }
     let deadline = Instant::now() + Duration::from_secs(3);
     if !request_shutdown(name, identity, deadline)? {
@@ -390,6 +397,20 @@ impl Runtime {
         let schema_id = engine.state().schema_id;
         Ok((engine, self.generation, schema_id))
     }
+
+    fn shutdown(&mut self, only_when_disabled: Option<&Path>) -> Result<bool, String> {
+        let _init = keytao_app_core::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
+        if only_when_disabled.is_some_and(keytao_core::engine_choice::is_enabled) {
+            return Ok(false);
+        }
+        if let Some(engine) = &self.engine {
+            engine.shutdown_server()?;
+        }
+        self.ready = false;
+        self.engine = None;
+        runtime_log::flush_blocking(Duration::from_millis(200));
+        Ok(true)
+    }
 }
 
 // Callers hold MAINTENANCE_LOCK so deployment cannot race the unlocked checks/reload.
@@ -475,15 +496,21 @@ impl Drop for ReloadNotification {
 }
 
 pub fn run() -> Result<(), String> {
-    let identity = Arc::new(current_identity()?);
     let dir =
         keytao_core::default_user_data_dir().ok_or("cannot determine KeyTao user directory")?;
+    if !keytao_core::engine_choice::is_enabled(&dir) {
+        return Ok(());
+    }
+    let identity = Arc::new(current_identity()?);
     runtime_log::init(&dir, "windows-ime-server");
     let name = crate::engine_config::pipe_name(&identity.sid, identity.session_id);
     let runtime = Arc::new(Mutex::new(Runtime::default()));
-    let Some(mut listener) = acquire_listener(&name, &identity)? else {
+    let Some(mut listener) = acquire_listener(&name, &identity, &dir)? else {
         return Ok(());
     };
+    if !keytao_core::engine_choice::is_enabled(&dir) {
+        return Ok(());
+    }
     loop {
         let watched_runtime = Arc::clone(&runtime);
         let watched_dir = dir.clone();
@@ -497,6 +524,18 @@ pub fn run() -> Result<(), String> {
                         drop(notification.take());
                         std::thread::sleep(Duration::from_secs(1));
                         notification = ReloadNotification::new(&watched_dir);
+                    }
+                    if !keytao_core::engine_choice::is_enabled(&watched_dir) {
+                        if let Some(_maintenance) = MAINTENANCE_LOCK.try_lock() {
+                            match watched_runtime.lock().shutdown(Some(&watched_dir)) {
+                                Ok(true) => std::process::exit(0),
+                                Ok(false) => {}
+                                Err(error) => {
+                                    keytao_core::rt_log!(Level::Info, "ipc", "shutdown_failed", msg = error);
+                                }
+                            }
+                        }
+                        continue;
                     }
                     // Status/current-schema writes and timeouts are not reload requests.
                     let Some(signature) = stamp.pending() else {
@@ -683,7 +722,7 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
         sequence = request.seq;
         let shutdown = matches!(request.message, Request::Shutdown);
         // A replacement must wait for deployment/userdb maintenance before exiting.
-        let shutdown_guard = if shutdown
+        let mut shutdown_guard = if shutdown
             && !client.is_appcontainer
             && installed_process(
                 pid,
@@ -698,8 +737,11 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
             None
         };
         let response = if shutdown {
-            if shutdown_guard.is_some() {
-                Response::Ok
+            if let Some((_, runtime)) = &mut shutdown_guard {
+                match runtime.shutdown(None) {
+                    Ok(_) => Response::Ok,
+                    Err(error) => Response::Err(EngineError::Failed(error)),
+                }
             } else {
                 Response::Err(EngineError::Failed(
                     "Shutdown requires an authenticated caller under the KeyTao app or runtime root".into(),
@@ -737,13 +779,15 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
             dispatch(&request.message, &mut session, runtime)
         };
         let exit = shutdown && matches!(response, Response::Ok);
-        write_frame(&mut file, &request.reply(response)).map_err(|e| e.to_string())?;
+        let written = write_frame(&mut file, &request.reply(response));
         if exit {
             // Flush waits until the replacement consumes the acknowledgment.
-            if unsafe { FlushFileBuffers(HANDLE(file.as_raw_handle())) }.is_ok() {
-                std::process::exit(0);
+            if written.is_ok() {
+                let _ = unsafe { FlushFileBuffers(HANDLE(file.as_raw_handle())) };
             }
+            std::process::exit(0);
         }
+        written.map_err(|e| e.to_string())?;
     }
 }
 

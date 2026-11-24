@@ -33,6 +33,7 @@
           wayland
           dbus
           gtk3
+          webkitgtk_4_1
           glib
           gdk-pixbuf
           pango
@@ -154,6 +155,7 @@
             dbus
             glib
             gtk3
+            webkitgtk_4_1
             gdk-pixbuf
             pango
             atk
