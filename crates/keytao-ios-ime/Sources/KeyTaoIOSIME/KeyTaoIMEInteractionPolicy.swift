@@ -157,6 +157,7 @@ struct KeyTaoClipboardAccessPolicy {
 struct KeyTaoClipboardHistory {
     static let maxTextBytes = 64 * 1024
     static let maxHistoryBytes = 1024 * 1024
+    private static let maxMediaCount = 8
     private(set) var records: [KeyTaoClipboardRecord]
     private(set) var limit: Int
 
@@ -167,22 +168,24 @@ struct KeyTaoClipboardHistory {
     }
 
     init(data: Data, limit: Int = 50) throws {
-        guard data.count <= Self.maxHistoryBytes else {
-            self.init(limit: limit)
-            return
-        }
-        self.init(records: try JSONDecoder().decode([KeyTaoClipboardRecord].self, from: data), limit: limit)
+        self.init(records: try Self.decodeRecords(data), limit: limit)
     }
 
     init(contentsOf file: URL, limit: Int = 50) throws {
+        self.init(records: try Self.readRecords(contentsOf: file), limit: limit)
+    }
+
+    static func readRecords(contentsOf file: URL) throws -> [KeyTaoClipboardRecord] {
         let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        guard let size, size <= Self.maxHistoryBytes else {
-            self.init(limit: limit)
-            return
-        }
+        guard let size, size <= Self.maxHistoryBytes else { return [] }
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
-        try self.init(data: handle.read(upToCount: Self.maxHistoryBytes + 1) ?? Data(), limit: limit)
+        return try decodeRecords(handle.read(upToCount: Self.maxHistoryBytes + 1) ?? Data())
+    }
+
+    private static func decodeRecords(_ data: Data) throws -> [KeyTaoClipboardRecord] {
+        guard data.count <= Self.maxHistoryBytes else { return [] }
+        return try JSONDecoder().decode([KeyTaoClipboardRecord].self, from: data)
     }
 
     func encoded() throws -> Data {
@@ -191,8 +194,10 @@ struct KeyTaoClipboardHistory {
 
     @discardableResult
     mutating func setLimit(_ limit: Int?) -> Bool {
+        let newLimit = max(10, min(200, limit ?? 200))
+        guard newLimit != self.limit else { return false }
         let previousRecords = records
-        self.limit = max(10, min(200, limit ?? 200))
+        self.limit = newLimit
         normalize()
         return limit != nil && records != previousRecords
     }
@@ -230,16 +235,19 @@ struct KeyTaoClipboardHistory {
         }
         var keys = Set<String>()
         var unpinnedCount = 0
+        var mediaCount = 0
         var remainingBytes = Self.maxHistoryBytes - 2
         let encoder = JSONEncoder()
         records = records.filter {
             guard ($0.text?.utf8.count ?? 0) <= Self.maxTextBytes,
                   keys.insert($0.key).inserted else { return false }
             if !$0.pinned, unpinnedCount >= limit { return false }
+            if !$0.pinned, $0.mime != nil, mediaCount >= Self.maxMediaCount { return false }
             // Include JSON escaping, the text key, metadata and array separators.
             guard let data = try? encoder.encode($0), data.count + 1 <= remainingBytes else { return false }
             remainingBytes -= data.count + 1
             if !$0.pinned { unpinnedCount += 1 }
+            if $0.mime != nil { mediaCount += 1 }
             return true
         }
     }
@@ -375,12 +383,6 @@ public enum KeyTaoIMEInteractionTuning {
     static let repeatableEditIntervalMs = 72
     static let repeatTimerToleranceFraction = 0.2
     static let repeatTimerMaximumToleranceSeconds = 0.01
-    static let accentBorderWidth: CGFloat = 1
-    static let softAccentKeyFillAmount: CGFloat = 0.22
-    static let softAccentKeyBorderAlpha: CGFloat = 0.60
-    static let accentToolbarBorderAlpha: CGFloat = 0.60
-    static let candidateBorderAlpha: CGFloat = 0.35
-    static let darkAccentBorderAlphaMultiplier: CGFloat = 0.70
     static let backspacePreviewMinimumHorizontalInset: CGFloat = 4
     static let backspacePreviewVerticalInset: CGFloat = 6
     static let backspacePreviewTextHorizontalPadding: CGFloat = 8

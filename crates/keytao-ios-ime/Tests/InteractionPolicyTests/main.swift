@@ -513,6 +513,19 @@ let mediaRecord = KeyTaoClipboardRecord(
     width: 30, height: 40, timestamp: 102, pinned: true
 )
 clipboard.upsert(mediaRecord)
+let mediaRecords = (1...9).map {
+    KeyTaoClipboardRecord(key: "media:\($0)", mime: "image/png", timestamp: Double($0), pinned: $0 == 1)
+}
+let retainedMediaKeys = ["media:1"] + (3...9).reversed().map { "media:\($0)" }
+var mediaClipboard = KeyTaoClipboardHistory(records: Array(mediaRecords.dropLast()))
+mediaClipboard.upsert(mediaRecords[8])
+expect(mediaClipboard.records.map(\.key), retainedMediaKeys, "the ninth medium evicts the oldest unpinned medium")
+do {
+    let restored = try KeyTaoClipboardHistory(data: JSONEncoder().encode(mediaRecords))
+    expect(restored.records.map(\.key), retainedMediaKeys, "loading legacy media history applies the eight-item cap")
+} catch {
+    failures.append("media clipboard cap failed: \(error)")
+}
 let clipboardTextByteLimit = 64 * 1024
 let clipboardHistoryByteLimit = 1024 * 1024
 let boundaryText = String(repeating: "a", count: clipboardTextByteLimit)
