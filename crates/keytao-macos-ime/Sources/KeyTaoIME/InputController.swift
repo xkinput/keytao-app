@@ -40,6 +40,7 @@ final class KeyTaoInputController: IMKInputController {
     private var hasMarkedText = false
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
+    private var hasLoggedMissingCursorRect = false
     private var reloadObserver: NSObjectProtocol?
     private var deploymentObserver: NSObjectProtocol?
     private var showingDeploymentHint = false
@@ -192,7 +193,7 @@ final class KeyTaoInputController: IMKInputController {
         }
         guard event.type == .keyDown else { return false }
         let generation = inputContextGeneration.current
-        deploymentKeyPressed(client: sender as? IMKTextInput)
+        let deploymentTheme = deploymentKeyPressed(client: sender as? IMKTextInput)
         guard inputContextGeneration.isCurrent(generation) else { return false }
 
         // Any ordinary key makes a pending modifier press part of a shortcut.
@@ -232,7 +233,7 @@ final class KeyTaoInputController: IMKInputController {
 
         let usesEnterPath = keytao_key_policy_is_enter(keyval)
             && modifiers & (rimeModifierControl | rimeModifierAlt) == 0
-        let theme = ImeThemeManager.shared.theme()
+        let theme = deploymentTheme ?? ImeThemeManager.shared.theme()
         let keyStarted = DispatchTime.now().uptimeNanoseconds
         let json = usesEnterPath
             ? keytao_session_process_enter_json(session)
@@ -259,7 +260,7 @@ final class KeyTaoInputController: IMKInputController {
             chordReleaseTimer = timer
             RunLoop.main.add(timer, forMode: .common)
         }
-        apply(state, to: sender)
+        apply(state, to: sender, theme: theme)
         keytao_log_keystroke(Double(DispatchTime.now().uptimeNanoseconds - keyStarted) / 1_000_000)
         return state.accepted
     }
@@ -348,13 +349,9 @@ final class KeyTaoInputController: IMKInputController {
 
     // MARK: State application
 
-    private func apply(_ state: KeyTaoImeState, to sender: Any?) {
+    private func apply(_ state: KeyTaoImeState, to sender: Any?, theme: ImeTheme = ImeThemeManager.shared.theme()) {
         let client = sender as? IMKTextInput
-        let theme = ImeThemeManager.shared.theme()
         let generation = inputContextGeneration.current
-        guard inputContextGeneration.perform(generation, {
-            rememberCursorRect(for: client, reason: "beforeApply")
-        }) else { return }
 
         if !state.committed.isEmpty {
             if hasMarkedText {
@@ -388,11 +385,12 @@ final class KeyTaoInputController: IMKInputController {
             normalCandidateModel = panelModel(for: state, theme: theme)
         }
         KeyTaoRuntime.shared.refreshDeploymentHint()
-        showDeploymentIndicator(client: client)
+        showDeploymentIndicator(client: client, theme: theme)
         if let hint = state.switchHint, inputContextGeneration.isCurrent(generation) {
             showModeIndicator(
                 KeyTaoModeHintModel(asciiMode: state.englishMode, text: hint),
-                client: client
+                client: client,
+                theme: theme
             )
         }
     }
@@ -556,7 +554,7 @@ final class KeyTaoInputController: IMKInputController {
         candidatePanel?.orderOut(nil)
     }
 
-    private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?) {
+    private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?, theme: ImeTheme) {
         let generation = inputContextGeneration.current
         guard isActive, !showingDeploymentHint else { return }
         let windowLevel = panelLevel(for: client)
@@ -567,20 +565,22 @@ final class KeyTaoInputController: IMKInputController {
         modeIndicatorPanel = panel
         panel.show(
             modeHint: modeHint,
+            theme: theme,
             windowLevel: windowLevel,
             near: rect
         )
     }
 
-    private func showDeploymentIndicator(client: IMKTextInput?) {
-        let theme = ImeThemeManager.shared.theme()
+    private func showDeploymentIndicator(
+        client: IMKTextInput?, theme: @autoclosure () -> ImeTheme = ImeThemeManager.shared.theme()
+    ) {
         if let hint = KeyTaoRuntime.shared.deploymentHint,
            keytao_deployment_blocks_input() || normalCandidateModel?.candidates.isEmpty != false {
             showingDeploymentHint = true
             hideModeIndicator()
             var model = KeyTaoPanelModel.empty
             model.preedit = hint
-            showCandidates(model, client: client, theme: theme)
+            showCandidates(model, client: client, theme: theme())
             candidatePanel?.onSelect = nil
             candidatePanel?.onPageChange = nil
             candidatePanel?.displayIfNeeded()
@@ -588,7 +588,7 @@ final class KeyTaoInputController: IMKInputController {
         } else {
             showingDeploymentHint = false
             if let model = normalCandidateModel {
-                showCandidates(model, client: client, theme: theme)
+                showCandidates(model, client: client, theme: theme())
             } else {
                 hideCandidates()
             }
@@ -599,12 +599,13 @@ final class KeyTaoInputController: IMKInputController {
         modeIndicatorPanel?.orderOut(nil)
     }
 
-    private func deploymentKeyPressed(client: IMKTextInput?) {
+    private func deploymentKeyPressed(client: IMKTextInput?) -> ImeTheme? {
         keytao_deployment_key_pressed()
         KeyTaoRuntime.shared.refreshDeploymentHint()
-        if KeyTaoRuntime.shared.deploymentHint != nil {
-            showDeploymentIndicator(client: client)
-        }
+        guard KeyTaoRuntime.shared.deploymentHint != nil else { return nil }
+        let theme = ImeThemeManager.shared.theme()
+        showDeploymentIndicator(client: client, theme: theme)
+        return theme
     }
 
     private func resetDeploymentInput() {
@@ -647,42 +648,43 @@ final class KeyTaoInputController: IMKInputController {
         }
 
         if lastCursorRect.isUsableTextInputRect {
-            NSLog("KeyTao: using last cursor rect %@", NSStringFromRect(lastCursorRect))
             return lastCursorRect
         }
 
         return .zero
     }
 
-    private func rememberCursorRect(for client: IMKTextInput?, reason: String) {
-        guard let rect = resolveCursorRect(for: client) else { return }
-        lastCursorRect = rect
-    }
-
     private func resolveCursorRect(for client: IMKTextInput?) -> NSRect? {
         guard let client else { return nil }
 
-        var attemptedRects: [String] = []
         var lineRect = NSRect.zero
         // This IMKit API uses an inline-relative index. Without our own marked
         // text, zero requests the current selection, not document character 0.
         let inlineCursor = hasMarkedText ? lastPreeditCursor : 0
         _ = client.attributes(forCharacterIndex: inlineCursor, lineHeightRectangle: &lineRect)
-        attemptedRects.append("lineHeight=\(NSStringFromRect(lineRect))")
         if let normalizedLineRect = normalizeTextInputRect(lineRect, source: "lineHeight") {
             return normalizedLineRect
         }
 
+        var attemptedRects: [String] = []
+        if !hasLoggedMissingCursorRect {
+            attemptedRects.append("lineHeight=\(NSStringFromRect(lineRect))")
+        }
         for query in cursorRectQueries(for: client) {
             var actualRange = NSRange(location: NSNotFound, length: 0)
             let rect = client.firstRect(forCharacterRange: query.range, actualRange: &actualRange)
-            attemptedRects.append("\(query.source)=\(NSStringFromRect(rect)) actual=\(NSStringFromRange(actualRange))")
             if let normalizedRect = normalizeTextInputRect(rect, source: query.source) {
                 return normalizedRect
             }
+            if !hasLoggedMissingCursorRect {
+                attemptedRects.append("\(query.source)=\(NSStringFromRect(rect)) actual=\(NSStringFromRange(actualRange))")
+            }
         }
 
-        NSLog("KeyTao: no usable client cursor rect, tried=%@", attemptedRects.joined(separator: " | "))
+        if !hasLoggedMissingCursorRect {
+            hasLoggedMissingCursorRect = true
+            NSLog("KeyTao: no usable client cursor rect, tried=%@", attemptedRects.joined(separator: " | "))
+        }
         return nil
     }
 
@@ -780,8 +782,9 @@ final class KeyTaoInputController: IMKInputController {
             modifierTap.clear()
             return false
         }
+        var deploymentTheme: ImeTheme?
         if !newFlags.subtracting(previousFlags).isEmpty {
-            deploymentKeyPressed(client: client)
+            deploymentTheme = deploymentKeyPressed(client: client)
             guard inputContextGeneration.isCurrent(generation) else { return false }
         }
         guard !keytao_deployment_blocks_input() else {
@@ -799,11 +802,12 @@ final class KeyTaoInputController: IMKInputController {
         guard let state = KeyTaoImeState.consuming(
             keytao_session_process_modifier_tap_json(session, keyval)
         ) else { return false }
-        apply(state, to: client)
+        let theme = deploymentTheme ?? ImeThemeManager.shared.theme()
+        apply(state, to: client, theme: theme)
         guard inputContextGeneration.isCurrent(generation) else { return state.accepted }
         let handled = state.accepted || englishMode != wasEnglishMode
         if handled {
-            showModeIndicator(state.modeHint, client: client)
+            showModeIndicator(state.modeHint, client: client, theme: theme)
         }
         return handled
     }

@@ -18,10 +18,10 @@ final class ModeIndicatorPanel: NSPanel {
 
     func show(
         modeHint: KeyTaoModeHintModel,
+        theme: ImeTheme,
         windowLevel: NSWindow.Level,
         near cursorRect: NSRect
     ) {
-        let theme = ImeThemeManager.shared.theme()
         level = windowLevel
         apply(theme)
 
