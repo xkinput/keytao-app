@@ -20,12 +20,38 @@ function Resolve-RepoRoot {
     return [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
 }
 
+function Invoke-WithRetry([scriptblock]$Request) {
+    for ($retry = 0; ; $retry++) {
+        try {
+            return (& $Request)
+        } catch {
+            if ($retry -eq 5) {
+                throw
+            }
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
 function Invoke-GitHubApi($Uri) {
     $headers = @{ "User-Agent" = "keytao-librime-fetch" }
     if ($env:GITHUB_TOKEN) {
         $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
     }
-    Invoke-RestMethod -Uri $Uri -Headers $headers
+    Invoke-WithRetry { Invoke-RestMethod -Uri $Uri -Headers $headers }
+}
+
+function Test-LibrimeArchive($Path, $Asset) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    if ($null -ne $Asset.size -and (Get-Item -LiteralPath $Path).Length -ne $Asset.size) {
+        return $false
+    }
+    if ($Asset.digest -like "sha256:*") {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Asset.digest.Substring(7)
+    }
+    return $true
 }
 
 function Find-Extractor {
@@ -79,7 +105,9 @@ function Save-GitHubContentFile($Repo, $Path, $DestinationFile) {
     }
 
     if ($content.download_url) {
-        Invoke-WebRequest -Uri $content.download_url -OutFile $DestinationFile -Headers @{ "User-Agent" = "keytao-librime-fetch" }
+        Invoke-WithRetry {
+            Invoke-WebRequest -Uri $content.download_url -OutFile $DestinationFile -Headers @{ "User-Agent" = "keytao-librime-fetch" }
+        }
         return
     }
 
@@ -202,11 +230,22 @@ New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
 
 foreach ($asset in @($mainAsset, $depsAsset)) {
     $archive = Join-Path $cacheDir $asset.name
-    if (-not (Test-Path $archive)) {
-        Write-Host "Downloading $($asset.name)"
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive -Headers @{ "User-Agent" = "keytao-librime-fetch" }
-    } else {
+    if (Test-LibrimeArchive $archive $asset) {
         Write-Host "Using cached $($asset.name)"
+    } else {
+        Write-Host "Downloading $($asset.name)"
+        $temporaryArchive = "$archive.$PID.tmp"
+        try {
+            Invoke-WithRetry {
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $temporaryArchive -Headers @{ "User-Agent" = "keytao-librime-fetch" }
+            }
+            if (-not (Test-LibrimeArchive $temporaryArchive $asset)) {
+                throw "Size or SHA-256 mismatch for $($asset.name)"
+            }
+            Move-Item -Force -LiteralPath $temporaryArchive -Destination $archive
+        } finally {
+            Remove-Item -Force -LiteralPath $temporaryArchive -ErrorAction SilentlyContinue
+        }
     }
 
     $out = Join-Path $extractDir ([System.IO.Path]::GetFileNameWithoutExtension($asset.name))

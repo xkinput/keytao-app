@@ -187,10 +187,13 @@ jobs:
         shell: bash
         run: |
           runtime="vendor/librime/windows-arm64"
+          download() {
+            curl -fsSL --retry 3 --retry-all-errors -H @- "$@" <<< "${GITHUB_TOKEN:+Authorization: Bearer $GITHUB_TOKEN}"
+          }
           for file in default.yaml key_bindings.yaml punctuation.yaml symbols.yaml; do
-            curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-prelude/master/$file" -o "$runtime/rime-data/$file"
+            download "https://raw.githubusercontent.com/rime/rime-prelude/master/$file" -o "$runtime/rime-data/$file"
           done
-          curl -fsSL --retry 3 https://raw.githubusercontent.com/rime/rime-essay/master/essay.txt -o "$runtime/rime-data/essay.txt"
+          download https://raw.githubusercontent.com/rime/rime-essay/master/essay.txt -o "$runtime/rime-data/essay.txt"
           for file in \
             luna_pinyin.dict.yaml \
             luna_pinyin.schema.yaml \
@@ -199,10 +202,10 @@ jobs:
             luna_pinyin_tw.schema.yaml \
             luna_quanpin.schema.yaml \
             pinyin.yaml; do
-            curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-luna-pinyin/master/$file" -o "$runtime/rime-data/$file"
+            download "https://raw.githubusercontent.com/rime/rime-luna-pinyin/master/$file" -o "$runtime/rime-data/$file"
           done
           for file in stroke.dict.yaml stroke.schema.yaml; do
-            curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-stroke/master/$file" -o "$runtime/rime-data/$file"
+            download "https://raw.githubusercontent.com/rime/rime-stroke/master/$file" -o "$runtime/rime-data/$file"
           done
 
       - name: Set build version
@@ -549,6 +552,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: publish-release-${{ github.ref }}
+      cancel-in-progress: false
     outputs:
       release-id: ${{ steps.create.outputs.result }}
     steps:
@@ -562,13 +568,23 @@ jobs:
         with:
           script: |
             const tag = context.ref.replace('refs/tags/', '')
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              ...context.repo,
+              per_page: 100,
+            })
+            const matches = releases.filter(release => release.tag_name === tag)
+            if (matches.length > 1 || matches.some(release => !release.draft)) {
+              throw new Error(`Cannot publish ${tag}: a published release or multiple drafts already exist`)
+            }
+            if (matches.length === 1) return matches[0].id
+
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
               name: tag,
               generate_release_notes: true,
-              draft: false,
+              draft: true,
               prerelease: tag.includes('-'),
             })
             return data.id
@@ -578,6 +594,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: gh release upload "$GITHUB_REF_NAME" dist/release-upload/* --clobber
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
 
   sync-nix-release:
     needs: [prepare, create-release]

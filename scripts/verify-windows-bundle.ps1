@@ -323,7 +323,8 @@ if (-not $LayoutOnly) {
     Require-Exports $forwarder @("DllCanUnloadNow", "DllGetClassObject", "DllRegisterServer", "DllUnregisterServer")
     Verify-AuthenticodeSignature $forwarder
     foreach ($runtime in @("current", "x86")) {
-        & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath (Join-Path $tsfRoot "$runtime\keytao_windows_ime.dll")
+        $timeoutSeconds = if ($runtime -eq "x86") { 90 } else { 20 }
+        & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath (Join-Path $tsfRoot "$runtime\keytao_windows_ime.dll") -TimeoutSeconds $timeoutSeconds
     }
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe)
     if ($info.ProductName -ne "KeyTao" -or $info.CompanyName -ne "rea" -or $info.ProductVersion -ne $version) {

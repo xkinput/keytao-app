@@ -32,8 +32,14 @@ release = jobs.fetch('create-release')
 check(release['if'] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')", 'Release must be tag-push-only')
 check(release['needs'].sort == (builds + ['prepare']).sort, 'Release must wait for every build')
 check(release['permissions'] == { 'contents' => 'write' }, 'Release needs contents write access')
+check(release['concurrency'] == { 'group' => 'publish-release-${{ github.ref }}', 'cancel-in-progress' => false }, 'Serialize publication of each tag')
 check(release['steps'].any? { |s| s['uses'] == 'actions/download-artifact@v4' && s.dig('with', 'merge-multiple') }, 'Release must collect all artifacts')
-check(release['steps'].any? { |s| s['run'] == 'gh release upload "$GITHUB_REF_NAME" dist/release-upload/* --clobber' }, 'Release must upload the collected artifacts')
+release_steps = release.fetch('steps')
+create_index = release_steps.index { |s| s['id'] == 'create' }
+upload_index = release_steps.index { |s| s['run'] == 'gh release upload "$GITHUB_REF_NAME" dist/release-upload/* --clobber' }
+publish_index = release_steps.index { |s| s['run'] == 'gh release edit "$GITHUB_REF_NAME" --draft=false' }
+check(create_index && upload_index && publish_index && create_index < upload_index && upload_index < publish_index, 'Release must create a draft, upload all assets, then publish')
+check([create_index, upload_index, publish_index].all? { |i| !release_steps[i].key?('if') && !release_steps[i]['continue-on-error'] }, 'Release steps must run in order and stop on failure')
 
 sync_nix = jobs.fetch('sync-nix-release')
 check(sync_nix['if'] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')", 'Nix release sync must be tag-push-only')
@@ -134,7 +140,7 @@ end
 
 # Execute the actual metadata code with read-only local inputs, never the API.
 metadata = jobs.fetch('prepare')['steps'].find { |s| s['id'] == 'metadata' }.dig('with', 'script')
-release_code = release['steps'].find { |s| s['id'] == 'create' }.dig('with', 'script')
+release_code = release_steps[create_index].dig('with', 'script')
 output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
   const assert = require('node:assert/strict')
   const resolve = new Function('context', 'core', 'require', process.argv[1])
@@ -153,18 +159,27 @@ output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
     assert.throws(() => run('workflow_dispatch', 'refs/heads/main', value))
   }
   const create = new (Object.getPrototypeOf(async function() {}).constructor)('context', 'github', process.argv[2])
+  async function createForTag(tag, releases = []) {
+    let payload
+    const id = await create({ref: `refs/tags/${tag}`, repo: {owner: 'test', repo: 'test'}}, {
+      paginate: async () => releases,
+      rest: {repos: {createRelease: async value => { payload = value; return {data: {id: 1}} }}}
+    })
+    return {id, payload}
+  }
   ;(async () => {
     for (const [tag, prerelease] of [['v1.2.1-alpha.89', true], ['v2.3.4-beta.1', true], ['v2.3.4-rc.1', true], ['v2.3.4', false]]) {
-      let payload
-      await create({ref: `refs/tags/${tag}`, repo: {owner: 'test', repo: 'test'}}, {
-        rest: {repos: {createRelease: async value => { payload = value; return {data: {id: 1}} }}}
-      })
+      const {payload} = await createForTag(tag, [{tag_name: 'v1.0.0', draft: false, id: 2}])
       assert.equal(payload.prerelease, prerelease)
       assert.equal(payload.tag_name, tag)
-      assert.equal(payload.draft, false)
+      assert.equal(payload.draft, true)
       assert.equal(payload.generate_release_notes, true)
     }
+    const draft = {tag_name: 'v2.3.4', draft: true, id: 3}
+    assert.deepEqual(await createForTag(draft.tag_name, [draft]), {id: 3, payload: undefined})
+    await assert.rejects(createForTag(draft.tag_name, [{...draft, draft: false}]), /Cannot publish/)
+    await assert.rejects(createForTag(draft.tag_name, [draft, {...draft, id: 4}]), /Cannot publish/)
   })().catch(error => { console.error(error); process.exitCode = 1 })
 JS
 check(status.success?, "Metadata/release decision checks: #{output}")
-puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, 10 asset names, SDK pins, dispatch isolation, version input and prerelease detection"
+puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, 10 asset names, SDK pins, dispatch isolation, version input, prerelease detection and draft publication order"
