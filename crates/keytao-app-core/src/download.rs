@@ -1,4 +1,7 @@
-use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme::build_client};
+use crate::{
+    Core, CoreError, CoreEvent, events::InstallProgress, generic_rime::DEFAULT_MAX_EXPANDED_BYTES,
+    scheme::build_client,
+};
 use futures_util::StreamExt;
 use std::{
     io::{Seek, Write},
@@ -20,8 +23,14 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
     cancel.borrow_and_update();
     let result: Result<_, String> = async {
         let client = build_client(core)?;
-        let mut temp =
-            download_to_temp_with(core, client.get(&url), &mut cancel, None, None).await?;
+        let mut temp = download_to_temp_with(
+            core,
+            client.get(&url),
+            &mut cancel,
+            None,
+            Some(DEFAULT_MAX_EXPANDED_BYTES),
+        )
+        .await?;
 
         if url.starts_with("https://github.com/rimeinn/rime-snow-pinyin/releases/download/")
             && url.ends_with("/snow-pinyin.zip")
@@ -154,7 +163,7 @@ mod tests {
     use std::{path::Path, sync::Arc};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
     };
 
     struct NullSink;
@@ -175,6 +184,16 @@ mod tests {
             Arc::new(NullSink),
         )
         .unwrap()
+    }
+
+    async fn read_request_headers(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.ends_with(b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "request ended prematurely");
+            request.extend_from_slice(&buffer[..count]);
+        }
     }
 
     #[tokio::test]
@@ -211,13 +230,7 @@ mod tests {
         let expected = body.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0; 1024];
-            while !request.ends_with(b"\r\n\r\n") {
-                let count = stream.read(&mut buffer).await.unwrap();
-                assert_ne!(count, 0, "request ended prematurely");
-                request.extend_from_slice(&buffer[..count]);
-            }
+            read_request_headers(&mut stream).await;
             stream
                 .write_all(
                     format!(
@@ -241,6 +254,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheme_download_rejects_an_oversized_archive_before_writing_to_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        DEFAULT_MAX_EXPANDED_BYTES + 1
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = tokio::time::timeout(Duration::from_secs(5), download_to_temp(&core, url))
+            .await
+            .expect("local download timed out")
+            .unwrap_err();
+        assert_eq!(error.to_string(), "下载文件超过大小限制");
+        assert!(!core.env().cache_dir.exists());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn interrupted_download_keeps_existing_archive_and_removes_partial_file() {
         let dir = tempfile::tempdir().unwrap();
         let core = open_core(dir.path());
@@ -251,8 +294,7 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            stream.read(&mut request).await.unwrap();
+            read_request_headers(&mut stream).await;
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",

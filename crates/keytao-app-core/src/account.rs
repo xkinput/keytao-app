@@ -2,7 +2,7 @@ use crate::{
     Core, CoreError,
     ime_host::ImeHost,
     ime_paths::path_string,
-    scheme::{api_error_message, build_client},
+    scheme::{api_error_message, build_client, client_builder},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -175,9 +175,7 @@ impl<'a> ApiClient<'a> {
     }
 
     pub(crate) async fn download_url(&self, path: &str) -> Result<String, CoreError> {
-        let client = reqwest::Client::builder()
-            .user_agent(format!("keytao-app/{}", self.core.env().app_version))
-            .connect_timeout(Duration::from_secs(8))
+        let client = client_builder(self.core)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| CoreError::Other(error.to_string()))?;
@@ -664,9 +662,7 @@ async fn issue_website_session_at(
     if api.account_id != Some(account_id) {
         return Err(CoreError::Permission("登录账号已变化".into()));
     }
-    let client = reqwest::Client::builder()
-        .user_agent(format!("keytao-app/{}", core.env().app_version))
-        .connect_timeout(Duration::from_secs(8))
+    let client = client_builder(core)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| CoreError::Network(error.to_string()))?;

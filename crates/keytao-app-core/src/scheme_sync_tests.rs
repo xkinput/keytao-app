@@ -283,8 +283,13 @@ async fn cloud_reference_for_another_scheme_is_rejected_before_storing() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
         let mut buffer = [0; 4096];
-        stream.read(&mut buffer).await.unwrap();
+        while !request.ends_with(b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "request ended prematurely");
+            request.extend_from_slice(&buffer[..count]);
+        }
         let body = json!({"packages":[{"id":1,"schemeKey":"keytao","name":"fixture","version":"v1","size":10,"sha256":"a".repeat(64),"createAt":"2026-11-11T00:00:00Z"}]}).to_string();
         stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
     });

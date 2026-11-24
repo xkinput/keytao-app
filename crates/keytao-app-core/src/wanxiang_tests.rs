@@ -477,6 +477,53 @@ impl Drop for TestRoot {
     }
 }
 
+#[test]
+fn receipt_reclaims_only_abandoned_stages_without_recovery_data() {
+    let root = TestRoot::new();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--list")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    assert!(child.wait().unwrap().success());
+
+    let abandoned = root.path.join(format!("{STAGE_PREFIX}{pid}-0"));
+    fs::create_dir_all(abandoned.join("files")).unwrap();
+    for name in ["download.zip", ".keytao-wanxiang-grammar-partial"] {
+        fs::write(abandoned.join(name), b"partial download").unwrap();
+    }
+
+    let preserved = [
+        root.path.join(format!("{STAGE_PREFIX}{pid}-1/backup")),
+        root.path.join(format!("{STAGE_PREFIX}{pid}-2/source-projection")),
+        root.path.join(format!("{STAGE_PREFIX}{}-99", std::process::id())),
+        root.path.join(format!("{STAGE_PREFIX}{pid}-unknown")),
+    ];
+    for path in &preserved {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("keep"), b"recovery data").unwrap();
+    }
+    let legacy_grammar = root.path.join(".keytao-wanxiang-grammar-legacy");
+    fs::write(&legacy_grammar, b"owner unknown").unwrap();
+    #[cfg(unix)]
+    let link = {
+        let link = root.path.join(format!("{STAGE_PREFIX}{pid}-3"));
+        std::os::unix::fs::symlink(&preserved[3], &link).unwrap();
+        link
+    };
+
+    InstallReceipt::new(&root.path).unwrap().finish().unwrap();
+
+    assert!(!abandoned.exists());
+    for path in &preserved {
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"recovery data");
+    }
+    assert_eq!(fs::read(legacy_grammar).unwrap(), b"owner unknown");
+    #[cfg(unix)]
+    assert!(link.is_symlink());
+}
+
 fn archive_at(path: &Path, entries: &[(&str, &str)]) {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, text) in entries {

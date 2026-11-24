@@ -6,6 +6,7 @@ use super::{
 use crate::{
     Core, CoreError,
     download::{DOWNLOAD_CANCELLED, download_to_temp_with, emit_progress},
+    generic_rime::DEFAULT_MAX_EXPANDED_BYTES as MAX_EXPANDED_BYTES,
     package_store::PackageStore,
     scheme::build_client,
 };
@@ -19,7 +20,6 @@ use std::{
 };
 
 const MAX_ARCHIVE_FILES: usize = 10_000;
-const MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNWRAP_DEPTH: usize = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -907,9 +907,15 @@ pub async fn import_git_scheme(
     };
 
     let client = build_client(core).map_err(CoreError::Other)?;
-    let downloaded = download_to_temp_with(core, client.get(&resolved.download_url), &mut cancel, None, None)
-        .await
-        .map_err(CoreError::Other)?;
+    let downloaded = download_to_temp_with(
+        core,
+        client.get(&resolved.download_url),
+        &mut cancel,
+        None,
+        Some(MAX_EXPANDED_BYTES),
+    )
+    .await
+    .map_err(CoreError::Other)?;
 
     emit_progress(core, "extracting", 65, "正在解压并校验方案文件...");
     let cache_dir = core.env().cache_dir.clone();
