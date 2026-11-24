@@ -203,6 +203,35 @@ void main() {
     }
   });
 
+  test(
+    'preview cache refreshes after a theme action with the same settings',
+    () async {
+      final controller = ViewController(BridgePlatform.macOs);
+      addTearDown(controller.dispose);
+      final settings = controller.uiSettings!;
+      Map<String, dynamic> preview({bool dark = false}) =>
+          controller.cachedCandidatePanelPreview(
+            colorScheme: settings.colorScheme,
+            accentColor: settings.accentColor,
+            cornerRadius: settings.cornerRadius,
+            backgroundColor: settings.backgroundColor,
+            fontSize: settings.fontSize,
+            systemDark: dark,
+          );
+
+      final light = preview();
+      final dark = preview(dark: true);
+      expect(dark, isNot(same(light)));
+      expect(preview(), same(light));
+      await controller.themeLibraryAction(() async {
+        expect(preview(), same(light));
+        expect(preview(dark: true), same(dark));
+      });
+      expect(controller.uiSettings, same(settings));
+      expect(preview(), isNot(same(light)));
+    },
+  );
+
   testWidgets('below-comment previews align horizontal candidates at the top', (
     tester,
   ) async {

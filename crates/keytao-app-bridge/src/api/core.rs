@@ -1,8 +1,8 @@
 use crate::{api::types::*, frb_generated::StreamSink, host::InstallHost, runtime};
 use flutter_rust_bridge::DartFnFuture;
 use keytao_app_core::ime_host::ImeHost;
-#[cfg(not(target_os = "android"))]
-use keytao_app_core::{events::InstallProgress, CoreEvent};
+#[cfg(target_os = "windows")]
+use keytao_app_core::CoreEvent;
 
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
@@ -933,27 +933,6 @@ pub async fn fetch_scheme_release(scheme: String) -> Result<SchemeReleaseDto, St
     })
 }
 
-/// Fetches the latest release for the same scheme key accepted by Core,
-/// downloads it, then installs into the host root. Does not deploy the IME.
-pub async fn install_latest_scheme(scheme: String) -> Result<InstallResultDto, String> {
-    #[cfg(target_os = "android")]
-    {
-        let _ = scheme;
-        return Err("Use the platform installation flow on Android".into());
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let state = runtime::state()?;
-        state.core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "fetching".into(),
-            percent: 0,
-            message: "正在获取方案版本...".into(),
-        }));
-        let release = fetch_scheme_release(scheme.clone()).await?;
-        install_scheme_from_url(release.download_url, scheme, Some(release.version)).await
-    }
-}
-
 pub async fn fetch_latest_release() -> Result<ReleaseInfoDto, String> {
     runtime::dto(
         keytao_app_core::scheme::fetch_latest_release(&runtime::state()?.core)
@@ -1009,85 +988,9 @@ pub async fn open_app_update_package(version: String, restart: bool) -> Result<S
     keytao_app_core::update::open_app_update_package(&state.core, &version, restart).await
 }
 
-/// Reads a filesystem directory. Android SAF tree URIs use the readLocalSchemas
-/// platform channel instead. Both Core-supported custom-config filenames count.
-pub fn read_local_schemas(dir: String) -> Result<LocalSchemasDto, String> {
-    let root = std::path::Path::new(&dir);
-    let has_default_custom = ["default.custom.yaml", "default-custom.yaml"]
-        .iter()
-        .any(|name| root.join(name).is_file());
-    Ok(LocalSchemasDto {
-        has_default_custom,
-        schemas: keytao_app_core::scheme::read_local_schemas(&runtime::state()?.core, dir)
-            .map_err(|error| error.to_string())?,
-    })
-}
-
-/// Returns Core's directory-first, name-sorted entries. SAF uses listFiles.
-pub fn list_dir(dir: String) -> Result<Vec<FileItemDto>, String> {
-    runtime::dto(
-        keytao_app_core::scheme::list_dir(&runtime::state()?.core, dir)
-            .map_err(|error| error.to_string())?,
-    )
-}
-
 pub fn cancel_scheme_download() -> Result<(), String> {
     runtime::state()?.core.cancel_download();
     Ok(())
-}
-
-/// Downloads and smart-installs into the selected filesystem directory without
-/// deploying. Android SAF uses download_scheme_archive and smartExtractZip.
-pub async fn install_scheme_to_dir(
-    url: String,
-    dir: String,
-    scheme_key: String,
-    version: Option<String>,
-) -> Result<InstallResultDto, String> {
-    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
-    let state = runtime::state()?;
-    let _guard = state.install_lock.lock().await;
-    let root = runtime::absolute_dir(&dir)?;
-    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let active = root
-        .canonicalize()
-        .ok()
-        .zip(state.host.user_root()?.canonicalize().ok())
-        .is_some_and(|(root, default_root)| root == default_root);
-    let archive = keytao_app_core::download::download_to_temp(&state.core, url)
-        .await
-        .map_err(|error| error.to_string())?;
-    let result = if active {
-        keytao_app_core::install::install_live_scheme(
-            &state.core,
-            archive.clone(),
-            &root,
-            &scheme_key,
-            version.as_deref(),
-        )
-        .await
-    } else {
-        keytao_app_core::install::export_scheme(&state.core, archive.clone(), &root)
-    };
-    let _ = std::fs::remove_file(archive);
-    let result = result.map_err(|error| error.to_string())?;
-    Ok(install_result_dto(result))
-}
-
-/// Android SAF sequence: confirm storage permission, pickDirectory,
-/// then listFiles/readLocalSchemas through the platform channel. Download here,
-/// call smartExtractZip(zipPath, treeUri) with its progress handler, and pass
-/// jsonEncode(result) to finish_android_install for the DTO and done event.
-/// Always call remove_downloaded_archive in Dart's finally block. Do not deploy
-/// or copy into the private/live root. Download progress uses core_events.
-/// Dart must serialize this entire sequence with all other installations:
-/// Core's fixed cache filename is protected only during each Rust call.
-pub async fn download_scheme_archive(url: String) -> Result<String, String> {
-    let state = runtime::state()?;
-    let _guard = state.install_lock.lock().await;
-    keytao_app_core::download::download_to_temp(&state.core, url)
-        .await
-        .map_err(|error| error.to_string())
 }
 
 /// Cleans up the download after extraction and package recording. Resolves
@@ -1216,6 +1119,9 @@ pub async fn finish_android_install(
     {
         let result: serde_json::Value =
             serde_json::from_str(&result_json).map_err(|error| error.to_string())?;
+        if result["coreInstall"].as_bool() != Some(true) {
+            return Err("Android private installation is required".into());
+        }
         let state = runtime::state()?;
         let _guard = state.install_lock.lock().await;
         let user_root = state.host.user_root()?;
@@ -1225,29 +1131,26 @@ pub async fn finish_android_install(
             .and_then(|root| std::path::Path::new(root).canonicalize().ok())
             .zip(user_root.canonicalize().ok())
             .is_some_and(|(root, default_root)| root == default_root);
-        if result["coreInstall"].as_bool() == Some(true) {
-            if !active {
-                return Err("Android private installation must target the IME root".into());
-            }
-            let archive = result["packageZipPath"]
-                .as_str()
-                .ok_or("Android installation is missing its archive")?;
-            let archive = downloaded_archive_path(state, archive)?;
-            if !std::fs::symlink_metadata(&archive).is_ok_and(|metadata| metadata.is_file()) {
-                return Err("Downloaded archive must be a regular file".into());
-            }
-            return keytao_app_core::install::install_live_scheme(
-                &state.core,
-                archive.to_string_lossy().into_owned(),
-                &user_root,
-                &scheme_key,
-                version.as_deref(),
-            )
-            .await
-            .map(install_result_dto)
-            .map_err(|error| error.to_string());
+        if !active {
+            return Err("Android private installation must target the IME root".into());
         }
-        Ok(install_result_dto(keytao_app_core::install::finish_android_export(&result)))
+        let archive = result["packageZipPath"]
+            .as_str()
+            .ok_or("Android installation is missing its archive")?;
+        let archive = downloaded_archive_path(state, archive)?;
+        if !std::fs::symlink_metadata(&archive).is_ok_and(|metadata| metadata.is_file()) {
+            return Err("Downloaded archive must be a regular file".into());
+        }
+        keytao_app_core::install::install_live_scheme(
+            &state.core,
+            archive.to_string_lossy().into_owned(),
+            &user_root,
+            &scheme_key,
+            version.as_deref(),
+        )
+        .await
+        .map(install_result_dto)
+        .map_err(|error| error.to_string())
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -1788,8 +1691,7 @@ pub fn wanxiang_grammar_status() -> Result<WanxiangGrammarStatusDto, String> {
 }
 
 pub fn cancel_wanxiang_grammar_download() -> Result<(), String> {
-    runtime::state()?.core.cancel_download();
-    Ok(())
+    cancel_scheme_download()
 }
 
 /// Uses the add-on deploy contract and holds the install lock through rollback.

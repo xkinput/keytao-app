@@ -324,14 +324,6 @@ class FakeCore implements RustLibApi {
   ];
 
   @override
-  Future<String> crateApiCoreDownloadSchemeArchive({
-    required String url,
-  }) async {
-    calls.add('download:$url');
-    return '/cache/archive.zip';
-  }
-
-  @override
   Future<void> crateApiCoreRemoveDownloadedArchive({
     required String path,
   }) async {

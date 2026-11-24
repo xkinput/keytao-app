@@ -171,17 +171,6 @@ pub struct UserWordsReportDto {
     pub conflicts: Vec<UserWordComparisonDto>,
 }
 
-pub struct LocalSchemasDto {
-    pub has_default_custom: bool,
-    pub schemas: Vec<String>,
-}
-
-#[derive(serde::Deserialize)]
-pub struct FileItemDto {
-    pub name: String,
-    pub is_dir: bool,
-}
-
 #[derive(serde::Deserialize)]
 pub struct AppUpdateDto {
     pub has_update: bool,
