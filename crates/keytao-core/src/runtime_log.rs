@@ -223,8 +223,9 @@ impl Logger {
         let line = self.line(level, cat, ev, dur_ms, kv);
         let mut queue = super::lock_ignore_poison(&self.queue);
         if !queue.failed && self.level.load(Ordering::Relaxed) >= level as u8 {
+            let was_empty = queue.lines.is_empty() && queue.dropped == 0;
             queue.push(line);
-            if queue.lines.len() > 256 {
+            if was_empty || queue.lines.len() > 256 {
                 self.wake.notify_one();
             }
         }
@@ -346,8 +347,21 @@ impl Logger {
         let mut checked = Instant::now();
         loop {
             let (lines, dropped, target) = {
-                let mut queue = super::lock_ignore_poison(&self.queue);
-                if queue.lines.len() <= 256 && !queue.flush && !queue.failed {
+                let queue = super::lock_ignore_poison(&self.queue);
+                let mut queue = self
+                    .wake
+                    .wait_timeout_while(
+                        queue,
+                        SETTINGS_INTERVAL.saturating_sub(checked.elapsed()),
+                        |queue| queue.completed == queue.submitted && !queue.flush && !queue.failed,
+                    )
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+                if queue.completed < queue.submitted
+                    && queue.lines.len() <= 256
+                    && !queue.flush
+                    && !queue.failed
+                {
                     queue = self
                         .wake
                         .wait_timeout(queue, FLUSH_INTERVAL)

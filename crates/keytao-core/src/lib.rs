@@ -10257,8 +10257,8 @@ pub fn generate_rime_lua_content(
             in_block_comment = !line.contains("]]");
             continue;
         }
-        if line.starts_with("--[[") {
-            in_block_comment = !line[4..].contains("]]");
+        if let Some(comment) = line.strip_prefix("--[[") {
+            in_block_comment = !comment.contains("]]");
             continue;
         }
         if line.is_empty() || line.starts_with("--") {

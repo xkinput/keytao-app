@@ -209,8 +209,6 @@ bool keytao_session_get_ascii_mode(void *session);
  */
 bool keytao_session_get_english_mode(void *session);
 
-char *keytao_session_set_english_mode_json(void *session, bool enabled);
-
 /**
  * What the linked librime can do through its own entry points, as a mask of
  * the `KEYTAO_CAP_*` bits.
@@ -338,8 +336,6 @@ bool keytao_fit_candidate_widths(const float *natural,
                                  float available,
                                  float *output);
 
-char *keytao_default_keyboard_yaml(void);
-
 char *keytao_resolve_keyboard_json(const char *default_keyboard_path,
                                    const char *user_keyboard_path);
 
@@ -415,6 +411,10 @@ char *keytao_session_set_ascii_mode_json(void *session, bool enabled);
 
 /**
  * Free a UTF-8 string returned by keytao-core-ffi.
+ *
+ * # Safety
+ * `ptr` must be null or a pointer returned by keytao-core-ffi that has not
+ * already been freed and whose string has not been modified.
  */
 void keytao_free_string(char *ptr);
 
