@@ -2652,6 +2652,16 @@ final class KeyTaoIOSKeyboardView: UIView {
             path.stroke()
         }
 
+        if item.global, item.selected, let color = candidateBar.selectedIndicatorColor, color.alpha > 0 {
+            let width = min(3, candidatePaddingX() / 3, rect.width / 3, rect.height / 3)
+            if width > 0 {
+                let height = min(20, rect.height * 0.55)
+                let indicator = CGRect(x: rect.minX + width, y: rect.midY - height / 2, width: width, height: height)
+                color.uiColor.setFill()
+                UIBezierPath(roundedRect: indicator, cornerRadius: width / 2).fill()
+            }
+        }
+
         var displayItem = item
         displayItem.selected = selected
         switch item.style {

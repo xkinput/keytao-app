@@ -1,0 +1,57 @@
+version: 3
+meta:
+  id: keytao.minimal
+  name: 素简
+  appearance: both
+common:
+  cornerRadius: 2
+  font: {weight: regular}
+pc:
+  font: {size: 16, labelSize: 13, commentSize: 13}
+  panel: {orientation: horizontal, gap: 2, paddingX: 4, paddingY: 3, preeditGap: 5}
+  candidate: {commentPosition: inline, cornerRadius: 2, paddingX: 6, paddingY: 2, minHeight: 25, borderWidth: 0, labelSuffix: ""}
+  navigation: {buttonSize: 22}
+mobile:
+  keyboard:
+    key: {cornerRadius: 5, shadowOffsetY: 0}
+  candidateBar: {cornerRadius: 3, borderWidth: 0, selectedBorderWidth: 0, paddingX: 7, inlineGap: 3}
+light:
+  common: {accentColor: "#146D73", backgroundColor: "#FBFCFC"}
+  pc:
+    panel: {borderColor: "#C8CDD0"}
+    candidate:
+      foreground: "#23292C"
+      labelColor: "#515B60"
+      commentColor: "#555F64"
+      selectedBackground: "#E9EEEF"
+      selectedForeground: "#23292C"
+      selectedLabelColor: "#146D73"
+      selectedCommentColor: "#485459"
+      selectedBorderColor: transparent
+  mobile:
+    keyboard:
+      background: "#ECEEEF"
+      key: {background: "#FBFCFC", borderColor: "#C5CDCF", hintForeground: "#485359"}
+      keyStates:
+        shiftOn: {borderColor: "#146D73"}
+    candidateBar: {background: "#ECEEEF", itemBackground: transparent}
+dark:
+  common: {accentColor: "#89D8D9", backgroundColor: "#24292C"}
+  pc:
+    panel: {borderColor: "#525D61"}
+    candidate:
+      foreground: "#F2F5F5"
+      labelColor: "#BAC7C9"
+      commentColor: "#BCC8CA"
+      selectedBackground: "#354042"
+      selectedForeground: "#F6FAFA"
+      selectedLabelColor: "#89D8D9"
+      selectedCommentColor: "#D1DDDE"
+      selectedBorderColor: transparent
+  mobile:
+    keyboard:
+      background: "#202527"
+      key: {background: "#2E3538", borderColor: "#4E5A5E", hintForeground: "#C7D1D3"}
+      keyStates:
+        shiftOn: {borderColor: "#89D8D9"}
+    candidateBar: {background: "#202527", itemBackground: transparent}

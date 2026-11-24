@@ -1,0 +1,58 @@
+version: 3
+meta:
+  id: keytao.night-watch
+  name: 夜航
+  appearance: both
+common:
+  cornerRadius: 14
+  font: {weight: semibold}
+pc:
+  font: {size: 21, labelSize: 13, commentSize: 14}
+  panel: {orientation: horizontal, gap: 5, paddingX: 9, paddingY: 8}
+  candidate: {commentPosition: below, cornerRadius: 8, paddingX: 9, paddingY: 5, inlineGap: 5}
+mobile:
+  keyboard:
+    key: {cornerRadius: 8, shadowOffsetY: 1}
+  candidateBar: {commentPosition: inline, cornerRadius: 6, itemBackground: transparent}
+light:
+  common: {accentColor: "#A96C1B", backgroundColor: "#F0F5FB"}
+  pc:
+    panel: {borderColor: "#BAC8DA"}
+    candidate:
+      foreground: "#182A44"
+      labelColor: "#495D76"
+      commentColor: "#4E627A"
+      selectedBackground: "#F5DCAC"
+      selectedForeground: "#372A1A"
+      selectedLabelColor: "#754510"
+      selectedCommentColor: "#52412F"
+      selectedBorderColor: "#A97635"
+      pressedBackground: "#E9C892"
+      pressedForeground: "#372A1A"
+    navigation: {foreground: "#495D76"}
+    modeHint: {background: "#F0F5FB", foreground: "#182A44"}
+  mobile:
+    keyboard:
+      background: "#DCE6F2"
+      key: {background: "#F5F9FF", borderColor: "#B6C5D8", hintForeground: "#394E67"}
+dark:
+  common: {accentColor: "#FABE63", backgroundColor: "#101D30"}
+  pc:
+    panel: {borderColor: "#425979"}
+    candidate:
+      foreground: "#E8F1FF"
+      labelColor: "#ADBED4"
+      commentColor: "#B9C8DB"
+      selectedBackground: "#403221"
+      selectedForeground: "#FFF2DB"
+      selectedLabelColor: "#FFCB79"
+      selectedCommentColor: "#F5D5A3"
+      selectedBorderColor: "#BD883D"
+      pressedBackground: "#594327"
+      pressedForeground: "#FFF2DB"
+    navigation: {foreground: "#ADBED4"}
+    modeHint: {background: "#101D30", foreground: "#E8F1FF"}
+  mobile:
+    keyboard:
+      background: "#142237"
+      key: {background: "#263B57", borderColor: "#4B6381", shadowColor: "#07111CF0"}

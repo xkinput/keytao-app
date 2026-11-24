@@ -245,6 +245,7 @@ public struct KeyTaoImeTheme: Codable {
             public var selectedLabelColor: KeyTaoThemeColor
             public var borderColor: KeyTaoThemeColor
             public var selectedBorderColor: KeyTaoThemeColor
+            public var selectedIndicatorColor: KeyTaoThemeColor?
             public var borderWidth: CGFloat
             public var selectedBorderWidth: CGFloat
             public var cornerRadius: CGFloat

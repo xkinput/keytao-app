@@ -1313,6 +1313,26 @@ impl PanelRenderer {
         );
 
         let option_pad_x = self.s(candidate_theme.padding_x);
+        if let Some(color) = candidate_theme
+            .selected_indicator_color
+            .filter(|color| candidate.selected && color.alpha > 0)
+        {
+            let indicator_width = self.s(3.0).min(option_pad_x / 3.0).min(width / 3.0);
+            let indicator_height = self.s(20.0).min(height * 0.55);
+            if indicator_width >= 1.0 && indicator_height >= 1.0 {
+                draw_rounded_rect(
+                    pm,
+                    x + indicator_width,
+                    y + (height - indicator_height) * 0.5,
+                    indicator_width,
+                    indicator_height,
+                    indicator_width * 0.5,
+                    color,
+                    color,
+                    0.0,
+                );
+            }
+        }
         let inline_gap = self.s(candidate_theme.inline_gap);
         let label_x = x + option_pad_x;
         let (text_x, baseline, comment_baseline) = if let Some(stacked) = stacked {

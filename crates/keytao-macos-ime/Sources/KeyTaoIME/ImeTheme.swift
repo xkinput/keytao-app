@@ -110,6 +110,7 @@ struct ImeTheme: Codable {
         var commentPosition: CandidateCommentPosition?
         var borderColor: ThemeColor
         var selectedBorderColor: ThemeColor
+        var selectedIndicatorColor: ThemeColor?
         var borderWidth: CGFloat
         var cornerRadius: CGFloat
         var paddingX: CGFloat

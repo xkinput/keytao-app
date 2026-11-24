@@ -1,0 +1,81 @@
+version: 3
+meta:
+  id: keytao.windows11
+  name: Windows11
+  appearance: both
+common:
+  cornerRadius: 6
+  font: {weight: regular}
+pc:
+  font: {size: 17, labelSize: 14, commentSize: 13}
+  panel: {orientation: horizontal, gap: 3, paddingX: 5, paddingY: 5, preeditGap: 5}
+  candidate:
+    commentPosition: inline
+    cornerRadius: 5
+    paddingX: 12
+    paddingY: 3
+    minHeight: 30
+    borderWidth: 0
+    selectedBorderColor: transparent
+    labelSuffix: ""
+  navigation: {buttonSize: 24}
+mobile:
+  keyboard:
+    key: {cornerRadius: 8, shadowOffsetY: 1}
+  candidateBar:
+    cornerRadius: 6
+    paddingX: 11
+    inlineGap: 3
+    itemBackground: transparent
+    borderWidth: 0
+    selectedBorderWidth: 0
+light:
+  common: {accentColor: "#137B87", backgroundColor: "#F7F8FA"}
+  pc:
+    panel: {borderColor: "#CCD2D8"}
+    candidate:
+      foreground: "#242A30"
+      labelColor: "#4F5962"
+      commentColor: "#4F5962"
+      selectedBackground: "#E6EAEE"
+      selectedForeground: "#242A30"
+      selectedLabelColor: "#424D56"
+      selectedCommentColor: "#424D56"
+      selectedIndicatorColor: "#137B87"
+      pressedBackground: "#D9E5E8"
+      pressedForeground: "#242A30"
+    modeHint: {background: "#F7F8FA", foreground: "#242A30", borderColor: "#AABEC4"}
+  mobile:
+    keyboard:
+      background: "#EBEFF1"
+      key: {background: "#FCFDFE", borderColor: "#C5CFD4", hintForeground: "#46545E"}
+      keyTypes:
+        enter: {background: "#B8DFE3", foreground: "#123A41", borderColor: "#98C3CA"}
+      keyStates:
+        shiftOn: {borderColor: "#137B87"}
+    candidateBar: {background: "#EBEFF1"}
+dark:
+  common: {accentColor: "#86DCE3", backgroundColor: "#24282D"}
+  pc:
+    panel: {borderColor: "#535D65"}
+    candidate:
+      foreground: "#F0F4F5"
+      labelColor: "#C0CDD0"
+      commentColor: "#C0CDD0"
+      selectedBackground: "#363F46"
+      selectedForeground: "#F5F8F9"
+      selectedLabelColor: "#D7E1E4"
+      selectedCommentColor: "#D7E1E4"
+      selectedIndicatorColor: "#86DCE3"
+      pressedBackground: "#42545B"
+      pressedForeground: "#F5F8F9"
+    modeHint: {background: "#24282D", foreground: "#F0F4F5", borderColor: "#5E7980"}
+  mobile:
+    keyboard:
+      background: "#23292E"
+      key: {background: "#343D45", borderColor: "#4A5962", hintForeground: "#DBE3E6"}
+      keyTypes:
+        enter: {background: "#32616A", foreground: "#F2FAFB", borderColor: "#52838A"}
+      keyStates:
+        shiftOn: {borderColor: "#86DCE3"}
+    candidateBar: {background: "#23292E"}

@@ -193,6 +193,9 @@ fn resolve_mobile_theme_for_platform(
     ] {
         mobile["candidateBar"][field] = json!(value);
     }
+    if let Some(indicator) = pc.candidate.selected_indicator_color {
+        mobile["candidateBar"]["selectedIndicatorColor"] = color(indicator);
+    }
 
     let mut overrides = overrides.clone();
     normalize_colors(&mut overrides);
@@ -388,6 +391,7 @@ fn is_color_field(field: &str) -> bool {
             | "selectedBackground"
             | "itemBackground"
             | "selectedBorderColor"
+            | "selectedIndicatorColor"
             | "labelColor"
             | "selectedLabelColor"
             | "selectedCommentColor"

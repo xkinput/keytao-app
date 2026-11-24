@@ -800,6 +800,26 @@ impl PanelRenderer {
             }
             return;
         }
+        if let Some(color) = option
+            .selected_indicator_color
+            .filter(|color| candidate.selected && color.alpha > 0)
+        {
+            let indicator_width = (3.0 * scale).min(option.padding_x / 3.0).min(width / 3.0);
+            let indicator_height = (20.0 * scale).min(height * 0.55);
+            if indicator_width >= 1.0 && indicator_height >= 1.0 {
+                draw_rounded_rect(
+                    pm,
+                    x + indicator_width,
+                    y + (height - indicator_height) * 0.5,
+                    indicator_width,
+                    indicator_height,
+                    indicator_width * 0.5,
+                    color,
+                    color,
+                    0.0,
+                );
+            }
+        }
         self.draw_text(
             pm,
             &candidate.label,
@@ -1295,6 +1315,59 @@ mod tests {
         CandidatePanelInput, CommentPosition, PanelOrientation, ResolvedImeTheme, ThemeCandidate,
         UiCapabilities,
     };
+
+    #[test]
+    fn selected_indicator_paints_only_in_the_selected_gutter() {
+        let renderer = PanelRenderer::new(Arc::new(FontSet {
+            family: String::new(),
+            fonts: Vec::new(),
+        }));
+        let mut theme = ResolvedImeTheme::default();
+        theme.panel.shadow = false;
+        theme.candidate.padding_x = 12.0;
+        let model = theme.candidate_panel_model(
+            CandidatePanelInput {
+                preedit: String::new(),
+                candidates: (0..2)
+                    .map(|_| ThemeCandidate {
+                        text: "word".into(),
+                        comment: None,
+                    })
+                    .collect(),
+                highlighted_candidate_index: 1,
+                page: 0,
+                is_last_page: true,
+                select_keys: None,
+            },
+            &UiCapabilities::full_custom(),
+        );
+        let baseline = renderer.render(&model, 2.0, theme.clone(), 1920.0, None);
+        theme.candidate.selected_indicator_color = Some(keytao_theme::RgbaColor {
+            red: 20,
+            green: 140,
+            blue: 135,
+            alpha: 255,
+        });
+        let marked = renderer.render(&model, 2.0, theme, 1920.0, None);
+        assert_eq!(marked.hit_areas, baseline.hit_areas);
+        let selected = marked.hit_areas.candidates[1];
+        let mut visible = false;
+        for (index, (before, after)) in baseline
+            .pixels
+            .chunks_exact(4)
+            .zip(marked.pixels.chunks_exact(4))
+            .enumerate()
+        {
+            if before != after {
+                let x = (index % marked.width as usize) as f32;
+                let y = (index / marked.width as usize) as f32;
+                assert!(selected.contains(x.into(), y.into()));
+                assert!(x < selected.x + 24.0);
+                visible |= after == [135, 140, 20, 255];
+            }
+        }
+        assert!(visible);
+    }
 
     #[test]
     fn below_comments_use_their_own_line_and_fit_the_candidate_hit_area() {

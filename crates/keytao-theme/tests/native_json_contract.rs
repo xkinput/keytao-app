@@ -22,12 +22,11 @@ fn swift_fields(name: &str) -> Vec<(&'static str, &'static str)> {
 
 fn check_fields(name: &str, value: &Value) {
     for (field, kind) in swift_fields(name) {
-        let v = value
-            .get(field)
-            .unwrap_or_else(|| panic!("Swift {name}.{field} missing"));
-        if kind.ends_with('?') && v.is_null() {
+        let field_value = value.get(field);
+        if kind.ends_with('?') && field_value.is_none_or(Value::is_null) {
             continue;
         }
+        let v = field_value.unwrap_or_else(|| panic!("Swift {name}.{field} missing"));
         match kind.trim_end_matches('?') {
             "String"
             | "ThemeFontWeight"
@@ -59,6 +58,7 @@ fn compiled_json_round_trips_against_swift_decoder_fields() {
             "meta": {"id": "my.contract", "name": "Contract", "appearance": appearance},
             "common": {"accentColor": "#12345678", "font": {"family": "A, B", "weight": "heavy"}},
             "pc": {"font": {"commentSize": 17}, "candidate": {"commentPosition": "below"}},
+            "light": {"pc": {"candidate": {"selectedIndicatorColor": "#137B87"}}},
             "mobile": {
                 "keyboard": {"key": {"background": "#12345678"}},
                 "candidateBar": {"commentPosition": "inline", "commentFontSize": 30}

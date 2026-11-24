@@ -334,90 +334,107 @@ class CandidatePanelPreview extends StatelessWidget {
               selected
                   ? 'pc.candidate.selectedBackground'
                   : 'pc.candidate.background',
-              Container(
-                width: width,
-                constraints: BoxConstraints(
-                  minHeight: _metric(option, 'minHeight'),
-                ),
-                decoration: BoxDecoration(
-                  color: _color(
-                    option,
-                    selected
-                        ? 'selectedBackground'
-                        : editorPreview && index == 1
-                        ? 'hoverBackground'
-                        : 'background',
+              CustomPaint(
+                foregroundPainter: selected
+                    ? themePreviewCandidateIndicator(
+                        option['selectedIndicatorColor'],
+                        _metric(option, 'paddingX'),
+                      )
+                    : null,
+                child: Container(
+                  width: width,
+                  constraints: BoxConstraints(
+                    minHeight: _metric(option, 'minHeight'),
                   ),
-                  borderRadius: BorderRadius.circular(
-                    _metric(option, 'cornerRadius'),
+                  decoration: BoxDecoration(
+                    color: _color(
+                      option,
+                      selected
+                          ? 'selectedBackground'
+                          : editorPreview && index == 1
+                          ? 'hoverBackground'
+                          : 'background',
+                    ),
+                    borderRadius: BorderRadius.circular(
+                      _metric(option, 'cornerRadius'),
+                    ),
                   ),
-                ),
-                foregroundDecoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(
-                    _metric(option, 'cornerRadius'),
+                  foregroundDecoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(
+                      _metric(option, 'cornerRadius'),
+                    ),
+                    border:
+                        themePreviewBorder(highlightItem) ??
+                        (!editorPreview || _metric(option, 'borderWidth') > 0
+                            ? Border.all(
+                                color: _color(
+                                  option,
+                                  selected
+                                      ? 'selectedBorderColor'
+                                      : 'borderColor',
+                                ),
+                                width: !editorPreview && selected
+                                    ? math
+                                          .max(
+                                            1,
+                                            _metric(option, 'borderWidth'),
+                                          )
+                                          .toDouble()
+                                    : _metric(option, 'borderWidth'),
+                              )
+                            : null),
                   ),
-                  border:
-                      themePreviewBorder(highlightItem) ??
-                      (!editorPreview || _metric(option, 'borderWidth') > 0
-                          ? Border.all(
-                              color: _color(
-                                option,
-                                selected
-                                    ? 'selectedBorderColor'
-                                    : 'borderColor',
+                  padding: EdgeInsets.symmetric(
+                    horizontal: math.min(
+                      _metric(option, 'paddingX'),
+                      width / 2,
+                    ),
+                    vertical: _metric(option, 'paddingY'),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: alignStackedRow
+                        ? Alignment.topLeft
+                        : Alignment.centerLeft,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: stacked
+                          ? CrossAxisAlignment.start
+                          : CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        if (stacked)
+                          Padding(
+                            padding: EdgeInsets.only(
+                              top: math.max(
+                                0,
+                                (wordSize.height - labelSize.height) / 2,
                               ),
-                              width: !editorPreview && selected
-                                  ? math
-                                        .max(1, _metric(option, 'borderWidth'))
-                                        .toDouble()
-                                  : _metric(option, 'borderWidth'),
-                            )
-                          : null),
-                ),
-                padding: EdgeInsets.symmetric(
-                  horizontal: math.min(_metric(option, 'paddingX'), width / 2),
-                  vertical: _metric(option, 'paddingY'),
-                ),
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: alignStackedRow
-                      ? Alignment.topLeft
-                      : Alignment.centerLeft,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: stacked
-                        ? CrossAxisAlignment.start
-                        : CrossAxisAlignment.baseline,
-                    textBaseline: TextBaseline.alphabetic,
-                    children: [
-                      if (stacked)
-                        Padding(
-                          padding: EdgeInsets.only(
-                            top: math.max(
-                              0,
-                              (wordSize.height - labelSize.height) / 2,
                             ),
-                          ),
-                          child: number,
-                        )
-                      else
-                        number,
-                      SizedBox(width: inlineGap),
-                      if (stacked)
-                        Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          spacing: inlineGap / 2,
-                          children: [word, if (comment.isNotEmpty) annotation],
-                        )
-                      else ...[
-                        word,
-                        if (comment.isNotEmpty) ...[
-                          SizedBox(width: inlineGap),
-                          annotation,
+                            child: number,
+                          )
+                        else
+                          number,
+                        SizedBox(width: inlineGap),
+                        if (stacked)
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            spacing: inlineGap / 2,
+                            children: [
+                              word,
+                              if (comment.isNotEmpty) annotation,
+                            ],
+                          )
+                        else ...[
+                          word,
+                          if (comment.isNotEmpty) ...[
+                            SizedBox(width: inlineGap),
+                            annotation,
+                          ],
                         ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
               ),

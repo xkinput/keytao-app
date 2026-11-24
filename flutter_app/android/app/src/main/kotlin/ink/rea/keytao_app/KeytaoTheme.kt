@@ -25,9 +25,10 @@ data class KeytaoColor(val red: Int, val green: Int, val blue: Int, val alpha: I
     }
 }
 
-internal fun JSONObject.themeColor(field: String): KeytaoColor = getJSONObject(field).let {
-    KeytaoColor(it.getInt("red"), it.getInt("green"), it.getInt("blue"), it.getInt("alpha"))
-}
+internal fun JSONObject.themeColor(field: String): KeytaoColor = getJSONObject(field).toKeytaoColor()
+
+private fun JSONObject.toKeytaoColor(): KeytaoColor =
+    KeytaoColor(getInt("red"), getInt("green"), getInt("blue"), getInt("alpha"))
 
 private fun themeTypeface(weight: String, family: Typeface): Typeface {
     val fontWeight = when (weight) {
@@ -89,9 +90,8 @@ class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {
     val isDark = mobile.getBoolean("isDark")
     val uiColorScheme = ui.getString("colorScheme")
     val effectiveColorScheme = ui.getString("effectiveColorScheme")
-    val accentColor = ui.optJSONObject("accentColor")?.let {
-        KeytaoColor(it.getInt("red"), it.getInt("green"), it.getInt("blue"), it.getInt("alpha"))
-    } ?: candidateBar.themeColor("selectedLabelColor")
+    val accentColor = ui.optJSONObject("accentColor")?.toKeytaoColor()
+        ?: candidateBar.themeColor("selectedLabelColor")
     val panelBackground = keyboard.themeColor("background")
     val panelBorder = key.borderColor
     val keyBackground = key.background
@@ -107,6 +107,8 @@ class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {
     val candidateBackground = candidateBar.themeColor("itemBackground")
     val candidateBorderColor = candidateBar.themeColor("borderColor")
     val candidateSelectedBorderColor = candidateBar.themeColor("selectedBorderColor")
+    val candidateSelectedIndicatorColor = candidateBar.optJSONObject("selectedIndicatorColor")
+        ?.toKeytaoColor()
     val candidateBorderWidthDp = candidateBar.getDouble("borderWidth").toFloat()
     val candidateSelectedBorderWidthDp = candidateBar.getDouble("selectedBorderWidth").toFloat()
     val candidateCornerRadiusDp = candidateBar.getDouble("cornerRadius").toFloat()

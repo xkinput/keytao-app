@@ -388,6 +388,8 @@ pub struct CandidateTheme {
     pub comment_position: CommentPosition,
     pub border_color: RgbaColor,
     pub selected_border_color: RgbaColor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_indicator_color: Option<RgbaColor>,
     pub border_width: f32,
     pub corner_radius: f32,
     pub padding_x: f32,
@@ -972,6 +974,7 @@ fn resolve_legacy_partials(
             theme.candidate.selected_comment_color = alternate.candidate.selected_comment_color;
             theme.candidate.border_color = alternate.candidate.border_color;
             theme.candidate.selected_border_color = alternate.candidate.selected_border_color;
+            theme.candidate.selected_indicator_color = alternate.candidate.selected_indicator_color;
             theme.candidate.separator_color = alternate.candidate.separator_color;
             theme.navigation.foreground = alternate.navigation.foreground;
             theme.navigation.disabled_foreground = alternate.navigation.disabled_foreground;
@@ -1067,6 +1070,7 @@ impl ResolvedImeTheme {
                 comment_position: CommentPosition::Inline,
                 border_color: rgba(0, 0, 0, 0),
                 selected_border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
+                selected_indicator_color: None,
                 border_width: 1.0,
                 corner_radius: 11.0,
                 padding_x: 10.0,
@@ -1423,6 +1427,8 @@ struct PartialCandidateTheme {
     border_color: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
     selected_border_color: Option<RgbaColor>,
+    #[serde(default, deserialize_with = "optional_color")]
+    selected_indicator_color: Option<RgbaColor>,
     border_width: Option<f32>,
     corner_radius: Option<f32>,
     padding_x: Option<f32>,
@@ -1569,6 +1575,9 @@ impl CandidateTheme {
             &mut self.selected_border_color,
             partial.selected_border_color,
         );
+        if let Some(color) = partial.selected_indicator_color {
+            self.selected_indicator_color = (color.alpha > 0).then_some(color);
+        }
         assign(&mut self.border_width, partial.border_width);
         assign(&mut self.corner_radius, partial.corner_radius);
         assign(&mut self.padding_x, partial.padding_x);

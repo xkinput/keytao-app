@@ -185,6 +185,7 @@ fn source_schema(preserve_local_text: bool) -> Value {
     let pc = resolved_to_flat(&ResolvedImeTheme::schema_base(UiTheme::default()));
     let common = json!({"accentColor":"color", "backgroundColor":"color", "cornerRadius":0, "font":{"family":if preserve_local_text { "localFamily" } else { "family" }, "weight":"weight"}});
     let mut pc_schema = pc;
+    pc_schema["candidate"]["selectedIndicatorColor"] = json!("color");
     pc_schema["font"].as_object_mut().unwrap().remove("family");
     pc_schema["font"].as_object_mut().unwrap().remove("weight");
     // Convert serialized PC leaf values to validation descriptors.
@@ -228,7 +229,7 @@ fn source_schema(preserve_local_text: bool) -> Value {
         "toolbar":{"background":"color","foreground":"color","selectedForeground":"color",
             "buttonBackground":"color","buttonBorderColor":"color","activeBackground":"color","selectedBackground":"color","pressedBackground":"color","activeBorderColor":"color","buttonBorderWidth":0,"buttonCornerRadius":0},"floating":{"borderColor":"color","shadowColor":"color"}},
         "candidateBar":{"background":"color","foreground":"color","selectedForeground":"color","selectedBackground":"color","commentColor":"color","fontScale":1,"commentFontSize":12,"showComment":true,"commentPosition":"commentPosition","preeditForeground":"color","preeditBackground":"color","expandedBackground":"color",
-            "itemBackground":"color","borderColor":"color","selectedBorderColor":"color","labelColor":"color","selectedLabelColor":"color","selectedCommentColor":"color","borderWidth":0,"selectedBorderWidth":0,"cornerRadius":0,"paddingX":0,"inlineGap":0}});
+            "itemBackground":"color","borderColor":"color","selectedBorderColor":"color","selectedIndicatorColor":"color","labelColor":"color","selectedLabelColor":"color","selectedCommentColor":"color","borderWidth":0,"selectedBorderWidth":0,"cornerRadius":0,"paddingX":0,"inlineGap":0}});
     let variant = json!({"common":common,"pc":pc_schema,"mobile":mobile});
     json!({"version":3,"meta":{"id":"id","name":"text64","author":"text64","appearance":"appearance"},"common":common,"pc":pc_schema,"mobile":mobile,"light":variant,"dark":variant})
 }
@@ -744,6 +745,11 @@ pub fn compile_theme(source: &ThemeSource, base_theme_yaml: &str) -> Result<Stri
     });
     merge(&mut root, &resolved_to_flat(&light));
     let mut dark_flat = resolved_to_flat(&dark);
+    if light.candidate.selected_indicator_color.is_some()
+        && dark.candidate.selected_indicator_color.is_none()
+    {
+        dark_flat["candidate"]["selectedIndicatorColor"] = json!("transparent");
+    }
     dark_flat["mobile"] = dark.mobile.clone();
     root["version"] = json!(THEME_SCHEMA_VERSION);
     root["dark"] = dark_flat;
@@ -791,6 +797,21 @@ mod tests {
             json!({"version":3,"meta":{"id":"my.sample","name":"Sample","appearance":"both"}});
         merge(&mut v, &extra);
         parse_theme_source_json(&v.to_string()).unwrap()
+    }
+
+    #[test]
+    fn selected_indicator_round_trips_without_leaking_to_the_other_appearance() {
+        let source = source(json!({
+            "light": {"pc": {"candidate": {"selectedIndicatorColor": "#137B87"}}}
+        }));
+        let compiled = compile_theme(&source, "").unwrap();
+        let light = crate::resolve_compiled_theme_yaml(&compiled, EffectiveColorScheme::Light);
+        let dark = crate::resolve_compiled_theme_yaml(&compiled, EffectiveColorScheme::Dark);
+        let indicator = parse_color("#137B87").unwrap();
+        assert_eq!(light.candidate.selected_indicator_color, Some(indicator));
+        assert_eq!(light.mobile["candidateBar"]["selectedIndicatorColor"], json!(indicator));
+        assert!(dark.candidate.selected_indicator_color.is_none());
+        assert!(dark.mobile["candidateBar"].get("selectedIndicatorColor").is_none());
     }
 
     #[test]

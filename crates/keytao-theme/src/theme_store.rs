@@ -28,9 +28,15 @@ pub const CURRENT_THEME_ID: &str = "my.current";
 pub const DEFAULT_THEME_ID: &str = "keytao.default";
 const BUILT_IN_THEMES: &[(&str, &str)] = &[
     (DEFAULT_THEME_ID, r#"{"version":3,"meta":{"id":"keytao.default","name":"默认","appearance":"both"}}"#),
+    ("keytao.windows11", include_str!("../presets/windows11.yaml")),
+    ("keytao.minimal", include_str!("../presets/minimal.yaml")),
     ("keytao.celadon", include_str!("../presets/celadon.yaml")),
     ("keytao.letterpress", include_str!("../presets/letterpress.yaml")),
     ("keytao.aurora", include_str!("../presets/aurora.yaml")),
+    ("keytao.paper-ink", include_str!("../presets/paper-ink.yaml")),
+    ("keytao.night-watch", include_str!("../presets/night-watch.yaml")),
+    ("keytao.sea-salt", include_str!("../presets/sea-salt.yaml")),
+    ("keytao.cinnabar", include_str!("../presets/cinnabar.yaml")),
 ];
 
 static STORE_LOCK: Mutex<()> = Mutex::new(());

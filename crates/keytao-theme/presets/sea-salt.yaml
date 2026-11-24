@@ -1,0 +1,61 @@
+version: 3
+meta:
+  id: keytao.sea-salt
+  name: 海盐
+  appearance: both
+common:
+  cornerRadius: 24
+  font: {weight: medium}
+pc:
+  font: {size: 20, labelSize: 13, commentSize: 14}
+  panel: {orientation: horizontal, gap: 5, paddingX: 8, paddingY: 7}
+  candidate: {cornerRadius: 18, borderWidth: 1, paddingX: 11, paddingY: 6}
+mobile:
+  keyboard:
+    key: {cornerRadius: 10, shadowOffsetY: 2}
+  candidateBar: {cornerRadius: 13, paddingX: 9, selectedBorderWidth: 1}
+light:
+  common: {accentColor: "#2861AD", backgroundColor: "#F4F9FE"}
+  pc:
+    panel: {borderColor: "#B5CBE2"}
+    candidate:
+      foreground: "#153354"
+      labelColor: "#486584"
+      commentColor: "#486584"
+      selectedBackground: "#DBECFF"
+      selectedForeground: "#153354"
+      selectedLabelColor: "#224F91"
+      selectedCommentColor: "#335475"
+      selectedBorderColor: "#6893C5"
+    navigation: {foreground: "#486584"}
+  mobile:
+    keyboard:
+      background: "#DDEAF7"
+      key:
+        background: "#F7FBFF"
+        foreground: "#153354"
+        hintForeground: "#34516F"
+        borderColor: "#ACC5DE"
+        shadowColor: "#6286AD55"
+dark:
+  common: {accentColor: "#92BBF0", backgroundColor: "#172536"}
+  pc:
+    panel: {borderColor: "#557799"}
+    candidate:
+      foreground: "#E6F3FF"
+      labelColor: "#ABC2D9"
+      commentColor: "#ABC2D9"
+      selectedBackground: "#2B4E73"
+      selectedForeground: "#F4FAFF"
+      selectedLabelColor: "#BEDDFF"
+      selectedCommentColor: "#D0E4FA"
+      selectedBorderColor: "#729BC6"
+    navigation: {foreground: "#ABC2D9"}
+  mobile:
+    keyboard:
+      background: "#152436"
+      key:
+        background: "#263B51"
+        foreground: "#E6F3FF"
+        borderColor: "#45637F"
+        shadowColor: "#08152277"

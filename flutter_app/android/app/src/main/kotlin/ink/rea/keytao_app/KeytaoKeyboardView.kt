@@ -2790,7 +2790,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             else -> when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
                 4 -> drawCandidateGridCell(canvas, displayItem, rect)
                 1 -> drawClipboardCandidateRow(canvas, displayItem, rect)
-                else -> drawInlineCandidateOption(canvas, displayItem, rect, stacked)
+                else -> {
+                    val indicator = theme.candidateSelectedIndicatorColor
+                    if (item.selected && item.command == null && indicator != null && indicator.alpha > 0) {
+                        val indicatorWidth = minOf(dp(3f), dp(candidatePaddingXDp()) / 3f, rect.width() / 3f)
+                        val indicatorHeight = minOf(dp(20f), rect.height() * 0.55f)
+                        if (indicatorWidth > 0f && indicatorHeight > 0f) {
+                            val left = rect.left + indicatorWidth
+                            val radius = indicatorWidth / 2f
+                            paint.style = Paint.Style.FILL
+                            paint.color = indicator.toArgb()
+                            canvas.drawRoundRect(
+                                left, rect.centerY() - indicatorHeight / 2f,
+                                left + indicatorWidth, rect.centerY() + indicatorHeight / 2f,
+                                radius, radius, paint,
+                            )
+                        }
+                    }
+                    drawInlineCandidateOption(canvas, displayItem, rect, stacked)
+                }
             }
         }
     }

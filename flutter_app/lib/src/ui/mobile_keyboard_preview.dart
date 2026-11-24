@@ -15,6 +15,48 @@ Widget themePreviewOutline(Widget child, bool highlighted) => DecoratedBox(
   child: child,
 );
 
+CustomPainter? themePreviewCandidateIndicator(Object? color, double paddingX) {
+  if (color is! Map<String, dynamic> || color['alpha'] == 0 || paddingX <= 0) {
+    return null;
+  }
+  return _CandidateIndicatorPainter(
+    Color.fromARGB(
+      color['alpha'] as int,
+      color['red'] as int,
+      color['green'] as int,
+      color['blue'] as int,
+    ),
+    paddingX,
+  );
+}
+
+class _CandidateIndicatorPainter extends CustomPainter {
+  const _CandidateIndicatorPainter(this.color, this.paddingX);
+
+  final Color color;
+  final double paddingX;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final width = math.min(3.0, math.min(paddingX, size.width / 2) / 3);
+    final height = math.min(20.0, size.height * 0.55);
+    final mark = Rect.fromLTWH(
+      width,
+      (size.height - height) / 2,
+      width,
+      height,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(mark, Radius.circular(width / 2)),
+      Paint()..color = color,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CandidateIndicatorPainter oldDelegate) =>
+      color != oldDelegate.color || paddingX != oldDelegate.paddingX;
+}
+
 class MobileKeyboardPreview extends StatelessWidget {
   const MobileKeyboardPreview({
     super.key,
@@ -667,81 +709,90 @@ class MobileKeyboardPreview extends StatelessWidget {
                                 index++
                               )
                                 edit(
-                                  Container(
-                                    height: candidateHeight,
-                                    padding: EdgeInsets.symmetric(
-                                      horizontal: _metric(
-                                        candidateBar,
-                                        'paddingX',
+                                  CustomPaint(
+                                    foregroundPainter: index == 0
+                                        ? themePreviewCandidateIndicator(
+                                            candidateBar['selectedIndicatorColor'],
+                                            _metric(candidateBar, 'paddingX'),
+                                          )
+                                        : null,
+                                    child: Container(
+                                      height: candidateHeight,
+                                      padding: EdgeInsets.symmetric(
+                                        horizontal: _metric(
+                                          candidateBar,
+                                          'paddingX',
+                                        ),
+                                        vertical: alignStackedRow ? 3 : 0,
                                       ),
-                                      vertical: alignStackedRow ? 3 : 0,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: _color(
-                                        candidateBar,
-                                        index == 0
-                                            ? 'selectedBackground'
-                                            : 'itemBackground',
+                                      decoration: BoxDecoration(
+                                        color: _color(
+                                          candidateBar,
+                                          index == 0
+                                              ? 'selectedBackground'
+                                              : 'itemBackground',
+                                        ),
+                                        borderRadius: BorderRadius.circular(
+                                          _metric(candidateBar, 'cornerRadius'),
+                                        ),
+                                        boxShadow: index == 0
+                                            ? surfaceShadow
+                                            : null,
                                       ),
-                                      borderRadius: BorderRadius.circular(
-                                        _metric(candidateBar, 'cornerRadius'),
-                                      ),
-                                      boxShadow: index == 0
-                                          ? surfaceShadow
-                                          : null,
-                                    ),
-                                    foregroundDecoration: BoxDecoration(
-                                      border:
-                                          themePreviewBorder(
-                                            switch (candidateField) {
-                                              'itemBackground' ||
-                                              'borderColor' ||
-                                              'borderWidth' =>
-                                                index == 1 ||
-                                                    previewCandidates.length ==
-                                                        1,
-                                              'selectedBackground' ||
-                                              'selectedBorderColor' ||
-                                              'selectedBorderWidth' ||
-                                              'cornerRadius' ||
-                                              'paddingX' ||
-                                              'inlineGap' ||
-                                              'commentPosition' => index == 0,
-                                              _ =>
-                                                index == 0 &&
-                                                    path ==
-                                                        'common.accentColor',
-                                            },
-                                          ) ??
-                                          Border.all(
-                                            color: _color(
-                                              candidateBar,
-                                              index == 0
-                                                  ? 'selectedBorderColor'
-                                                  : 'borderColor',
+                                      foregroundDecoration: BoxDecoration(
+                                        border:
+                                            themePreviewBorder(
+                                              switch (candidateField) {
+                                                'itemBackground' ||
+                                                'borderColor' ||
+                                                'borderWidth' =>
+                                                  index == 1 ||
+                                                      previewCandidates
+                                                              .length ==
+                                                          1,
+                                                'selectedBackground' ||
+                                                'selectedBorderColor' ||
+                                                'selectedBorderWidth' ||
+                                                'cornerRadius' ||
+                                                'paddingX' ||
+                                                'inlineGap' ||
+                                                'commentPosition' => index == 0,
+                                                _ =>
+                                                  index == 0 &&
+                                                      path ==
+                                                          'common.accentColor',
+                                              },
+                                            ) ??
+                                            Border.all(
+                                              color: _color(
+                                                candidateBar,
+                                                index == 0
+                                                    ? 'selectedBorderColor'
+                                                    : 'borderColor',
+                                              ),
+                                              width: _metric(
+                                                candidateBar,
+                                                index == 0
+                                                    ? 'selectedBorderWidth'
+                                                    : 'borderWidth',
+                                              ),
+                                              style:
+                                                  _metric(
+                                                        candidateBar,
+                                                        index == 0
+                                                            ? 'selectedBorderWidth'
+                                                            : 'borderWidth',
+                                                      ) >
+                                                      0
+                                                  ? BorderStyle.solid
+                                                  : BorderStyle.none,
                                             ),
-                                            width: _metric(
-                                              candidateBar,
-                                              index == 0
-                                                  ? 'selectedBorderWidth'
-                                                  : 'borderWidth',
-                                            ),
-                                            style:
-                                                _metric(
-                                                      candidateBar,
-                                                      index == 0
-                                                          ? 'selectedBorderWidth'
-                                                          : 'borderWidth',
-                                                    ) >
-                                                    0
-                                                ? BorderStyle.solid
-                                                : BorderStyle.none,
-                                          ),
-                                      borderRadius: BorderRadius.circular(
-                                        _metric(candidateBar, 'cornerRadius'),
+                                        borderRadius: BorderRadius.circular(
+                                          _metric(candidateBar, 'cornerRadius'),
+                                        ),
                                       ),
+                                      child: candidateContents(index),
                                     ),
-                                    child: candidateContents(index),
                                   ),
                                   index == 0
                                       ? '${candidatePath}selectedBackground'

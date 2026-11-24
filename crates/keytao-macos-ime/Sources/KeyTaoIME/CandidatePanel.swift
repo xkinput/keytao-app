@@ -429,6 +429,17 @@ private final class CandidateOptionView: NSControl {
         widthAnchor.constraint(equalToConstant: width).isActive = true
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard isSelectedOption, let color = theme.candidate.selectedIndicatorColor, color.alpha > 0 else { return }
+        let width = min(3, theme.candidate.paddingX / 3, bounds.width / 3, bounds.height / 3)
+        guard width > 0 else { return }
+        let height = min(20, bounds.height * 0.55)
+        let rect = NSRect(x: bounds.minX + width, y: bounds.midY - height / 2, width: width, height: height)
+        color.nsColor.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: width / 2, yRadius: width / 2).fill()
+    }
+
     override func updateTrackingAreas() {
         if let trackingArea {
             removeTrackingArea(trackingArea)

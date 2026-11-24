@@ -1,0 +1,60 @@
+version: 3
+meta:
+  id: keytao.paper-ink
+  name: 纸墨
+  appearance: both
+common:
+  cornerRadius: 6
+  font: {weight: regular}
+pc:
+  font: {size: 20, labelSize: 13, commentSize: 14}
+  panel: {orientation: vertical, gap: 3, paddingX: 8, paddingY: 7, shadow: false}
+  candidate: {cornerRadius: 3, paddingX: 10, paddingY: 5, inlineGap: 7, separatorVisible: true, labelSuffix: "·"}
+mobile:
+  keyboard:
+    key: {cornerRadius: 5, shadowOffsetY: 0}
+  candidateBar: {cornerRadius: 3, itemBackground: transparent, inlineGap: 4}
+light:
+  common: {accentColor: "#845920", backgroundColor: "#F9F5EC"}
+  pc:
+    panel: {borderColor: "#C1AD94"}
+    candidate:
+      foreground: "#2E291F"
+      labelColor: "#655644"
+      commentColor: "#665A4C"
+      separatorColor: "#DED1BC"
+      selectedBackground: "#EBDABE"
+      selectedForeground: "#2F2518"
+      selectedLabelColor: "#714B1A"
+      selectedCommentColor: "#544330"
+      selectedBorderColor: "#AD8759"
+      pressedBackground: "#E2CCAA"
+      pressedForeground: "#2F2518"
+    navigation: {foreground: "#655644"}
+    modeHint: {background: "#F9F5EC", foreground: "#2E291F"}
+  mobile:
+    keyboard:
+      background: "#E8DFD1"
+      key: {background: "#F8F4EB", borderColor: "#C8B9A5", hintForeground: "#504235"}
+dark:
+  common: {accentColor: "#D5AB70", backgroundColor: "#241E1A"}
+  pc:
+    panel: {borderColor: "#6B5440"}
+    candidate:
+      foreground: "#F1E8DB"
+      labelColor: "#C0AF98"
+      commentColor: "#C8BBAA"
+      separatorColor: "#48392E"
+      selectedBackground: "#4C3A2A"
+      selectedForeground: "#FFF4E1"
+      selectedLabelColor: "#F7CF92"
+      selectedCommentColor: "#E4CCAE"
+      selectedBorderColor: "#9C7850"
+      pressedBackground: "#624B35"
+      pressedForeground: "#FFF4E1"
+    navigation: {foreground: "#C0AF98"}
+    modeHint: {background: "#241E1A", foreground: "#F1E8DB"}
+  mobile:
+    keyboard:
+      background: "#211C19"
+      key: {background: "#382E27", borderColor: "#695445"}
