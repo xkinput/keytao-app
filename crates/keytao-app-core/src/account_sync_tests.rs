@@ -614,6 +614,58 @@ async fn first_sync_unions_local_and_remote_preserving_file_and_remote_weight() 
 }
 
 #[tokio::test]
+async fn sync_batches_personal_rows_and_removal_markers_together() {
+    let (_dir, core, host) = fixture();
+    let dictionary = host.0.join(USER_DICTIONARY);
+    let markers = host.0.join(USER_WORD_REMOVALS);
+    let header = "# keep me\n---\nname: keytao.user\ncolumns: [code, text, weight]\n...\n";
+    std::fs::write(
+        &dictionary,
+        format!("{header}aaaa\tdrop-first\t10\n# keep row comment\nkkkk\tkeep\t30\nbbbb\tdrop-last\t20\n"),
+    )
+    .unwrap();
+    std::fs::write(&markers, "drop-marker\tdddd\n").unwrap();
+    super::save_base(
+        &host.0,
+        7,
+        &BTreeSet::from([
+            ("drop-first".into(), "aaaa".into(), false),
+            ("drop-last".into(), "bbbb".into(), false),
+            ("drop-marker".into(), "dddd".into(), true),
+            ("keep".into(), "kkkk".into(), false),
+        ]),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&dictionary).unwrap();
+    let instance = dictionary_instance(&before).unwrap();
+    let mock = server(vec![(
+        "200 OK",
+        json!({"entries":[
+            remote("keep", "kkkk", 1), remote("new-a", "cccc", 2), remote("new-b", "eeee", 3),
+            remote_marker("new-a", "cccc", 4), remote_marker("new-b", "eeee", 5)
+        ], "total":5}),
+    )])
+    .await;
+
+    let result = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+        .await
+        .unwrap();
+    assert!(!result.pending);
+    assert_eq!(result.count, 5);
+    assert_eq!(mock.finish().await.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&dictionary).unwrap(),
+        format!(
+            "{header}# keep row comment\nkkkk\tkeep\t30\n{INSTANCE_PREFIX}{instance}\ncccc\tnew-a\t123\neeee\tnew-b\t123\n"
+        ),
+    );
+    assert_eq!(
+        std::fs::read_to_string(&markers).unwrap(),
+        "new-a\tcccc\nnew-b\teeee\n"
+    );
+}
+
+#[tokio::test]
 async fn interrupted_upload_preserves_base_for_later_local_deletion() {
     for first_sync in [false, true] {
         let (_dir, core, host) = fixture();
@@ -1271,7 +1323,7 @@ async fn rate_limit_stops_sync_with_only_acknowledged_uploads_in_base() {
     assert_eq!(local(&core, &host).len(), 3);
 }
 
-fn jwt(iat: u64, exp: u64) -> String {
+pub(super) fn jwt(iat: u64, exp: u64) -> String {
     jwt_for(7, iat, exp)
 }
 
