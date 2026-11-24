@@ -151,7 +151,7 @@ DYLD_FALLBACK_LIBRARY_PATH=$RIME_LIB_DIR cargo test
 
 各平台发行包都自带 librime、OpenCC 数据和基础 `rime-data`，App 与系统输入法使用同一套 runtime。Linux 在 `ubuntu:24.04` 中通过 `scripts/build-linux-librime.sh` 从源码构建 [版本文件](scripts/librime-versions.env) 固定的 librime，Lua 合并进单个 stripped `librime.so.1`，不使用 Ubuntu apt 的 librime。升级后 daemon 会在独立子进程中重新部署已有方案，成功后自动重载。平台细节：macOS 见 [crates/keytao-macos-ime/README.md](crates/keytao-macos-ime/README.md#构建与排查)，Linux 见 [packaging/linux/README.md](packaging/linux/README.md)，Windows 见 [packaging/windows/README.md](packaging/windows/README.md)。
 
-Android 构建需要 Zig 0.17 生成 `armeabi-v7a` 的 libjd-engine，其余 Android ABI 使用校验过的上游二进制。iOS 设备包将上游 libjd-engine 静态链接到 App 和键盘扩展。
+Android 构建需要 Zig 0.17 和 Android NDK。三种 ABI 的 libjd-engine 均从固定上游源码构建，并按 App 的最低 Android API 链接系统 libc。iOS 设备包将上游 libjd-engine 静态链接到 App 和键盘扩展。
 
 ## 发版流程
 
