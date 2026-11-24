@@ -449,6 +449,10 @@ jobs:
               echo "::error::Expected only lib/$abi/libjd-engine.so in $apk"
               exit 1
             fi
+            engine="$RUNNER_TEMP/libjd-engine-$abi.so"
+            unzip -p "$apk" "lib/$abi/libjd-engine.so" > "$engine"
+            "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$engine" \
+              | grep -F 'Shared library: [libc.so]'
             cp "$apk" "dist/release-upload/keytao-app-${VERSION}-android-${arch}-release.apk"
           done
 

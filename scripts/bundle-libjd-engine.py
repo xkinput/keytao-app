@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import io
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -29,14 +30,12 @@ ASSETS = {
     "windows-x86_64": ("zip", "64a92a15a724c24b1e44dc2b94e108051febe4aa49c9dd5ec8fd71a36bb0ee49"),
     "linux-arm64": ("so.tar.xz", "ceba256d6c0284bff5e285643dcf3f1a68293878cb17ac78f53a7c8ebb57b651"),
     "linux-x86_64": ("so.tar.xz", "affb7ebddfb89fb16cbfbb04247379a0c92b65fd81c6fa7ca77febe021cd46a8"),
-    "android-arm64": ("so.tar.xz", "796b4e618213a11adc364aad88afe51043298d24c3218383990c5cb42d32e619"),
-    "android-x86_64": ("so.tar.xz", "0bdd44d2b1389d07f268a9fe310e67b988a1836cd2f6d41f70b59880c322e62c"),
     "ios-arm64": ("a.tar.xz", "cddfc647f540d1cfd99257c297369fd220ddfee287be78e3ddc6179bc2f14b56"),
 }
 ANDROID_TARGETS = {
-    "armeabi-v7a": "android-arm",
-    "arm64-v8a": "android-arm64",
-    "x86_64": "android-x86_64",
+    "armeabi-v7a": ("arm-linux-androideabi", "armv7a-linux-androideabi"),
+    "arm64-v8a": ("aarch64-linux-android", "aarch64-linux-android"),
+    "x86_64": ("x86_64-linux-android", "x86_64-linux-android"),
 }
 CACHE = Path(__file__).resolve().parents[1] / "target" / "libjd-engine-cache"
 
@@ -84,9 +83,14 @@ def stage_library(target, directory):
     return output
 
 
-def stage_android_arm(directory):
-    # Upstream publishes 64-bit Android binaries; use the same engine-only
-    # build from the pinned source for KeyTao's armeabi-v7a APK.
+def stage_android(abis, directory, ndk, api):
+    clang_name = "clang.exe" if os.name == "nt" else "clang"
+    compilers = sorted(ndk.glob(f"toolchains/llvm/prebuilt/*/bin/{clang_name}"))
+    if len(compilers) != 1:
+        raise ValueError("Expected one Android NDK clang compiler")
+    clang = compilers[0]
+    # Zig's shared Android build can leave getauxval unresolved without a
+    # dependency on bionic. Link its PIC archive with the Android toolchain.
     source = verified_download(
         f"https://codeload.github.com/hronro/ime-jd/tar.gz/{SOURCE_COMMIT}", SOURCE_SHA256
     )
@@ -94,21 +98,44 @@ def stage_android_arm(directory):
         root = Path(temp)
         with tarfile.open(fileobj=io.BytesIO(source), mode="r:gz") as archive:
             archive.extractall(root, filter="data")
-        try:
+        core = root / f"ime-jd-{SOURCE_COMMIT}" / "core"
+        # ELF TLS is unavailable below Android 10. Bionic's allocator is
+        # thread-safe and the engine only allocates once per context.
+        for name, old, new in [
+            ("src/main.zig", "else std.heap.smp_allocator;", "else std.heap.c_allocator;"),
+            ("build.zig", '.root_source_file = b.path("src/main.zig"),',
+             '.root_source_file = b.path("src/main.zig"),\n        .link_libc = true,'),
+            ("build.zig", "if (target.result.os.tag != .ios) {",
+             "if (target.result.os.tag != .ios and !target.result.abi.isAndroid()) {"),
+        ]:
+            path = core / name
+            contents = path.read_text(encoding="utf-8")
+            if contents.count(old) != 1:
+                raise ValueError(f"Unexpected Android engine source in {name}")
+            path.write_text(contents.replace(old, new), encoding="utf-8")
+        for abi in abis:
+            zig_target, clang_target = ANDROID_TARGETS[abi]
+            build = root / abi
             subprocess.run(
-                ["zig", "build", "-Dtarget=arm-linux-androideabi", "-Dcpu=baseline",
-                 "-Doptimize=fast", "-Dbuiltin_dict=false", "--prefix", root / "build"],
-                cwd=root / f"ime-jd-{SOURCE_COMMIT}" / "core",
+                ["zig", "build", f"-Dtarget={zig_target}", "-Dcpu=baseline",
+                 "-Doptimize=fast", "-Dbuiltin_dict=false", "--prefix", build],
+                cwd=core,
                 check=True,
             )
-        except FileNotFoundError as error:
-            raise RuntimeError("Zig 0.17 is required to build Android armeabi-v7a libjd-engine") from error
-        library = (root / "build/lib/libjd.so").read_bytes()
-        if len(library) > MAX_FILE_BYTES:
-            raise ValueError("Unexpected size for Android armeabi-v7a libjd-engine")
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "libjd-engine.so").write_bytes(library)
-        print(f"Built libjd-engine {VERSION} for Android armeabi-v7a")
+            library = build / "libjd-engine.so"
+            subprocess.run(
+                [clang, f"--target={clang_target}{api}", "-shared",
+                 "-Wl,--no-undefined,-z,max-page-size=16384,-soname,libjd-engine.so",
+                 "-Wl,--whole-archive", build / "lib/libjd.a", "-Wl,--no-whole-archive",
+                 "-o", library],
+                check=True,
+            )
+            if library.stat().st_size > MAX_FILE_BYTES:
+                raise ValueError(f"Unexpected size for Android {abi} libjd-engine")
+            output = directory / abi
+            output.mkdir(parents=True, exist_ok=True)
+            (output / library.name).write_bytes(library.read_bytes())
+            print(f"Built libjd-engine {VERSION} for Android {abi}")
 
 
 def main():
@@ -117,9 +144,13 @@ def main():
     parser.add_argument("libraries", type=Path)
     parser.add_argument("notices", type=Path)
     parser.add_argument("--android-abi", action="append", choices=ANDROID_TARGETS)
+    parser.add_argument("--android-ndk", type=Path, default=os.environ.get("ANDROID_NDK_HOME"))
+    parser.add_argument("--android-api", type=int, default=24)
     args = parser.parse_args()
     if args.android_abi and args.target != "android":
         parser.error("--android-abi requires the android target")
+    if args.target == "android" and not args.android_ndk:
+        parser.error("Android requires --android-ndk or ANDROID_NDK_HOME")
     license_text = verified_download(LICENSE, LICENSE_SHA256)
 
     if args.target == "macos-universal":
@@ -133,12 +164,12 @@ def main():
             subprocess.run(["lipo", "-create", *slices, "-output", output], check=True)
             subprocess.run(["install_name_tool", "-id", "@rpath/libjd-engine.dylib", output], check=True)
     elif args.target == "android":
-        for abi in dict.fromkeys(args.android_abi or ANDROID_TARGETS):
-            directory = args.libraries / abi
-            if abi == "armeabi-v7a":
-                stage_android_arm(directory)
-            else:
-                stage_library(ANDROID_TARGETS[abi], directory)
+        stage_android(
+            dict.fromkeys(args.android_abi or ANDROID_TARGETS),
+            args.libraries,
+            args.android_ndk,
+            args.android_api,
+        )
     else:
         stage_library(args.target, args.libraries)
 

@@ -138,8 +138,12 @@ tasks.register<Exec>("syncKeytaoAndroidAssets") {
 }
 
 tasks.register<Exec>("bundleKeytaoLibjdEngine") {
+    val ndk = androidComponents.sdkComponents.ndkDirectory.get().asFile
+    val api = android.defaultConfig.minSdk!!
     inputs.files(bundleLibjdEngine)
     inputs.property("androidAbis", libjdAbis)
+    inputs.property("androidNdk", ndk.absolutePath)
+    inputs.property("androidApi", api)
     outputs.dirs(libjdJniDir, libjdNoticesDir)
     commandLine(
         "python3",
@@ -147,6 +151,8 @@ tasks.register<Exec>("bundleKeytaoLibjdEngine") {
         "android",
         libjdJniDir.get().asFile.absolutePath,
         libjdNoticesDir.get().asFile.absolutePath,
+        "--android-ndk=${ndk.absolutePath}",
+        "--android-api=$api",
         *libjdAbis.map { "--android-abi=$it" }.toTypedArray(),
     )
 }
