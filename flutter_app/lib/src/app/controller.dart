@@ -38,6 +38,46 @@ enum OperationKind {
   rimeLssp,
 }
 
+class RimeAddonSlot {
+  RimeAddonSlot._(
+    this.operation,
+    this.title,
+    this.tooltip,
+    this._installedMessage,
+    this._removedMessage,
+    this._readStatus,
+    this._manage,
+  );
+
+  final OperationKind operation;
+  final String title;
+  final String tooltip;
+  final String _installedMessage;
+  final String _removedMessage;
+  final Future<core.AddonStatusDto> Function() _readStatus;
+  final Future<core.AddonStatusDto> Function({
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) _manage;
+  core.AddonStatusDto? status;
+  String? error;
+  InstallProgressDto? progress;
+  String? latestVersion;
+
+  bool get installed => status?.installed == true;
+  bool get hasUpdate =>
+      installed &&
+      latestVersion != null &&
+      AppController._normalizedVersion(latestVersion!) !=
+          AppController._normalizedVersion(status!.version);
+  bool get showInstall => !installed || status?.deployed != true || hasUpdate;
+  String get buttonLabel => hasUpdate
+      ? AppStrings.update
+      : installed
+      ? AppStrings.deploy
+      : AppStrings.download;
+}
+
 enum LogLineKind { normal, error, warning, deploy, merged }
 
 enum DeployStepState { neutral, ok, failed }
@@ -187,8 +227,6 @@ class AppController extends ChangeNotifier {
   bool _packageMigrationFailed = false;
   bool get packageMigrationFailed => _packageMigrationFailed;
   bool _migrationDuringOperation = false;
-  bool get isMigratingPackages =>
-      operation == OperationKind.migrate || _migrationDuringOperation;
   String? migrationBackupDir;
   String? _pendingMigrationFailureToast;
   bool _migrationFailureToastShown = false;
@@ -354,10 +392,6 @@ class AppController extends ChangeNotifier {
   String? addonError;
   String? wanxiangError;
   String? wanxiangGrammarError;
-  String? rimeIceError;
-  String? rimeMintError;
-  String? rimeFrostError;
-  String? rimeLsspError;
   String? macosImeError;
   String? windowsImeError;
   String? linuxImeError;
@@ -374,10 +408,6 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? addonProgress;
   InstallProgressDto? wanxiangProgress;
   InstallProgressDto? wanxiangGrammarProgress;
-  InstallProgressDto? rimeIceProgress;
-  InstallProgressDto? rimeMintProgress;
-  InstallProgressDto? rimeFrostProgress;
-  InstallProgressDto? rimeLsspProgress;
   final List<DeployStep> deploySteps = [];
   final _packageDeployProgress = <String, DeployProgressDto?>{};
   LibjdStatusDto? libjd;
@@ -388,14 +418,44 @@ class AppController extends ChangeNotifier {
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
   String? wanxiangLatestVersion;
-  core.AddonStatusDto? rimeIce;
-  String? rimeIceLatestVersion;
-  core.AddonStatusDto? rimeMint;
-  String? rimeMintLatestVersion;
-  core.AddonStatusDto? rimeFrost;
-  String? rimeFrostLatestVersion;
-  core.AddonStatusDto? rimeLssp;
-  String? rimeLsspLatestVersion;
+  final rimeAddons = Map<String, RimeAddonSlot>.unmodifiable({
+    'rime_ice': RimeAddonSlot._(
+      OperationKind.rimeIce,
+      AppStrings.rimeIce,
+      AppStrings.installRimeIceTooltip,
+      AppStrings.rimeIceInstalled,
+      AppStrings.rimeIceRemoved,
+      core.rimeIceStatus,
+      core.manageRimeIce,
+    ),
+    'rime_mint': RimeAddonSlot._(
+      OperationKind.rimeMint,
+      AppStrings.rimeMint,
+      AppStrings.installRimeMintTooltip,
+      AppStrings.rimeMintInstalled,
+      AppStrings.rimeMintRemoved,
+      core.rimeMintStatus,
+      core.manageRimeMint,
+    ),
+    'rime_frost': RimeAddonSlot._(
+      OperationKind.rimeFrost,
+      AppStrings.rimeFrost,
+      AppStrings.installRimeFrostTooltip,
+      AppStrings.rimeFrostInstalled,
+      AppStrings.rimeFrostRemoved,
+      core.rimeFrostStatus,
+      core.manageRimeFrost,
+    ),
+    'triple_pinyin_lssp': RimeAddonSlot._(
+      OperationKind.rimeLssp,
+      AppStrings.rimeLssp,
+      AppStrings.installRimeLsspTooltip,
+      AppStrings.rimeLsspInstalled,
+      AppStrings.rimeLsspRemoved,
+      core.rimeLsspStatus,
+      core.manageRimeLssp,
+    ),
+  });
   String? addonLatestVersion;
   final _addonUpdateChecks = <String, Object>{};
   DebugLogsDto? systemLogs;
@@ -816,22 +876,17 @@ class AppController extends ChangeNotifier {
       wanxiangGrammar != null && wanxiangGrammar!.size > BigInt.zero
       ? formatLogBytes(wanxiangGrammar!.size)
       : '407 MB';
-  bool get isManagingRimeIce => operation == OperationKind.rimeIce;
-  bool get isManagingRimeMint => operation == OperationKind.rimeMint;
-  bool get isManagingRimeFrost => operation == OperationKind.rimeFrost;
-  bool get isManagingRimeLssp => operation == OperationKind.rimeLssp;
+  RimeAddonSlot? get _managingRimeAddon {
+    for (final slot in rimeAddons.values) {
+      if (operation == slot.operation) return slot;
+    }
+    return null;
+  }
+
   bool get canInstallAddon => !busy;
   bool get canInstallWanxiang => canInstallAddon;
-  bool get canInstallRimeIce => canInstallAddon;
-  bool get canInstallRimeMint => canInstallAddon;
-  bool get canInstallRimeFrost => canInstallAddon;
-  bool get canInstallRimeLssp => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
-  bool get canUninstallRimeIce => !busy && rimeIce?.installed == true;
-  bool get canUninstallRimeMint => !busy && rimeMint?.installed == true;
-  bool get canUninstallRimeFrost => !busy && rimeFrost?.installed == true;
-  bool get canUninstallRimeLssp => !busy && rimeLssp?.installed == true;
   String get installedWanxiangVariant =>
       wanxiang?.installed == true ? wanxiang?.variant ?? 'base' : 'base';
   String get selectedWanxiangVariant =>
@@ -852,42 +907,6 @@ class AppController extends ChangeNotifier {
       wanxiang?.deployed != true ||
       wanxiangHasUpdate ||
       selectedWanxiangVariant != installedWanxiangVariant;
-  bool get rimeIceHasUpdate =>
-      rimeIce?.installed == true &&
-      rimeIceLatestVersion != null &&
-      _normalizedVersion(rimeIceLatestVersion!) !=
-          _normalizedVersion(rimeIce!.version);
-  bool get showRimeIceInstall =>
-      rimeIce?.installed != true ||
-      rimeIce?.deployed != true ||
-      rimeIceHasUpdate;
-  bool get rimeMintHasUpdate =>
-      rimeMint?.installed == true &&
-      rimeMintLatestVersion != null &&
-      _normalizedVersion(rimeMintLatestVersion!) !=
-          _normalizedVersion(rimeMint!.version);
-  bool get showRimeMintInstall =>
-      rimeMint?.installed != true ||
-      rimeMint?.deployed != true ||
-      rimeMintHasUpdate;
-  bool get rimeFrostHasUpdate =>
-      rimeFrost?.installed == true &&
-      rimeFrostLatestVersion != null &&
-      _normalizedVersion(rimeFrostLatestVersion!) !=
-          _normalizedVersion(rimeFrost!.version);
-  bool get showRimeFrostInstall =>
-      rimeFrost?.installed != true ||
-      rimeFrost?.deployed != true ||
-      rimeFrostHasUpdate;
-  bool get rimeLsspHasUpdate =>
-      rimeLssp?.installed == true &&
-      rimeLsspLatestVersion != null &&
-      _normalizedVersion(rimeLsspLatestVersion!) !=
-          _normalizedVersion(rimeLssp!.version);
-  bool get showRimeLsspInstall =>
-      rimeLssp?.installed != true ||
-      rimeLssp?.deployed != true ||
-      rimeLsspHasUpdate;
   int get operationLogCount => operationLogs.length;
   String get installButtonLabel => checkingStorage
       ? AppStrings.checkingPermission
@@ -906,10 +925,6 @@ class AppController extends ChangeNotifier {
       : AppStrings.installFirst;
   String get addonTooltip => AppStrings.installEnglishTooltip;
   String get wanxiangTooltip => AppStrings.installWanxiangTooltip;
-  String get rimeIceTooltip => AppStrings.installRimeIceTooltip;
-  String get rimeMintTooltip => AppStrings.installRimeMintTooltip;
-  String get rimeFrostTooltip => AppStrings.installRimeFrostTooltip;
-  String get rimeLsspTooltip => AppStrings.installRimeLsspTooltip;
   String get addonButtonLabel => addonHasUpdate
       ? AppStrings.update
       : addon?.installed == true
@@ -925,34 +940,11 @@ class AppController extends ChangeNotifier {
       ? AppStrings.deploy
       : AppStrings.download;
   String get addonStatusText => _addonStatus('easy_en', addon, addonHasUpdate);
-  String get rimeIceButtonLabel => rimeIceHasUpdate
-      ? AppStrings.update
-      : rimeIce?.installed == true
-      ? AppStrings.deploy
-      : AppStrings.download;
-  String get rimeIceStatusText =>
-      _addonStatus('rime_ice', rimeIce, rimeIceHasUpdate);
-  String get rimeMintButtonLabel => rimeMintHasUpdate
-      ? AppStrings.update
-      : rimeMint?.installed == true
-      ? AppStrings.deploy
-      : AppStrings.download;
-  String get rimeMintStatusText =>
-      _addonStatus('rime_mint', rimeMint, rimeMintHasUpdate);
-  String get rimeFrostButtonLabel => rimeFrostHasUpdate
-      ? AppStrings.update
-      : rimeFrost?.installed == true
-      ? AppStrings.deploy
-      : AppStrings.download;
-  String get rimeFrostStatusText =>
-      _addonStatus('rime_frost', rimeFrost, rimeFrostHasUpdate);
-  String get rimeLsspButtonLabel => rimeLsspHasUpdate
-      ? AppStrings.update
-      : rimeLssp?.installed == true
-      ? AppStrings.deploy
-      : AppStrings.download;
-  String get rimeLsspStatusText =>
-      _addonStatus('triple_pinyin_lssp', rimeLssp, rimeLsspHasUpdate);
+  String rimeAddonStatusText(String id) {
+    final slot = rimeAddons[id]!;
+    return _addonStatus(id, slot.status, slot.hasUpdate);
+  }
+
   String get wanxiangStatusText {
     final status = _addonStatus('wanxiang', wanxiang, wanxiangHasUpdate);
     return wanxiang?.installed == true
@@ -1107,12 +1099,6 @@ class AppController extends ChangeNotifier {
   ).toString();
   bool get canOpenDictionaryManager =>
       !isMobile && !busy && defaultDir.isNotEmpty;
-  String get englishModeLabel =>
-      (isMobile
-          ? androidSettings?.englishMode == 'schema'
-          : desktopEnglishMode == EnglishModeDto.schema)
-      ? AppStrings.englishSchema
-      : AppStrings.englishAscii;
   String? get englishModeHint => englishReady ? null : AppStrings.englishHint;
   bool get canOpenStorageSettings =>
       !busy && storage?['canOpenSettings'] != false;
@@ -1141,10 +1127,7 @@ class AppController extends ChangeNotifier {
     addonError,
     wanxiangError,
     wanxiangGrammarError,
-    rimeIceError,
-    rimeMintError,
-    rimeFrostError,
-    rimeLsspError,
+    ...rimeAddons.values.map((slot) => slot.error),
     macosImeError,
     windowsImeError,
     linuxImeError,
@@ -1227,8 +1210,14 @@ class AppController extends ChangeNotifier {
           return;
         }
         if (event.cloudTransferProgress case final value?) {
+          final previous = cloudTransferProgress;
           cloudTransferProgress = value;
-          _changed();
+          if (previous == null ||
+              previous.direction != value.direction ||
+              previous.schemeKey != value.schemeKey ||
+              _cloudTransferPercent(previous) != _cloudTransferPercent(value)) {
+            _changed();
+          }
           return;
         }
         if (event.deployProgress case final value?) {
@@ -1295,33 +1284,41 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  static BigInt? _cloudTransferPercent(CloudTransferProgressDto value) =>
+      value.totalBytes == BigInt.zero
+      ? null
+      : value.bytesTransferred * BigInt.from(100) ~/ value.totalBytes;
+
   void _receiveInstallProgress(InstallProgressDto value) {
+    bool changedFrom(InstallProgressDto? previous) =>
+        previous?.stage != value.stage || previous?.percent != value.percent;
+
     if (value.stage == 'app_update_downloading' ||
         value.stage == 'app_update_verifying') {
       if (appUpdateBusy && appUpdateAction == AppUpdateAction.download) {
+        final changed = changedFrom(appUpdateProgress);
         appUpdateProgress = value;
-        _changed();
+        if (changed) _changed();
       }
       return;
     }
+    final changed = changedFrom(installProgress);
     installProgress = value;
     progress = value.message;
     installFraction = value.percent.clamp(0, 100) / 100;
-    if (value.stage == 'repairing') {
-      addOperationLogs(['[REPAIR] ${value.message}']);
-      showToast(value.message);
-    }
     if (isManagingAddon) addonProgress = value;
-    if (value.stage.contains('deploy') && isManagingRimeIce) {
+    if (value.stage.contains('deploy') && operation == OperationKind.rimeIce) {
       deployingSchemeKey = 'rime_ice';
     }
     if (isManagingWanxiang) wanxiangProgress = value;
     if (isManagingWanxiangGrammar) wanxiangGrammarProgress = value;
-    if (isManagingRimeIce) rimeIceProgress = value;
-    if (isManagingRimeMint) rimeMintProgress = value;
-    if (isManagingRimeFrost) rimeFrostProgress = value;
-    if (isManagingRimeLssp) rimeLsspProgress = value;
-    _changed();
+    _managingRimeAddon?.progress = value;
+    if (value.stage == 'repairing') {
+      addOperationLogs(['[REPAIR] ${value.message}']);
+      showToast(value.message);
+    } else if (changed) {
+      _changed();
+    }
   }
 
   void _receiveDeployProgress(DeployProgressDto value) {
@@ -1345,8 +1342,8 @@ class AppController extends ChangeNotifier {
         return;
       }
       if (message.isEmpty) return;
-      if (isManagingAddon || isManagingRimeIce) {
-        if (isManagingRimeIce) deployingSchemeKey = 'rime_ice';
+      if (isManagingAddon || operation == OperationKind.rimeIce) {
+        if (operation == OperationKind.rimeIce) deployingSchemeKey = 'rime_ice';
         progress = message;
       }
       if (message == AppStrings.deployDone) deployWarning = null;
@@ -1358,10 +1355,7 @@ class AppController extends ChangeNotifier {
           ((isManagingAddon ||
                   isManagingWanxiang ||
                   isManagingWanxiangGrammar ||
-                  isManagingRimeIce ||
-                  isManagingRimeMint ||
-                  isManagingRimeFrost ||
-                  isManagingRimeLssp) &&
+                  _managingRimeAddon != null) &&
               (publicWarning || compileWarning))) {
         progress = message;
         _deployStep(message, DeployStepState.neutral);
@@ -1449,7 +1443,6 @@ class AppController extends ChangeNotifier {
     }
     if (page == AppPage.input) {
       unawaited(refreshSchemas());
-      unawaited(refreshCandidatePreview());
     }
     _changed();
   }
@@ -1576,12 +1569,7 @@ class AppController extends ChangeNotifier {
     } catch (failure) {
       addonError = errorText(failure);
     }
-    try {
-      rimeIce = await core.rimeIceStatus();
-      if (!isManagingRimeIce) rimeIceError = null;
-    } catch (failure) {
-      rimeIceError ??= errorText(failure);
-    }
+    await _readRimeAddon(rimeAddons['rime_ice']!);
     await refreshIsolatedPackages(notify: false);
     _watchCurrentSchema();
     await _readSchemas();
@@ -1589,6 +1577,19 @@ class AppController extends ChangeNotifier {
     final logoPath = await core.activeSchemaLogoPath();
     if (logoPath != null) await _readSchemaLogoVersion(logoPath);
     activeSchemaLogoPath = logoPath;
+  }
+
+  Future<void> _readRimeAddon(RimeAddonSlot slot) async {
+    try {
+      slot.status = await slot._readStatus();
+      if (slot.operation != OperationKind.rimeIce || operation != slot.operation) {
+        slot.error = null;
+      }
+    } catch (failure) {
+      if (slot.operation != OperationKind.rimeIce || slot.error == null) {
+        slot.error = errorText(failure);
+      }
+    }
   }
 
   void _watchCurrentSchema() {
@@ -1775,7 +1776,7 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _readState({bool quiet = false}) async {
+  Future<void> _readState({bool quiet = false, bool refreshPreview = true}) async {
     final errors = <String>[];
     Future<void> read(Future<void> Function() action) async {
       try {
@@ -1837,30 +1838,9 @@ class AppController extends ChangeNotifier {
           wanxiangError = errorText(failure);
         }
       }),
-      read(() async {
-        try {
-          rimeMint = await core.rimeMintStatus();
-          rimeMintError = null;
-        } catch (failure) {
-          rimeMintError = errorText(failure);
-        }
-      }),
-      read(() async {
-        try {
-          rimeFrost = await core.rimeFrostStatus();
-          rimeFrostError = null;
-        } catch (failure) {
-          rimeFrostError = errorText(failure);
-        }
-      }),
-      read(() async {
-        try {
-          rimeLssp = await core.rimeLsspStatus();
-          rimeLsspError = null;
-        } catch (failure) {
-          rimeLsspError = errorText(failure);
-        }
-      }),
+      for (final slot in rimeAddons.values)
+        if (slot.operation != OperationKind.rimeIce)
+          read(() => _readRimeAddon(slot)),
       read(() async {
         versions = await core.getComponentVersions();
       }),
@@ -1894,7 +1874,7 @@ class AppController extends ChangeNotifier {
         error = message;
       }
     }
-    unawaited(refreshCandidatePreview());
+    if (refreshPreview) unawaited(refreshCandidatePreview());
   }
 
   Future<bool> refreshState() async {
@@ -1974,14 +1954,9 @@ class AppController extends ChangeNotifier {
         _checkAddonUpdate('easy_en', addon!.version),
       if (wanxiang?.installed == true)
         _checkAddonUpdate('wanxiang', wanxiang!.version),
-      if (rimeIce?.installed == true)
-        _checkAddonUpdate('rime_ice', rimeIce!.version),
-      if (rimeMint?.installed == true)
-        _checkAddonUpdate('rime_mint', rimeMint!.version),
-      if (rimeFrost?.installed == true)
-        _checkAddonUpdate('rime_frost', rimeFrost!.version),
-      if (rimeLssp?.installed == true)
-        _checkAddonUpdate('triple_pinyin_lssp', rimeLssp!.version),
+      for (final entry in rimeAddons.entries)
+        if (entry.value.installed)
+          _checkAddonUpdate(entry.key, entry.value.status!.version),
     ]);
   }
 
@@ -1991,13 +1966,11 @@ class AppController extends ChangeNotifier {
     _addonUpdateChecks[id] = check;
     try {
       final status = await core.checkAddonUpdate(id: id);
+      final slot = rimeAddons[id];
       final current = switch (id) {
         'easy_en' => addon,
-        'rime_ice' => rimeIce,
-        'rime_mint' => rimeMint,
-        'rime_frost' => rimeFrost,
-        'triple_pinyin_lssp' => rimeLssp,
-        _ => wanxiang,
+        'wanxiang' => wanxiang,
+        _ => slot?.status,
       };
       if (_disposed ||
           !identical(_addonUpdateChecks[id], check) ||
@@ -2007,14 +1980,8 @@ class AppController extends ChangeNotifier {
       }
       if (id == 'easy_en') {
         addonLatestVersion = status.latestVersion;
-      } else if (id == 'rime_ice') {
-        rimeIceLatestVersion = status.latestVersion;
-      } else if (id == 'rime_mint') {
-        rimeMintLatestVersion = status.latestVersion;
-      } else if (id == 'rime_frost') {
-        rimeFrostLatestVersion = status.latestVersion;
-      } else if (id == 'triple_pinyin_lssp') {
-        rimeLsspLatestVersion = status.latestVersion;
+      } else if (slot != null) {
+        slot.latestVersion = status.latestVersion;
       } else {
         wanxiangLatestVersion = status.latestVersion;
       }
@@ -2199,7 +2166,15 @@ class AppController extends ChangeNotifier {
     if (busy || _resumeRefreshInFlight || _disposed) return;
     _resumeRefreshInFlight = true;
     try {
-      await _readState(quiet: true);
+      final previousSize = candidatePageSize;
+      final previousEngineEnabled = inputEngineEnabled;
+      await _readState(quiet: true, refreshPreview: false);
+      if (_candidatePreviewTarget != _activePreviewTarget ||
+          candidatePreviewPageSize == null ||
+          previousSize != candidatePageSize ||
+          previousEngineEnabled != inputEngineEnabled) {
+        unawaited(refreshCandidatePreview());
+      }
     } catch (failure) {
       debugPrint('Resume refresh failed: ${errorText(failure)}');
     } finally {
@@ -2414,27 +2389,6 @@ class AppController extends ChangeNotifier {
     if (canCancelWanxiangGrammarDownload) {
       await core.cancelWanxiangGrammarDownload();
     }
-  }
-
-  Future<bool> installAndDeploy() async {
-    if (prefersLibjd) return downloadSchemePackage(scheme);
-    if (!canInstall || !requireRimeEngine()) return false;
-    var deferred = false;
-    final result = await run(() async {
-      final installing = scheme;
-      await _install();
-      // Deploying clears the verification list, so keep failures on screen.
-      if (verification.every((entry) => entry.ok)) {
-        deferred = await _deferDeployForSchemaSelection(
-          installing,
-          activateOnConfirm: true,
-        );
-        if (!deferred) {
-          await _switchSchemePackage(installing);
-        }
-      }
-    });
-    return result && (deferred || verification.every((entry) => entry.ok));
   }
 
   Future<bool> install() {
@@ -2762,7 +2716,7 @@ class AppController extends ChangeNotifier {
     var package = installedPackageFor(key);
     final addonStatus = switch (key) {
       'easy_en' => addon,
-      'rime_ice' => rimeIce,
+      'rime_ice' => rimeAddons[key]!.status,
       _ => null,
     };
     if (prefersLibjd &&
@@ -2883,16 +2837,11 @@ class AppController extends ChangeNotifier {
     _invalidateSchemeUpdates();
     await _readInstalledPackages();
     await _readLocal();
-    switch (key) {
-      case 'wanxiang':
-        wanxiang = await core.wanxiangStatus();
-        await _readWanxiangGrammar();
-      case 'rime_mint':
-        rimeMint = await core.rimeMintStatus();
-      case 'rime_frost':
-        rimeFrost = await core.rimeFrostStatus();
-      case 'triple_pinyin_lssp':
-        rimeLssp = await core.rimeLsspStatus();
+    if (key == 'wanxiang') {
+      wanxiang = await core.wanxiangStatus();
+      await _readWanxiangGrammar();
+    } else if (rimeAddons[key] case final slot? when key != 'rime_ice') {
+      slot.status = await slot._readStatus();
     }
     scheduleSchemeProfileSync(
       packageKey: key,
@@ -4101,171 +4050,47 @@ class AppController extends ChangeNotifier {
   });
   }
 
-  Future<bool> manageRimeIce(bool installed) => run(() async {
-    _addonUpdateChecks['rime_ice'] = Object();
+  Future<bool> manageRimeAddon(String id, bool installed) => run(() async {
+    final slot = rimeAddons[id]!;
+    _addonUpdateChecks[id] = Object();
     _startOperation(
-      OperationKind.rimeIce,
+      slot.operation,
       installed ? AppStrings.installing : AppStrings.uninstall,
     );
-    rimeIceError = null;
-    rimeIceProgress = null;
+    slot.error = null;
+    slot.progress = null;
     try {
       if (isAndroid) await _requireStorage();
-      rimeIce = await core.manageRimeIce(
+      final status = await slot._manage(
         installed: installed,
         androidDeploy: _androidDeploy,
       );
+      slot.status = status;
       if (installed) {
-        rimeIceLatestVersion = rimeIce!.version;
-        await _finishAddonDownload('rime_ice', rimeIce!);
+        slot.latestVersion = status.version;
+        await _finishAddonDownload(id, status);
       }
       await _readLocal();
       addOperationLogs([
-        installed
-          ? prefersLibjd
-              ? '[ADDON] ${AppStrings.rimeIce}已转换'
-              : rimeIce?.deployed == true
-                  ? AppStrings.rimeIceInstalled
-                  : '[ADDON] ${AppStrings.rimeIce}已下载'
-            : AppStrings.rimeIceRemoved,
+        !installed
+            ? slot._removedMessage
+            : prefersLibjd
+            ? '[ADDON] ${slot.title}已转换'
+            : slot.status?.deployed == true
+            ? slot._installedMessage
+            : '[ADDON] ${slot.title}已下载',
       ]);
     } catch (failure) {
-      rimeIceError = errorText(failure);
+      slot.error = errorText(failure);
       try {
-        rimeIce = await core.rimeIceStatus();
+        slot.status = await slot._readStatus();
       } catch (_) {}
       try {
         await _readLocal();
       } catch (_) {}
       rethrow;
     } finally {
-      deployingSchemeKey = null;
-      operation = null;
-    }
-  });
-
-  Future<bool> manageRimeMint(bool installed) => run(() async {
-    _addonUpdateChecks['rime_mint'] = Object();
-    _startOperation(
-      OperationKind.rimeMint,
-      installed ? AppStrings.installing : AppStrings.uninstall,
-    );
-    rimeMintError = null;
-    rimeMintProgress = null;
-    try {
-      if (isAndroid) await _requireStorage();
-      rimeMint = await core.manageRimeMint(
-        installed: installed,
-        androidDeploy: _androidDeploy,
-      );
-      if (installed) {
-        rimeMintLatestVersion = rimeMint!.version;
-        await _finishAddonDownload('rime_mint', rimeMint!);
-      }
-      await _readLocal();
-      addOperationLogs([
-        installed
-          ? prefersLibjd
-              ? '[ADDON] ${AppStrings.rimeMint}已转换'
-              : rimeMint?.deployed == true
-                  ? AppStrings.rimeMintInstalled
-                  : '[ADDON] ${AppStrings.rimeMint}已下载'
-            : AppStrings.rimeMintRemoved,
-      ]);
-    } catch (failure) {
-      rimeMintError = errorText(failure);
-      try {
-        rimeMint = await core.rimeMintStatus();
-      } catch (_) {}
-      try {
-        await _readLocal();
-      } catch (_) {}
-      rethrow;
-    } finally {
-      operation = null;
-    }
-  });
-
-  Future<bool> manageRimeFrost(bool installed) => run(() async {
-    _addonUpdateChecks['rime_frost'] = Object();
-    _startOperation(
-      OperationKind.rimeFrost,
-      installed ? AppStrings.installing : AppStrings.uninstall,
-    );
-    rimeFrostError = null;
-    rimeFrostProgress = null;
-    try {
-      if (isAndroid) await _requireStorage();
-      rimeFrost = await core.manageRimeFrost(
-        installed: installed,
-        androidDeploy: _androidDeploy,
-      );
-      if (installed) {
-        rimeFrostLatestVersion = rimeFrost!.version;
-        await _finishAddonDownload('rime_frost', rimeFrost!);
-      }
-      await _readLocal();
-      addOperationLogs([
-        installed
-          ? prefersLibjd
-              ? '[ADDON] ${AppStrings.rimeFrost}已转换'
-              : rimeFrost?.deployed == true
-                  ? AppStrings.rimeFrostInstalled
-                  : '[ADDON] ${AppStrings.rimeFrost}已下载'
-            : AppStrings.rimeFrostRemoved,
-      ]);
-    } catch (failure) {
-      rimeFrostError = errorText(failure);
-      try {
-        rimeFrost = await core.rimeFrostStatus();
-      } catch (_) {}
-      try {
-        await _readLocal();
-      } catch (_) {}
-      rethrow;
-    } finally {
-      operation = null;
-    }
-  });
-
-  Future<bool> manageRimeLssp(bool installed) => run(() async {
-    _addonUpdateChecks['triple_pinyin_lssp'] = Object();
-    _startOperation(
-      OperationKind.rimeLssp,
-      installed ? AppStrings.installing : AppStrings.uninstall,
-    );
-    rimeLsspError = null;
-    rimeLsspProgress = null;
-    try {
-      if (isAndroid) await _requireStorage();
-      rimeLssp = await core.manageRimeLssp(
-        installed: installed,
-        androidDeploy: _androidDeploy,
-      );
-      if (installed) {
-        rimeLsspLatestVersion = rimeLssp!.version;
-        await _finishAddonDownload('triple_pinyin_lssp', rimeLssp!);
-      }
-      await _readLocal();
-      addOperationLogs([
-        installed
-          ? prefersLibjd
-              ? '[ADDON] ${AppStrings.rimeLssp}已转换'
-              : rimeLssp?.deployed == true
-                  ? AppStrings.rimeLsspInstalled
-                  : '[ADDON] ${AppStrings.rimeLssp}已下载'
-            : AppStrings.rimeLsspRemoved,
-      ]);
-    } catch (failure) {
-      rimeLsspError = errorText(failure);
-      try {
-        rimeLssp = await core.rimeLsspStatus();
-      } catch (_) {}
-      try {
-        await _readLocal();
-      } catch (_) {}
-      rethrow;
-    } finally {
+      if (id == 'rime_ice') deployingSchemeKey = null;
       operation = null;
     }
   });

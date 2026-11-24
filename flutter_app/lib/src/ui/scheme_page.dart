@@ -1405,10 +1405,9 @@ Map<String, Widget> _addonCells(
         .where((package) => package.packageKey == packageKey)
         .firstOrNull;
     final cloudCard = !compact && _homeAddonKeys.contains(packageKey);
-    final info = packageKey == 'easy_en' ? c.addon : c.rimeIce;
-    final hasUpdate = packageKey == 'easy_en'
-        ? c.addonHasUpdate
-        : c.rimeIceHasUpdate;
+    final rime = c.rimeAddons[packageKey];
+    final info = overlay ? c.addon : rime?.status;
+    final hasUpdate = overlay ? c.addonHasUpdate : rime?.hasUpdate == true;
     final inUse = c.prefersLibjd && !overlay
         ? c.isUsingLibjd && c.activeSchemeKey == packageKey
         : isolatedPackage?.active == true &&
@@ -1722,6 +1721,29 @@ Map<String, Widget> _addonCells(
     );
   }
 
+  Widget rimeAddon(String id, RimeAddonSlot slot) {
+    final repositoryKey = id == 'triple_pinyin_lssp' ? 'rime_lssp' : id;
+    final active = c.operation == slot.operation;
+    return addon(
+      key: 'addon-${repositoryKey.replaceAll('_', '-')}',
+      packageKey: id,
+      title: slot.title,
+      repositoryUrl: schemeRepositoryUrls[repositoryKey]!,
+      status: c.rimeAddonStatusText(id),
+      label: slot.buttonLabel,
+      tooltip: slot.tooltip,
+      showInstall: slot.showInstall,
+      install: c.canInstallAddon ? () => c.manageRimeAddon(id, true) : null,
+      installed: slot.installed,
+      uninstall: !c.busy && slot.installed
+          ? () => c.manageRimeAddon(id, false)
+          : null,
+      active: active,
+      progress: InstallProgressView(active: active, progress: slot.progress),
+      error: slot.error,
+    );
+  }
+
   return {
     'easy_en': addon(
       key: 'addon-easy-en',
@@ -1835,83 +1857,7 @@ Map<String, Widget> _addonCells(
             )
           : null,
     ),
-    'rime_ice': addon(
-      key: 'addon-rime-ice',
-      packageKey: 'rime_ice',
-      title: AppStrings.rimeIce,
-      repositoryUrl: schemeRepositoryUrls['rime_ice']!,
-      status: c.rimeIceStatusText,
-      label: c.rimeIceButtonLabel,
-      tooltip: c.rimeIceTooltip,
-      showInstall: c.showRimeIceInstall,
-      install: c.canInstallRimeIce ? () => c.manageRimeIce(true) : null,
-      installed: c.rimeIce?.installed == true,
-      uninstall: c.canUninstallRimeIce ? () => c.manageRimeIce(false) : null,
-      active: c.isManagingRimeIce,
-      progress: InstallProgressView(
-        active: c.isManagingRimeIce,
-        progress: c.rimeIceProgress,
-      ),
-      error: c.rimeIceError,
-    ),
-    'rime_mint': addon(
-      key: 'addon-rime-mint',
-      packageKey: 'rime_mint',
-      title: AppStrings.rimeMint,
-      repositoryUrl: schemeRepositoryUrls['rime_mint']!,
-      status: c.rimeMintStatusText,
-      label: c.rimeMintButtonLabel,
-      tooltip: c.rimeMintTooltip,
-      showInstall: c.showRimeMintInstall,
-      install: c.canInstallRimeMint ? () => c.manageRimeMint(true) : null,
-      installed: c.rimeMint?.installed == true,
-      uninstall: c.canUninstallRimeMint ? () => c.manageRimeMint(false) : null,
-      active: c.isManagingRimeMint,
-      progress: InstallProgressView(
-        active: c.isManagingRimeMint,
-        progress: c.rimeMintProgress,
-      ),
-      error: c.rimeMintError,
-    ),
-    'rime_frost': addon(
-      key: 'addon-rime-frost',
-      packageKey: 'rime_frost',
-      title: AppStrings.rimeFrost,
-      repositoryUrl: schemeRepositoryUrls['rime_frost']!,
-      status: c.rimeFrostStatusText,
-      label: c.rimeFrostButtonLabel,
-      tooltip: c.rimeFrostTooltip,
-      showInstall: c.showRimeFrostInstall,
-      install: c.canInstallRimeFrost ? () => c.manageRimeFrost(true) : null,
-      installed: c.rimeFrost?.installed == true,
-      uninstall: c.canUninstallRimeFrost
-          ? () => c.manageRimeFrost(false)
-          : null,
-      active: c.isManagingRimeFrost,
-      progress: InstallProgressView(
-        active: c.isManagingRimeFrost,
-        progress: c.rimeFrostProgress,
-      ),
-      error: c.rimeFrostError,
-    ),
-    'triple_pinyin_lssp': addon(
-      key: 'addon-rime-lssp',
-      packageKey: 'triple_pinyin_lssp',
-      repositoryUrl: schemeRepositoryUrls['rime_lssp']!,
-      title: AppStrings.rimeLssp,
-      status: c.rimeLsspStatusText,
-      label: c.rimeLsspButtonLabel,
-      tooltip: c.rimeLsspTooltip,
-      showInstall: c.showRimeLsspInstall,
-      install: c.canInstallRimeLssp ? () => c.manageRimeLssp(true) : null,
-      installed: c.rimeLssp?.installed == true,
-      uninstall: c.canUninstallRimeLssp ? () => c.manageRimeLssp(false) : null,
-      active: c.isManagingRimeLssp,
-      progress: InstallProgressView(
-        active: c.isManagingRimeLssp,
-        progress: c.rimeLsspProgress,
-      ),
-      error: c.rimeLsspError,
-    ),
+    for (final entry in c.rimeAddons.entries)
+      entry.key: rimeAddon(entry.key, entry.value),
   };
 }

@@ -390,7 +390,7 @@ void main() {
           englishAvailable: false,
         );
         core.rimeIceStatus = status;
-        controller.rimeIce = core.rimeIceStatus;
+        controller.rimeAddons['rime_ice']!.status = core.rimeIceStatus;
         controller.local = core.local;
         core.schemaList = const SchemaListDto(
           current: 'keytao',
@@ -423,7 +423,7 @@ void main() {
       PackageSchemaDto(id: 'double_pinyin_flypy', name: '小鹤双拼', selected: true),
     ];
 
-    expect(await controller.manageRimeIce(true), isTrue);
+    expect(await controller.manageRimeAddon('rime_ice', true), isTrue);
     expect(
       controller.takePendingSchemaSelectionPrompt(),
       (packageKey: 'rime_ice', activateOnConfirm: false),
@@ -440,7 +440,7 @@ void main() {
       core.addonDeployGate = Completer<void>();
       final managing = key == 'easy_en'
           ? controller.installAddon()
-          : controller.manageRimeIce(true);
+          : controller.manageRimeAddon('rime_ice', true);
       await settle();
       expect(controller.deployingSchemeKey, key == 'easy_en' ? isNull : key);
       core.addonDeployGate!.complete();

@@ -14,7 +14,6 @@ abstract final class AppStrings {
   static const selectSchemas = '选择方案';
   static const about = '关于';
   static const debug = '调试';
-  static const schemeTitle = '键道方案';
   static const localSchemeTitle = '本地方案';
   static const addonTitle = '附加方案';
   static const imeSettings = '输入法设置';
@@ -56,18 +55,14 @@ abstract final class AppStrings {
   static const iosKeyboardReady = '已启用 · 已允许完全访问';
   static const mobileKeyboard = '移动端键盘';
   static const openDirectory = '打开目录';
-  static const easyEnglish = 'Easy English · 英文单词输入';
   static const wanxiang = '万象拼音';
   static const wanxiangGrammar = '语法模型';
   static const wanxiangGrammarUnavailable = '语法模型不可用';
   static const rimeIce = '雾凇拼音';
   static const rimeMint = '薄荷拼音';
-  static const rimeMintEnglish = 'Mint Pinyin';
   static const rimeFrost = '白霜拼音';
-  static const rimeFrostEnglish = 'Frost Pinyin';
   static const rimeSnow = '冰雪键道';
   static const rimeLssp = '李氏三拼';
-  static const rimeLsspEnglish = 'LSSP Triple Pinyin';
   static const wanxiangVariant = '万象拼音版本';
   static const wanxiangVariants = {
     'base': '基础版',
@@ -85,7 +80,6 @@ abstract final class AppStrings {
   };
   static const checking = '检测中';
   static const notInstalled = '未安装';
-  static const installedNotDeployed = '已安装 · 未部署';
   static const install = '安装';
   static const download = '下载';
   static const replace = '替换';
@@ -111,8 +105,6 @@ abstract final class AppStrings {
   static const deployingLibjd = '正在重新部署 ime-jd 词库…';
   static const deployCurrent = '部署当前方案';
   static const installFirst = '请先安装方案';
-  static const installKeytaoFirst = '请先安装键道方案';
-  static const installMainFirst = '请先安装主方案';
   static const installEnglishTooltip = '下载 Easy English';
   static const installWanxiangTooltip = '下载万象拼音';
   static const installRimeIceTooltip = '下载雾凇拼音';
@@ -203,9 +195,7 @@ abstract final class AppStrings {
   static const selectKeytao = '切换到 KeyTao';
   static const selectDescription = '从系统输入法选择器中选中 KeyTao。';
   static const grantStorage = '授予文件访问权限';
-  static const installKeytao = '安装键道方案';
   static const installDescription = '将所选键道方案写入用户目录，安装完成后还需要手动部署。';
-  static const deployKeytao = '部署键道方案';
   static const deployDescription = '编译并启用已安装的方案，完成后输入法才可使用。';
   static const openSystemSettings = '打开系统设置';
   static const chooseKeytao = '选择 KeyTao';
@@ -237,7 +227,6 @@ abstract final class AppStrings {
   static const librimeVersion = 'librime 版本';
   static const openccVersion = 'OpenCC 版本';
   static const platform = '平台';
-  static const keytaoDirectory = '键道目录';
   static const easyEnglishRemoved = '[ADDON] Easy English 已卸载';
   static const wanxiangInstalled = '[ADDON] 万象拼音已安装并部署';
   static const wanxiangRemoved = '[ADDON] 万象拼音已卸载';

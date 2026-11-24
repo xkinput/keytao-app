@@ -86,7 +86,10 @@ class _SchemeScreenshotController extends ViewController {
       version: '',
       size: BigInt.zero,
     );
-    rimeMint = rimeFrost = rimeLssp = rimeIce;
+    final rimeIceStatus = rimeAddons['rime_ice']!.status;
+    for (final slot in rimeAddons.values) {
+      slot.status = rimeIceStatus;
+    }
   }
 }
 
