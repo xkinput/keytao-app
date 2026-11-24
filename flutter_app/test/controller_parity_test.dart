@@ -120,6 +120,10 @@ class FakeCore implements RustLibApi {
   String? deployWarning;
   EnglishModeDto english = EnglishModeDto.schema;
   bool inputEngineEnabled = true;
+  SchemaListDto previewSchemaList = const SchemaListDto(current: null, schemas: []);
+  int? configuredCandidatePageSize;
+  String? previewResult;
+  int previewCalls = 0;
   int onboardingWrites = 0;
 
   Future<void> emitAddonDeployProgress() async {
@@ -170,10 +174,15 @@ class FakeCore implements RustLibApi {
   @override
   Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => [];
   @override
-  Future<SchemaListDto> crateApiCoreGetSchemas() async =>
-      const SchemaListDto(current: null, schemas: []);
+  Future<SchemaListDto> crateApiCoreGetSchemas() async => previewSchemaList;
   @override
-  Future<int?> crateApiCoreGetCandidatePageSize() async => null;
+  Future<String> crateApiCorePreviewCandidates({int? size}) async {
+    previewCalls++;
+    return previewResult ?? (throw StateError('Preview unavailable'));
+  }
+  @override
+  Future<int?> crateApiCoreGetCandidatePageSize() async =>
+      configuredCandidatePageSize;
   @override
   Future<int?> crateApiCoreSetCandidatePageSize({int? size}) async => size;
   @override
@@ -585,17 +594,15 @@ void main() {
   });
 
   test('every managed scheme uses the download action label', () {
-    controller.addon = controller.wanxiang = controller.rimeIce =
-        controller.rimeMint = controller.rimeFrost = controller.rimeLssp =
-            missingAddon;
+    controller.addon = controller.wanxiang = missingAddon;
+    for (final slot in controller.rimeAddons.values) {
+      slot.status = missingAddon;
+    }
     expect([
       controller.installButtonLabel,
       controller.addonButtonLabel,
       controller.wanxiangButtonLabel,
-      controller.rimeIceButtonLabel,
-      controller.rimeMintButtonLabel,
-      controller.rimeFrostButtonLabel,
-      controller.rimeLsspButtonLabel,
+      ...controller.rimeAddons.values.map((slot) => slot.buttonLabel),
     ], everyElement(AppStrings.download));
     controller.wanxiang = installedAddon;
     controller.selectWanxiangVariant('pure');
@@ -603,30 +610,30 @@ void main() {
   });
 
   test('add-on status uses the same installed and active vocabulary', () {
-    expect(controller.rimeIceStatusText, AppStrings.checking);
-    controller.rimeIce = missingAddon;
-    expect(controller.rimeIceStatusText, AppStrings.notInstalled);
-    controller.rimeIce = installedAddon;
+    expect(controller.rimeAddonStatusText('rime_ice'), AppStrings.checking);
+    controller.rimeAddons['rime_ice']!.status = missingAddon;
+    expect(controller.rimeAddonStatusText('rime_ice'), AppStrings.notInstalled);
+    controller.rimeAddons['rime_ice']!.status = installedAddon;
     controller.local = deployedLocal;
-    expect(controller.rimeIceStatusText, '已安装 · 1');
-    controller.rimeIceLatestVersion = '2';
-    expect(controller.rimeIceStatusText, '可更新 · 1');
+    expect(controller.rimeAddonStatusText('rime_ice'), '已安装 · 1');
+    controller.rimeAddons['rime_ice']!.latestVersion = '2';
+    expect(controller.rimeAddonStatusText('rime_ice'), '可更新 · 1');
     controller.local = const LocalSchemaDto(
       installed: true,
       deployed: true,
       schemas: ['rime_ice'],
     );
-    expect(controller.rimeIceStatusText, '使用中 · 1');
-    controller.rimeIce = const AddonStatusDto(
+    expect(controller.rimeAddonStatusText('rime_ice'), '使用中 · 1');
+    controller.rimeAddons['rime_ice']!.status = const AddonStatusDto(
       installed: true,
       deployed: false,
       version: '1',
       englishAvailable: false,
     );
-    expect(controller.rimeIceStatusText, '待部署 · 1');
+    expect(controller.rimeAddonStatusText('rime_ice'), '待部署 · 1');
     controller.local = deployedLocal;
-    controller.rimeIceLatestVersion = null;
-    expect(controller.rimeIceStatusText, '待部署 · 1');
+    controller.rimeAddons['rime_ice']!.latestVersion = null;
+    expect(controller.rimeAddonStatusText('rime_ice'), '待部署 · 1');
   });
 
   Future<File> prepareIosUpgrade() async {
@@ -687,6 +694,54 @@ void main() {
     expect(await deploying, isTrue);
     await settle();
     expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+  });
+
+  test('candidate preview is reused on resume and page changes', () async {
+    controller.dispose();
+    controller = create(mobile: false);
+    core.local = deployedLocal;
+    core.previewSchemaList = const SchemaListDto(current: 'keytao', schemas: []);
+    core.previewResult = '{"page_size":5,"candidates":[]}';
+    expect(await controller.refreshState(), isTrue);
+    await settle();
+    expect(controller.candidatePreviewPageSize, 5);
+    expect(core.previewCalls, 1);
+
+    controller.onResume();
+    await settle();
+    controller.selectPage(AppPage.about);
+    controller.selectPage(AppPage.input);
+    await settle();
+    expect(core.previewCalls, 1);
+
+    core.previewSchemaList = const SchemaListDto(current: 'keytao_alt', schemas: []);
+    controller.onResume();
+    await settle();
+    expect(controller.currentSchemaId, 'keytao_alt');
+    expect(core.previewCalls, 2);
+
+    expect(await controller.deploy(), isTrue);
+    await settle();
+    expect(core.previewCalls, 3);
+
+    core.configuredCandidatePageSize = 7;
+    core.previewResult = '{"page_size":7,"candidates":[]}';
+    controller.onResume();
+    await settle();
+    expect(controller.candidatePreviewPageSize, 7);
+    expect(core.previewCalls, 4);
+
+    core.inputEngineEnabled = false;
+    controller.onResume();
+    await settle();
+    expect(controller.candidatePreviewPageSize, isNull);
+    expect(core.previewCalls, 4);
+
+    core.inputEngineEnabled = true;
+    controller.onResume();
+    await settle();
+    expect(controller.candidatePreviewPageSize, 7);
+    expect(core.previewCalls, 5);
   });
 
   test('iOS failed upgrade retries only for a new bundle stamp', () async {
@@ -799,14 +854,14 @@ void main() {
           controller.uninstallAddon,
           () => controller.manageWanxiang(true),
           () => controller.manageWanxiang(false),
-          () => controller.manageRimeIce(true),
-          () => controller.manageRimeIce(false),
-          () => controller.manageRimeMint(true),
-          () => controller.manageRimeMint(false),
-          () => controller.manageRimeFrost(true),
-          () => controller.manageRimeFrost(false),
-          () => controller.manageRimeLssp(true),
-          () => controller.manageRimeLssp(false),
+          () => controller.manageRimeAddon('rime_ice', true),
+          () => controller.manageRimeAddon('rime_ice', false),
+          () => controller.manageRimeAddon('rime_mint', true),
+          () => controller.manageRimeAddon('rime_mint', false),
+          () => controller.manageRimeAddon('rime_frost', true),
+          () => controller.manageRimeAddon('rime_frost', false),
+          () => controller.manageRimeAddon('triple_pinyin_lssp', true),
+          () => controller.manageRimeAddon('triple_pinyin_lssp', false),
         ]) {
           controller.clearOperationLogs();
           expect(await action(), isTrue);
@@ -841,14 +896,14 @@ void main() {
       () => controller.manageWanxiangGrammar(true),
       () => controller.manageWanxiangGrammar(false),
       () => controller.manageWanxiang(false),
-      () => controller.manageRimeIce(true),
-      () => controller.manageRimeIce(false),
-      () => controller.manageRimeMint(true),
-      () => controller.manageRimeMint(false),
-      () => controller.manageRimeFrost(true),
-      () => controller.manageRimeFrost(false),
-      () => controller.manageRimeLssp(true),
-      () => controller.manageRimeLssp(false),
+      () => controller.manageRimeAddon('rime_ice', true),
+      () => controller.manageRimeAddon('rime_ice', false),
+      () => controller.manageRimeAddon('rime_mint', true),
+      () => controller.manageRimeAddon('rime_mint', false),
+      () => controller.manageRimeAddon('rime_frost', true),
+      () => controller.manageRimeAddon('rime_frost', false),
+      () => controller.manageRimeAddon('triple_pinyin_lssp', true),
+      () => controller.manageRimeAddon('triple_pinyin_lssp', false),
     ]) {
       controller.deploySteps.clear();
       controller.clearOperationLogs();
@@ -906,34 +961,75 @@ void main() {
         if (operation == OperationKind.wanxiangGrammar) {
           expect(controller.wanxiangGrammarProgress, same(progress));
         }
-        if (operation == OperationKind.rimeIce) {
-          expect(controller.rimeIceProgress, same(progress));
-        }
-        if (operation == OperationKind.rimeMint) {
-          expect(controller.rimeMintProgress, same(progress));
-        }
-        if (operation == OperationKind.rimeFrost) {
-          expect(controller.rimeFrostProgress, same(progress));
-        }
-        if (operation == OperationKind.rimeLssp) {
-          expect(controller.rimeLsspProgress, same(progress));
+        for (final slot in controller.rimeAddons.values) {
+          if (operation == slot.operation) expect(slot.progress, same(progress));
         }
       }
       var changes = 0;
       controller.addListener(() => changes++);
       android.progress.add(
         const InstallProgressDto(
+          stage: 'downloading',
+          percent: 42,
+          message: 'latest download tick',
+        ),
+      );
+      await settle();
+      expect(controller.progress, 'latest download tick');
+      expect(changes, 0);
+      android.progress.add(
+        const InstallProgressDto(
           stage: 'extracting',
-          percent: 80,
+          percent: 42,
           message: 'extract tick',
         ),
       );
       await settle();
-      expect(controller.installFraction, .8);
       expect(changes, 1);
+      android.progress.add(
+        const InstallProgressDto(
+          stage: 'extracting',
+          percent: 80,
+          message: 'latest extract tick',
+        ),
+      );
+      await settle();
+      expect(controller.installFraction, .8);
+      expect(changes, 2);
       expect(controller.operationLogs, logs);
     },
   );
+
+  test('cloud transfer notifies once per percentage and transfer', () async {
+    await controller.connectEvents();
+    await settle();
+    var changes = 0;
+    controller.addListener(() => changes++);
+    for (final (direction, key, bytes, total, expected) in [
+      ('upload', 'keytao', 0, 0, 1),
+      ('upload', 'keytao', 0, 1000, 2),
+      ('upload', 'keytao', 9, 1000, 2),
+      ('upload', 'keytao', 10, 1000, 3),
+      ('upload', 'rime_ice', 10, 1000, 4),
+      ('download', 'rime_ice', 10, 1000, 5),
+    ]) {
+      final progress = CloudTransferProgressDto(
+        direction: direction,
+        schemeKey: key,
+        bytesTransferred: BigInt.from(bytes),
+        totalBytes: BigInt.from(total),
+      );
+      core.events.add(
+        BridgeEvent(
+          kind: BridgeEventKind.cloudTransferProgress,
+          cloudTransferProgress: progress,
+        ),
+      );
+      await settle();
+      expect(controller.cloudTransferProgress, same(progress));
+      expect(changes, expected);
+    }
+  });
 
   test('grammar download cancels only during its download stage', () async {
     await controller.connectEvents();
@@ -1134,8 +1230,8 @@ void main() {
       core.calls.where((call) => call == 'addonUpdate:rime_ice'),
       hasLength(1),
     );
-    expect(controller.rimeIceLatestVersion, '2');
-    expect(controller.rimeIceHasUpdate, isTrue);
+    expect(controller.rimeAddons['rime_ice']!.latestVersion, '2');
+    expect(controller.rimeAddons['rime_ice']!.hasUpdate, isTrue);
     core.rimeMintStatus = installedAddon;
     core.rimeFrostStatus = installedAddon;
     core.rimeLsspStatus = installedAddon;
@@ -1155,12 +1251,12 @@ void main() {
         hasLength(1),
       );
     }
-    expect(controller.rimeMintLatestVersion, '2');
-    expect(controller.rimeMintHasUpdate, isTrue);
-    expect(controller.rimeFrostLatestVersion, '2');
-    expect(controller.rimeFrostHasUpdate, isTrue);
-    expect(controller.rimeLsspLatestVersion, '2');
-    expect(controller.rimeLsspHasUpdate, isTrue);
+    expect(controller.rimeAddons['rime_mint']!.latestVersion, '2');
+    expect(controller.rimeAddons['rime_mint']!.hasUpdate, isTrue);
+    expect(controller.rimeAddons['rime_frost']!.latestVersion, '2');
+    expect(controller.rimeAddons['rime_frost']!.hasUpdate, isTrue);
+    expect(controller.rimeAddons['triple_pinyin_lssp']!.latestVersion, '2');
+    expect(controller.rimeAddons['triple_pinyin_lssp']!.hasUpdate, isTrue);
   });
 
   test('add-on update check failures remain nonblocking for the session', () async {
@@ -1188,14 +1284,14 @@ void main() {
     expect(controller.error, isNull);
     expect(controller.addonError, isNull);
     expect(controller.wanxiangError, isNull);
-    expect(controller.rimeIceError, isNull);
-    expect(controller.rimeMintError, isNull);
-    expect(controller.rimeFrostError, isNull);
+    expect(controller.rimeAddons['rime_ice']!.error, isNull);
+    expect(controller.rimeAddons['rime_mint']!.error, isNull);
+    expect(controller.rimeAddons['rime_frost']!.error, isNull);
     expect(controller.addonLatestVersion, isNull);
     expect(controller.wanxiangLatestVersion, isNull);
-    expect(controller.rimeIceLatestVersion, isNull);
-    expect(controller.rimeMintLatestVersion, isNull);
-    expect(controller.rimeFrostLatestVersion, isNull);
+    expect(controller.rimeAddons['rime_ice']!.latestVersion, isNull);
+    expect(controller.rimeAddons['rime_mint']!.latestVersion, isNull);
+    expect(controller.rimeAddons['rime_frost']!.latestVersion, isNull);
   });
 
   test('add-on update checks discard results across install and uninstall', () async {
@@ -1222,10 +1318,10 @@ void main() {
             : controller.uninstallAddon()),
         isTrue,
       );
-      expect(await controller.manageRimeIce(installed), isTrue);
-      expect(await controller.manageRimeMint(installed), isTrue);
-      expect(await controller.manageRimeFrost(installed), isTrue);
-      expect(await controller.manageRimeLssp(installed), isTrue);
+      expect(await controller.manageRimeAddon('rime_ice', installed), isTrue);
+      expect(await controller.manageRimeAddon('rime_mint', installed), isTrue);
+      expect(await controller.manageRimeAddon('rime_frost', installed), isTrue);
+      expect(await controller.manageRimeAddon('triple_pinyin_lssp', installed), isTrue);
       easyEnRequest.complete(addonUpdate);
       wanxiangRequest.complete(addonUpdate);
       rimeIceRequest.complete(addonUpdate);
@@ -1235,10 +1331,10 @@ void main() {
       await settle();
       expect(controller.addonLatestVersion, installed ? '1' : null);
       expect(controller.wanxiangLatestVersion, '2');
-      expect(controller.rimeIceLatestVersion, installed ? '1' : null);
-      expect(controller.rimeMintLatestVersion, installed ? '1' : null);
-      expect(controller.rimeFrostLatestVersion, installed ? '1' : null);
-      expect(controller.rimeLsspLatestVersion, installed ? '1' : null);
+      expect(controller.rimeAddons['rime_ice']!.latestVersion, installed ? '1' : null);
+      expect(controller.rimeAddons['rime_mint']!.latestVersion, installed ? '1' : null);
+      expect(controller.rimeAddons['rime_frost']!.latestVersion, installed ? '1' : null);
+      expect(controller.rimeAddons['triple_pinyin_lssp']!.latestVersion, installed ? '1' : null);
     }
   });
 
@@ -1248,20 +1344,18 @@ void main() {
       ..latestRelease = release
       ..local = installedLocal;
     core.installFailure = AppStrings.downloadCancelled;
-    for (final install in [controller.install, controller.installAndDeploy]) {
-      expect(await install(), isFalse);
-      expect(controller.installError, isNull);
-      expect(controller.error, isNull);
-      expect(controller.progress, AppStrings.downloadCancelled);
-      expect(controller.canInstall, isTrue);
-      expect(controller.busy, isFalse);
-      expect(controller.operation, isNull);
-      expect(
-        controller.operationLogs.any((line) => line.contains('[ERROR]')),
-        isFalse,
-      );
-    }
-    expect(core.calls.where((call) => call.startsWith('install:')), hasLength(2));
+    expect(await controller.install(), isFalse);
+    expect(controller.installError, isNull);
+    expect(controller.error, isNull);
+    expect(controller.progress, AppStrings.downloadCancelled);
+    expect(controller.canInstall, isTrue);
+    expect(controller.busy, isFalse);
+    expect(controller.operation, isNull);
+    expect(
+      controller.operationLogs.any((line) => line.contains('[ERROR]')),
+      isFalse,
+    );
+    expect(core.calls.where((call) => call.startsWith('install:')), hasLength(1));
     expect(core.calls, isNot(contains('deployDefault')));
   });
 
@@ -1332,14 +1426,10 @@ void main() {
     expect(controller.local, isNull);
     expect(controller.canInstallAddon, isTrue);
     expect(controller.canInstallWanxiang, isTrue);
-    expect(controller.canInstallRimeIce, isTrue);
-    expect(controller.canInstallRimeMint, isTrue);
-    expect(controller.canInstallRimeFrost, isTrue);
-    expect(controller.canInstallRimeLssp, isTrue);
-    expect(await controller.manageRimeIce(true), isTrue);
-    expect(await controller.manageRimeMint(true), isTrue);
-    expect(await controller.manageRimeFrost(true), isTrue);
-    expect(await controller.manageRimeLssp(true), isTrue);
+    expect(await controller.manageRimeAddon('rime_ice', true), isTrue);
+    expect(await controller.manageRimeAddon('rime_mint', true), isTrue);
+    expect(await controller.manageRimeAddon('rime_frost', true), isTrue);
+    expect(await controller.manageRimeAddon('triple_pinyin_lssp', true), isTrue);
     expect(await controller.manageWanxiang(true), isTrue);
     core.calls.clear();
     expect(await controller.installAddon(), isTrue);
@@ -1356,26 +1446,26 @@ void main() {
     expect(await controller.manageWanxiang(true), isFalse);
     expect(core.calls, contains('callback:deploy failed'));
     expect(controller.wanxiangError, 'deploy failed');
-    expect(await controller.manageRimeIce(true), isFalse);
-    expect(controller.rimeIceError, 'deploy failed');
-    expect(await controller.manageRimeMint(true), isFalse);
-    expect(controller.rimeMintError, 'deploy failed');
-    expect(await controller.manageRimeFrost(true), isFalse);
-    expect(controller.rimeFrostError, 'deploy failed');
-    expect(await controller.manageRimeLssp(true), isFalse);
-    expect(controller.rimeLsspError, 'deploy failed');
+    expect(await controller.manageRimeAddon('rime_ice', true), isFalse);
+    expect(controller.rimeAddons['rime_ice']!.error, 'deploy failed');
+    expect(await controller.manageRimeAddon('rime_mint', true), isFalse);
+    expect(controller.rimeAddons['rime_mint']!.error, 'deploy failed');
+    expect(await controller.manageRimeAddon('rime_frost', true), isFalse);
+    expect(controller.rimeAddons['rime_frost']!.error, 'deploy failed');
+    expect(await controller.manageRimeAddon('triple_pinyin_lssp', true), isFalse);
+    expect(controller.rimeAddons['triple_pinyin_lssp']!.error, 'deploy failed');
     android.failDeploy = false;
     android.deployed = false;
     expect(await controller.manageWanxiang(true), isFalse);
     expect(core.calls, contains('callback:部署未完成'));
-    expect(await controller.manageRimeIce(true), isFalse);
-    expect(controller.rimeIceError, '部署未完成');
-    expect(await controller.manageRimeMint(true), isFalse);
-    expect(controller.rimeMintError, '部署未完成');
-    expect(await controller.manageRimeFrost(true), isFalse);
-    expect(controller.rimeFrostError, '部署未完成');
-    expect(await controller.manageRimeLssp(true), isFalse);
-    expect(controller.rimeLsspError, '部署未完成');
+    expect(await controller.manageRimeAddon('rime_ice', true), isFalse);
+    expect(controller.rimeAddons['rime_ice']!.error, '部署未完成');
+    expect(await controller.manageRimeAddon('rime_mint', true), isFalse);
+    expect(controller.rimeAddons['rime_mint']!.error, '部署未完成');
+    expect(await controller.manageRimeAddon('rime_frost', true), isFalse);
+    expect(controller.rimeAddons['rime_frost']!.error, '部署未完成');
+    expect(await controller.manageRimeAddon('triple_pinyin_lssp', true), isFalse);
+    expect(controller.rimeAddons['triple_pinyin_lssp']!.error, '部署未完成');
     controller.dispose();
     controller = create(mobile: false)
       ..desktopEnglishMode = EnglishModeDto.schema;

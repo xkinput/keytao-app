@@ -825,7 +825,7 @@ void main() {
         {'id': 'fixture', 'schemeKey': 'local-cloud-fixture'},
       ];
       expect(await c.downloadCloudPackage('fixture'), isTrue);
-      expect(await c.manageRimeIce(true), isTrue);
+      expect(await c.manageRimeAddon('rime_ice', true), isTrue);
       expect(c.activeSchemeKey, 'rime_ice');
       expect(c.hasPendingSchemaSelectionPrompt, isFalse);
       expect(c.installedPackageFor('txjx')?.hasPackageZip, isTrue);
@@ -834,9 +834,9 @@ void main() {
         c.installedPackageFor('local-cloud-fixture')?.hasPackageZip,
         isTrue,
       );
-      expect(c.rimeIce?.installed, isTrue);
-      expect(c.rimeIce?.deployed, isFalse);
-      expect(c.rimeIceStatusText, contains('使用中'));
+      expect(c.rimeAddons['rime_ice']!.status?.installed, isTrue);
+      expect(c.rimeAddons['rime_ice']!.status?.deployed, isFalse);
+      expect(c.rimeAddonStatusText('rime_ice'), contains('使用中'));
       expect(
         api.calls.where((call) => call.startsWith('switchPackage:')),
         isEmpty,

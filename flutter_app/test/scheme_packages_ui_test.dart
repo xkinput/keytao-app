@@ -155,26 +155,8 @@ class _PackageController extends ViewController {
   }
 
   @override
-  Future<bool> manageRimeIce(bool installed) async {
-    actions.add('ice:$installed');
-    return true;
-  }
-
-  @override
-  Future<bool> manageRimeMint(bool installed) async {
-    actions.add('mint:$installed');
-    return true;
-  }
-
-  @override
-  Future<bool> manageRimeFrost(bool installed) async {
-    actions.add('frost:$installed');
-    return true;
-  }
-
-  @override
-  Future<bool> manageRimeLssp(bool installed) async {
-    actions.add('lssp:$installed');
+  Future<bool> manageRimeAddon(String id, bool installed) async {
+    actions.add('$id:$installed');
     return true;
   }
 
@@ -364,8 +346,10 @@ void main() {
         version: 'v1',
         englishAvailable: false,
       );
-      c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost = c.rimeLssp =
-          installed;
+      c.addon = c.wanxiang = installed;
+      for (final slot in c.rimeAddons.values) {
+        slot.status = installed;
+      }
       await _pumpAddons(tester, c);
       await select(
         'rime_ice',
@@ -461,11 +445,12 @@ void main() {
           version: '1',
           englishAvailable: false,
         );
-        c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost =
-            c.rimeLssp = status;
-        c.addonLatestVersion = c.wanxiangLatestVersion =
-            c.rimeIceLatestVersion = c.rimeMintLatestVersion =
-                c.rimeFrostLatestVersion = c.rimeLsspLatestVersion = latest;
+        c.addon = c.wanxiang = status;
+        c.addonLatestVersion = c.wanxiangLatestVersion = latest;
+        for (final slot in c.rimeAddons.values) {
+          slot.status = status;
+          slot.latestVersion = latest;
+        }
         await _pumpSchemePage(tester, c);
         await _openAddons(tester);
         final grid = find.byKey(const ValueKey('addon-schemes'));
@@ -488,9 +473,9 @@ void main() {
         );
         for (final (key, name) in [
           ('addon-wanxiang', 'wanxiang'),
-          ('addon-rime-mint', 'mint'),
-          ('addon-rime-frost', 'frost'),
-          ('addon-rime-lssp', 'lssp'),
+          ('addon-rime-mint', 'rime_mint'),
+          ('addon-rime-frost', 'rime_frost'),
+          ('addon-rime-lssp', 'triple_pinyin_lssp'),
         ]) {
           final card = find.byKey(ValueKey(key));
           if (label != null) {
@@ -742,7 +727,7 @@ void main() {
         );
         c.addon = status;
         c.wanxiang = status;
-        c.rimeLssp = status;
+        c.rimeAddons['triple_pinyin_lssp']!.status = status;
         await tester.pumpWidget(
           KeyTaoTheme(
             platform: c.info.platform,
@@ -1627,7 +1612,7 @@ void main() {
       'add-on dialog header and responsive grid at $width on ${platform.name}',
       (tester) async {
         final c = _PackageController(platform);
-        c.addon = c.rimeIce;
+        c.addon = c.rimeAddons['rime_ice']!.status;
         addTearDown(c.dispose);
         _size(tester, Size(width, 1200));
         await _pumpSchemePage(tester, c);
@@ -1753,7 +1738,7 @@ void main() {
   }
 
   for (final (key, action, operation) in [
-    ('rime-ice', 'ice', OperationKind.rimeIce),
+    ('rime-ice', 'rime_ice', OperationKind.rimeIce),
     ('easy-en', 'easy', OperationKind.addon),
   ]) {
     testWidgets('home $key card uses package badges and retains operations', (
@@ -1782,8 +1767,9 @@ void main() {
           c.addon = info;
           c.addonLatestVersion = latest;
         } else {
-          c.rimeIce = info;
-          c.rimeIceLatestVersion = latest;
+          c.rimeAddons['rime_ice']!
+            ..status = info
+            ..latestVersion = latest;
         }
         final overlay = key == 'easy-en';
         c.isolatedPackages = [
@@ -1936,8 +1922,9 @@ void main() {
         c.addonProgress = progress;
         c.addonError = 'Download failed';
       } else {
-        c.rimeIceProgress = progress;
-        c.rimeIceError = 'Download failed';
+        c.rimeAddons['rime_ice']!
+          ..progress = progress
+          ..error = 'Download failed';
       }
       c.rebuild();
       await tester.pumpAndSettle();
@@ -2052,13 +2039,12 @@ void main() {
     c
       ..busy = true
       ..wanxiangProgress = progress
-      ..rimeMintProgress = progress
-      ..rimeFrostProgress = progress
-      ..rimeLsspProgress = progress
-      ..wanxiangError = 'Download failed'
-      ..rimeMintError = 'Download failed'
-      ..rimeFrostError = 'Download failed'
-      ..rimeLsspError = 'Download failed';
+      ..wanxiangError = 'Download failed';
+    for (final id in ['rime_mint', 'rime_frost', 'triple_pinyin_lssp']) {
+      c.rimeAddons[id]!
+        ..progress = progress
+        ..error = 'Download failed';
+    }
     for (final (operation, key) in [
       (OperationKind.wanxiang, 'wanxiang'),
       (OperationKind.rimeMint, 'rime-mint'),
@@ -2302,12 +2288,6 @@ void main() {
     tester,
   ) async {
     final c = _PackageController(BridgePlatform.android)
-      ..rimeIce = const AddonStatusDto(
-        installed: false,
-        deployed: false,
-        version: '',
-        englishAvailable: false,
-      )
       ..addon = const AddonStatusDto(
         installed: false,
         deployed: false,
@@ -2353,6 +2333,7 @@ void main() {
           options: ['first', 'second'],
         ),
       ];
+    c.rimeAddons['rime_ice']!.status = c.addon;
     addTearDown(c.dispose);
     _size(tester, const Size(320, 850));
     await _pumpSchemePage(tester, c);

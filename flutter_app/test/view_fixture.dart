@@ -70,7 +70,7 @@ class ViewController extends AppController {
       version: '',
       englishAvailable: false,
     );
-    rimeIce = const AddonStatusDto(
+    rimeAddons['rime_ice']!.status = const AddonStatusDto(
       installed: false,
       deployed: false,
       version: '',
