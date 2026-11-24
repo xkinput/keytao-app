@@ -87,6 +87,17 @@ class ThemeEditorSection extends StatefulWidget {
 class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   static const _commentPositions = {'inline': '词条旁', 'below': '词条下'};
   static const _mobileCommentSizePath = 'mobile.candidateBar.commentFontSize';
+  static const _panelPath = 'pc.panel.';
+  static const _paddingPath = '${_panelPath}padding';
+  static const _verticalPadding = {'paddingTop': '上', 'paddingBottom': '下'};
+  static const _horizontalPadding = {'paddingLeft': '左', 'paddingRight': '右'};
+  static const _keyTypes = {
+    'keyTypes.function': '功能键',
+    'keyTypes.space': '空格',
+    'keyTypes.enter': '回车',
+    'keyClasses.accent': '强调键',
+    'keyClasses.accentPunctuation': '标点键',
+  };
 
   Map<String, dynamic>? _snapshot;
   Map<String, dynamic>? _draft;
@@ -102,6 +113,9 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   bool _loading = false;
   bool _working = false;
   bool _pending = true;
+  bool _verticalPaddingLocked = true;
+  bool _horizontalPaddingLocked = true;
+  bool _allPaddingLocked = false;
   late bool _mobile;
   String _target = 'light';
   String? _error;
@@ -225,12 +239,13 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       if (_draft != null) setState(() => _draft = null);
       return;
     }
+    final linked = _linkedPadding(path, value);
     _preview(path, value);
     await _perform(
       () => _controller.updateThemeEditor(
         target: _target,
-        path: path,
-        value: value,
+        path: linked == null ? path : _paddingPath,
+        value: linked ?? value,
       ),
     );
   }
@@ -269,10 +284,37 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     return value;
   }
 
+  Map<String, Object?>? _linkedPadding(String path, Object? value) {
+    if (!path.startsWith(_paddingPath)) return null;
+    final side = path.substring(_panelPath.length);
+    final vertical = _verticalPadding.containsKey(side);
+    if (!vertical && !_horizontalPadding.containsKey(side)) return null;
+    if (_allPaddingLocked) {
+      return {
+        for (final side in _verticalPadding.keys) side: value,
+        for (final side in _horizontalPadding.keys) side: value,
+      };
+    }
+    if (!(vertical ? _verticalPaddingLocked : _horizontalPaddingLocked)) {
+      return null;
+    }
+    return {
+      for (final side
+          in (vertical ? _verticalPadding : _horizontalPadding).keys)
+        side: value,
+    };
+  }
+
+  Object? _pendingValue(String path, (String, Object?)? edit) {
+    if (edit == null) return null;
+    if (edit.$1 == path) return edit.$2;
+    if (!path.startsWith(_paddingPath)) return null;
+    return _linkedPadding(edit.$1, edit.$2)?[path.substring(_panelPath.length)];
+  }
+
   Object? _value(String path) {
-    if (_draft != null && _previewField?.$1 == path) {
-      final value = _previewField?.$2;
-      if (value != null) return value;
+    if (_draft != null) {
+      if (_pendingValue(path, _previewField) case final value?) return value;
     }
     final raw =
         _snapshot![_target == 'dark' ? 'resolvedDark' : 'resolvedLight'];
@@ -367,7 +409,11 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
 
   void _schedulePreview(String path, Object value) {
     _previewDebounce?.cancel();
-    _queuedPreview = (path, value);
+    if (_linkedPadding(path, value) != null) {
+      setState(() => _queuedPreview = (path, value));
+    } else {
+      _queuedPreview = (path, value);
+    }
     _previewDebounce = Timer(const Duration(milliseconds: 80), () {
       if (_enabled) {
         _preview(path, value);
@@ -381,20 +427,28 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     _cancelPreview();
     if (_draft != null && _previewField == (path, value)) return;
     final source = jsonDecode(jsonEncode(_source)) as Map<String, dynamic>;
-    var node = source;
-    final parts = [_target, ...path.split('.')];
-    for (final part in parts.take(parts.length - 1)) {
-      node = (node[part] ??= <String, dynamic>{}) as Map<String, dynamic>;
-    }
-    if (value == null) {
-      node.remove(parts.last);
+    final linked = _linkedPadding(path, value);
+    final fields = linked == null
+        ? {path: value}
+        : {
+            for (final entry in linked.entries)
+              '$_panelPath${entry.key}': entry.value,
+          };
+    for (final field in fields.entries) {
+      final parts = field.key.split('.');
+      var layer =
+          (source[_target] ??= <String, dynamic>{}) as Map<String, dynamic>;
       Map<String, dynamic>? base = source;
-      for (final part in path.split('.').take(parts.length - 2)) {
+      for (final part in parts.take(parts.length - 1)) {
+        layer = (layer[part] ??= <String, dynamic>{}) as Map<String, dynamic>;
         base = base?[part] as Map<String, dynamic>?;
       }
-      base?.remove(parts.last);
-    } else {
-      node[parts.last] = value;
+      if (field.value == null) {
+        layer.remove(parts.last);
+        base?.remove(parts.last);
+      } else {
+        layer[parts.last] = field.value;
+      }
     }
     try {
       final preview = _controller.resolveThemeEditorPreview(
@@ -453,12 +507,19 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       }
     }
 
+    final linked = _linkedPadding(path, null);
+    final resetPaths = linked == null
+        ? [path]
+        : linked.keys.map((side) => '$_panelPath$side');
     final reset = _reset(
       label,
       _enabled &&
               supported &&
-              (_at(_source, '$_target.$path') != null ||
-                  _at(_source, path) != null)
+              resetPaths.any(
+                (path) =>
+                    _at(_source, '$_target.$path') != null ||
+                    _at(_source, path) != null,
+              )
           ? () => _save(path, null)
           : null,
     );
@@ -529,12 +590,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     bool scale = false,
     bool compact = false,
   }) {
-    final pending = _queuedPreview;
-    final selected = pending?.$1 == path ? pending!.$2 : _value(path);
-    var value = ((selected as num).toDouble() * (scale ? 100 : 1)).clamp(
-      min,
-      max,
-    );
+    final selected = _pendingValue(path, _queuedPreview) ?? _value(path);
+    var value = (selected as num).toDouble() * (scale ? 100 : 1);
     double number(double fraction) =>
         min + (fraction * divisions).round() / divisions * (max - min);
     String display(double value) =>
@@ -552,7 +609,9 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                 // A disabled thumb can leave a queued tooltip layout; use the value tooltip.
                 tooltipControls: const FSliderTooltipControls.disabled(),
                 control: FSliderControl.liftedContinuous(
-                  value: FSliderValue(max: (value - min) / (max - min)),
+                  value: FSliderValue(
+                    max: ((value - min) / (max - min)).clamp(0.0, 1.0),
+                  ),
                   stepPercentage: 1 / divisions,
                   onChange: (selection) {
                     setLocalState(() => value = number(selection.max));
@@ -560,7 +619,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
                   },
                 ),
                 onEnd: _enabled && _supported(path)
-                    ? (_) => _save(path, scale ? value / 100 : value)
+                    ? (_) =>
+                          _save(path, value.clamp(min, max) / (scale ? 100 : 1))
                     : null,
                 semanticValueFormatterCallback: (value) =>
                     '$label ${display(number(value))}',
@@ -581,6 +641,110 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         ),
       ),
       compact: compact,
+    );
+  }
+
+  Widget _paddingLock(
+    String id,
+    String label,
+    bool locked,
+    VoidCallback? toggle,
+  ) {
+    final size = context.platformVariant.touch ? 44.0 : 32.0;
+    return FTooltip(
+      tipBuilder: (_, _) => Text(locked ? '解除$label' : '开启$label'),
+      child: Semantics(
+        label: label,
+        toggled: locked,
+        child: FButton.icon(
+          key: ValueKey('theme-padding-lock-$id'),
+          variant: FButtonVariant.ghost,
+          style: FButtonStyleDelta.delta(
+            contentStyle: FButtonContentStyleDelta.delta(
+              constraints: BoxConstraints.tightFor(width: size, height: size),
+              padding: const EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
+            ),
+          ),
+          onPress: toggle == null
+              ? null
+              : () => setState(() {
+                  _cancelPreview();
+                  _draft = null;
+                  toggle();
+                }),
+          child: Icon(
+            locked ? FLucideIcons.lock : FLucideIcons.lockOpen,
+            size: 15,
+            color: locked && toggle != null ? ChromeAccent.of(context) : null,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _panelPadding() {
+    Widget axis(Map<String, String> sides, Widget lock, int limit) => Row(
+      spacing: 8,
+      children: [
+        for (final side in sides.entries) ...[
+          if (side.key != sides.keys.first) lock,
+          Expanded(
+            child: _slider(
+              side.value,
+              '$_panelPath${side.key}',
+              0,
+              limit.toDouble(),
+              limit,
+              compact: true,
+            ),
+          ),
+        ],
+      ],
+    );
+    final vertical = axis(
+      _verticalPadding,
+      _paddingLock(
+        'vertical',
+        '上下联动',
+        _verticalPaddingLocked,
+        _canPreview && !_allPaddingLocked
+            ? () => _verticalPaddingLocked = !_verticalPaddingLocked
+            : null,
+      ),
+      28,
+    );
+    final horizontal = axis(
+      _horizontalPadding,
+      _paddingLock(
+        'horizontal',
+        '左右联动',
+        _horizontalPaddingLocked,
+        _canPreview && !_allPaddingLocked
+            ? () => _horizontalPaddingLocked = !_horizontalPaddingLocked
+            : null,
+      ),
+      _allPaddingLocked ? 28 : 32,
+    );
+    final all = _paddingLock(
+      'all',
+      '四边联动',
+      _allPaddingLocked,
+      _canPreview ? () => _allPaddingLocked = !_allPaddingLocked : null,
+    );
+    return Semantics(
+      label: '面板内边距',
+      child: LayoutBuilder(
+        builder: (_, constraints) => constraints.maxWidth >= 560
+            ? Row(
+                spacing: 8,
+                children: [
+                  Expanded(child: vertical),
+                  all,
+                  Expanded(child: horizontal),
+                ],
+              )
+            : Column(children: [vertical, all, horizontal]),
+      ),
     );
   }
 
@@ -755,7 +919,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     return '#${['red', 'green', 'blue', 'alpha'].map((part) => (color[part] as int).toRadixString(16).padLeft(2, '0')).join().toUpperCase()}';
   }
 
-  Widget _color(String label, String path) {
+  Widget _color(String label, String path, {required bool showValue}) {
     final value = _colorValue(path);
     return _field(
       label,
@@ -765,6 +929,14 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         child: FButton(
           variant: FButtonVariant.ghost,
           mainAxisSize: MainAxisSize.min,
+          style: showValue
+              ? const FButtonStyleDelta.context()
+              : const FButtonStyleDelta.delta(
+                  contentStyle: FButtonContentStyleDelta.delta(
+                    constraints: BoxConstraints.tightFor(width: 44, height: 44),
+                    padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
+                  ),
+                ),
           onPress: _enabled && _supported(path)
               ? () async {
                   final color = await showThemeColorPicker(
@@ -789,8 +961,17 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
               mainAxisSize: MainAxisSize.min,
               spacing: 6,
               children: [
-                ThemeColorSwatch(value: value),
-                Text(value.isEmpty ? '默认' : value),
+                ThemeColorSwatch(value: value, size: 20),
+                if (showValue)
+                  SizedBox(
+                    width: 76,
+                    child: Text(
+                      value.isEmpty ? '默认' : value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.theme.typography.body.xs,
+                    ),
+                  ),
               ],
             ),
           ),
@@ -800,9 +981,23 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     );
   }
 
-  Widget _colors(Map<String, String> fields) => _compactRows([
-    for (final entry in fields.entries) _color(entry.value, entry.key),
-  ]);
+  Widget _colors(Map<String, String> fields) => LayoutBuilder(
+    builder: (context, constraints) {
+      final columns = constraints.maxWidth >= 300 ? 2 : 1;
+      final width = (constraints.maxWidth - (columns - 1) * 12) / columns;
+      return Wrap(
+        spacing: 12,
+        runSpacing: 2,
+        children: [
+          for (final entry in fields.entries)
+            SizedBox(
+              width: width,
+              child: _color(entry.value, entry.key, showValue: width >= 260),
+            ),
+        ],
+      );
+    },
+  );
 
   Widget _compactRows(List<Widget> children) => LayoutBuilder(
     builder: (context, constraints) {
@@ -1050,30 +1245,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
             _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
           ]),
-          Semantics(
-            label: '面板内边距',
-            child: Row(
-              spacing: 12,
-              children: [
-                for (final side in const {
-                  'Top': '上',
-                  'Right': '右',
-                  'Bottom': '下',
-                  'Left': '左',
-                }.entries)
-                  Expanded(
-                    child: _slider(
-                      side.value,
-                      'pc.panel.padding${side.key}',
-                      0,
-                      side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
-                      side.key == 'Top' || side.key == 'Bottom' ? 28 : 32,
-                      compact: true,
-                    ),
-                  ),
-              ],
-            ),
-          ),
+          _panelPadding(),
           _compactRows([
             _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
             _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),
@@ -1086,16 +1258,16 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           _colors({
             for (final entry in const {
               'background': '候选底色',
+              'borderColor': '候选边框',
+              'selectedBackground': '高亮底色',
+              'selectedBorderColor': '高亮边框',
               'foreground': '候选字色',
               'selectedForeground': '高亮字色',
-              'selectedBackground': '高亮底色',
               'labelColor': '序号字色',
               'selectedLabelColor': '高亮序号',
               'commentColor': '注释字色',
               'selectedCommentColor': '高亮注释',
               'hoverBackground': '悬停底色',
-              'borderColor': '候选边框',
-              'selectedBorderColor': '高亮边框',
             }.entries)
               'pc.candidate.${entry.key}': entry.value,
           }),
@@ -1108,8 +1280,8 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         _group('pc.modeHint', '模式提示', [
           _colors(const {
             'pc.modeHint.background': '背景',
-            'pc.modeHint.foreground': '字色',
             'pc.modeHint.borderColor': '边框',
+            'pc.modeHint.foreground': '字色',
           }),
           _compactRows([
             _slider('边框宽度', 'pc.modeHint.borderWidth', 0, 4, 8),
@@ -1140,29 +1312,15 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
         ]),
         _group('mobile.keyTypes', '功能键', [
           _colors({
-            for (final entry in const {
-              'keyTypes.function': '功能键',
-              'keyTypes.space': '空格',
-              'keyTypes.enter': '回车',
-              'keyClasses.accent': '强调键',
-              'keyClasses.accentPunctuation': '标点键',
-            }.entries)
-              for (final color in const {
-                'background': '底色',
-                'foreground': '字色',
-                'borderColor': '边框',
-              }.entries)
-                'mobile.keyboard.${entry.key}.${color.key}':
-                    '${entry.value}${color.value}',
+            for (final entry in _keyTypes.entries) ...{
+              'mobile.keyboard.${entry.key}.background': '${entry.value}底色',
+              'mobile.keyboard.${entry.key}.borderColor': '${entry.value}边框',
+            },
+            for (final entry in _keyTypes.entries)
+              'mobile.keyboard.${entry.key}.foreground': '${entry.value}字色',
           }),
           _compactRows([
-            for (final entry in const {
-              'keyTypes.function': '功能键',
-              'keyTypes.space': '空格',
-              'keyTypes.enter': '回车',
-              'keyClasses.accent': '强调键',
-              'keyClasses.accentPunctuation': '标点键',
-            }.entries)
+            for (final entry in _keyTypes.entries)
               _slider(
                 '${entry.value}边框宽度',
                 'mobile.keyboard.${entry.key}.borderWidth',
@@ -1199,17 +1357,17 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           _slider('注释字号', _mobileCommentSizePath, 9, 24, 15),
           _colors({
             for (final entry in const {
-              'background': '栏背景',
               'itemBackground': '候选底色',
-              'foreground': '候选字色',
-              'selectedBackground': '高亮底色',
-              'selectedForeground': '高亮字色',
               'borderColor': '候选边框',
+              'selectedBackground': '高亮底色',
               'selectedBorderColor': '高亮边框',
+              'foreground': '候选字色',
+              'selectedForeground': '高亮字色',
               'labelColor': '序号字色',
               'selectedLabelColor': '高亮序号',
               'commentColor': '注释字色',
               'selectedCommentColor': '高亮注释',
+              'background': '栏背景',
             }.entries)
               'mobile.candidateBar.${entry.key}': entry.value,
           }),
@@ -1241,13 +1399,13 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             for (final entry in const {
               'background': '栏背景',
               'foreground': '图标字色',
-              'selectedForeground': '选中字色',
               'buttonBackground': '按钮底色',
               'buttonBorderColor': '按钮边框',
               'activeBackground': '强调底色',
-              'selectedBackground': '选中底色',
-              'pressedBackground': '按下底色',
               'activeBorderColor': '强调边框',
+              'selectedBackground': '选中底色',
+              'selectedForeground': '选中字色',
+              'pressedBackground': '按下底色',
             }.entries)
               'mobile.keyboard.toolbar.${entry.key}': entry.value,
           }),

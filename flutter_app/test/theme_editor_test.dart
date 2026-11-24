@@ -66,7 +66,213 @@ class _DragThemeEditorController extends ViewController {
   }
 }
 
+class _PaddingThemeEditorController extends ViewController {
+  _PaddingThemeEditorController() : super(BridgePlatform.macOs);
+
+  static const initial = {
+    'paddingTop': 2.0,
+    'paddingBottom': 7.0,
+    'paddingLeft': 31.0,
+    'paddingRight': 12.0,
+  };
+  final padding = Map.of(initial);
+  final writes = <(String, Object?)>[];
+
+  @override
+  Future<Map<String, dynamic>> getThemeEditor() async {
+    final snapshot = await super.getThemeEditor();
+    final source = snapshot['source'] as Map<String, dynamic>;
+    final pc = source['pc'] as Map<String, dynamic>;
+    source['pc'] = <String, dynamic>{
+      ...pc,
+      'panel': {...pc['panel'] as Map<String, dynamic>, ...padding},
+    };
+    for (final dark in [false, true]) {
+      snapshot[dark ? 'resolvedDark' : 'resolvedLight'] =
+          resolveThemeEditorPreview(source: source, dark: dark);
+    }
+    return snapshot;
+  }
+
+  @override
+  Map<String, dynamic> resolveThemeEditorPreview({
+    required Map<String, dynamic> source,
+    required bool dark,
+  }) {
+    final theme = super.resolveThemeEditorPreview(source: source, dark: dark);
+    final panel = theme['panel'] as Map<String, dynamic>;
+    for (final side in initial.keys) {
+      final value =
+          source[dark ? 'dark' : 'light']?['pc']?['panel']?[side] ??
+          source['pc']?['panel']?[side];
+      if (value != null) panel[side] = value;
+    }
+    return theme;
+  }
+
+  @override
+  Future<Map<String, dynamic>> updateThemeEditor({
+    required String target,
+    required String path,
+    Object? value,
+  }) async {
+    writes.add((path, value));
+    final edits = path == 'pc.panel.padding'
+        ? value as Map<String, Object?>
+        : {path.split('.').last: value};
+    for (final entry in edits.entries) {
+      if (entry.value case final num value) {
+        padding[entry.key] = value.toDouble();
+      } else {
+        padding.remove(entry.key);
+      }
+    }
+    return getThemeEditor();
+  }
+}
+
 void main() {
+  testWidgets('padding locks keep existing values and save linked moves once', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1150, 1100);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PaddingThemeEditorController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: BridgePlatform.macOs,
+        home: FScaffold(child: ThemeEditorSection(controller: controller)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('面板'));
+    await tester.pumpAndSettle();
+
+    Finder lock(String axis) =>
+        find.byKey(ValueKey('theme-padding-lock-$axis'));
+    Finder field(String side) =>
+        find.byKey(ValueKey(('theme-control', 'pc.panel.$side')));
+    double displayed(String side) => double.parse(
+      tester
+          .widgetList<Text>(
+            find.descendant(of: field(side), matching: find.byType(Text)),
+          )
+          .last
+          .data!,
+    );
+    Map<String, double> displayedAll() => {
+      for (final side in _PaddingThemeEditorController.initial.keys)
+        side: displayed(side),
+    };
+    Future<TestGesture> move(String side, double limit) async {
+      final slider = find.descendant(
+        of: field(side),
+        matching: find.byType(FSlider),
+      );
+      await tester.ensureVisible(slider);
+      await tester.pumpAndSettle();
+      expect(slider.hitTestable(), findsOneWidget);
+      final bounds = tester.getRect(slider);
+      final thumb = tester
+          .element(slider)
+          .theme
+          .sliderStyles
+          .horizontal
+          .thumbSize;
+      Offset point(double fraction) => Offset(
+        bounds.left + thumb / 2 + (bounds.width - thumb) * fraction,
+        bounds.center.dy,
+      );
+      final start = displayed(side).clamp(0.0, limit) / limit;
+      final end = start < .5 ? .93 : .07;
+      final drag = await tester.startGesture(point(start));
+      await drag.moveTo(point((start + end) / 2));
+      await drag.moveTo(point(end));
+      await tester.pump();
+      return drag;
+    }
+
+    expect(displayedAll(), _PaddingThemeEditorController.initial);
+    await tester.tap(lock('vertical'));
+    await tester.pumpAndSettle();
+    await tester.tap(lock('all'));
+    await tester.pumpAndSettle();
+    expect(displayedAll(), _PaddingThemeEditorController.initial);
+    expect(controller.writes, isEmpty);
+    expect(tester.widget<FButton>(lock('vertical')).onPress, isNull);
+    await tester.tap(lock('all'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: lock('vertical'),
+        matching: find.byIcon(FLucideIcons.lockOpen),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: lock('horizontal'),
+        matching: find.byIcon(FLucideIcons.lock),
+      ),
+      findsOneWidget,
+    );
+
+    final horizontal = await move('paddingRight', 32);
+    final right = displayed('paddingRight');
+    expect(right, isNot(12));
+    expect(displayed('paddingLeft'), right);
+    expect(displayed('paddingTop'), 2);
+    expect(controller.writes, isEmpty);
+    await tester.pump(const Duration(milliseconds: 90));
+    final panel = tester
+        .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
+        .theme['panel'];
+    expect(panel['paddingLeft'], right);
+    expect(panel['paddingRight'], right);
+    await horizontal.up();
+    await tester.pumpAndSettle();
+    expect(controller.writes.single.$1, 'pc.panel.padding');
+    expect(controller.writes.single.$2, {
+      'paddingLeft': right,
+      'paddingRight': right,
+    });
+
+    final vertical = await move('paddingTop', 28);
+    final top = displayed('paddingTop');
+    expect(displayed('paddingBottom'), 7);
+    await vertical.up();
+    await tester.pumpAndSettle();
+    expect(controller.writes.last, ('pc.panel.paddingTop', top));
+
+    await tester.tap(lock('all'));
+    await tester.pumpAndSettle();
+    final all = await move('paddingLeft', 28);
+    final value = displayed('paddingLeft');
+    expect(value, lessThanOrEqualTo(28));
+    expect(displayedAll().values, everyElement(value));
+    await all.up();
+    await tester.pumpAndSettle();
+    expect(controller.writes, hasLength(3));
+    expect(controller.writes.last.$1, 'pc.panel.padding');
+    expect(controller.writes.last.$2, displayedAll());
+
+    await tester.tap(
+      find.descendant(
+        of: field('paddingTop'),
+        matching: find.byIcon(FLucideIcons.rotateCcw),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(controller.writes, hasLength(4));
+    expect(controller.writes.last.$2, {
+      for (final side in _PaddingThemeEditorController.initial.keys) side: null,
+    });
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('phone editor pins its preview and reveals the tapped field', (
     tester,
   ) async {

@@ -348,12 +348,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
         LayoutBuilder(
           builder: (context, constraints) {
             const gap = 6.0;
-            final columns = widget.controller.isMobile
-                ? 4
-                : ((constraints.maxWidth + gap) / (104 + gap)).floor().clamp(
-                    1,
-                    _themes.length,
-                  );
+            const columns = 4;
             final width = ((constraints.maxWidth + gap) / columns - gap)
                 .floorToDouble()
                 .clamp(0.0, 128.0);

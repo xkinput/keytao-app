@@ -191,6 +191,30 @@ pub fn edit_theme_source_field(
             Some(font["weight"].clone()),
         );
     }
+    if path == "pc.panel.padding" {
+        let fields = value
+            .as_ref()
+            .and_then(Value::as_object)
+            .filter(|fields| !fields.is_empty())
+            .ok_or("Panel padding edit requires at least one side")?;
+        let mut next = source.clone();
+        for (field, value) in fields {
+            let side_path = match field.as_str() {
+                "paddingTop" => "pc.panel.paddingTop",
+                "paddingBottom" => "pc.panel.paddingBottom",
+                "paddingLeft" => "pc.panel.paddingLeft",
+                "paddingRight" => "pc.panel.paddingRight",
+                _ => return Err("Unsupported panel padding side".into()),
+            };
+            next = edit_theme_source_field(
+                &next,
+                target,
+                side_path,
+                (!value.is_null()).then(|| value.clone()),
+            )?;
+        }
+        return Ok(next);
+    }
     if !FIELDS.iter().any(|(field, _)| *field == path) {
         return Err("Unsupported theme editor field".into());
     }
@@ -488,6 +512,54 @@ mod tests {
                 assert!(edit_theme_source_field(&original, target, "common.font", value).is_err());
                 assert_eq!(original.value, before);
             }
+        }
+    }
+
+    #[test]
+    fn linked_padding_reuses_leaf_edits_and_keeps_other_settings() {
+        let source = crate::source::parse_local_theme_source(json!({
+            "version": 3,
+            "meta": {"id": "my.padding", "name": "Padding"},
+            "pc": {"panel": {"paddingY": 9, "paddingTop": 3}},
+            "light": {"pc": {"panel": {"paddingLeft": 15}}},
+            "dark": {"pc": {"panel": {"paddingTop": 6, "paddingLeft": 17, "gap": 4}}}
+        }))
+        .unwrap();
+        let linked = edit_theme_source_field(
+            &source,
+            "dark",
+            "pc.panel.padding",
+            Some(json!({"paddingTop": 12, "paddingBottom": 12})),
+        )
+        .unwrap();
+        assert_eq!(linked.value["dark"]["pc"]["panel"]["paddingTop"], 12.0);
+        assert_eq!(linked.value["dark"]["pc"]["panel"]["paddingBottom"], 12.0);
+        assert_eq!(linked.value["dark"]["pc"]["panel"]["paddingLeft"], 17.0);
+        assert_eq!(linked.value["dark"]["pc"]["panel"]["gap"], 4.0);
+        assert_eq!(linked.value["light"], source.value["light"]);
+        assert_eq!(linked.value["pc"], source.value["pc"]);
+
+        let reset = edit_theme_source_field(
+            &linked,
+            "dark",
+            "pc.panel.padding",
+            Some(json!({"paddingTop": null, "paddingBottom": null})),
+        )
+        .unwrap();
+        assert_eq!(reset.value["pc"]["panel"], json!({"paddingY": 9.0}));
+        assert_eq!(
+            reset.value["dark"]["pc"]["panel"],
+            json!({"paddingLeft": 17.0, "gap": 4.0})
+        );
+        for invalid in [
+            json!({}),
+            json!({"paddingTop": 12, "paddingX": 10}),
+            json!({"paddingTop": "invalid", "paddingBottom": 12}),
+        ] {
+            assert!(
+                edit_theme_source_field(&source, "dark", "pc.panel.padding", Some(invalid))
+                    .is_err()
+            );
         }
     }
 }
