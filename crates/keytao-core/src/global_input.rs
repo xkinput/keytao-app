@@ -6,21 +6,16 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::{collections::BTreeMap, path::Path};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct InputState {
     pub schema_id: String,
-    ascii_mode: bool,
-    options: BTreeMap<String, bool>,
+    pub ascii_mode: bool,
+    pub options: BTreeMap<String, bool>,
 }
 
 impl InputState {
     pub fn read(engine: &dyn ImeBackend) -> Self {
-        let state = engine.state();
-        Self {
-            schema_id: state.schema_id,
-            ascii_mode: state.ascii_mode,
-            options: crate::english_mode::schema_options(engine),
-        }
+        engine.input_state()
     }
 
     pub fn is_switcher(&self) -> bool {

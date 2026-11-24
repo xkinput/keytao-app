@@ -95,12 +95,15 @@ pub(crate) trait EnglishBackend {
     fn set_ascii_mode(&self, enabled: bool) -> ImeState;
 }
 
-pub(crate) fn schema_options(engine: &dyn EnglishBackend) -> BTreeMap<String, bool> {
-    engine
-        .schema_switches()
+pub(crate) fn schema_option_names(switches: Vec<SchemaSwitch>) -> impl Iterator<Item = String> {
+    switches
         .into_iter()
         .flat_map(|s| s.name.into_iter().chain(s.options))
         .filter(|name| name != "ascii_mode")
+}
+
+pub(crate) fn schema_options(engine: &dyn EnglishBackend) -> BTreeMap<String, bool> {
+    schema_option_names(engine.schema_switches())
         .map(|name| {
             let enabled = engine.get_option(&name);
             (name, enabled)

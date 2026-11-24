@@ -851,6 +851,15 @@ impl EnglishBackend for JdBackend {
 }
 
 impl ImeBackend for JdBackend {
+    fn input_state(&self) -> crate::global_input::InputState {
+        let session = lock_ignore_poison(&self.session);
+        crate::global_input::InputState {
+            schema_id: session.schema.id.clone(),
+            ascii_mode: session.ascii_mode,
+            ..Default::default()
+        }
+    }
+
     fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
         let mut session = lock_ignore_poison(&self.session);
         if matches!(keycode, XK_SHIFT_L | XK_SHIFT_R) {
