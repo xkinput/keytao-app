@@ -2,8 +2,9 @@
 //! The fake compositor follows KWin: deactivate deletes the server resources.
 
 use super::*;
+use crate::wayland_common::tempfile;
 use std::{
-    io::Read,
+    io::{Read, Write},
     os::unix::net::UnixStream,
     sync::{Mutex, MutexGuard, OnceLock},
     time::Duration,
@@ -137,6 +138,43 @@ impl Compositor {
         );
         assert!(self.app.xkb_keymap.is_some());
     }
+}
+
+#[test]
+fn panel_buffers_are_reused_only_after_compositor_release() {
+    let mut compositor = Compositor::new();
+    let registry_queue = compositor.conn.new_event_queue::<RegistryState>();
+    let registry = compositor
+        .conn
+        .display()
+        .get_registry(&registry_queue.handle(), ());
+    let qh = compositor.queue.handle();
+    let shm = registry.bind::<WlShm, _, _>(2, 1, &qh, ());
+    let buffers = &mut compositor.app.panel_buffers;
+    let first = buffers
+        .write(0, &shm, &qh, (1, 1), 1, &[0; 4])
+        .unwrap()
+        .clone();
+    assert_eq!(buffers.available_slot(), Some(1));
+    buffers.write(1, &shm, &qh, (2, 2), 2, &[1; 16]).unwrap();
+    assert_eq!(buffers.available_slot(), None);
+
+    let requests = compositor.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|&&req| req == (shm.id().protocol_id(), 0))
+            .count(),
+        1
+    );
+    compositor.event(first.id().protocol_id(), 0, &[]);
+    compositor.dispatch();
+
+    let buffers = &mut compositor.app.panel_buffers;
+    assert_eq!(buffers.available_slot(), Some(0));
+    let reused = buffers.write(0, &shm, &qh, (1, 1), 1, &[2; 4]).unwrap();
+    assert_eq!(*reused, first);
+    assert!(compositor.requests().is_empty());
 }
 
 #[test]
@@ -305,9 +343,7 @@ fn chinese_composition_and_commit_work_after_each_focus_change() {
                 .app
                 .pending_kimpanel_state
                 .as_ref()
-                .unwrap()
-                .committed
-                .as_deref(),
+                .and_then(|(state, _)| state.committed.as_deref()),
             Some(smoke_fixture::WORDS[0]),
         );
         let requests = compositor.requests();

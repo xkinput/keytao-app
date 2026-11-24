@@ -2,9 +2,8 @@ use crate::engine::ibus_cursor_pos;
 use crate::ibus_shared::candidate_display_text;
 use crate::panel::state_to_panel_input;
 use keytao_core::ImeState;
-use keytao_theme::{ThemeResolver, UiCapabilities};
-use std::sync::Arc;
-use zbus::{connection, interface, object_server::SignalContext, Connection};
+use keytao_theme::{ResolvedImeTheme, UiCapabilities};
+use zbus::{connection, interface, object_server::SignalContext, Proxy};
 
 const KIMPANEL_BUS_NAME: &str = "org.kde.kimpanel.inputmethod";
 const KIMPANEL_OBJECT_PATH: &str = "/kimpanel";
@@ -95,8 +94,7 @@ impl Kimpanel {
 #[derive(Clone)]
 pub struct KimpanelHandle {
     ctxt: SignalContext<'static>,
-    _conn: Connection,
-    theme_resolver: Arc<ThemeResolver>,
+    impanel: Proxy<'static>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -135,11 +133,24 @@ impl KimpanelHandle {
                 return None;
             }
         };
+        let impanel = match Proxy::new(
+            &conn,
+            IMPANEL_BUS_NAME,
+            IMPANEL_OBJECT_PATH,
+            IMPANEL2_INTERFACE,
+        )
+        .await
+        {
+            Ok(impanel) => impanel,
+            Err(e) => {
+                tracing::warn!("Kimpanel: failed to create impanel2 proxy: {e}");
+                return None;
+            }
+        };
         tracing::info!("Kimpanel D-Bus panel ready");
         let handle = Self {
             ctxt,
-            _conn: conn,
-            theme_resolver: Arc::new(ThemeResolver::from_default_locations()),
+            impanel,
             runtime: tokio::runtime::Handle::current(),
         };
         handle.register_status().await;
@@ -163,13 +174,17 @@ impl KimpanelHandle {
         });
     }
 
-    pub async fn update_state(&self, state: &ImeState, has_native_panel: bool) {
+    pub async fn update_state(
+        &self,
+        state: &ImeState,
+        has_native_panel: bool,
+        theme: &ResolvedImeTheme,
+    ) {
         tracing::debug!(
             "Kimpanel: updating state, preedit={} chars, candidates_len={}",
             state.preedit.chars().count(),
             state.candidates.len()
         );
-        let theme = self.theme_resolver.current();
         let hide_candidate_panel = theme.ui.hide_candidate_panel && !state.is_package_switcher();
         let preedit = if has_native_panel || theme.ui.effective_embedded_composition() {
             ""
@@ -291,12 +306,8 @@ impl KimpanelHandle {
         has_next: bool,
         cursor: i32,
     ) -> zbus::Result<()> {
-        match self
-            ._conn
-            .call_method(
-                Some(IMPANEL_BUS_NAME),
-                IMPANEL_OBJECT_PATH,
-                Some(IMPANEL2_INTERFACE),
+        self.impanel
+            .call_noreply(
                 "SetLookupTable",
                 &(
                     labels,
@@ -309,16 +320,6 @@ impl KimpanelHandle {
                 ),
             )
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("ServiceUnknown") => {
-                tracing::debug!(
-                    "Kimpanel impanel2 service is not available; using compositor/X11 fallback panel"
-                );
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
     }
 }
 

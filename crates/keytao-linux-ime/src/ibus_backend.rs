@@ -15,18 +15,39 @@ use crate::panel::{spawn_x11_overlay_panel, OverlayPanelMessage};
 use keytao_core::{runtime_log, ImeState};
 use keytao_theme::ThemeResolver;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     sync::{
         atomic::{AtomicI32, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex, Weak,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use zbus::{connection, interface, object_server::SignalContext, zvariant};
+use zbus::{
+    connection,
+    export::futures_util::StreamExt,
+    fdo::{DBusProxy, NameOwnerChangedStream},
+    interface,
+    names::BusName,
+    object_server::SignalContext,
+    zvariant::{self, ObjectPath, OwnedObjectPath},
+    ObjectServer,
+};
+
+type ContextOwners = Arc<Mutex<HashMap<String, HashSet<OwnedObjectPath>>>>;
+type ActiveContext = Arc<tokio::sync::Mutex<Option<FocusedContext>>>;
+
+struct FocusedContext {
+    id: u64,
+    deployment: Weak<ibus_shared::IbusDeploymentHint>,
+}
 
 // ── InputContext D-Bus object ─────────────────────────────────────────────────
 
 struct InputContext {
+    id: u64,
+    active: ActiveContext,
+    closed: bool,
     session: ImeSession,
     control_alt_tap: ControlAltTap,
     deployment: Arc<ibus_shared::IbusDeploymentHint>,
@@ -43,14 +64,64 @@ struct InputContext {
 }
 
 impl InputContext {
-    async fn clear_ui(&self, ctxt: &SignalContext<'_>) {
+    fn is_active(&self, active: &Option<FocusedContext>) -> bool {
+        active.as_ref().is_some_and(|context| context.id == self.id)
+    }
+
+    async fn activate(&self, active: &mut Option<FocusedContext>) {
+        if self.is_active(active) {
+            return;
+        }
+        if let Some(previous) = active.take() {
+            if let Some(deployment) = previous.deployment.upgrade() {
+                deployment.discard().await;
+            }
+            self.hide_kimpanel_ui().await;
+        }
+        *active = Some(FocusedContext {
+            id: self.id,
+            deployment: Arc::downgrade(&self.deployment),
+        });
+    }
+
+    async fn clear_ui(&self, ctxt: &SignalContext<'_>, is_active: bool) {
         let _ = Self::hide_preedit_text(ctxt).await;
         let _ = Self::hide_lookup_table(ctxt).await;
+        if is_active {
+            self.hide_shared_ui().await;
+            self.deployment
+                .apply_state(&ImeState::empty(), false, false)
+                .await;
+        }
+    }
+
+    async fn hide_shared_ui(&self) {
+        self.hide_kimpanel_ui().await;
+        let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
+    }
+
+    async fn hide_kimpanel_ui(&self) {
         if let Some(kc) = &self.kimpanel_ctxt {
             let _ = Kimpanel::show_preedit(kc, false).await;
             let _ = Kimpanel::show_lookup_table(kc, false).await;
         }
-        let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
+    }
+
+    async fn reset_ui(&self, ctxt: Option<&SignalContext<'_>>, deactivate: bool) {
+        let mut active = self.active.lock().await;
+        if let Some(ctxt) = ctxt {
+            let _ = Self::hide_preedit_text(ctxt).await;
+            let _ = Self::hide_lookup_table(ctxt).await;
+        }
+        if self.is_active(&active) {
+            self.deployment.reset().await;
+            self.hide_shared_ui().await;
+            if deactivate {
+                *active = None;
+            }
+        } else {
+            self.deployment.discard().await;
+        }
     }
 
     fn show_mode_hint(&self, ascii_mode: bool) {
@@ -95,18 +166,25 @@ impl InputContext {
         let change = self.content_type.set(purpose, hints);
         if change.turned_sensitive {
             self.control_alt_tap.clear();
-            self.deployment.reset().await;
         }
         self.session.set_input_policy(change.policy);
         if change.turned_sensitive {
             tracing::debug!("IBus InputContext: sensitive content type, passing keys through");
-            if let Some(ctxt) = &self.signal_ctxt {
-                self.clear_ui(ctxt).await;
-            }
+            self.reset_ui(self.signal_ctxt.as_ref(), false).await;
         }
     }
 
-    async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
+    async fn apply_ime_state(
+        &self,
+        ime_state: ImeState,
+        ctxt: &SignalContext<'_>,
+        active: &Option<FocusedContext>,
+    ) {
+        if self.closed {
+            return;
+        }
+        let is_active = self.is_active(active);
+        let kimpanel_ctxt = self.kimpanel_ctxt.as_ref().filter(|_| is_active);
         let ascii_mode = ime_state.is_english_mode();
         let theme = self.theme_resolver.current();
         let hide_candidate_panel =
@@ -116,7 +194,7 @@ impl InputContext {
             if !text.is_empty() {
                 tracing::debug!("IBus CommitText: {} chars", text.chars().count());
                 tracing::trace!("IBus CommitText: {text:?}");
-                clear_preedit(ctxt, &self.kimpanel_ctxt).await;
+                clear_preedit(ctxt, kimpanel_ctxt).await;
                 let _ = Self::commit_text(ctxt, ibus_text_variant(text)).await;
             }
         }
@@ -126,7 +204,7 @@ impl InputContext {
         if preedit.is_empty() {
             let _ = Self::hide_preedit_text(ctxt).await;
         } else {
-            clear_preedit(ctxt, &None).await;
+            clear_preedit(ctxt, None).await;
 
             let _ = Self::update_preedit_text(
                 ctxt,
@@ -139,13 +217,13 @@ impl InputContext {
 
         if ime_state.candidates.is_empty() || hide_candidate_panel {
             let _ = Self::hide_lookup_table(ctxt).await;
-            if let Some(kctxt) = &self.kimpanel_ctxt {
+            if let Some(kctxt) = kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;
             }
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
             let _ = Self::update_lookup_table(ctxt, ibus_lookup_table_value(&model), true).await;
-            if let Some(kctxt) = &self.kimpanel_ctxt {
+            if let Some(kctxt) = kimpanel_ctxt {
                 let labels: Vec<String> = model
                     .candidates
                     .iter()
@@ -178,6 +256,9 @@ impl InputContext {
             }
         }
 
+        if !is_active {
+            return;
+        }
         let message = if has_content {
             OverlayPanelMessage::Show {
                 state: ime_state.clone(),
@@ -198,21 +279,24 @@ impl InputContext {
     async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
         if let Some(ime_state) = ibus_shared::select_candidate(&self.session, index) {
-            self.apply_ime_state(ime_state, ctxt).await;
+            let active = self.active.lock().await;
+            self.apply_ime_state(ime_state, ctxt, &active).await;
         }
     }
 
     async fn change_page(&self, backward: bool, ctxt: &SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
         if let Some(ime_state) = ibus_shared::change_page(&self.session, backward) {
-            self.apply_ime_state(ime_state, ctxt).await;
+            let active = self.active.lock().await;
+            self.apply_ime_state(ime_state, ctxt, &active).await;
         }
     }
 
     async fn process_navigation_key(&self, keyval: u32, ctxt: &SignalContext<'_>) {
         let _activity = crate::hot_update::activity();
         if let Some(ime_state) = ibus_shared::navigation_key(&self.session, keyval) {
-            self.apply_ime_state(ime_state, ctxt).await;
+            let active = self.active.lock().await;
+            self.apply_ime_state(ime_state, ctxt, &active).await;
         }
     }
 }
@@ -223,6 +307,11 @@ impl InputContext {
 #[interface(name = "org.freedesktop.IBus.InputContext", spawn = true)]
 impl InputContext {
     async fn focus_in(&self) {
+        if self.closed {
+            return;
+        }
+        let mut active = self.active.lock().await;
+        self.activate(&mut active).await;
         self.control_alt_tap.clear();
         tracing::debug!("IBus InputContext: FocusIn");
         self.deployment.reset().await;
@@ -232,20 +321,21 @@ impl InputContext {
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
-        self.deployment.reset().await;
         tracing::debug!("IBus InputContext: FocusOut");
         self.session.clear_composition();
-        self.clear_ui(&ctxt).await;
+        self.reset_ui(Some(&ctxt), true).await;
         runtime_log::drain_key_stats();
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        if self.closed {
+            return;
+        }
         self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
-        self.deployment.reset().await;
         tracing::debug!("IBus InputContext: Reset");
         self.session.clear_composition();
-        self.clear_ui(&ctxt).await;
+        self.reset_ui(Some(&ctxt), false).await;
     }
 
     async fn set_cursor_location(&self, x: i32, y: i32, _w: i32, _h: i32) {
@@ -278,6 +368,9 @@ impl InputContext {
     }
 
     async fn enable(&self) {
+        if self.closed {
+            return;
+        }
         tracing::debug!("IBus InputContext: Enable");
         self.deployment.reset().await;
         self.publish_current_mode().await;
@@ -286,10 +379,9 @@ impl InputContext {
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.control_alt_tap.clear();
         let _activity = crate::hot_update::activity();
-        self.deployment.reset().await;
         tracing::debug!("IBus InputContext: Disable");
         self.session.clear_composition();
-        self.clear_ui(&ctxt).await;
+        self.reset_ui(Some(&ctxt), true).await;
         runtime_log::drain_key_stats();
     }
 
@@ -332,11 +424,19 @@ impl InputContext {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> crate::hot_update::KeyReply {
         let activity = crate::hot_update::activity();
-        if !crate::reload_bus::engine_enabled() {
+        if self.closed || !crate::reload_bus::engine_enabled() {
             return crate::hot_update::KeyReply::new(false, activity);
         }
         let started = Instant::now();
-        if state & keytao_core::RIME_RELEASE_MASK == 0 && self.session.input_policy().composing {
+        let mut active = self.active.lock().await;
+        if active.is_none() {
+            self.activate(&mut active).await;
+        }
+        let is_active = self.is_active(&active);
+        if is_active
+            && state & keytao_core::RIME_RELEASE_MASK == 0
+            && self.session.input_policy().composing
+        {
             self.deployment.key_pressed().await;
         }
         // The decision is shared with the GNOME engine backend; this object only
@@ -352,13 +452,10 @@ impl InputContext {
         match outcome {
             KeyOutcome::Forward => {}
             KeyOutcome::ClearUi => {
-                self.clear_ui(&ctxt).await;
-                self.deployment
-                    .apply_state(&ImeState::empty(), false, false)
-                    .await;
+                self.clear_ui(&ctxt, is_active).await;
             }
             KeyOutcome::Publish { state, .. } => {
-                self.apply_ime_state(*state, &ctxt).await;
+                self.apply_ime_state(*state, &ctxt, &active).await;
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             }
         }
@@ -402,10 +499,8 @@ impl InputContext {
 /// has no Destroy of its own, so without this interface every context the
 /// client drops leaks a D-Bus object and a librime session.
 struct InputContextService {
-    session: ImeSession,
-    deployment: Arc<ibus_shared::IbusDeploymentHint>,
-    kimpanel_ctxt: Option<SignalContext<'static>>,
-    x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
+    owner: String,
+    contexts: ContextOwners,
 }
 
 // Use the same serialized dispatch as InputContext, including Destroy.
@@ -416,28 +511,62 @@ impl InputContextService {
         #[zbus(object_server)] server: &zbus::ObjectServer,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
-        let _activity = crate::hot_update::activity();
         tracing::info!("IBus InputContext: Destroy {}", ctxt.path());
-        runtime_log::drain_key_stats();
-        self.deployment.reset().await;
-        self.session.clear_composition();
-        if let Some(kctxt) = &self.kimpanel_ctxt {
-            let _ = Kimpanel::show_preedit(kctxt, false).await;
-            let _ = Kimpanel::show_lookup_table(kctxt, false).await;
+        let path = OwnedObjectPath::from(ctxt.path().clone());
+        if untrack_context(&self.contexts, &self.owner, &path) {
+            remove_input_context(server, &path)
+                .await
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         }
-        let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
-
-        // Both interfaces have to go before the object server drops the node.
-        let path = ctxt.path().to_owned();
-        server
-            .remove::<InputContext, _>(&path)
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-        server
-            .remove::<InputContextService, _>(&path)
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         Ok(())
+    }
+}
+
+fn untrack_context(contexts: &ContextOwners, owner: &str, path: &OwnedObjectPath) -> bool {
+    let mut contexts = contexts.lock().unwrap();
+    let Some(paths) = contexts.get_mut(owner) else {
+        return false;
+    };
+    let removed = paths.remove(path);
+    if paths.is_empty() {
+        contexts.remove(owner);
+    }
+    removed
+}
+
+async fn remove_input_context(server: &ObjectServer, path: &ObjectPath<'_>) -> zbus::Result<()> {
+    let _activity = crate::hot_update::activity();
+    let context = server.interface::<_, InputContext>(path).await;
+    // Detach both interfaces before locking the context to drain any in-flight key handling.
+    let input = server.remove::<InputContext, _>(path).await;
+    let service = server.remove::<InputContextService, _>(path).await;
+    if let Ok(context) = context {
+        let mut input = context.get_mut().await;
+        input.closed = true;
+        runtime_log::drain_key_stats();
+        input.session.clear_composition();
+        input.reset_ui(None, true).await;
+    }
+    input?;
+    service?;
+    Ok(())
+}
+
+async fn watch_context_owners(
+    mut changes: NameOwnerChangedStream<'_>,
+    server: &ObjectServer,
+    contexts: &ContextOwners,
+) {
+    while let Some(change) = changes.next().await {
+        let Ok(args) = change.args() else { continue };
+        if let (BusName::Unique(owner), None) = (args.name(), args.new_owner().as_ref()) {
+            let paths = contexts.lock().unwrap().remove(owner.as_str());
+            for path in paths.into_iter().flatten() {
+                if let Err(e) = remove_input_context(server, &path).await {
+                    tracing::warn!("IBus: could not remove disconnected context {path}: {e}");
+                }
+            }
+        }
     }
 }
 
@@ -445,7 +574,7 @@ impl InputContextService {
 /// before committing. This is the sequence Chromium/CEF requires so that it
 /// can correctly place the committed text without conflating it with the
 /// still-active preedit region.
-async fn clear_preedit(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'static>>) {
+async fn clear_preedit(ctxt: &SignalContext<'_>, kctxt: Option<&SignalContext<'_>>) {
     let _ = InputContext::update_preedit_text(ctxt, ibus_text_variant(""), 0, false).await;
     if let Some(kc) = kctxt {
         let _ = Kimpanel::update_preedit_text(kc, "", "").await;
@@ -458,6 +587,8 @@ async fn clear_preedit(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'s
 struct IBusBus {
     engine: CoreEngine,
     ctx_counter: Arc<AtomicU64>,
+    contexts: ContextOwners,
+    active: ActiveContext,
     kimpanel_ctxt: Option<SignalContext<'static>>,
     x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
     x11_panel_available: bool,
@@ -472,10 +603,15 @@ impl IBusBus {
         client_name: &str,
         #[zbus(object_server)] server: &zbus::ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> zbus::fdo::Result<zbus::zvariant::OwnedObjectPath> {
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        let sender = header
+            .sender()
+            .ok_or_else(|| zbus::fdo::Error::Failed("Missing input context owner".into()))?;
+        let owner = sender.as_str().to_owned();
         let n = self.ctx_counter.fetch_add(1, Ordering::SeqCst);
         let path_str = format!("/org/freedesktop/IBus/InputContext_{n}");
-        let path = zbus::zvariant::OwnedObjectPath::try_from(path_str.clone())
+        let path = OwnedObjectPath::try_from(path_str.clone())
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
         tracing::info!("IBus CreateInputContext client={client_name:?} -> {path_str}");
@@ -494,7 +630,10 @@ impl IBusBus {
             cursor_y.clone(),
         );
         let ctx = InputContext {
-            session: session.clone(),
+            id: n,
+            active: self.active.clone(),
+            closed: false,
+            session,
             control_alt_tap: ControlAltTap::default(),
             deployment: deployment.clone(),
             kimpanel_ctxt: self.kimpanel_ctxt.clone(),
@@ -512,18 +651,19 @@ impl IBusBus {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         // Clients drop the context through org.freedesktop.IBus.Service, so that
         // interface has to live at the same path as the context.
-        server
+        if let Err(e) = server
             .at(
                 path.clone(),
                 InputContextService {
-                    session,
-                    deployment: deployment.clone(),
-                    kimpanel_ctxt: self.kimpanel_ctxt.clone(),
-                    x11_panel_tx: self.x11_panel_tx.clone(),
+                    owner: owner.clone(),
+                    contexts: self.contexts.clone(),
                 },
             )
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        {
+            let _ = server.remove::<InputContext, _>(&path).await;
+            return Err(zbus::fdo::Error::Failed(e.to_string()));
+        }
         deployment.watch_reload(|ctxt| async move {
             let server = ctxt.connection().object_server();
             if let Ok(context) = server.interface::<_, InputContext>(ctxt.path()).await {
@@ -532,7 +672,33 @@ impl IBusBus {
             }
         });
 
-        Ok(path)
+        self.contexts
+            .lock()
+            .unwrap()
+            .entry(owner.clone())
+            .or_default()
+            .insert(path.clone());
+        // A disconnect can arrive while the two interfaces are being registered.
+        let still_connected = async {
+            DBusProxy::new(connection)
+                .await?
+                .name_has_owner(BusName::Unique(sender.clone()))
+                .await
+        }
+        .await;
+        match still_connected {
+            Ok(true) => Ok(path),
+            result => {
+                if untrack_context(&self.contexts, &owner, &path) {
+                    if let Err(e) = remove_input_context(server, &path).await {
+                        tracing::warn!("IBus: could not remove unclaimed context {path}: {e}");
+                    }
+                }
+                Err(result
+                    .err()
+                    .unwrap_or_else(|| zbus::fdo::Error::NameHasNoOwner(owner)))
+            }
+        }
     }
 
     async fn is_global_engine(&self) -> bool {
@@ -707,6 +873,14 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
             return;
         }
     };
+    let contexts = ContextOwners::default();
+    let changes = match context_owner_changes(&conn).await {
+        Ok(changes) => changes,
+        Err(e) => {
+            tracing::error!("IBus: failed to watch input context owners: {e}");
+            return;
+        }
+    };
 
     let kimpanel_ctxt = SignalContext::new(&conn, "/org/kde/kimpanel/inputmethod").ok();
     if let Err(e) = conn
@@ -716,6 +890,8 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
             IBusBus {
                 engine,
                 ctx_counter,
+                contexts: contexts.clone(),
+                active: ActiveContext::default(),
                 kimpanel_ctxt: kimpanel_ctxt.clone(),
                 x11_panel_tx: tx,
                 x11_panel_available,
@@ -763,21 +939,215 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
 
     tracing::info!("IBus D-Bus backend ready ({})", dbus_address);
     frontend.connected();
-    use zbus::export::futures_util::StreamExt;
-    let mut messages = zbus::MessageStream::from(&conn);
-    while let Some(message) = messages.next().await {
-        if let Err(error) = message {
-            tracing::error!("IBus D-Bus connection lost: {error}");
-            return;
+    let server = conn.object_server();
+    tokio::select! {
+        () = watch_context_owners(changes, &server, &contexts) => {
+            tracing::warn!("IBus D-Bus owner watch closed");
         }
+        () = async {
+            let mut messages = zbus::MessageStream::from(&conn);
+            while let Some(message) = messages.next().await {
+                if let Err(error) = message {
+                    tracing::error!("IBus D-Bus connection lost: {error}");
+                    return;
+                }
+            }
+            tracing::warn!("IBus D-Bus connection closed");
+        } => {}
     }
-    tracing::warn!("IBus D-Bus connection closed");
+}
+
+async fn context_owner_changes(
+    conn: &zbus::Connection,
+) -> zbus::Result<NameOwnerChangedStream<'static>> {
+    DBusProxy::new(conn)
+        .await?
+        .receive_name_owner_changed_with_args(&[(2, "")])
+        .await
 }
 
 #[cfg(test)]
+#[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
+mod smoke_fixture;
+
+#[cfg(test)]
 mod tests {
-    use super::session_bus_address_from;
-    use keytao_core::{key_policy, Candidate, ImeState};
+    use super::*;
+    use keytao_core::{key_policy, Candidate};
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    async fn create_test_context(client: &zbus::Connection, service: &str) -> OwnedObjectPath {
+        client
+            .call_method(
+                Some(service),
+                "/org/freedesktop/IBus",
+                Some("org.freedesktop.IBus"),
+                "CreateInputContext",
+                &("disconnect-test",),
+            )
+            .await
+            .unwrap()
+            .body()
+            .deserialize()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_all_client_contexts_and_releases_sessions() {
+        let mut daemon = tokio::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start isolated D-Bus daemon");
+        let mut address = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            BufReader::new(daemon.stdout.take().unwrap()).read_line(&mut address),
+        )
+        .await
+        .expect("D-Bus daemon start timeout")
+        .unwrap();
+        let connect = || {
+            connection::Builder::address(address.trim())
+                .unwrap()
+                .build()
+        };
+        let server = connect().await.unwrap();
+        let changes = context_owner_changes(&server).await.unwrap();
+        let dir = smoke_fixture::scratch_dir("ibus-disconnect");
+        keytao_core::engine_choice::set_enabled(&dir, false).unwrap();
+        let contexts = ContextOwners::default();
+        let objects = server.object_server();
+        let (x11_panel_tx, panel_events) = std::sync::mpsc::channel();
+        let kimpanel_path = "/org/kde/kimpanel/inputmethod";
+        objects
+            .at(
+                "/org/freedesktop/IBus",
+                IBusBus {
+                    engine: CoreEngine::with_dirs(&dir, dir.to_string_lossy()),
+                    ctx_counter: Arc::new(AtomicU64::new(1)),
+                    contexts: contexts.clone(),
+                    active: ActiveContext::default(),
+                    kimpanel_ctxt: Some(SignalContext::new(&server, kimpanel_path).unwrap()),
+                    x11_panel_tx,
+                    x11_panel_available: true,
+                    theme_resolver: Arc::new(ThemeResolver::with_system_scheme(
+                        None,
+                        None,
+                        Some(keytao_theme::EffectiveColorScheme::Light),
+                    )),
+                },
+            )
+            .await
+            .unwrap();
+
+        let exercise = async {
+            let client = connect().await.unwrap();
+            let other = connect().await.unwrap();
+            let service = server.unique_name().unwrap().as_str();
+            let kimpanel = zbus::Proxy::new(
+                &other,
+                service,
+                kimpanel_path,
+                "org.kde.kimpanel.inputmethod",
+            )
+            .await
+            .unwrap();
+            let mut lookup_visibility = kimpanel.receive_signal("ShowLookupTable").await.unwrap();
+            let mut sessions = Vec::new();
+            for _ in 0..2 {
+                let path = create_test_context(&client, service).await;
+                let context = objects.interface::<_, InputContext>(&path).await.unwrap();
+                let session = Arc::downgrade(&context.get().await.session);
+                sessions.push((path, session));
+            }
+            let other_path = create_test_context(&other, service).await;
+            for (connection, path) in [(&client, &sessions[0].0), (&other, &other_path)] {
+                connection
+                    .call_method(
+                        Some(service),
+                        path,
+                        Some("org.freedesktop.IBus.InputContext"),
+                        "FocusIn",
+                        &(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(panel_events.try_iter().count(), 2);
+            let signal = lookup_visibility.next().await.unwrap();
+            assert!(!signal.body().deserialize::<bool>().unwrap());
+
+            {
+                let context = objects
+                    .interface::<_, InputContext>(&sessions[0].0)
+                    .await
+                    .unwrap();
+                let input = context.get().await;
+                let active = input.active.lock().await;
+                let mut state = ImeState::empty();
+                state.candidates.push(Candidate {
+                    text: "你".to_owned(),
+                    comment: None,
+                });
+                input
+                    .apply_ime_state(state, context.signal_context(), &active)
+                    .await;
+            }
+            assert!(panel_events.try_recv().is_err());
+
+            client.close().await.unwrap();
+            while sessions
+                .iter()
+                .any(|(_, session)| session.strong_count() != 0)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            for (path, _) in &sessions {
+                assert!(matches!(
+                    objects.interface::<_, InputContext>(path).await,
+                    Err(zbus::Error::InterfaceNotFound)
+                ));
+                assert!(matches!(
+                    objects.interface::<_, InputContextService>(path).await,
+                    Err(zbus::Error::InterfaceNotFound)
+                ));
+            }
+            assert!(panel_events.try_recv().is_err());
+            assert!(objects
+                .interface::<_, InputContext>(&other_path)
+                .await
+                .is_ok());
+
+            other
+                .call_method(
+                    Some(service),
+                    &other_path,
+                    Some("org.freedesktop.IBus.Service"),
+                    "Destroy",
+                    &(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                panel_events.try_recv(),
+                Ok(OverlayPanelMessage::Hide)
+            ));
+            assert!(matches!(
+                objects.interface::<_, InputContext>(&other_path).await,
+                Err(zbus::Error::InterfaceNotFound)
+            ));
+            assert!(contexts.lock().unwrap().is_empty());
+        };
+        let result = tokio::select! {
+            () = watch_context_owners(changes, &objects, &contexts) => panic!("D-Bus owner watch closed"),
+            result = tokio::time::timeout(Duration::from_secs(5), exercise) => result,
+        };
+        fs::remove_dir_all(dir).unwrap();
+        result.expect("client contexts were not released on disconnect");
+    }
 
     #[test]
     fn empty_composition_backspace_bypasses_to_client() {

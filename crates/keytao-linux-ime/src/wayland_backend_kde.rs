@@ -5,21 +5,20 @@
 
 use std::{
     collections::HashSet,
-    io::Write,
     os::fd::{AsFd, AsRawFd},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use keytao_core::{
     key_policy, runtime_log, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL,
     RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
-use keytao_theme::ThemeResolver;
+use keytao_theme::{ResolvedImeTheme, ThemeResolver};
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
-        wl_buffer::WlBuffer,
+        wl_buffer::{self, WlBuffer},
         wl_compositor::WlCompositor,
         wl_keyboard::{self, WlKeyboard},
         wl_output::{self, WlOutput},
@@ -27,7 +26,7 @@ use wayland_client::{
         wl_region::WlRegion,
         wl_registry,
         wl_seat::{self, WlSeat},
-        wl_shm::{self, WlShm},
+        wl_shm::WlShm,
         wl_shm_pool::WlShmPool,
         wl_surface::{self, WlSurface},
     },
@@ -64,7 +63,8 @@ use crate::{
     reload_bus,
     wayland_common::{
         deadline_active, key_repeats, key_sym, mode_hint_deadline, poll_timeout_ms,
-        preedit_cursor_bytes, take_expired_deadline, tempfile, KeyRepeat, WaylandPanelScale,
+        preedit_cursor_bytes, take_expired_deadline, KeyRepeat, WaylandPanelBuffers,
+        WaylandPanelScale,
     },
 };
 
@@ -133,7 +133,7 @@ struct App {
     key_repeat: KeyRepeat,
     ascii_mode: bool,
     kimpanel: Option<KimpanelHandle>,
-    pending_kimpanel_state: Option<ImeState>,
+    pending_kimpanel_state: Option<(ImeState, ResolvedImeTheme)>,
     /// Conversion mode waiting to be pushed to the Kimpanel indicator; the
     /// Kimpanel calls are async, so the event loop drains this.
     pending_kimpanel_mode: Option<bool>,
@@ -147,7 +147,8 @@ struct App {
     input_panel: Option<ZwpInputPanelV1>,
     panel_surface: Option<WlSurface>,
     panel_popup: Option<ZwpInputPanelSurfaceV1>,
-    panel_buffer: Option<WlBuffer>,
+    panel_buffers: WaylandPanelBuffers,
+    panel_redraw_pending: bool,
     panel_visible: bool,
     /// Where the candidates on screen were drawn; empty unless candidates are.
     panel_hit_areas: PanelHitAreas,
@@ -197,7 +198,8 @@ impl App {
             input_panel: None,
             panel_surface: None,
             panel_popup: None,
-            panel_buffer: None,
+            panel_buffers: WaylandPanelBuffers::default(),
+            panel_redraw_pending: false,
             panel_visible: false,
             panel_hit_areas: PanelHitAreas::default(),
             pointer: None,
@@ -257,11 +259,26 @@ impl App {
         }
     }
 
-    fn refresh_deployment_hint(&mut self, qh: &QueueHandle<Self>) {
+    fn refresh_deployment_hint(
+        &mut self,
+        theme: Option<&ResolvedImeTheme>,
+        qh: &QueueHandle<Self>,
+    ) {
         let hint = self.deployment.hint();
         if hint != self.deployment_text {
             self.deployment_text = hint;
-            self.show_panel(self.ime_state.clone().unwrap_or_else(ImeState::empty), qh);
+            let resolved;
+            let theme = if let Some(theme) = theme {
+                theme
+            } else {
+                resolved = self.theme_resolver.current();
+                &resolved
+            };
+            self.show_panel(
+                self.ime_state.clone().unwrap_or_else(ImeState::empty),
+                theme,
+                qh,
+            );
         }
     }
 
@@ -323,28 +340,18 @@ impl App {
             return;
         };
         // 1x1 transparent dummy buffer to make surface valid for KWin
-        let mut fd = match tempfile(libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) {
-            Ok(file) => file,
+        let buffer = match self.panel_buffers.write(0, shm, qh, (1, 1), 1, &[0; 4]) {
+            Ok(buffer) => buffer,
             Err(e) => {
-                tracing::warn!("failed to create dummy SHM file: {e}");
+                tracing::warn!("failed to create dummy SHM buffer: {e}");
                 return;
             }
         };
-        if fd.set_len(4).is_err() {
-            tracing::warn!("failed to truncate dummy SHM file");
-            return;
-        }
-        if fd.write_all(&[0u8; 4]).is_err() {
-            tracing::warn!("failed to write dummy SHM buffer");
-            return;
-        }
         let surface = compositor.create_surface(qh, ());
         self.panel_scale.attach_surface(&surface, qh);
         let popup = panel_manager.get_input_panel_surface(&surface, qh, ());
         popup.set_overlay_panel();
-        let pool = shm.create_pool(fd.as_fd(), 4, qh, ());
-        let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
-        surface.attach(Some(&buf), 0, 0);
+        surface.attach(Some(buffer), 0, 0);
         if surface.version() >= 4 {
             surface.damage_buffer(0, 0, 1, 1);
         } else {
@@ -352,10 +359,8 @@ impl App {
         }
         surface.commit();
 
-        self.panel_buffer = Some(buf);
         self.panel_surface = Some(surface);
         self.panel_popup = Some(popup);
-        pool.destroy();
     }
 
     fn hide_panel_popup(&mut self) {
@@ -363,9 +368,7 @@ impl App {
             surface.attach(None, 0, 0);
             surface.commit();
         }
-        if let Some(buf) = self.panel_buffer.take() {
-            buf.destroy();
-        }
+        self.panel_redraw_pending = false;
         self.panel_visible = false;
         self.panel_hit_areas = PanelHitAreas::default();
         self.pressed_click = None;
@@ -374,6 +377,10 @@ impl App {
 
     fn redraw_panel(&mut self, qh: &QueueHandle<Self>) {
         let theme = self.theme_resolver.current();
+        self.redraw_panel_with_theme(&theme, qh);
+    }
+
+    fn redraw_panel_with_theme(&mut self, theme: &ResolvedImeTheme, qh: &QueueHandle<Self>) {
         let (Some(renderer), Some(shm), Some(surface)) = (
             self.renderer.as_mut(),
             self.shm.as_ref(),
@@ -400,8 +407,16 @@ impl App {
             self.hide_panel_popup();
             return;
         }
+        let Some(slot) = self.panel_buffers.available_slot() else {
+            self.panel_redraw_pending = true;
+            self.panel_hit_areas = PanelHitAreas::default();
+            self.pressed_click = None;
+            return;
+        };
+        self.panel_redraw_pending = false;
         let WaylandPanel {
             pixels,
+            raster_width,
             width: w,
             height: h,
             logical_width,
@@ -413,10 +428,21 @@ impl App {
             self.panel_scale.scale(surface),
             self.panel_scale.screen_width(),
             text_hint,
+            theme,
         );
         if w == 0 || h == 0 {
             return;
         }
+        let buffer = match self
+            .panel_buffers
+            .write(slot, shm, qh, (w, h), raster_width, &pixels)
+        {
+            Ok(buffer) => buffer,
+            Err(e) => {
+                tracing::warn!("failed to write panel SHM buffer: {e}");
+                return;
+            }
+        };
         // Candidates take clicks; the transient mode hint lets them through.
         if let Some(compositor) = self.compositor.as_ref() {
             if hit_areas.candidates.is_empty() {
@@ -427,38 +453,9 @@ impl App {
                 surface.set_input_region(None);
             }
         }
-        let stride = w * 4;
-        let pool_size = (stride * h) as usize;
-
-        let mut tmp = match tempfile(libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) {
-            Ok(file) => file,
-            Err(e) => {
-                tracing::warn!("failed to create SHM tempfile: {e}");
-                return;
-            }
-        };
-        if tmp.set_len(pool_size as u64).is_err() {
-            tracing::warn!("failed to truncate SHM tempfile");
-            return;
-        }
-        if tmp.write_all(&pixels).is_err() {
-            tracing::warn!("failed to write SHM buffer");
-            return;
-        }
-        let pool = shm.create_pool(tmp.as_fd(), pool_size as i32, qh, ());
-        let buffer = pool.create_buffer(
-            0,
-            w as i32,
-            h as i32,
-            stride as i32,
-            wl_shm::Format::Argb8888,
-            qh,
-            (),
-        );
-
         self.panel_scale
             .configure_surface(surface, logical_width, logical_height);
-        surface.attach(Some(&buffer), 0, 0);
+        surface.attach(Some(buffer), 0, 0);
         if surface.version() >= 4 {
             surface.damage_buffer(0, 0, w as i32, h as i32);
         } else {
@@ -467,21 +464,18 @@ impl App {
         surface.commit();
 
         self.panel_hit_areas = hit_areas;
-        if let Some(old) = self.panel_buffer.replace(buffer) {
-            old.destroy();
-        }
-        pool.destroy();
     }
 
-    fn show_panel(&mut self, state: ImeState, qh: &QueueHandle<Self>) {
+    fn show_panel(&mut self, state: ImeState, theme: &ResolvedImeTheme, qh: &QueueHandle<Self>) {
         // The content changes, so a press on what was drawn before must not
         // select what is drawn now.
         self.pressed_click = None;
-        let has_content = self.renderer.is_some()
-            && panel_has_composition(&state, &self.theme_resolver.current().ui);
+        let has_content = self.renderer.is_some() && panel_has_composition(&state, &theme.ui);
         if state.switch_hint.is_some() {
             self.mode_hint_until = Some(mode_hint_deadline(
-                self.renderer.as_ref().map(PanelRenderer::mode_hint_duration),
+                self.renderer
+                    .as_ref()
+                    .map(|_| Duration::from_secs_f32(theme.mode_hint.duration)),
             ));
         } else if has_content
             || !state.candidates.is_empty()
@@ -497,14 +491,19 @@ impl App {
                 self.create_panel_popup(qh);
             }
             self.panel_visible = true;
-            self.redraw_panel(qh);
+            self.redraw_panel_with_theme(theme, qh);
         } else {
             self.hide_panel_popup();
         }
         self.sync_deployment_aux();
     }
 
-    fn update_ascii_mode(&mut self, ascii_mode: bool, qh: &QueueHandle<Self>) {
+    fn update_ascii_mode(
+        &mut self,
+        ascii_mode: bool,
+        theme: &ResolvedImeTheme,
+        qh: &QueueHandle<Self>,
+    ) {
         if ascii_mode == self.ascii_mode {
             return;
         }
@@ -515,20 +514,19 @@ impl App {
         self.mode_hint_until = Some(mode_hint_deadline(
             self.renderer
                 .as_ref()
-                .map(PanelRenderer::mode_hint_duration),
+                .map(|_| Duration::from_secs_f32(theme.mode_hint.duration)),
         ));
-        self.show_panel(ImeState::empty(), qh);
+        self.show_panel(ImeState::empty(), theme, qh);
         tracing::info!("IME mode changed: {}", if ascii_mode { "EN" } else { "CN" });
     }
 
-    fn commit_state_to_context(&self, state: &ImeState) {
+    fn commit_state_to_context(&self, state: &ImeState, theme: &ResolvedImeTheme) {
         let Some(ctx) = &self.context else { return };
         if let Some(committed) = &state.committed {
             tracing::debug!("KDE commit_string: {} chars", committed.chars().count());
             tracing::trace!("KDE commit_string: {committed:?}");
             ctx.commit_string(self.serial, committed.clone());
         }
-        let theme = self.theme_resolver.current();
         let has_floating_panel = self.kimpanel.is_some()
             || (self.renderer.is_some()
                 && self.compositor.is_some()
@@ -553,8 +551,8 @@ impl App {
         }
     }
 
-    fn update_kimpanel(&mut self, state: &ImeState) {
-        self.pending_kimpanel_state = Some(state.clone());
+    fn update_kimpanel(&mut self, state: &ImeState, theme: &ResolvedImeTheme) {
+        self.pending_kimpanel_state = Some((state.clone(), theme.clone()));
         self.clear_kimpanel = false;
     }
 
@@ -642,9 +640,14 @@ impl App {
             self.mods
         };
 
+        let theme = self.theme_resolver.current();
         self.deployment_text = self.deployment.key_pressed();
         if self.deployment_text.is_some() {
-            self.show_panel(self.ime_state.clone().unwrap_or_else(ImeState::empty), qh);
+            self.show_panel(
+                self.ime_state.clone().unwrap_or_else(ImeState::empty),
+                &theme,
+                qh,
+            );
             if let Some(backend) = self
                 .panel_surface
                 .as_ref()
@@ -654,7 +657,7 @@ impl App {
             }
         }
         let before_state = self.session.state();
-        self.refresh_deployment_hint(qh);
+        self.refresh_deployment_hint(Some(&theme), qh);
         let tap_mods = ControlAltTap::xkb_modifiers(sym_raw, self.mods, self.xkb_state.as_ref());
         if self.control_alt_tap.press(sym_raw, tap_mods)
             || key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state)
@@ -674,10 +677,10 @@ impl App {
                 self.forward_key_press(evdev_keycode);
                 return;
             };
-            self.update_ascii_mode(result.state.is_english_mode(), qh);
-            self.commit_state_to_context(&result.state);
-            self.update_kimpanel(&result.state);
-            self.show_panel(result.state, qh);
+            self.update_ascii_mode(result.state.is_english_mode(), &theme, qh);
+            self.commit_state_to_context(&result.state, &theme);
+            self.update_kimpanel(&result.state, &theme);
+            self.show_panel(result.state, &theme, qh);
             runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             if !result.accepted {
                 self.forward_key_press(evdev_keycode);
@@ -689,7 +692,7 @@ impl App {
             if shift_press { base_sym } else { sym_raw },
             effective_mods,
             &before_state,
-            candidate_panel_layout(&self.theme_resolver.current()),
+            candidate_panel_layout(&theme),
         );
         let Some(result) = self.session.process_key_result(keysym, effective_mods) else {
             self.forward_key_press(evdev_keycode);
@@ -697,14 +700,14 @@ impl App {
         };
         let ime_state = result.state;
 
-        self.update_ascii_mode(ime_state.is_english_mode(), qh);
+        self.update_ascii_mode(ime_state.is_english_mode(), &theme, qh);
 
         if result.accepted {
-            self.commit_state_to_context(&ime_state);
-            self.update_kimpanel(&ime_state);
+            self.commit_state_to_context(&ime_state, &theme);
+            self.update_kimpanel(&ime_state, &theme);
             let forwards_shortcut = !ime_state.is_package_switcher()
                 && self.session.should_forward_consumed_shortcut(sym_raw, effective_mods);
-            self.show_panel(ime_state, qh);
+            self.show_panel(ime_state, &theme, qh);
             if forwards_shortcut {
                 self.forward_key_press(evdev_keycode);
             } else {
@@ -720,9 +723,9 @@ impl App {
             // on the way out (the ascii_composer confirms the composition when
             // it switches mode). Publish the actual composition as well; a
             // rejected key does not mean Rime stopped composing.
-            self.commit_state_to_context(&ime_state);
-            self.update_kimpanel(&ime_state);
-            self.show_panel(ime_state, qh);
+            self.commit_state_to_context(&ime_state, &theme);
+            self.update_kimpanel(&ime_state, &theme);
+            self.show_panel(ime_state, &theme, qh);
             self.forward_key_press(evdev_keycode);
         }
         runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
@@ -740,10 +743,11 @@ impl App {
             PanelClick::NextPage => self.session.change_page(false),
         };
         let Some(state) = state else { return };
-        self.update_ascii_mode(state.is_english_mode(), qh);
-        self.commit_state_to_context(&state);
-        self.update_kimpanel(&state);
-        self.show_panel(state, qh);
+        let theme = self.theme_resolver.current();
+        self.update_ascii_mode(state.is_english_mode(), &theme, qh);
+        self.commit_state_to_context(&state, &theme);
+        self.update_kimpanel(&state, &theme);
+        self.show_panel(state, &theme, qh);
     }
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>, started: Instant) {
@@ -755,30 +759,33 @@ impl App {
                 .session
                 .process_key_result(sym_raw, shift_key_modifiers(self.mods | RIME_RELEASE_MASK))
             {
-                self.update_ascii_mode(result.state.is_english_mode(), qh);
-                self.commit_state_to_context(&result.state);
-                self.update_kimpanel(&result.state);
-                self.show_panel(result.state, qh);
+                let theme = self.theme_resolver.current();
+                self.update_ascii_mode(result.state.is_english_mode(), &theme, qh);
+                self.commit_state_to_context(&result.state, &theme);
+                self.update_kimpanel(&result.state, &theme);
+                self.show_panel(result.state, &theme, qh);
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             }
         } else if self.active && composing {
             let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
             let tap_mods = ControlAltTap::xkb_modifiers(sym, self.mods, self.xkb_state.as_ref());
             if let Some(result) = self.control_alt_tap.release(sym, tap_mods, &self.session) {
-                self.update_ascii_mode(result.state.is_english_mode(), qh);
-                self.commit_state_to_context(&result.state);
-                self.update_kimpanel(&result.state);
-                self.show_panel(result.state, qh);
+                let theme = self.theme_resolver.current();
+                self.update_ascii_mode(result.state.is_english_mode(), &theme, qh);
+                self.commit_state_to_context(&result.state, &theme);
+                self.update_kimpanel(&result.state, &theme);
+                self.show_panel(result.state, &theme, qh);
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             } else if key_policy::should_forward_chord_release(sym, self.mods, &self.session.state()) {
                 if let Some(result) = self
                     .session
                     .process_key_result(sym, self.mods | RIME_RELEASE_MASK)
                 {
-                    self.update_ascii_mode(result.state.is_english_mode(), qh);
-                    self.commit_state_to_context(&result.state);
-                    self.update_kimpanel(&result.state);
-                    self.show_panel(result.state, qh);
+                    let theme = self.theme_resolver.current();
+                    self.update_ascii_mode(result.state.is_english_mode(), &theme, qh);
+                    self.commit_state_to_context(&result.state, &theme);
+                    self.update_kimpanel(&result.state, &theme);
+                    self.show_panel(result.state, &theme, qh);
                     runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
                     if result.accepted {
                         self.forwarded_keys.remove(&evdev_keycode);
@@ -1124,11 +1131,28 @@ impl Dispatch<WlPointer, ()> for App {
 delegate_noop!(App: ignore WlCompositor);
 delegate_noop!(App: ignore WlShm);
 delegate_noop!(App: ignore WlShmPool);
-delegate_noop!(App: ignore WlBuffer);
 delegate_noop!(App: ignore WpFractionalScaleManagerV1);
 delegate_noop!(App: ignore WpViewporter);
 delegate_noop!(App: ignore WpViewport);
 delegate_noop!(App: ignore ZxdgOutputManagerV1);
+
+impl Dispatch<WlBuffer, ()> for App {
+    fn event(
+        state: &mut Self,
+        buffer: &WlBuffer,
+        event: wl_buffer::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            state.panel_buffers.release(buffer);
+            if state.panel_redraw_pending {
+                state.redraw_panel(qh);
+            }
+        }
+    }
+}
 
 impl Dispatch<ZxdgOutputV1, u32> for App {
     fn event(
@@ -1272,13 +1296,14 @@ fn run_event_loop(
         queue
             .dispatch_pending(app)
             .map_err(|e| format!("KDE Wayland dispatch: {e}"))?;
-        app.refresh_deployment_hint(&qh);
+        app.refresh_deployment_hint(None, &qh);
         if take_expired_deadline(&mut app.mode_hint_until) {
             let mut state = app.ime_state.take()
                 .filter(|state| state.switch_hint.is_some())
                 .unwrap_or_else(ImeState::empty);
             state.switch_hint = None;
-            app.show_panel(state, &qh);
+            let theme = app.theme_resolver.current();
+            app.show_panel(state, &theme, &qh);
         }
 
         if app.key_repeat.due() {
@@ -1292,10 +1317,12 @@ fn run_event_loop(
             if app.clear_kimpanel {
                 kimpanel_runtime.block_on(kimpanel.clear());
                 app.clear_kimpanel = false;
-            } else if let Some(state) = app.pending_kimpanel_state.take() {
-                kimpanel_runtime.block_on(
-                    kimpanel.update_state(&state, app.panel_visible && app.panel_surface.is_some()),
-                );
+            } else if let Some((state, theme)) = app.pending_kimpanel_state.take() {
+                kimpanel_runtime.block_on(kimpanel.update_state(
+                    &state,
+                    app.panel_visible && app.panel_surface.is_some(),
+                    &theme,
+                ));
             }
         }
         // Prepare the read before polling, as required by wayland-client. A
