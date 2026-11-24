@@ -137,22 +137,22 @@ mod tests {
             std::fs::read(path)
         };
         let mut cache = ReloadStampCache::default();
-        let first = cache.signature_at_with(&path, &read).unwrap();
+        let first = cache.signature_at_with(&path, read).unwrap();
         assert_eq!(
             Some(first.clone()),
             super::super::ReloadStamp::signature_at(&path)
         );
-        assert_eq!(cache.signature_at_with(&path, &read), Some(first.clone()));
+        assert_eq!(cache.signature_at_with(&path, read), Some(first.clone()));
         assert_eq!(reads.get(), 1);
 
         std::fs::write(&path, "next deployment").unwrap();
-        let changed = cache.signature_at_with(&path, &read).unwrap();
+        let changed = cache.signature_at_with(&path, read).unwrap();
         assert_ne!(first, changed);
         assert_eq!(
             Some(changed.clone()),
             super::super::ReloadStamp::signature_at(&path)
         );
-        assert_eq!(cache.signature_at_with(&path, &read), Some(changed));
+        assert_eq!(cache.signature_at_with(&path, read), Some(changed));
         assert_eq!(reads.get(), 2);
         std::fs::remove_file(path).unwrap();
     }
@@ -166,14 +166,14 @@ mod tests {
             std::fs::read(path)
         };
         let mut cache = ReloadStampCache::default();
-        assert_eq!(cache.signature_at_with(&path, &read), None);
+        assert_eq!(cache.signature_at_with(&path, read), None);
         assert_eq!(reads.get(), 0);
         std::fs::write(&path, "first").unwrap();
-        assert!(cache.signature_at_with(&path, &read).is_some());
+        assert!(cache.signature_at_with(&path, read).is_some());
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(cache.signature_at_with(&path, &read), None);
+        assert_eq!(cache.signature_at_with(&path, read), None);
         std::fs::write(&path, "first").unwrap();
-        assert!(cache.signature_at_with(&path, &read).is_some());
+        assert!(cache.signature_at_with(&path, read).is_some());
         assert_eq!(reads.get(), 2);
         std::fs::remove_file(path).unwrap();
     }
@@ -220,9 +220,9 @@ mod tests {
             reads.set(reads.get() + 1);
             std::fs::read(path)
         };
-        let current = cache.signature_at_with(&path, &read);
+        let current = cache.signature_at_with(&path, read);
         assert_ne!(current, failed);
-        assert_eq!(cache.signature_at_with(&path, &read), current);
+        assert_eq!(cache.signature_at_with(&path, read), current);
         assert_eq!(reads.get(), 1);
         std::fs::remove_file(path).unwrap();
     }

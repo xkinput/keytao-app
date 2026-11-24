@@ -993,18 +993,6 @@ pub extern "C" fn keytao_session_get_english_mode(session: *mut c_void) -> bool 
     })
 }
 
-#[no_mangle]
-pub extern "C" fn keytao_session_set_english_mode_json(
-    session: *mut c_void,
-    enabled: bool,
-) -> *mut c_char {
-    session_json("keytao_session_set_english_mode_json", session, |s| {
-        s.set_english_mode(enabled)
-            .ok()
-            .map(|state| state_json(state, true))
-    })
-}
-
 // The values are written as plain literals rather than shifts because these go
 // through cbindgen into `#define`s, and Swift's importer only picks up macros
 // whose body is a literal — `(1 << 4)` would arrive in Swift as nothing at all.
@@ -1420,13 +1408,6 @@ pub unsafe extern "C" fn keytao_fit_candidate_widths(
 }
 
 #[no_mangle]
-pub extern "C" fn keytao_default_keyboard_yaml() -> *mut c_char {
-    guard("keytao_default_keyboard_yaml", std::ptr::null_mut(), || {
-        to_cstring(keytao_theme::default_keyboard_yaml())
-    })
-}
-
-#[no_mangle]
 pub extern "C" fn keytao_resolve_keyboard_json(
     default_keyboard_path: *const c_char,
     user_keyboard_path: *const c_char,
@@ -1787,8 +1768,12 @@ pub extern "C" fn keytao_session_set_ascii_mode_json(
 }
 
 /// Free a UTF-8 string returned by keytao-core-ffi.
+///
+/// # Safety
+/// `ptr` must be null or a pointer returned by keytao-core-ffi that has not
+/// already been freed and whose string has not been modified.
 #[no_mangle]
-pub extern "C" fn keytao_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn keytao_free_string(ptr: *mut c_char) {
     guard("keytao_free_string", (), || unsafe { free_cstring(ptr) })
 }
 
@@ -2081,7 +2066,7 @@ mod tests {
         for ch in smoke_fixture::CODE.chars() {
             let state = keytao_session_process_key_json(session, ch as u32, 0);
             assert!(!state.is_null());
-            keytao_free_string(state);
+            unsafe { keytao_free_string(state) };
         }
         let undeployed = dir.join("undeployed");
         smoke_fixture::write(&undeployed).unwrap();
@@ -2101,7 +2086,7 @@ mod tests {
                 .unwrap()["preedit"],
                 smoke_fixture::CODE
             );
-            keytao_free_string(state);
+            unsafe { keytao_free_string(state) };
         }
 
         // A genuine switch still retires the old handle and creates a usable
@@ -2125,7 +2110,7 @@ mod tests {
             .unwrap()["accepted"],
             true
         );
-        keytao_free_string(state);
+        unsafe { keytao_free_string(state) };
         keytao_destroy_session(session);
         keytao_destroy_session(replacement);
         let _ = std::fs::remove_dir_all(dir);
@@ -2224,7 +2209,7 @@ mod tests {
             unsafe { CStr::from_ptr(path) }.to_str().unwrap(),
             stamp.to_string_lossy()
         );
-        keytao_free_string(path);
+        unsafe { keytao_free_string(path) };
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2482,7 +2467,7 @@ mod tests {
         mark_deployment_loaded(&path, loading);
         let signature = keytao_loaded_reload_stamp_signature();
         assert_eq!(c_string_arg(signature, "signature").unwrap(), applied);
-        keytao_free_string(signature);
+        unsafe { keytao_free_string(signature) };
 
         let (_, pending) =
             stamp_changed_peek().expect("the deployment that landed mid-reload is still pending");
@@ -2534,7 +2519,6 @@ mod tests {
         assert!(keytao_session_set_input_policy_json(std::ptr::null_mut(), false, false).is_null());
         assert!(!keytao_session_get_ascii_mode(std::ptr::null_mut()));
         assert!(!keytao_session_get_english_mode(std::ptr::null_mut()));
-        assert!(keytao_session_set_english_mode_json(std::ptr::null_mut(), true).is_null());
         // Destroying nothing is not an error either.
         keytao_destroy_session(std::ptr::null_mut());
     }

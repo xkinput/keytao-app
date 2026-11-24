@@ -228,14 +228,14 @@ native key event
 | 按键 | `keytao_session_process_key_json(session, keyval, modifiers)`、`keytao_session_process_enter_json(session)` |
 | 候选 | `keytao_session_select_candidate_json(session, index)`、`keytao_session_select_candidate_global_json(session, index)`、`keytao_session_delete_candidate_json(session, index)`、`keytao_session_candidate_is_user_phrase(session, index)`、`keytao_session_change_page_json(session, backward)`、`keytao_session_all_candidates_json(session, limit)` |
 | 组字收尾 | `keytao_session_commit_composition_json(session)`、`keytao_session_clear_composition_json(session)`、`keytao_session_reset_json(session)` |
-| 状态与模式 | `keytao_session_state_json(session)`、`keytao_session_get_ascii_mode(session)`、`keytao_session_set_ascii_mode_json(session, enabled)`、`keytao_session_get_english_mode(session)`、`keytao_session_set_english_mode_json(session, enabled)` |
+| 状态与模式 | `keytao_session_state_json(session)`、`keytao_session_get_ascii_mode(session)`、`keytao_session_set_ascii_mode_json(session, enabled)`、`keytao_session_get_english_mode(session)` |
 | 方案与选项 | `keytao_session_list_schemas_json(session)`、`keytao_session_schema_switches_json(session)`、`keytao_session_current_schema_json(session)`、`keytao_session_select_schema_json(session, schema_id)`、`keytao_session_get_option(session, name)`、`keytao_session_set_option_json(session, name, value)` |
 | 能力 | `keytao_engine_capabilities()`、`keytao_session_capabilities(session)` |
 | 输入策略 | `keytao_session_set_input_policy_json(session, composing, learning)`；返回 null 时保留上一次 UI 状态 |
 | key policy | `keytao_text_to_keysym(utf8)`、`keytao_key_policy_is_enter(keyval)`、`keytao_key_policy_should_bypass(session, keyval, modifiers)`、`keytao_utf16_offset_from_chars(text, char_offset)` |
 | reload stamp | `keytao_reload_stamp_path_at(user_dir)`、`keytao_reload_if_stamp_changed()` |
 | 进程级注入 | `keytao_set_ui_capabilities(...)`、`keytao_set_theme_paths(default, user)`、`keytao_set_system_color_scheme("dark"/"light"/null)` |
-| 主题 | `keytao_resolve_theme_json(...)`、`keytao_resolve_keyboard_json(...)`、`keytao_default_keyboard_yaml()` |
+| 主题 | `keytao_resolve_theme_json(...)`、`keytao_resolve_keyboard_json(...)` |
 | 释放 | `keytao_free_string(ptr)` |
 
 状态操作通过 `*_json` 入口返回带 `CandidatePanelModel` / `ModeHintModel` 的完整 UI JSON，供自绘前端使用；返回字符串的所有权遵循上文规则。
