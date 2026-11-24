@@ -1,6 +1,7 @@
 use crate::{
     Core, CoreError, ime_host::ImeHost, ime_paths::path_string, scheme_files::write_file_atomic,
 };
+use keytao_core::runtime_log::SETTINGS_FILE;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
@@ -11,6 +12,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
+#[cfg(target_os = "windows")]
+static RUNTIME_LOG_SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Serialize)]
 pub struct DebugLogFile {
@@ -36,6 +39,15 @@ pub enum RuntimeLogLevel {
 struct RuntimeLogConfig {
     enabled: bool,
     level: RuntimeLogLevel,
+}
+
+impl Default for RuntimeLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            level: RuntimeLogLevel::Info,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -116,13 +128,10 @@ pub async fn get_runtime_log_settings(
 ) -> Result<RuntimeLogSettings, CoreError> {
     let result: Result<_, String> = async {
         let root = host.user_root()?;
-        let config = match std::fs::read(root.join("runtime-log.json")) {
+        let config = match std::fs::read(root.join(SETTINGS_FILE)) {
             Ok(bytes) => serde_json::from_slice::<RuntimeLogConfig>(&bytes)
                 .map_err(|e| format!("Cannot parse runtime log settings: {e}"))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => RuntimeLogConfig {
-                enabled: true,
-                level: RuntimeLogLevel::Info,
-            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => RuntimeLogConfig::default(),
             Err(e) => return Err(format!("Cannot read runtime log settings: {e}")),
         };
         let dir = runtime_log_directory(&root)?;
@@ -164,10 +173,108 @@ pub async fn set_runtime_log_settings(
         std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let bytes =
             serde_json::to_vec(&RuntimeLogConfig { enabled, level }).map_err(|e| e.to_string())?;
-        write_file_atomic(&root.join("runtime-log.json"), &bytes).map_err(|e| e.to_string())
+        #[cfg(target_os = "windows")]
+        let _guard = RUNTIME_LOG_SETTINGS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        write_file_atomic(&root.join(SETTINGS_FILE), &bytes).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        let _ = mirror_windows_runtime_log_settings(&root);
+        Ok(())
     }
     .await;
     result.map_err(CoreError::Other)
+}
+
+#[cfg(target_os = "windows")]
+pub fn sync_windows_runtime_log_settings(root: &Path) {
+    let _guard = RUNTIME_LOG_SETTINGS_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _ = mirror_windows_runtime_log_settings(root);
+}
+
+#[cfg(target_os = "windows")]
+fn mirror_windows_runtime_log_settings(root: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+    if keytao_core::default_user_data_dir().as_deref() != Some(root)
+        && !crate::windows_public_schemas::is_default_user_root(root)
+    {
+        return Ok(());
+    }
+    let public = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or("LOCALAPPDATA is unavailable")?
+        .join("KeyTao/appcontainer-schemas");
+    sync_runtime_log_settings(root, &public)?;
+    // Replace stale settings even if the read grant cannot be applied.
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        let _ = std::process::Command::new(PathBuf::from(system_root).join("System32/icacls.exe"))
+            .arg(&public)
+            .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/Q"])
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .output();
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn sync_runtime_log_settings(root: &Path, mirror_dir: &Path) -> Result<(), String> {
+    let bytes = match std::fs::read(root.join(SETTINGS_FILE)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::to_vec(&RuntimeLogConfig::default()).map_err(|e| e.to_string())?
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    std::fs::create_dir_all(mirror_dir).map_err(|e| e.to_string())?;
+    write_file_atomic(&mirror_dir.join(SETTINGS_FILE), &bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn startup_sync_copies_private_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private");
+        let mirror = dir.path().join("public");
+        let private_settings = b"{\n  \"enabled\": false, \"level\": \"verbose\"\n}\n";
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(SETTINGS_FILE), private_settings).unwrap();
+        fs::create_dir(&mirror).unwrap();
+        fs::write(
+            mirror.join(SETTINGS_FILE),
+            br#"{"enabled":true,"level":"info"}"#,
+        )
+        .unwrap();
+
+        sync_runtime_log_settings(&root, &mirror).unwrap();
+
+        assert_eq!(
+            fs::read(mirror.join(SETTINGS_FILE)).unwrap(),
+            private_settings
+        );
+    }
+
+    #[test]
+    fn startup_sync_writes_defaults_without_private_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private");
+        let mirror = dir.path().join("public");
+
+        sync_runtime_log_settings(&root, &mirror).unwrap();
+
+        let bytes = fs::read(mirror.join(SETTINGS_FILE)).unwrap();
+        let config: RuntimeLogConfig = serde_json::from_slice(&bytes).unwrap();
+        assert!(config.enabled);
+        assert!(matches!(config.level, RuntimeLogLevel::Info));
+        assert!(!root.exists());
+    }
 }
 
 pub async fn read_runtime_log(

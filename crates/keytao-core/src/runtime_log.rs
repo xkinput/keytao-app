@@ -16,6 +16,8 @@ use std::{
 #[doc(hidden)]
 pub use serde_json as json;
 
+pub const SETTINGS_FILE: &str = "runtime-log.json";
+
 const CAPACITY: usize = 2048;
 const ROTATE_BYTES: u64 = 2 * 1024 * 1024;
 // Reserve space for the fixed session header in a freshly rotated file.
@@ -42,9 +44,20 @@ pub fn enabled(level: Level) -> bool {
 /// Start at most one writer. All filesystem work happens on that thread.
 /// An initialization or write failure is terminal for this process.
 pub fn init(user_data_dir: &Path, tag: &str) {
+    init_with_settings_path(user_data_dir, tag, None);
+}
+
+/// Read settings from a separate path while keeping the log in the usual directory.
+/// An explicit settings path must be readable and enabled for logging to turn on.
+pub fn init_with_settings_path(user_data_dir: &Path, tag: &str, settings_path: Option<&Path>) {
     LOGGER.get_or_init(|| {
         let logger = Arc::new(Logger::new(&LEVEL));
-        let _ = logger.start(user_data_dir.to_owned(), tag.to_owned(), log_dir);
+        let _ = logger.start(
+            user_data_dir.to_owned(),
+            tag.to_owned(),
+            settings_path.map(Path::to_path_buf),
+            log_dir,
+        );
         logger
     });
 }
@@ -182,6 +195,7 @@ impl Logger {
         self: &Arc<Self>,
         user_dir: PathBuf,
         tag: String,
+        settings_path: Option<PathBuf>,
         directory: fn(&Path) -> Option<PathBuf>,
     ) -> io::Result<std::thread::JoinHandle<()>> {
         let worker = Arc::clone(self);
@@ -190,7 +204,7 @@ impl Logger {
             .name("keytao-log".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker.run(&user_dir, &tag, directory)
+                    worker.run(&user_dir, &tag, settings_path, directory)
                 }));
                 if !matches!(result, Ok(Ok(()))) {
                     worker.disable();
@@ -215,7 +229,7 @@ impl Logger {
         }
         if !matches!(
             cat,
-            "lifecycle" | "input" | "rime" | "render" | "memory" | "ui" | "error"
+            "lifecycle" | "input" | "rime" | "render" | "memory" | "ui" | "ipc" | "error"
         ) || !identifier(ev)
         {
             return;
@@ -306,6 +320,7 @@ impl Logger {
         &self,
         user_dir: &Path,
         tag: &str,
+        settings_path: Option<PathBuf>,
         directory: fn(&Path) -> Option<PathBuf>,
     ) -> io::Result<()> {
         let tag = if tag == "engine" { process_tag() } else { tag };
@@ -317,6 +332,7 @@ impl Logger {
                 | "ios-ime"
                 | "macos-ime"
                 | "windows-ime"
+                | "windows-ime-server"
                 | "linux-ime"
                 | "desktop-app"
         ) {
@@ -325,7 +341,11 @@ impl Logger {
                 "invalid logger tag",
             ));
         }
-        let mut settings = Settings::new(user_dir.join("runtime-log.json"));
+        let required = settings_path.is_some();
+        let mut settings = Settings::new(
+            settings_path.unwrap_or_else(|| user_dir.join(SETTINGS_FILE)),
+            required,
+        );
         let initial_level = settings.read();
         {
             let mut queue = super::lock_ignore_poison(&self.queue);
@@ -595,12 +615,17 @@ impl LogFile {
 
 struct Settings {
     path: PathBuf,
+    required: bool,
     stamp: Option<(SystemTime, u64)>,
 }
 
 impl Settings {
-    fn new(path: PathBuf) -> Self {
-        Self { path, stamp: None }
+    fn new(path: PathBuf, required: bool) -> Self {
+        Self {
+            path,
+            required,
+            stamp: None,
+        }
     }
     fn stamp(&self) -> Option<(SystemTime, u64)> {
         fs::metadata(&self.path)
@@ -614,9 +639,11 @@ impl Settings {
         )
     }
     fn read_with_windows_diagnostics(&mut self, diagnostics: bool) -> Level {
-        self.stamp = self.stamp();
+        if !self.required {
+            self.stamp = self.stamp();
+        }
         let level = match fs::read(&self.path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Level::Info,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.required => Level::Info,
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(value) if value.get("enabled").and_then(Value::as_bool) == Some(true) => {
                     match value.get("level").and_then(Value::as_str) {
@@ -636,7 +663,8 @@ impl Settings {
         }
     }
     fn refresh(&mut self) -> Option<Level> {
-        (self.stamp() != self.stamp).then(|| self.read())
+        // A mirror's ACL can change without changing its modification time or size.
+        (self.required || self.stamp() != self.stamp).then(|| self.read())
     }
 }
 
@@ -1005,7 +1033,7 @@ mod tests {
         let engine_guard = crate::desktop::rime_api_lock();
         let logger = Arc::new(local_logger());
         let handle = logger
-            .start(dir.0.clone(), "windows-ime".into(), |root| {
+            .start(dir.0.clone(), "windows-ime".into(), None, |root| {
                 Some(root.join("log"))
             })
             .unwrap();
@@ -1026,6 +1054,27 @@ mod tests {
         assert_eq!(records[0]["ev"], "session_begin");
         assert!(records[0]["librime"].is_null());
         assert_eq!(records[1]["ev"], "before_engine");
+    }
+
+    #[test]
+    fn windows_ime_server_logger_writes_ipc_events() {
+        let dir = TempDir::new();
+        let logger = Arc::new(local_logger());
+        let handle = logger
+            .start(dir.0.clone(), "windows-ime-server".into(), None, |root| {
+                Some(root.join("log"))
+            })
+            .unwrap();
+        logger.event(Level::Info, "ipc", "client_authenticated", None, Map::new());
+        logger.flush(Duration::from_secs(2));
+        let level = logger.level.load(Ordering::Relaxed);
+        logger.disable();
+        handle.join().unwrap();
+
+        assert!(level >= Level::Info as u8);
+        let written = fs::read_to_string(dir.0.join("log/keytao-windows-ime-server.log")).unwrap();
+        assert!(written.contains("\"tag\":\"windows-ime-server\""));
+        assert!(written.contains("\"ev\":\"client_authenticated\""));
     }
 
     #[test]
@@ -1232,7 +1281,9 @@ mod tests {
         let logger = Arc::new(local_logger());
         // Exercise the same asynchronous start/error boundary used by init.
         let handle = logger
-            .start(blocked, "ios-ime".into(), |root| Some(root.join("log")))
+            .start(blocked, "ios-ime".into(), None, |root| {
+                Some(root.join("log"))
+            })
             .unwrap();
         assert!(handle.join().is_ok());
         logger.event(Level::Info, "error", "ignored", None, Map::new());
@@ -1248,7 +1299,7 @@ mod tests {
         let dir = TempDir::new();
         let logger = Arc::new(local_logger());
         let handle = logger
-            .start(dir.0.clone(), "ios-ime".into(), |root| {
+            .start(dir.0.clone(), "ios-ime".into(), None, |root| {
                 Some(root.join("log"))
             })
             .unwrap();
@@ -1284,7 +1335,7 @@ mod tests {
         let logger = Arc::new(local_logger());
         logger.event(Level::Info, "rime", "startup", None, Map::new());
         let handle = logger
-            .start(dir.0.clone(), "ios-ime".into(), |root| {
+            .start(dir.0.clone(), "ios-ime".into(), None, |root| {
                 Some(root.join("log"))
             })
             .unwrap();
@@ -1294,6 +1345,43 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(level, 0);
         let content = fs::read_to_string(dir.0.join("log/keytao-ios-ime.log")).unwrap();
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn settings_path_override_disables_logger() {
+        assert_settings_override_disables_logger(Some(r#"{"enabled":false,"level":"info"}"#));
+    }
+
+    #[test]
+    fn missing_settings_path_override_disables_logger() {
+        assert_settings_override_disables_logger(None);
+    }
+
+    fn assert_settings_override_disables_logger(contents: Option<&str>) {
+        let private = TempDir::new();
+        let public = TempDir::new();
+        let settings_path = public.0.join(SETTINGS_FILE);
+        if let Some(contents) = contents {
+            fs::write(&settings_path, contents).unwrap();
+        }
+        let logger = Arc::new(local_logger());
+        logger.event(Level::Info, "rime", "startup", None, Map::new());
+        let handle = logger
+            .start(
+                private.0.clone(),
+                "windows-ime".into(),
+                Some(settings_path),
+                |root| Some(root.join("log")),
+            )
+            .unwrap();
+        logger.flush(Duration::from_secs(2));
+        let level = logger.level.load(Ordering::Relaxed);
+        logger.disable();
+        handle.join().unwrap();
+
+        assert_eq!(level, Level::Off as u8);
+        let content = fs::read_to_string(private.0.join("log/keytao-windows-ime.log")).unwrap();
         assert!(content.is_empty());
     }
 
@@ -1331,7 +1419,7 @@ mod tests {
     fn settings_default_disable_reload_and_delete() {
         let dir = TempDir::new();
         let path = dir.0.join("runtime-log.json");
-        let mut settings = Settings::new(path.clone());
+        let mut settings = Settings::new(path.clone(), false);
         assert_eq!(settings.read(), Level::Info);
         fs::write(&path, r#"{"enabled":false,"level":"info"}"#).unwrap();
         assert_eq!(settings.refresh(), Some(Level::Off));
@@ -1343,10 +1431,24 @@ mod tests {
     }
 
     #[test]
+    fn required_settings_refresh_when_mirror_becomes_readable_or_unreadable() {
+        let dir = TempDir::new();
+        let path = dir.0.join(SETTINGS_FILE);
+        fs::create_dir(&path).unwrap();
+        let mut settings = Settings::new(path.clone(), true);
+        assert_eq!(settings.read_with_windows_diagnostics(true), Level::Off);
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, r#"{"enabled":true,"level":"verbose"}"#).unwrap();
+        assert_eq!(settings.refresh(), Some(Level::Verbose));
+        fs::remove_file(path).unwrap();
+        assert_eq!(settings.refresh(), Some(Level::Off));
+    }
+
+    #[test]
     fn windows_diagnostics_raises_info_without_overriding_disabled_settings() {
         let dir = TempDir::new();
         let path = dir.0.join("runtime-log.json");
-        let mut settings = Settings::new(path.clone());
+        let mut settings = Settings::new(path.clone(), false);
         assert_eq!(settings.read_with_windows_diagnostics(false), Level::Info);
         assert_eq!(settings.read_with_windows_diagnostics(true), Level::Verbose);
         for (contents, expected) in [

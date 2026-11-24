@@ -251,7 +251,6 @@ impl PipeEngine {
                         keytao_core::runtime_log::Level::Info,
                         "ipc",
                         "key_request_timeout",
-                        key = format!("{request:?}"),
                         duration_ms = started.elapsed().as_millis(),
                         timeout_ms = timeout.as_millis(),
                         written = error.written
@@ -504,7 +503,14 @@ impl Connection {
             RequestError::open(format!("connect to engine pipe: {error}"), error.code().0)
         })?;
         let pipe = Arc::new(OwnedHandle(pipe));
-        verify_server_image(pipe.0, &identity)?;
+        verify_server_image(pipe.0, &identity).inspect_err(|error| {
+            keytao_core::rt_log!(
+                keytao_core::runtime_log::Level::Info,
+                "ipc",
+                "server_identity_rejected",
+                msg = &error.message
+            );
+        })?;
         let mut connection = Self {
             pipe,
             reaper,
@@ -941,8 +947,9 @@ fn verify_pipe_owner(pipe: HANDLE, user_sid: &str) -> Result<(), RequestError> {
         })
     })();
     unsafe { LocalFree(HLOCAL(descriptor.0)) };
-    if owner_sid? != user_sid {
-        return Err("engine pipe owner does not match the client user".into());
+    let owner = owner_sid?;
+    if owner != user_sid {
+        return Err(format!("engine pipe owner {owner} does not match the client user").into());
     }
     log_server_verification("pipe_owner_sid");
     Ok(())

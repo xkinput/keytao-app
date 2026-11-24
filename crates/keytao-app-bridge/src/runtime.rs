@@ -68,6 +68,8 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
     let core = Core::new(env, events.clone()).map_err(|error| error.to_string())?;
     core.initialize_onboarding(Some(root.clone()))
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    keytao_app_core::logs::sync_windows_runtime_log_settings(&root);
     let preferences = core.state();
     let info = BridgeInfo {
         platform: config.platform,

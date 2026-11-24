@@ -24,7 +24,7 @@ pub fn pipe_name(sid: &str, session_id: u32) -> String {
 }
 
 pub fn pipe_sddl(sid: &str) -> String {
-    format!("D:(A;;GRGW;;;{sid})(A;;GRGW;;;S-1-15-2-1)S:(ML;;NW;;;LW)")
+    format!("O:{sid}D:(A;;GRGW;;;{sid})(A;;GRGW;;;S-1-15-2-1)S:(ML;;NW;;;LW)")
 }
 
 /// Select the first existing installation directory from trusted machine records.
@@ -69,6 +69,14 @@ pub fn is_descendant(image: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipe_sddl_assigns_ownership_to_the_user() {
+        assert_eq!(
+            pipe_sddl("S-1-5-21-1-2-3-500"),
+            "O:S-1-5-21-1-2-3-500D:(A;;GRGW;;;S-1-5-21-1-2-3-500)(A;;GRGW;;;S-1-15-2-1)S:(ML;;NW;;;LW)"
+        );
+    }
 
     #[test]
     fn installation_root_uses_record_order_and_strips_surrounding_quotes() {
