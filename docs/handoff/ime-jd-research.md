@@ -138,8 +138,14 @@ ime-jd 接入设计（只读，未改仓库，未下载）
 6. libjd 的词库与 KeyTao 当前词库版本可能不一致，需不需要在 UI 上提示？
 ---
 # Owner decisions (2026-11-21)
-1. Not bundled in any KeyTao build. The user clicks to download libjd from the hronro/ime-jd GitHub releases; the owner's position is that this does not trigger GPL obligations for KeyTao.
-2. Version: whatever GitHub reports as the latest release at the moment the user clicks (no pinned tag). Still verify the downloaded asset against the GitHub API `digest` (sha256) and check `jd_abi_layout`; never update silently.
-3. Platforms: every platform libjd publishes a loadable binary for — macOS (arm64/x86_64 dylib), Linux (x86_64/arm64 so), Windows (x86_64/arm64 dll, server/pipe mode only), Android (arm64/x86_64 so). iOS only ships a static .a, which cannot be downloaded at runtime, so iOS is out.
+
+On 2026-11-25, the owner decided that all KeyTao builds bundle libjd-engine at
+`v0.14.0`, pinned in `scripts/bundle-libjd-engine.py`. Each platform package
+ships the GPL-3.0 license and corresponding source notice as
+`libjd-engine-LICENSE.txt` and `libjd-engine-SOURCE.txt`.
+
+1. **Superseded.** Not bundled in any KeyTao build. The user clicks to download libjd from the hronro/ime-jd GitHub releases; the owner's position is that this does not trigger GPL obligations for KeyTao.
+2. **Superseded.** Version: whatever GitHub reports as the latest release at the moment the user clicks (no pinned tag). Still verify the downloaded asset against the GitHub API `digest` (sha256) and check `jd_abi_layout`; never update silently.
+3. **Superseded.** Platforms: every platform libjd publishes a loadable binary for — macOS (arm64/x86_64 dylib), Linux (x86_64/arm64 so), Windows (x86_64/arm64 dll, server/pipe mode only), Android (arm64/x86_64 so). iOS only ships a static .a, which cannot be downloaded at runtime, so iOS is out.
 4. KeyTao custom words are NOT fed into libjd.
 5. Once the 键道6 card is switched to ime-jd, that card no longer offers scheme download/update: it shows only the current libjd version and an '更新 ime-jd' action (plus '切回 Rime').

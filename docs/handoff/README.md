@@ -115,7 +115,7 @@ Hot files overlap with isolation (`lib.rs`), so engine batch J0 (`ImeBackend` tr
 ## Status update (2026-11-21, later)
 
 - Isolation B3–B6 introduced package switching, a two-level home and F4 selector, independently deployable add-ons, and per-package Easy English.
-- ime-jd engine J0–J2 merged: `ImeBackend` trait (`RimeBackend`, `JdBackend`), user-initiated libjd download from GitHub latest with sha256/ABI checks, per-package engine choice (keytao only), 键道6 card actions, Linux/Windows-server/Android wiring. No libjd binary is bundled.
+- ime-jd engine J0–J2 merged: `ImeBackend` trait (`RimeBackend`, `JdBackend`), user-initiated libjd download from GitHub latest with sha256/ABI checks, per-package engine choice (keytao only), 键道6 card actions, Linux/Windows-server/Android wiring. All KeyTao release packages bundle libjd-engine at the version pinned in `scripts/bundle-libjd-engine.py` and ship its license and source notice as `libjd-engine-LICENSE.txt` and `libjd-engine-SOURCE.txt`.
 - Forced isolation migration (`896b839`..`f26febf` + follow-ups): isolated per-package layout is the only layout; existing flat installs migrate automatically and archive legacy files under `legacy-backup/<UTC timestamp>/` on a later start.
 - Resolved CI and follow-up items:
   - Linux host package deploy, Windows no-learning/AppContainer cache paths, Windows public schema publishing after migration, child-process librime test isolation, and `write_current_schema`/`persist_selected_schema` directory creation for unmaterialized/unselected runtimes.
