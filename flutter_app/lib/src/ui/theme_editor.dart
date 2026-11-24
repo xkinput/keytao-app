@@ -104,6 +104,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   final Map<String, Map<String, dynamic>> _previews = {};
   (String, Object?)? _previewField;
   (String, Object)? _queuedPreview;
+  final _queuedPaddingPreview = ValueNotifier<(String, Object)?>(null);
   Timer? _previewDebounce;
   String? _hoveredField;
   String? _activeField;
@@ -188,6 +189,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   @override
   void dispose() {
     _cancelPreview();
+    _queuedPaddingPreview.dispose();
     _controller.removeListener(_changed);
     super.dispose();
   }
@@ -405,15 +407,15 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     _previewDebounce?.cancel();
     _previewDebounce = null;
     _queuedPreview = null;
+    _queuedPaddingPreview.value = null;
   }
 
   void _schedulePreview(String path, Object value) {
     _previewDebounce?.cancel();
-    if (_linkedPadding(path, value) != null) {
-      setState(() => _queuedPreview = (path, value));
-    } else {
-      _queuedPreview = (path, value);
-    }
+    _queuedPreview = (path, value);
+    _queuedPaddingPreview.value = _linkedPadding(path, value) == null
+        ? null
+        : _queuedPreview;
     _previewDebounce = Timer(const Duration(milliseconds: 80), () {
       if (_enabled) {
         _preview(path, value);
@@ -1245,7 +1247,10 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             _slider('边框宽度', 'pc.panel.borderWidth', 0, 4, 8),
             _slider('面板圆角', 'pc.panel.cornerRadius', 0, 28, 28),
           ]),
-          _panelPadding(),
+          ListenableBuilder(
+            listenable: _queuedPaddingPreview,
+            builder: (_, _) => _panelPadding(),
+          ),
           _compactRows([
             _slider('候选间距', 'pc.panel.gap', 0, 24, 24),
             _slider('编码间距', 'pc.panel.preeditGap', 0, 48, 48),

@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/semantics.dart';
 import 'package:forui/forui.dart';
@@ -16,6 +17,7 @@ import 'website_page.dart';
 import 'widgets.dart';
 
 const _mobileChromeTopExtent = 8.0;
+const _mobileChromeCollapseExtent = 96.0;
 
 extension PageIcon on AppPage {
   IconData get icon => switch (this) {
@@ -65,7 +67,7 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _cloudDialogOpen = false;
   late AppPage _chromePage = widget.controller.activePage;
-  bool _mobileBarsVisible = true;
+  final _mobileChrome = ValueNotifier(1.0);
   double? _scrollAnchor;
 
   @override
@@ -97,6 +99,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.controller.removeListener(_controllerChanged);
+    _mobileChrome.dispose();
     super.dispose();
   }
 
@@ -104,7 +107,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final c = widget.controller;
     if (_chromePage != c.activePage) {
       _chromePage = c.activePage;
-      _mobileBarsVisible = true;
+      _mobileChrome.value = 1;
       _scrollAnchor = null;
     }
     if (_cloudDialogOpen ||
@@ -165,18 +168,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         !offset.isFinite) {
       return;
     }
-    const threshold = 24.0;
+    final previous = _scrollAnchor ?? offset;
+    _scrollAnchor = offset;
     if (offset <= _mobileChromeTopExtent) {
-      _scrollAnchor = 0;
-      if (!_mobileBarsVisible) setState(() => _mobileBarsVisible = true);
-      return;
-    }
-    final delta = offset - (_scrollAnchor ??= offset);
-    if (_mobileBarsVisible ? delta < 0 : delta > 0) {
-      _scrollAnchor = offset;
-    } else if (delta.abs() >= threshold) {
-      _scrollAnchor = offset;
-      setState(() => _mobileBarsVisible = !_mobileBarsVisible);
+      _mobileChrome.value = 1;
+    } else {
+      _mobileChrome.value =
+          (_mobileChrome.value -
+                  (offset - previous) / _mobileChromeCollapseExtent)
+              .clamp(0.0, 1.0);
     }
   }
 
@@ -204,7 +204,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           final hideHeaderForKeyboard =
               keyboardInset > 0 && availableHeight < 160;
           final mobileWebsite = c.isMobile && c.activePage == AppPage.website;
-          final showMobileBars = !c.isMobile || _mobileBarsVisible;
           final reduceMotion = MediaQuery.disableAnimationsOf(context);
           return FScaffold(
             scaffoldStyle: FScaffoldStyleDelta.delta(
@@ -226,8 +225,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 ? null
                 : SafeArea(
                     bottom: false,
-                    child: _CollapsibleBar(
-                      visible: showMobileBars,
+                    child: ScrollChrome(
+                      fraction: _mobileChrome,
                       alignment: Alignment.bottomCenter,
                       child: Padding(
                         padding: wide
@@ -301,73 +300,70 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   ),
             footer: wide
                 ? null
-                : ColoredBox(
-                    color: showMobileBars ? palette.surface : palette.ground,
-                    child: SafeArea(
-                      top: false,
-                      child: _CollapsibleBar(
-                        visible: showMobileBars,
-                        alignment: Alignment.topCenter,
-                        child: FBottomNavigationBar(
-                          safeAreaBottom: true,
-                          style: FBottomNavigationBarStyleDelta.delta(
-                            decoration: DecorationDelta.value(
-                              BoxDecoration(
-                                color: palette.surface,
-                                border: Border(
-                                  top: BorderSide(color: palette.hairline),
-                                ),
-                              ),
-                            ),
-                            padding: const EdgeInsetsGeometryDelta.value(
-                              EdgeInsets.fromLTRB(4, 1, 4, 2),
-                            ),
-                            itemStyle: FBottomNavigationBarItemStyleDelta.delta(
-                              padding: const EdgeInsetsGeometryDelta.value(
-                                EdgeInsets.symmetric(vertical: 4),
-                              ),
-                              iconStyle: FVariants(
-                                IconThemeData(color: palette.muted, size: 20),
-                                variants: {
-                                  [FTappableVariant.selected]: IconThemeData(
-                                    color: accent,
-                                    size: 20,
-                                  ),
-                                },
-                              ),
-                              textStyle: FVariants(
-                                context.theme.typography.body.sm.copyWith(
-                                  fontSize: 12,
-                                  height: 1.2,
-                                  color: palette.muted,
-                                ),
-                                variants: {
-                                  [FTappableVariant.selected]: context
-                                      .theme
-                                      .typography
-                                      .body
-                                      .sm
-                                      .copyWith(
-                                        fontSize: 12,
-                                        height: 1.2,
-                                        color: accent,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                },
+                : SafeArea(
+                    top: false,
+                    child: ScrollChrome(
+                      fraction: _mobileChrome,
+                      alignment: Alignment.topCenter,
+                      child: FBottomNavigationBar(
+                        safeAreaBottom: true,
+                        style: FBottomNavigationBarStyleDelta.delta(
+                          decoration: DecorationDelta.value(
+                            BoxDecoration(
+                              color: palette.surface,
+                              border: Border(
+                                top: BorderSide(color: palette.hairline),
                               ),
                             ),
                           ),
-                          index: c.activePage.index,
-                          onChange: select,
-                          children: [
-                            for (final page in c.visiblePages)
-                              FBottomNavigationBarItem(
-                                key: ValueKey('nav-${page.id}'),
-                                icon: _navigationIcon(page, c, 20),
-                                label: Text(page.title),
+                          padding: const EdgeInsetsGeometryDelta.value(
+                            EdgeInsets.fromLTRB(4, 1, 4, 2),
+                          ),
+                          itemStyle: FBottomNavigationBarItemStyleDelta.delta(
+                            padding: const EdgeInsetsGeometryDelta.value(
+                              EdgeInsets.symmetric(vertical: 4),
+                            ),
+                            iconStyle: FVariants(
+                              IconThemeData(color: palette.muted, size: 20),
+                              variants: {
+                                [FTappableVariant.selected]: IconThemeData(
+                                  color: accent,
+                                  size: 20,
+                                ),
+                              },
+                            ),
+                            textStyle: FVariants(
+                              context.theme.typography.body.sm.copyWith(
+                                fontSize: 12,
+                                height: 1.2,
+                                color: palette.muted,
                               ),
-                          ],
+                              variants: {
+                                [FTappableVariant.selected]: context
+                                    .theme
+                                    .typography
+                                    .body
+                                    .sm
+                                    .copyWith(
+                                      fontSize: 12,
+                                      height: 1.2,
+                                      color: accent,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                              },
+                            ),
+                          ),
                         ),
+                        index: c.activePage.index,
+                        onChange: select,
+                        children: [
+                          for (final page in c.visiblePages)
+                            FBottomNavigationBarItem(
+                              key: ValueKey('nav-${page.id}'),
+                              icon: _navigationIcon(page, c, 20),
+                              label: Text(page.title),
+                            ),
+                        ],
                       ),
                     ),
                   ),
@@ -375,6 +371,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               activePage: c.activePage,
               animate: !reduceMotion,
               nativeWebsiteOverlay: c.isLinux,
+              onSelect: (page) => select(page.index),
               children: {
                 AppPage.input: InputPage(controller: c),
                 AppPage.scheme: SchemePage(controller: c),
@@ -387,8 +384,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     mobileAccount: c.isMobile
                         ? _AccountButton(controller: c)
                         : null,
-                    mobileToolbarVisible:
-                        showMobileBars && !hideHeaderForKeyboard,
+                    mobileToolbarVisible: !hideHeaderForKeyboard,
+                    mobileToolbarFraction: _mobileChrome,
                     onScrollOffset: c.isMobile
                         ? (offset) => _mobileScrolled(AppPage.website, offset)
                         : null,
@@ -407,45 +404,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   );
 }
 
-class _CollapsibleBar extends StatelessWidget {
-  const _CollapsibleBar({
-    required this.visible,
-    required this.alignment,
-    required this.child,
-  });
-
-  final bool visible;
-  final Alignment alignment;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) => ExcludeSemantics(
-    excluding: !visible,
-    child: ExcludeFocus(
-      excluding: !visible,
-      child: IgnorePointer(
-        ignoring: !visible,
-        child: ClipRect(
-          child: AnimatedAlign(
-            alignment: alignment,
-            heightFactor: visible ? 1 : 0,
-            duration: MediaQuery.disableAnimationsOf(context)
-                ? Duration.zero
-                : const Duration(milliseconds: 160),
-            curve: Curves.easeOutCubic,
-            child: child,
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
 class _PageDeck extends StatefulWidget {
   const _PageDeck({
     required this.activePage,
     required this.animate,
     required this.nativeWebsiteOverlay,
+    required this.onSelect,
     required this.children,
     required this.onScrollOffset,
   });
@@ -453,6 +417,7 @@ class _PageDeck extends StatefulWidget {
   final AppPage activePage;
   final bool animate;
   final bool nativeWebsiteOverlay;
+  final ValueChanged<AppPage> onSelect;
   final Map<AppPage, Widget> children;
   final void Function(AppPage, double)? onScrollOffset;
 
@@ -473,7 +438,11 @@ class _PageDeckState extends State<_PageDeck>
         }
       });
   AppPage? _outgoing;
+  AppPage? _incoming;
+  final _retainedConstraints = <AppPage, BoxConstraints>{};
   double _direction = 1;
+  double _dragDistance = 0;
+  bool _dragging = false;
 
   @override
   void didUpdateWidget(covariant _PageDeck oldWidget) {
@@ -485,15 +454,29 @@ class _PageDeckState extends State<_PageDeck>
         widget.nativeWebsiteOverlay &&
         (oldWidget.activePage == AppPage.website ||
             widget.activePage == AppPage.website);
-    if (!widget.animate || switchingNativeWebsite) {
+    final targetRemoved =
+        _incoming != null && !widget.children.containsKey(_incoming);
+    if (targetRemoved ||
+        switchingNativeWebsite ||
+        (!widget.animate && (switching || _outgoing != null))) {
+      _dragging = false;
       _outgoing = null;
+      _incoming = null;
       _slide.value = 1;
     } else if (switching) {
+      final progress = _incoming == widget.activePage ? _slide.value : 0.0;
+      _dragging = false;
+      _incoming = null;
       _outgoing = oldWidget.activePage;
       _direction = widget.activePage.index > oldWidget.activePage.index
           ? 1
           : -1;
-      _slide.forward(from: 0);
+      _slide.value = progress;
+      if (progress == 1) {
+        _outgoing = null;
+      } else {
+        _slide.animateTo(1, curve: Curves.easeOutCubic);
+      }
     }
   }
 
@@ -503,59 +486,138 @@ class _PageDeckState extends State<_PageDeck>
     super.dispose();
   }
 
+  void _startDrag(DragStartDetails _) {
+    _dragging = true;
+    _dragDistance = 0;
+    if (_outgoing != null || _incoming != null) {
+      setState(() {
+        _outgoing = null;
+        _incoming = null;
+      });
+      _slide.value = 0;
+    }
+  }
+
+  void _updateDrag(DragUpdateDetails details) {
+    final width = context.size?.width ?? 0;
+    if (!_dragging || width <= 0) return;
+    _dragDistance += details.primaryDelta ?? 0;
+    final direction = _dragDistance < 0 ? 1 : -1;
+    final pages = widget.children.keys.toList(growable: false);
+    final adjacent = pages.indexOf(widget.activePage) + direction;
+    final target =
+        _dragDistance != 0 && adjacent >= 0 && adjacent < pages.length
+        ? pages[adjacent]
+        : null;
+    if (_incoming != target) {
+      setState(() {
+        _incoming = target;
+        _direction = direction.toDouble();
+      });
+    }
+    _slide.value = target == null
+        ? 0
+        : (_dragDistance.abs() / width).clamp(0.0, 1.0);
+  }
+
+  void _endDrag(DragEndDetails details) {
+    final target = _incoming;
+    if (!_dragging || target == null) return;
+    final velocity = -(details.primaryVelocity ?? 0) * _direction;
+    if (_slide.value >= .35 || (velocity > 500 && _slide.value > .06)) {
+      _dragging = false;
+      widget.onSelect(target);
+    } else {
+      _cancelDrag();
+    }
+  }
+
+  void _cancelDrag() {
+    _dragging = false;
+    if (_incoming == null) return;
+    if (!widget.animate || _slide.value == 0) {
+      setState(() => _incoming = null);
+      return;
+    }
+    _slide.animateBack(0, curve: Curves.easeOutCubic).then((_) {
+      if (mounted) setState(() => _incoming = null);
+    });
+  }
+
   Widget _page(AppPage page, Widget child) {
     final active = page == widget.activePage;
-    final moving = _outgoing != null;
-    final visible = active || page == _outgoing;
-    final offset = Offset(active ? _direction : -_direction, 0);
+    final entering =
+        _incoming ?? (_outgoing == null ? null : widget.activePage);
+    final leaving = _incoming == null ? _outgoing : widget.activePage;
+    final moving = page == entering || page == leaving;
+    final visible = active || moving;
+    final offset = Offset(_direction, 0);
     return Positioned.fill(
       key: ValueKey(page),
       child: Visibility(
         visible: visible,
         maintainState: true,
-        child: ExcludeSemantics(
-          excluding: !active,
-          child: ExcludeFocus(
+        child: ConstraintsTransformBox(
+          constraintsTransform: (constraints) {
+            // Keep hidden pages from relaying out with every change in bar height.
+            final previous = _retainedConstraints[page];
+            if (visible || previous == null) {
+              return _retainedConstraints[page] = constraints;
+            }
+            if (previous.minWidth == constraints.minWidth &&
+                previous.maxWidth == constraints.maxWidth) {
+              return previous;
+            }
+            return _retainedConstraints[page] = previous.copyWith(
+              minWidth: constraints.minWidth,
+              maxWidth: constraints.maxWidth,
+            );
+          },
+          child: ExcludeSemantics(
             excluding: !active,
-            child: IgnorePointer(
-              ignoring: !active,
-              child: TickerMode(
-                enabled: visible,
-                child: SlideTransition(
-                  key: ValueKey('page-slide-${page.id}'),
-                  position: moving && visible
-                      ? Tween(
-                              begin: active ? offset : Offset.zero,
-                              end: active ? Offset.zero : offset,
-                            )
-                            .chain(CurveTween(curve: Curves.easeOutCubic))
-                            .animate(_slide)
-                      : const AlwaysStoppedAnimation(Offset.zero),
-                  child: NotificationListener<Notification>(
-                    onNotification: (notification) {
-                      if (!active || widget.onScrollOffset == null) {
+            child: ExcludeFocus(
+              excluding: !active,
+              child: IgnorePointer(
+                ignoring: !active,
+                child: TickerMode(
+                  enabled: visible,
+                  child: SlideTransition(
+                    key: ValueKey('page-slide-${page.id}'),
+                    position: moving
+                        ? Tween(
+                            begin: page == entering ? offset : Offset.zero,
+                            end: page == leaving ? -offset : Offset.zero,
+                          ).animate(_slide)
+                        : const AlwaysStoppedAnimation(Offset.zero),
+                    child: NotificationListener<Notification>(
+                      onNotification: (notification) {
+                        if (!active || widget.onScrollOffset == null) {
+                          return false;
+                        }
+                        final metrics = switch (notification) {
+                          ScrollStartNotification(depth: 0, :final metrics) ||
+                          ScrollUpdateNotification(
+                            depth: 0,
+                            :final metrics,
+                          ) => metrics,
+                          // Resizing can return a short page to the top without
+                          // firing any scroll updates.
+                          ScrollMetricsNotification(depth: 0, :final metrics)
+                              when metrics.extentBefore <=
+                                  _mobileChromeTopExtent =>
+                            metrics,
+                          _ => null,
+                        };
+                        if (metrics != null && metrics.axis == Axis.vertical) {
+                          widget.onScrollOffset?.call(
+                            page,
+                            metrics.extentBefore,
+                          );
+                        }
                         return false;
-                      }
-                      final metrics = switch (notification) {
-                        ScrollStartNotification(depth: 0, :final metrics) ||
-                        ScrollUpdateNotification(
-                          depth: 0,
-                          :final metrics,
-                        ) => metrics,
-                        // Resizing can return a short page to the top without
-                        // firing any scroll updates.
-                        ScrollMetricsNotification(depth: 0, :final metrics)
-                            when metrics.extentBefore <=
-                                _mobileChromeTopExtent =>
-                          metrics,
-                        _ => null,
-                      };
-                      if (metrics != null && metrics.axis == Axis.vertical) {
-                        widget.onScrollOffset?.call(page, metrics.extentBefore);
-                      }
-                      return false;
-                    },
-                    child: RepaintBoundary(child: child),
+                      },
+                      child: RepaintBoundary(child: child),
+                    ),
                   ),
                 ),
               ),
@@ -567,12 +629,20 @@ class _PageDeckState extends State<_PageDeck>
   }
 
   @override
-  Widget build(BuildContext context) => ClipRect(
-    child: Stack(
-      children: [
-        for (final entry in widget.children.entries)
-          _page(entry.key, entry.value),
-      ],
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    dragStartBehavior: DragStartBehavior.down,
+    onHorizontalDragStart: _startDrag,
+    onHorizontalDragUpdate: _updateDrag,
+    onHorizontalDragEnd: _endDrag,
+    onHorizontalDragCancel: _cancelDrag,
+    child: ClipRect(
+      child: Stack(
+        children: [
+          for (final entry in widget.children.entries)
+            _page(entry.key, entry.value),
+        ],
+      ),
     ),
   );
 }

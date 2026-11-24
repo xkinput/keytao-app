@@ -1,4 +1,5 @@
 use super::{PackageMeta, excluded_from_manifest, validate_relative};
+use crate::generic_rime::{NOMEDIA_FILE, has_excluded_hidden_component};
 use crate::package_store::PackageStore;
 use crate::{Core, CoreError, package_fs::context};
 use sha2::{Digest, Sha256};
@@ -19,9 +20,9 @@ fn excluded(relative: &str) -> bool {
         top,
         "build" | "sync" | "log" | "installation.yaml" | "user.yaml" | "__MACOSX"
     )
+        || has_excluded_hidden_component(relative)
         || relative.split('/').any(|part| {
-            part.starts_with('.')
-                || part == "__MACOSX"
+            part == "__MACOSX"
                 || part.eq_ignore_ascii_case("System Volume Information")
                 || part.eq_ignore_ascii_case("$RECYCLE.BIN")
                 || part.eq_ignore_ascii_case("app-state.json")
@@ -37,9 +38,10 @@ fn excluded(relative: &str) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn excluded_attributes(attributes: u32) -> bool {
+fn excluded_attributes(attributes: u32, allow_hidden_marker: bool) -> bool {
     // Windows hidden/system flags; readonly scheme files are still importable.
-    attributes & (0x2 | 0x4) != 0
+    let excluded = if allow_hidden_marker { 0x4 } else { 0x2 | 0x4 };
+    attributes & excluded != 0
 }
 
 fn import_io<T>(
@@ -65,7 +67,7 @@ pub(super) fn has_root_schema(directory: &Path) -> Result<bool, CoreError> {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if excluded_attributes(metadata.file_attributes()) {
+            if excluded_attributes(metadata.file_attributes(), false) {
                 continue;
             }
         }
@@ -105,22 +107,23 @@ fn collect(
             continue;
         }
         let metadata = import_io(entry.metadata(), "读取文件属性", &path)?;
+        let kind = metadata.file_type();
+        let is_nomedia = relative.rsplit('/').next() == Some(NOMEDIA_FILE);
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if excluded_attributes(metadata.file_attributes()) {
+            if excluded_attributes(metadata.file_attributes(), is_nomedia && kind.is_file()) {
                 tracing::warn!(path = %path.display(), "Skipping hidden or system import entry");
                 continue;
             }
         }
-        let kind = metadata.file_type();
         if kind.is_symlink() {
             return Err(CoreError::Other(format!(
                 "方案包不能包含符号链接：{}",
                 path.display()
             )));
         }
-        if kind.is_dir() {
+        if kind.is_dir() && !is_nomedia {
             collect(&path, &relative, files, size, skip_trime_assets)?;
         } else if kind.is_file() {
             if files.len() >= 10_000 {
@@ -167,7 +170,7 @@ fn collect_orphan_prebuilt_bins(
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if excluded_attributes(metadata.file_attributes()) {
+        if excluded_attributes(metadata.file_attributes(), false) {
             return Ok(());
         }
     }
@@ -198,7 +201,7 @@ fn collect_orphan_prebuilt_bins(
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if excluded_attributes(entry_meta.file_attributes()) {
+            if excluded_attributes(entry_meta.file_attributes(), false) {
                 continue;
             }
         }

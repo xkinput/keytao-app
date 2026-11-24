@@ -25,9 +25,9 @@ const DEPLOY_LOCK: &str = ".keytao-package-deploy.lock";
 const MIGRATION_LOCK: &str = ".keytao-migration.lock";
 const MATERIALIZE_LOCK: &str = ".keytao-materialize.lock";
 
-// JD's Lua scripts update these files while typing and learning phrases.
+// Lua scripts update these files while typing and learning phrases.
 // shortcut: keep the paths explicit until scheme packages can declare mutable data.
-const LUA_RUNTIME_STATE: &[&str] = &[
+pub const LUA_RUNTIME_STATE: &[&str] = &[
     "JD6_userdata/JD6_overrides.tsv",
     "JD6_userdata/JD6_usage.tsv",
     "JD6_userdata/JD6_usage_events.tsv",
@@ -35,7 +35,28 @@ const LUA_RUNTIME_STATE: &[&str] = &[
     "lua/TJ/direct_pending.txt",
     "lua/TJ/stats.txt",
     "lua/TJ/stats.txt.tmp",
+    "white_replace/whitkey_created.txt",
+    "white_replace/whitkey_otj_stats.txt",
+    "white_replace/whitkey_pinned.txt",
 ];
+
+/// User-writable runtime inputs that package materialization should preserve.
+/// Callers separately validate paths and filter reserved files.
+pub fn preserves_runtime_data(relative: &Path) -> bool {
+    let Some(name) = relative.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    let is_yaml = name.ends_with(".yaml") || name.ends_with(".yml");
+    !is_yaml
+        || matches!(name.as_str(), "user.dict.yaml" | "user.dict.yml")
+        || name.ends_with(".user.dict.yaml")
+        || name.ends_with(".user.dict.yml")
+        || relative
+            .iter()
+            .next()
+            .is_some_and(|part| part.eq_ignore_ascii_case("lua"))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PackageDeployTarget {
@@ -413,7 +434,8 @@ fn deploy_package(
     walk_files(user, false, &mut |relative, path| {
         let copy = stage.0.join(relative);
         fs::create_dir_all(copy.parent().unwrap())?;
-        if fs::hard_link(path, &copy).is_err() {
+        // A compiler or Lua script can write its copy while the live IME is typing.
+        if preserves_runtime_data(relative) || fs::hard_link(path, &copy).is_err() {
             fs::copy(path, copy)?;
         }
         Ok(())
@@ -425,7 +447,7 @@ fn deploy_package(
         ..dirs.clone()
     };
     for edit in &edits {
-        edit.apply_staged(&stage.0)?;
+        edit.apply_staged(&stage.0, true)?;
     }
     let inputs = if edits.is_empty() {
         live_inputs
@@ -451,7 +473,7 @@ fn deploy_package(
     let mut applied = 0;
     let publish: Result<_, String> = (|| {
         for edit in &edits {
-            edit.apply_staged(user)?;
+            edit.apply_staged(user, false)?;
             applied += 1;
         }
         if !skip {
@@ -489,10 +511,16 @@ struct InputEdit {
 }
 
 impl InputEdit {
-    fn apply_staged(&self, root: &Path) -> Result<(), String> {
+    fn apply_staged(&self, root: &Path, compiling: bool) -> Result<(), String> {
         let path = edit_path(root, &self.relative)?;
         let result = if let Some(source) = &self.staged_source {
-            link_or_copy_atomic(source, &path)
+            if compiling && preserves_runtime_data(&self.relative) {
+                fs::create_dir_all(path.parent().unwrap())
+                    .and_then(|()| fs::copy(source, &path))
+                    .map(|_| ())
+            } else {
+                link_or_copy_atomic(source, &path)
+            }
         } else if path.exists() {
             fs::remove_file(&path)
         } else {
@@ -645,8 +673,10 @@ fn edit_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
         if !metadata {
             // Windows and default macOS volumes also resolve case variants of reserved paths.
             let name = part.to_ascii_lowercase();
-            if excluded_input(&name, false)
-                || matches!(name.as_str(), "scheme-packages" | "rime-data")
+            let is_nomedia = part == ".nomedia" && parts.peek().is_none();
+            if !is_nomedia
+                && (excluded_input(&name, false)
+                    || matches!(name.as_str(), "scheme-packages" | "rime-data"))
             {
                 return Err(invalid());
             }
@@ -1169,6 +1199,19 @@ mod tests {
         fs::create_dir(&dirs.staging_dir).unwrap();
         fs::write(user.join("rime.lua"), b"old entry").unwrap();
         fs::write(user.join("lua/old.lua"), b"old module").unwrap();
+        let live_data = [
+            ("lua/state.yml", "live Lua data"),
+            ("custom_phrase.txt", "live custom phrases"),
+            ("example.user.dict.yaml", "live user words"),
+        ];
+        for (path, content) in live_data {
+            fs::write(user.join(path), content).unwrap();
+        }
+        let assert_live_data = || {
+            for (path, content) in live_data {
+                assert_eq!(fs::read_to_string(user.join(path)).unwrap(), content);
+            }
+        };
         fs::write(dirs.staging_dir.join("default.yaml"), b"old build").unwrap();
 
         let name = ".keytao-inputs-regression";
@@ -1176,6 +1219,7 @@ mod tests {
         fs::create_dir_all(preparation.join("lua")).unwrap();
         fs::write(preparation.join("rime.lua"), b"new entry").unwrap();
         fs::write(preparation.join("lua/new.lua"), b"new module").unwrap();
+        fs::write(preparation.join("lua/.nomedia"), b"").unwrap();
         let edits = BTreeMap::from([
             (
                 "rime.lua",
@@ -1198,6 +1242,13 @@ mod tests {
                     replace: true,
                 },
             ),
+            (
+                "lua/.nomedia",
+                StagedInput {
+                    previous_sha256: None,
+                    replace: true,
+                },
+            ),
         ]);
         fs::write(
             preparation.join(STAGED_INPUTS_MANIFEST),
@@ -1215,6 +1266,13 @@ mod tests {
                 b"new module"
             );
             assert!(!stage.user_data_dir.join("lua/old.lua").exists());
+            assert!(stage.user_data_dir.join("lua/.nomedia").is_file());
+            for (path, content) in live_data {
+                let path = stage.user_data_dir.join(path);
+                assert_eq!(fs::read_to_string(&path).unwrap(), content);
+                fs::write(path, b"compiler output").unwrap();
+            }
+            fs::write(stage.user_data_dir.join("lua/new.lua"), b"compiler output").unwrap();
             fs::create_dir(&stage.staging_dir).unwrap();
             for output in [crate::DEPLOYED_FILE, "default.yaml", SCHEMA_RECEIPT] {
                 fs::write(stage.staging_dir.join(output), b"new build").unwrap();
@@ -1232,6 +1290,12 @@ mod tests {
         assert_eq!(fs::read(user.join("rime.lua")).unwrap(), b"old entry");
         assert_eq!(fs::read(user.join("lua/old.lua")).unwrap(), b"old module");
         assert!(!user.join("lua/new.lua").exists());
+        assert!(!user.join("lua/.nomedia").exists());
+        assert_eq!(
+            fs::read(preparation.join("lua/new.lua")).unwrap(),
+            b"new module"
+        );
+        assert_live_data();
         assert_eq!(
             fs::read(dirs.staging_dir.join("default.yaml")).unwrap(),
             b"old build"
@@ -1244,6 +1308,8 @@ mod tests {
         assert_eq!(fs::read(user.join("rime.lua")).unwrap(), b"new entry");
         assert_eq!(fs::read(user.join("lua/new.lua")).unwrap(), b"new module");
         assert!(!user.join("lua/old.lua").exists());
+        assert!(user.join("lua/.nomedia").is_file());
+        assert_live_data();
         assert_eq!(
             fs::read(dirs.staging_dir.join("default.yaml")).unwrap(),
             b"new build"
@@ -1254,6 +1320,26 @@ mod tests {
             )),
             Ok(DeployStep::Skip)
         );
+    }
+
+    #[test]
+    fn staged_nomedia_exception_only_allows_a_file_leaf() {
+        let fixture = crate::preview::PreviewDirectory::create().unwrap();
+        let root = fixture.path();
+        assert_eq!(
+            edit_path(root, Path::new("assets/.nomedia")).unwrap(),
+            root.join("assets/.nomedia")
+        );
+        for path in [
+            ".nomedia/file",
+            "assets/.other",
+            "sync/.nomedia",
+            "../.nomedia",
+        ] {
+            assert!(edit_path(root, Path::new(path)).is_err(), "{path}");
+        }
+        fs::create_dir(root.join(".nomedia")).unwrap();
+        assert!(edit_path(root, Path::new(".nomedia")).is_err());
     }
 
     #[test]
@@ -1360,6 +1446,7 @@ mod tests {
         assert!(crate::schema_install_state_with_shared(root, &shared).deployed);
 
         fs::write(dirs.user_data_dir.join(overrides), b"learned phrase\n").unwrap();
+        fs::create_dir(dirs.user_data_dir.join("white_replace")).unwrap();
         for path in [
             "JD6_userdata/JD6_usage.tsv",
             "JD6_userdata/JD6_usage_events.tsv",
@@ -1367,6 +1454,9 @@ mod tests {
             "lua/TJ/direct_pending.txt",
             "lua/TJ/stats.txt",
             "lua/TJ/stats.txt.tmp",
+            "white_replace/whitkey_created.txt",
+            "white_replace/whitkey_otj_stats.txt",
+            "white_replace/whitkey_pinned.txt",
         ] {
             fs::write(dirs.user_data_dir.join(path), b"runtime state\n").unwrap();
         }

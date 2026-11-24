@@ -2949,7 +2949,10 @@ class AppController extends ChangeNotifier {
       packageError = null;
       installingSchemeKey = key;
       _invalidateSchemeUpdates();
-      _startOperation(OperationKind.install, '正在备份并修复方案…');
+      _startOperation(
+        OperationKind.install,
+        isLocalScheme(key) ? '正在修复方案…' : '正在备份并修复方案…',
+      );
       try {
         if (isAndroid) await _requireStorage(redirect: true);
         final backup = await core.repairSchemePackage(
@@ -2960,8 +2963,8 @@ class AppController extends ChangeNotifier {
           addOperationLogs(['[REPAIR] 已备份异常文件至 $backup 并重新下载修复']);
           showToast('已备份异常文件并重新下载修复方案');
         } else {
-          addOperationLogs(['[REPAIR] 已重置并重新部署方案 $key']);
-          showToast('已重置并重新部署方案');
+          addOperationLogs(['[REPAIR] 已重新部署方案 $key']);
+          showToast('已重新部署方案');
         }
         await _readState();
       } catch (failure) {

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
@@ -44,7 +45,9 @@ class SchemaLogo extends StatelessWidget {
     final file = File(path);
     final version = controller.schemaLogoVersion(path);
     return Image(
-      image: version == null ? FileImage(file) : _VersionedLogoImage(file, version),
+      image: version == null
+          ? FileImage(file)
+          : _VersionedLogoImage(file, version),
       width: size,
       height: size,
       excludeFromSemantics: true,
@@ -347,12 +350,16 @@ class StatusPill extends StatelessWidget {
               ),
               child: const SizedBox.square(dimension: 6),
             ),
-            Text(
-              label,
-              style: context.theme.typography.body.sm.copyWith(
-                color: palette.ink,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.theme.typography.body.sm.copyWith(
+                  color: palette.ink,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -827,6 +834,7 @@ class ActionButton extends StatelessWidget {
     this.icon,
     this.primary = false,
     this.success = false,
+    this.compact = false,
     this.tooltip,
   });
   final String label;
@@ -834,6 +842,7 @@ class ActionButton extends StatelessWidget {
   final IconData? icon;
   final bool primary;
   final bool success;
+  final bool compact;
   final String? tooltip;
   @override
   Widget build(BuildContext context) {
@@ -891,8 +900,8 @@ class ActionButton extends StatelessWidget {
         ),
         contentStyle: FButtonContentStyleDelta.delta(
           constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-          padding: const EdgeInsetsGeometryDelta.value(
-            EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+          padding: EdgeInsetsGeometryDelta.value(
+            EdgeInsets.symmetric(horizontal: compact ? 8 : 15, vertical: 8),
           ),
           textStyle: FVariants.from(
             context.theme.typography.body.sm.copyWith(
@@ -928,15 +937,72 @@ class ActionButton extends StatelessWidget {
 }
 
 class ActionRow extends StatelessWidget {
-  const ActionRow({super.key, required this.children});
+  const ActionRow({
+    super.key,
+    required this.children,
+    this.keepPairTogether = false,
+  });
   final List<Widget> children;
+  final bool keepPairTogether;
   @override
-  Widget build(BuildContext context) => Wrap(
-    spacing: 8,
-    runSpacing: 8,
-    crossAxisAlignment: WrapCrossAlignment.center,
-    children: children,
+  Widget build(BuildContext context) => keepPairTogether && children.length == 2
+      ? Row(
+          spacing: 6,
+          children: [
+            Flexible(child: children.first),
+            children.last,
+          ],
+        )
+      : Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: children,
+        );
+}
+
+class ScrollChrome extends StatelessWidget {
+  const ScrollChrome({
+    super.key,
+    required this.fraction,
+    required this.alignment,
+    required this.child,
+    this.visible = true,
+  });
+
+  final ValueListenable<double>? fraction;
+  final Alignment alignment;
+  final Widget child;
+  final bool visible;
+
+  Widget _clip(double height, Widget child) => ExcludeSemantics(
+    excluding: height == 0,
+    child: ExcludeFocus(
+      excluding: height == 0,
+      child: IgnorePointer(
+        ignoring: height == 0,
+        child: ClipRect(
+          child: Align(
+            alignment: alignment,
+            heightFactor: height,
+            child: child,
+          ),
+        ),
+      ),
+    ),
   );
+
+  @override
+  Widget build(BuildContext context) {
+    if (!visible) return const SizedBox.shrink();
+    final progress = fraction;
+    if (progress == null) return child;
+    return ValueListenableBuilder<double>(
+      valueListenable: progress,
+      child: child,
+      builder: (_, height, child) => _clip(height, child!),
+    );
+  }
 }
 
 class ValueRow extends StatelessWidget {

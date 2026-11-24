@@ -2,7 +2,12 @@
 //! from the app's published public packages. The desktop user dictionary is
 //! neither read nor granted to sandboxed applications.
 
-use std::path::{Component, Path, PathBuf};
+use keytao_core::isolated_deploy::LUA_RUNTIME_STATE;
+use std::{
+    collections::BTreeSet,
+    io::{ErrorKind, Write},
+    path::{Component, Path, PathBuf},
+};
 use windows::{
     core::Result,
     Win32::{
@@ -21,6 +26,7 @@ use windows::{
 
 const SEED_MARKER: &str = ".keytao-public-seed.version";
 const SEED_FILES: &str = ".keytao-public-seed.files";
+const SEED_RUNTIME_DATA: &str = ".keytao-public-seed.runtime";
 const PACKAGE_CACHE_POINTER: &str = "current.txt";
 #[cfg(test)]
 const LIBRIME_VERSION_FILE: &str = "build/keytao-librime-version.txt";
@@ -139,6 +145,87 @@ fn checked_relative(text: &str) -> std::result::Result<PathBuf, String> {
         return Err("invalid relative path in public schema snapshot".into());
     }
     Ok(path)
+}
+
+fn preserves_sandbox_file(relative: &Path) -> bool {
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    if LUA_RUNTIME_STATE
+        .iter()
+        .any(|path| normalized.eq_ignore_ascii_case(path))
+    {
+        return true;
+    }
+    let normalized = normalized.to_ascii_lowercase();
+    if normalized.split('/').any(|part| {
+        part.starts_with('.')
+            || part.ends_with(['.', ' '])
+            || part.contains(".userdb")
+            || part.ends_with(".leveldb")
+            || matches!(
+                part,
+                "build" | "prebuilt" | "sync" | "log" | "runtime" | "scheme-packages" | "rime-data"
+            )
+    }) {
+        return false;
+    }
+    let name = normalized.rsplit('/').next().unwrap();
+    matches!(
+        name,
+        "user_dict.txt" | "user.dict" | "user.dict.yaml" | "user.dict.yml"
+    ) || (name.contains("custom_phrase") && name.ends_with(".txt"))
+        || name.ends_with("_user.txt")
+        || name.ends_with(".user.dict.yaml")
+        || name.ends_with(".user.dict.yml")
+}
+
+fn read_seed_file(root: &Path, relative: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    match std::fs::symlink_metadata(root) {
+        Ok(meta)
+            if meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 => {}
+        Ok(_) => return Err("invalid sandbox runtime data root".into()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    }
+    let mut path = root.to_path_buf();
+    let mut parts = relative.iter().peekable();
+    while let Some(part) = parts.next() {
+        path.push(part);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta)
+                if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
+                    && if parts.peek().is_some() {
+                        meta.is_dir()
+                    } else {
+                        meta.is_file()
+                    } => {}
+            Ok(_) => return Err("invalid sandbox runtime data path".into()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn seed_file_if_missing(path: &Path, content: &[u8]) -> std::result::Result<(), String> {
+    let parent = path.parent().unwrap();
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let result = tempfile::NamedTempFile::new_in(parent).and_then(|mut file| {
+        file.write_all(content)?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(path).map_err(|error| error.error)
+    });
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!("preserve sandbox runtime data: {error}")),
+    }
 }
 
 pub(crate) fn public_asset(path: &Path) -> bool {
@@ -373,7 +460,12 @@ fn prune_legacy_cache_at(root: &Path, staging_dir: &Path) {
         let Ok(relative) = checked_relative(&name) else {
             continue;
         };
-        if !public_asset_at(&relative, build) {
+        let runtime_relative = staging_dir
+            .parent()
+            .and_then(|parent| parent.strip_prefix(root).ok())
+            .and_then(|parent| relative.strip_prefix(parent).ok())
+            .unwrap_or(&relative);
+        if preserves_sandbox_file(runtime_relative) || !public_asset_at(&relative, build) {
             continue;
         }
         if let Some(path) = safe_path(&relative).filter(|path| path.is_file()) {
@@ -488,16 +580,18 @@ fn prepare_at_with(
     let user_dir = &result.user_dir;
     std::fs::create_dir_all(user_dir)
         .map_err(|error| format!("create sandbox schema cache: {error}"))?;
-    let selection = user_dir.join("user.yaml");
-    if result.active_package_key.is_some() && !selection.exists() {
-        restore_cached_schema_selection(private, &selection)?;
+    let mut copied = BTreeSet::new();
+    if result.active_package_key.is_some() {
+        if let Some(previous) = previous_package_cache(private)?.filter(|path| path != private) {
+            restore_cached_runtime_data(public_root, &previous, user_dir, &mut copied)?;
+        }
     }
-    let mut copied = Vec::new();
     fn copy_assets(
         base: &Path,
         dir: &Path,
         dest: &Path,
-        copied: &mut Vec<String>,
+        seed_data: &Path,
+        copied: &mut BTreeSet<String>,
     ) -> std::result::Result<(), String> {
         for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
@@ -512,31 +606,54 @@ fn prepare_at_with(
             }
             let relative = checked_relative(&relative.to_string_lossy())?;
             if kind.is_dir() {
-                copy_assets(base, &path, dest, copied)?;
+                copy_assets(base, &path, dest, seed_data, copied)?;
             } else if kind.is_file() {
                 let output = dest.join(&relative);
-                std::fs::create_dir_all(output.parent().unwrap())
-                    .map_err(|error| error.to_string())?;
                 let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-                if std::fs::read(&output).ok().as_deref() != Some(bytes.as_slice()) {
+                if preserves_sandbox_file(&relative) {
+                    if read_seed_file(dest, &relative)?.is_none() {
+                        seed_file_if_missing(&output, &bytes)?;
+                    }
+                    if read_seed_file(seed_data, &relative)?.as_ref() != Some(&bytes) {
+                        let template = seed_data.join(&relative);
+                        std::fs::create_dir_all(template.parent().unwrap())
+                            .map_err(|error| error.to_string())?;
+                        keytao_core::write_file_atomic(&template, &bytes)
+                            .map_err(|error| error.to_string())?;
+                    }
+                } else if std::fs::read(&output).ok().as_deref() != Some(bytes.as_slice()) {
                     // Never overwrite another host's mapped dictionary in place.
+                    std::fs::create_dir_all(output.parent().unwrap())
+                        .map_err(|error| error.to_string())?;
                     keytao_core::write_file_atomic(&output, &bytes)
                         .map_err(|error| error.to_string())?;
                 }
-                copied.push(relative.to_string_lossy().into_owned());
+                copied.insert(relative.to_string_lossy().into_owned());
             }
         }
         Ok(())
     }
-    copy_assets(&source_root, &source_root, user_dir, &mut copied)?;
+    copy_assets(
+        &source_root,
+        &source_root,
+        user_dir,
+        &private.join(SEED_RUNTIME_DATA),
+        &mut copied,
+    )?;
     keytao_core::rebase_active_scheme_manifest(user_dir)?;
     let dirs = keytao_core::RuntimeDirs::flat(user_dir, user_dir);
     if let Ok(previous) = std::fs::read_to_string(private.join(SEED_FILES)) {
-        for name in previous
-            .lines()
-            .filter(|name| !copied.iter().any(|current| current == name))
-        {
+        for name in previous.lines() {
+            if copied.contains(name) {
+                continue;
+            }
             let relative = checked_relative(name)?;
+            if preserves_sandbox_file(&relative) {
+                if read_seed_file(user_dir, &relative)?.is_some() {
+                    copied.insert(name.to_owned());
+                }
+                continue;
+            }
             if public_asset(&relative) {
                 let path = user_dir.join(&relative);
                 if path.is_file() {
@@ -554,7 +671,8 @@ fn prepare_at_with(
             }
         }
     }
-    keytao_core::write_file_atomic(&private.join(SEED_FILES), copied.join("\n").as_bytes())
+    let copied = copied.into_iter().collect::<Vec<_>>().join("\n");
+    keytao_core::write_file_atomic(&private.join(SEED_FILES), copied.as_bytes())
         .map_err(|error| error.to_string())?;
     keytao_core::complete_deployment(user_dir).map_err(|error| format!("需要重新部署: {error}"))?;
     keytao_core::mark_windows_rime_build_repair_complete(user_dir)?;
@@ -577,37 +695,86 @@ fn sandbox_user_dir(cache: &Path) -> std::result::Result<PathBuf, String> {
     }
 }
 
-fn restore_cached_schema_selection(
-    cache: &Path,
-    selection: &Path,
-) -> std::result::Result<(), String> {
-    use std::io::{ErrorKind, Write};
-
-    let previous = cache.with_file_name(PACKAGE_CACHE_POINTER);
-    let Ok(previous) = std::fs::read_to_string(previous) else {
-        return Ok(());
+fn previous_package_cache(cache: &Path) -> std::result::Result<Option<PathBuf>, String> {
+    let Some(previous) = read_seed_file(cache.parent().unwrap(), Path::new(PACKAGE_CACHE_POINTER))?
+    else {
+        return Ok(None);
     };
+    let previous = std::str::from_utf8(&previous).map_err(|error| error.to_string())?;
     if previous.len() != 64 || !previous.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid package schema cache generation".into());
     }
-    let previous = sandbox_user_dir(&cache.with_file_name(previous))?.join("user.yaml");
-    let content = match std::fs::read(previous) {
-        Ok(content) => content,
+    Ok(Some(cache.with_file_name(previous)))
+}
+
+fn restore_cached_runtime_data(
+    public_root: &Path,
+    cache: &Path,
+    user_dir: &Path,
+    restored: &mut BTreeSet<String>,
+) -> std::result::Result<(), String> {
+    let previous = sandbox_user_dir(cache)?;
+    let entries = match std::fs::read_dir(&previous) {
+        Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.to_string()),
     };
-    let result =
-        tempfile::NamedTempFile::new_in(selection.parent().unwrap()).and_then(|mut file| {
-            file.write_all(&content)?;
-            file.as_file().sync_all()?;
-            file.persist_noclobber(selection)
-                .map_err(|error| error.error)
-        });
-    match result {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(format!("preserve sandbox schema selection: {error}")),
+    let selection = Path::new("user.yaml");
+    if read_seed_file(user_dir, selection)?.is_none() {
+        if let Some(content) = read_seed_file(&previous, selection)? {
+            seed_file_if_missing(&user_dir.join(selection), &content)?;
+        }
     }
+    let mut paths: BTreeSet<PathBuf> = LUA_RUNTIME_STATE
+        .iter()
+        .copied()
+        .map(PathBuf::from)
+        .collect();
+    if let Some(seed_files) = read_seed_file(cache, Path::new(SEED_FILES))? {
+        for name in std::str::from_utf8(&seed_files)
+            .map_err(|error| error.to_string())?
+            .lines()
+        {
+            let relative = checked_relative(name)?;
+            if preserves_sandbox_file(&relative) {
+                paths.insert(relative);
+            }
+        }
+    }
+    for entry in entries {
+        let relative = PathBuf::from(entry.map_err(|error| error.to_string())?.file_name());
+        if preserves_sandbox_file(&relative) {
+            paths.insert(relative);
+        }
+    }
+    let previous_templates = cache.join(SEED_RUNTIME_DATA);
+    let public_templates = public_root.join(cache.file_name().unwrap());
+    for relative in paths {
+        if relative
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+        {
+            continue;
+        }
+        if read_seed_file(user_dir, &relative)?.is_some() {
+            restored.insert(relative.to_string_lossy().into_owned());
+            continue;
+        }
+        let Some(content) = read_seed_file(&previous, &relative)? else {
+            continue;
+        };
+        // Keep edits to known private data and pick up new defaults for files
+        // that still match the previous generation's public templates.
+        let template = match read_seed_file(&previous_templates, &relative)? {
+            Some(bytes) => Some(bytes),
+            None => read_seed_file(&public_templates, &relative)?,
+        };
+        if template.as_ref() != Some(&content) {
+            seed_file_if_missing(&user_dir.join(&relative), &content)?;
+            restored.insert(relative.to_string_lossy().into_owned());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -727,6 +894,93 @@ mod tests {
             selection
         );
         assert!(!updated.user_dir.join("keytao.userdb").exists());
+    }
+
+    #[test]
+    fn sandbox_reseed_and_redeploy_keep_only_edited_runtime_data_for_the_same_package() {
+        let root = tempfile::tempdir().unwrap();
+        let public = root.path().join("public");
+        let private = root.path().join("private");
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let other = "c".repeat(64);
+        let stats = "lua/TJ/stats.txt";
+        let unedited = "JD6_userdata/JD6_usage.tsv";
+        let phrases = "white_replace/A_custom_phrases.txt";
+        let words = "example.user.dict.yaml";
+        let whitkey = "white_replace/whitkey_created.txt";
+        let stats_temp = "lua/TJ/stats.txt.tmp";
+        let build = "build/keytao.table.bin";
+        let edited = [stats, phrases, words, "user_dict.txt", "user.dict", whitkey];
+        let put = |root: &Path, relative, bytes: &str| {
+            let file = root.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        };
+        let read = |root: &Path, relative| std::fs::read_to_string(root.join(relative)).unwrap();
+        for (generation, key, template) in [
+            (&first, "keytao", "original template"),
+            (&second, "keytao", "updated template"),
+            (&other, "other", "other template"),
+        ] {
+            let source = public.join(generation);
+            seed(&source);
+            put(&source, keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE, key);
+            for relative in [stats, unedited, phrases, words, build, "rime.lua"] {
+                put(&source, relative, template);
+            }
+        }
+
+        let pointer = public.join("current.txt");
+        std::fs::write(&pointer, &first).unwrap();
+        let initial = prepare_at(&public, &private, VERSION).unwrap();
+        initial.mark_loaded().unwrap();
+        for relative in edited {
+            put(&initial.user_dir, relative, "private edit");
+        }
+        assert!(!prepare_at(&public, &private, VERSION).unwrap().changed);
+        for relative in [
+            "keytao.userdb/LOG",
+            "learned.leveldb/LOG",
+            "rime.lua",
+            stats_temp,
+        ] {
+            put(&initial.user_dir, relative, "do not migrate");
+        }
+        std::fs::remove_file(initial.cache_dir.join(SEED_MARKER)).unwrap();
+        let reseeded = prepare_at(&public, &private, VERSION).unwrap();
+        reseeded.mark_loaded().unwrap();
+        for relative in edited {
+            assert_eq!(read(&reseeded.user_dir, relative), "private edit");
+        }
+        assert!(reseeded.user_dir.join(stats_temp).is_file());
+
+        // Public snapshots can be pruned before the private host switches.
+        std::fs::remove_dir_all(public.join(&first)).unwrap();
+        std::fs::write(&pointer, &second).unwrap();
+        let updated = prepare_at(&public, &private, VERSION).unwrap();
+        for relative in edited {
+            assert_eq!(read(&updated.user_dir, relative), "private edit");
+        }
+        for relative in [unedited, build, "rime.lua"] {
+            assert_eq!(read(&updated.user_dir, relative), "updated template");
+        }
+        assert!(!updated.user_dir.join("keytao.userdb").exists());
+        assert!(!updated.user_dir.join("learned.leveldb").exists());
+        assert!(!updated.user_dir.join(stats_temp).exists());
+        assert_eq!(read(&public.join(&second), stats), "updated template");
+        let unrelated_host = prepare_at(&public, &root.path().join("other-host"), VERSION).unwrap();
+        assert_eq!(read(&unrelated_host.user_dir, stats), "updated template");
+        assert!(!unrelated_host.user_dir.join(whitkey).exists());
+
+        prune_legacy_cache_at(&initial.user_dir, &initial.user_dir.join("build"));
+        assert_eq!(read(&initial.user_dir, stats), "private edit");
+        assert!(!initial.user_dir.join(build).exists());
+
+        std::fs::write(&pointer, &other).unwrap();
+        let separate = prepare_at(&public, &private, VERSION).unwrap();
+        assert_eq!(read(&separate.user_dir, stats), "other template");
+        assert!(!separate.user_dir.join("user_dict.txt").exists());
     }
 
     #[test]

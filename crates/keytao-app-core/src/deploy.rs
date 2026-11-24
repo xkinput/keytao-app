@@ -505,15 +505,12 @@ async fn repair_failed_packages(
         core.emit(CoreEvent::InstallProgress(crate::events::InstallProgress {
             stage: "repairing".into(),
             percent: 10,
-            message: format!("检测到 {name} 部署异常，正在自动备份并修复…"),
+            message: format!("检测到 {name} 部署异常，正在重新准备方案来源…"),
         }));
-        let backup = crate::packages::repair_package_for_redeploy(core, root, key)
+        crate::packages::repair_package_source_for_redeploy(core, root, key)
             .await
             .map_err(|error| error.to_string())?;
-        repaired.push(match backup {
-            Some(dir) => format!("已自动备份并重新下载修复方案 {name}（备份目录：{dir}）"),
-            None => format!("已清理并重新部署用户方案 {name}"),
-        });
+        repaired.push(format!("已重新部署方案 {name}"));
     }
     Ok((!repaired.is_empty()).then(|| repaired.join("\n")))
 }
@@ -1730,6 +1727,7 @@ mod tests {
                     &core_for_repair,
                     &root_for_repair,
                     "keytao",
+                    crate::packages::RepairMode::BackUpRuntime,
                     |key| {
                         let core = core_for_repair.clone();
                         let root = root_for_repair.clone();

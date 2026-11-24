@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show Factory, ValueListenable;
+import 'package:flutter/gestures.dart'
+    show HorizontalDragGestureRecognizer, OneSequenceGestureRecognizer;
 import 'package:flutter/widgets.dart';
 import 'package:forui/forui.dart';
 import 'package:webview_core/webview_core.dart';
@@ -19,6 +22,7 @@ class WebsitePage extends StatefulWidget {
     required this.active,
     this.mobileAccount,
     this.mobileToolbarVisible = true,
+    this.mobileToolbarFraction,
     this.onScrollOffset,
   });
 
@@ -26,6 +30,7 @@ class WebsitePage extends StatefulWidget {
   final bool active;
   final Widget? mobileAccount;
   final bool mobileToolbarVisible;
+  final ValueListenable<double>? mobileToolbarFraction;
   final ValueChanged<double>? onScrollOffset;
 
   @override
@@ -43,7 +48,7 @@ class _WebsitePageState extends State<WebsitePage> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_opened) return const SizedBox.shrink();
+    if (!_opened) return const Center(child: Text('网站'));
     final controller = widget.controller;
     final origin = controller.websiteOrigin;
     final account = controller.accountUser;
@@ -54,6 +59,7 @@ class _WebsitePageState extends State<WebsitePage> {
       active: widget.active,
       mobileAccount: widget.mobileAccount,
       mobileToolbarVisible: widget.mobileToolbarVisible,
+      mobileToolbarFraction: widget.mobileToolbarFraction,
       onScrollOffset: widget.onScrollOffset,
     );
   }
@@ -67,6 +73,7 @@ class _WebsiteBrowser extends StatefulWidget {
     required this.active,
     required this.mobileAccount,
     required this.mobileToolbarVisible,
+    required this.mobileToolbarFraction,
     required this.onScrollOffset,
   });
 
@@ -75,6 +82,7 @@ class _WebsiteBrowser extends StatefulWidget {
   final bool active;
   final Widget? mobileAccount;
   final bool mobileToolbarVisible;
+  final ValueListenable<double>? mobileToolbarFraction;
   final ValueChanged<double>? onScrollOffset;
 
   @override
@@ -284,7 +292,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
         if (controller.appUpdate?.hasUpdate == true)
           AppUpdateBanner(controller: controller),
         if (mobileAccount != null)
-          _mobileToolbar(context, controller, mobileAccount)
+          _mobileToolbar(controller, mobileAccount)
         else
           LayoutBuilder(
             builder: (context, constraints) {
@@ -309,7 +317,18 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
               ? const Center(child: Text('无法在 App 内加载网站'))
               : Opacity(
                   opacity: _initializingSession ? 0 : 1,
-                  child: ClipRect(child: WebViewWidget(controller: _browser)),
+                  child: ClipRect(
+                    child: WebViewWidget(
+                      controller: _browser,
+                      gestureRecognizers: mobileAccount == null
+                          ? const {}
+                          : const {
+                              Factory<OneSequenceGestureRecognizer>(
+                                HorizontalDragGestureRecognizer.new,
+                              ),
+                            },
+                    ),
+                  ),
                 ),
         ),
       ],
@@ -317,33 +336,24 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
     return mobileAccount == null ? page : SafeArea(bottom: false, child: page);
   }
 
-  Widget _mobileToolbar(
-    BuildContext context,
-    AppController controller,
-    Widget account,
-  ) {
-    final toolbar = widget.mobileToolbarVisible
-        ? Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Row(
-              children: [
-                Expanded(child: _domainSelect(controller)),
-                const SizedBox(width: 4),
-                for (final action in _actions(controller))
-                  SizedBox.square(dimension: 44, child: action),
-                SizedBox.square(dimension: 44, child: account),
-              ],
-            ),
-          )
-        : const SizedBox.shrink();
-    if (MediaQuery.disableAnimationsOf(context)) return toolbar;
-    return AnimatedSize(
-      alignment: Alignment.topCenter,
-      duration: const Duration(milliseconds: 160),
-      curve: Curves.easeOutCubic,
-      child: toolbar,
-    );
-  }
+  Widget _mobileToolbar(AppController controller, Widget account) =>
+      ScrollChrome(
+        fraction: widget.mobileToolbarFraction,
+        visible: widget.mobileToolbarVisible,
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            children: [
+              Expanded(child: _domainSelect(controller)),
+              const SizedBox(width: 4),
+              for (final action in _actions(controller))
+                SizedBox.square(dimension: 44, child: action),
+              SizedBox.square(dimension: 44, child: account),
+            ],
+          ),
+        ),
+      );
 
   Widget _toolbar(AppController controller) => Row(
     spacing: 8,

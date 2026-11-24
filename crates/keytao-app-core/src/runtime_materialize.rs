@@ -9,6 +9,7 @@ use keytao_core::{
     RuntimeDirs,
     isolated_deploy::{
         PackageDeployTarget, STAGED_INPUTS_MANIFEST, STAGED_INPUTS_PREFIX, StagedInput,
+        preserves_runtime_data,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -830,12 +831,8 @@ fn utf8(bytes: &[u8]) -> Result<&str, CoreError> {
     std::str::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string()))
 }
 
-fn lua_path(path: &str) -> bool {
-    path == "rime.lua" || path.starts_with("lua/")
-}
-
 fn materialized_path(path: &str) -> bool {
-    !private_path(path)
+    path == ".nomedia" || !private_path(path.strip_suffix("/.nomedia").unwrap_or(path))
 }
 
 fn prepare_runtime(
@@ -926,47 +923,51 @@ fn prepare_runtime(
     } else {
         legacy.clone()
     };
-    let mut runtime_overrides = if is_local {
-        BTreeSet::new()
-    } else {
-        previous.runtime_overrides.clone()
-    };
+    let mut runtime_overrides = previous.runtime_overrides.clone();
     let mut disk_hashes = BTreeMap::new();
-    if !is_local {
-        walk_files(&runtime, "", private_path, &mut |path, relative| {
-            let tracked = previous.fingerprint(relative);
-            if relative == crate::account::USER_WORD_REMOVALS
-                || relative == keytao_core::english_mode::SETTINGS_FILE
-                || relative == crate::account::USER_DICTIONARY
-                || (tracked.is_none() && !user_path(relative))
-            {
-                return Ok(());
-            }
-            let digest = sha256_reader(fs::File::open(path)?)?;
-            let changed = tracked != Some(&digest);
-            disk_hashes.insert(relative.to_owned(), digest);
-            if changed {
-                runtime_overrides.insert(relative.to_owned());
-            }
-            if relative == DEFAULT_CUSTOM[0]
-                && !runtime_overrides.contains(relative)
-                && let Some(default) = &previous.user_default
-            {
-                user.entry(relative.to_owned())
-                    .or_insert_with(|| default.as_bytes().to_vec());
-                return Ok(());
-            }
-            if runtime_overrides.contains(relative)
-                || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
-            {
-                let bytes = strip_generated(relative, fs::read(path)?)?;
+    walk_files(&runtime, "", private_path, &mut |path, relative| {
+        let tracked = previous.fingerprint(relative);
+        let preserve = preserves_runtime_data(Path::new(relative));
+        let seeds_file = owned.contains_key(relative) || generated.contains_key(relative);
+        if relative == crate::account::USER_WORD_REMOVALS
+            || relative == keytao_core::english_mode::SETTINGS_FILE
+            || (relative == crate::account::USER_DICTIONARY
+                && previous.generated.contains_key(relative))
+            || (is_local && !preserve)
+            || (tracked.is_none() && !user_path(relative) && !(preserve && seeds_file))
+        {
+            return Ok(());
+        }
+        let digest = sha256_reader(fs::File::open(path)?)?;
+        let changed = tracked != Some(&digest);
+        disk_hashes.insert(relative.to_owned(), digest);
+        if changed {
+            runtime_overrides.insert(relative.to_owned());
+        }
+        if relative == DEFAULT_CUSTOM[0]
+            && !runtime_overrides.contains(relative)
+            && let Some(default) = &previous.user_default
+        {
+            user.entry(relative.to_owned())
+                .or_insert_with(|| default.as_bytes().to_vec());
+            return Ok(());
+        }
+        if runtime_overrides.contains(relative)
+            || (previous.user_owned.contains_key(relative) && !user.contains_key(relative))
+        {
+            let bytes = fs::read(path)?;
+            if preserve {
+                disk_hashes.insert(relative.to_owned(), sha256_reader(bytes.as_slice())?);
+                user.insert(relative.to_owned(), bytes);
+            } else {
+                let bytes = strip_generated(relative, bytes)?;
                 if !bytes.is_empty() {
                     user.insert(relative.to_owned(), bytes);
                 }
             }
-            Ok(())
-        })?;
-    }
+        }
+        Ok(())
+    })?;
 
     let incoming = take_default_custom(&mut owned);
     let existing = take_default_custom(&mut user);
@@ -980,8 +981,8 @@ fn prepare_runtime(
     generated.insert(DEFAULT_CUSTOM[0].into(), default);
     for (path, bytes) in &user {
         owned.remove(path);
-        if path == "rime.lua" {
-            generated.remove("rime.lua");
+        if preserves_runtime_data(Path::new(path)) {
+            generated.remove(path);
         }
         if path.ends_with(".schema.yaml") && !path.contains('/') {
             schema_sources.insert(path.clone(), bytes.clone());
@@ -1298,7 +1299,7 @@ fn write_runtime(
         {
             let path = safe(runtime, relative)?;
             if let Some(actual) = optional_sha256(&path)? {
-                if is_local || actual == *hash {
+                if actual == *hash || (is_local && !preserves_runtime_data(Path::new(relative))) {
                     scheduled_removals.insert(relative.clone());
                     removals.push((path, actual));
                 }
@@ -1307,7 +1308,8 @@ fn write_runtime(
     }
     if is_local {
         walk_files(runtime, "", private_path, &mut |path, relative| {
-            if (user_path(relative) || lua_path(relative))
+            if user_path(relative)
+                && !preserves_runtime_data(Path::new(relative))
                 && relative != crate::account::USER_WORD_REMOVALS
                 && manifest.fingerprint(relative).is_none()
                 && !scheduled_removals.contains(relative)
@@ -1525,6 +1527,86 @@ mod tests {
         })
         .unwrap();
         digests
+    }
+
+    #[test]
+    fn local_redeploy_keeps_runtime_data_and_updates_untouched_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        let key = "local-example";
+        let mut sources = fixture(root, key);
+        let edited = [
+            (
+                "white_replace/A_custom_phrases.txt",
+                "template\tab\n",
+                "new phrase\tab\n",
+            ),
+            ("lua/TJ/stats.txt", "0", "24"),
+            (
+                "example.user.dict.yaml",
+                "name: example.user\n...\n",
+                "name: example.user\n...\n新\tab\n",
+            ),
+            ("dicts/user.dict", "initial", "edited"),
+            ("phrases.txt", "to be cleared", ""),
+        ];
+        for (path, template, _) in edited {
+            sources.insert(path.into(), template.as_bytes().to_vec());
+        }
+        sources.insert("images/.nomedia".into(), Vec::new());
+        sources.insert("dicts/reference.txt".into(), b"older package".to_vec());
+        let run = |inputs| {
+            materialize(root, &bundled, key, inputs, None, None, &Files::new()).unwrap();
+        };
+        run(sources.clone());
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, key).unwrap();
+        for (path, _, current) in edited {
+            put(&runtime, path, current);
+        }
+        put(&runtime, "lua/TJ/generated.yaml", "daily: 7\n");
+        put(&runtime, "example.userdb/CURRENT", "learned words");
+        sources.insert("dicts/reference.txt".into(), b"updated package".to_vec());
+        sources.remove("lua/TJ/stats.txt");
+
+        let stage = prepare_runtime(
+            root, &bundled, key, sources.clone(), None, None, &Files::new(), true, false,
+        )
+        .unwrap()
+        .unwrap();
+        let staged: BTreeMap<PathBuf, StagedInput> = serde_json::from_slice(
+            &fs::read(stage.path().join(STAGED_INPUTS_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert!(staged.contains_key(Path::new("dicts/reference.txt")));
+        for (path, _, _) in edited {
+            assert!(!staged.contains_key(Path::new(path)), "{path}");
+        }
+        drop(stage);
+
+        for _ in 0..2 {
+            run(sources.clone());
+            for (path, _, expected) in edited {
+                assert_eq!(
+                    fs::read(runtime.join(path)).unwrap(),
+                    expected.as_bytes(),
+                    "{path}"
+                );
+            }
+        }
+        assert_eq!(
+            fs::read(runtime.join("dicts/reference.txt")).unwrap(),
+            b"updated package"
+        );
+        assert_eq!(
+            fs::read(runtime.join("lua/TJ/generated.yaml")).unwrap(),
+            b"daily: 7\n"
+        );
+        assert_eq!(
+            fs::read(runtime.join("example.userdb/CURRENT")).unwrap(),
+            b"learned words"
+        );
+        assert!(runtime.join("images/.nomedia").is_file());
     }
 
     #[test]

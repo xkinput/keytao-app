@@ -369,14 +369,20 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
         )
       else if (_themes.isNotEmpty)
         SizedBox(
-          height: 64,
+          height: 136,
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
-            child: Row(
+            child: Wrap(
+              direction: Axis.vertical,
               spacing: 8,
+              runSpacing: 8,
               children: [
                 for (final theme in _themes)
-                  SizedBox(width: 144, child: _card(context, theme)),
+                  SizedBox(
+                    width: 144,
+                    height: 64,
+                    child: _card(context, theme),
+                  ),
               ],
             ),
           ),

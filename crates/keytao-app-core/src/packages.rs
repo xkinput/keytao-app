@@ -688,6 +688,31 @@ pub async fn repair_package_for_redeploy(
     root: &Path,
     package_key: &str,
 ) -> Result<Option<String>, CoreError> {
+    repair_package_with_mode(core, root, package_key, RepairMode::BackUpRuntime).await
+}
+
+pub(crate) async fn repair_package_source_for_redeploy(
+    core: &Core,
+    root: &Path,
+    package_key: &str,
+) -> Result<(), CoreError> {
+    repair_package_with_mode(core, root, package_key, RepairMode::SourceOnly)
+        .await
+        .map(|_| ())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RepairMode {
+    SourceOnly,
+    BackUpRuntime,
+}
+
+async fn repair_package_with_mode(
+    core: &Core,
+    root: &Path,
+    package_key: &str,
+    mode: RepairMode,
+) -> Result<Option<String>, CoreError> {
     let wanxiang_variant = (package_key == crate::wanxiang::SCHEMA_ID)
         .then(|| {
             crate::wanxiang::wanxiang_status(core, root)
@@ -696,7 +721,7 @@ pub async fn repair_package_for_redeploy(
                 .filter(|variant| !variant.is_empty())
         })
         .flatten();
-    repair_package_for_redeploy_with(core, root, package_key, |key| {
+    repair_package_for_redeploy_with(core, root, package_key, mode, |key| {
         let variant = wanxiang_variant.clone();
         async move {
             if crate::scheme::is_local_scheme_key(&key) {
@@ -744,6 +769,7 @@ pub(crate) async fn repair_package_for_redeploy_with<Download, DownloadFuture>(
     core: &Core,
     root: &Path,
     package_key: &str,
+    mode: RepairMode,
     download_fresh: Download,
 ) -> Result<Option<String>, CoreError>
 where
@@ -757,28 +783,15 @@ where
     let store = PackageStore::new(core);
 
     if crate::scheme::is_local_scheme_key(key) {
-        let meta = store.read_meta(key)?;
-        let is_git = meta.as_ref().and_then(|m| m.git.as_ref()).is_some();
-        if !is_git && !store.package_path(key).is_file() {
-            return Err(CoreError::Other(format!(
-                "用户方案 {key} 缺少导入包文件，请重新导入"
-            )));
-        }
-        keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
-            for rel in [format!("runtime/{key}"), format!("scheme-packages/local/{key}")] {
-                let path = safe_path(root, &rel)?;
-                if path.try_exists().map_err(|error| error.to_string())? {
-                    crate::package_fs::remove_dir_all(&path)
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            Ok(())
-        })
-        .map_err(CoreError::Other)?;
-        #[cfg(target_os = "windows")]
-        crate::windows_public_schemas::remove_isolated_package_cache(key);
-        if is_git {
+        let meta = store.read_meta(key)?.ok_or_else(|| {
+            CoreError::Other(format!("用户方案 {key} 缺少导入包，请重新导入"))
+        })?;
+        if meta.git.is_some() {
             download_fresh(key.to_owned()).await?;
+        } else {
+            store.read_files(key).map_err(|error| {
+                CoreError::Other(format!("用户方案 {key} 无法读取导入包，请重新导入：{error}"))
+            })?;
         }
         return Ok(None);
     }
@@ -789,6 +802,10 @@ where
         crate::scheme::validate_scheme_key(key).is_ok() && !crate::scheme::is_local_scheme_key(key);
     if !is_addon && !is_cloud_scheme {
         return Err(CoreError::Other(format!("不支持自动修复方案包：{key}")));
+    }
+    if matches!(mode, RepairMode::SourceOnly) {
+        download_fresh(key.to_owned()).await?;
+        return Ok(None);
     }
 
     let backup_dir = keytao_core::isolated_deploy::with_isolated_package_lock(root, || {

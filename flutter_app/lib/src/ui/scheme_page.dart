@@ -395,9 +395,7 @@ class _SchemePageState extends State<SchemePage> {
                   if (!c.prefersLibjd)
                     ValueRow(AppStrings.directory, c.activeSchemeDir),
                   if (c.prefersLibjd)
-                    StatusMessage(
-                      c.isUsingLibjd ? '当前方案已转换' : '下载或导入方案后自动转换',
-                    )
+                    StatusMessage(c.isUsingLibjd ? '当前方案已转换' : '下载或导入方案后自动转换')
                   else if (c.localStatusLine case final status?)
                     StatusMessage(
                       '$status${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
@@ -541,6 +539,34 @@ class _SchemeMoreButton extends StatelessWidget {
   );
 }
 
+class _SchemeCardHeader extends StatelessWidget {
+  const _SchemeCardHeader({required this.metadata, required this.heading});
+
+  final Widget metadata;
+  final Widget heading;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      ConstrainedBox(
+        constraints: BoxConstraints(
+          minHeight:
+              MediaQuery.textScalerOf(context).scale(13) *
+                  (context.theme.typography.body.sm.height ?? 1.2) +
+              8,
+        ),
+        child: Align(child: metadata),
+      ),
+      const SizedBox(height: 4),
+      ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Align(alignment: Alignment.centerLeft, child: heading),
+      ),
+    ],
+  );
+}
+
 class SchemePackageRow extends StatelessWidget {
   const SchemePackageRow({
     super.key,
@@ -608,20 +634,23 @@ class SchemePackageRow extends StatelessWidget {
         !c.isDeploying &&
         (deployFailed || (checksCurrentPackage && local?.deployed == false));
     final actions = ActionRow(
+      keepPairTogether: mobile && !compact,
       children: [
         if (schemeKey == 'keytao' && showSource) _SchemeSource(controller: c),
         if (update != null)
           ActionButton(
             '更新',
+            compact: mobile && !compact,
             primary: !needsDeploy,
             icon: FLucideIcons.arrowUpCircle,
             onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
           ),
         if (deployLabel != null)
-          ActionButton(deployLabel, primary: true)
+          ActionButton(deployLabel, primary: true, compact: mobile && !compact)
         else if (!isLocal && package == null)
           ActionButton(
             '下载',
+            compact: mobile && !compact,
             primary: false,
             icon: FLucideIcons.download,
             onPress: c.busy ? null : () => c.installSchemePackage(schemeKey),
@@ -636,6 +665,7 @@ class SchemePackageRow extends StatelessWidget {
                 ? AppStrings.deploy
                 : '使用',
             primary: !inUse && (needsDeploy || update == null),
+            compact: mobile && !compact,
             success: inUse,
             icon: inUse ? FLucideIcons.check : FLucideIcons.play,
             onPress: c.busy || inUse
@@ -647,6 +677,7 @@ class SchemePackageRow extends StatelessWidget {
         else if (package != null && !isLocal)
           ActionButton(
             '下载',
+            compact: mobile && !compact,
             icon: FLucideIcons.download,
             onPress: c.busy ? null : () => c.downloadSchemePackage(schemeKey),
           ),
@@ -707,11 +738,7 @@ class SchemePackageRow extends StatelessWidget {
                         (deployFailed ||
                             c.packageDeployError(schemeKey) != null))
                       FItem(
-                        title: Text(
-                          isLocal && package.git == null
-                              ? '重置并重新部署'
-                              : '备份并重下修复',
-                        ),
+                        title: Text(isLocal ? '修复并重新部署' : '备份并重下修复'),
                         prefix: const Icon(FLucideIcons.wrench),
                         onPress: c.busy
                             ? null
@@ -851,8 +878,11 @@ class SchemePackageRow extends StatelessWidget {
       ],
     );
     final name = package?.displayName ?? schemeDisplayName(schemeKey);
-    final title = Semantics(
+    const xmjdVariants = {'xmjd': '顶功', 'xmjd-feiding': '非顶'};
+    final xmjdVariant = xmjdVariants[schemeKey];
+    Widget titleButton(VoidCallback onPress) => Semantics(
       selected: c.scheme == schemeKey,
+      hint: xmjdVariant == null ? null : '切换顶功或非顶',
       child: FButton(
         variant: FButtonVariant.ghost,
         mainAxisSize: MainAxisSize.min,
@@ -862,15 +892,18 @@ class SchemePackageRow extends StatelessWidget {
             padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
           ),
         ),
-        onPress: c.busy ? null : () => c.selectScheme(schemeKey),
+        onPress: c.busy ? null : onPress,
         onSecondaryPress: menu.show,
+        suffix: xmjdVariant == null
+            ? null
+            : const Icon(FLucideIcons.chevronDown, size: 14),
         child: Flexible(
           child: Text(
-            schemeKey.startsWith('xmjd') && package?.displayName == null
+            xmjdVariant != null && package?.displayName == null
                 ? schemes['xmjd']!
                 : name,
             semanticsLabel: name,
-            maxLines: mobile ? 2 : null,
+            maxLines: mobile ? 1 : null,
             overflow: mobile ? TextOverflow.ellipsis : null,
             style: context.theme.typography.body.sm.copyWith(
               fontSize: compact || mobile
@@ -886,6 +919,33 @@ class SchemePackageRow extends StatelessWidget {
         ),
       ),
     );
+    final title = xmjdVariant == null
+        ? titleButton(() => c.selectScheme(schemeKey))
+        : FPopoverMenu(
+            menuAnchor: Alignment.topLeft,
+            childAnchor: Alignment.bottomLeft,
+            menuBuilder: (_, popover, _) => [
+              FItemGroup(
+                enabled: !c.busy,
+                children: [
+                  for (final MapEntry(key: key, value: label)
+                      in xmjdVariants.entries)
+                    FItem(
+                      title: Text(label),
+                      semanticsChecked: key == schemeKey,
+                      suffix: key == schemeKey
+                          ? const Icon(FLucideIcons.check)
+                          : null,
+                      onPress: () {
+                        popover.hide();
+                        if (key != schemeKey) c.selectScheme(key);
+                      },
+                    ),
+                ],
+              ),
+            ],
+            builder: (_, popover, _) => titleButton(popover.toggle),
+          );
     final state =
         !c.prefersLibjd && !c.isDeploying && (deployFailed || needsDeploy)
         ? AppBadge(
@@ -979,78 +1039,57 @@ class SchemePackageRow extends StatelessWidget {
       key: ValueKey('scheme-package-$schemeKey'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (!compact) ...[
-          Row(
-            children: [
-              EyebrowLabel(
-                inUse && !mobile
-                    ? '在用'
-                    : package?.git != null
-                    ? 'Git'
-                    : isLocal
-                    ? '本地'
-                    : '云端',
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: [
-                    if (package?.version?.trim().isNotEmpty == true)
-                      Text(
-                        package!.version!,
-                        style: context.theme.typography.body.sm.copyWith(
-                          color: inUse && !mobile
-                              ? palette.successForeground
-                              : palette.muted,
-                          fontSize: mobile ? 12 : 13,
-                          fontWeight: inUse && !mobile
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                        ),
-                      ),
-                    if (uninstalledInHeader) ?state,
-                    if (update != null)
-                      Text(
-                        '→ ${update.latestVersion}',
-                        style: context.theme.typography.body.sm.copyWith(
-                          color: palette.muted,
-                          fontSize: mobile ? 12 : 13,
-                        ),
-                      ),
-                  ],
+        if (compact)
+          heading
+        else
+          _SchemeCardHeader(
+            heading: heading,
+            metadata: Row(
+              children: [
+                EyebrowLabel(
+                  inUse && !mobile
+                      ? '在用'
+                      : package?.git != null
+                      ? 'Git'
+                      : isLocal
+                      ? '本地'
+                      : '云端',
                 ),
-              ),
-            ],
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      if (package?.version?.trim().isNotEmpty == true)
+                        Text(
+                          package!.version!,
+                          style: context.theme.typography.body.sm.copyWith(
+                            color: inUse && !mobile
+                                ? palette.successForeground
+                                : palette.muted,
+                            fontSize: mobile ? 12 : 13,
+                            fontWeight: inUse && !mobile
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      if (uninstalledInHeader) ?state,
+                      if (update != null)
+                        Text(
+                          '→ ${update.latestVersion}',
+                          style: context.theme.typography.body.sm.copyWith(
+                            color: palette.muted,
+                            fontSize: mobile ? 12 : 13,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
-          SizedBox(height: mobile ? 4 : 10),
-        ],
-        heading,
-        if (mobile && !compact && !uninstalledInHeader && state != null)
-          Align(alignment: Alignment.centerLeft, child: state),
-        if (c.packageDeployError(schemeKey) case final error?) ...[
-          const SizedBox(height: 8),
-          ErrorMessage(error),
-        ],
-        if (!deploying && c.packageDeployError(schemeKey) == null)
-          for (final step in failedDeploySteps) ...[
-            const SizedBox(height: 8),
-            ErrorMessage(step.message),
-          ],
-        if (schemeKey == 'xmjd' || schemeKey == 'xmjd-feiding') ...[
-          const SizedBox(height: 8),
-          BigTextRadioGroup<String>(
-            label: '${schemes['xmjd']} 变体',
-            value: schemeKey,
-            options: const {'xmjd': '顶功', 'xmjd-feiding': '非顶'},
-            onChanged: c.busy ? null : c.selectScheme,
-          ),
-        ] else if (!compact && !mobile && (desktop || !active)) ...[
-          const SizedBox(height: 10),
-          const SizedBox(height: 44),
-        ],
         SizedBox(height: mobile ? 6 : 10),
         if (!compact && !desktop && !mobile && active && !showSource)
           Row(
@@ -1065,6 +1104,19 @@ class SchemePackageRow extends StatelessWidget {
           )
         else
           actions,
+        if (mobile && !compact && !uninstalledInHeader && state != null) ...[
+          const SizedBox(height: 6),
+          Align(alignment: Alignment.centerLeft, child: state),
+        ],
+        if (c.packageDeployError(schemeKey) case final error?) ...[
+          const SizedBox(height: 8),
+          ErrorMessage(error),
+        ],
+        if (!deploying && c.packageDeployError(schemeKey) == null)
+          for (final step in failedDeploySteps) ...[
+            const SizedBox(height: 8),
+            ErrorMessage(step.message),
+          ],
         if (installing || deploying) ...[
           const SizedBox(height: 8),
           InstallProgressView(
@@ -1398,9 +1450,32 @@ Map<String, Widget> _addonCells(
       ),
     );
     final hasAddonLogo = c.effectiveSchemeLogoPath(packageKey) != null;
+    final cardState =
+        cloudCard &&
+            !inUse &&
+            !uninstalled &&
+            (info == null ||
+                hasUpdate ||
+                (!c.prefersLibjd && !info.deployed) ||
+                (c.prefersLibjd && !overlay))
+        ? StatusPill(
+            info == null
+                ? AppStrings.checking
+                : hasUpdate
+                ? '可更新'
+                : c.prefersLibjd && !overlay
+                ? (c.usesImportedLibjd(packageKey) ? '已转换' : '待转换')
+                : AppStrings.pendingDeploy,
+            color: hasUpdate
+                ? ChromeAccent.of(context)
+                : installed
+                ? palette.success
+                : palette.muted,
+          )
+        : null;
     final titleText = Text(
       title,
-      maxLines: mobile ? 2 : (cloudCard ? 1 : null),
+      maxLines: cloudCard ? 1 : (mobile ? 2 : null),
       overflow: cloudCard || mobile ? TextOverflow.ellipsis : null,
       strutStyle: cloudCard && !mobile
           ? StrutStyle.fromTextStyle(titleStyle, forceStrutHeight: true)
@@ -1440,60 +1515,42 @@ Map<String, Widget> _addonCells(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (cloudCard) ...[
-              Row(
-                children: [
-                  EyebrowLabel(inUse && !mobile ? '在用' : '云端'),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: uninstalled
-                        ? Align(
-                            alignment: Alignment.centerRight,
-                            child: StatusPill('未安装', color: palette.muted),
-                          )
-                        : Text(
-                            installed ? info!.version : '',
-                            textAlign: TextAlign.end,
-                            style: context.theme.typography.body.sm.copyWith(
-                              color: inUse && !mobile
-                                  ? palette.successForeground
-                                  : palette.muted,
-                              fontSize: mobile ? 12 : 13,
-                              fontWeight: inUse && !mobile
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
+              _SchemeCardHeader(
+                metadata: Row(
+                  children: [
+                    EyebrowLabel(inUse && !mobile ? '在用' : '云端'),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: uninstalled
+                          ? Align(
+                              alignment: Alignment.centerRight,
+                              child: StatusPill('未安装', color: palette.muted),
+                            )
+                          : Text(
+                              installed ? info!.version : '',
+                              textAlign: TextAlign.end,
+                              style: context.theme.typography.body.sm.copyWith(
+                                color: inUse && !mobile
+                                    ? palette.successForeground
+                                    : palette.muted,
+                                fontSize: mobile ? 12 : 13,
+                                fontWeight: inUse && !mobile
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                              ),
                             ),
-                          ),
-                  ),
-                ],
-              ),
-              SizedBox(height: mobile ? 4 : 10),
-              Row(
-                spacing: 6,
-                children: [
-                  Flexible(child: name),
-                  if (!inUse &&
-                      !uninstalled &&
-                      (info == null ||
-                          hasUpdate ||
-                          (!c.prefersLibjd && !info.deployed) ||
-                          (c.prefersLibjd && !overlay)))
-                    StatusPill(
-                      info == null
-                          ? AppStrings.checking
-                          : hasUpdate
-                          ? '可更新'
-                          : c.prefersLibjd && !overlay
-                          ? (c.usesImportedLibjd(packageKey) ? '已转换' : '待转换')
-                          : AppStrings.pendingDeploy,
-                      color: hasUpdate
-                          ? ChromeAccent.of(context)
-                          : installed
-                          ? palette.success
-                          : palette.muted,
                     ),
-                ],
+                  ],
+                ),
+                heading: Row(
+                  spacing: 6,
+                  children: [
+                    Flexible(child: name),
+                    if (!mobile) ?cardState,
+                  ],
+                ),
               ),
-              SizedBox(height: mobile ? 6 : 64),
+              SizedBox(height: mobile ? 6 : 10),
             ] else ...[
               name,
               const SizedBox(height: 4),
@@ -1507,10 +1564,12 @@ Map<String, Widget> _addonCells(
               const SizedBox(height: 12),
             ],
             ActionRow(
+              keepPairTogether: mobile && cloudCard,
               children: [
                 if (overlay && installed)
                   ActionButton(
                     englishEnabled == true ? '从当前方案移除' : '加入当前方案',
+                    compact: mobile && cloudCard,
                     primary: englishEnabled != true,
                     onPress:
                         c.busy ||
@@ -1528,6 +1587,7 @@ Map<String, Widget> _addonCells(
                         : label != AppStrings.deploy))
                   ActionButton(
                     cloudCard ? (installed ? '更新' : '下载') : label,
+                    compact: mobile && cloudCard,
                     primary: installed,
                     icon: FLucideIcons.download,
                     tooltip: overlay ? null : tooltip,
@@ -1538,6 +1598,7 @@ Map<String, Widget> _addonCells(
                 else if (!overlay && (installed || deployLabel != null))
                   ActionButton(
                     deployLabel ?? (inUse ? '使用中' : '使用'),
+                    compact: mobile && cloudCard,
                     primary: !inUse,
                     success: inUse && deployLabel == null,
                     icon: inUse ? FLucideIcons.check : FLucideIcons.play,
@@ -1628,6 +1689,10 @@ Map<String, Widget> _addonCells(
                 ),
               ],
             ),
+            if (mobile && cardState != null) ...[
+              const SizedBox(height: 6),
+              Align(alignment: Alignment.centerLeft, child: cardState),
+            ],
             if (active || deploying || importing) ...[
               const SizedBox(height: 12),
               if (importing)

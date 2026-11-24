@@ -190,8 +190,15 @@ void main() {
       final end = start < .5 ? .93 : .07;
       final drag = await tester.startGesture(point(start));
       await drag.moveTo(point((start + end) / 2));
+      await tester.pump();
+      final preview = find.byType(CandidatePanelPreview);
+      final previewBeforeMove = tester.widget<CandidatePanelPreview>(preview);
       await drag.moveTo(point(end));
       await tester.pump();
+      expect(
+        tester.widget<CandidatePanelPreview>(preview),
+        same(previewBeforeMove),
+      );
       return drag;
     }
 

@@ -1512,7 +1512,9 @@ void main() {
               .widgetList<FItem>(find.byType(FItem))
               .where(
                 (item) =>
-                    item != repository && item != directory && item != changelog,
+                    item != repository &&
+                    item != directory &&
+                    item != changelog,
               ),
           everyElement(
             isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
@@ -1571,9 +1573,9 @@ void main() {
       );
       expect(directory.onPress, isNotNull);
       expect(
-        tester.widgetList<FItem>(find.byType(FItem)).where(
-          (item) => item != directory,
-        ),
+        tester
+            .widgetList<FItem>(find.byType(FItem))
+            .where((item) => item != directory),
         everyElement(
           isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
         ),
@@ -2300,6 +2302,18 @@ void main() {
     tester,
   ) async {
     final c = _PackageController(BridgePlatform.android)
+      ..rimeIce = const AddonStatusDto(
+        installed: false,
+        deployed: false,
+        version: '',
+        englishAvailable: false,
+      )
+      ..addon = const AddonStatusDto(
+        installed: false,
+        deployed: false,
+        version: '',
+        englishAvailable: false,
+      )
       ..installedPackages = const [
         InstalledPackageDto(
           schemeKey: 'keytao',
@@ -2344,6 +2358,21 @@ void main() {
     await _pumpSchemePage(tester, c);
 
     Finder card(String key) => find.byKey(ValueKey('scheme-package-$key'));
+    Finder cellFor(String key) => find
+        .ancestor(of: card(key), matching: find.byType(HairlineGridCell))
+        .first;
+    double titleOffset(Finder cell, String name) =>
+        tester
+            .getCenter(find.descendant(of: cell, matching: find.text(name)))
+            .dy -
+        tester.getTopLeft(cell).dy;
+    double actionOffset(Finder cell) =>
+        tester
+            .getTopLeft(
+              find.descendant(of: cell, matching: find.byType(ActionRow)),
+            )
+            .dy -
+        tester.getTopLeft(cell).dy;
     void expectSameRow(Finder left, Finder right) {
       final first = tester.getRect(left);
       final second = tester.getRect(right);
@@ -2354,11 +2383,36 @@ void main() {
     final active = card('keytao');
     expectSameRow(active, card('xmjd'));
     expectSameRow(card('local-custom'), card('local-second'));
+    final ice = find.byKey(const ValueKey('addon-rime-ice'));
+    expectSameRow(cellFor('snow_jiandao'), ice);
     expectSameRow(find.byType(SwitchSetting), find.byType(ChoiceSetting<int>));
-    final activeCell = find.ancestor(
-      of: active,
-      matching: find.byType(HairlineGridCell),
-    );
+    final activeCell = cellFor('keytao');
+    final expectedTitleOffset = titleOffset(activeCell, '键道6');
+    final expectedActionOffset = actionOffset(activeCell);
+    for (final (cell, name) in [
+      (cellFor('xmjd'), '星猫键道'),
+      (cellFor('local-custom'), 'Very long local scheme display name'),
+      (cellFor('local-second'), 'Second local scheme'),
+      (cellFor('snow_jiandao'), AppStrings.rimeSnow),
+      (ice, AppStrings.rimeIce),
+      (find.byKey(const ValueKey('addon-easy-en')), 'Easy English'),
+    ]) {
+      expect(
+        titleOffset(cell, name),
+        closeTo(expectedTitleOffset, .5),
+        reason: name,
+      );
+      expect(
+        actionOffset(cell),
+        closeTo(expectedActionOffset, .5),
+        reason: name,
+      );
+      expect(
+        tester.getSize(cell).height,
+        closeTo(tester.getSize(activeCell).height, .5),
+        reason: name,
+      );
+    }
     expect(tester.widget<HairlineGridCell>(activeCell).color, isNull);
     final activeLabel = find.descendant(of: active, matching: find.text('使用中'));
     expect(activeLabel, findsOneWidget);
@@ -2624,14 +2678,11 @@ void main() {
     );
     expect(find.text('20261104'), findsOneWidget);
     expect(find.text('20261103'), findsNothing);
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('scheme-package-xmjd')),
-        matching: find.byType(BigTextRadioGroup<String>),
-      ),
-      findsOneWidget,
-    );
-    await tester.ensureVisible(find.text('非顶'));
+    expect(find.text('非顶'), findsNothing);
+    await tester.ensureVisible(find.text('星猫键道'));
+    await tester.tap(find.text('星猫键道'));
+    await tester.pumpAndSettle();
+    expect(find.text('顶功'), findsOneWidget);
     await tester.tap(find.text('非顶'));
     await tester.pumpAndSettle();
     expect(c.scheme, 'xmjd-feiding');
@@ -2645,10 +2696,11 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
-        matching: find.byType(BigTextRadioGroup<String>),
+        matching: find.byIcon(FLucideIcons.chevronDown),
       ),
       findsOneWidget,
     );
+    expect(find.text('非顶'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));

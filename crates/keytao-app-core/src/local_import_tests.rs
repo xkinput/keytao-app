@@ -83,6 +83,90 @@ fn local_import_skips_protected_and_hidden_entries() {
 }
 
 #[test]
+fn local_import_keeps_nomedia_as_a_regular_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = source(directory.path(), "source");
+    for (name, contents) in [
+        (".nomedia", ""),
+        ("resources/.nomedia", "marker"),
+        (".git/.nomedia", "excluded"),
+        ("nested/.nomedia/.nomedia", "excluded"),
+        ("nested/.keytao-generated", "excluded"),
+    ] {
+        let file = path.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, contents).unwrap();
+    }
+    let key = import_local_scheme(&core, &path, "Example", None).unwrap();
+    let (files, meta) = PackageStore::new(&core).read_files(&key).unwrap();
+    assert_eq!(
+        files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+        [".nomedia", "default.custom.yaml", "example.schema.yaml", "resources/.nomedia"]
+    );
+    assert!(meta.manifest.contains_key(".nomedia"));
+    assert!(meta.manifest.contains_key("resources/.nomedia"));
+
+    #[cfg(unix)]
+    {
+        fs::remove_file(path.join(".nomedia")).unwrap();
+        std::os::unix::fs::symlink("example.schema.yaml", path.join(".nomedia")).unwrap();
+        assert!(
+            import_local_scheme(&core, &path, "Example", Some(&key))
+                .unwrap_err()
+                .to_string()
+                .contains("符号链接")
+        );
+        assert!(stored_files(&core, &key)[".nomedia"].is_empty());
+    }
+}
+
+#[test]
+fn scheme_zip_keeps_nomedia_from_root_or_wrapper() {
+    for (prefix, wrapper_marker, root_marker) in [
+        ("", true, false),
+        ("wrapper/", true, false),
+        ("wrapper/", false, true),
+        ("wrapper/", true, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("scheme.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, contents) in [
+            ("example.schema.yaml", "schema: {schema_id: example}"),
+            ("resources/.nomedia", ""),
+            (".git/.nomedia", "excluded"),
+            ("nested/.nomedia/.nomedia", "excluded"),
+            ("nested/.keytao-generated", "excluded"),
+        ] {
+            archive.start_file(format!("{prefix}{name}"), options).unwrap();
+            archive.write_all(contents.as_bytes()).unwrap();
+        }
+        if wrapper_marker {
+            archive.start_file(format!("{prefix}.nomedia"), options).unwrap();
+            archive.write_all(b"preferred marker").unwrap();
+        }
+        if root_marker {
+            archive.start_file(".nomedia", options).unwrap();
+            archive.write_all(b"outer marker").unwrap();
+        }
+        archive.finish().unwrap();
+
+        let stage = directory.path().join("stage");
+        let files = crate::generic_rime::extract_archive(&archive_path, &stage, None, 4096).unwrap();
+        assert_eq!(
+            files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            [".nomedia", "example.schema.yaml", "resources/.nomedia"]
+        );
+        assert_eq!(
+            fs::read_to_string(stage.join(".nomedia")).unwrap(),
+            if wrapper_marker { "preferred marker" } else { "outer marker" }
+        );
+    }
+}
+
+#[test]
 fn downloaded_import_skips_trime_assets_before_parsing_theme_customs() {
     let directory = tempfile::tempdir().unwrap();
     let path = source(directory.path(), "source");
@@ -129,11 +213,13 @@ fn local_import_propagates_permission_denied_and_other_errors() {
 #[test]
 fn local_import_windows_attributes_exclude_hidden_and_system_but_not_readonly() {
     for flags in [0x2, 0x4, 0x6, 0x13, 0x24] {
-        assert!(excluded_attributes(flags));
+        assert!(excluded_attributes(flags, false));
     }
     for flags in [0, 0x1, 0x10, 0x20, 0x21] {
-        assert!(!excluded_attributes(flags));
+        assert!(!excluded_attributes(flags, false));
     }
+    assert!(!excluded_attributes(0x2, true));
+    assert!(excluded_attributes(0x6, true));
 }
 
 #[cfg(windows)]
@@ -168,7 +254,7 @@ fn local_import_skips_windows_hidden_and_system_attributes() {
     use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES};
     let directory = tempfile::tempdir().unwrap();
     let path = source(directory.path(), "source");
-    for (name, flags) in [("hidden.yaml", 0x2), ("system", 0x4)] {
+    for (name, flags) in [("hidden.yaml", 0x2), ("system", 0x4), (".nomedia", 0x2)] {
         let entry = path.join(name);
         if name == "system" {
             fs::create_dir(&entry).unwrap();
@@ -181,7 +267,7 @@ fn local_import_skips_windows_hidden_and_system_attributes() {
     }
     let mut files = BTreeMap::new();
     collect(&path, "", &mut files, &mut 0, false).unwrap();
-    assert_eq!(files.keys().collect::<Vec<_>>(), [&"example.schema.yaml"]);
+    assert_eq!(files.keys().collect::<Vec<_>>(), [&".nomedia", &"example.schema.yaml"]);
 }
 
 #[test]

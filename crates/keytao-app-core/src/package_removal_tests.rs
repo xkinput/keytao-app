@@ -149,7 +149,7 @@ async fn removing_local_scheme_never_retains_or_backs_up_modified_files() {
 }
 
 #[tokio::test]
-async fn repair_package_backs_up_cloud_files_and_wipes_local_runtime_cleanly() {
+async fn repair_package_backs_up_cloud_files() {
     let (_directory, host) = fixture();
     fs::write(
         host.root.join("runtime/keytao/keytao.custom.yaml"),
@@ -162,16 +162,22 @@ async fn repair_package_backs_up_cloud_files_and_wipes_local_runtime_cleanly() {
         b"schema: {schema_id: keytao, name: Clean}\n".to_vec(),
     )])
     .unwrap();
-    let backup = repair_package_for_redeploy_with(&host.core, &host.root, "keytao", |key| {
-        let core = host.core.clone();
-        let root = host.root.clone();
-        let bytes = clean_archive.clone();
-        async move {
-            assert_eq!(key, "keytao");
-            store_cloud_archive(&core, "keytao", Some("v2"), "official", None, &bytes, &root)?;
-            Ok(())
-        }
-    })
+    let backup = repair_package_for_redeploy_with(
+        &host.core,
+        &host.root,
+        "keytao",
+        RepairMode::BackUpRuntime,
+        |key| {
+            let core = host.core.clone();
+            let root = host.root.clone();
+            let bytes = clean_archive.clone();
+            async move {
+                assert_eq!(key, "keytao");
+                store_cloud_archive(&core, "keytao", Some("v2"), "official", None, &bytes, &root)?;
+                Ok(())
+            }
+        },
+    )
     .await
     .unwrap();
     assert!(backup.is_some());
@@ -179,6 +185,123 @@ async fn repair_package_backs_up_cloud_files_and_wipes_local_runtime_cleanly() {
     let (stored, meta) = PackageStore::new(&host.core).read_files("keytao").unwrap();
     assert_eq!(meta.version.as_deref(), Some("v2"));
     assert_eq!(stored.len(), 1);
+}
+
+#[tokio::test]
+async fn automatic_cloud_repair_leaves_active_runtime_in_place() {
+    let (_directory, host) = fixture();
+    let learned = host.root.join("runtime/keytao/keytao.userdb/words");
+    let backup = repair_package_for_redeploy_with(
+        &host.core,
+        &host.root,
+        "keytao",
+        RepairMode::SourceOnly,
+        |key| {
+            let root = &host.root;
+            let core = &host.core;
+            let learned = &learned;
+            async move {
+                assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some("keytao"));
+                assert_eq!(fs::read(learned).unwrap(), b"learned content");
+                let archive = archive_from_files(&[(
+                    "keytao.schema.yaml".into(),
+                    b"schema: {schema_id: keytao, name: Updated}\n".to_vec(),
+                )])?;
+                store_cloud_archive(core, &key, Some("v2"), "official", None, &archive, root)?;
+                Ok(())
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert!(backup.is_none());
+    assert_eq!(RuntimeDirs::active_package_key(&host.root).as_deref(), Some("keytao"));
+    assert_eq!(fs::read(&learned).unwrap(), b"learned content");
+    let (_, meta) = PackageStore::new(&host.core).read_files("keytao").unwrap();
+    assert_eq!(meta.version.as_deref(), Some("v2"));
+}
+
+#[tokio::test]
+async fn local_git_repair_preserves_live_runtime_on_download_success_and_failure() {
+    for download_succeeds in [false, true] {
+        let (directory, host) = fixture();
+        let source = directory.path().join("git-source");
+        fs::create_dir(&source).unwrap();
+        let schema = source.join("fixture.schema.yaml");
+        fs::write(&schema, b"schema: {schema_id: fixture, name: Original}\n").unwrap();
+        let key = local_import::import_local_scheme_with(
+            &host.core,
+            &source,
+            "Fixture",
+            None,
+            local_import::LocalImportOptions {
+                version_override: Some("v1"),
+                git: Some(GitSchemeConfig {
+                    repo_url: "https://example.com/fixture.zip".into(),
+                    mode: GitSchemeMode::Release,
+                    branch: None,
+                    asset_name: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fs::write(
+            host.root.join(RuntimeDirs::MIGRATION_MARKER),
+            serde_json::to_vec(&serde_json::json!({"version": 1, "runtime_package": key})).unwrap(),
+        )
+        .unwrap();
+        let runtime = host.root.join("runtime").join(&key);
+        let projected = host.root.join("scheme-packages/local").join(&key);
+        let existing = [
+            (runtime.join("build/default.yaml"), "last good build"),
+            (runtime.join("fixture.userdb/words"), "learned content"),
+            (runtime.join("fixture.user.dict.yaml"), "user words"),
+            (runtime.join("custom_phrase.txt"), "user phrases"),
+            (runtime.join("lua/stats.txt"), "live stats"),
+            (projected.join("files/fixture.schema.yaml"), "last projected source"),
+        ];
+        for (path, contents) in &existing {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+
+        let result = repair_package_for_redeploy_with(
+            &host.core,
+            &host.root,
+            &key,
+            RepairMode::SourceOnly,
+            |key| {
+                let core = host.core.clone();
+                async move {
+                    if !download_succeeds {
+                        return Err(CoreError::Other("fixture download failed".into()));
+                    }
+                    fs::write(&schema, b"schema: {schema_id: fixture, name: Updated}\n")?;
+                    local_import::import_local_scheme_with(
+                        &core,
+                        &source,
+                        "Fixture",
+                        Some(&key),
+                        local_import::LocalImportOptions {
+                            version_override: Some("v2"),
+                            ..Default::default()
+                        },
+                    )?;
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result.is_ok(), download_succeeds);
+        assert_eq!(RuntimeDirs::active_package_key(&host.root).as_deref(), Some(key.as_str()));
+        for (path, contents) in existing {
+            assert_eq!(fs::read_to_string(path).unwrap(), contents);
+        }
+        let (_, meta) = PackageStore::new(&host.core).read_files(&key).unwrap();
+        assert_eq!(meta.version.as_deref(), Some(if download_succeeds { "v2" } else { "v1" }));
+    }
 }
 
 #[tokio::test]

@@ -11,6 +11,13 @@ use std::{
 const MAX_FILES: usize = 10_000;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const DEFAULT_MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const NOMEDIA_FILE: &str = ".nomedia";
+
+pub(crate) fn has_excluded_hidden_component(relative: &str) -> bool {
+    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    (name.starts_with('.') && name != NOMEDIA_FILE)
+        || parent.split('/').any(|component| component.starts_with('.'))
+}
 
 pub(crate) fn ships_with_scheme(name: &str) -> bool {
     name.ends_with(".user.dict.yaml") || name.ends_with("_user.txt") || name == "user_dict.txt"
@@ -42,20 +49,20 @@ pub(crate) fn is_excluded_path(relative: &str) -> bool {
     ) {
         return true;
     }
-    relative.split('/').any(|part| {
-        part.starts_with('.')
-            || part == "__MACOSX"
-            || part.eq_ignore_ascii_case("Thumbs.db")
-            || part.eq_ignore_ascii_case("desktop.ini")
-            || part.eq_ignore_ascii_case("System Volume Information")
-            || part.eq_ignore_ascii_case("$RECYCLE.BIN")
-            || part.eq_ignore_ascii_case("app-state.json")
-            || part.ends_with(".userdb")
-            || part.ends_with(".leveldb")
-            || (part != "user.yaml"
-                && !ships_with_scheme(part)
-                && crate::install::is_protected_user_file(part))
-    })
+    has_excluded_hidden_component(relative)
+        || relative.split('/').any(|part| {
+            part == "__MACOSX"
+                || part.eq_ignore_ascii_case("Thumbs.db")
+                || part.eq_ignore_ascii_case("desktop.ini")
+                || part.eq_ignore_ascii_case("System Volume Information")
+                || part.eq_ignore_ascii_case("$RECYCLE.BIN")
+                || part.eq_ignore_ascii_case("app-state.json")
+                || part.ends_with(".userdb")
+                || part.ends_with(".leveldb")
+                || (part != "user.yaml"
+                    && !ships_with_scheme(part)
+                    && crate::install::is_protected_user_file(part))
+        })
 }
 
 pub(crate) fn is_orphan_prebuilt_bin<S: AsRef<str>>(
@@ -163,11 +170,18 @@ fn extract_archive_inner(
 
     let raw_names: Vec<String> = raw_entries.iter().map(|(_, name)| name.clone()).collect();
     let wrapper_prefix = detect_wrapper_prefix(&raw_names);
+    // Prefer the scheme's own marker when unwrapping a nested archive.
+    let wrapped_nomedia = wrapper_prefix.as_ref().is_some_and(|prefix| {
+        raw_names
+            .iter()
+            .any(|name| name.strip_prefix(prefix) == Some(NOMEDIA_FILE))
+    });
 
     let mapped: Vec<(usize, String)> = raw_entries
         .into_iter()
         .filter_map(|(index, raw_name)| {
             let relative = match &wrapper_prefix {
+                Some(_) if raw_name == NOMEDIA_FILE && !wrapped_nomedia => raw_name,
                 Some(prefix) => raw_name.strip_prefix(prefix)?.to_owned(),
                 None => raw_name,
             };

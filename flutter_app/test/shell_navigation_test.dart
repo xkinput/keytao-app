@@ -1,11 +1,15 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/app.dart';
+import 'package:keytao/src/app/options.dart' show AppPage;
 import 'package:keytao/src/rust/api/types.dart';
 
 import 'view_fixture.dart';
 
-Future<void> mountShell(WidgetTester tester, BridgePlatform platform) async {
+Future<ViewController> mountShell(
+  WidgetTester tester,
+  BridgePlatform platform,
+) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = platform == BridgePlatform.android
       ? const Size(390, 800)
@@ -21,7 +25,14 @@ Future<void> mountShell(WidgetTester tester, BridgePlatform platform) async {
     ),
   );
   await tester.pumpAndSettle();
+  return controller;
 }
+
+double offsetOf(WidgetTester tester, String page) => tester
+    .widget<SlideTransition>(find.byKey(ValueKey('page-slide-$page')))
+    .position
+    .value
+    .dx;
 
 void main() {
   for (final platform in [BridgePlatform.macOs, BridgePlatform.android]) {
@@ -29,23 +40,60 @@ void main() {
       tester,
     ) async {
       await mountShell(tester, platform);
-      double offsetOf(String page) => tester
-          .widget<SlideTransition>(find.byKey(ValueKey('page-slide-$page')))
-          .position
-          .value
-          .dx;
 
       await tester.tap(find.byKey(const ValueKey('nav-scheme')));
       await tester.pump();
-      expect(offsetOf('scheme'), greaterThan(0));
+      expect(offsetOf(tester, 'scheme'), greaterThan(0));
       await tester.pumpAndSettle();
-      expect(offsetOf('scheme'), 0);
+      expect(offsetOf(tester, 'scheme'), 0);
 
       await tester.tap(find.byKey(const ValueKey('nav-ime')));
       await tester.pump();
-      expect(offsetOf('ime'), lessThan(0));
+      expect(offsetOf(tester, 'ime'), lessThan(0));
       await tester.pumpAndSettle();
-      expect(offsetOf('ime'), 0);
+      expect(offsetOf(tester, 'ime'), 0);
+    });
+
+    testWidgets('adjacent pages follow a horizontal drag on ${platform.name}', (
+      tester,
+    ) async {
+      final controller = await mountShell(tester, platform);
+      final width = tester.view.physicalSize.width;
+      final start = Offset(width * .75, 170);
+      final swipe = await tester.startGesture(start);
+      await swipe.moveBy(Offset(-width * .16, 0));
+      await tester.pump();
+      final firstOffset = offsetOf(tester, 'ime');
+      expect(firstOffset, inExclusiveRange(-.35, 0));
+      expect(offsetOf(tester, 'scheme'), closeTo(1 + firstOffset, .001));
+      await swipe.moveBy(Offset(-width * .23, 0));
+      await tester.pump();
+      final lastOffset = offsetOf(tester, 'ime');
+      expect(lastOffset, lessThan(firstOffset));
+      expect(controller.activePage, AppPage.input);
+      await swipe.up();
+      await tester.pump();
+      expect(offsetOf(tester, 'scheme'), closeTo(1 + lastOffset, .001));
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.scheme);
+      expect(offsetOf(tester, 'scheme'), 0);
+
+      final shortDrag = await tester.startGesture(Offset(width * .25, 170));
+      await shortDrag.moveBy(Offset(width * .16, 0));
+      await tester.pump();
+      expect(offsetOf(tester, 'scheme'), greaterThan(0));
+      await shortDrag.up();
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.scheme);
+      expect(offsetOf(tester, 'scheme'), 0);
+
+      final swipeBack = await tester.startGesture(Offset(width * .25, 170));
+      await swipeBack.moveBy(Offset(width * .42, 0));
+      await tester.pump();
+      expect(offsetOf(tester, 'ime'), inExclusiveRange(-1, 0));
+      await swipeBack.up();
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.input);
     });
   }
 
@@ -53,18 +101,55 @@ void main() {
     await mountShell(tester, BridgePlatform.android);
     final nav = find.byKey(const ValueKey('nav-ime'));
     final page = find.byKey(const PageStorageKey('ime'));
+    final inactivePage = find.byKey(
+      const PageStorageKey('scheme'),
+      skipOffstage: false,
+    );
+    final inactiveHeight = tester.getSize(inactivePage).height;
     final expandedHeight = tester.getSize(page).height;
     expect(nav.hitTestable(), findsOneWidget);
 
-    await tester.dragFrom(const Offset(12, 310), const Offset(0, -150));
-    await tester.pumpAndSettle();
+    final swipe = await tester.startGesture(const Offset(12, 310));
+    await swipe.moveBy(const Offset(0, -24));
+    await swipe.moveBy(const Offset(0, -28));
+    await tester.pump();
+    final partialHeight = tester.getSize(page).height;
+    expect(partialHeight, greaterThan(expandedHeight));
+    expect(tester.getSize(inactivePage).height, inactiveHeight);
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(tester.getSize(page).height, partialHeight);
+    await swipe.moveBy(const Offset(0, -24));
+    await tester.pump();
+    expect(tester.getSize(page).height, greaterThan(partialHeight));
+    await swipe.moveBy(const Offset(0, -100));
+    await tester.pump();
     expect(nav.hitTestable(), findsNothing);
-    expect(tester.getSize(page).height, greaterThan(expandedHeight));
+    final collapsedHeight = tester.getSize(page).height;
+    expect(tester.getSize(inactivePage).height, inactiveHeight);
+    await swipe.up();
+    await tester.pumpAndSettle();
 
-    await tester.dragFrom(const Offset(12, 310), const Offset(0, 150));
+    final reverse = await tester.startGesture(const Offset(12, 310));
+    await reverse.moveBy(const Offset(0, 24));
+    await reverse.moveBy(const Offset(0, 40));
+    await tester.pump();
+    expect(
+      tester.getSize(page).height,
+      inExclusiveRange(expandedHeight, collapsedHeight),
+    );
+    await reverse.moveBy(const Offset(0, 140));
+    await reverse.up();
     await tester.pumpAndSettle();
     expect(nav.hitTestable(), findsOneWidget);
     expect(tester.getSize(page).height, expandedHeight);
+
+    tester.view.physicalSize = const Size(390, 860);
+    await tester.pumpAndSettle();
+    final resizedHeight = tester.getSize(page).height;
+    expect(tester.getSize(inactivePage).height, inactiveHeight);
+    await tester.tap(find.byKey(const ValueKey('nav-scheme')));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(inactivePage).height, resizedHeight);
   });
 
   testWidgets('navigation returns when expanded content fits the viewport', (

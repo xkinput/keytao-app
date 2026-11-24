@@ -68,53 +68,44 @@ class AboutPage extends StatelessWidget {
       controller: c,
       page: AppPage.about,
       children: [
-        if (!c.isAndroid)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 15),
-            child: Column(
-              children: [
-                Image.asset(logoAsset, width: 60, height: 60),
-                const SizedBox(height: 12),
-                Text(
-                  'KeyTao 输入法',
-                  style: context.theme.typography.display.xl2.copyWith(
-                    fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 28,
-                    color: AppPalette.of(context).ink,
-                    fontWeight: FontWeight.w700,
-                    height: 1.1,
-                  ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 15),
+          child: Column(
+            children: [
+              Image.asset(logoAsset, width: 60, height: 60),
+              const SizedBox(height: 12),
+              Text(
+                'KeyTao 输入法',
+                textAlign: TextAlign.center,
+                style: context.theme.typography.display.xl2.copyWith(
+                  fontSize: MediaQuery.sizeOf(context).width >= 720 ? 34 : 28,
+                  color: AppPalette.of(context).ink,
+                  fontWeight: FontWeight.w700,
+                  height: 1.1,
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'v${c.info.appVersion}',
-                  style: context.theme.typography.body.sm.copyWith(
-                    color: AppPalette.of(context).muted,
-                  ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'v${c.info.appVersion}',
+                style: context.theme.typography.body.sm.copyWith(
+                  color: AppPalette.of(context).muted,
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  'KeyTao 是支持 librime 与 libjd 的跨平台输入法',
-                  textAlign: TextAlign.center,
-                  style: context.theme.typography.body.sm.copyWith(
-                    color: AppPalette.of(context).muted,
-                  ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'KeyTao 是支持 librime 与 libjd 的跨平台输入法',
+                textAlign: TextAlign.center,
+                style: context.theme.typography.body.sm.copyWith(
+                  color: AppPalette.of(context).muted,
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
+        ),
         Section(
           title: AppStrings.about,
           icon: FLucideIcons.info,
           children: [
-            if (c.isAndroid)
-              Center(
-                child: Image.asset(
-                  logoAsset,
-                  width: 64,
-                  height: 64,
-                  semanticLabel: 'KeyTao',
-                ),
-              ),
             ValueRow(
               AppStrings.keytaoVersion,
               c.versions?.appVersion ?? c.info.appVersion,

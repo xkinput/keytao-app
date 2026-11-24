@@ -11,6 +11,7 @@ import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/website_page.dart';
 import 'package:keytao/src/ui/widgets.dart';
+import 'package:webview_core/webview_core.dart' show WebViewWidget;
 
 import 'view_fixture.dart';
 
@@ -58,8 +59,10 @@ void main() {
     addTearDown(RustLib.dispose);
     final controller = ViewController(BridgePlatform.android);
     final toolbarVisible = ValueNotifier(true);
+    final toolbarFraction = ValueNotifier(1.0);
     addTearDown(controller.dispose);
     addTearDown(toolbarVisible.dispose);
+    addTearDown(toolbarFraction.dispose);
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(320, 700);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -107,6 +110,7 @@ void main() {
                   key: ValueKey('website-account'),
                 ),
                 mobileToolbarVisible: toolbarVisible.value,
+                mobileToolbarFraction: toolbarFraction,
                 onScrollOffset: offsets.add,
               ),
             ),
@@ -134,6 +138,15 @@ void main() {
 
     final page = find.byKey(const PageStorageKey('website'));
     expect(tester.getRect(page).top, 32);
+    final webView = find.byType(WebViewWidget);
+    final expandedTop = tester.getTopLeft(webView).dy;
+    toolbarFraction.value = .6;
+    await tester.pump();
+    final partialTop = tester.getTopLeft(webView).dy;
+    expect(partialTop, lessThan(expandedTop));
+    toolbarFraction.value = .3;
+    await tester.pump();
+    expect(tester.getTopLeft(webView).dy, lessThan(partialTop));
     toolbarVisible.value = false;
     await tester.pump();
     expect(domain, findsNothing);
