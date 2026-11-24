@@ -913,33 +913,44 @@ pub async fn import_git_scheme(
 
     emit_progress(core, "extracting", 65, "正在解压并校验方案文件...");
     let cache_dir = core.env().cache_dir.clone();
-    fs::create_dir_all(&cache_dir)?;
-    let stage = tempfile::Builder::new()
-        .prefix(".git-scheme-")
-        .tempdir_in(&cache_dir)?;
-    let archive_path = downloaded.path().to_path_buf();
-    let stage_path = stage.path().to_path_buf();
-    let scheme_dir = tokio::task::spawn_blocking(move || -> Result<PathBuf, CoreError> {
-        extract_archive_to_dir(&archive_path, &stage_path)?;
-        locate_scheme_root(&stage_path)
+    let (scheme_dir, stage) = tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(&cache_dir)?;
+        let stage = tempfile::Builder::new()
+            .prefix(".git-scheme-")
+            .tempdir_in(&cache_dir)?;
+        extract_archive_to_dir(downloaded.path(), stage.path())?;
+        let scheme_dir = locate_scheme_root(stage.path())?;
+        Ok::<_, CoreError>((scheme_dir, stage))
     })
     .await
     .map_err(|error| CoreError::Other(format!("解压任务失败：{error}")))??;
 
     let origin = normalized.repo_url.clone();
     let slug_hint = host.slug().to_owned();
-    let key = import_local_scheme_with(
-        core,
-        &scheme_dir,
-        display_name,
-        scheme_key,
-        LocalImportOptions {
-            slug_hint: Some(&slug_hint),
-            version_override: resolved.version_hint.as_deref(),
-            origin: Some(&origin),
-            git: Some(normalized),
-        },
-    )?;
+    let display_name = display_name.to_owned();
+    let scheme_key = scheme_key.map(str::to_owned);
+    let import = move |core: &Core| {
+        let _stage = stage;
+        import_local_scheme_with(
+            core,
+            &scheme_dir,
+            &display_name,
+            scheme_key.as_deref(),
+            LocalImportOptions {
+                slug_hint: Some(&slug_hint),
+                version_override: resolved.version_hint.as_deref(),
+                origin: Some(&origin),
+                git: Some(normalized),
+            },
+        )
+    };
+    let key = if let Some(task_core) = core.self_ref.upgrade() {
+        tokio::task::spawn_blocking(move || import(&task_core))
+            .await
+            .map_err(|error| CoreError::Other(format!("导入任务失败：{error}")))??
+    } else {
+        import(core)?
+    };
 
     emit_progress(core, "done", 100, "下载完成！");
     Ok(key)

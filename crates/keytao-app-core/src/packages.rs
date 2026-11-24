@@ -308,7 +308,6 @@ pub(crate) fn store_cloud_archive_reader(
     let dir = store.checked_root()?;
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|error| CoreError::Other(error.to_string()))?;
-    let mut manifest = BTreeMap::new();
     let mut expanded = 0u64;
     if archive.len() > 10_000 {
         return Err(CoreError::Other("方案包文件过多".into()));
@@ -322,32 +321,14 @@ pub(crate) fn store_cloud_archive_reader(
         },
     )
     .map_err(CoreError::Other)?;
-    let mut read_bytes = 0u64;
     for relative in paths {
-        let mut file = archive
+        let file = archive
             .by_name(&relative)
             .map_err(|error| CoreError::Other(error.to_string()))?;
         expanded = expanded.saturating_add(file.size());
         if expanded > 512 * 1024 * 1024 {
             return Err(CoreError::Other("方案包解压后过大".into()));
         }
-        if excluded_from_manifest(&relative) {
-            continue;
-        }
-        let mut digest = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            read_bytes = read_bytes.saturating_add(read as u64);
-            if read_bytes > 512 * 1024 * 1024 {
-                return Err(CoreError::Other("方案包解压后过大".into()));
-            }
-            digest.update(&buffer[..read]);
-        }
-        manifest.insert(relative, format!("{:x}", digest.finalize()));
     }
     let mut reader = archive.into_inner();
     reader.rewind()?;
@@ -414,7 +395,7 @@ pub(crate) fn store_cloud_archive_reader(
         },
         selection_base_version: None,
         git: existing.and_then(|meta| meta.git),
-        manifest,
+        manifest: BTreeMap::new(),
         zip_sha256: digest,
     };
     fs::create_dir_all(&dir)?;
@@ -1086,30 +1067,10 @@ pub(crate) async fn repair_package_for_redeploy_with(
 }
 
 pub(crate) fn clear_active_package(root: &Path, key: &str) -> Result<(), CoreError> {
-    use keytao_core::RuntimeDirs;
     keytao_core::isolated_deploy::with_isolated_package_lock(root, || {
-        if RuntimeDirs::active_package_key(root).as_deref() != Some(key) {
+        let Some((path, previous)) = clear_active_package_unlocked(root, &[key])? else {
             return Ok(());
-        }
-        let path = safe_path(root, "scheme-packages/active-manifest.json")?;
-        let previous = match fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.to_string()),
         };
-        let mut manifest: serde_json::Map<String, serde_json::Value> = previous
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default();
-        manifest.insert("active_package".into(), serde_json::Value::Null);
-        if RuntimeDirs::migration_complete(root) {
-            manifest.insert("runtime_migration_version".into(), 1.into());
-        }
-        fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
-        let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
-        crate::scheme_files::write_file_atomic(&path, &bytes).map_err(|error| error.to_string())?;
         if let Err(error) = keytao_core::ReloadStamp::write(root) {
             let rollback = match previous {
                 Some(bytes) => crate::scheme_files::write_file_atomic(&path, &bytes),
@@ -1242,10 +1203,13 @@ mod tests {
         let core = open_core(dir.path());
         let root = dir.path().join("rime");
         fs::create_dir(&root).unwrap();
-        let files = vec![(
-            "alpha.schema.yaml".into(),
-            b"schema: {schema_id: alpha}\n".to_vec(),
-        )];
+        let files = vec![
+            (
+                "alpha.schema.yaml".into(),
+                b"schema: {schema_id: alpha}\n".to_vec(),
+            ),
+            ("rime.lua".into(), b"return {}".to_vec()),
+        ];
         let archive = dir.path().join("download.zip");
         let mut downloaded = files.clone();
         for path in ["trime.yaml", "trime.custom.yaml", "Skin.Trime.YAML", "backgrounds/image.png"] {
@@ -1269,8 +1233,34 @@ mod tests {
         assert!(keytao_core::RuntimeDirs::active_package_key(&root).is_none());
         let (stored, meta) = PackageStore::new(&core).read_files("xmjd").unwrap();
         assert_eq!(stored, files);
-        assert_eq!(meta.manifest.keys().collect::<Vec<_>>(), [&files[0].0]);
+        assert_eq!(
+            meta.manifest,
+            BTreeMap::from([(
+                files[0].0.clone(),
+                sha256_reader(files[0].1.as_slice()).unwrap(),
+            )]),
+        );
         assert_eq!(meta.version.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn download_rejects_corrupt_trime_assets_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let asset = b"Trime assets";
+        let mut archive = archive_from_files(&[("trime.yaml".into(), asset.to_vec())]).unwrap();
+        let offset = archive
+            .windows(asset.len())
+            .position(|window| window == asset)
+            .unwrap();
+        archive[offset] ^= 1;
+
+        let result = store_cloud_archive(
+            &core, "xmjd", None, "official", None, &archive, dir.path(),
+        );
+        assert!(result.unwrap_err().to_string().contains("Invalid checksum"));
+        assert!(core.state().installed_packages.is_empty());
+        assert!(!PackageStore::new(&core).package_path("xmjd").exists());
     }
 
     #[test]

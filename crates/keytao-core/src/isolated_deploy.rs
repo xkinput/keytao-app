@@ -421,14 +421,19 @@ fn deploy_package(
         recover_build(&build)?;
         build
     };
-    let live_inputs = input_signature(control_root, dirs)?;
     let edits = staged_inputs
         .map(|name| read_input_edits(user, name))
         .transpose()?
         .unwrap_or_default();
-    if edits.is_empty() && !cfg!(target_os = "ios") && receipt_matches(&build, &live_inputs) {
-        return Ok(DeployStep::Skip);
-    }
+    let live_inputs = if edits.is_empty() && !cfg!(target_os = "ios") {
+        let (inputs, matches) = check_package_receipt(control_root, dirs, &build)?;
+        if matches {
+            return Ok(DeployStep::Skip);
+        }
+        inputs
+    } else {
+        input_signature(control_root, dirs)?
+    };
 
     let stage = Stage::create(user.join(STAGE))?;
     walk_files(user, false, &mut |relative, path| {
@@ -829,23 +834,28 @@ fn regular_file(path: &Path) -> io::Result<fs::File> {
 }
 
 pub(crate) fn package_receipt_matches(control_root: &Path, dirs: &RuntimeDirs) -> bool {
+    check_package_receipt(control_root, dirs, &dirs.staging_dir).is_ok_and(|(_, matches)| matches)
+}
+
+fn check_package_receipt(
+    control_root: &Path,
+    dirs: &RuntimeDirs,
+    build: &Path,
+) -> Result<([u8; 32], bool), String> {
     let stats = input_stat_signature(control_root, dirs);
     let cache_path = dirs.user_data_dir.join(INPUT_CACHE);
     if let Ok(stats) = stats.as_ref() {
-        let cached = regular_file(&cache_path)
+        if let Some(cache) = regular_file(&cache_path)
             .ok()
-            .and_then(|file| serde_json::from_reader::<_, InputCache>(file).ok());
-        if cached.is_some_and(|cache| {
-            cache.stats == *stats && receipt_matches(&dirs.staging_dir, &cache.inputs)
-        }) {
-            return true;
+            .and_then(|file| serde_json::from_reader::<_, InputCache>(file).ok())
+            .filter(|cache| cache.stats == *stats && receipt_matches(build, &cache.inputs))
+        {
+            return Ok((cache.inputs, true));
         }
     }
-    let Ok(inputs) = input_signature(control_root, dirs) else {
-        return false;
-    };
-    if !receipt_matches(&dirs.staging_dir, &inputs) {
-        return false;
+    let inputs = input_signature(control_root, dirs)?;
+    if !receipt_matches(build, &inputs) {
+        return Ok((inputs, false));
     }
     if let Ok(stats) = stats {
         // Never pair the content digest with metadata from a concurrent edit.
@@ -855,7 +865,7 @@ pub(crate) fn package_receipt_matches(control_root: &Path, dirs: &RuntimeDirs) -
             }
         }
     }
-    true
+    Ok((inputs, true))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1422,6 +1432,13 @@ mod tests {
             let full_checks = FULL_INPUT_CHECKS.get();
             switch_ready_package(root, &shared, key).unwrap();
             assert_eq!(FULL_INPUT_CHECKS.get(), full_checks);
+            assert_eq!(
+                deploy_package(root, &dirs, None, |_| panic!(
+                    "cached receipt must skip compilation"
+                )),
+                Ok(DeployStep::Skip)
+            );
+            assert_eq!(FULL_INPUT_CHECKS.get(), full_checks);
 
             let modified = fs::metadata(&source).unwrap().modified().unwrap();
             let mut writer = fs::File::options()
@@ -1440,6 +1457,14 @@ mod tests {
             drop(writer);
             #[cfg(windows)]
             assert!(switch_ready_package(root, &shared, key).is_err());
+            let full_checks = FULL_INPUT_CHECKS.get();
+            assert_eq!(
+                deploy_package(root, &dirs, None, |_| Err(
+                    "changed input requires compilation".into()
+                )),
+                Err("changed input requires compilation".into())
+            );
+            assert_eq!(FULL_INPUT_CHECKS.get(), full_checks + 1);
             fs::write(&source, original).unwrap();
         }
         assert!(crate::schema_install_state(root).deployed, "{key}");

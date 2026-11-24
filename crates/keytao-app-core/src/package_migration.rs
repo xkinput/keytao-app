@@ -531,6 +531,7 @@ mod tests {
 
     fn fixture(data_dir: &Path, version: &str) -> Core {
         Core {
+            self_ref: Default::default(),
             env: AppEnv {
                 data_dir: data_dir.to_owned(),
                 cache_dir: data_dir.join("cache"),

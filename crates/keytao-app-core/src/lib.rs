@@ -95,11 +95,12 @@ fn run_librime_test_in_child(name: &str) -> bool {
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 pub struct Core {
+    self_ref: Weak<Self>,
     env: AppEnv,
     sink: Arc<dyn EventSink>,
     state: Mutex<AppState>,
@@ -142,7 +143,8 @@ impl Core {
             }
             Err(error) => return Err(error),
         };
-        let core = Arc::new(Self {
+        let core = Arc::new_cyclic(|self_ref| Self {
+            self_ref: self_ref.clone(),
             env,
             sink,
             state: Mutex::new(state),

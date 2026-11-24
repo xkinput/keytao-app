@@ -1,7 +1,7 @@
 use crate::{
     Core, CoreError,
     package_fs::{self, context},
-    packages::{InstalledPackageInfo, PackageMeta, safe_path, sha256_reader},
+    packages::{InstalledPackageInfo, PackageMeta, excluded_from_manifest, safe_path, sha256_reader},
 };
 use serde::{Deserialize, Serialize};
 use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine};
@@ -422,13 +422,7 @@ impl<'a> PackageStore<'a> {
         meta: &PackageMeta,
         origin: Option<&str>,
     ) -> Result<(), CoreError> {
-        self.write_archive_with(
-            reader,
-            meta,
-            origin,
-            self.core.env().platform == crate::Platform::Android,
-            package_fs::rename,
-        )
+        self.write_archive_with(reader, meta, origin, true, package_fs::rename)
     }
 
     fn write_archive_with(
@@ -436,7 +430,7 @@ impl<'a> PackageStore<'a> {
         reader: impl Read + Seek,
         meta: &PackageMeta,
         origin: Option<&str>,
-        skip_trime_assets: bool,
+        downloaded: bool,
         rename_new: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     ) -> Result<(), CoreError> {
         let destination = self.checked_package_path(&meta.scheme_key)?;
@@ -451,8 +445,9 @@ impl<'a> PackageStore<'a> {
         let mut files = Vec::new();
         let mut names = BTreeSet::new();
         let mut total = 0u64;
+        let skip_trime_assets = downloaded && self.core.env().platform == crate::Platform::Android;
         for index in 0..archive.len() {
-            let mut entry = archive
+            let entry = archive
                 .by_index(index)
                 .map_err(|error| CoreError::Other(error.to_string()))?;
             let relative = entry.name().trim_end_matches('/').to_owned();
@@ -471,11 +466,23 @@ impl<'a> PackageStore<'a> {
             if entry.is_dir() {
                 continue;
             }
-            total = total.saturating_add(entry.size());
+            let expected_size = entry.size();
+            total = total.saturating_add(expected_size);
             if total > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("Expanded package is too large".into()));
             }
+            let copy_entry = |output: &mut dyn Write| -> Result<(), CoreError> {
+                let size = std::io::copy(&mut entry.take(expected_size + 1), output)
+                    .map_err(|error| context("解压写入", &target, error))?;
+                if size != expected_size {
+                    return Err(CoreError::Other("Package file size mismatch".into()));
+                }
+                Ok(())
+            };
             if skip_trime_assets && crate::generic_rime::is_trime_asset(&relative) {
+                if !excluded_from_manifest(&relative) {
+                    copy_entry(&mut std::io::sink())?;
+                }
                 continue;
             }
             let parent = target.parent().unwrap();
@@ -483,15 +490,7 @@ impl<'a> PackageStore<'a> {
             let mut output =
                 fs::File::create(&target).map_err(|error| context("创建文件", &target, error))?;
             package_fs::clear_readonly(&target)?;
-            let expected_size = entry.size();
-            let size = std::io::copy(
-                &mut entry.by_ref().take(expected_size.saturating_add(1)),
-                &mut output,
-            )
-            .map_err(|error| context("解压写入", &target, error))?;
-            if size != expected_size {
-                return Err(CoreError::Other("Package file size mismatch".into()));
-            }
+            copy_entry(&mut output)?;
             output
                 .sync_all()
                 .map_err(|error| context("同步文件", &target, error))?;
@@ -501,7 +500,7 @@ impl<'a> PackageStore<'a> {
                     fs::File::open(&target).map_err(|error| context("打开文件", &target, error))?,
                 )
                 .map_err(|error| context("读取文件校验和", &target, error))?,
-                size,
+                size: expected_size,
             });
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -519,8 +518,12 @@ impl<'a> PackageStore<'a> {
                 )
             }).transpose()?;
         let mut meta: PackageMeta = serde_json::from_value(serde_json::to_value(meta)?)?;
-        if skip_trime_assets {
-            meta.manifest.retain(|path, _| !crate::generic_rime::is_trime_asset(path));
+        if downloaded {
+            meta.manifest = files
+                .iter()
+                .filter(|file| !excluded_from_manifest(&file.path))
+                .map(|file| (file.path.clone(), file.sha256.clone()))
+                .collect();
         }
         if let Some(previous) = previous.as_ref() {
             meta.engine = previous.meta.engine;

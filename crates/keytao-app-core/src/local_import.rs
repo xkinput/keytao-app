@@ -421,6 +421,7 @@ pub(super) fn import_local_scheme_with(
             .start_file(
                 name,
                 zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored)
                     .last_modified_time(zip::DateTime::default())
                     .unix_permissions(0o644),
             )

@@ -236,7 +236,7 @@ pub fn materialize_all_installed_packages(
     control_root: &Path,
     bundled: &Path,
 ) -> Result<(), CoreError> {
-    for target in prepare_targets(core, control_root, bundled, false, None, None)?.0 {
+    for target in prepare_targets(core, control_root, bundled, false, None)?.0 {
         if let Some(error) = target.materialize_error {
             return Err(CoreError::Other(error));
         }
@@ -251,7 +251,7 @@ pub(crate) fn materialize_installed_package(
     bundled: &Path,
     key: &str,
 ) -> Result<(), CoreError> {
-    for target in prepare_targets(core, root, bundled, false, Some(key), None)?.0 {
+    for target in prepare_targets(core, root, bundled, false, Some(key))?.0 {
         if let Some(error) = target.materialize_error {
             return Err(CoreError::Other(error));
         }
@@ -267,29 +267,7 @@ pub(crate) fn prepare_deploy_targets(
     bundled: &Path,
     package_key: Option<&str>,
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
-    prepare_targets(core, control_root, bundled, true, package_key, None)
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn materialize_migration(
-    core: &Core,
-    root: &Path,
-    bundled: &Path,
-    active: &str,
-    legacy: &Files,
-) -> Result<Vec<RuntimeDirs>, CoreError> {
-    prepare_targets(core, root, bundled, false, None, Some((active, legacy)))?
-        .0
-        .into_iter()
-        .map(|target| {
-            if let Some(error) = target.materialize_error {
-                return Err(CoreError::Other(error));
-            }
-            RuntimeDirs::for_package(root, bundled, &target.package_key)
-                .ok_or_else(|| CoreError::Other(format!("Missing runtime for {}", target.package_key)))
-        })
-        .collect()
+    prepare_targets(core, control_root, bundled, true, package_key)
 }
 
 fn prepare_targets(
@@ -298,15 +276,9 @@ fn prepare_targets(
     bundled: &Path,
     stage: bool,
     package_key: Option<&str>,
-    migration: Option<(&str, &Files)>,
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
     let settings = read_settings(control_root)?;
     let store = PackageStore::new(core);
-    let activations = if migration.is_some() {
-        crate::package_activation::read_all(core, control_root)?
-    } else {
-        BTreeMap::new()
-    };
     let addons: BTreeSet<_> = installed_addons(&store)?
         .into_iter()
         .filter(|id| *id != EASY_EN_ADDON_ID)
@@ -330,16 +302,8 @@ fn prepare_targets(
             .map(Some)
             .map_err(|error| CoreError::Other(error.to_string()))
     };
-    let legacy;
-    let inputs = if let Some((_, legacy)) = migration {
-        legacy
-    } else {
-        legacy = Files::new();
-        &legacy
-    };
-    let installed = installed_main_packages(core, &activations);
-    let active = migration.map(|(active, _)| active.to_owned())
-        .or_else(|| RuntimeDirs::active_package_key(control_root))
+    let installed = installed_main_packages(core);
+    let active = RuntimeDirs::active_package_key(control_root)
         .filter(|key| key != EASY_EN_ADDON_ID);
     let mut keys = installed
         .union(&addons)
@@ -427,7 +391,6 @@ fn prepare_targets(
                     files,
                     selection.as_deref(),
                     overlay_for(&key)?,
-                    inputs,
                     stage,
                     core.env().platform == crate::Platform::Windows,
                 )?;
@@ -457,14 +420,10 @@ fn prepare_targets(
     Ok((targets, stages))
 }
 
-pub(crate) fn installed_main_packages(
-    core: &Core,
-    activations: &BTreeMap<String, crate::package_activation::Activation>,
-) -> BTreeSet<String> {
+pub(crate) fn installed_main_packages(core: &Core) -> BTreeSet<String> {
     core.lock_state()
         .installed_packages
         .keys()
-        .chain(activations.keys())
         .cloned()
         .collect()
 }
@@ -611,57 +570,6 @@ pub(crate) fn legacy_sync_dir(root: &Path) -> Result<PathBuf, CoreError> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn legacy_user_files(core: &Core, root: &Path) -> Result<Files, CoreError> {
-    let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
-    let store = PackageStore::new(core);
-    for record in crate::package_activation::read_all(core, root)?.into_values() {
-        for file in record.owned.into_iter().chain(record.generated) {
-            owners.entry(file.path).or_default().insert(file.sha256);
-        }
-        for (path, sha256) in record.manifest {
-            owners.entry(path).or_default().insert(sha256);
-        }
-    }
-    for id in installed_addons(&store)? {
-        let path = safe(&store.checked_addon_path(id)?, "activation.json")?;
-        let record: crate::package_activation::Activation = serde_json::from_slice(&fs::read(path)?)?;
-        for file in record.owned.into_iter().chain(record.generated) {
-            owners.entry(file.path).or_default().insert(file.sha256);
-        }
-    }
-    for files in crate::addon_store::unprojected_legacy_addons(core, root)?.into_values() {
-        for file in files {
-            owners.entry(file.path).or_default().insert(file.sha256);
-        }
-    }
-    let sync_dir = legacy_sync_dir(root)?;
-    let mut legacy = user_files(root, &owners, &sync_dir)?;
-    if let Some(active) = crate::package_activation::read(core, root)? {
-        for path in DEFAULT_CUSTOM {
-            if let (Some(applied), Some(current)) =
-                (active.default_applied.get(path), read_optional(&safe(root, path)?)?)
-            {
-                let original = active
-                    .backups
-                    .iter()
-                    .find(|backup| backup.path == path)
-                    .map(|backup| crate::package_activation::backup_bytes(core, backup))
-                    .transpose()?;
-                let current = strip_generated(path, current)?;
-                let user = restore_user_default(&current, applied, original.as_deref())?;
-                if user.is_empty() {
-                    legacy.remove(path);
-                } else {
-                    legacy.insert(path.into(), user);
-                }
-            }
-        }
-    }
-    Ok(legacy)
 }
 
 fn private_path(path: &str) -> bool {
@@ -842,7 +750,6 @@ fn prepare_runtime(
     sources: Files,
     selection: Option<&[String]>,
     overlay: Option<&Files>,
-    legacy: &Files,
     stage: bool,
     windows_lua: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
@@ -918,11 +825,7 @@ fn prepare_runtime(
     }
 
     let is_local = crate::scheme::is_local_scheme_key(key);
-    let mut user = if is_local {
-        Files::new()
-    } else {
-        legacy.clone()
-    };
+    let mut user = Files::new();
     let mut runtime_overrides = previous.runtime_overrides.clone();
     let mut disk_hashes = BTreeMap::new();
     walk_files(&runtime, "", private_path, &mut |path, relative| {
@@ -1462,7 +1365,6 @@ mod tests {
         sources: Files,
         selection: Option<&[String]>,
         overlay: Option<&Files>,
-        legacy: &Files,
     ) -> Result<(), CoreError> {
         prepare_runtime(
             control_root,
@@ -1471,7 +1373,6 @@ mod tests {
             sources,
             selection,
             overlay,
-            legacy,
             false,
             cfg!(windows),
         )
@@ -1557,7 +1458,7 @@ mod tests {
         sources.insert("images/.nomedia".into(), Vec::new());
         sources.insert("dicts/reference.txt".into(), b"older package".to_vec());
         let run = |inputs| {
-            materialize(root, &bundled, key, inputs, None, None, &Files::new()).unwrap();
+            materialize(root, &bundled, key, inputs, None, None).unwrap();
         };
         run(sources.clone());
         let runtime = RuntimeDirs::isolated_user_data_dir(root, key).unwrap();
@@ -1570,7 +1471,7 @@ mod tests {
         sources.remove("lua/TJ/stats.txt");
 
         let stage = prepare_runtime(
-            root, &bundled, key, sources.clone(), None, None, &Files::new(), true, false,
+            root, &bundled, key, sources.clone(), None, None, true, false,
         )
         .unwrap()
         .unwrap();
@@ -1731,16 +1632,21 @@ mod tests {
             ("lua/easy_en.lua".into(), b"module".to_vec()),
         ]);
         for (key, english) in [("keytao", Some(&overlay)), ("keydo", None)] {
-            materialize(
-                root,
-                &bundled,
-                key,
-                fixture(root, key),
-                None,
-                english,
-                &legacy,
-            )
-            .unwrap();
+            let runtime = RuntimeDirs::isolated_user_data_dir(root, key).unwrap();
+            let mut manifest = Manifest {
+                package: key.into(),
+                user_default: Some(utf8(&legacy[DEFAULT_CUSTOM[0]]).unwrap().into()),
+                ..Default::default()
+            };
+            for (path, bytes) in &legacy {
+                put(&runtime, path, utf8(bytes).unwrap());
+                manifest.user_owned.insert(
+                    path.clone(),
+                    sha256_reader(bytes.as_slice()).unwrap(),
+                );
+            }
+            put(&runtime, MANIFEST, &serde_json::to_string(&manifest).unwrap());
+            materialize(root, &bundled, key, fixture(root, key), None, english).unwrap();
         }
         let ta = RuntimeDirs::for_package(root, &bundled, "keytao").unwrap();
         let kd = RuntimeDirs::for_package(root, &bundled, "keydo").unwrap();
@@ -1816,7 +1722,6 @@ mod tests {
             fixture(root, "keytao"),
             None,
             Some(&overlay),
-            &legacy,
         )
         .unwrap();
         assert_eq!(hashes(&root.join("runtime")), before);
@@ -1834,7 +1739,6 @@ mod tests {
             fixture(root, "keytao"),
             None,
             None,
-            &legacy,
         )
         .unwrap();
         assert!(!ta.user_data_dir.join("easy_en.schema.yaml").exists());
@@ -1856,7 +1760,6 @@ mod tests {
             fixture(root, "keytao"),
             None,
             None,
-            &legacy,
         )
         .unwrap();
         assert_eq!(hashes(&ta.user_data_dir), edited);
@@ -1883,7 +1786,7 @@ mod tests {
             },
         };
         fs::write(run.join(PENDING), serde_json::to_vec(&pending).unwrap()).unwrap();
-        materialize(root, &bundle, "keytao", package, None, None, &Files::new()).unwrap();
+        materialize(root, &bundle, "keytao", package, None, None).unwrap();
         assert_eq!(
             fs::read_to_string(run.join("rime.lua")).unwrap(),
             "require('keytao')\n"
@@ -1934,7 +1837,6 @@ mod tests {
                 package,
                 None,
                 None,
-                &Files::new()
             )
             .is_err()
         );
