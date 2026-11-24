@@ -37,7 +37,9 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
 
   AppController get _controller => widget.controller;
   bool get _ready => !_controller.isAndroid || _controller.storageReady;
-  bool get _enabled => _ready && !_controller.busy && !_loading && !_working;
+  bool get _enabled =>
+      _ready && !_controller.savingTheme && !_loading && !_working;
+  bool get _canSave => _enabled && _controller.canSaveTheme;
   ThemeSummaryDto? get _current =>
       _themes.where((theme) => theme.current).firstOrNull;
 
@@ -64,14 +66,14 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
     _settings = _controller.uiSettings;
     _storageReady = _ready;
     if (changed) _reloadPending = true;
-    if (_reloadPending && !_working && !_loading && !_controller.busy) {
+    if (_reloadPending && !_working && !_loading && !_controller.savingTheme) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _load());
     }
     if (mounted) setState(() {});
   }
 
   Future<void> _load() async {
-    if (!mounted || !_ready || _loading || _controller.busy) return;
+    if (!mounted || !_ready || _loading || _controller.savingTheme) return;
     _reloadPending = false;
     setState(() => _loading = true);
     try {
@@ -196,9 +198,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   });
 
   Future<void> _export(String id, {bool copy = false}) => _perform(() async {
-    final exported = await _controller.themeLibraryAction(
-      () => core.exportTheme(id: id),
-    );
+    final exported = await core.exportTheme(id: id);
     if (!mounted) return;
     if (copy && exported.useFile) {
       final useFile = await showFDialog<bool>(
@@ -245,9 +245,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   });
 
   Future<void> _import(String text) async {
-    final preview = await _controller.themeLibraryAction(
-      () => core.previewThemeImport(text: text),
-    );
+    final preview = await core.previewThemeImport(text: text);
     if (!mounted) return;
     var overwrite = false;
     if (preview.conflict && preview.canOverwrite) {
@@ -309,7 +307,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
             _action(
               '粘贴导入',
               FLucideIcons.clipboardPaste,
-              _enabled ? _paste : null,
+              _canSave ? _paste : null,
             ),
             _action(
               '复制分享串',
@@ -323,7 +321,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
               FLucideIcons.download,
               _enabled && _current != null ? () => _export(_current!.id) : null,
             ),
-            _action('导入文件', FLucideIcons.upload, _enabled ? _openFile : null),
+            _action('导入文件', FLucideIcons.upload, _canSave ? _openFile : null),
           ],
         ),
         if (_current case final theme?)
@@ -340,20 +338,39 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                 _action(
                   '重命名',
                   FLucideIcons.pencil,
-                  _enabled ? () => _rename(theme) : null,
+                  _canSave ? () => _rename(theme) : null,
                 ),
             ],
           ),
       ],
       if (_loading || _working) const FProgress(),
-      if (widget.quickSwitch)
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final theme in _themes)
-              SizedBox(width: 144, height: 64, child: _card(context, theme)),
-          ],
+      if (widget.quickSwitch && _themes.isNotEmpty)
+        LayoutBuilder(
+          builder: (context, constraints) {
+            const gap = 6.0;
+            final columns = widget.controller.isMobile
+                ? 4
+                : ((constraints.maxWidth + gap) / (104 + gap)).floor().clamp(
+                    1,
+                    _themes.length,
+                  );
+            final width = ((constraints.maxWidth + gap) / columns - gap)
+                .floorToDouble()
+                .clamp(0.0, 128.0);
+            return Column(
+              spacing: gap,
+              children: [
+                for (var start = 0; start < _themes.length; start += columns)
+                  Row(
+                    spacing: gap,
+                    children: [
+                      for (final theme in _themes.skip(start).take(columns))
+                        SizedBox(width: width, child: _card(context, theme)),
+                    ],
+                  ),
+              ],
+            );
+          },
         )
       else if (_themes.isNotEmpty)
         SizedBox(
@@ -397,8 +414,14 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
       selected: theme.current,
       child: FTappable(
         semanticsLabel: '应用主题 ${theme.name}',
-        onPress: _enabled && !theme.current ? () => _apply(theme) : null,
+        onPress: _canSave && !theme.current ? () => _apply(theme) : null,
         child: Container(
+          constraints: widget.quickSwitch
+              ? const BoxConstraints(minHeight: 44)
+              : null,
+          padding: widget.quickSwitch
+              ? const EdgeInsets.symmetric(vertical: 4)
+              : null,
           decoration: BoxDecoration(
             color: palette.surface,
             border: Border.all(
@@ -409,6 +432,9 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
             borderRadius: BorderRadius.circular(8),
           ),
           child: Column(
+            mainAxisSize: widget.quickSwitch
+                ? MainAxisSize.min
+                : MainAxisSize.max,
             mainAxisAlignment: widget.quickSwitch
                 ? MainAxisAlignment.center
                 : MainAxisAlignment.start,
@@ -435,6 +461,9 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                     Expanded(
                       child: Text(
                         theme.name,
+                        style: widget.quickSwitch
+                            ? const TextStyle(fontSize: 12)
+                            : null,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -442,7 +471,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                     if (theme.current)
                       Icon(
                         FLucideIcons.check,
-                        size: 16,
+                        size: widget.quickSwitch ? 12 : 16,
                         color: ChromeAccent.of(context),
                         semanticLabel: '当前主题',
                       ),
@@ -456,6 +485,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                             children: [
                               FItem(
                                 title: const Text('复制'),
+                                enabled: _canSave,
                                 onPress: () {
                                   popover.hide();
                                   _duplicate(theme);
@@ -470,7 +500,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                               ),
                               FItem(
                                 title: const Text('删除'),
-                                enabled: !theme.builtIn,
+                                enabled: _canSave && !theme.builtIn,
                                 onPress: theme.builtIn
                                     ? null
                                     : () {

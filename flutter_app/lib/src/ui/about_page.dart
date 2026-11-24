@@ -23,7 +23,7 @@ class AboutPage extends StatelessWidget {
       controller.showToast(AppStrings.appUpToDate(locale));
       return;
     }
-    await showFDialog<void>(
+    final redownload = await showFDialog<bool>(
       context: context,
       builder: (context, _, animation) => AppDialog(
         title: AppStrings.checkAppUpdate(locale),
@@ -33,10 +33,16 @@ class AboutPage extends StatelessWidget {
         ],
         child: ListenableBuilder(
           listenable: controller,
-          builder: (_, _) => AppUpdateBanner(controller: controller),
+          builder: (_, _) => AppUpdateBanner(
+            controller: controller,
+            onDownload: (redownload) => Navigator.pop(context, redownload),
+          ),
         ),
       ),
     );
+    if (redownload != null) {
+      await controller.openAppUpdate(redownload: redownload);
+    }
   }
 
   Widget _repositoryButton(String name, String url) {
@@ -45,7 +51,7 @@ class AboutPage extends StatelessWidget {
       tipBuilder: (_, _) => Text(label),
       child: FButton.icon(
         variant: FButtonVariant.ghost,
-        onPress: controller.busy ? null : () => controller.open(url),
+        onPress: () => controller.open(url),
         child: Icon(FLucideIcons.externalLink, size: 16, semanticLabel: label),
       ),
     );
@@ -149,10 +155,10 @@ class AboutPage extends StatelessWidget {
                 width: 160,
                 child: Semantics(
                   label: updateChannelLabel,
-                  enabled: c.canRunAppUpdate,
+                  enabled: c.canChangeAppUpdateChannel,
                   child: FSelect<bool>(
                     size: FTextFieldSizeVariant.sm,
-                    enabled: c.canRunAppUpdate,
+                    enabled: c.canChangeAppUpdateChannel,
                     control: FSelectControl.lifted(
                       value: c.appUpdatePrereleases,
                       onChange: (enabled) async {
@@ -172,11 +178,11 @@ class AboutPage extends StatelessWidget {
               ),
             ),
             SwitchSetting(
-              '显示 KeyTao 网站',
+              '显示网站',
               value: !c.websiteHidden,
-              onChanged: c.busy
-                  ? null
-                  : (visible) => c.saveWebsiteSettings(hidden: !visible),
+              onChanged: c.canEditWebsiteSettings
+                  ? (visible) => c.saveWebsiteSettings(hidden: !visible)
+                  : null,
             ),
             ValueRow('Flutter', c.aboutValues['Flutter']!),
             ValueRow(

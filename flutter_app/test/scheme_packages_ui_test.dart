@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/gestures.dart';
@@ -50,6 +51,7 @@ class _PackageController extends ViewController {
   }
 
   final actions = <String>[];
+  Completer<bool>? schemaSave;
 
   List<PackageSchemaDto> schemasResult = const [
     PackageSchemaDto(id: 'alpha', name: 'Alpha Name', selected: true),
@@ -71,7 +73,7 @@ class _PackageController extends ViewController {
           ? 'schemas:$key:${ids.join(',')}:activate'
           : 'schemas:$key:${ids.join(',')}',
     );
-    return true;
+    return await schemaSave?.future ?? true;
   }
 
   void rebuild() => notifyListeners();
@@ -260,8 +262,9 @@ Future<void> _pumpAddons(
 
 Future<void> _pumpSchemePage(
   WidgetTester tester,
-  AppController controller,
-) async {
+  AppController controller, {
+  bool settle = true,
+}) async {
   await tester.pumpWidget(
     KeyTaoTheme(
       platform: controller.info.platform,
@@ -273,7 +276,7 @@ Future<void> _pumpSchemePage(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  if (settle) await tester.pumpAndSettle();
 }
 
 Future<void> _openAddons(WidgetTester tester) async {
@@ -1002,117 +1005,133 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
 
-  testWidgets('a Git scheme keeps its deployed status while edits wait', (
-    tester,
-  ) async {
-    const key = 'local-evo';
-    final c = _PackageController(BridgePlatform.windows)
-      ..installedPackages = const [
-        InstalledPackageDto(
-          schemeKey: key,
-          active: true,
-          hasPackageZip: true,
-          source: 'local',
-          version: '90fea1d09811',
-          displayName: '进化键道',
-          git: GitSchemeConfigDto(
-            repoUrl: 'https://example.org/evo',
-            mode: 'branch',
+  testWidgets(
+    'a Git scheme keeps its usable build while deployment is queued',
+    (tester) async {
+      const key = 'local-evo';
+      final c = _PackageController(BridgePlatform.windows)
+        ..installedPackages = const [
+          InstalledPackageDto(
+            schemeKey: key,
+            active: true,
+            hasPackageZip: true,
+            source: 'local',
+            version: '90fea1d09811',
+            displayName: '进化键道',
+            git: GitSchemeConfigDto(
+              repoUrl: 'https://example.org/evo',
+              mode: 'branch',
+            ),
           ),
+        ]
+        ..local = const LocalSchemaDto(
+          installed: true,
+          deployed: false,
+          buildAvailable: true,
+          installedScheme: key,
+          schemas: ['evo'],
+        );
+      addTearDown(c.dispose);
+      _size(tester, const Size(1200, 1000));
+      await _pumpRow(tester, c, key);
+      expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
+      expect(find.text(AppStrings.pendingDeploy), findsNothing);
+      expect(find.text(AppStrings.packageDeployQueued), findsOneWidget);
+
+      c.local = const LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        installedScheme: key,
+        schemas: ['evo'],
+      );
+      c.deploySteps.addAll(const [
+        DeployStep(
+          'Another package failed',
+          DeployStepState.failed,
+          packageKey: 'keytao',
         ),
-      ]
-      ..local = const LocalSchemaDto(
+        DeployStep('Deployment failed', DeployStepState.failed),
+      ]);
+      await _pumpRow(tester, c, key);
+      expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
+      expect(find.text(AppStrings.deployFailed), findsNothing);
+
+      c.local = const LocalSchemaDto(
         installed: true,
         deployed: false,
         buildAvailable: true,
         installedScheme: key,
         schemas: ['evo'],
       );
-    addTearDown(c.dispose);
-    _size(tester, const Size(1200, 1000));
-    await _pumpRow(tester, c, key);
-    expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
-    expect(find.text(AppStrings.pendingDeploy), findsNothing);
-    expect(find.text(AppStrings.pendingRedeploy), findsOneWidget);
-
-    c.local = const LocalSchemaDto(
-      installed: true,
-      deployed: true,
-      installedScheme: key,
-      schemas: ['evo'],
-    );
-    c.deploySteps.addAll(const [
-      DeployStep(
-        'Another package failed',
-        DeployStepState.failed,
-        packageKey: 'keytao',
-      ),
-      DeployStep('Deployment failed', DeployStepState.failed),
-    ]);
-    await _pumpRow(tester, c, key);
-    expect(find.widgetWithText(ActionButton, '使用中'), findsOneWidget);
-    expect(find.text(AppStrings.deployFailed), findsNothing);
-
-    c.local = const LocalSchemaDto(
-      installed: true,
-      deployed: false,
-      buildAvailable: true,
-      installedScheme: key,
-      schemas: ['evo'],
-    );
-    await tester.pumpWidget(
-      KeyTaoTheme(
-        platform: c.info.platform,
-        home: FScaffold(child: InputPage(controller: c)),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.widgetWithText(AppBadge, AppStrings.deployed), findsNothing);
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('current-schema-selector')),
-        matching: find.text(AppStrings.pendingRedeploy),
-      ),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('a usable build keeps its scheme switches while edits wait', (
-    tester,
-  ) async {
-    final core = _SchemaSwitchCore()
-      ..local = const LocalSchemaDto(
-        installed: true,
-        deployed: false,
-        buildAvailable: true,
-        installedScheme: 'local-jd-v3-6-6',
-        schemas: ['JD6'],
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: c.info.platform,
+          home: FScaffold(child: InputPage(controller: c)),
+        ),
       );
-    RustLib.initMock(api: core);
-    final c = AppController(
-      info: const BridgeInfo(
-        platform: BridgePlatform.macOs,
-        appVersion: 'test',
-        userRoot: '/isolated/packages',
-      ),
-    );
-    addTearDown(() async {
-      c.dispose();
-      await core.events.close();
-      RustLib.dispose();
-    });
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(AppBadge, AppStrings.deployed), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('current-schema-selector')),
+          matching: find.text(AppStrings.packageDeployQueued),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
 
-    await c.refreshState();
-    expect(c.local?.deployed, isFalse);
-    expect(c.schemaSwitches.map((entry) => entry.name), ['jffh']);
-    _size(tester, const Size(1000, 900));
-    await _pumpSchemePage(tester, c);
-    expect(find.text('方案开关'), findsOneWidget);
-    final setting = tester.widget<SwitchSetting>(
-      find.widgetWithText(SwitchSetting, '繁體'),
-    );
-    expect(setting.onChanged, isNotNull);
-  });
+  testWidgets(
+    'a dirty build automatically deploys and keeps switches available',
+    (tester) async {
+      final core = _SchemaSwitchCore()
+        ..deployGate = Completer<void>()
+        ..local = const LocalSchemaDto(
+          installed: true,
+          deployed: false,
+          buildAvailable: true,
+          installedScheme: 'local-jd-v3-6-6',
+          schemas: ['JD6'],
+        );
+      RustLib.initMock(api: core);
+      final c = AppController(
+        info: const BridgeInfo(
+          platform: BridgePlatform.macOs,
+          appVersion: 'test',
+          userRoot: '/isolated/packages',
+        ),
+      );
+      addTearDown(() async {
+        c.dispose();
+        await core.events.close();
+        RustLib.dispose();
+      });
+
+      await c.refreshState();
+      await core.deployStarted.future;
+      expect(c.isDeploying, isTrue);
+      expect(c.local?.deployed, isFalse);
+      expect(c.schemaSwitches.map((entry) => entry.name), ['jffh']);
+      _size(tester, const Size(1000, 900));
+      await _pumpSchemePage(tester, c, settle: false);
+      expect(find.text('方案开关'), findsOneWidget);
+      final setting = tester.widget<SwitchSetting>(
+        find.widgetWithText(SwitchSetting, '繁體'),
+      );
+      expect(setting.onChanged, isNull);
+      core.deployGate!.complete();
+      await tester.pumpAndSettle();
+      expect(c.local?.deployed, isTrue);
+      expect(c.isDeploying, isFalse);
+      expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+      expect(
+        tester
+            .widget<SwitchSetting>(find.widgetWithText(SwitchSetting, '繁體'))
+            .onChanged,
+        isNotNull,
+      );
+    },
+  );
 
   testWidgets('package cards keep their own logo throughout deployment', (
     tester,
@@ -1479,11 +1498,22 @@ void main() {
         final repository = tester.widget<FItem>(
           find.widgetWithText(FItem, '仓库地址'),
         );
+        final directory = tester.widget<FItem>(
+          find.widgetWithText(FItem, '打开方案目录'),
+        );
         expect(repository.onPress, isNotNull);
+        expect(directory.onPress, isNotNull);
+        final changelog = tester
+            .widgetList<FItem>(find.widgetWithText(FItem, AppStrings.changelog))
+            .firstOrNull;
+        if (changelog != null) expect(changelog.onPress, isNotNull);
         expect(
           tester
               .widgetList<FItem>(find.byType(FItem))
-              .where((item) => item != repository),
+              .where(
+                (item) =>
+                    item != repository && item != directory && item != changelog,
+              ),
           everyElement(
             isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
           ),
@@ -1536,8 +1566,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(FItem), findsNWidgets(5));
       expect(find.text('打开方案目录'), findsOneWidget);
+      final directory = tester.widget<FItem>(
+        find.widgetWithText(FItem, '打开方案目录'),
+      );
+      expect(directory.onPress, isNotNull);
       expect(
-        tester.widgetList<FItem>(find.byType(FItem)),
+        tester.widgetList<FItem>(find.byType(FItem)).where(
+          (item) => item != directory,
+        ),
         everyElement(
           isA<FItem>().having((item) => item.onPress, 'onPress', isNull),
         ),
@@ -2697,9 +2733,11 @@ void main() {
   }
 
   testWidgets(
-    'pending post-download schema selection prompt opens dialog and activates on confirm',
+    'confirming post-download schema selection closes before deployment ends',
     (tester) async {
+      final schemaSave = Completer<bool>();
       final c = _PackageController()
+        ..schemaSave = schemaSave
         ..schemasResult = const [
           PackageSchemaDto(id: 's1', name: '冰雪键道', selected: true),
           PackageSchemaDto(id: 's2', name: '冰雪双拼', selected: true),
@@ -2727,6 +2765,9 @@ void main() {
 
       expect(c.actions, ['schemas:snow_jiandao:s1,s2:activate']);
       expect(find.text('选择方案'), findsNothing);
+      expect(schemaSave.isCompleted, isFalse);
+      schemaSave.complete(true);
+      await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),

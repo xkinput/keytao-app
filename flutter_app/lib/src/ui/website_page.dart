@@ -275,7 +275,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
               label: '网站域名',
               child: FSelect<String>(
                 size: FTextFieldSizeVariant.sm,
-                enabled: !controller.busy,
+                enabled: controller.canEditWebsiteSettings,
                 control: FSelectControl.lifted(
                   value: widget.origin,
                   onChange: (origin) {

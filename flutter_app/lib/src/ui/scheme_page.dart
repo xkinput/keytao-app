@@ -266,7 +266,7 @@ class _SchemePageState extends State<SchemePage> {
                       tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
                       child: FButton.icon(
                         variant: FButtonVariant.ghost,
-                        onPress: c.busy || c.schemeUpdatesLoading
+                        onPress: c.schemeUpdatesLoading
                             ? null
                             : c.refreshSchemeUpdates,
                         child: const Icon(
@@ -659,21 +659,17 @@ class SchemePackageRow extends StatelessWidget {
             childAnchor: Alignment.bottomRight,
             menuBuilder: (_, popover, _) => [
               FItemGroup(
-                enabled: !c.busy,
                 children: [
                   if (changelogBody != null)
                     FItem(
                       title: const Text(AppStrings.changelog),
                       prefix: const Icon(FLucideIcons.scrollText),
-                      onPress: c.busy
-                          ? null
-                          : () {
-                              popover.hide();
-                              showChangelog(context, c, changelogBody);
-                            },
+                      onPress: () {
+                        popover.hide();
+                        showChangelog(context, c, changelogBody);
+                      },
                     ),
-                  if ((schemeRepositoryUrls[schemeKey] ??
-                          package?.git?.repoUrl)
+                  if ((schemeRepositoryUrls[schemeKey] ?? package?.git?.repoUrl)
                       case final url?)
                     FItem(
                       title: const Text('仓库地址'),
@@ -748,12 +744,10 @@ class SchemePackageRow extends StatelessWidget {
                       FItem(
                         title: const Text('打开方案目录'),
                         prefix: const Icon(FLucideIcons.folderOpen),
-                        onPress: c.busy
-                            ? null
-                            : () {
-                                popover.hide();
-                                c.openSchemeDirectory(schemeKey);
-                              },
+                        onPress: () {
+                          popover.hide();
+                          c.openSchemeDirectory(schemeKey);
+                        },
                       ),
                     if (package.supportsUserWords)
                       FItem(
@@ -897,8 +891,8 @@ class SchemePackageRow extends StatelessWidget {
         ? AppBadge(
             deployFailed
                 ? AppStrings.deployFailed
-                : inUse
-                ? AppStrings.pendingRedeploy
+                : c.autoDeployQueued && active
+                ? AppStrings.packageDeployQueued
                 : AppStrings.pendingDeploy,
             background: deployFailed
                 ? palette.error.withValues(alpha: .12)
@@ -1291,7 +1285,7 @@ class VersionPicker extends StatelessWidget {
                 tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
                 child: FButton.icon(
                   variant: FButtonVariant.ghost,
-                  onPress: c.busy || c.releaseLoading ? null : c.refreshRelease,
+                  onPress: c.releaseLoading ? null : c.refreshRelease,
                   child: const Icon(
                     FLucideIcons.refreshCw,
                     size: 16,

@@ -1017,8 +1017,18 @@ class AppPageBody extends StatelessWidget {
 }
 
 class AppUpdateBanner extends StatelessWidget {
-  const AppUpdateBanner({super.key, required this.controller});
+  const AppUpdateBanner({super.key, required this.controller, this.onDownload});
   final AppController controller;
+  final ValueChanged<bool>? onDownload;
+
+  void _download({bool redownload = false}) {
+    if (onDownload case final confirm?) {
+      confirm(redownload);
+    } else {
+      controller.openAppUpdate(redownload: redownload);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final update = controller.appUpdate;
@@ -1045,6 +1055,9 @@ class AppUpdateBanner extends StatelessWidget {
     };
     final progress = controller.appUpdateProgress;
     final percent = progress?.percent.clamp(0, 100);
+    final canRunAction = action == AppUpdateAction.download
+        ? controller.canDownloadAppUpdate
+        : controller.canRunAppUpdate;
     return FTileGroup(
       children: [
         FTile(
@@ -1069,7 +1082,11 @@ class AppUpdateBanner extends StatelessWidget {
             ],
           ),
           suffix: Icon(icon, size: 16),
-          onPress: controller.canRunAppUpdate ? controller.openAppUpdate : null,
+          onPress: canRunAction
+              ? action == AppUpdateAction.download
+                    ? _download
+                    : controller.openAppUpdate
+              : null,
         ),
         if (action == AppUpdateAction.restart)
           FTile(
@@ -1111,8 +1128,8 @@ class AppUpdateBanner extends StatelessWidget {
             FTile(
               title: Text(AppStrings.redownloadAppUpdatePackage(locale)),
               suffix: const Icon(FLucideIcons.download, size: 16),
-              onPress: controller.canRunAppUpdate
-                  ? () => controller.openAppUpdate(redownload: true)
+              onPress: controller.canDownloadAppUpdate
+                  ? () => _download(redownload: true)
                   : null,
             ),
         ],

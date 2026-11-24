@@ -1547,9 +1547,17 @@ pub fn resolve_candidate_panel_preview(
     corner_radius: Option<f32>,
     background_color: String,
 ) -> Result<String, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let user_theme_path = runtime::state()
+        .and_then(|state| state.host.user_root())
+        .ok()
+        .map(|root| root.join("theme.yaml"))
+        .or_else(keytao_theme::default_user_theme_path);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let user_theme_path = keytao_theme::default_user_theme_path();
     let theme = keytao_theme::resolve_candidate_panel_preview_from_paths(
         keytao_theme::default_bundled_theme_path().as_deref(),
-        keytao_theme::default_user_theme_path().as_deref(),
+        user_theme_path.as_deref(),
         if system_dark {
             keytao_theme::EffectiveColorScheme::Dark
         } else {

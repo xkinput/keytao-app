@@ -123,7 +123,6 @@ abstract final class AppStrings {
   static const componentMissing = '系统组件缺失';
   static const schemeMissing = '未安装方案';
   static const pendingDeploy = '待部署';
-  static const pendingRedeploy = '改动待部署';
   static const usable = '可使用';
   static const systemLocation = '系统位置';
   static const directory = '目录';

@@ -107,7 +107,7 @@ enum AppPage {
   scheme('scheme', AppStrings.scheme),
   about('about', AppStrings.about),
   debug('debug', AppStrings.debug),
-  website('website', 'KeyTao 网站');
+  website('website', '网站');
 
   const AppPage(this.id, this.title);
   final String id;
@@ -175,8 +175,7 @@ extension AppViewOptions on AppController {
   bool get canInstallDuringSetup => canInstall;
   bool get canDeploy => !busy && !prefersLibjd && activeSchemeDownloaded;
   bool get canOpenTheme =>
-      !busy && uiSettings?.themeExists == true && uiSettings?.themePath != null;
-  bool get canEditLogs => !busy && logSettings != null;
+      uiSettings?.themeExists == true && uiSettings?.themePath != null;
   String get installButtonTitle => installButtonLabel;
   Map<String, String> get aboutValues => {
     'KeyTao': versions?.appVersion ?? info.appVersion,

@@ -113,7 +113,9 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   AppController get _controller => widget.controller;
   SystemFontCatalog get _fonts => SystemFontCatalog.forController(_controller);
   bool get _ready => !_controller.isAndroid || _controller.storageReady;
-  bool get _enabled => _ready && !_loading && !_working && !_controller.busy;
+  bool get _canPreview =>
+      _ready && !_loading && !_working && !_controller.savingTheme;
+  bool get _enabled => _canPreview && _controller.canSaveTheme;
   Map<String, dynamic> get _source =>
       _snapshot!['source'] as Map<String, dynamic>;
   Map<String, dynamic> get _resolved => _draft ?? _previews[_target]!;
@@ -183,14 +185,20 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       _storageReady = _ready;
       _pending = true;
     }
-    if (_pending && !_working && !_loading && !_controller.busy) {
+    if (_pending && !_working && !_loading && !_controller.savingTheme) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _load());
     }
     if (mounted) setState(() {});
   }
 
   Future<void> _load() async {
-    if (!mounted || !_ready || _loading || _working || _controller.busy) return;
+    if (!mounted ||
+        !_ready ||
+        _loading ||
+        _working ||
+        _controller.savingTheme) {
+      return;
+    }
     _pending = false;
     setState(() => _loading = true);
     try {
@@ -212,7 +220,11 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   }
 
   Future<void> _save(String path, Object? value) async {
-    if (!_enabled) return;
+    if (!_enabled) {
+      _cancelPreview();
+      if (_draft != null) setState(() => _draft = null);
+      return;
+    }
     _preview(path, value);
     await _perform(
       () => _controller.updateThemeEditor(
@@ -224,6 +236,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   }
 
   Future<void> _perform(Future<Map<String, dynamic>> Function() action) async {
+    if (!_enabled) return;
     _cancelPreview();
     setState(() {
       _working = true;
@@ -270,7 +283,13 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           _at(raw, 'ui.accentColor') is Map
               ? _at(_resolved, 'ui.accentColor')
               : _at(raw, 'ui.accentColor'),
-        'common.backgroundColor' => _at(_resolved, 'panel.background'),
+        'common.backgroundColor' =>
+          _at(_source, '$_target.$path') ??
+              _at(_source, path) ??
+              _at(
+                _resolved,
+                _mobile ? 'mobile.keyboard.background' : 'panel.background',
+              ),
         'common.cornerRadius' =>
           _at(_source, '$_target.$path') ??
               _at(_source, path) ??
@@ -305,7 +324,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
   }
 
   void _focusPreviewField(String path) {
-    if (!_enabled || !_supported(path)) return;
+    if (!_canPreview || !_supported(path)) return;
     final tab = _mobile;
     Element? findField() => _findElement(
       _controlKeys[tab]!.currentContext as Element?,
@@ -889,7 +908,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
             for (final entry in const {'light': '浅色', 'dark': '深色'}.entries)
               if (!_disabledTargets.contains(entry.key)) entry.key: entry.value,
           },
-          _enabled
+          _canPreview
               ? (value) => setState(() {
                   _cancelPreview();
                   _target = value;

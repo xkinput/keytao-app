@@ -13,7 +13,7 @@ class DebugPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controller;
     final settings = c.logSettings;
-    final enabled = c.canEditLogs && (!c.isMobile || !c.logsLoading);
+    final enabled = c.canEditLogs && settings != null;
     return AppPageBody(
       controller: c,
       page: AppPage.debug,
@@ -33,7 +33,7 @@ class DebugPage extends StatelessWidget {
                     : AppStrings.logsDisabled,
                 value: settings?.enabled ?? false,
                 onChanged: enabled
-                    ? (value) => c.saveLogSettings(value, settings!.level)
+                    ? (value) => c.saveLogSettings(value, settings.level)
                     : null,
               ),
               ChoiceSetting<RuntimeLogLevelDto>(
@@ -41,7 +41,7 @@ class DebugPage extends StatelessWidget {
                 value: settings?.level ?? RuntimeLogLevelDto.info,
                 options: logLevels,
                 onChanged: enabled
-                    ? (value) => c.saveLogSettings(settings!.enabled, value)
+                    ? (value) => c.saveLogSettings(settings.enabled, value)
                     : null,
               ),
               ActionRow(
@@ -50,20 +50,18 @@ class DebugPage extends StatelessWidget {
                     AppStrings.refresh,
                     primary: true,
                     icon: FLucideIcons.refreshCw,
-                    onPress: c.busy || c.logsLoading ? null : c.refreshLogs,
+                    onPress: c.canEditLogs ? c.refreshLogs : null,
                   ),
                   if (c.isAndroid)
                     ActionButton(
                       AppStrings.share,
                       icon: FLucideIcons.share2,
-                      onPress: c.busy || c.logsLoading ? null : c.shareLogs,
+                      onPress: c.canEditLogs ? c.shareLogs : null,
                     ),
                   ActionButton(
                     AppStrings.clear,
                     icon: FLucideIcons.trash2,
-                    onPress: c.busy || (c.isMobile && c.logsLoading)
-                        ? null
-                        : c.clearLogs,
+                    onPress: c.canEditLogs ? c.clearLogs : null,
                   ),
                   if (!c.isMobile) ...[
                     ActionButton(

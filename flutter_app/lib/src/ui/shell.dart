@@ -99,12 +99,19 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final c = widget.controller;
     if (_cloudDialogOpen ||
         c.busy ||
+        (c.savingTheme && c.pendingCloudProfile != null) ||
         c.loggingIn ||
         (c.pendingCloudProfile == null && c.pendingCloudActiveScheme == null)) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted || _cloudDialogOpen || c.busy || c.loggingIn) return;
+      if (!mounted ||
+          _cloudDialogOpen ||
+          c.busy ||
+          (c.savingTheme && c.pendingCloudProfile != null) ||
+          c.loggingIn) {
+        return;
+      }
       final profile = c.pendingCloudProfile;
       final active = c.pendingCloudActiveScheme;
       if (profile == null && active == null) return;
@@ -313,10 +320,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
                             icon: _navigationIcon(page, c, 20),
-                            label: Text(
-                              page == AppPage.website ? '网站' : page.title,
-                              semanticsLabel: page.title,
-                            ),
+                            label: Text(page.title),
                           ),
                       ],
                     ),

@@ -460,7 +460,7 @@ class _CurrentSchemeHero extends StatelessWidget {
       _ when !installed => AppStrings.schemeMissing,
       _ when c.prefersLibjd => '未转换',
       _ when !c.hasUsableBuild => '未部署',
-      _ when !local.deployed => AppStrings.pendingRedeploy,
+      _ when c.autoDeployQueued => AppStrings.packageDeployQueued,
       _ => null,
     };
     final schemeName =

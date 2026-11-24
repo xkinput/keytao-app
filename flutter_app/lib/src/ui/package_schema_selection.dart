@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
@@ -15,19 +15,28 @@ Future<void> showPackageSchemaSelection(
   bool activateOnConfirm = false,
   bool convert = false,
 }) async {
-  final schemaId = await showFDialog<String>(
+  final schemaIds = await showFDialog<List<String>>(
     context: context,
     barrierDismissible: false,
     builder: (_, _, animation) => _SchemaSelectionDialog(
       controller: controller,
       packageKey: packageKey,
       animation: animation,
-      activateOnConfirm: activateOnConfirm,
       convert: convert,
     ),
   );
-  if (convert && schemaId != null) {
-    await controller.convertSchemePackage(packageKey, schemaId);
+  if (schemaIds == null) {
+    if (controller.autoDeployQueued) await controller.refreshSchemas();
+    return;
+  }
+  if (convert) {
+    await controller.convertSchemePackage(packageKey, schemaIds.single);
+  } else {
+    await controller.setPackageSchemas(
+      packageKey,
+      schemaIds,
+      activate: activateOnConfirm,
+    );
   }
 }
 
@@ -36,14 +45,12 @@ class _SchemaSelectionDialog extends StatefulWidget {
     required this.controller,
     required this.packageKey,
     required this.animation,
-    this.activateOnConfirm = false,
     required this.convert,
   });
 
   final AppController controller;
   final String packageKey;
   final Animation<double> animation;
-  final bool activateOnConfirm;
   final bool convert;
 
   @override
@@ -55,7 +62,6 @@ class _SchemaSelectionDialogState extends State<_SchemaSelectionDialog> {
   final Set<String> _selected = {};
   String? _conversionSchema;
   bool _loading = true;
-  bool _saving = false;
   String? _error;
 
   @override
@@ -101,115 +107,89 @@ class _SchemaSelectionDialogState extends State<_SchemaSelectionDialog> {
     }
   }
 
-  Future<void> _save() async {
-    if (widget.convert) {
-      Navigator.pop(context, _conversionSchema);
-      return;
-    }
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    final ok = await widget.controller.setPackageSchemas(
-      widget.packageKey,
-      _schemas
-          .where((schema) => _selected.contains(schema.id))
-          .map((schema) => schema.id)
-          .toList(),
-      activate: widget.activateOnConfirm,
+  void _confirm() {
+    if (widget.controller.busy) return;
+    Navigator.pop(
+      context,
+      widget.convert
+          ? [_conversionSchema!]
+          : [
+              for (final schema in _schemas)
+                if (_selected.contains(schema.id)) schema.id,
+            ],
     );
-    if (!mounted) return;
-    if (ok) {
-      Navigator.pop(context);
-    } else {
-      setState(() {
-        _saving = false;
-        _error = widget.controller.packageError ?? widget.controller.error;
-      });
-    }
   }
 
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_saving,
-    child: AppDialog(
-      title: widget.convert
-          ? selectConversionSchemaLabel
-          : AppStrings.selectSchemas,
-      animation: widget.animation,
-      actions: [
-        ActionButton(
-          AppStrings.cancel,
-          onPress: _saving ? null : () => Navigator.pop(context),
-        ),
-        ActionButton(
-          widget.convert
-              ? '转换词库'
-              : (_saving ? AppStrings.deploying : AppStrings.deploy),
+  Widget build(BuildContext context) => AppDialog(
+    title: widget.convert
+        ? selectConversionSchemaLabel
+        : AppStrings.selectSchemas,
+    animation: widget.animation,
+    actions: [
+      ActionButton(AppStrings.cancel, onPress: () => Navigator.pop(context)),
+      ListenableBuilder(
+        listenable: widget.controller,
+        builder: (context, _) => ActionButton(
+          widget.convert ? '转换词库' : AppStrings.deploy,
           primary: true,
           onPress:
-              _loading ||
-                  _saving ||
+              widget.controller.busy ||
+                  _loading ||
                   (widget.convert
                       ? _conversionSchema == null
                       : _selected.isEmpty)
               ? null
-              : _save,
+              : _confirm,
         ),
-      ],
-      child: SizedBox(
-        width: 480,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_loading || _saving) const FProgress(),
-            if (_error case final error?) ErrorMessage(error),
-            if (widget.convert && _conversionSchema != null)
-              BigTextRadioGroup<String>(
-                label: selectConversionSchemaLabel,
-                value: _conversionSchema!,
-                options: {
-                  for (final schema in _schemas)
-                    schema.id:
-                        _schemas.any(
-                          (other) =>
-                              other.id != schema.id &&
-                              other.name == schema.name,
-                        )
-                        ? '${schema.name} (${schema.id})'
-                        : schema.name,
-                },
-                onChanged: (id) => setState(() => _conversionSchema = id),
-              ),
-            if (widget.convert &&
-                !_loading &&
-                _error == null &&
-                _schemas.isEmpty)
-              const Text('此方案包没有可转换的子方案'),
-            if (!widget.convert)
-              for (final schema in _schemas)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: FCheckbox(
-                    value: _selected.contains(schema.id),
-                    enabled:
-                        !_saving &&
-                        !(_selected.length == 1 &&
-                            _selected.contains(schema.id)),
-                    label: Text(schema.name),
-                    description: Text(schema.id),
-                    onChange: (value) => setState(() {
-                      if (value) {
-                        _selected.add(schema.id);
-                      } else if (_selected.length > 1) {
-                        _selected.remove(schema.id);
-                      }
-                    }),
-                  ),
+      ),
+    ],
+    child: SizedBox(
+      width: 480,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_loading) const FProgress(),
+          if (_error case final error?) ErrorMessage(error),
+          if (widget.convert && _conversionSchema != null)
+            BigTextRadioGroup<String>(
+              label: selectConversionSchemaLabel,
+              value: _conversionSchema!,
+              options: {
+                for (final schema in _schemas)
+                  schema.id:
+                      _schemas.any(
+                        (other) =>
+                            other.id != schema.id && other.name == schema.name,
+                      )
+                      ? '${schema.name} (${schema.id})'
+                      : schema.name,
+              },
+              onChanged: (id) => setState(() => _conversionSchema = id),
+            ),
+          if (widget.convert && !_loading && _error == null && _schemas.isEmpty)
+            const Text('此方案包没有可转换的子方案'),
+          if (!widget.convert)
+            for (final schema in _schemas)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: FCheckbox(
+                  value: _selected.contains(schema.id),
+                  enabled:
+                      !(_selected.length == 1 && _selected.contains(schema.id)),
+                  label: Text(schema.name),
+                  description: Text(schema.id),
+                  onChange: (value) => setState(() {
+                    if (value) {
+                      _selected.add(schema.id);
+                    } else if (_selected.length > 1) {
+                      _selected.remove(schema.id);
+                    }
+                  }),
                 ),
-          ],
-        ),
+              ),
+        ],
       ),
     ),
   );

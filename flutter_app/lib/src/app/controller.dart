@@ -162,12 +162,16 @@ class AppController extends ChangeNotifier {
   bool get hasOnboarding => isMobile || info.platform == BridgePlatform.macOs;
   bool get showsEmbeddedComposition => !isMobile;
   bool _busy = false;
+  bool _installingAppUpdate = false;
   bool _switchingInput = false;
   bool get isSwitchingInput => _switchingInput;
   bool get busy =>
-      _busy || windowsRegistrationBusy || _pendingUserWordDeletes.isNotEmpty;
+      busyWithoutPendingUserWordDeletes || _pendingUserWordDeletes.isNotEmpty;
   bool get busyWithoutPendingUserWordDeletes =>
-      _busy || windowsRegistrationBusy;
+      _busy ||
+      windowsRegistrationBusy ||
+      _installingAppUpdate ||
+      (isMobile && savingTheme);
   set busy(bool value) => _busy = value;
   bool _platformStarted = false;
   bool _windowsActionRequested = false;
@@ -261,8 +265,18 @@ class AppController extends ChangeNotifier {
     _migrationFailureToastShown = true;
     _pendingMigrationFailureToast = message;
   }
+
   final Set<String> _iosUpgradeDeploymentAttempts = {};
-  bool _logsWhenIdle = false;
+  bool _editingLogs = false;
+  bool get canEditLogs => !logsLoading && !_editingLogs;
+  bool _savingWebsiteSettings = false;
+  bool get canEditWebsiteSettings => !_savingWebsiteSettings;
+  bool savingTheme = false;
+  bool get canSaveTheme =>
+      !savingTheme &&
+      !_applyingCloudProfile &&
+      !_installingAppUpdate &&
+      (!isMobile || !busy);
   int _releaseRequest = 0;
   int _schemeUpdatesRequest = 0;
   AppPage activePage = AppPage.input;
@@ -308,7 +322,13 @@ class AppController extends ChangeNotifier {
         : AppUpdateAction.openPackage;
   }
 
-  bool get canRunAppUpdate => !busy && !appUpdateBusy && !checkingAppUpdate;
+  bool get canChangeAppUpdateChannel => !appUpdateBusy && !checkingAppUpdate;
+  bool get canDownloadAppUpdate => canChangeAppUpdateChannel;
+  bool get canRunAppUpdate =>
+      canChangeAppUpdateChannel &&
+      ((!busy && !savingTheme) ||
+          appUpdateAction == AppUpdateAction.download ||
+          appUpdateAction == AppUpdateAction.openLink);
 
   List<InstalledPackageDto> installedPackages = [];
   List<IsolatedPackageDto> isolatedPackages = [];
@@ -408,6 +428,27 @@ class AppController extends ChangeNotifier {
   bool get hasPackageDeployProgress => _packageDeployProgress.isNotEmpty;
   bool get hasUsableBuild =>
       local?.deployed == true || local?.buildAvailable == true;
+  String? _attemptedAutoDeployKey;
+  bool get _activeBuildHasChanges =>
+      !prefersLibjd &&
+      !packageMigrationFailed &&
+      _localSchemaError == null &&
+      local?.installed == true &&
+      local?.buildAvailable == true &&
+      local?.deployed == false;
+  bool get autoDeployQueued =>
+      _activeBuildHasChanges && _attemptedAutoDeployKey != activeSchemeKey;
+
+  void _deployChangedScheme() {
+    if (_disposed || busy || _resumeRefreshInFlight) return;
+    if (!_activeBuildHasChanges) {
+      _attemptedAutoDeployKey = null;
+      return;
+    }
+    if (!autoDeployQueued || hasPendingSchemaSelectionPrompt) return;
+    unawaited(deploy(schemeKey: activeSchemeKey));
+  }
+
   bool get activeSchemeDownloaded =>
       local?.installed == true ||
       installedPackageFor(activeSchemeKey)?.hasPackageZip == true ||
@@ -668,15 +709,7 @@ class AppController extends ChangeNotifier {
       _pendingUserWordDeletes.add(key);
     } else {
       _pendingUserWordDeletes.remove(key);
-      if (_refreshSchemasWhenIdle && !_disposed) {
-        _refreshSchemasWhenIdle = false;
-        unawaited(refreshSchemas());
-      }
-      if (_logsWhenIdle && !_disposed) {
-        _logsWhenIdle = false;
-        if (activePage == AppPage.debug) unawaited(refreshLogs());
-      }
-      unawaited(_handleWindowsAction());
+      _resumeDeferredActions();
     }
     _changed();
   }
@@ -1403,11 +1436,7 @@ class AppController extends ChangeNotifier {
     unawaited(setWindowTitle());
     if (page == AppPage.debug) {
       sharedLogPath = null;
-      if (busy) {
-        _logsWhenIdle = true;
-      } else {
-        unawaited(refreshLogs());
-      }
+      unawaited(refreshLogs());
     }
     if (page == AppPage.scheme) {
       unawaited(refreshSchemeUpdates());
@@ -1420,18 +1449,29 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
-  Future<bool> saveWebsiteSettings({String? origin, bool? hidden}) =>
-      run(() async {
-        final nextOrigin = origin ?? websiteOrigin;
-        final nextHidden = hidden ?? websiteHidden;
-        await core.setWebsiteSettings(origin: nextOrigin, hidden: nextHidden);
-        if (_disposed) return;
-        websiteOrigin = nextOrigin;
-        _websiteHidden.value = nextHidden;
-        if (websiteHidden && activePage == AppPage.website) {
-          selectPage(AppPage.input);
-        }
-      });
+  Future<bool> saveWebsiteSettings({String? origin, bool? hidden}) async {
+    if (_disposed || !canEditWebsiteSettings) return false;
+    _savingWebsiteSettings = true;
+    _changed();
+    try {
+      final nextOrigin = origin ?? websiteOrigin;
+      final nextHidden = hidden ?? websiteHidden;
+      await core.setWebsiteSettings(origin: nextOrigin, hidden: nextHidden);
+      if (_disposed) return false;
+      websiteOrigin = nextOrigin;
+      _websiteHidden.value = nextHidden;
+      if (websiteHidden && activePage == AppPage.website) {
+        selectPage(AppPage.input);
+      }
+      return true;
+    } catch (failure) {
+      if (!_disposed) showToast(errorText(failure));
+      return false;
+    } finally {
+      _savingWebsiteSettings = false;
+      _changed();
+    }
+  }
 
   Future<bool> run(
     Future<void> Function() action, {
@@ -1461,20 +1501,22 @@ class AppController extends ChangeNotifier {
       _switchingInput = false;
       busy = false;
       _changed();
-      if (_refreshOnResumeWhenIdle) {
-        _refreshOnResumeWhenIdle = false;
-        unawaited(_refreshOnResume());
-      }
-      if (_refreshSchemasWhenIdle && !_disposed) {
-        _refreshSchemasWhenIdle = false;
-        unawaited(refreshSchemas());
-      }
-      if (_logsWhenIdle && !_disposed) {
-        _logsWhenIdle = false;
-        if (activePage == AppPage.debug) unawaited(refreshLogs());
-      }
-      unawaited(_handleWindowsAction());
+      _resumeDeferredActions();
     }
+  }
+
+  void _resumeDeferredActions() {
+    if (busy || _disposed) return;
+    if (_refreshOnResumeWhenIdle) {
+      _refreshOnResumeWhenIdle = false;
+      unawaited(_refreshOnResume());
+    }
+    if (_refreshSchemasWhenIdle) {
+      _refreshSchemasWhenIdle = false;
+      unawaited(refreshSchemas());
+    }
+    unawaited(_handleWindowsAction());
+    _deployChangedScheme();
   }
 
   Future<void> _readLocal() async {
@@ -1633,7 +1675,14 @@ class AppController extends ChangeNotifier {
       final previous = _activePreviewTarget;
       final previousEngineEnabled = inputEngineEnabled;
       await _readInputEngineEnabled();
-      local = await core.checkLocalSchema();
+      final snapshot = await core.checkLocalSchema();
+      if (_disposed) return;
+      if (busy) {
+        _refreshSchemasWhenIdle = true;
+        return;
+      }
+      local = snapshot;
+      _localSchemaError = null;
       deployWarning = local?.deployWarning;
       await _readInstalledPackages();
       await refreshIsolatedPackages(notify: false);
@@ -1644,6 +1693,7 @@ class AppController extends ChangeNotifier {
         unawaited(refreshCandidatePreview());
       }
       _changed();
+      _deployChangedScheme();
     } catch (_) {
       // Keep the last schema visible if a foreground refresh is unavailable.
     }
@@ -1825,6 +1875,7 @@ class AppController extends ChangeNotifier {
 
   Future<bool> refreshState() async {
     final result = await run(() async {
+      _attemptedAutoDeployKey = null;
       String? startupImeError;
       if (!_platformStarted) {
         _platformStarted = true;
@@ -1872,6 +1923,7 @@ class AppController extends ChangeNotifier {
     if (!isIos ||
         prefersLibjd ||
         packageMigrationFailed ||
+        _activeBuildHasChanges ||
         local?.installed != true ||
         local?.deployed == true) {
       return;
@@ -1974,7 +2026,9 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> setAppUpdatePrereleases(bool enabled) async {
-    if (_disposed || !canRunAppUpdate || appUpdatePrereleases == enabled) {
+    if (_disposed ||
+        !canChangeAppUpdateChannel ||
+        appUpdatePrereleases == enabled) {
       return false;
     }
     appUpdateBusy = true;
@@ -2127,6 +2181,7 @@ class AppController extends ChangeNotifier {
     } finally {
       _resumeRefreshInFlight = false;
       _changed();
+      _deployChangedScheme();
     }
   }
 
@@ -3011,8 +3066,12 @@ class AppController extends ChangeNotifier {
         installedPackages
             .where((package) => package.inUse)
             .map((package) => package.schemeKey)
-              .firstOrNull ??
+            .firstOrNull ??
         (activeSchemeDownloaded ? activeSchemeKey : null);
+    if (_activeBuildHasChanges && deployingSchemeKey == activeSchemeKey) {
+      _attemptedAutoDeployKey = activeSchemeKey;
+    }
+    _userWordsDeployDebounce?.cancel();
     final deploying = prefersLibjd
         ? AppStrings.deployingLibjd
         : AppStrings.deployingLibrime;
@@ -3594,7 +3653,7 @@ class AppController extends ChangeNotifier {
 
   Future<bool> applyCloudProfile() {
     final profile = pendingCloudProfile;
-    if (profile == null) return Future.value(false);
+    if (profile == null || savingTheme) return Future.value(false);
     return _schemeCloudAction(() async {
       _applyingCloudProfile = true;
       _schemeSyncDebounce?.cancel();
@@ -4354,20 +4413,19 @@ class AppController extends ChangeNotifier {
     Future<T> Function() action, {
     bool refresh = false,
   }) async {
-    late T result;
-    Object? failure;
-    final completed = await run(() async {
-      try {
-        if (isAndroid) await _requireStorage();
-        result = await action();
-        if (refresh) uiSettings = await core.getImeUiSettings();
-      } catch (error) {
-        failure = error;
-        rethrow;
-      }
-    });
-    if (!completed) throw failure ?? StateError('操作中');
-    return result;
+    if (_disposed || !canSaveTheme) throw StateError('操作中');
+    savingTheme = true;
+    _changed();
+    try {
+      if (isAndroid) await _requireStorage();
+      final result = await action();
+      if (refresh) uiSettings = await core.getImeUiSettings();
+      return result;
+    } finally {
+      savingTheme = false;
+      _changed();
+      if (isMobile) _resumeDeferredActions();
+    }
   }
 
   Future<Map<String, dynamic>> getThemeEditor() async =>
@@ -4441,7 +4499,7 @@ class AppController extends ChangeNotifier {
     bool resetCornerRadius = false,
     String? backgroundColor,
     double? fontSize,
-  }) {
+  }) async {
     final normalizedAccent = accentColor?.trim().toUpperCase();
     final normalizedBackground = backgroundColor?.trim().toUpperCase();
     // Match the Rust IME_UI_*_CHANGED flags.
@@ -4456,16 +4514,15 @@ class AppController extends ChangeNotifier {
         (fontSize != null ? fontSizeChanged : 0);
     if (normalizedAccent != null &&
         !RegExp(r'^#[0-9A-F]{6}$').hasMatch(normalizedAccent)) {
-      return Future.value(false);
+      return false;
     }
     if ((cornerRadius != null && !cornerRadius.isFinite) ||
         (normalizedBackground != null &&
             normalizedBackground.isNotEmpty &&
             !RegExp(r'^#[0-9A-F]{6}$').hasMatch(normalizedBackground))) {
-      return Future.value(false);
+      return false;
     }
-    return run(() async {
-      if (isAndroid) await _requireStorage();
+    return _saveAppearance(() async {
       final current = await core.getImeUiSettings();
       uiSettings = await core.setImeUiSettings(
         colorScheme: colorScheme ?? current.colorScheme,
@@ -4484,21 +4541,31 @@ class AppController extends ChangeNotifier {
           hide_: hideCandidatePanel,
         );
       }
-      await _persistSchemeSettings();
     });
   }
 
-  Future<bool> saveEmbedded(bool value) => run(() async {
+  Future<bool> _saveAppearance(Future<void> Function() save) async {
+    if (_disposed || !canSaveTheme) return false;
+    try {
+      await themeLibraryAction(() async {
+        await save();
+        await _persistSchemeSettings();
+      });
+      return true;
+    } catch (failure) {
+      if (!_disposed) showToast(errorText(failure));
+      return false;
+    }
+  }
+
+  Future<bool> saveEmbedded(bool value) => _saveAppearance(() async {
     uiSettings = await core.setImeEmbeddedComposition(embedded: value);
-    await _persistSchemeSettings();
   });
-  Future<bool> saveHideCandidatePanel(bool value) => run(() async {
+  Future<bool> saveHideCandidatePanel(bool value) => _saveAppearance(() async {
     uiSettings = await core.setImeHideCandidatePanel(hide_: value);
-    await _persistSchemeSettings();
   });
-  Future<bool> saveShowTrayModeIndicator(bool value) => run(() async {
+  Future<bool> saveShowTrayModeIndicator(bool value) => _saveAppearance(() async {
     uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
-    await _persistSchemeSettings();
   });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {
     await _readLocal();
@@ -4580,7 +4647,10 @@ class AppController extends ChangeNotifier {
     bool redownload = false,
   }) async {
     final update = appUpdate;
-    if (_disposed || update == null || !update.hasUpdate || !canRunAppUpdate) {
+    if (_disposed ||
+        update == null ||
+        !update.hasUpdate ||
+        !(redownload ? canDownloadAppUpdate : canRunAppUpdate)) {
       return false;
     }
     final version = update.latestVersion;
@@ -4588,6 +4658,9 @@ class AppController extends ChangeNotifier {
     final action = interactive && appUpdateAction == AppUpdateAction.restart
         ? AppUpdateAction.openPackage
         : appUpdateAction;
+    _installingAppUpdate =
+        action == AppUpdateAction.openPackage ||
+        action == AppUpdateAction.restart;
     appUpdateBusy = true;
     appUpdateProgress = null;
     appUpdateActionError = null;
@@ -4610,7 +4683,6 @@ class AppController extends ChangeNotifier {
             restart: action == AppUpdateAction.restart,
           );
           if (executable != null) {
-            if (busy) throw StateError(AppStrings.appUpdateReopenManually);
             try {
               await Process.start(
                 executable,
@@ -4643,9 +4715,11 @@ class AppController extends ChangeNotifier {
       appUpdateActionError = errorText(failure);
       return false;
     } finally {
+      _installingAppUpdate = false;
       appUpdateBusy = false;
       appUpdateProgress = null;
       _changed();
+      _resumeDeferredActions();
     }
   }
 
@@ -4784,7 +4858,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> refreshLogs() async {
-    if (_disposed || logsLoading) return false;
+    if (_disposed || !canEditLogs) return false;
     await _readLogs();
     return true;
   }
@@ -4793,17 +4867,24 @@ class AppController extends ChangeNotifier {
     String failurePrefix,
     Future<void> Function() action, {
     String? notice,
-  }) => run(() async {
+  }) async {
+    if (_disposed || !canEditLogs) return false;
+    _editingLogs = true;
     debugError = null;
     debugNotice = null;
+    _changed();
     try {
       await action();
       debugNotice = notice;
+      return true;
     } catch (failure) {
       debugError = AppStrings.failure(failurePrefix, errorText(failure));
-      throw StateError(debugError!);
+      return false;
+    } finally {
+      _editingLogs = false;
+      _changed();
     }
-  });
+  }
 
   Future<bool> saveLogSettings(bool enabled, RuntimeLogLevelDto level) =>
       _logAction(AppStrings.updateLogSettingsFailure, () async {

@@ -190,28 +190,20 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('the update banner downloads before offering installer actions', (
+  testWidgets('the update dialog closes and the page shows download progress', (
     tester,
   ) async {
     final core = _AboutCore();
     RustLib.initMock(api: core);
     addTearDown(RustLib.dispose);
     addTearDown(core.events.close);
-    final controller =
-        AppController(
-            info: const BridgeInfo(
-              platform: BridgePlatform.windows,
-              appVersion: '1',
-              userRoot: '/isolated/keytao',
-            ),
-          )
-          ..appUpdate = const AppUpdateDto(
-            currentVersion: '1',
-            latestVersion: '2',
-            hasUpdate: true,
-            releaseUrl: 'https://example.com/releases/2',
-            installMode: 'restart',
-          );
+    final controller = AppController(
+      info: const BridgeInfo(
+        platform: BridgePlatform.windows,
+        appVersion: '1',
+        userRoot: '/isolated/keytao',
+      ),
+    );
     addTearDown(controller.dispose);
     await controller.connectEvents();
     await tester.pumpWidget(
@@ -226,9 +218,29 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('下载升级包'));
+    final deploy = Completer<void>();
+    final deployment = controller.run(() => deploy.future);
     await tester.pump();
+    final check = find.byKey(const ValueKey('check-app-update'));
+    await tester.ensureVisible(check);
+    await tester.tap(check);
+    await tester.pump();
+    core.update.complete(
+      const AppUpdateDto(
+        currentVersion: '1',
+        latestVersion: '2',
+        hasUpdate: true,
+        releaseUrl: 'https://example.com/releases/2',
+        installMode: 'restart',
+      ),
+    );
+    await tester.pumpAndSettle();
+    final dialog = find.byType(AppDialog);
+    await tester.tap(find.descendant(of: dialog, matching: find.text('下载升级包')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
     expect(core.downloads, ['2']);
+    expect(dialog, findsNothing);
     expect(find.text('正在下载升级包…'), findsOneWidget);
     expect(find.text('重启并安装'), findsNothing);
 
@@ -255,6 +267,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(FDeterminateProgress), findsNothing);
     expect(find.text('重启并安装'), findsOneWidget);
+
+    await tester.tap(find.text('重启并安装'));
+    await tester.pumpAndSettle();
+    expect(core.installerCalls, isEmpty);
+    deploy.complete();
+    expect(await deployment, isTrue);
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('重启并安装'));
     await tester.pumpAndSettle();

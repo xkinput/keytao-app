@@ -710,11 +710,12 @@ void main() {
       controller = create(mobile: mobile)..latestRelease = release;
       core.calls.clear();
       core.delayReleases = true;
-      var changes = 0;
-      controller.addListener(() => changes++);
+      var notifiedSource = controller.source;
+      controller.addListener(() => notifiedSource = controller.source);
       for (final source in ['github', 'gitee']) {
         controller.selectSource(source);
         await settle();
+        expect(notifiedSource, source);
         expect(core.calls, isEmpty);
         expect(controller.latestRelease, same(release));
         expect(controller.releaseLoading, isFalse);
@@ -725,13 +726,60 @@ void main() {
         expect(controller.canInstall, isTrue);
         expect(controller.changelogBody, 'Release notes');
       }
-      expect(changes, 2);
       controller.busy = true;
       controller.selectSource('github');
       expect(controller.downloadUrl, 'offline-gh');
       expect(controller.latestRelease, same(release));
       expect(core.calls, isEmpty);
     }
+  });
+
+  test('a failed automatic deployment keeps the build and stops retrying', () async {
+    controller.dispose();
+    controller = create(mobile: false);
+    core.local = const LocalSchemaDto(
+      installed: true,
+      deployed: false,
+      buildAvailable: true,
+      installedScheme: 'keytao',
+      schemas: ['keytao'],
+    );
+    core.deployFailure = 'invalid YAML';
+    await controller.refreshSchemas();
+    await core.deployStarted.future;
+    await settle();
+    expect(controller.hasUsableBuild, isTrue);
+    expect(controller.isDeploying, isFalse);
+    expect(controller.deploySteps.last.message, contains('invalid YAML'));
+    await controller.refreshSchemas();
+    expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+    core.deployFailure = null;
+    expect(await controller.deploy(), isTrue);
+    expect(controller.local?.deployed, isTrue);
+  });
+
+  test('desktop theme saves share one slot during deployment', () async {
+    controller.dispose();
+    controller = create(mobile: false);
+    final deployGate = Completer<void>();
+    final deployment = controller.run(() => deployGate.future);
+    final themeGate = Completer<void>();
+    final themeWrite = controller.themeLibraryAction(() => themeGate.future);
+    try {
+      expect(controller.busy, isTrue);
+      expect(controller.savingTheme, isTrue);
+      expect(controller.canSaveTheme, isFalse);
+      await expectLater(
+        controller.themeLibraryAction(() async => fail('overlapping write')),
+        throwsStateError,
+      );
+    } finally {
+      themeGate.complete();
+      deployGate.complete();
+      await themeWrite;
+      await deployment;
+    }
+    expect(controller.canSaveTheme, isTrue);
   });
 
   test(
@@ -1516,14 +1564,15 @@ void main() {
       final gate = Completer<void>();
       controller.selectPage(AppPage.input);
       final running = controller.run(() => gate.future);
-      controller.selectPage(AppPage.debug);
       core.logFailures.clear();
       core.calls.clear();
-      gate.complete();
-      await running;
+      controller.selectPage(AppPage.debug);
       await settle();
+      expect(controller.busy, isTrue);
       expect(core.calls, containsAll(['settings', 'runtime', 'system']));
       expect(controller.debugError, isNull);
+      gate.complete();
+      await running;
     },
   );
 

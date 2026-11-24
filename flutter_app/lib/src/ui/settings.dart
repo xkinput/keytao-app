@@ -398,23 +398,23 @@ class _SettingsCardState extends State<SettingsCard> {
                   label: '候选模式',
                   value: s.hideCandidatePanel ? null : s.orientation,
                   options: const {...orientations, null: '隐藏'},
-                  onChanged: c.busy
-                      ? null
-                      : (value) => value == null
+                  onChanged: c.canSaveTheme
+                      ? (value) => value == null
                             ? c.saveHideCandidatePanel(true)
                             : _savePreview(
                                 orientation: value,
                                 hideCandidatePanel: false,
-                              ),
+                              )
+                      : null,
                 ),
                 if (c.showsEmbeddedComposition)
                   _separated(
                     SwitchSetting(
                       AppStrings.embedded,
                       value: s.effectiveEmbeddedComposition,
-                      onChanged: c.busy || s.hideCandidatePanel
-                          ? null
-                          : c.saveEmbedded,
+                      onChanged: c.canSaveTheme && !s.hideCandidatePanel
+                          ? c.saveEmbedded
+                          : null,
                     ),
                   ),
                 if (c.isWindows)
@@ -422,7 +422,9 @@ class _SettingsCardState extends State<SettingsCard> {
                     SwitchSetting(
                       '托盘显示中英状态',
                       value: s.showTrayModeIndicator,
-                      onChanged: c.busy ? null : c.saveShowTrayModeIndicator,
+                      onChanged: c.canSaveTheme
+                          ? c.saveShowTrayModeIndicator
+                          : null,
                     ),
                   ),
               ]),
@@ -448,9 +450,9 @@ class _SettingsCardState extends State<SettingsCard> {
                   label: '配色方案',
                   value: s.colorScheme,
                   options: colorSchemes,
-                  onChanged: c.busy
-                      ? null
-                      : (value) => _savePreview(colorScheme: value),
+                  onChanged: c.canSaveTheme
+                      ? (value) => _savePreview(colorScheme: value)
+                      : null,
                 ),
                 if (!s.hideCandidatePanel) ...[
                   ..._appearanceControls(),
@@ -462,12 +464,12 @@ class _SettingsCardState extends State<SettingsCard> {
                     divisions: candidateFontDivisions,
                     onPreview: (value) =>
                         _schedulePreview(() => _previewFontSize = value),
-                    onChanged: c.busy
-                        ? null
-                        : (value) => _savePreview(fontSize: value),
+                    onChanged: c.canSaveTheme
+                        ? (value) => _savePreview(fontSize: value)
+                        : null,
                   ),
                 ],
-                ActionButton('编辑主题', onPress: c.busy ? null : _editTheme),
+                ActionButton('编辑主题', onPress: _editTheme),
               ]),
             ],
           ),
@@ -536,14 +538,16 @@ class _SettingsCardState extends State<SettingsCard> {
           _previewRadius = value;
           _resetRadius = false;
         }),
-        onChanged: c.busy ? null : (value) => _savePreview(cornerRadius: value),
+        onChanged: c.canSaveTheme
+            ? (value) => _savePreview(cornerRadius: value)
+            : null,
       ),
       Align(
         alignment: Alignment.centerRight,
         child: ActionButton(
           '恢复默认',
           icon: FLucideIcons.rotateCcw,
-          onPress: c.busy || settings.cornerRadius == null
+          onPress: !c.canSaveTheme || settings.cornerRadius == null
               ? null
               : () => _savePreview(resetCornerRadius: true),
         ),
@@ -693,7 +697,7 @@ class _SettingsCardState extends State<SettingsCard> {
             children: [
               _themeLibrary(),
               ..._appearanceControls(),
-              ActionButton('编辑主题', onPress: c.busy ? null : _editTheme),
+              ActionButton('编辑主题', onPress: _editTheme),
             ],
           ),
         Semantics(

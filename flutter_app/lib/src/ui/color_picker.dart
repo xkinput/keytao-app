@@ -148,18 +148,22 @@ class AccentPicker extends StatelessWidget {
     final selected = raw.length == 9 && raw.endsWith('FF')
         ? raw.substring(0, 7)
         : raw;
-    var defaultColor = '#3B73D9';
+    var resolvedColor = '#3B73D9';
     if (background && value == null) {
       final settings = controller.uiSettings!;
       final theme = controller.resolveCandidatePanelPreview(
         colorScheme: settings.colorScheme,
         accentColor: settings.accentColor,
         cornerRadius: settings.cornerRadius,
+        backgroundColor: settings.backgroundColor,
         systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
         fontSize: settings.fontSize,
       );
-      final color = theme['panel']['background'] as Map<String, dynamic>;
-      defaultColor = _hex(
+      final mobileColor = theme['mobile']?['keyboard']?['background'];
+      final color =
+          (controller.isMobile ? mobileColor : null) ??
+          theme['panel']['background'] as Map<String, dynamic>;
+      resolvedColor = _hex(
         Color.fromARGB(
           255,
           color['red'] as int,
@@ -170,15 +174,14 @@ class AccentPicker extends StatelessWidget {
     }
     final touch = context.platformVariant.touch;
     final size = touch ? 44.0 : 28.0;
-    final gap = touch ? 8.0 : 4.0;
+    const gap = 4.0;
     final presets = background ? themeBackgrounds : themeAccents;
-    final accent = ChromeAccent.of(context);
+    final current = background && selected.isEmpty ? resolvedColor : selected;
     Widget swatch(String hex, {bool custom = false, bool reset = false}) {
-      final isSelected = reset
-          ? selected.isEmpty
-          : custom
-          ? selected.isNotEmpty && !presets.containsKey(selected)
-          : selected == hex;
+      final isSelected =
+          !reset &&
+          current.isNotEmpty &&
+          (custom ? !presets.containsKey(current) : current == hex);
       final label = reset
           ? '恢复默认'
           : custom
@@ -186,54 +189,65 @@ class AccentPicker extends StatelessWidget {
           : background
           ? '使用背景色 $hex'
           : AppStrings.useColor(hex);
+      final swatchColor = parseAccentColor(hex);
       return FTooltip(
         tipBuilder: (_, _) => Text(label),
         child: Semantics(
-          selected: isSelected,
+          selected: reset ? null : isSelected,
           label: label,
           child: FTappable(
             focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
               borderRadius: BorderRadius.circular(8),
             ),
-            onPress: controller.busy || !enabled
+            onPress:
+                !controller.canSaveTheme ||
+                    !enabled ||
+                    (reset && selected.isEmpty)
                 ? null
                 : () => custom ? _pick(context, hex) : _save(reset ? '' : hex),
-            child: AnimatedContainer(
-              duration: MediaQuery.disableAnimationsOf(context)
-                  ? Duration.zero
-                  : const Duration(milliseconds: 150),
-              curve: Curves.easeOutCubic,
+            child: SizedBox(
               width: size,
               height: size,
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? accent.withValues(alpha: .12)
-                    : Colors.transparent,
-                border: Border.all(
-                  color: isSelected ? accent : Colors.transparent,
-                ),
-                borderRadius: BorderRadius.circular(8),
-              ),
               child: Center(
-                child: ThemeColorSwatch(
-                  value: hex,
-                  size: touch ? 32 : 24,
-                  child: custom || reset || selected == hex
-                      ? Icon(
-                          reset
-                              ? FLucideIcons.rotateCcw
-                              : custom
-                              ? FLucideIcons.pipette
-                              : FLucideIcons.check,
-                          size: touch ? 18 : 16,
-                          color:
-                              (custom || reset) &&
-                                  parseAccentColor(hex).computeLuminance() > .5
-                              ? Colors.black
-                              : Colors.white,
-                        )
-                      : null,
-                ),
+                child: reset
+                    ? Icon(
+                        FLucideIcons.rotateCcw,
+                        size: 16,
+                        color: AppPalette.of(context).ink
+                            .withValues(alpha: selected.isEmpty ? .40 : .82),
+                      )
+                    : AnimatedContainer(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : const Duration(milliseconds: 150),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(4),
+                          boxShadow: isSelected
+                              ? [
+                                  BoxShadow(
+                                    color: swatchColor.withValues(alpha: .65),
+                                    blurRadius: 6,
+                                    offset: const Offset(0, 2),
+                                  ),
+                                ]
+                              : const [],
+                        ),
+                        child: ThemeColorSwatch(
+                          value: hex,
+                          size: touch ? 26 : 24,
+                          child: custom || isSelected
+                              ? Icon(
+                                  custom
+                                      ? FLucideIcons.pipette
+                                      : FLucideIcons.check,
+                                  size: 14,
+                                  color: swatchColor.computeLuminance() > .179
+                                      ? Colors.black
+                                      : Colors.white,
+                                )
+                              : null,
+                        ),
+                      ),
               ),
             ),
           ),
@@ -246,26 +260,37 @@ class AccentPicker extends StatelessWidget {
       controlAlignment: Alignment.centerLeft,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final count = presets.length + (background ? 2 : 1);
-          final capacity = ((constraints.maxWidth + gap) / (size + gap))
-              .floor()
-              .clamp(1, count);
+          final tiles = [
+            for (final hex in presets.keys) swatch(hex),
+            swatch(
+              (background && value == null) || current.isEmpty
+                  ? resolvedColor
+                  : current,
+              custom: true,
+            ),
+            if (background) swatch(resolvedColor, reset: true),
+          ];
+          final count = tiles.length;
+          final width = ((themeAccents.length + 1) * (size + 2 * gap) - 2 * gap)
+              .clamp(0.0, constraints.maxWidth);
+          final capacity = ((width + gap) / (size + gap)).floor().clamp(
+            1,
+            count,
+          );
           final rows = (count / capacity).ceil();
           final columns = (count / rows).ceil();
           return Align(
             alignment: Alignment.centerLeft,
             child: SizedBox(
-              width: columns * (size + gap) - gap,
-              child: Wrap(
+              width: width,
+              child: Column(
                 spacing: gap,
-                runSpacing: 8,
                 children: [
-                  for (final hex in presets.keys) swatch(hex),
-                  swatch(
-                    selected.isEmpty ? defaultColor : selected,
-                    custom: true,
-                  ),
-                  if (background) swatch(defaultColor, reset: true),
+                  for (var start = 0; start < count; start += columns)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: tiles.skip(start).take(columns).toList(),
+                    ),
                 ],
               ),
             ),
