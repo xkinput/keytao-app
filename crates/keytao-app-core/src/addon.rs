@@ -1555,39 +1555,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_defaults_with_user_customizations_and_user_databases_are_preserved() {
-        let original = format!("{CUSTOM}  user_setting: true\n");
-        assert_eq!(
-            strip_legacy_custom(&original),
-            "patch:\n  user_setting: true\n"
-        );
-        let root = TestRoot::new();
-        std::fs::create_dir(root.path().join("build")).unwrap();
-        std::fs::write(root.path().join("easy_en.userdb"), "private vocabulary").unwrap();
-        std::fs::write(root.path().join("build/easy_en.table.bin"), "compiled").unwrap();
-        std::fs::write(
-            root.path().join("keytao.schema.yaml"),
-            "schema: {schema_id: keytao}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.path().join("build/keytao.schema.yaml"),
-            "schema: {schema_id: keytao}\n",
-        )
-        .unwrap();
-        let sources = vec![(
-            "easy_en.schema.yaml".into(),
-            b"schema: {schema_id: easy_en}\ntranslator: {dictionary: easy_en}\n".to_vec(),
-        )];
-        crate::package_artifacts::cleanup(root.path(), &sources, &Default::default()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("easy_en.userdb")).unwrap(),
-            "private vocabulary"
-        );
-        assert!(!root.path().join("build/easy_en.table.bin").exists());
-    }
-
-    #[test]
     fn modified_receipt_custom_is_preserved_on_update_redeploy_and_rollback() {
         let root = TestRoot::new();
         install_fixture(root.path(), 'a', "first upstream")

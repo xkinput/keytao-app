@@ -30,13 +30,8 @@ mod generic_rime;
 mod pinyin_addons;
 mod shape_addons;
 mod package_activation;
-#[cfg(test)]
-mod package_artifacts;
 pub mod package_orphans;
 pub mod package_migration;
-#[cfg(test)]
-#[allow(dead_code)]
-mod migration_userdb;
 #[cfg(test)]
 mod package_activation_tests;
 pub mod packages;

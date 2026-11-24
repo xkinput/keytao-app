@@ -9,7 +9,7 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Write},
+    io::Write,
     path::{Component, Path, PathBuf},
     sync::Mutex,
 };
@@ -74,25 +74,6 @@ fn public_error_details(error: &str) -> Vec<String> {
         .chunks(128)
         .map(|chunk| chunk.iter().collect())
         .collect()
-}
-
-pub fn after_private_deploy(
-    private: Result<(), String>,
-    public: impl FnOnce() -> Result<(), String>,
-) -> Result<Option<String>, String> {
-    private?;
-    Ok(public()
-        .err()
-        .map(|error| public_warning("public-build", &error)))
-}
-
-pub struct PublicSchemaUpdate {
-    root: PathBuf,
-    previous: GenerationPointers,
-    _backup_lock: Option<std::fs::File>,
-    _backup: Option<tempfile::TempDir>,
-    published: GenerationPointers,
-    published_sources: String,
 }
 
 #[derive(Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -254,88 +235,6 @@ fn pin_legacy_layout(root: &Path, previous: &GenerationPointers) -> Result<(), S
         .map_err(|error| error.to_string())
 }
 
-
-impl PublicSchemaUpdate {
-    pub fn rollback(self) -> Result<(), String> {
-        #[cfg(target_os = "windows")]
-        let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-        let _guard = PUBLISH_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let current = GenerationPointers::read(&self.root)?;
-        if current != self.published {
-            // The child adds build files; a concurrent source update must survive rollback.
-            let files = read_snapshot(&self.root)?;
-            if snapshot_hash(files.iter().filter(|(path, _)| !path.starts_with("build")))
-                != self.published_sources
-            {
-                return Err("公共方案已被更新，无法自动恢复，请重新部署".into());
-            }
-        }
-        for generation in self.previous.generations() {
-            let snapshot = self.root.join(generation);
-            if !snapshot.exists() {
-                return Err("retained public schema snapshot is missing".into());
-            }
-        }
-        self.previous.write(&self.root)?;
-        prune_snapshots(&self.root);
-        Ok(())
-    }
-}
-
-pub fn update_public_schemas(
-    update: impl FnOnce() -> Result<(), String>,
-) -> Result<PublicSchemaUpdate, String> {
-    #[cfg(target_os = "windows")]
-    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-    update_public_schemas_at(public_root()?, update)
-}
-
-fn update_public_schemas_at(
-    root: PathBuf,
-    update: impl FnOnce() -> Result<(), String>,
-) -> Result<PublicSchemaUpdate, String> {
-    let previous = GenerationPointers::read(&root)?;
-    let backup = if previous.generations().next().is_some() {
-        Some((|| {
-            let backup = tempfile::Builder::new()
-                .prefix(".rollback-")
-                .tempdir_in(&root)
-                .map_err(|error| error.to_string())?;
-            let lease = std::fs::File::create(backup.path().join("lease"))
-                .map_err(|error| error.to_string())?;
-            lease.lock().map_err(|error| error.to_string())?;
-            // Keep generations in place while the child publishes; no per-file backup is needed.
-            previous.write(backup.path())?;
-            Ok::<_, String>((lease, backup))
-        })()?)
-    } else {
-        None
-    };
-    let (_backup_lock, backup) = backup
-        .map(|(lease, backup)| (Some(lease), Some(backup)))
-        .unwrap_or_default();
-    let result = update();
-    let files = read_snapshot(&root)?;
-    let receipt = PublicSchemaUpdate {
-        published: GenerationPointers::read(&root)?,
-        published_sources: snapshot_hash(
-            files.iter().filter(|(path, _)| !path.starts_with("build")),
-        ),
-        previous,
-        _backup_lock,
-        _backup: backup,
-        root,
-    };
-    if let Err(error) = result {
-        receipt
-            .rollback()
-            .map_err(|rollback| format!("{error}；恢复公共方案失败：{rollback}"))?;
-        return Err(error);
-    }
-    Ok(receipt)
-}
 
 fn link_snapshot(source: &Path, target: &Path) -> Result<(), String> {
     if std::fs::symlink_metadata(source)
@@ -944,46 +843,6 @@ fn is_public_lua_metadata(path: &Path) -> bool {
     }) && (parts.len() < 2 || parts[1].as_os_str() == "lua")
 }
 
-/// The bytes must come directly from a public package download, before merging
-/// local customizations. Use publish_files for addons that require patching.
-pub fn publish_package(zip_bytes: &[u8]) -> Result<(), String> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
-        .map_err(|error| format!("read public schema package: {error}"))?;
-    let mut files = Vec::new();
-    let mut total = 0u64;
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        if entry.is_dir() {
-            continue;
-        }
-        let relative = checked_relative(Path::new(entry.name()))?;
-        if !is_public_asset(&relative)
-            || is_public_lua_metadata(&relative)
-            || relative == Path::new(keytao_core::RuntimeDirs::PUBLIC_PACKAGE_FILE)
-        {
-            continue;
-        }
-        if entry
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            return Err("public schema packages may not contain symbolic links".into());
-        }
-        total = total
-            .checked_add(entry.size())
-            .ok_or("public schema package is too large")?;
-        if total > MAX_PACKAGE_BYTES {
-            return Err("public schema package is too large".into());
-        }
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        files.push((relative, bytes));
-    }
-    publish_files(&files)
-}
-
 /// Publish only package-derived assets. Callers may patch a public addon (for
 /// example, disable optional large models) before passing its files here.
 pub fn publish_files(files: &[(PathBuf, Vec<u8>)]) -> Result<(), String> {
@@ -1015,38 +874,6 @@ pub fn publish_source_files(files: &[(PathBuf, PathBuf)]) -> Result<(), String> 
         ));
     }
     publish_files(&contents)
-}
-
-fn source_selected_schema(root: &Path) -> Option<String> {
-    let schemas = crate::managed_custom::active_schema_ids_from_default(root).ok()?;
-    let saved = std::fs::read(root.join("user.yaml")).ok()
-        .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
-        .and_then(|value| value["var"]["previously_selected_schema"].as_str().map(str::to_owned));
-    let current = std::fs::read_to_string(root.join(CURRENT_SCHEMA)).ok()
-        .map(|id| id.trim().to_owned());
-    saved.into_iter().chain(current).find(|id| schemas.contains(id))
-        .or_else(|| keytao_core::deployed_schema_id_from_dir(root))
-}
-
-pub fn remove_package(
-    core: &crate::Core,
-    directory: &Path,
-    private_root: &Path,
-) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-    let _guard = PUBLISH_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    publish_activation_with_selection_at(
-        &public_root()?,
-        None,
-        Some(directory),
-        &crate::package_activation::addon_ownership(core, private_root)
-            .map_err(|error| error.to_string())?,
-        true,
-        source_selected_schema(private_root).as_deref(),
-    )
 }
 
 fn package_directory_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
@@ -1231,6 +1058,7 @@ fn publish_activation_at(
     publish_activation_with_selection_at(root, incoming, previous, addons, grant_access, None)
 }
 
+#[cfg(test)]
 fn publish_activation_with_selection_at(
     root: &Path,
     incoming: Option<&Path>,
@@ -1427,32 +1255,6 @@ fn sanitize_public_package_entry(
     None
 }
 
-pub fn has_schemas() -> bool {
-    let Ok(root) = public_root() else {
-        return false;
-    };
-    let Ok(current) = std::fs::read_to_string(root.join("current.txt")) else {
-        return false;
-    };
-    let current = current.trim();
-    if !valid_generation(current) {
-        return false;
-    }
-    let snapshot = root.join(current);
-    let Ok(config) = std::fs::read_to_string(snapshot.join("default.custom.yaml")) else {
-        return false;
-    };
-    crate::scheme_files::parse_schema_list(&config)
-        .iter()
-        .any(|schema| {
-            ["keytao", "xmjd", "txjx", "keydo", "snow_jiandao"]
-                .iter()
-                .any(|prefix| schema.starts_with(prefix))
-                && !schema.contains(['/', '\\', ':'])
-                && snapshot.join(format!("{schema}.schema.yaml")).is_file()
-        })
-}
-
 fn valid_generation(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -1520,21 +1322,6 @@ pub fn publish_english_settings(root: &Path, enabled: bool) -> Result<(), String
 
 pub fn publish_schema_switches(root: &Path) -> Result<(), String> {
     publish_files(&[crate::ime_settings::schema_switch_settings_file(root)?])
-}
-
-pub fn publish_schema_selection(private_root: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let _engine_guard = crate::ime_status::windows::WindowsImeEngineInitGuard::acquire()?;
-    let _guard = PUBLISH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let root = public_root()?;
-    let mut files = read_snapshot(&root)?;
-    let (_, content) = crate::addon::addon_default_custom(private_root)?;
-    let ids: Vec<_> = crate::scheme_files::parse_schema_list(&content).into_iter()
-        .filter(|id| files.contains_key(&PathBuf::from(format!("{id}.schema.yaml")))).collect();
-    let config = crate::addon::update_addon_schemas_content("patch: {}", &[], &ids)?;
-    files.insert(PathBuf::from("default.custom.yaml"), config.into_bytes());
-    files.retain(|path, _| !path.starts_with("build"));
-    store_snapshot(&root, &files, true)
 }
 
 fn read_generation(root: &Path) -> Result<Option<String>, String> {
@@ -2014,23 +1801,6 @@ mod tests {
             assert!(GenerationPointers::read(root).unwrap() == isolated);
             assert!(snapshot.is_dir());
         }
-    }
-
-    #[test]
-    fn public_source_selection_accepts_an_uncompiled_new_schema() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("build")).unwrap();
-        std::fs::write(root.path().join("default.custom.yaml"), "patch: {schema_list: [{schema: public_a}, {schema: public_b}]}").unwrap();
-        for id in ["public_a", "public_b"] {
-            std::fs::write(root.path().join(format!("{id}.schema.yaml")), "schema: {}").unwrap();
-        }
-        std::fs::write(root.path().join("build/default.yaml"), "schema_list: [{schema: public_a}]").unwrap();
-        std::fs::write(root.path().join("build/public_a.schema.yaml"), "compiled").unwrap();
-        std::fs::write(root.path().join("user.yaml"), "var: {previously_selected_schema: public_b}").unwrap();
-        std::fs::write(root.path().join(CURRENT_SCHEMA), "public_a").unwrap();
-        assert_eq!(source_selected_schema(root.path()).as_deref(), Some("public_b"));
-        std::fs::write(root.path().join("user.yaml"), "var: {previously_selected_schema: removed}").unwrap();
-        assert_eq!(source_selected_schema(root.path()).as_deref(), Some("public_a"));
     }
 
     #[test]
@@ -2552,13 +2322,9 @@ mod tests {
             }
             store_snapshot(root.path(), &initial, false).unwrap();
             let previous = GenerationPointers::read(root.path()).unwrap();
-            let update = update_public_schemas_at(root.path().into(), || {
-                for id in ["keytao6", "auxiliary"] {
-                    remove_schema_at(root.path(), id, &package_paths, false)?;
-                }
-                Ok(())
-            })
-            .unwrap();
+            for id in ["keytao6", "auxiliary"] {
+                remove_schema_at(root.path(), id, &package_paths, false).unwrap();
+            }
             let files = read_snapshot(root.path()).unwrap();
             let config = std::str::from_utf8(&files[Path::new("default.custom.yaml")]).unwrap();
             assert_eq!(
@@ -2579,8 +2345,6 @@ mod tests {
                 assert_ne!(pointers.current, previous.current);
                 assert!(pointers.pending.is_none());
             }
-            update.rollback().unwrap();
-            assert_eq!(read_snapshot(root.path()).unwrap(), initial);
         }
     }
 
@@ -2627,17 +2391,10 @@ mod tests {
         )
         .unwrap();
         let pending = std::fs::read(root.path().join("pending.txt")).unwrap();
-        let result = after_private_deploy(Ok(()), || {
-            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
-                Err("new main scheme compile failed".into())
-            })
+        let result = deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
+            Err("new main scheme compile failed".into())
         });
-        assert_eq!(
-            result,
-            Ok(Some(
-                "public-build：compile: new main scheme compile failed".into()
-            ))
-        );
+        assert_eq!(result, Err("compile: new main scheme compile failed".into()));
         assert_eq!(
             std::fs::read(root.path().join("current.txt")).unwrap(),
             current
@@ -2654,79 +2411,6 @@ mod tests {
                 .unwrap()
                 .contains_key(Path::new(LIBRIME_VERSION_FILE))
         );
-    }
-
-    #[test]
-    fn rollback_restores_both_exact_pointers_after_a_successful_child_publication() {
-        for state in ["empty", "source-only", "compiled", "pending"] {
-            let root = tempfile::tempdir().unwrap();
-            if state != "empty" {
-                let mut initial = BTreeMap::from([(
-                    "keytao.schema.yaml".into(),
-                    b"schema: {schema_id: keytao}".to_vec(),
-                )]);
-                if state != "source-only" {
-                    initial.insert(
-                        "build/keytao.schema.yaml".into(),
-                        b"previous compiled schema".to_vec(),
-                    );
-                    initial.insert(LIBRIME_VERSION_FILE.into(), b"1.0".to_vec());
-                }
-                store_snapshot(root.path(), &initial, false).unwrap();
-                if state == "pending" {
-                    publish_at(
-                        root.path(),
-                        &[(
-                            "keytao.schema.yaml".into(),
-                            b"schema: {schema_id: keytao, version: 'pending'}".to_vec(),
-                        )],
-                        false,
-                    )
-                    .unwrap();
-                }
-            }
-            let current = std::fs::read(root.path().join("current.txt")).ok();
-            let pending = std::fs::read(root.path().join("pending.txt")).ok();
-            let files = read_snapshot(root.path()).unwrap();
-            let update = update_public_schemas_at(root.path().into(), || {
-                publish_at(
-                    root.path(),
-                    &[(
-                        "keytao.schema.yaml".into(),
-                        b"schema: {schema_id: keytao, version: 'new'}".to_vec(),
-                    )],
-                    false,
-                )
-            })
-            .unwrap();
-            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |stage| {
-                std::fs::create_dir(stage.join("build")).unwrap();
-                std::fs::write(
-                    stage.join("build/keytao.schema.yaml"),
-                    "new compiled schema",
-                )
-                .unwrap();
-                Ok(())
-            })
-            .unwrap();
-            assert!(!root.path().join("pending.txt").exists());
-            update.rollback().unwrap();
-            assert_eq!(
-                std::fs::read(root.path().join("current.txt")).ok(),
-                current,
-                "{state}"
-            );
-            assert_eq!(
-                std::fs::read(root.path().join("pending.txt")).ok(),
-                pending,
-                "{state}"
-            );
-            assert_eq!(read_snapshot(root.path()).unwrap(), files, "{state}");
-            let pointers = GenerationPointers::read(root.path()).unwrap();
-            for generation in pointers.generations() {
-                assert!(root.path().join(generation).is_dir(), "{state}");
-            }
-        }
     }
 
     #[test]
@@ -2754,63 +2438,16 @@ mod tests {
             false,
         )
         .unwrap();
-        let result = after_private_deploy(Ok(()), || {
-            deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
-                panic!("invalid dependency must not reach librime")
-            })
-        });
-        assert_eq!(result, Ok(Some("public-build：prepare-dependencies: invalid public schema path: ../secret.schema.yaml".into())));
-        assert_eq!(
-            std::fs::read(root.path().join("current.txt")).unwrap(),
-            current
-        );
-    }
-
-    #[test]
-    fn public_failure_warns_after_private_success_and_restores_previous_generation() {
-        let root = tempfile::tempdir().unwrap();
-        let previous = BTreeMap::from([
-            (
-                "keytao.schema.yaml".into(),
-                b"schema: {schema_id: keytao}".to_vec(),
-            ),
-            (
-                "build/keytao.schema.yaml".into(),
-                b"previous compiled schema".to_vec(),
-            ),
-            (LIBRIME_VERSION_FILE.into(), b"old version".to_vec()),
-        ]);
-        store_snapshot(root.path(), &previous, false).unwrap();
-        let generation = read_generation(root.path()).unwrap();
-        let result = after_private_deploy(Ok(()), || {
-            update_public_schemas_at(root.path().into(), || {
-                publish_at(
-                    root.path(),
-                    &[(
-                        "keytao.schema.yaml".into(),
-                        b"schema: {schema_id: keytao, version: '2'}".to_vec(),
-                    )],
-                    false,
-                )?;
-                deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
-                    Err("xmjd6 dictionary compile failed".into())
-                })
-            })
-            .map(|_| ())
+        let result = deploy_and_publish_at(root.path(), "1.0", Path::new(""), false, |_| {
+            panic!("invalid dependency must not reach librime")
         });
         assert_eq!(
             result,
-            Ok(Some(
-                "public-build：compile: xmjd6 dictionary compile failed".into()
-            ))
+            Err("prepare-dependencies: invalid public schema path: ../secret.schema.yaml".into())
         );
-        assert_eq!(read_generation(root.path()).unwrap(), generation);
-        assert_eq!(read_snapshot(root.path()).unwrap(), previous);
         assert_eq!(
-            after_private_deploy(Err("private deploy failed".into()), || {
-                panic!("public build must not run after a private failure")
-            }),
-            Err("private deploy failed".into())
+            std::fs::read(root.path().join("current.txt")).unwrap(),
+            current
         );
     }
 
@@ -2864,7 +2501,7 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn public_acl_failure_warns_without_selecting_an_unprotected_generation() {
+    fn public_acl_failure_preserves_the_protected_generation() {
         let root = tempfile::tempdir().unwrap();
         publish_at(
             root.path(),
@@ -2876,22 +2513,18 @@ mod tests {
         )
         .unwrap();
         let generation = read_generation(root.path()).unwrap();
-        let result = after_private_deploy(Ok(()), || {
-            deploy_and_publish_at(root.path(), "1.0", Path::new(""), true, |stage| {
-                std::fs::create_dir(stage.join("build")).unwrap();
-                std::fs::write(
-                    stage.join("build/keytao.schema.yaml"),
-                    "compiled public schema",
-                )
-                .unwrap();
-                Ok(())
-            })
+        let result = deploy_and_publish_at(root.path(), "1.0", Path::new(""), true, |stage| {
+            std::fs::create_dir(stage.join("build")).unwrap();
+            std::fs::write(
+                stage.join("build/keytao.schema.yaml"),
+                "compiled public schema",
+            )
+            .unwrap();
+            Ok(())
         });
         assert_eq!(
             result,
-            Ok(Some(
-                "public-build：publish: public schema ACLs require Windows".into()
-            ))
+            Err("publish: public schema ACLs require Windows".into())
         );
         assert_eq!(read_generation(root.path()).unwrap(), generation);
     }
@@ -3059,22 +2692,16 @@ mod tests {
         )
         .unwrap();
         let previous = read_generation(root.path()).unwrap().unwrap();
-        let update = update_public_schemas_at(root.path().into(), || {
-            publish_at(
-                root.path(),
-                &[("second.txt".into(), b"second".to_vec())],
-                false,
-            )
-        })
-        .unwrap();
-        let live = update._backup.as_ref().unwrap().path().to_owned();
-        assert!(live.is_dir());
-        assert!(root.path().join(&previous).is_dir());
-        assert!(!live.join(&previous).exists());
-        assert_eq!(
-            GenerationPointers::read(&live).unwrap().current.as_deref(),
-            Some(previous.as_str())
-        );
+        let backup = tempfile::Builder::new()
+            .prefix(".rollback-")
+            .tempdir_in(root.path())
+            .unwrap();
+        let lease = std::fs::File::create(backup.path().join("lease")).unwrap();
+        lease.lock().unwrap();
+        GenerationPointers::read(root.path())
+            .unwrap()
+            .write(backup.path())
+            .unwrap();
         let abandoned = tempfile::Builder::new()
             .prefix(".rollback-")
             .tempdir_in(root.path())
@@ -3083,15 +2710,15 @@ mod tests {
         let abandoned = abandoned.keep();
         publish_at(
             root.path(),
-            &[("third.txt".into(), b"third".to_vec())],
+            &[("second.txt".into(), b"second".to_vec())],
             false,
         )
         .unwrap();
-        assert!(live.is_dir());
+        assert!(backup.path().is_dir());
         assert!(root.path().join(&previous).is_dir());
         assert!(!abandoned.exists());
-        drop(update);
-        assert!(!live.exists());
+        drop(lease);
+        drop(backup);
         prune_snapshots(root.path());
         assert!(!root.path().join(previous).exists());
     }
@@ -3135,72 +2762,6 @@ mod tests {
             read_generation(root.path()).unwrap().as_deref(),
             Some(generation.as_str())
         );
-    }
-
-    #[test]
-    fn addon_rollback_restores_prior_builds_and_preserves_concurrent_publication() {
-        let root = tempfile::tempdir().unwrap();
-        let sources = vec![(
-            "keytao.schema.yaml".into(),
-            b"schema: {schema_id: keytao}".to_vec(),
-        )];
-        publish_at(root.path(), &sources, false).unwrap();
-        let mut initial = read_snapshot(root.path()).unwrap();
-        initial.insert(
-            "build/keytao.table.bin".into(),
-            b"original dictionary".to_vec(),
-        );
-        initial.insert(LIBRIME_VERSION_FILE.into(), b"1.0".to_vec());
-        store_snapshot(root.path(), &initial, false).unwrap();
-        let original = read_generation(root.path()).unwrap();
-        let addon = vec![(
-            "easy_en.schema.yaml".into(),
-            b"schema: {schema_id: easy_en}".to_vec(),
-        )];
-        let update = update_public_schemas_at(root.path().into(), || {
-            publish_at(root.path(), &addon, false)?;
-            publish_at(
-                root.path(),
-                &[("keytao-ime.json".into(), b"{}".to_vec())],
-                false,
-            )
-        })
-        .unwrap();
-        let mut compiled = read_snapshot(root.path()).unwrap();
-        compiled.insert(LIBRIME_VERSION_FILE.into(), b"1.0".to_vec());
-        store_snapshot(root.path(), &compiled, false).unwrap();
-        update.rollback().unwrap();
-        assert_eq!(read_generation(root.path()).unwrap(), original);
-        assert_eq!(read_snapshot(root.path()).unwrap(), initial);
-        assert_eq!(
-            read_snapshot(root.path()).unwrap()[Path::new("keytao.schema.yaml")],
-            sources[0].1
-        );
-
-        let update = update_public_schemas_at(root.path().into(), || {
-            publish_at(root.path(), &addon, false)
-        })
-        .unwrap();
-        publish_at(
-            root.path(),
-            &[(
-                "another.schema.yaml".into(),
-                b"schema: {schema_id: another}".to_vec(),
-            )],
-            false,
-        )
-        .unwrap();
-        let newer = read_generation(root.path()).unwrap();
-        assert!(update.rollback().is_err());
-        assert_eq!(read_generation(root.path()).unwrap(), newer);
-        assert!(
-            update_public_schemas_at(root.path().into(), || {
-                publish_at(root.path(), &sources, false)?;
-                Err("publication failed".into())
-            })
-            .is_err()
-        );
-        assert_eq!(read_generation(root.path()).unwrap(), newer);
     }
 
     #[test]

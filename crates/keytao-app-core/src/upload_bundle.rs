@@ -883,7 +883,8 @@ fn build_from(
     })
 }
 
-pub fn verified(
+#[cfg(test)]
+fn verified(
     root: &Path,
     shared: Option<&Path>,
     schema_ids: &[String],
@@ -892,7 +893,8 @@ pub fn verified(
     checked(root, shared, None, schema_ids, Some(&mut smoke))
 }
 
-pub fn verified_artifacts(
+#[cfg(test)]
+pub(crate) fn verified_artifacts(
     root: &Path,
     shared: Option<&Path>,
     schema_ids: &[String],
