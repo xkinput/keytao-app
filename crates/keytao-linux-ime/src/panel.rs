@@ -5,7 +5,8 @@
 
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    cell::{RefCell, RefMut},
+    collections::{HashMap, HashSet},
     path::Path as StdPath,
     process::Command,
     sync::mpsc::Receiver,
@@ -35,6 +36,7 @@ const FONT_PROBE_SIZE: f32 = 22.0;
 const COLOR_GLYPH_HEIGHT_FACTOR: f32 = 1.05;
 const COLOR_GLYPH_WIDTH_FACTOR: f32 = 1.35;
 const MAX_COLLECTION_FACES: isize = 32;
+const MAX_CACHED_GLYPHS: usize = 512;
 const TEXT_FONT_ENV: &str = "KEYTAO_IME_FONT";
 const SYMBOL_FONT_ENV: &str = "KEYTAO_IME_SYMBOL_FONT";
 const TEXT_FALLBACK_PATTERNS: &[&str] = &[
@@ -344,6 +346,7 @@ fn detect_x11_panel_scale() -> f32 {
 pub struct PanelRenderer {
     faces: Vec<Face>,
     theme_face: Option<Face>,
+    glyph_cache: RefCell<HashMap<(char, u32), Option<GlyphLayout>>>,
     font_family: String,
     _library: Library,
     scale: f32,
@@ -353,6 +356,7 @@ pub struct PanelRenderer {
 
 pub struct WaylandPanel {
     pub pixels: Vec<u8>,
+    pub raster_width: u32,
     pub width: u32,
     pub height: u32,
     pub logical_width: u32,
@@ -360,8 +364,14 @@ pub struct WaylandPanel {
     pub hit_areas: PanelHitAreas,
 }
 
-struct GlyphLayout<'a> {
-    glyph: &'a freetype::GlyphSlot,
+struct GlyphLayout {
+    bitmap: Vec<u8>,
+    bitmap_width: usize,
+    bitmap_rows: usize,
+    pitch: i32,
+    pixel_mode: Option<PixelMode>,
+    left: f32,
+    top: f32,
     scale: f32,
     width: usize,
     rows: usize,
@@ -722,6 +732,7 @@ impl PanelRenderer {
         Some(Self {
             faces,
             theme_face: None,
+            glyph_cache: RefCell::default(),
             font_family: String::new(),
             _library: library,
             scale: clamp_panel_scale(scale),
@@ -763,40 +774,31 @@ impl PanelRenderer {
         scale: f32,
         screen_width: f32,
         text_hint: Option<&str>,
+        theme: &keytao_theme::ResolvedImeTheme,
     ) -> WaylandPanel {
-        self.scale = scale;
+        if self.scale != scale {
+            self.scale = scale;
+            self.glyph_cache.get_mut().clear();
+        }
         let (pixels, width, height, mut hit_areas) = if let Some(text) = text_hint {
-            let (pixels, width, height) = self.render_text_hint(text);
+            let (pixels, width, height) = self.render_text_hint_themed(text, theme);
             (pixels, width, height, PanelHitAreas::default())
         } else if let Some(state) = state {
-            let theme = self.theme_resolver.current();
             self.render_themed(
                 state,
                 screen_width * scale,
-                &theme,
+                theme,
                 !theme.ui.effective_embedded_composition(),
             )
         } else {
-            let (pixels, width, height) = self.render_mode_hint(ascii_mode);
+            let model = theme.mode_hint_model(ascii_mode);
+            let (pixels, width, height) = self.render_text_hint_themed(&model.text, theme);
             (pixels, width, height, PanelHitAreas::default())
         };
         let logical_width = (width as f64 / scale as f64).ceil().max(1.0) as u32;
         let logical_height = (height as f64 / scale as f64).ceil().max(1.0) as u32;
         let buffer_width = crate::panel_scale::logical_to_physical(logical_width, scale);
         let buffer_height = crate::panel_scale::logical_to_physical(logical_height, scale);
-        // Pad rather than stretch the raster; integer buffer scales require divisible sizes.
-        let pixels = if (buffer_width, buffer_height) == (width, height) {
-            pixels
-        } else {
-            let mut padded = vec![0; buffer_width as usize * buffer_height as usize * 4];
-            for (source, target) in pixels
-                .chunks_exact(width as usize * 4)
-                .zip(padded.chunks_exact_mut(buffer_width as usize * 4))
-            {
-                target[..source.len()].copy_from_slice(source);
-            }
-            padded
-        };
         let x_scale = logical_width as f32 / buffer_width as f32;
         let y_scale = logical_height as f32 / buffer_height as f32;
         for rect in hit_areas
@@ -812,6 +814,7 @@ impl PanelRenderer {
         }
         WaylandPanel {
             pixels,
+            raster_width: width,
             width: buffer_width,
             height: buffer_height,
             logical_width,
@@ -1190,7 +1193,7 @@ impl PanelRenderer {
         }
 
         // Convert RGBA (tiny-skia) → BGRA (platform native)
-        let mut out: Vec<u8> = pm.data().to_vec();
+        let mut out = pm.take();
         for px in out.chunks_exact_mut(4) {
             px.swap(0, 2); // R↔B
         }
@@ -1201,11 +1204,19 @@ impl PanelRenderer {
     pub fn render_mode_hint(&mut self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
         let model = theme.mode_hint_model(ascii_mode);
-        self.render_text_hint(&model.text)
+        self.render_text_hint_themed(&model.text, &theme)
     }
 
     pub fn render_text_hint(&mut self, label: &str) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
+        self.render_text_hint_themed(label, &theme)
+    }
+
+    fn render_text_hint_themed(
+        &mut self,
+        label: &str,
+        theme: &keytao_theme::ResolvedImeTheme,
+    ) -> (Vec<u8>, u32, u32) {
         self.update_theme_font(theme.font.effective_family.as_deref());
         let hint_size = self.s(theme.mode_hint.font_size);
         let padding = hint_size / 6.0;
@@ -1256,7 +1267,7 @@ impl PanelRenderer {
             self.scale,
         );
         let (width, hint_height) = (pm.width(), pm.height());
-        let mut out = pm.data().to_vec();
+        let mut out = pm.take();
         for px in out.chunks_exact_mut(4) {
             px.swap(0, 2);
         }
@@ -1447,8 +1458,7 @@ impl PanelRenderer {
                 let (advance, right) =
                     self.layout_glyph(ch, size)
                         .map_or((size * 0.5, size * 0.5), |layout| {
-                            let right = layout.glyph.bitmap_left() as f32 * layout.scale
-                                + layout.width as f32;
+                            let right = layout.left + layout.width as f32;
                             (layout.advance, right.max(layout.advance))
                         });
                 if pen + right > width {
@@ -1485,9 +1495,25 @@ impl PanelRenderer {
                 .and_then(|(path, index)| self._library.new_face(path, index.unwrap_or(0)).ok())
         };
         self.font_family = family.to_owned();
+        self.glyph_cache.get_mut().clear();
     }
 
-    fn layout_glyph(&self, ch: char, size: f32) -> Option<GlyphLayout<'_>> {
+    fn layout_glyph(&self, ch: char, size: f32) -> Option<RefMut<'_, GlyphLayout>> {
+        let key = (ch, size.to_bits());
+        let mut cache = self.glyph_cache.borrow_mut();
+        if cache.len() == MAX_CACHED_GLYPHS && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        RefMut::filter_map(cache, |cache| {
+            cache
+                .entry(key)
+                .or_insert_with(|| self.rasterize_glyph(ch, size))
+                .as_mut()
+        })
+        .ok()
+    }
+
+    fn rasterize_glyph(&self, ch: char, size: f32) -> Option<GlyphLayout> {
         let face = self.face_for_char(ch)?;
         let color_face = face.has_color();
         let load_flags = if color_face {
@@ -1511,37 +1537,42 @@ impl PanelRenderer {
 
         let glyph = face.glyph();
         let bitmap = glyph.bitmap();
-        let width = bitmap.width().max(0) as usize;
-        let rows = bitmap.rows().max(0) as usize;
-        let advance = (glyph.advance().x as f32 / 64.0).max(size * 0.35);
-        if width == 0 || rows == 0 || bitmap.buffer().is_empty() {
-            return Some(GlyphLayout {
-                glyph,
-                scale: 1.0,
-                width: 0,
-                rows: 0,
-                advance,
-            });
-        }
-        let color_glyph = bitmap.pixel_mode().ok() == Some(PixelMode::Bgra);
-        let scale = if color_glyph {
-            (size * COLOR_GLYPH_HEIGHT_FACTOR / rows as f32)
-                .min(size * COLOR_GLYPH_WIDTH_FACTOR / width as f32)
+        let bitmap_width = bitmap.width().max(0) as usize;
+        let bitmap_rows = bitmap.rows().max(0) as usize;
+        let buffer = bitmap.buffer();
+        let visible = bitmap_width > 0 && bitmap_rows > 0 && !buffer.is_empty();
+        let pixel_mode = bitmap.pixel_mode().ok();
+        let color = pixel_mode == Some(PixelMode::Bgra);
+        let scale = if visible && color {
+            (size * COLOR_GLYPH_HEIGHT_FACTOR / bitmap_rows as f32)
+                .min(size * COLOR_GLYPH_WIDTH_FACTOR / bitmap_width as f32)
                 .min(1.0)
         } else {
             1.0
         };
-        let width = ((width as f32 * scale).ceil() as usize).max(1);
-        let rows = ((rows as f32 * scale).ceil() as usize).max(1);
+        let (width, rows) = if visible {
+            (
+                ((bitmap_width as f32 * scale).ceil() as usize).max(1),
+                ((bitmap_rows as f32 * scale).ceil() as usize).max(1),
+            )
+        } else {
+            (0, 0)
+        };
         Some(GlyphLayout {
-            glyph,
+            bitmap: buffer.to_vec(),
+            bitmap_width,
+            bitmap_rows,
+            pitch: bitmap.pitch(),
+            pixel_mode,
+            left: glyph.bitmap_left() as f32 * scale,
+            top: glyph.bitmap_top() as f32 * scale,
             scale,
             width,
             rows,
-            advance: if color_glyph {
+            advance: if visible && color {
                 width as f32 + size * 0.1
             } else {
-                advance
+                (glyph.advance().x as f32 / 64.0).max(size * 0.35)
             },
         })
     }
@@ -1560,26 +1591,22 @@ impl PanelRenderer {
                 x += size * 0.5;
                 continue;
             };
-            let bitmap = layout.glyph.bitmap();
-            let width = bitmap.width().max(0) as usize;
-            let rows = bitmap.rows().max(0) as usize;
-            let pitch = bitmap.pitch().unsigned_abs() as usize;
-            let buffer = bitmap.buffer();
-            let pixel_mode = bitmap.pixel_mode().ok();
-            let gx = (x + layout.glyph.bitmap_left() as f32 * layout.scale) as i32;
-            let gy = (baseline - layout.glyph.bitmap_top() as f32 * layout.scale) as i32;
+            let pitch = layout.pitch.unsigned_abs() as usize;
+            let buffer = &layout.bitmap;
+            let gx = (x + layout.left) as i32;
+            let gy = (baseline - layout.top) as i32;
 
             for row in 0..layout.rows {
                 let scaled_row = (row as f32 / layout.scale).floor() as usize;
-                let source_row = if bitmap.pitch() >= 0 {
-                    scaled_row.min(rows - 1)
+                let source_row = if layout.pitch >= 0 {
+                    scaled_row.min(layout.bitmap_rows - 1)
                 } else {
-                    rows - scaled_row.min(rows - 1) - 1
+                    layout.bitmap_rows - scaled_row.min(layout.bitmap_rows - 1) - 1
                 };
                 for col in 0..layout.width {
                     let source_col = (col as f32 / layout.scale).floor() as usize;
-                    let source_col = source_col.min(width - 1);
-                    let (r, g, b, alpha) = match pixel_mode {
+                    let source_col = source_col.min(layout.bitmap_width - 1);
+                    let (r, g, b, alpha) = match layout.pixel_mode {
                         Some(PixelMode::Bgra) => {
                             let offset = source_row * pitch + source_col * 4;
                             if offset + 3 >= buffer.len() {
@@ -1646,8 +1673,8 @@ impl PanelRenderer {
                 continue;
             };
             if layout.width > 0 && layout.rows > 0 {
-                let glyph_left = x + layout.glyph.bitmap_left() as f32 * layout.scale;
-                let glyph_top = -layout.glyph.bitmap_top() as f32 * layout.scale;
+                let glyph_left = x + layout.left;
+                let glyph_top = -layout.top;
                 left = left.min(glyph_left);
                 right = right.max(glyph_left + layout.width as f32);
                 top = top.min(glyph_top);
@@ -2132,9 +2159,12 @@ mod tests {
             return;
         };
 
-        for size in [10.0, 20.0, 36.0] {
-            let text = "j中英";
-            let (left, top, right, bottom) = renderer.text_bounds(text, size);
+        let text = "j中英";
+        let sizes = [10.0, 20.0, 36.0];
+        let bounds = sizes.map(|size| renderer.text_bounds(text, size));
+        let cached_glyphs = renderer.glyph_cache.borrow().len();
+        assert_eq!(cached_glyphs, sizes.len() * text.chars().count());
+        for (size, (left, top, right, bottom)) in sizes.into_iter().zip(bounds) {
             let mut pm = Pixmap::new(256, 128).unwrap();
             let x = 32.0;
             let baseline = 64.0;
@@ -2152,6 +2182,7 @@ mod tests {
             }
             assert!(visible, "text bounds check rendered no visible glyphs");
         }
+        assert_eq!(renderer.glyph_cache.borrow().len(), cached_glyphs);
     }
 
     #[test]

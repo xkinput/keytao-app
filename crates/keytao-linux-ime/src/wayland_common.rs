@@ -3,15 +3,20 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    os::fd::FromRawFd,
+    ops::Range,
+    os::fd::{AsFd, FromRawFd},
     time::{Duration, Instant},
 };
 
+use memmap2::{MmapMut, MmapOptions};
 use wayland_client::{
     globals::GlobalList,
     protocol::{
+        wl_buffer::WlBuffer,
         wl_output::{self, WlOutput},
         wl_registry::WlRegistry,
+        wl_shm::{self, WlShm},
+        wl_shm_pool::WlShmPool,
         wl_surface::{self, WlSurface},
     },
     Dispatch, Proxy, QueueHandle, WEnum,
@@ -29,6 +34,163 @@ use wayland_protocols::xdg::xdg_output::zv1::client::{
 use xkbcommon::xkb;
 
 use crate::panel_scale::select_scale;
+
+#[derive(Default)]
+pub struct WaylandPanelBuffers {
+    pool: Option<(File, WlShmPool, MmapMut)>,
+    slots: [Option<PanelBuffer>; 2],
+}
+
+struct PanelBuffer {
+    proxy: WlBuffer,
+    range: Range<usize>,
+    width: u32,
+    busy: bool,
+}
+
+impl WaylandPanelBuffers {
+    pub fn available_slot(&self) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.as_ref().is_none_or(|slot| !slot.busy))
+    }
+
+    pub fn release(&mut self, buffer: &WlBuffer) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|slot| slot.proxy == *buffer)
+        {
+            slot.busy = false;
+        }
+    }
+
+    pub fn write<D>(
+        &mut self,
+        slot: usize,
+        shm: &WlShm,
+        qh: &QueueHandle<D>,
+        size: (u32, u32),
+        raster_width: u32,
+        pixels: &[u8],
+    ) -> std::io::Result<&WlBuffer>
+    where
+        D: Dispatch<WlShmPool, ()> + Dispatch<WlBuffer, ()> + 'static,
+    {
+        let (width, height) = size;
+        let invalid_size = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid panel buffer size",
+            )
+        };
+        let stride = width.checked_mul(4).ok_or_else(invalid_size)? as usize;
+        let raster_stride = raster_width.checked_mul(4).ok_or_else(invalid_size)? as usize;
+        let len = stride
+            .checked_mul(height as usize)
+            .ok_or_else(invalid_size)?;
+        if raster_stride == 0
+            || raster_stride > stride
+            || pixels.len() % raster_stride != 0
+            || pixels.len() / raster_stride > height as usize
+            || len == 0
+        {
+            return Err(invalid_size());
+        }
+
+        let current = self.slots[slot].as_ref();
+        assert!(current.is_none_or(|buffer| !buffer.busy));
+        let other = self.slots[1 - slot].as_ref();
+        let offset = panel_buffer_offset(
+            current.map(|buffer| &buffer.range),
+            other.map(|buffer| &buffer.range),
+            len,
+        );
+        let end = offset
+            .checked_add(len)
+            .filter(|end| *end <= i32::MAX as usize)
+            .ok_or_else(invalid_size)?;
+        let capacity = end.next_power_of_two().min(i32::MAX as usize);
+        match &mut self.pool {
+            Some((file, pool, mapping)) if end > mapping.len() => {
+                file.set_len(capacity as u64)?;
+                // The memfd is owned here, grows monotonically, and the compositor only reads it.
+                *mapping = unsafe { MmapOptions::new().len(capacity).map_mut(&*file)? };
+                pool.resize(capacity as i32);
+            }
+            None => {
+                let file = tempfile(libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)?;
+                file.set_len(capacity as u64)?;
+                let mapping = unsafe { MmapOptions::new().len(capacity).map_mut(&file)? };
+                let pool = shm.create_pool(file.as_fd(), capacity as i32, qh, ());
+                self.pool = Some((file, pool, mapping));
+            }
+            _ => {}
+        }
+        let (_, pool, mapping) = self.pool.as_mut().unwrap();
+        copy_panel_pixels(&mut mapping[offset..end], stride, pixels, raster_stride);
+
+        let range = offset..end;
+        let entry = &mut self.slots[slot];
+        if !entry
+            .as_ref()
+            .is_some_and(|buffer| buffer.range == range && buffer.width == width)
+        {
+            if let Some(old) = entry.take() {
+                old.proxy.destroy();
+            }
+            *entry = Some(PanelBuffer {
+                proxy: pool.create_buffer(
+                    offset as i32,
+                    width as i32,
+                    height as i32,
+                    stride as i32,
+                    wl_shm::Format::Argb8888,
+                    qh,
+                    (),
+                ),
+                range,
+                width,
+                busy: false,
+            });
+        }
+        let buffer = entry.as_mut().unwrap();
+        buffer.busy = true;
+        Ok(&buffer.proxy)
+    }
+}
+
+fn panel_buffer_offset(
+    current: Option<&Range<usize>>,
+    other: Option<&Range<usize>>,
+    len: usize,
+) -> usize {
+    if let Some(range) = current.filter(|range| range.len() >= len) {
+        return range.start;
+    }
+    other
+        .filter(|range| range.start < len)
+        .map_or(0, |range| range.end)
+}
+
+fn copy_panel_pixels(output: &mut [u8], stride: usize, pixels: &[u8], raster_stride: usize) {
+    if stride == raster_stride {
+        let (body, padding) = output.split_at_mut(pixels.len());
+        body.copy_from_slice(pixels);
+        padding.fill(0);
+        return;
+    }
+    let mut rows = output.chunks_exact_mut(stride);
+    for (source, row) in pixels.chunks_exact(raster_stride).zip(&mut rows) {
+        let (body, padding) = row.split_at_mut(raster_stride);
+        body.copy_from_slice(source);
+        padding.fill(0);
+    }
+    for row in rows {
+        row.fill(0);
+    }
+}
 
 struct PanelOutput {
     output: WlOutput,
@@ -439,7 +601,7 @@ pub fn tempfile(flags: libc::c_uint) -> std::io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{preedit_cursor_bytes, repeat_timings};
+    use super::{copy_panel_pixels, panel_buffer_offset, preedit_cursor_bytes, repeat_timings};
     use std::time::Duration;
 
     #[test]
@@ -462,5 +624,22 @@ mod tests {
         // Past the end clamps to the byte length rather than panicking.
         assert_eq!(preedit_cursor_bytes("你好", 9), 6);
         assert_eq!(preedit_cursor_bytes("", 0), 0);
+    }
+
+    #[test]
+    fn growing_panel_buffer_keeps_the_other_slot_intact() {
+        assert_eq!(panel_buffer_offset(Some(&(0..4)), Some(&(4..12)), 8), 12);
+        assert_eq!(panel_buffer_offset(Some(&(4..12)), Some(&(12..20)), 12), 0);
+        assert_eq!(panel_buffer_offset(Some(&(12..20)), Some(&(0..12)), 8), 12);
+    }
+
+    #[test]
+    fn copying_panel_pixels_clears_padding_from_a_reused_slot() {
+        let mut output = [255; 18];
+        copy_panel_pixels(&mut output, 6, &[1, 2, 3, 4, 5, 6, 7, 8], 4);
+        assert_eq!(
+            output,
+            [1, 2, 3, 4, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 }

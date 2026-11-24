@@ -94,13 +94,23 @@ impl IbusDeploymentHint {
     }
 
     pub async fn reset(&self) {
+        let generation = self.clear_state();
+        self.publish(None, generation).await;
+    }
+
+    pub async fn discard(&self) {
+        self.clear_state();
+        let _publication = self.publication.lock().await;
+    }
+
+    fn clear_state(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.deployment.reset();
         *self
             .normal_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        self.publish(None, generation).await;
+        generation
     }
 
     pub async fn key_pressed(self: &Arc<Self>) {
