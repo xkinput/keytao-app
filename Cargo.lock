@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-app-core"
-version = "1.2.18-alpha.2"
+version = "1.2.18-alpha.3"
 dependencies = [
  "dirs",
  "flate2",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "1.2.18-alpha.2"
+version = "1.2.18-alpha.3"
 dependencies = [
  "dirs",
  "freetype-rs",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-schema-logo"
-version = "1.2.18-alpha.2"
+version = "1.2.18-alpha.3"
 dependencies = [
  "image",
  "resvg",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-setup-helper"
-version = "1.2.18-alpha.2"
+version = "1.2.18-alpha.3"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "1.2.18-alpha.2"
+version = "1.2.18-alpha.3"
 dependencies = [
  "embed-resource",
  "fontdb",
@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime-server"
-version = "1.2.18-alpha.2"
+version = "1.2.18-alpha.3"
 dependencies = [
  "keytao-app-core",
  "keytao-core",
