@@ -43,3 +43,11 @@ vocabulary reference uses the runtime's bundled `essay` data.
 These packages are downloaded at runtime and are not bundled with KeyTao. Their
 installed notices retain source and license attribution. Uninstall preserves
 user customizations and learned dictionaries, including Snow's user database.
+
+## libjd-engine
+
+KeyTao bundles the engine library from [hronro/ime-jd](https://github.com/hronro/ime-jd),
+pinned to `v0.14.0` and licensed under GPL-3.0, on macOS, Windows, Linux, and
+Android, and statically links it on iOS. Each release package includes the full
+license text in `libjd-engine-LICENSE.txt` and the corresponding source location
+in `libjd-engine-SOURCE.txt`.
