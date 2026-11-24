@@ -186,19 +186,40 @@ extension ImeTheme.Ui {
 final class ImeThemeManager {
     static let shared = ImeThemeManager()
 
+    private let defaultThemePath: String?
+    private let userThemePath: String
+    private let colorSchemeOverride: EffectiveThemeColorScheme?
     private let lock = NSLock()
     private var cachedTheme = ImeTheme.default
     private var cachedSignature: String?
     private var pushedColorScheme: EffectiveThemeColorScheme?
 
+    init() {
+        let bundle = Bundle.main
+        defaultThemePath = (bundle.url(forResource: "default-theme", withExtension: "yaml")
+            ?? bundle.resourceURL?.appendingPathComponent("default-theme.yaml"))?.path
+
+        let environment = ProcessInfo.processInfo.environment
+        if let override = environment["KEYTAO_IME_THEME_PATH"], !override.isEmpty {
+            userThemePath = URL(fileURLWithPath: (override as NSString).expandingTildeInPath).path
+        } else {
+            userThemePath = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/keytao/theme.yaml").path
+        }
+
+        switch environment["KEYTAO_IME_SYSTEM_COLOR_SCHEME"]?.lowercased() {
+        case "dark", "night": colorSchemeOverride = .dark
+        case "light", "day": colorSchemeOverride = .light
+        default: colorSchemeOverride = nil
+        }
+    }
+
     /// Point the shared runtime at the same theme files this renderer reads, so
     /// the candidate panel model it builds for the JSON state uses the user's
     /// theme instead of the built-in defaults.
     func installThemeSources() {
-        let defaultPath = defaultThemeURL()?.path
-        let userPath = userThemeURL()?.path
-        withOptionalCString(defaultPath) { defaultPtr in
-            withOptionalCString(userPath) { userPtr in
+        withOptionalCString(defaultThemePath) { defaultPtr in
+            userThemePath.withCString { userPtr in
                 keytao_set_theme_paths(defaultPtr, userPtr)
             }
         }
@@ -211,23 +232,18 @@ final class ImeThemeManager {
         lock.lock()
         defer { lock.unlock() }
 
-        let defaultURL = defaultThemeURL()
-        let userURL = userThemeURL()
         let colorScheme = systemColorScheme()
         pushSystemColorSchemeLocked(colorScheme)
-        let signatureParts = [defaultURL, userURL]
-            .compactMap { $0 }
-            .map { "\($0.path):\(fileSignature(for: $0))" }
-        let signature = (signatureParts + ["system:\(colorScheme.rawValue)"])
-            .joined(separator: "|")
+        let defaultSignature = defaultThemePath.map { fileSignature(for: $0) } ?? "missing"
+        let signature = "\(defaultSignature)|\(fileSignature(for: userThemePath))|\(colorScheme.rawValue)"
 
         if signature == cachedSignature {
             return cachedTheme
         }
 
         let theme = loadTheme(
-            defaultPath: defaultURL?.path,
-            userPath: userURL?.path,
+            defaultPath: defaultThemePath,
+            userPath: userThemePath,
             systemColorScheme: colorScheme
         ) ?? .default
         cachedSignature = signature
@@ -304,25 +320,8 @@ final class ImeThemeManager {
         return body(nil)
     }
 
-    private func defaultThemeURL() -> URL? {
-        if let url = Bundle.main.url(forResource: "default-theme", withExtension: "yaml") {
-            return url
-        }
-        return Bundle.main.resourceURL?.appendingPathComponent("default-theme.yaml")
-    }
-
-    private func userThemeURL() -> URL? {
-        let environment = ProcessInfo.processInfo.environment
-        if let override = environment["KEYTAO_IME_THEME_PATH"], !override.isEmpty {
-            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
-        }
-
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return URL(fileURLWithPath: (home as NSString).appendingPathComponent("Library/keytao/theme.yaml"))
-    }
-
-    private func fileSignature(for url: URL) -> String {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+    private func fileSignature(for path: String) -> String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
             return "missing"
         }
         let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -331,15 +330,7 @@ final class ImeThemeManager {
     }
 
     private func systemColorScheme() -> EffectiveThemeColorScheme {
-        let environment = ProcessInfo.processInfo.environment
-        if let override = environment["KEYTAO_IME_SYSTEM_COLOR_SCHEME"]?.lowercased() {
-            if override == "dark" || override == "night" {
-                return .dark
-            }
-            if override == "light" || override == "day" {
-                return .light
-            }
-        }
+        if let colorSchemeOverride { return colorSchemeOverride }
         let appearance = NSApp.effectiveAppearance
         return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
