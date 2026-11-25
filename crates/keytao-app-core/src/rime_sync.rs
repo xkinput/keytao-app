@@ -466,6 +466,14 @@ fn migrate_default_sync_dir(
 ) -> PathBuf {
     let relative = format!("sync/keytao-packages/{key}");
     let legacy_dir = root.join(&relative);
+    // Preserve user-managed links even when their target is unavailable.
+    let mut component = root.to_path_buf();
+    for part in relative.split('/') {
+        component.push(part);
+        if fs::symlink_metadata(&component).is_ok_and(|metadata| metadata.is_symlink()) {
+            return std::path::absolute(&legacy_dir).unwrap_or(legacy_dir);
+        }
+    }
     let migrate = || -> Result<(), String> {
         let destination_error = match fs::symlink_metadata(&default_dir) {
             Ok(_) => return Ok(()),
@@ -751,6 +759,7 @@ mod tests {
             let ui = read_ui_settings(root).unwrap();
             assert_eq!(Path::new(&ui.default_sync_dir), runtime.join("sync"));
             assert_eq!(ui.package_sync_dir, ui.default_sync_dir);
+            assert!(!runtime.join("sync").exists());
         }
         assert_eq!(fs::read(root.join("installation.yaml")).unwrap(), legacy);
         assert!(!root.join("sync").exists());
@@ -788,6 +797,34 @@ mod tests {
         prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
         assert!(!old.exists());
         assert_eq!(fs::read(new.join(snapshot)).unwrap(), b"old snapshot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_pins_a_dangling_legacy_sync_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        select_test_package(root, "one");
+        let settings = save_settings(root, "device", "").unwrap();
+        let installation = root.join("installation.yaml");
+        let original = fs::read(&installation).unwrap();
+        std::os::unix::fs::symlink(root.join("unavailable"), root.join("sync")).unwrap();
+        let legacy = root.join("sync/keytao-packages/one");
+        let default_dir = root.join("runtime/one/sync");
+
+        let ui = read_ui_settings(root).unwrap();
+        assert!(ui.sync_dir.is_empty());
+        assert_eq!(Path::new(&ui.package_sync_dir), legacy);
+        assert_eq!(Path::new(&ui.default_sync_dir), default_dir);
+        assert!(!default_dir.exists());
+
+        let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        assert_eq!(
+            Path::new(&read_settings(&runtime).unwrap().sync_dir),
+            legacy
+        );
+        assert!(!default_dir.exists());
+        assert_eq!(fs::read(&installation).unwrap(), original);
     }
 
     #[cfg(unix)]
@@ -868,27 +905,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn migration_failure_does_not_redirect_an_already_migrated_package() {
+    fn symlinked_legacy_sync_root_takes_precedence_over_existing_default() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
-        save_settings(root, "device", "").unwrap();
         select_test_package(root, "one");
-        let migrated = root.join("runtime/one/sync");
-        fs::create_dir(&migrated).unwrap();
-
-        select_test_package(root, "two");
+        let settings = save_settings(root, "device", "").unwrap();
+        let default_dir = root.join("runtime/one/sync");
+        fs::create_dir(&default_dir).unwrap();
         let shared = root.join("shared");
-        fs::create_dir_all(shared.join("keytao-packages/two")).unwrap();
+        fs::create_dir_all(shared.join("keytao-packages/one")).unwrap();
         std::os::unix::fs::symlink(&shared, root.join("sync")).unwrap();
-        let ui = read_ui_settings(root).unwrap();
-        assert_eq!(
-            Path::new(&ui.package_sync_dir),
-            root.join("sync/keytao-packages/two")
-        );
+        let legacy = root.join("sync/keytao-packages/one");
 
-        select_test_package(root, "one");
         let ui = read_ui_settings(root).unwrap();
-        assert_eq!(Path::new(&ui.package_sync_dir), migrated);
+        assert_eq!(Path::new(&ui.package_sync_dir), legacy);
+        let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        assert_eq!(
+            Path::new(&read_settings(&runtime).unwrap().sync_dir),
+            legacy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_pins_symlinked_components_below_the_legacy_sync_root() {
+        for component in ["keytao-packages", "keytao-packages/one"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path();
+            select_test_package(root, "one");
+            let settings = save_settings(root, "device", "").unwrap();
+            let legacy = root.join("sync/keytao-packages/one");
+            let link = root.join("sync").join(component);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(root.join("unavailable"), &link).unwrap();
+
+            let ui = read_ui_settings(root).unwrap();
+            assert_eq!(Path::new(&ui.package_sync_dir), legacy);
+            let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+            assert_eq!(
+                Path::new(&read_settings(&runtime).unwrap().sync_dir),
+                legacy
+            );
+            assert!(!runtime.join("sync").exists());
+        }
     }
 
     #[cfg(unix)]
