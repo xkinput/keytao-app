@@ -1171,16 +1171,30 @@ class RimeSyncSettingsDto {
   final String installationId;
   final String syncDir;
   final String effectiveSyncDir;
+  final String defaultSyncDir;
+  final String packageSyncDir;
+  final BigInt lastSyncAt;
+  final String? lastSyncError;
 
   const RimeSyncSettingsDto({
     required this.installationId,
     required this.syncDir,
     required this.effectiveSyncDir,
+    required this.defaultSyncDir,
+    required this.packageSyncDir,
+    required this.lastSyncAt,
+    this.lastSyncError,
   });
 
   @override
   int get hashCode =>
-      installationId.hashCode ^ syncDir.hashCode ^ effectiveSyncDir.hashCode;
+      installationId.hashCode ^
+      syncDir.hashCode ^
+      effectiveSyncDir.hashCode ^
+      defaultSyncDir.hashCode ^
+      packageSyncDir.hashCode ^
+      lastSyncAt.hashCode ^
+      lastSyncError.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1189,7 +1203,11 @@ class RimeSyncSettingsDto {
           runtimeType == other.runtimeType &&
           installationId == other.installationId &&
           syncDir == other.syncDir &&
-          effectiveSyncDir == other.effectiveSyncDir;
+          effectiveSyncDir == other.effectiveSyncDir &&
+          defaultSyncDir == other.defaultSyncDir &&
+          packageSyncDir == other.packageSyncDir &&
+          lastSyncAt == other.lastSyncAt &&
+          lastSyncError == other.lastSyncError;
 }
 
 class RuntimeLogFileInfoDto {

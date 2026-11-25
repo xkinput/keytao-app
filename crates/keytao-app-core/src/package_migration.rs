@@ -444,6 +444,7 @@ fn preserved_during_migration(name: &str) -> bool {
             | "keytao.user.remove.txt"
             | ".keytao-migration.lock"
             | ".keytao-package-deploy.lock"
+            | crate::rime_sync::INSTALLATION_LOCK
     ) || lower.starts_with("app-state.json")
 }
 

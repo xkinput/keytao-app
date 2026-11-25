@@ -192,10 +192,12 @@ class AppController extends ChangeNotifier {
     required this.info,
     this.android = const AndroidHost(),
     this.pickDesktopDirectory = getDirectoryPath,
+    this.runDesktopOpen = Process.run,
   });
   final BridgeInfo info;
   final AndroidHost android;
   final Future<String?> Function() pickDesktopDirectory;
+  final Future<ProcessResult> Function(String, List<String>) runDesktopOpen;
   bool get isAndroid => info.platform == BridgePlatform.android;
   bool get isWindows => info.platform == BridgePlatform.windows;
   bool get isLinux => info.platform == BridgePlatform.linux;
@@ -403,7 +405,6 @@ class AppController extends ChangeNotifier {
   RimeSyncSettingsDto? rimeSyncSettings;
   bool rimeSyncLoading = false;
   bool rimeSyncing = false;
-  bool? rimeSyncSucceeded;
   String? rimeSyncError;
   InstallProgressDto? installProgress;
   String? installingSchemeKey;
@@ -4479,7 +4480,7 @@ class AppController extends ChangeNotifier {
     } else if (isIos) {
       await const IosHost().openUrl(value);
     } else {
-      final result = await Process.run(
+      final result = await runDesktopOpen(
         isWindows
             ? 'rundll32'
             : isLinux
@@ -4664,13 +4665,23 @@ class AppController extends ChangeNotifier {
   ) async {
     rimeSyncSettings = await core.saveRimeSyncSettings(
       installationId: installationId,
-      syncDir: syncDir,
+      syncDir: syncDir == rimeSyncSettings?.defaultSyncDir ? '' : syncDir,
     );
-    rimeSyncSucceeded = null;
   }
 
   Future<bool> saveRimeSyncSettings(String installationId, String syncDir) =>
       _rimeSyncAction(() => _saveRimeSyncSettings(installationId, syncDir));
+
+  Future<bool> regenerateRimeInstallationId() {
+    final settings = rimeSyncSettings;
+    if (settings == null) return Future.value(false);
+    return _rimeSyncAction(() async {
+      rimeSyncSettings = await core.saveRimeSyncSettings(
+        installationId: await core.newRimeInstallationId(),
+        syncDir: settings.syncDir,
+      );
+    });
+  }
 
   Future<bool> pickRimeSyncDirectory(String installationId) =>
       _rimeSyncAction(() async {
@@ -4683,23 +4694,36 @@ class AppController extends ChangeNotifier {
       saveRimeSyncSettings(installationId, '');
 
   Future<bool> openRimeSyncDirectory() => _rimeSyncAction(() async {
-    if (rimeSyncSettings case final settings?) {
-      await Directory(settings.effectiveSyncDir).create(recursive: true);
-      await _open(settings.effectiveSyncDir);
+    if (rimeSyncSettings case final settings?
+        when settings.packageSyncDir.isNotEmpty) {
+      final directory = Directory(settings.packageSyncDir);
+      if (!await directory.exists()) {
+        final custom = settings.syncDir.isNotEmpty;
+        final parent = custom ? Directory(settings.syncDir) : directory.parent;
+        if ((!custom && directory.path != settings.defaultSyncDir) ||
+            !await parent.exists()) {
+          throw FileSystemException(
+            'Sync directory parent does not exist',
+            parent.path,
+          );
+        }
+        await directory.create(recursive: custom);
+      }
+      await _open(directory.path);
     }
   });
 
   Future<bool> syncRimeUserData() => _rimeSyncAction(() async {
     rimeSyncing = true;
-    rimeSyncSucceeded = null;
     _changed();
     try {
       await core.syncRimeUserData();
-      rimeSyncSucceeded = true;
-    } catch (_) {
-      rimeSyncSucceeded = false;
-      rethrow;
     } finally {
+      try {
+        rimeSyncSettings = await core.getRimeSyncSettings();
+      } catch (failure) {
+        rimeSyncError = errorText(failure);
+      }
       rimeSyncing = false;
     }
   });

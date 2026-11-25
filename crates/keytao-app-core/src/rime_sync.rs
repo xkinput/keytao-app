@@ -1,5 +1,5 @@
 use crate::{Core, CoreError, ime_host::ImeHost, scheme_files::write_file_atomic};
-use keytao_core::runtime_log::AppOperation;
+use keytao_core::{RuntimeDirs, runtime_log::AppOperation};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
@@ -9,63 +9,67 @@ use std::{
     time::Duration,
 };
 
+pub(crate) const INSTALLATION_LOCK: &str = ".keytao-rime-installation.lock";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RimeSyncSettings {
     pub installation_id: String,
     pub sync_dir: String,
     pub effective_sync_dir: String,
+    pub default_sync_dir: String,
+    pub package_sync_dir: String,
+    pub last_sync_at: u64,
+    pub last_sync_error: Option<String>,
 }
 
 pub(crate) fn ensure_installation(core: &Core, root: &Path) -> Result<(), CoreError> {
-    let path = crate::packages::safe_path(root, "installation.yaml").map_err(CoreError::Other)?;
-    if path.try_exists()? {
+    let has_id = |mapping: &Mapping| match mapping.get(Value::String("installation_id".into())) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(id)) => !id.trim().is_empty(),
+        Some(_) => true,
+    };
+    if has_id(&read_document(root).map_err(CoreError::Other)?.2) {
         return Ok(());
     }
     fs::create_dir_all(root)?;
     if !fs::symlink_metadata(root)?.is_dir() {
-        return Err(CoreError::Other("Rime user root must be a directory".into()));
+        return Err(CoreError::Other(
+            "Rime user root must be a directory".into(),
+        ));
     }
 
     #[cfg(target_os = "android")]
-    let _lock = {
+    let lock_path = {
         // Shared storage may reject both locking and no-replace rename.
         let data_dir = &core.env().data_dir;
         fs::create_dir_all(data_dir)?;
-        let lock = fs::File::options()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(data_dir.join(".rime-installation.lock"))?;
-        keytao_core::lock_file(&lock, true)?;
-        if path.try_exists()? {
-            return Ok(());
-        }
-        lock
+        data_dir.join(".rime-installation.lock")
     };
+    #[cfg(not(target_os = "android"))]
+    let lock_path = root.join(INSTALLATION_LOCK);
+    let _lock = crate::package_fs::file_lease(&lock_path, true)?;
+    let (path, text, mut document) = read_document(root).map_err(CoreError::Other)?;
+    if has_id(&document) {
+        return Ok(());
+    }
 
-    let mut bytes = [0; 16];
-    getrandom::fill(&mut bytes).map_err(|error| CoreError::Other(error.to_string()))?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex = format!("{:032x}", u128::from_be_bytes(bytes));
-    let installation_id = format!(
-        "{}-{}-{}-{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..],
-    );
+    let installation_id = new_installation_id().map_err(CoreError::Other)?;
+    if let Some(text) = text {
+        document.insert("installation_id".into(), installation_id.into());
+        let yaml =
+            update_document(&text, &document, &["installation_id"]).map_err(CoreError::Other)?;
+        write_file_atomic(&path, yaml.as_bytes())?;
+        return Ok(());
+    }
     let version = match core.env().app_version.trim() {
         "" => env!("CARGO_PKG_VERSION"),
         version => version,
     };
-    let mut document = Mapping::new();
     for (key, value) in [
         ("distribution_name", "KeyTao".into()),
         ("distribution_code_name", "keytao".into()),
         ("distribution_version", version.into()),
-        ("installation_id", installation_id),
+        ("installation_id", installation_id.clone()),
         ("install_time", time::OffsetDateTime::now_utc().to_string()),
     ] {
         document.insert(key.into(), value.into());
@@ -85,22 +89,49 @@ pub(crate) fn ensure_installation(core: &Core, root: &Path) -> Result<(), CoreEr
         file.as_file().sync_all()?;
         match file.persist_noclobber(path) {
             Ok(_) => {}
-            Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+                // A frontend may have created its own installation file.
+                let (path, text, mut document) = read_document(root).map_err(CoreError::Other)?;
+                if let Some(text) = text
+                    && !has_id(&document)
+                {
+                    document.insert("installation_id".into(), installation_id.into());
+                    let yaml = update_document(&text, &document, &["installation_id"])
+                        .map_err(CoreError::Other)?;
+                    write_file_atomic(&path, yaml.as_bytes())?;
+                }
+            }
             Err(error) => return Err(error.error.into()),
         }
     }
     Ok(())
 }
 
-fn read_document(root: &Path) -> Result<(PathBuf, String, Mapping), String> {
+pub fn new_installation_id() -> Result<String, String> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = format!("{:032x}", u128::from_be_bytes(bytes));
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..],
+    ))
+}
+
+fn read_document(root: &Path) -> Result<(PathBuf, Option<String>, Mapping), String> {
     let path = crate::packages::safe_path(root, "installation.yaml")?;
     let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(format!("Read installation.yaml: {error}")),
     };
-    let value: Value =
-        serde_yaml::from_str(&text).map_err(|error| format!("Read installation.yaml: {error}"))?;
+    let value: Value = serde_yaml::from_str(text.as_deref().unwrap_or_default())
+        .map_err(|error| format!("Read installation.yaml: {error}"))?;
     let mapping = match value {
         Value::Null => Mapping::new(),
         Value::Mapping(mapping) => mapping,
@@ -126,11 +157,48 @@ fn settings(root: &Path, mapping: &Mapping) -> Result<RimeSyncSettings, String> 
         installation_id,
         sync_dir,
         effective_sync_dir: effective.to_string_lossy().into_owned(),
+        default_sync_dir: String::new(),
+        package_sync_dir: String::new(),
+        last_sync_at: 0,
+        last_sync_error: None,
     })
 }
 
 pub fn read_settings(root: &Path) -> Result<RimeSyncSettings, String> {
     settings(root, &read_document(root)?.2)
+}
+
+pub fn read_ui_settings(root: &Path) -> Result<RimeSyncSettings, String> {
+    let mut settings = read_settings(root)?;
+    let (runtime, sync_dir) = match package_sync_dir(root, &settings, rename_sync_dir) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            settings.last_sync_error = Some(error);
+            return Ok(settings);
+        }
+    };
+    let default_dir = if runtime.active_package_key.is_some() {
+        runtime.user_data_dir.join("sync")
+    } else {
+        root.join("sync")
+    };
+    settings.default_sync_dir = default_dir.to_string_lossy().into_owned();
+    settings.package_sync_dir = sync_dir.to_string_lossy().into_owned();
+    match keytao_core::read_user_data_sync_result(&runtime.user_data_dir) {
+        Ok(Some(result)) if result.finished_at != 0 => {
+            settings.last_sync_at = result.finished_at;
+            if !result.ok {
+                settings.last_sync_error = Some(
+                    result
+                        .error
+                        .unwrap_or_else(|| "Rime user data sync failed".into()),
+                );
+            }
+        }
+        Err(error) => settings.last_sync_error = Some(error),
+        _ => {}
+    }
+    Ok(settings)
 }
 
 fn validate_installation_id(value: &str) -> Result<&str, String> {
@@ -177,6 +245,27 @@ fn validate_sync_dir(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
+pub fn validate_user_sync_dir(path: &Path) -> Result<(), String> {
+    use std::io::Write;
+
+    validate_sync_dir(path.to_str().ok_or("Rime sync path is not valid UTF-8")?)?;
+    if !path.parent().is_some_and(Path::is_dir) {
+        return Err("Rime sync path must have an existing parent directory".into());
+    }
+    if !path.is_dir()
+        && let Err(error) = fs::create_dir(path)
+        && error.kind() != ErrorKind::AlreadyExists
+    {
+        return Err(format!("Create Rime sync directory: {error}"));
+    }
+    let mut probe = tempfile::NamedTempFile::new_in(path)
+        .map_err(|error| format!("Rime sync directory is not writable: {error}"))?;
+    probe
+        .write_all(b"\n")
+        .and_then(|_| probe.close())
+        .map_err(|error| format!("Rime sync directory is not writable: {error}"))
+}
+
 fn inline_comment(line: &str) -> &str {
     line.match_indices('#')
         .find(|(offset, _)| {
@@ -191,7 +280,7 @@ fn inline_comment(line: &str) -> &str {
 }
 
 // Patch librime's usual block mapping; unusual YAML falls back to a semantic rewrite.
-fn update_document(text: &str, mapping: &Mapping) -> Result<String, String> {
+fn update_document(text: &str, mapping: &Mapping, keys: &[&str]) -> Result<String, String> {
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines = Vec::new();
     let mut replaced = [false; 2];
@@ -207,10 +296,7 @@ fn update_document(text: &str, mapping: &Mapping) -> Result<String, String> {
             in_replaced_value = false;
         }
         let key = line.split_once(':').map(|(key, _)| key);
-        let Some(index) = ["installation_id", "sync_dir"]
-            .iter()
-            .position(|candidate| key == Some(*candidate))
-        else {
+        let Some(index) = keys.iter().position(|candidate| key == Some(*candidate)) else {
             lines.push(line.to_owned());
             continue;
         };
@@ -231,7 +317,7 @@ fn update_document(text: &str, mapping: &Mapping) -> Result<String, String> {
             lines.push(inline_comment(line).to_owned());
         }
     }
-    for (index, key) in ["installation_id", "sync_dir"].iter().enumerate() {
+    for (index, key) in keys.iter().enumerate() {
         if !replaced[index] {
             if let Some(value) = mapping.get(Value::String((*key).into())) {
                 let scalar = serde_json::to_string(value.as_str().unwrap())
@@ -255,17 +341,31 @@ pub fn save_settings(
 ) -> Result<RimeSyncSettings, String> {
     let installation_id = validate_installation_id(installation_id)?;
     let sync_dir = validate_sync_dir(sync_dir)?;
+    update_installation(root, &["installation_id", "sync_dir"], |mapping| {
+        mapping.insert("installation_id".into(), installation_id.into());
+        if sync_dir.is_empty() {
+            mapping.remove(Value::String("sync_dir".into()));
+        } else {
+            mapping.insert("sync_dir".into(), sync_dir.into());
+        }
+        Ok(true)
+    })
+}
+
+fn update_installation(
+    root: &Path,
+    keys: &[&str],
+    update: impl FnOnce(&mut Mapping) -> Result<bool, String>,
+) -> Result<RimeSyncSettings, String> {
+    fs::create_dir_all(root).map_err(|error| format!("Create Rime user directory: {error}"))?;
+    #[cfg(not(target_os = "android"))]
+    let _lock = crate::package_fs::file_lease(&root.join(INSTALLATION_LOCK), true)
+        .map_err(|error| format!("Lock installation.yaml: {error}"))?;
     let (path, text, mut mapping) = read_document(root)?;
-    mapping.insert("installation_id".into(), installation_id.into());
-    if sync_dir.is_empty() {
-        mapping.remove(Value::String("sync_dir".into()));
-    } else {
-        mapping.insert("sync_dir".into(), sync_dir.into());
+    if update(&mut mapping)? {
+        let text = update_document(text.as_deref().unwrap_or_default(), &mapping, keys)?;
+        write_file_atomic(&path, text.as_bytes()).map_err(|error| error.to_string())?;
     }
-    let text = update_document(&text, &mapping)?;
-    std::fs::create_dir_all(root)
-        .map_err(|error| format!("Create Rime user directory: {error}"))?;
-    write_file_atomic(&path, text.as_bytes()).map_err(|error| error.to_string())?;
     settings(root, &mapping)
 }
 
@@ -284,7 +384,7 @@ async fn sync_user_data_with_timeout(
         return Err("installation_id must be trimmed".into());
     }
     validate_sync_dir(&settings.sync_dir)?;
-    let request_root = prepare_sync_root(&root, &settings)?;
+    let request_root = prepare_sync_root(&root, &settings, rename_sync_dir)?;
     let generation = keytao_core::request_user_data_sync(&request_root)?;
     if let Err(error) = host.write_reload_stamp(&root) {
         if keytao_core::cancel_user_data_sync(&request_root, generation).unwrap_or(true) {
@@ -339,10 +439,138 @@ async fn sync_user_data_with_timeout(
     }
 }
 
-fn prepare_sync_root(root: &Path, settings: &RimeSyncSettings) -> Result<PathBuf, String> {
-    let runtime = keytao_core::RuntimeDirs::resolve(root, root)?;
-    let Some(key) = runtime.active_package_key else {
-        return if keytao_core::RuntimeDirs::needs_migration(root) {
+fn package_sync_dir(
+    root: &Path,
+    settings: &RimeSyncSettings,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(RuntimeDirs, PathBuf), String> {
+    let runtime = RuntimeDirs::resolve(root, root)?;
+    let sync_dir = match runtime.active_package_key.as_deref() {
+        Some(key) if settings.sync_dir.is_empty() => {
+            migrate_default_sync_dir(root, key, runtime.user_data_dir.join("sync"), rename)
+        }
+        Some(key) => Path::new(&settings.sync_dir)
+            .join("keytao-packages")
+            .join(key),
+        None if runtime.user_data_dir == root => PathBuf::from(&settings.effective_sync_dir),
+        None => PathBuf::new(),
+    };
+    Ok((runtime, sync_dir))
+}
+
+fn migrate_default_sync_dir(
+    root: &Path,
+    key: &str,
+    default_dir: PathBuf,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> PathBuf {
+    let relative = format!("sync/keytao-packages/{key}");
+    let legacy_dir = root.join(&relative);
+    let migrate = || -> Result<(), String> {
+        let destination_error = match fs::symlink_metadata(&default_dir) {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        match fs::metadata(&legacy_dir) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("Inspect previous Rime sync directory: {error}")),
+        }
+        if destination_error.kind() != ErrorKind::NotFound {
+            return Err(format!("Inspect Rime sync directory: {destination_error}"));
+        }
+        let old_dir = crate::packages::safe_path(root, &relative)?;
+        match rename(&old_dir, &default_dir) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.kind() == ErrorKind::NotFound
+                    && default_dir.is_dir()
+                    && !legacy_dir.is_dir() =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(format!("Move Rime sync directory: {error}")),
+        }
+    };
+    match migrate() {
+        Ok(()) => default_dir,
+        Err(error) => {
+            tracing::warn!(%error, path = %legacy_dir.display(), "Keeping the previous Rime sync directory");
+            // Keep the alias so a user-managed symlink can continue to redirect sync.
+            std::path::absolute(&legacy_dir).unwrap_or(legacy_dir)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn rename_sync_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    // A concurrent sync or directory open can create the destination after the existence check.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_sync_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW},
+        core::PCWSTR,
+    };
+
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>()
+    };
+    let (from, to) = (wide(from), wide(to));
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVE_FILE_FLAGS(0),
+        )
+    }
+    .map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xffff))
+}
+
+fn prepare_sync_root(
+    root: &Path,
+    settings: &RimeSyncSettings,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<PathBuf, String> {
+    let (runtime, sync_dir) = package_sync_dir(root, settings, rename)?;
+    let Some(key) = runtime.active_package_key.as_deref() else {
+        return if runtime.user_data_dir == root {
             Ok(runtime.user_data_dir)
         } else {
             Err("没有使用中的方案包".into())
@@ -351,12 +579,17 @@ fn prepare_sync_root(root: &Path, settings: &RimeSyncSettings) -> Result<PathBuf
     if !runtime.user_data_dir.is_dir() {
         return Err(format!("Rime runtime is not available for {key}"));
     }
-    // Librime backs up configs beside userdb snapshots, so packages need separate sync folders.
-    let sync_dir = Path::new(&settings.effective_sync_dir).join("keytao-packages").join(key);
+    let configured_dir = if sync_dir == runtime.user_data_dir.join("sync") {
+        ""
+    } else {
+        sync_dir
+            .to_str()
+            .ok_or("Rime sync path is not valid UTF-8")?
+    };
     save_settings(
         &runtime.user_data_dir,
         &settings.installation_id,
-        sync_dir.to_str().ok_or("Rime sync path is not valid UTF-8")?,
+        configured_dir,
     )?;
     Ok(runtime.user_data_dir)
 }
@@ -486,28 +719,308 @@ mod tests {
         }
     }
 
+    fn select_test_package(root: &Path, key: &str) {
+        let store = root.join("scheme-packages");
+        fs::create_dir_all(store.join("cloud").join(key).join("files")).unwrap();
+        fs::create_dir_all(root.join("runtime").join(key)).unwrap();
+        fs::write(root.join(RuntimeDirs::MIGRATION_MARKER), r#"{"version":1}"#).unwrap();
+        fs::write(
+            store.join("active-manifest.json"),
+            format!(r#"{{"active_package":"{key}","runtime_migration_version":1}}"#),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn isolated_sync_prepares_settings_only_for_the_selected_runtime() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         let settings = save_settings(root, "device", "").unwrap();
-        let legacy = std::fs::read(root.join("installation.yaml")).unwrap();
-        let store = root.join("scheme-packages");
+        let legacy = fs::read(root.join("installation.yaml")).unwrap();
         for key in ["one", "two"] {
-            std::fs::create_dir_all(store.join("cloud").join(key).join("files")).unwrap();
-            std::fs::create_dir_all(root.join("runtime").join(key)).unwrap();
-        }
-        std::fs::write(root.join(keytao_core::RuntimeDirs::MIGRATION_MARKER), r#"{"version":1,"runtime_package":"one"}"#).unwrap();
-        for key in ["one", "two"] {
-            std::fs::write(store.join("active-manifest.json"), format!(r#"{{"active_package":"{key}","runtime_migration_version":1}}"#)).unwrap();
-            let runtime = prepare_sync_root(root, &settings).unwrap();
+            select_test_package(root, key);
+            let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
             assert_eq!(runtime, root.join("runtime").join(key));
             let prepared = read_settings(&runtime).unwrap();
             assert_eq!(prepared.installation_id, "device");
-            assert_eq!(Path::new(&prepared.effective_sync_dir), root.join("sync/keytao-packages").join(key));
+            assert_eq!(
+                Path::new(&prepared.effective_sync_dir),
+                runtime.join("sync")
+            );
+            assert!(!read_document(&runtime).unwrap().2.contains_key("sync_dir"));
+            let ui = read_ui_settings(root).unwrap();
+            assert_eq!(Path::new(&ui.default_sync_dir), runtime.join("sync"));
+            assert_eq!(ui.package_sync_dir, ui.default_sync_dir);
         }
-        assert_eq!(std::fs::read(root.join("installation.yaml")).unwrap(), legacy);
+        assert_eq!(fs::read(root.join("installation.yaml")).unwrap(), legacy);
         assert!(!root.join("sync").exists());
+
+        let custom = root.join("shared sync");
+        let settings = save_settings(root, "device", custom.to_str().unwrap()).unwrap();
+        let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        let expected_path = custom.join("keytao-packages/two");
+        assert_eq!(
+            Path::new(&read_settings(&runtime).unwrap().sync_dir),
+            expected_path
+        );
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(Path::new(&ui.default_sync_dir), runtime.join("sync"));
+        assert_eq!(Path::new(&ui.package_sync_dir), expected_path);
+    }
+
+    #[test]
+    fn migrates_old_default_sync_dir_without_replacing_an_existing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        select_test_package(root, "one");
+        let settings = save_settings(root, "device", "").unwrap();
+        let old = root.join("sync/keytao-packages/one");
+        let new = root.join("runtime/one/sync");
+        let snapshot = "device/dict.userdb.txt";
+        fs::create_dir_all(old.join("device")).unwrap();
+        fs::write(old.join(snapshot), b"old snapshot").unwrap();
+        fs::create_dir(&new).unwrap();
+        prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        assert_eq!(fs::read(old.join(snapshot)).unwrap(), b"old snapshot");
+        assert!(fs::read_dir(&new).unwrap().next().is_none());
+
+        fs::remove_dir(&new).unwrap();
+        prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        assert!(!old.exists());
+        assert_eq!(fs::read(new.join(snapshot)).unwrap(), b"old snapshot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_preserves_a_symlinked_legacy_sync_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        select_test_package(root, "one");
+        let settings = save_settings(root, "device", "").unwrap();
+        let shared = root.join("shared");
+        let old = shared.join("keytao-packages/one/device");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("dict.userdb.txt"), b"old snapshot").unwrap();
+        std::os::unix::fs::symlink(&shared, root.join("sync")).unwrap();
+
+        let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        let legacy = root.join("sync");
+        let expected = legacy.join("keytao-packages/one");
+        assert!(!read_document(root).unwrap().2.contains_key("sync_dir"));
+        assert_eq!(
+            Path::new(&read_settings(&runtime).unwrap().sync_dir),
+            expected
+        );
+        assert_eq!(
+            Path::new(&read_ui_settings(root).unwrap().package_sync_dir),
+            expected
+        );
+        assert_eq!(
+            fs::read(old.join("dict.userdb.txt")).unwrap(),
+            b"old snapshot"
+        );
+        assert!(!runtime.join("sync").exists());
+
+        fs::remove_file(&legacy).unwrap();
+        fs::rename(&shared, &legacy).unwrap();
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(Path::new(&ui.package_sync_dir), runtime.join("sync"));
+        assert_eq!(
+            fs::read(runtime.join("sync/device/dict.userdb.txt")).unwrap(),
+            b"old snapshot"
+        );
+        assert!(!expected.exists());
+        prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
+        assert!(!read_document(&runtime).unwrap().2.contains_key("sync_dir"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_keeps_the_legacy_directory_when_rename_fails() {
+        for errno in [libc::EXDEV, libc::EINVAL] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path();
+            select_test_package(root, "one");
+            let settings = save_settings(root, "device", "").unwrap();
+            let old = root.join("sync/keytao-packages/one");
+            let dest = root.join("runtime/one/sync");
+            fs::create_dir_all(&old).unwrap();
+            fs::write(old.join("snapshot"), b"old snapshot").unwrap();
+
+            let runtime = prepare_sync_root(root, &settings, |from, to| {
+                assert_eq!(from, old);
+                assert_eq!(to, dest);
+                Err(std::io::Error::from_raw_os_error(errno))
+            })
+            .unwrap();
+
+            assert!(!read_document(root).unwrap().2.contains_key("sync_dir"));
+            assert_eq!(Path::new(&read_settings(&runtime).unwrap().sync_dir), old);
+            assert_eq!(fs::read(old.join("snapshot")).unwrap(), b"old snapshot");
+            assert!(!dest.exists());
+
+            let ui = read_ui_settings(root).unwrap();
+            assert_eq!(Path::new(&ui.package_sync_dir), dest);
+            assert_eq!(fs::read(dest.join("snapshot")).unwrap(), b"old snapshot");
+            assert!(!old.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_failure_does_not_redirect_an_already_migrated_package() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        save_settings(root, "device", "").unwrap();
+        select_test_package(root, "one");
+        let migrated = root.join("runtime/one/sync");
+        fs::create_dir(&migrated).unwrap();
+
+        select_test_package(root, "two");
+        let shared = root.join("shared");
+        fs::create_dir_all(shared.join("keytao-packages/two")).unwrap();
+        std::os::unix::fs::symlink(&shared, root.join("sync")).unwrap();
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(
+            Path::new(&ui.package_sync_dir),
+            root.join("sync/keytao-packages/two")
+        );
+
+        select_test_package(root, "one");
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(Path::new(&ui.package_sync_dir), migrated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resetting_sync_path_stays_saved_when_legacy_dir_cannot_move() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        select_test_package(root, "two");
+        save_settings(root, "device", root.join("custom").to_str().unwrap()).unwrap();
+        let shared = root.join("shared");
+        fs::create_dir_all(shared.join("keytao-packages/two")).unwrap();
+        std::os::unix::fs::symlink(&shared, root.join("sync")).unwrap();
+
+        save_settings(root, "device", "").unwrap();
+        let ui = read_ui_settings(root).unwrap();
+        assert!(ui.sync_dir.is_empty());
+        assert_eq!(
+            Path::new(&ui.default_sync_dir),
+            root.join("runtime/two/sync")
+        );
+        assert_eq!(
+            Path::new(&ui.package_sync_dir),
+            root.join("sync/keytao-packages/two")
+        );
+        assert!(!read_document(root).unwrap().2.contains_key("sync_dir"));
+    }
+
+    #[test]
+    fn ui_settings_keep_saved_fields_when_runtime_resolution_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        select_test_package(root, "one");
+        let custom = root.join("custom");
+        let saved = save_settings(root, "device", custom.to_str().unwrap()).unwrap();
+        fs::remove_dir(root.join("scheme-packages/cloud/one/files")).unwrap();
+
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(ui.installation_id, saved.installation_id);
+        assert_eq!(ui.sync_dir, saved.sync_dir);
+        assert!(ui.default_sync_dir.is_empty());
+        assert!(ui.package_sync_dir.is_empty());
+        assert_eq!(ui.last_sync_at, 0);
+        assert!(
+            ui.last_sync_error
+                .unwrap()
+                .contains("package files directory")
+        );
+    }
+
+    #[test]
+    fn ui_settings_keep_sync_paths_when_result_json_is_invalid() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        select_test_package(root, "one");
+        save_settings(root, "device", "").unwrap();
+        let runtime = root.join("runtime/one");
+        fs::write(runtime.join(keytao_core::USER_DATA_SYNC_RESULT_FILE), b"{").unwrap();
+
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(ui.installation_id, "device");
+        assert_eq!(Path::new(&ui.default_sync_dir), runtime.join("sync"));
+        assert_eq!(ui.package_sync_dir, ui.default_sync_dir);
+        assert_eq!(ui.last_sync_at, 0);
+        assert!(ui.last_sync_error.is_some());
+    }
+
+    #[test]
+    fn fills_missing_and_empty_installation_id_without_changing_other_keys() {
+        struct Sink;
+        impl crate::EventSink for Sink {
+            fn emit(&self, _: crate::CoreEvent) {}
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: temp.path().join("data"),
+                cache_dir: temp.path().join("cache"),
+                resource_dir: temp.path().join("resources"),
+                app_version: "1.2.15".into(),
+                platform: crate::Platform::MacOs,
+            },
+            std::sync::Arc::new(Sink),
+        )
+        .unwrap();
+        let root = temp.path().join("rime");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("installation.yaml");
+        for id in ["", "installation_id: ''\n", "installation_id:\n"] {
+            fs::write(
+                &path,
+                format!("{id}custom: [1, true]\nsync_dir: /other # keep\n"),
+            )
+            .unwrap();
+            ensure_installation(&core, &root).unwrap();
+            let (_, text, mut mapping) = read_document(&root).unwrap();
+            let text = text.unwrap();
+            let generated = mapping.remove("installation_id").unwrap();
+            let bytes = generated.as_str().unwrap().as_bytes();
+            assert_eq!(bytes.len(), 36);
+            assert_eq!(bytes[14], b'4');
+            assert!(b"89ab".contains(&bytes[19]));
+            assert_eq!(
+                mapping,
+                serde_yaml::from_str("custom: [1, true]\nsync_dir: /other").unwrap()
+            );
+            assert!(text.contains("sync_dir: /other # keep"));
+            ensure_installation(&core, &root).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn user_sync_dir_requires_absolute_writable_path_with_existing_parent() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(validate_user_sync_dir(Path::new("relative")).is_err());
+        assert!(validate_user_sync_dir(&root.path().join("missing/sync")).is_err());
+        let file = root.path().join("file");
+        fs::write(&file, b"keep").unwrap();
+        assert!(validate_user_sync_dir(&file).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+        let dir = root.path().join("sync");
+        validate_user_sync_dir(&dir).unwrap();
+        assert!(fs::read_dir(&dir).unwrap().next().is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+            if unsafe { libc::geteuid() } != 0 {
+                assert!(validate_user_sync_dir(&dir).is_err());
+            }
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
