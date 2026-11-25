@@ -41,6 +41,14 @@ pub(crate) fn build_client_with_redirects(
     })
 }
 
+fn parse_download_url(obj: &serde_json::Value) -> Option<String> {
+    obj["downloadUrl"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
     let urls = &obj["downloadUrls"];
     DownloadUrls {
@@ -50,6 +58,18 @@ fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
         android: urls["android"].as_str().map(|s| s.to_string()),
         ios: urls["ios"].as_str().map(|s| s.to_string()),
     }
+}
+
+fn parse_platform_release(obj: &serde_json::Value) -> Option<PlatformRelease> {
+    let version = obj["version"].as_str().unwrap_or("").to_string();
+    if version.is_empty() {
+        return None;
+    }
+    Some(PlatformRelease {
+        version,
+        download_url: parse_download_url(obj),
+        download_urls: parse_download_urls(obj),
+    })
 }
 
 pub async fn fetch_latest_release(core: &Core) -> Result<ReleaseInfo, CoreError> {
@@ -113,25 +133,8 @@ pub async fn fetch_latest_release(core: &Core) -> Result<ReleaseInfo, CoreError>
             Err(error) => return cached.map(|cache| cache.release).ok_or(error),
         };
 
-        let github_version = data["github"]["version"].as_str().unwrap_or("").to_string();
-        let github = if !github_version.is_empty() {
-            Some(PlatformRelease {
-                version: github_version.clone(),
-                download_urls: parse_download_urls(&data["github"]),
-            })
-        } else {
-            None
-        };
-
-        let gitee_version = data["gitee"]["version"].as_str().unwrap_or("").to_string();
-        let gitee = if !gitee_version.is_empty() {
-            Some(PlatformRelease {
-                version: gitee_version,
-                download_urls: parse_download_urls(&data["gitee"]),
-            })
-        } else {
-            None
-        };
+        let github = parse_platform_release(&data["github"]);
+        let gitee = parse_platform_release(&data["gitee"]);
 
         let version = data["version"].as_str().unwrap_or("unknown").to_string();
         let name = data["name"].as_str().unwrap_or("").to_string();
@@ -440,5 +443,20 @@ mod tests {
         let actual = fetch_latest_release(&core).await.unwrap();
         assert_eq!(serde_json::to_value(actual).unwrap(), release);
         assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn parse_platform_release_reads_universal_download_url() {
+        let payload = serde_json::json!({
+            "version": "v1.3.35",
+            "downloadUrl": "https://github.com/xkinput/KeyTao/releases/download/v1.3.35/keytao-v1.3.35.zip",
+            "downloadUrls": {}
+        });
+        let release = parse_platform_release(&payload).unwrap();
+        assert_eq!(release.version, "v1.3.35");
+        assert_eq!(
+            release.download_url.as_deref(),
+            Some("https://github.com/xkinput/KeyTao/releases/download/v1.3.35/keytao-v1.3.35.zip")
+        );
     }
 }

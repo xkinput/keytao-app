@@ -1120,12 +1120,18 @@ enum PanelOrientationDto { horizontal, vertical }
 
 class PlatformReleaseDto {
   final String version;
+  final String? downloadUrl;
   final DownloadUrlsDto downloadUrls;
 
-  const PlatformReleaseDto({required this.version, required this.downloadUrls});
+  const PlatformReleaseDto({
+    required this.version,
+    this.downloadUrl,
+    required this.downloadUrls,
+  });
 
   @override
-  int get hashCode => version.hashCode ^ downloadUrls.hashCode;
+  int get hashCode =>
+      version.hashCode ^ downloadUrl.hashCode ^ downloadUrls.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1133,6 +1139,7 @@ class PlatformReleaseDto {
       other is PlatformReleaseDto &&
           runtimeType == other.runtimeType &&
           version == other.version &&
+          downloadUrl == other.downloadUrl &&
           downloadUrls == other.downloadUrls;
 }
 

@@ -84,6 +84,9 @@ find_keytao_ios_package_dir() {
         candidates+=("$KEYTAO_IOS_RIME_PACKAGE_DIR")
     fi
     candidates+=(
+        "$PROJECT_DIR/../KeyTao/release/keytao"
+        "$PROJECT_DIR/KeyTao/release/keytao"
+        "$PROJECT_DIR/release/keytao"
         "$PROJECT_DIR/../KeyTao/release/keytao-ios"
         "$PROJECT_DIR/KeyTao/release/keytao-ios"
         "$PROJECT_DIR/release/keytao-ios"

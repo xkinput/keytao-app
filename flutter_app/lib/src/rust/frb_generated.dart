@@ -6543,11 +6543,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformReleaseDto dco_decode_platform_release_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return PlatformReleaseDto(
       version: dco_decode_String(arr[0]),
-      downloadUrls: dco_decode_download_urls_dto(arr[1]),
+      downloadUrl: dco_decode_opt_String(arr[1]),
+      downloadUrls: dco_decode_download_urls_dto(arr[2]),
     );
   }
 
@@ -8328,9 +8329,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_version = sse_decode_String(deserializer);
+    var var_downloadUrl = sse_decode_opt_String(deserializer);
     var var_downloadUrls = sse_decode_download_urls_dto(deserializer);
     return PlatformReleaseDto(
       version: var_version,
+      downloadUrl: var_downloadUrl,
       downloadUrls: var_downloadUrls,
     );
   }
@@ -10037,6 +10040,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.version, serializer);
+    sse_encode_opt_String(self.downloadUrl, serializer);
     sse_encode_download_urls_dto(self.downloadUrls, serializer);
   }
 
