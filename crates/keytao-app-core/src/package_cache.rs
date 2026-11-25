@@ -24,7 +24,7 @@ pub fn cache_sizes(core: &Core, root: &Path, scheme_key: &str) -> Result<Package
     } else {
         0
     };
-    let ime_jd_bytes = if engine_choice::can_release_libjd_dictionary(root, scheme_key) {
+    let ime_jd_bytes = if engine_choice::can_release_libjd_dictionary(root) {
         cache_bytes(&dictionary_files(core, root, scheme_key, &source)?)?
     } else {
         0
@@ -47,11 +47,13 @@ pub fn release(core: &Core, root: &Path, scheme_key: &str, ime_jd: bool) -> Resu
             }
             return isolated_deploy::release_rime_build_cache(root, scheme_key);
         }
-        if !engine_choice::can_release_libjd_dictionary(root, scheme_key) {
-            return Err("当前引擎或此方案仍选用了 ime-jd，无法释放词库".into());
+        if !engine_choice::can_release_libjd_dictionary(root) {
+            return Err("无法释放 ime-jd 词库".into());
         }
         let files = dictionary_files(core, root, scheme_key, &source)
             .map_err(|error| error.to_string())?;
+        // A partial deletion must leave the package unconfigured.
+        crate::libjd::clear_package_engine(root, scheme_key).map_err(|error| error.to_string())?;
         for file in files {
             match fs::remove_file(&file) {
                 Ok(()) => {}
@@ -59,7 +61,7 @@ pub fn release(core: &Core, root: &Path, scheme_key: &str, ime_jd: bool) -> Resu
                 Err(error) => return Err(package_fs::context("删除缓存", &file, error).to_string()),
             }
         }
-        Ok(())
+        keytao_core::ReloadStamp::write(root).map(|_| ())
     })
     .map_err(CoreError::Other)
 }
@@ -174,14 +176,47 @@ mod tests {
         install_dictionary(core, key);
         assert!(cache_sizes(core, root, key).unwrap().ime_jd_bytes > 0);
 
-        fs::write(root.join(keytao_core::english_mode::SETTINGS_FILE), b"{").unwrap();
-        assert_eq!(cache_sizes(core, root, key).unwrap().ime_jd_bytes, 0);
-        assert!(release(core, root, key, true).is_err());
-        assert!(libjd::imported_dictionary(&core.env().data_dir, key).is_some());
+        let settings = root.join(keytao_core::english_mode::SETTINGS_FILE);
+        for invalid in ["{", "null", r#"{"engine":"rime","engines":null}"#] {
+            fs::write(&settings, invalid).unwrap();
+            assert_eq!(cache_sizes(core, root, key).unwrap().ime_jd_bytes, 0);
+            assert!(release(core, root, key, true).is_err());
+            assert!(libjd::imported_dictionary(&core.env().data_dir, key).is_some());
+        }
     }
 
     #[test]
-    fn inactive_converted_package_keeps_its_dictionary_after_upgrade() {
+    fn rime_releases_the_converted_dictionary_and_clears_only_its_engine() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = AddonHost::new(root);
+        let core = &host.core;
+        let key = "xmjd";
+        install_dictionary(core, key);
+        let dictionary = libjd::dictionary_directory(&core.env().data_dir, key).unwrap();
+        let settings = root.join(keytao_core::english_mode::SETTINGS_FILE);
+        fs::write(
+            &settings,
+            br#"{"engine":"rime","engines":{"xmjd":"libjd_engine","other":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        assert!(cache_sizes(core, root, key).unwrap().ime_jd_bytes > 0);
+
+        release(core, root, key, true).unwrap();
+
+        assert!(!dictionary.join("dictionary.bin").exists());
+        assert!(!dictionary.join("schema.json").exists());
+        assert_eq!(cache_sizes(core, root, key).unwrap().ime_jd_bytes, 0);
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"engine":"rime","engines":{"other":"libjd_engine"}})
+        );
+        assert!(keytao_core::ReloadStamp::path(root).is_file());
+    }
+
+    #[test]
+    fn explicit_and_legacy_ime_jd_preference_prevent_dictionary_release() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let host = AddonHost::new(root);
@@ -190,22 +225,90 @@ mod tests {
         install_dictionary(core, key);
         let manifest = keytao_core::package_store::active_manifest(root);
         fs::create_dir_all(manifest.parent().unwrap()).unwrap();
-        fs::write(manifest, br#"{"active_package":"keytao"}"#).unwrap();
-
-        assert!(cache_sizes(core, root, key).unwrap().ime_jd_bytes > 0);
-
         let settings = root.join(keytao_core::english_mode::SETTINGS_FILE);
-        for choice in [
-            br#"{"engines":{"xmjd":"libjd_engine"}}"#.as_slice(),
-            br#"{"engine":"rime","engines":{"xmjd":"libjd_engine"}}"#,
+        for (active, choice) in [
+            (
+                "keytao",
+                br#"{"engine":"libjd_engine","engines":{"xmjd":"libjd_engine"}}"#.as_slice(),
+            ),
+            ("xmjd", br#"{"engines":{"xmjd":"libjd_engine"}}"#),
         ] {
+            fs::write(
+                &manifest,
+                serde_json::json!({"active_package":active}).to_string(),
+            )
+            .unwrap();
             fs::write(&settings, choice).unwrap();
-            assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some("keytao"));
-            assert!(engine_choice::preferred(root).is_rime());
+            assert_eq!(
+                engine_choice::preferred(root),
+                engine_choice::PackageEngine::LibjdEngine
+            );
             assert_eq!(cache_sizes(core, root, key).unwrap().ime_jd_bytes, 0);
             assert!(release(core, root, key, true).is_err());
             assert!(libjd::imported_dictionary(&core.env().data_dir, key).is_some());
             assert_eq!(fs::read(&settings).unwrap(), choice);
+            assert!(!keytao_core::ReloadStamp::path(root).exists());
         }
+    }
+
+    #[test]
+    fn released_package_stays_on_rime_when_ime_jd_is_selected_again() {
+        use engine_choice::PackageEngine;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = AddonHost::new(root);
+        let core = &host.core;
+        let key = "xmjd";
+        install_dictionary(core, key);
+        let data_dir = &core.env().data_dir;
+        let settings = root.join(keytao_core::english_mode::SETTINGS_FILE);
+        fs::write(
+            &settings,
+            br#"{"engine":"rime","engines":{"xmjd":"libjd_engine","other":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        assert!(libjd::imported_dictionary(data_dir, key).is_some());
+
+        release(core, root, key, true).unwrap();
+
+        assert!(libjd::imported_dictionary(data_dir, key).is_none());
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        saved["engine"] = serde_json::json!("libjd_engine");
+        fs::write(settings, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        assert_eq!(engine_choice::read(root, Some(key)), PackageEngine::Rime);
+        assert_eq!(
+            engine_choice::read(root, Some("other")),
+            PackageEngine::LibjdEngine
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the bundled ime-jd engine"]
+    fn selecting_ime_jd_again_leaves_the_released_package_on_rime() {
+        use engine_choice::PackageEngine;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = AddonHost::new(root);
+        let core = &host.core;
+        let key = "xmjd";
+        install_dictionary(core, key);
+        fs::write(
+            root.join(keytao_core::english_mode::SETTINGS_FILE),
+            br#"{"engine":"rime","engines":{"xmjd":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        assert!(crate::libjd::imported_package_ready(core, key));
+
+        release(core, root, key, true).unwrap();
+        assert!(!crate::libjd::imported_package_ready(core, key));
+        crate::libjd::set_input_engine(core, root, "libjd_engine").unwrap();
+
+        assert_eq!(engine_choice::preferred(root), PackageEngine::LibjdEngine);
+        assert_eq!(engine_choice::read(root, Some(key)), PackageEngine::Rime);
     }
 }
