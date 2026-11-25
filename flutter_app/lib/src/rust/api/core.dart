@@ -233,6 +233,9 @@ Future<List<UserWordDto>> searchStockWords({
   query: query,
 );
 
+Future<void> releaseUserWordsStockCache() =>
+    RustLib.instance.api.crateApiCoreReleaseUserWordsStockCache();
+
 Future<void> setUserWordRemoved({
   required String schemeKey,
   required String word,

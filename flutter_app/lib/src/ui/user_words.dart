@@ -106,6 +106,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
   List<UserWordDto> _stockWords = [];
   Timer? _stockDebounce;
   int _stockRequest = 0;
+  int _pendingStockRequests = 0;
+  bool _usedStockCache = false;
   bool _searchingStock = false;
   bool _loading = true;
   bool _saving = false;
@@ -141,6 +143,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
     widget.controller.removeListener(_controllerChanged);
     unawaited(_commitPendingDelete());
     _stockDebounce?.cancel();
+    if (_usedStockCache && _pendingStockRequests == 0) {
+      unawaited(core.releaseUserWordsStockCache());
+    }
     _search.dispose();
     super.dispose();
   }
@@ -318,6 +323,19 @@ class _UserWordsPageState extends State<UserWordsPage> {
     }
   }
 
+  Future<T> _trackStockRequest<T>(Future<T> request) async {
+    _usedStockCache = true;
+    _pendingStockRequests++;
+    try {
+      return await request;
+    } finally {
+      _pendingStockRequests--;
+      if (_pendingStockRequests == 0 && !mounted) {
+        unawaited(core.releaseUserWordsStockCache());
+      }
+    }
+  }
+
   void _searchChanged() {
     _stockDebounce?.cancel();
     final request = ++_stockRequest;
@@ -331,9 +349,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
     if (!_searchingStock) return;
     _stockDebounce = Timer(const Duration(milliseconds: 180), () async {
       try {
-        final words = await core.searchStockWords(
-          schemeKey: scheme,
-          query: query,
+        final words = await _trackStockRequest(
+          core.searchStockWords(schemeKey: scheme, query: query),
         );
         if (!mounted || request != _stockRequest) return;
         setState(() => _stockWords = words);
@@ -381,6 +398,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
       schemeKey: scheme,
       entry: entry,
       animation: animation,
+      lookup: (word, code) => _trackStockRequest(
+        core.lookupUserWord(schemeKey: scheme, word: word, code: code),
+      ),
       onChanged: () => widget.controller.markUserWordsChanged(scheme),
     );
     final bool? changed;
@@ -1132,12 +1152,14 @@ class _UserWordEditor extends StatefulWidget {
   const _UserWordEditor({
     required this.controller,
     required this.schemeKey,
+    required this.lookup,
     required this.onChanged,
     this.entry,
     this.animation,
   });
   final AppController controller;
   final String schemeKey;
+  final Future<UserWordComparisonDto> Function(String word, String code) lookup;
   final VoidCallback onChanged;
   final UserWordDto? entry;
   final Animation<double>? animation;
@@ -1197,11 +1219,7 @@ class _UserWordEditorState extends State<_UserWordEditor> {
     }
     _debounce = Timer(const Duration(milliseconds: 180), () async {
       try {
-        final comparison = await core.lookupUserWord(
-          schemeKey: widget.schemeKey,
-          word: _word.text,
-          code: _code.text,
-        );
+        final comparison = await widget.lookup(_word.text, _code.text);
         if (!mounted || request != _request) return;
         setState(() {
           _hint = switch (comparison.status) {

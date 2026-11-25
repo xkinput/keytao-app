@@ -1,6 +1,7 @@
 use crate::{Core, CoreError};
 use serde::Serialize;
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{BufRead, Write},
@@ -60,7 +61,6 @@ struct CachedPackage {
 struct PackageData {
     user_name: Option<String>,
     template: Option<Vec<u8>>,
-    dictionaries: HashMap<String, Vec<u8>>,
     main: Option<String>,
     index: OnceLock<Result<PackageIndex, String>>,
 }
@@ -71,107 +71,264 @@ impl PackageData {
             .as_deref()
             .ok_or_else(|| CoreError::Other("该方案不支持自造词".into()))
     }
+
+    fn user_template(&self) -> Result<Cow<'_, [u8]>, CoreError> {
+        let user_name = self.user_name()?;
+        Ok(match &self.template {
+            Some(bytes) => Cow::Borrowed(bytes),
+            None => Cow::Owned(
+                format!("---\nname: {user_name}\nversion: \"1\"\nsort: original\n...\n")
+                    .into_bytes(),
+            ),
+        })
+    }
 }
 
-#[derive(Default)]
-struct PackageIndex {
-    by_word: HashMap<String, HashSet<String>>,
-    by_code: HashMap<String, HashSet<String>>,
-}
+type DictionaryFiles = HashMap<String, Vec<u8>>;
 
-impl PackageIndex {
-    fn build(package: &PackageData) -> Result<Self, CoreError> {
-        let main = package.main.as_ref().ok_or_else(|| {
+impl PackageData {
+    fn visit_stock_entries(
+        &self,
+        dictionaries: &DictionaryFiles,
+        mut visit: impl FnMut(&str, &str),
+    ) -> Result<(), CoreError> {
+        let main = self.main.as_ref().ok_or_else(|| {
             CoreError::Other(
                 "Stored package has no main dictionary; comparison is unavailable".into(),
             )
         })?;
-        let mut index = Self::default();
         let mut remaining = vec![main.clone()];
         let mut visited = HashSet::new();
         while let Some(name) = remaining.pop() {
-            if name.ends_with(".user") || !visited.insert(name.clone()) {
+            if name.ends_with(".user") {
                 continue;
             }
-            let bytes = package_file(&package.dictionaries, &name)?.ok_or_else(|| {
+            let (path, bytes) = package_file(dictionaries, &name)?.ok_or_else(|| {
                 CoreError::Other(format!("Imported package dictionary is missing: {name}"))
             })?;
-            let yaml = header(bytes)?;
+            if !visited.insert(path) {
+                continue;
+            }
+            let (yaml, body) = dictionary_header(bytes)?;
             remaining.extend(imports(&yaml));
-            for entry in Dictionary::parse(bytes)?.entries() {
-                index
-                    .by_word
-                    .entry(entry.word.clone())
-                    .or_default()
-                    .insert(entry.code.clone());
-                index
-                    .by_code
-                    .entry(entry.code)
-                    .or_default()
-                    .insert(entry.word);
+            let columns = dictionary_columns(&yaml)?;
+            let text = dictionary_column(&columns, "text")?;
+            let code = dictionary_column(&columns, "code")?;
+            for line in body.split_inclusive('\n') {
+                if let Some(body) = entry_body(line) {
+                    let mut fields = body.split('\t');
+                    let (word, code) = if text < code {
+                        (fields.nth(text), fields.nth(code - text - 1))
+                    } else {
+                        let value = fields.nth(code);
+                        (fields.nth(text - code - 1), value)
+                    };
+                    if let (Some(word), Some(code)) = (word, code)
+                        && !word.is_empty()
+                        && !code.is_empty()
+                    {
+                        visit(word, code);
+                    }
+                }
             }
         }
-        Ok(index)
-    }
-
-    fn compare(&self, entry: UserWord) -> UserWordComparison {
-        if entry.remove {
-            return UserWordComparison {
-                entry,
-                status: "removed".into(),
-                words: Vec::new(),
-                codes: Vec::new(),
-            };
-        }
-        let identical = self
-            .by_word
-            .get(&entry.word)
-            .is_some_and(|codes| codes.contains(&entry.code));
-        let mut words: Vec<String> = self
-            .by_code
-            .get(&entry.code)
-            .into_iter()
-            .flatten()
-            .filter(|word| *word != &entry.word)
-            .cloned()
-            .collect();
-        let mut codes: Vec<String> = self
-            .by_word
-            .get(&entry.word)
-            .into_iter()
-            .flatten()
-            .filter(|code| *code != &entry.code)
-            .cloned()
-            .collect();
-        words.sort();
-        codes.sort();
-        let status = if identical {
-            "identical"
-        } else if !words.is_empty() {
-            "code_taken"
-        } else if !codes.is_empty() {
-            "word_has_code"
-        } else {
-            "none"
-        };
-        UserWordComparison {
-            entry,
-            status: status.into(),
-            words,
-            codes,
-        }
+        Ok(())
     }
 }
 
-fn package_index(package: &PackageData) -> Result<&PackageIndex, CoreError> {
+struct StockMatches {
+    by_word: HashMap<String, BTreeSet<String>>,
+    by_code: HashMap<String, BTreeSet<String>>,
+}
+
+impl StockMatches {
+    fn scan(
+        package: &PackageData,
+        dictionaries: &DictionaryFiles,
+        entries: &[UserWord],
+    ) -> Result<Self, CoreError> {
+        let mut matches = Self {
+            by_word: entries
+                .iter()
+                .filter(|entry| !entry.remove)
+                .map(|entry| (entry.word.clone(), BTreeSet::new()))
+                .collect(),
+            by_code: entries
+                .iter()
+                .filter(|entry| !entry.remove)
+                .map(|entry| (entry.code.clone(), BTreeSet::new()))
+                .collect(),
+        };
+        package.visit_stock_entries(dictionaries, |word, code| {
+            if let Some(codes) = matches.by_word.get_mut(word) {
+                codes.insert(code.into());
+            }
+            if let Some(words) = matches.by_code.get_mut(code) {
+                words.insert(word.into());
+            }
+        })?;
+        Ok(matches)
+    }
+
+    fn compare(&self, entry: UserWord) -> UserWordComparison {
+        let words = self
+            .by_code
+            .get(entry.code.as_str())
+            .into_iter()
+            .flatten()
+            .map(String::as_str);
+        let codes = self
+            .by_word
+            .get(entry.word.as_str())
+            .into_iter()
+            .flatten()
+            .map(String::as_str);
+        compare_stock(entry, words, codes)
+    }
+}
+
+fn compare_stock<'a>(
+    entry: UserWord,
+    words: impl Iterator<Item = &'a str>,
+    codes: impl Iterator<Item = &'a str>,
+) -> UserWordComparison {
+    if entry.remove {
+        return UserWordComparison {
+            entry,
+            status: "removed".into(),
+            words: Vec::new(),
+            codes: Vec::new(),
+        };
+    }
+    let words: Vec<_> = words
+        .filter(|word| *word != entry.word)
+        .map(String::from)
+        .collect();
+    let mut identical = false;
+    let codes: Vec<_> = codes
+        .filter(|code| {
+            let same = *code == entry.code;
+            identical |= same;
+            !same
+        })
+        .map(String::from)
+        .collect();
+    let status = if identical {
+        "identical"
+    } else if !words.is_empty() {
+        "code_taken"
+    } else if !codes.is_empty() {
+        "word_has_code"
+    } else {
+        "none"
+    };
+    UserWordComparison {
+        entry,
+        status: status.into(),
+        words,
+        codes,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EntryOffsets {
+    word: u32,
+    code: u32,
+    end: u32,
+}
+
+impl EntryOffsets {
+    fn entry(self, text: &str) -> (&str, &str) {
+        (
+            &text[self.word as usize..self.code as usize],
+            &text[self.code as usize..self.end as usize],
+        )
+    }
+}
+
+#[derive(Default)]
+struct PackageIndex {
+    text: String,
+    by_word: Vec<EntryOffsets>,
+    by_code: Vec<u32>,
+}
+
+impl PackageIndex {
+    fn build(package: &PackageData, dictionaries: &DictionaryFiles) -> Result<Self, CoreError> {
+        let mut index = Self::default();
+        package.visit_stock_entries(dictionaries, |word, code| index.push(word, code))?;
+        index.finish();
+        Ok(index)
+    }
+
+    fn push(&mut self, word: &str, code: &str) {
+        // The package store limits expanded files to 512 MiB.
+        let start = self.text.len() as u32;
+        self.text.push_str(word);
+        let middle = self.text.len() as u32;
+        self.text.push_str(code);
+        self.by_word.push(EntryOffsets {
+            word: start,
+            code: middle,
+            end: self.text.len() as u32,
+        });
+    }
+
+    fn finish(&mut self) {
+        self.by_word
+            .sort_unstable_by(|left, right| left.entry(&self.text).cmp(&right.entry(&self.text)));
+        self.by_word
+            .dedup_by(|left, right| left.entry(&self.text) == right.entry(&self.text));
+        self.by_code = (0..self.by_word.len() as u32).collect();
+        self.by_code.sort_unstable_by(|&left, &right| {
+            let (left_word, left_code) = self.by_word[left as usize].entry(&self.text);
+            let (right_word, right_code) = self.by_word[right as usize].entry(&self.text);
+            (left_code, left_word).cmp(&(right_code, right_word))
+        });
+        self.text.shrink_to_fit();
+        self.by_word.shrink_to_fit();
+    }
+
+    fn compare(&self, entry: UserWord) -> UserWordComparison {
+        let word_start = self
+            .by_word
+            .partition_point(|row| row.entry(&self.text).0 < entry.word.as_str());
+        let word_rows = &self.by_word[word_start..];
+        let word_end = word_rows.partition_point(|row| row.entry(&self.text).0 == entry.word);
+        let code_start = self.by_code.partition_point(|&row| {
+            self.by_word[row as usize].entry(&self.text).1 < entry.code.as_str()
+        });
+        let code_rows = &self.by_code[code_start..];
+        let code_end = code_rows
+            .partition_point(|&row| self.by_word[row as usize].entry(&self.text).1 == entry.code);
+        let codes = word_rows[..word_end]
+            .iter()
+            .map(|row| row.entry(&self.text).1);
+        let words = code_rows[..code_end]
+            .iter()
+            .map(|&row| self.by_word[row as usize].entry(&self.text).0);
+        compare_stock(entry, words, codes)
+    }
+}
+
+fn package_index<'a>(
+    package: &'a PackageData,
+    dictionaries: &DictionaryFiles,
+) -> Result<&'a PackageIndex, CoreError> {
     package
         .index
-        .get_or_init(|| PackageIndex::build(package).map_err(|error| error.to_string()))
+        .get_or_init(|| {
+            PackageIndex::build(package, dictionaries).map_err(|error| error.to_string())
+        })
         .as_ref()
         .map_err(|error| CoreError::Other(error.clone()))
 }
 
 fn header(bytes: &[u8]) -> Result<serde_yaml::Value, CoreError> {
+    dictionary_header(bytes).map(|(yaml, _)| yaml)
+}
+
+fn dictionary_header(bytes: &[u8]) -> Result<(serde_yaml::Value, &str), CoreError> {
     let text = std::str::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string()))?;
     let end = text
         .split_inclusive('\n')
@@ -181,8 +338,9 @@ fn header(bytes: &[u8]) -> Result<serde_yaml::Value, CoreError> {
         })
         .find_map(|(end, offset)| end.then_some(offset))
         .unwrap_or(text.len());
-    serde_yaml::from_str(text[..end].trim_start_matches('\u{feff}'))
-        .map_err(|error| CoreError::Other(error.to_string()))
+    let yaml = serde_yaml::from_str(text[..end].trim_start_matches('\u{feff}'))
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    Ok((yaml, &text[end..]))
 }
 
 fn imports(header: &serde_yaml::Value) -> Vec<String> {
@@ -208,15 +366,15 @@ fn safe_name(name: &str) -> bool {
 }
 
 fn package_file<'a>(
-    files: &'a HashMap<String, Vec<u8>>,
+    files: &'a DictionaryFiles,
     name: &str,
-) -> Result<Option<&'a Vec<u8>>, CoreError> {
-    if let Some(bytes) = files.get(name) {
-        return Ok(Some(bytes));
+) -> Result<Option<(&'a String, &'a Vec<u8>)>, CoreError> {
+    if let Some(entry) = files.get_key_value(name) {
+        return Ok(Some(entry));
     }
     let suffix = format!("/{name}");
     let mut matches = files.iter().filter(|(path, _)| path.ends_with(&suffix));
-    let found = matches.next().map(|(_, bytes)| bytes);
+    let found = matches.next();
     if matches.next().is_some() {
         return Err(CoreError::Other(format!(
             "Package dictionary path is ambiguous: {name}"
@@ -230,15 +388,23 @@ fn package_data(
     core: &Core,
     scheme: &str,
 ) -> Result<Arc<PackageData>, CoreError> {
-    load_package_data(state, core, scheme, false)
+    Ok(load_package_data(state, core, scheme, PackageAccess::Metadata)?.0)
+}
+
+#[derive(Clone, Copy)]
+enum PackageAccess {
+    Support,
+    Metadata,
+    Scan,
+    Index,
 }
 
 fn load_package_data(
     state: &mut UserWordsState,
     core: &Core,
     scheme: &str,
-    metadata_only: bool,
-) -> Result<Arc<PackageData>, CoreError> {
+    access: PackageAccess,
+) -> Result<(Arc<PackageData>, DictionaryFiles), CoreError> {
     let scheme = match scheme {
         "keytao-dz" | "keytao-bj" => "keytao",
         _ => scheme,
@@ -272,12 +438,19 @@ fn load_package_data(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    if let Some(cached) = state
+    if state
         .packages
         .get(scheme)
-        .filter(|cached| cached.fingerprint == fingerprint)
+        .is_some_and(|cached| cached.fingerprint != fingerprint)
     {
-        return Ok(cached.data.clone());
+        state.packages.remove(scheme);
+    }
+    if let Some(cached) = state.packages.get(scheme).filter(|cached| match access {
+        PackageAccess::Support | PackageAccess::Metadata => true,
+        PackageAccess::Scan => false,
+        PackageAccess::Index => cached.data.index.get().is_some(),
+    }) {
+        return Ok((cached.data.clone(), HashMap::new()));
     }
     let mut dictionaries = HashMap::new();
     let mut schemas = HashMap::new();
@@ -288,7 +461,7 @@ fn load_package_data(
                 continue;
             }
             let mut bytes = Vec::new();
-            if metadata_only && filename.ends_with(".dict.yaml") {
+            if matches!(access, PackageAccess::Support) && filename.ends_with(".dict.yaml") {
                 let mut reader = content.as_slice();
                 loop {
                     let offset = bytes.len();
@@ -314,7 +487,7 @@ fn load_package_data(
         _ => scheme,
     };
     let mut candidates = Vec::new();
-    if let Some(schema) = package_file(&schemas, base)? {
+    if let Some((_, schema)) = package_file(&schemas, base)? {
         if let Some(name) = header(schema)?
             .get("translator")
             .and_then(|value| value.get("dictionary"))
@@ -332,7 +505,7 @@ fn load_package_data(
         }
     }
     let user_name = if let Some(name) = &main {
-        imports(&header(package_file(&dictionaries, name)?.unwrap())?)
+        imports(&header(package_file(&dictionaries, name)?.unwrap().1)?)
             .into_iter()
             .find(|name| name.ends_with(".user"))
     } else {
@@ -354,17 +527,16 @@ fn load_package_data(
         None => fallback_dict(scheme)?.map(String::from),
     };
     let template = match &user_name {
-        Some(name) => package_file(&dictionaries, name)?.cloned(),
+        Some(name) => package_file(&dictionaries, name)?.map(|(_, bytes)| bytes.clone()),
         None => None,
     };
     let data = Arc::new(PackageData {
         user_name,
         template,
-        dictionaries,
         main,
         index: OnceLock::new(),
     });
-    if !metadata_only {
+    if matches!(access, PackageAccess::Metadata | PackageAccess::Index) {
         state.packages.insert(
             scheme.into(),
             CachedPackage {
@@ -373,7 +545,7 @@ fn load_package_data(
             },
         );
     }
-    Ok(data)
+    Ok((data, dictionaries))
 }
 
 pub(crate) fn supports_user_words(core: &Core, scheme: &str) -> Result<bool, CoreError> {
@@ -381,9 +553,22 @@ pub(crate) fn supports_user_words(core: &Core, scheme: &str) -> Result<bool, Cor
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    Ok(load_package_data(&mut state, core, scheme, true)?
-        .user_name
-        .is_some())
+    Ok(
+        load_package_data(&mut state, core, scheme, PackageAccess::Support)?
+            .0
+            .user_name
+            .is_some(),
+    )
+}
+
+impl Core {
+    pub fn release_user_words_stock_cache(&self) {
+        self.user_words
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .packages
+            .clear();
+    }
 }
 
 pub fn take_user_words_report(core: &Core, scheme: &str) -> Result<UserWordsReport, CoreError> {
@@ -417,15 +602,41 @@ pub fn compare_user_words(
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
+    let (package, dictionaries) = load_package_data(&mut state, core, scheme, PackageAccess::Scan)?;
     if package.user_name.is_none() {
         return Ok(Vec::new());
     }
-    let index = package_index(&package)?;
-    let (_, entries) = read_user_words_locked(core, &mut state, scheme, root)?;
+    let path = user_path(core, &package, root, false);
+    let missing = path
+        .as_ref()
+        .is_ok_and(|path| matches!(path.try_exists(), Ok(false)));
+    let entries = path.and_then(|path| {
+        let bytes = if missing {
+            package.user_template()?.into_owned()
+        } else {
+            fs::read(path)?
+        };
+        user_entries(&bytes, scheme, root)
+    });
+    // Validate the stock tables before creating a missing user dictionary.
+    let mut matches = StockMatches::scan(
+        &package,
+        &dictionaries,
+        entries.as_deref().unwrap_or_default(),
+    )?;
+    let entries = if missing {
+        let path = user_path(core, &package, root, true)?;
+        let current = user_entries(&fs::read(path)?, scheme, root)?;
+        if entries.as_ref().ok() != Some(&current) {
+            matches = StockMatches::scan(&package, &dictionaries, &current)?;
+        }
+        current
+    } else {
+        entries?
+    };
     Ok(entries
         .into_iter()
-        .map(|entry| index.compare(entry))
+        .map(|entry| matches.compare(entry))
         .collect())
 }
 
@@ -439,9 +650,10 @@ pub fn lookup_user_word(
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
+    let (package, dictionaries) =
+        load_package_data(&mut state, core, scheme, PackageAccess::Index)?;
     package.user_name()?;
-    Ok(package_index(&package)?.compare(UserWord {
+    Ok(package_index(&package, &dictionaries)?.compare(UserWord {
         id: 0,
         word: word.into(),
         code: code.into(),
@@ -464,25 +676,23 @@ pub fn search_stock_words(
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
-    let index = package_index(&package)?;
-    let mut entries = Vec::new();
-    for (word, codes) in &index.by_word {
-        for code in codes {
-            if word.contains(query) || code.contains(query) {
-                entries.push(UserWord {
-                    id: 0,
-                    word: word.clone(),
-                    code: code.clone(),
-                    weight: None,
-                    remove: false,
-                });
-            }
-        }
-    }
-    entries.sort_by(|left, right| (&left.word, &left.code).cmp(&(&right.word, &right.code)));
-    entries.truncate(100);
-    Ok(entries)
+    let (package, dictionaries) =
+        load_package_data(&mut state, core, scheme, PackageAccess::Index)?;
+    let index = package_index(&package, &dictionaries)?;
+    Ok(index
+        .by_word
+        .iter()
+        .map(|row| row.entry(&index.text))
+        .filter(|(word, code)| word.contains(query) || code.contains(query))
+        .take(100)
+        .map(|(word, code)| UserWord {
+            id: 0,
+            word: word.into(),
+            code: code.into(),
+            weight: None,
+            remove: false,
+        })
+        .collect())
 }
 
 pub fn reconcile_user_words(
@@ -495,7 +705,7 @@ pub fn reconcile_user_words(
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
+    let (package, dictionaries) = load_package_data(&mut state, core, scheme, PackageAccess::Scan)?;
     if package.user_name.is_none() || package.main.is_none() {
         return Ok(UserWordsReport::default());
     }
@@ -503,9 +713,15 @@ pub fn reconcile_user_words(
     if !path.try_exists()? {
         return Ok(UserWordsReport::default());
     }
-    let index = package_index(&package)?;
-    let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
-    let entries = dictionary.entries();
+    let dictionary = fs::read(&path)
+        .map_err(CoreError::from)
+        .and_then(|bytes| Dictionary::parse(&bytes));
+    let entries = dictionary
+        .as_ref()
+        .map(Dictionary::entries)
+        .unwrap_or_default();
+    let matches = StockMatches::scan(&package, &dictionaries, &entries)?;
+    let mut dictionary = dictionary?;
     let mut code_counts = HashMap::new();
     for entry in &entries {
         *code_counts.entry(entry.code.as_str()).or_insert(0) += 1;
@@ -515,14 +731,10 @@ pub fn reconcile_user_words(
         .filter(|entry| {
             remove
                 && code_counts[entry.code.as_str()] == 1
-                && index
-                    .by_word
-                    .get(&entry.word)
-                    .is_some_and(|codes| codes.contains(&entry.code))
-                && index
+                && matches
                     .by_code
-                    .get(&entry.code)
-                    .is_some_and(|words| words.iter().all(|word| word == &entry.word))
+                    .get(entry.code.as_str())
+                    .is_some_and(|words| words.len() == 1 && words.contains(&entry.word))
         })
         .cloned()
         .collect();
@@ -539,7 +751,7 @@ pub fn reconcile_user_words(
     let conflicts = dictionary
         .entries()
         .into_iter()
-        .map(|entry| index.compare(entry))
+        .map(|entry| matches.compare(entry))
         .filter(|comparison| matches!(comparison.status.as_str(), "code_taken" | "word_has_code"))
         .collect();
     Ok(UserWordsReport { removed, conflicts })
@@ -574,13 +786,7 @@ fn user_path(
     }
     if create && !path.try_exists()? {
         fs::create_dir_all(path.parent().unwrap())?;
-        let bytes = package.template.clone().unwrap_or_else(|| {
-            format!(
-                "---\nname: {}\nversion: \"1\"\nsort: original\n...\n",
-                user_name
-            )
-            .into_bytes()
-        });
+        let bytes = package.user_template()?;
         Dictionary::parse(&bytes)?;
         if user_name == "keytao.user" {
             // A recreated dictionary cannot authorize deletions from an older instance.
@@ -601,6 +807,35 @@ fn user_path(
 fn line_body(line: &str) -> &str {
     let body = line.strip_suffix('\n').unwrap_or(line);
     body.strip_suffix('\r').unwrap_or(body)
+}
+
+fn entry_body(line: &str) -> Option<&str> {
+    let body = line_body(line);
+    let trimmed = body.trim_start();
+    (!trimmed.is_empty() && !trimmed.starts_with('#')).then_some(body)
+}
+
+fn dictionary_columns(yaml: &serde_yaml::Value) -> Result<Vec<String>, CoreError> {
+    match yaml.get("columns") {
+        Some(value) => value
+            .as_sequence()
+            .ok_or_else(|| CoreError::Other("Dictionary columns must be a list".into()))?
+            .iter()
+            .map(|value| {
+                value.as_str().map(String::from).ok_or_else(|| {
+                    CoreError::Other("Dictionary column names must be strings".into())
+                })
+            })
+            .collect(),
+        None => Ok(vec!["text".into(), "code".into(), "weight".into()]),
+    }
+}
+
+fn dictionary_column(columns: &[String], name: &str) -> Result<usize, CoreError> {
+    columns
+        .iter()
+        .position(|column| column == name)
+        .ok_or_else(|| CoreError::Other(format!("Dictionary has no {name} column")))
 }
 
 fn validate_input(word: &str, code: &str, weight: Option<&str>) -> Result<(), CoreError> {
@@ -773,19 +1008,7 @@ impl Dictionary {
         let header = lines[..data_start].concat();
         let yaml: serde_yaml::Value = serde_yaml::from_str(header.trim_start_matches('\u{feff}'))
             .map_err(|error| CoreError::Other(error.to_string()))?;
-        let columns = match yaml.get("columns") {
-            Some(value) => value
-                .as_sequence()
-                .ok_or_else(|| CoreError::Other("Dictionary columns must be a list".into()))?
-                .iter()
-                .map(|value| {
-                    value.as_str().map(String::from).ok_or_else(|| {
-                        CoreError::Other("Dictionary column names must be strings".into())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            None => vec!["text".into(), "code".into(), "weight".into()],
-        };
+        let columns = dictionary_columns(&yaml)?;
         let document = Self {
             lines,
             data_start,
@@ -798,10 +1021,7 @@ impl Dictionary {
     }
 
     fn column(&self, name: &str) -> Result<usize, CoreError> {
-        self.columns
-            .iter()
-            .position(|column| column == name)
-            .ok_or_else(|| CoreError::Other(format!("Dictionary has no {name} column")))
+        dictionary_column(&self.columns, name)
     }
 
     fn entries(&self) -> Vec<UserWord> {
@@ -813,10 +1033,7 @@ impl Dictionary {
             .enumerate()
             .skip(self.data_start)
             .filter_map(|(id, line)| {
-                let body = line_body(line);
-                if body.trim().is_empty() || body.trim_start().starts_with('#') {
-                    return None;
-                }
+                let body = entry_body(line)?;
                 let fields: Vec<&str> = body.split('\t').collect();
                 let word = *fields.get(text_column)?;
                 let code = *fields.get(code_column)?;
@@ -958,11 +1175,16 @@ pub(crate) fn read_user_words_locked(
         return Ok((Vec::new(), Vec::new()));
     }
     let content = fs::read(user_path(core, &package, root, true)?)?;
-    let mut entries = Dictionary::parse(&content)?.entries();
+    let entries = user_entries(&content, scheme, root)?;
+    Ok((content, entries))
+}
+
+fn user_entries(bytes: &[u8], scheme: &str, root: &Path) -> Result<Vec<UserWord>, CoreError> {
+    let mut entries = Dictionary::parse(bytes)?.entries();
     if matches!(scheme, "keytao" | "keytao-dz" | "keytao-bj") {
         entries.extend(read_user_word_removals(root)?);
     }
-    Ok((content, entries))
+    Ok(entries)
 }
 
 pub(crate) fn apply_batch_locked<'a>(
@@ -1383,6 +1605,66 @@ mod tests {
         );
         assert!(search_stock_words(&core, "keytao", " ").unwrap().is_empty());
         assert!(search_stock_words(&core, "xmjd", "word").is_err());
+    }
+
+    #[test]
+    fn reconciliation_and_comparison_match_lookup_without_caching_stock_entries() {
+        let (dir, core) = fixture();
+        package(
+            &core,
+            "keytao",
+            &[
+                (
+                    "keytao.extended.dict.yaml",
+                    "---\nname: keytao.extended\nimport_tables: [keytao.user, stock, extra]\n...\n",
+                ),
+                (
+                    "nested/stock.dict.yaml",
+                    "\u{feff}---\r\nname: stock\r\ncolumns: [code, weight, text]\r\n...\r\n  # comment\r\nab\t8\t目标\r\naz\t2\t目标\r\nab\t\talpha\r\nab\t\t\r\nsolo\t1\tunique",
+                ),
+                (
+                    "extra.dict.yaml",
+                    "---\nname: extra\nimport_tables: [nested/stock]\n...\n目标\tab\nthird\txaby\n",
+                ),
+            ],
+        );
+        fs::write(
+            dir.path().join("keytao.user.dict.yaml"),
+            "---\nname: keytao.user\n...\nunique\tsolo\n目标\tab\nnew\tab\n目标\tnew\n",
+        )
+        .unwrap();
+        remember_reconciliation(&core, "keytao", dir.path(), true);
+        let report = take_user_words_report(&core, "keytao").unwrap();
+        assert_eq!(report.removed[0].word, "unique");
+        assert!(core.user_words.lock().unwrap().packages.is_empty());
+
+        let comparisons = compare_user_words(&core, "keytao-bj", dir.path()).unwrap();
+        assert!(core.user_words.lock().unwrap().packages.is_empty());
+        assert_eq!(comparisons[0].entry.id, 3);
+        assert_eq!(comparisons[0].words, ["alpha"]);
+        assert_eq!(comparisons[0].codes, ["az"]);
+        assert_eq!(report.conflicts, comparisons[1..]);
+        for mut comparison in comparisons {
+            comparison.entry.id = 0;
+            assert_eq!(
+                lookup_user_word(
+                    &core,
+                    "keytao-dz",
+                    &comparison.entry.word,
+                    &comparison.entry.code
+                )
+                .unwrap(),
+                comparison
+            );
+        }
+        let results = search_stock_words(&core, "keytao", " ab ").unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|entry| entry.word.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "third", "目标"]
+        );
     }
 
     #[cfg(unix)]
@@ -1819,6 +2101,8 @@ mod tests {
         );
         let path = dir.path().join("keytao.user.dict.yaml");
         let original = "---\nname: keytao.user\n...\ncustom\tabc\n";
+        assert!(compare_user_words(&core, "keytao", dir.path()).is_err());
+        assert!(!path.exists());
         fs::write(&path, original).unwrap();
         assert!(reconcile_user_words(&core, "keytao", dir.path(), true).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), original);
@@ -2138,7 +2422,7 @@ mod tests {
         let original = core.user_words.lock().unwrap().packages["keytao"]
             .data
             .clone();
-        let original_index = package_index(&original).unwrap() as *const PackageIndex;
+        let original_index = original.index.get().unwrap().as_ref().unwrap() as *const PackageIndex;
         for _ in 0..20 {
             assert_eq!(
                 lookup_user_word(&core, "keytao", "new", "code123999")
@@ -2153,7 +2437,7 @@ mod tests {
         assert!(Arc::ptr_eq(&original, &reused));
         assert_eq!(
             original_index,
-            package_index(&reused).unwrap() as *const PackageIndex
+            reused.index.get().unwrap().as_ref().unwrap() as *const PackageIndex
         );
         package(
             &core,
@@ -2182,5 +2466,13 @@ mod tests {
             .data
             .clone();
         assert!(!Arc::ptr_eq(&original, &replaced));
+        core.release_user_words_stock_cache();
+        assert!(core.user_words.lock().unwrap().packages.is_empty());
+        assert_eq!(
+            lookup_user_word(&core, "keytao", "replacement", "newcode")
+                .unwrap()
+                .status,
+            "identical"
+        );
     }
 }

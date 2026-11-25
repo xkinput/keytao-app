@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/controller.dart';
@@ -13,6 +15,8 @@ class _RemoveCore implements RustLibApi {
   final changes = <Invocation>[];
   final queries = <String>[];
   bool removed = false;
+  Completer<List<UserWordDto>>? searchGate;
+  int cacheReleases = 0;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -37,7 +41,10 @@ class _RemoveCore implements RustLibApi {
         ]);
       case #crateApiCoreSearchStockWords:
         queries.add(invocation.namedArguments[#query] as String);
-        return Future.value([_stock]);
+        return searchGate?.future ?? Future.value([_stock]);
+      case #crateApiCoreReleaseUserWordsStockCache:
+        cacheReleases++;
+        return Future<void>.value();
       case #crateApiCoreSetUserWordRemoved:
         changes.add(invocation);
         removed = invocation.namedArguments[#remove] as bool;
@@ -117,6 +124,23 @@ void main() {
       expect(find.text('移除'), findsOneWidget);
     },
   );
+
+  testWidgets('closing waits for stock search before releasing cache', (
+    tester,
+  ) async {
+    final searchGate = core.searchGate = Completer<List<UserWordDto>>();
+    await openPage(tester, 'keytao');
+    await tester.enterText(find.byType(EditableText), 'csci');
+    await tester.pump(const Duration(milliseconds: 180));
+    expect(core.queries, ['csci']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(core.cacheReleases, 0);
+
+    searchGate.complete([_stock]);
+    await tester.pump();
+    expect(core.cacheReleases, 1);
+  });
 
   testWidgets('xmjd search does not request stock removals', (tester) async {
     await openPage(tester, 'xmjd');

@@ -535,6 +535,12 @@ pub async fn search_stock_words(
     )
 }
 
+pub async fn release_user_words_stock_cache() {
+    if let Ok(state) = runtime::state() {
+        state.core.release_user_words_stock_cache();
+    }
+}
+
 pub async fn set_user_word_removed(
     scheme_key: String,
     word: String,
