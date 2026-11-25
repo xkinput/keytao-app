@@ -38,17 +38,33 @@ class WebsitePage extends StatefulWidget {
 }
 
 class _WebsitePageState extends State<WebsitePage> {
-  late bool _opened = widget.active;
+  Timer? _idleTimer;
 
   @override
   void didUpdateWidget(covariant WebsitePage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _opened = _opened || widget.active;
+    if (widget.active) {
+      _idleTimer?.cancel();
+      _idleTimer = null;
+    } else if (oldWidget.active) {
+      _idleTimer = Timer(
+        const Duration(minutes: 5),
+        () => setState(() => _idleTimer = null),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _idleTimer?.cancel();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_opened) return const Center(child: Text('网站'));
+    if (!widget.active && _idleTimer == null) {
+      return const Center(child: Text('网站'));
+    }
     final controller = widget.controller;
     final origin = controller.websiteOrigin;
     final account = controller.accountUser;
