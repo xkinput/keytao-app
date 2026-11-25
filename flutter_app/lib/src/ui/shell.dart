@@ -7,11 +7,11 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'about_page.dart';
-import 'color_picker.dart';
-import 'debug_page.dart';
 import 'input_page.dart';
+import 'library_page.dart';
 import 'login.dart';
 import 'scheme_page.dart';
+import 'skin_page.dart';
 import 'theme.dart';
 import 'website_page.dart';
 import 'widgets.dart';
@@ -23,8 +23,9 @@ extension PageIcon on AppPage {
   IconData get icon => switch (this) {
     AppPage.input => FLucideIcons.keyboard,
     AppPage.scheme => FLucideIcons.download,
+    AppPage.skin => FLucideIcons.palette,
+    AppPage.library => FLucideIcons.library,
     AppPage.about => FLucideIcons.info,
-    AppPage.debug => FLucideIcons.scrollText,
     AppPage.website => FLucideIcons.globe,
   };
 }
@@ -185,10 +186,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      final customAccent = c.uiSettings?.accentColor;
-      final accent = c.isMobile || customAccent == null
-          ? ChromeAccent.defaultColor
-          : parseAccentColor(customAccent);
       void select(int index) {
         if (index == c.activePage.index) return;
         FocusScope.of(context).unfocus();
@@ -199,6 +196,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         builder: (context, constraints) {
           final wide = !c.isMobile && constraints.maxWidth >= 720;
           final palette = AppPalette.of(context);
+          final accent = ChromeAccent.of(context);
           final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
           final availableHeight = constraints.maxHeight - keyboardInset;
           final hideHeaderForKeyboard =
@@ -347,7 +345,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                                     .copyWith(
                                       fontSize: 12,
                                       height: 1.2,
-                                      color: accent,
+                                      color: palette.ink,
                                       fontWeight: FontWeight.w600,
                                     ),
                               },
@@ -361,7 +359,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             FBottomNavigationBarItem(
                               key: ValueKey('nav-${page.id}'),
                               icon: _navigationIcon(page, c, 20),
-                              label: Text(page.title),
+                              label: Text(
+                                page.title,
+                                textAlign: TextAlign.center,
+                              ),
                             ),
                         ],
                       ),
@@ -375,8 +376,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               children: {
                 AppPage.input: InputPage(controller: c),
                 AppPage.scheme: SchemePage(controller: c),
+                AppPage.skin: SkinPage(controller: c),
+                AppPage.library: LibraryPage(controller: c),
                 AppPage.about: AboutPage(controller: c),
-                AppPage.debug: DebugPage(controller: c),
                 if (!c.websiteHidden)
                   AppPage.website: WebsitePage(
                     controller: c,
@@ -396,10 +398,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           );
         },
       );
-      return ChromeAccent(
-        color: accent,
-        child: c.isAndroid ? AppSystemBars(child: shell) : shell,
-      );
+      return c.isAndroid ? AppSystemBars(child: shell) : shell;
     },
   );
 }
@@ -707,7 +706,7 @@ class _DesktopNavigation extends StatelessWidget {
                                 ? FontWeight.w600
                                 : FontWeight.w500,
                             color: controller.activePage == page
-                                ? const Color(0xFFFFFFFF)
+                                ? ChromeAccent.foreground(accent)
                                 : palette.ink,
                           ),
                         ),
@@ -723,7 +722,7 @@ class _DesktopNavigation extends StatelessWidget {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: controller.activePage == page
-                                    ? const Color(0xFFFFFFFF)
+                                    ? ChromeAccent.foreground(accent)
                                     : accent,
                               ),
                             ),

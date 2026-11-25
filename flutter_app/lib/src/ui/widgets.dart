@@ -204,7 +204,7 @@ class _BigTextRadioState<T> extends State<_BigTextRadio<T>>
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
-    final color = widget.selected ? palette.ink : palette.unselected;
+    final color = widget.selected ? palette.ink : palette.muted;
     return FTappable(
       focusNode: focusNode,
       semanticsLabel: widget.semanticLabel,
@@ -872,7 +872,7 @@ class ActionButton extends StatelessWidget {
     final foreground = success
         ? palette.successForeground
         : primary
-        ? Colors.white
+        ? ChromeAccent.foreground(background)
         : palette.ink;
     ShapeDecoration decoration(Color fill, Color stroke) => ShapeDecoration(
       color: fill,

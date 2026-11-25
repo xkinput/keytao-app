@@ -281,7 +281,7 @@ void main() {
       expect(creations.last['initialHeaders'], {sessionHeader: 'clear'});
       await finishLoading('https://keytao.vercel.app');
 
-      await tester.tap(find.byKey(const ValueKey('nav-ime')));
+      await tester.tap(find.byKey(const ValueKey('nav-library')));
       await tester.pumpAndSettle();
       final toggle = find.descendant(
         of: find.byWidgetPredicate(

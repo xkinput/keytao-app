@@ -103,16 +103,20 @@ const candidateFontMax = 36.0;
 const candidateFontDivisions = 26;
 
 enum AppPage {
-  input('ime', AppStrings.ime),
+  input('ime', AppStrings.input),
   scheme('scheme', AppStrings.scheme),
+  skin('skin', AppStrings.skin),
+  library('library', AppStrings.library),
   about('about', AppStrings.about),
-  debug('debug', AppStrings.debug),
-  website('website', '网站');
+  website('website', AppStrings.website);
 
   const AppPage(this.id, this.title);
   final String id;
   final String title;
   int get shortcutDigit => index + 1;
+
+  static AppPage? fromId(String id) =>
+      id == 'debug' ? about : values.where((page) => page.id == id).firstOrNull;
 }
 
 enum SetupStep {

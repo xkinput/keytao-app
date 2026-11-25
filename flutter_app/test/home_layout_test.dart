@@ -3,7 +3,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/input_page.dart';
-import 'package:keytao/src/ui/settings.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -31,11 +30,8 @@ void main() {
 
       final cells = [
         for (final content in [
-          find.widgetWithText(EyebrowLabel, '候选模式'),
-          find.widgetWithText(EyebrowLabel, '外观'),
+          find.widgetWithText(EyebrowLabel, '候选'),
           find.byType(MacosImeCard),
-          find.text('应用设置'),
-          find.byType(AccountCard),
           find.text('刚刚'),
         ])
           find.ancestor(of: content, matching: find.byType(HairlineGridCell)),

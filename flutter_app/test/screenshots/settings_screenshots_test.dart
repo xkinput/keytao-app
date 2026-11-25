@@ -17,9 +17,7 @@ import 'package:keytao/src/ui/widgets.dart';
 import '../view_fixture.dart';
 
 final _directory =
-    Platform.environment['SCREENSHOTS_DIR'] ??
-    '/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/'
-        '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/redesign-shots';
+    Platform.environment['SCREENSHOTS_DIR'] ?? '../target/ui-shots';
 const _cjkFamily = 'SettingsScreenshotCjk';
 const _captureKey = ValueKey('settings-screenshot');
 final _schemaLogoPath = '$_directory/schema-logo.png';
@@ -31,12 +29,30 @@ const _conflict = UserWordComparisonDto(
   words: ['测试'],
   codes: [],
 );
+const _themes = [
+  ThemeSummaryDto(
+    id: 'keytao',
+    name: '键道',
+    builtIn: true,
+    current: true,
+    light: ThemePreviewColorsDto(
+      background: '#FFFFFF',
+      foreground: '#202124',
+      accent: '#3B73D9',
+    ),
+    dark: ThemePreviewColorsDto(
+      background: '#202124',
+      foreground: '#EEEEEE',
+      accent: '#89ACF0',
+    ),
+  ),
+];
 
 class _ScreenshotCore implements RustLibApi {
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       switch (invocation.memberName) {
-        #crateApiCoreGetThemeLibrary => Future.value(<ThemeSummaryDto>[]),
+        #crateApiCoreGetThemeLibrary => Future.value(_themes),
         #crateApiCoreListUserWords => Future.value([_conflict.entry]),
         #crateApiCoreCompareUserWords => Future.value([_conflict]),
         _ => throw StateError(
@@ -211,25 +227,24 @@ FTypeface _withScreenshotFont(FTypeface typeface) => typeface.copyWith(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final enabled = Platform.environment['SCREENSHOTS'] == '1';
-  final compact = Platform.environment.containsKey('SCREENSHOTS_DIR');
-  final allowOverflow =
-      Platform.environment['SCREENSHOTS_ALLOW_OVERFLOW'] == '1';
   setUpAll(() async {
     if (enabled) {
       await _loadFonts();
       await _writeSchemaLogo(_schemaLogoPath, '键道', const Color(0xFF3B73D9));
       await _writeSchemaLogo(_catLogoPath, '星猫', const Color(0xFF9964CC));
       await _writeSchemaLogo(_tianLogoPath, '天行', const Color(0xFF188574));
-      if (compact) {
-        await File('$_directory/scroll-extents.txt').writeAsString('');
-      }
     }
   });
 
   for (final device in [
     (
-      name: 'desktop',
-      size: compact ? const Size(960, 860) : const Size(1440, 1220),
+      name: 'desktop-960',
+      size: const Size(960, 860),
+      platform: BridgePlatform.macOs,
+    ),
+    (
+      name: 'desktop-1440',
+      size: const Size(1440, 900),
       platform: BridgePlatform.macOs,
     ),
     (
@@ -238,221 +253,222 @@ void main() {
       platform: BridgePlatform.android,
     ),
   ]) {
-    for (final page
-        in compact
-            ? AppPage.values.where((page) => page != AppPage.website)
-            : [AppPage.input, AppPage.scheme]) {
-      for (final brightness
-          in compact ? [Brightness.light] : Brightness.values) {
+    for (final page in AppPage.values) {
+      for (final brightness in Brightness.values) {
         final name = '${device.name}-${page.id}-${brightness.name}';
-        testWidgets('capture settings $name', (tester) async {
-          final overflows = <FlutterErrorDetails>[];
-          final originalOnError = FlutterError.onError!;
-          if (compact) {
-            FlutterError.onError = (details) {
-              if (details.exceptionAsString().contains('overflowed')) {
-                overflows.add(details);
-              } else {
-                originalOnError(details);
-              }
-            };
-            addTearDown(() => FlutterError.onError = originalOnError);
-          }
-          final controller = _ScreenshotController(device.platform)
-            ..activePage = page;
-          if (page == AppPage.scheme) {
-            controller.userWordsReportScheme = 'keytao';
-            controller.userWordsReport = const UserWordsReportDto(
-              removed: [],
-              conflicts: [_conflict],
-            );
-          }
-          RustLib.initMock(api: _ScreenshotCore());
-          addTearDown(RustLib.dispose);
-          addTearDown(controller.dispose);
-          tester.view.devicePixelRatio = 1;
-          tester.view.physicalSize = device.size;
-          tester.platformDispatcher.platformBrightnessTestValue = brightness;
-          addTearDown(tester.view.resetPhysicalSize);
-          addTearDown(tester.view.resetDevicePixelRatio);
-          addTearDown(
-            tester.platformDispatcher.clearPlatformBrightnessTestValue,
-          );
-
-          await tester.pumpWidget(const SizedBox(key: _captureKey));
-          for (final path in [_schemaLogoPath, _catLogoPath, _tianLogoPath]) {
-            await tester.runAsync(
-              () => precacheImage(
-                FileImage(File(path)),
-                tester.element(find.byKey(_captureKey)),
-                onError: (error, stack) =>
-                    Error.throwWithStackTrace(error, stack!),
-              ),
-            );
-          }
-          await tester.pumpWidget(
-            RepaintBoundary(
-              key: _captureKey,
-              child: KeyTaoTheme(
-                platform: device.platform,
-                home: Builder(
-                  builder: (context) {
-                    final theme = context.theme;
-                    return FTheme(
-                      platform: context.platformVariant,
-                      data: FThemeData(
-                        colors: theme.colors,
-                        touch: context.platformVariant.touch,
-                        style: theme.style,
-                        typography: FTypography(
-                          display: _withScreenshotFont(
-                            theme.typography.display,
-                          ),
-                          body: _withScreenshotFont(theme.typography.body),
-                        ),
-                      ),
-                      child: Theme(
-                        data: Theme.of(context).copyWith(
-                          textTheme: Theme.of(context).textTheme
-                              .apply(fontFamilyFallback: const [_cjkFamily]),
-                        ),
-                        child: Navigator(
-                          onGenerateRoute: (_) => MaterialPageRoute<void>(
-                            builder: (_) => AppShell(controller: controller),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-          );
-          await tester.pumpAndSettle();
-          if (page == AppPage.input || page == AppPage.scheme) {
-            final logos = find.byType(SchemaLogo);
-            expect(logos, findsWidgets);
-            final logo = logos.first;
-            final logoImage = tester.widget<Image>(
-              find.descendant(of: logo, matching: find.byType(Image)),
-            );
-            expect(logoImage.image, isA<FileImage>());
-            final renderedLogo = tester.widget<RawImage>(
-              find.descendant(of: logo, matching: find.byType(RawImage)),
-            );
-            expect(renderedLogo.image?.width, 192);
-            expect(renderedLogo.image?.height, 192);
-          }
-          expect(tester.getSize(find.byKey(_captureKey)), device.size);
-          if (page == AppPage.scheme) {
-            for (final (key, path) in [
-              ('keytao', _schemaLogoPath),
-              ('xmjd', _catLogoPath),
-              ('txjx', _tianLogoPath),
-            ]) {
-              final card = find.byKey(ValueKey('scheme-package-$key'));
-              final image = tester.widget<Image>(
-                find.descendant(of: card, matching: find.byType(Image)).first,
-              );
-              expect((image.image as FileImage).file.path, path);
-            }
-            final notice = find.text('键道6 · 自造词');
-            expect(
-              tester.getTopLeft(notice).dx,
-              greaterThanOrEqualTo(device.name == 'desktop' ? 24 : 16),
-            );
-            expect(find.text('方案开关'), findsOneWidget);
-            for (final label in ['西文', '全角', '繁體']) {
-              expect(
-                tester.getTopLeft(find.text(label)).dx,
-                greaterThanOrEqualTo(device.name == 'desktop' ? 24 : 16),
+        testWidgets(
+          'capture settings $name',
+          (tester) async {
+            final controller = _ScreenshotController(device.platform)
+              ..activePage = page;
+            if (page == AppPage.scheme) {
+              controller.userWordsReportScheme = 'keytao';
+              controller.userWordsReport = const UserWordsReportDto(
+                removed: [],
+                conflicts: [_conflict],
               );
             }
-          }
-
-          if (!compact && device.name == 'phone' && page == AppPage.input) {
-            await _capture(tester, 'phone-keyboard-${brightness.name}');
-          }
-
-          if (!compact && device.name == 'phone') {
-            final scrollable = tester.state<ScrollableState>(
-              find
-                  .descendant(
-                    of: find.byKey(PageStorageKey(page.id)),
-                    matching: find.byType(Scrollable),
-                  )
-                  .first,
-            );
-            // Keep the phone width while exposing every setting below the fold.
-            tester.view.physicalSize = Size(
-              device.size.width,
-              device.size.height + scrollable.position.maxScrollExtent.ceil(),
-            );
-            await tester.pumpAndSettle();
-            expect(scrollable.position.maxScrollExtent, lessThanOrEqualTo(1));
-          }
-          expect(tester.takeException(), isNull);
-
-          if (compact) {
-            final scrollable = find
-                .descendant(
-                  of: find.byKey(PageStorageKey(page.id)),
-                  matching: find.byType(Scrollable),
-                )
-                .first;
-            final extent = tester
-                .state<ScrollableState>(scrollable)
-                .position
-                .maxScrollExtent;
-            await tester.runAsync(() async {
-              await File('$_directory/scroll-extents.txt').writeAsString(
-                '$name: ${extent.toStringAsFixed(1)}\n',
-                mode: FileMode.append,
-              );
-            });
-          }
-          await _capture(tester, name);
-          if (compact && page == AppPage.scheme) {
-            for (final (key, title) in [
-              ('rime-ice', AppStrings.rimeIce),
-              ('easy-en', schemeDisplayName('easy_en')),
-            ]) {
-              final paragraph = tester.renderObject<RenderParagraph>(
-                find.descendant(
-                  of: find.byKey(ValueKey('addon-$key')),
-                  matching: find.text(title),
-                ),
-              );
-              expect(paragraph.didExceedMaxLines, isFalse, reason: title);
-            }
-            final addons = find.byKey(const ValueKey('addon-schemes-button'));
-            await tester.ensureVisible(addons);
-            await tester.tap(addons);
-            await tester.pumpAndSettle();
-            expect(find.byType(AppDialog), findsOneWidget);
-            await _capture(tester, '${device.name}-addons-${brightness.name}');
-          }
-          if (!compact && page == AppPage.scheme) {
+            RustLib.initMock(api: _ScreenshotCore());
+            addTearDown(RustLib.dispose);
+            addTearDown(controller.dispose);
+            tester.view.devicePixelRatio = 1;
             tester.view.physicalSize = device.size;
-            await tester.pumpAndSettle();
-            await tester.tap(find.text('查看冲突'));
-            await tester.pumpAndSettle();
-            expect(find.text('测试词'), findsOneWidget);
-            expect(tester.takeException(), isNull);
-            await _capture(
-              tester,
-              '${device.name}-user-words-${brightness.name}',
+            tester.platformDispatcher.platformBrightnessTestValue = brightness;
+            addTearDown(tester.view.resetPhysicalSize);
+            addTearDown(tester.view.resetDevicePixelRatio);
+            addTearDown(
+              tester.platformDispatcher.clearPlatformBrightnessTestValue,
             );
-          }
-          if (compact) {
-            for (final details in overflows) {
-              debugPrint('$name: ${details.exceptionAsString()}');
-              debugPrint(details.toString());
+            const webViewChannel = MethodChannel('com.infradise.webview_core');
+            final messenger = tester.binding.defaultBinaryMessenger;
+            int? webViewId;
+            if (page == AppPage.website) {
+              messenger.setMockMethodCallHandler(webViewChannel, (call) async {
+                if (call.method == 'create') {
+                  webViewId = (call.arguments as Map)['controllerId'] as int;
+                }
+                return null;
+              });
+              addTearDown(
+                () => messenger.setMockMethodCallHandler(webViewChannel, null),
+              );
             }
-            if (!allowOverflow) expect(overflows, isEmpty, reason: name);
-          }
-          await tester.pumpWidget(const SizedBox.shrink());
-        }, skip: !enabled);
+
+            await tester.pumpWidget(const SizedBox(key: _captureKey));
+            for (final path in [_schemaLogoPath, _catLogoPath, _tianLogoPath]) {
+              await tester.runAsync(
+                () => precacheImage(
+                  FileImage(File(path)),
+                  tester.element(find.byKey(_captureKey)),
+                  onError: (error, stack) =>
+                      Error.throwWithStackTrace(error, stack!),
+                ),
+              );
+            }
+            await tester.pumpWidget(
+              RepaintBoundary(
+                key: _captureKey,
+                child: KeyTaoTheme(
+                  platform: device.platform,
+                  home: Builder(
+                    builder: (context) {
+                      final theme = context.theme;
+                      return FTheme(
+                        platform: context.platformVariant,
+                        data: FThemeData(
+                          colors: theme.colors,
+                          touch: context.platformVariant.touch,
+                          style: theme.style,
+                          typography: FTypography(
+                            display: _withScreenshotFont(
+                              theme.typography.display,
+                            ),
+                            body: _withScreenshotFont(theme.typography.body),
+                          ),
+                        ),
+                        child: Theme(
+                          data: Theme.of(context).copyWith(
+                            textTheme: Theme.of(context).textTheme
+                                .apply(fontFamilyFallback: const [_cjkFamily]),
+                          ),
+                          child: Navigator(
+                            onGenerateRoute: (_) => MaterialPageRoute<void>(
+                              builder: (_) => AppShell(controller: controller),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            );
+            if (page == AppPage.website) {
+              await tester.pump();
+              expect(webViewId, isNotNull);
+              await messenger.handlePlatformMessage(
+                webViewChannel.name,
+                webViewChannel.codec.encodeMethodCall(
+                  MethodCall('onPageFinished', {
+                    'controllerId': webViewId,
+                    'url': controller.websiteOrigin,
+                  }),
+                ),
+                null,
+              );
+            }
+            await tester.pumpAndSettle();
+            if (page == AppPage.input || page == AppPage.scheme) {
+              final logos = find.byType(SchemaLogo);
+              expect(logos, findsWidgets);
+              final logo = logos.first;
+              final logoImage = tester.widget<Image>(
+                find.descendant(of: logo, matching: find.byType(Image)),
+              );
+              expect(logoImage.image, isA<FileImage>());
+              final renderedLogo = tester.widget<RawImage>(
+                find.descendant(of: logo, matching: find.byType(RawImage)),
+              );
+              expect(renderedLogo.image?.width, 192);
+              expect(renderedLogo.image?.height, 192);
+            }
+            expect(tester.getSize(find.byKey(_captureKey)), device.size);
+            if (page == AppPage.scheme) {
+              for (final (key, path) in [
+                ('keytao', _schemaLogoPath),
+                ('xmjd', _catLogoPath),
+                ('txjx', _tianLogoPath),
+              ]) {
+                final card = find.byKey(ValueKey('scheme-package-$key'));
+                final image = tester.widget<Image>(
+                  find.descendant(of: card, matching: find.byType(Image)).first,
+                );
+                expect((image.image as FileImage).file.path, path);
+              }
+              final notice = find.text('键道6 · 自造词');
+              expect(
+                tester.getTopLeft(notice).dx,
+                greaterThanOrEqualTo(controller.isMobile ? 16 : 24),
+              );
+              expect(find.text('方案开关'), findsOneWidget);
+              for (final label in ['西文', '全角', '繁體']) {
+                expect(
+                  tester.getTopLeft(find.text(label)).dx,
+                  greaterThanOrEqualTo(controller.isMobile ? 16 : 24),
+                );
+              }
+            }
+
+            expect(tester.takeException(), isNull);
+            await _capture(tester, name);
+            if (page != AppPage.website) {
+              final scrollable = tester.state<ScrollableState>(
+                find
+                    .descendant(
+                      of: find.byKey(PageStorageKey(page.id)),
+                      matching: find.byType(Scrollable),
+                    )
+                    .first,
+              );
+              final extent = scrollable.position.maxScrollExtent.ceil();
+              if (extent > 0) {
+                tester.view.physicalSize = Size(
+                  device.size.width,
+                  device.size.height + extent,
+                );
+                await tester.pumpAndSettle();
+                expect(
+                  scrollable.position.maxScrollExtent,
+                  lessThanOrEqualTo(1),
+                );
+                expect(tester.takeException(), isNull);
+                await _capture(tester, '$name-full');
+                tester.view.physicalSize = device.size;
+                await tester.pumpAndSettle();
+              }
+            }
+            if (page == AppPage.scheme) {
+              for (final (key, title) in [
+                ('rime-ice', AppStrings.rimeIce),
+                ('easy-en', schemeDisplayName('easy_en')),
+              ]) {
+                final paragraph = tester.renderObject<RenderParagraph>(
+                  find.descendant(
+                    of: find.byKey(ValueKey('addon-$key')),
+                    matching: find.text(title),
+                  ),
+                );
+                expect(paragraph.didExceedMaxLines, isFalse, reason: title);
+              }
+              final addons = find.byKey(const ValueKey('addon-schemes-button'));
+              await tester.ensureVisible(addons);
+              await tester.tap(addons);
+              await tester.pumpAndSettle();
+              expect(find.byType(AppDialog), findsOneWidget);
+              await _capture(
+                tester,
+                '${device.name}-addons-${brightness.name}',
+              );
+              Navigator.of(tester.element(find.byType(AppDialog))).pop();
+              await tester.pumpAndSettle();
+              final conflicts = find.text('查看冲突');
+              await tester.ensureVisible(conflicts);
+              await tester.tap(conflicts);
+              await tester.pumpAndSettle();
+              expect(find.text('测试词'), findsOneWidget);
+              expect(tester.takeException(), isNull);
+              await _capture(
+                tester,
+                '${device.name}-user-words-${brightness.name}',
+              );
+            }
+            await tester.pumpWidget(const SizedBox.shrink());
+          },
+          skip: !enabled,
+          variant: page == AppPage.website
+              ? TargetPlatformVariant.only(TargetPlatform.linux)
+              : const DefaultTestVariant(),
+        );
       }
     }
   }

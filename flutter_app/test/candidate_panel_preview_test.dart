@@ -128,11 +128,16 @@ void _narrowScreen(WidgetTester tester) {
 
 Future<void> _pumpSettings(
   WidgetTester tester,
-  ViewController controller,
-) async {
+  ViewController controller, {
+  bool appearance = false,
+}) async {
   _narrowScreen(tester);
   addTearDown(controller.dispose);
-  await tester.pumpWidget(
+  await tester.pumpWidget(_settingsWidget(controller, appearance: appearance));
+  await tester.pumpAndSettle();
+}
+
+Widget _settingsWidget(ViewController controller, {required bool appearance}) =>
     KeyTaoTheme(
       platform: controller.info.platform,
       home: FScaffold(
@@ -141,15 +146,14 @@ Future<void> _pumpSettings(
             padding: const EdgeInsets.all(16),
             child: ListenableBuilder(
               listenable: controller,
-              builder: (_, _) => SettingsCard(controller: controller),
+              builder: (_, _) => appearance
+                  ? SettingsCard.skin(controller: controller)
+                  : SettingsCard(controller: controller),
             ),
           ),
         ),
       ),
-    ),
-  );
-  await tester.pumpAndSettle();
-}
+    );
 
 Color? _panelColor(WidgetTester tester) =>
     (tester.widget<Container>(_panel).decoration as BoxDecoration).color;
@@ -209,9 +213,12 @@ void main() {
       final controller = ViewController(BridgePlatform.macOs);
       addTearDown(controller.dispose);
       final settings = controller.uiSettings!;
-      Map<String, dynamic> preview({bool dark = false}) =>
+      Map<String, dynamic> preview({
+        UiColorSchemeDto? scheme,
+        bool dark = false,
+      }) =>
           controller.cachedCandidatePanelPreview(
-            colorScheme: settings.colorScheme,
+            colorScheme: scheme ?? settings.colorScheme,
             accentColor: settings.accentColor,
             cornerRadius: settings.cornerRadius,
             backgroundColor: settings.backgroundColor,
@@ -221,8 +228,12 @@ void main() {
 
       final light = preview();
       final dark = preview(dark: true);
+      final dayPreview = preview(scheme: UiColorSchemeDto.light);
+      final nightPreview = preview(scheme: UiColorSchemeDto.dark);
       expect(dark, isNot(same(light)));
       expect(preview(), same(light));
+      expect(preview(scheme: UiColorSchemeDto.light), same(dayPreview));
+      expect(preview(scheme: UiColorSchemeDto.dark), same(nightPreview));
       await controller.themeLibraryAction(() async {
         expect(preview(), same(light));
         expect(preview(dark: true), same(dark));
@@ -624,7 +635,7 @@ void main() {
           fontSize: 24,
           orientation: PanelOrientationDto.vertical,
         );
-      await _pumpSettings(tester, controller);
+      await _pumpSettings(tester, controller, appearance: true);
       expect(tester.widget<Flex>(_candidates).direction, Axis.vertical);
       expect(tester.widget<Text>(_firstText).style!.fontSize, 24);
       final originalHeight = tester.getSize(_panel).height;
@@ -673,6 +684,8 @@ void main() {
         controller.savedFonts.single,
       );
 
+      await tester.pumpWidget(_settingsWidget(controller, appearance: false));
+      await tester.pumpAndSettle();
       controller.saveGate = Completer<bool>();
       final horizontal = find.text('横排');
       await tester.ensureVisible(horizontal);
@@ -696,7 +709,7 @@ void main() {
     final semantics = tester.ensureSemantics();
     try {
       final controller = _PreviewController()..saveGate = Completer<bool>();
-      await _pumpSettings(tester, controller);
+      await _pumpSettings(tester, controller, appearance: true);
       final green = find.bySemanticsLabel(AppStrings.useColor('#0F9F8F'));
       await tester.ensureVisible(green);
       await tester.tap(green);
@@ -828,7 +841,7 @@ void main() {
       tester,
     ) async {
       final controller = _PreviewController(entry.key);
-      await _pumpSettings(tester, controller);
+      await _pumpSettings(tester, controller, appearance: true);
       final panel = entry.key == BridgePlatform.android
           ? find.byKey(const ValueKey('mobile-keyboard-preview'))
           : _panel;

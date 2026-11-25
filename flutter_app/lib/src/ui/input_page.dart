@@ -51,25 +51,11 @@ class InputPage extends StatelessWidget {
     fullWidth: true,
     spacing: 0,
     children: [
-      if (controller.userWordsReport != null ||
-          controller.userWordsReportError != null)
-        UserWordsNotice(controller: controller),
       SettingsCard(
         controller: controller,
         hero: _CurrentSchemeHero(controller: controller),
-        desktopGridBuilder: (settingsCells) => Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (controller.isWindows && controller.deploySteps.isNotEmpty)
-              HairlineGridCell(child: DeploySteps(controller: controller)),
-            HairlineGridSection(
-              children: [...settingsCells, ..._homeCells(context)],
-            ),
-          ],
-        ),
+        inputCells: _homeCells(context),
       ),
-      if (controller.isMobile)
-        HairlineGridSection(children: _homeCells(context)),
     ],
   );
 
@@ -77,7 +63,7 @@ class InputPage extends StatelessWidget {
     HairlineGridCell(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: 18,
+        spacing: 16,
         children: [
           if (controller.isAndroid) AndroidImeCard(controller: controller),
           if (controller.info.platform == BridgePlatform.macOs)
@@ -157,28 +143,8 @@ class InputPage extends StatelessWidget {
         ],
       ),
     ),
-    HairlineGridCell(
-      child: Section(
-        title: '应用设置',
-        children: [
-          SwitchSetting(
-            '显示网站',
-            value: !controller.websiteHidden,
-            onChanged: controller.canEditWebsiteSettings
-                ? (visible) => controller.saveWebsiteSettings(hidden: !visible)
-                : null,
-          ),
-          SwitchSetting(
-            '减少动画',
-            value: controller.reduceMotion,
-            onChanged: controller.canSaveReduceMotion
-                ? controller.saveReduceMotion
-                : null,
-          ),
-        ],
-      ),
-    ),
-    HairlineGridCell(child: AccountCard(controller: controller)),
+    if (controller.isWindows && controller.deploySteps.isNotEmpty)
+      HairlineGridCell(child: DeploySteps(controller: controller)),
     if (controller.operationLogs.any(
       (line) => line.contains('[DEPLOY]') || line.contains('[DEPLOY ERROR]'),
     ))
@@ -198,6 +164,9 @@ class InputPage extends StatelessWidget {
           ],
         ),
       ),
+    if (controller.userWordsReport != null ||
+        controller.userWordsReportError != null)
+      UserWordsNotice(controller: controller),
   ];
 }
 
@@ -211,7 +180,7 @@ class _RecentOperation extends StatelessWidget {
     final palette = AppPalette.of(context);
     final failed = operationLogKind(line) == LogLineKind.error;
     final style = context.theme.typography.body.sm.copyWith(
-      color: failed ? palette.error : palette.success,
+      color: failed ? palette.error : palette.successForeground,
     );
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,

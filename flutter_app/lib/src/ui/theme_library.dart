@@ -16,9 +16,11 @@ class ThemeLibrarySection extends StatefulWidget {
     super.key,
     required this.controller,
     this.quickSwitch = false,
+    this.onEdit,
   });
   final AppController controller;
   final bool quickSwitch;
+  final VoidCallback? onEdit;
 
   @override
   State<ThemeLibrarySection> createState() => _ThemeLibrarySectionState();
@@ -298,32 +300,54 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     spacing: widget.quickSwitch ? 8 : 4,
     children: [
-      if (widget.quickSwitch)
-        const EyebrowLabel('主题')
-      else ...[
-        Row(
-          children: [
-            const Expanded(child: EyebrowLabel('主题库')),
-            _action(
-              '粘贴导入',
-              FLucideIcons.clipboardPaste,
-              _canSave ? _paste : null,
+      Row(
+        children: [
+          EyebrowLabel(widget.quickSwitch ? '主题' : '主题库'),
+          Expanded(
+            child: Wrap(
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _action(
+                  '粘贴导入',
+                  FLucideIcons.clipboardPaste,
+                  _canSave ? _paste : null,
+                ),
+                _action(
+                  '复制分享串',
+                  FLucideIcons.copy,
+                  _enabled && _current != null
+                      ? () => _export(_current!.id, copy: true)
+                      : null,
+                ),
+                _action(
+                  '导出文件',
+                  FLucideIcons.download,
+                  _enabled && _current != null
+                      ? () => _export(_current!.id)
+                      : null,
+                ),
+                _action(
+                  '导入文件',
+                  FLucideIcons.upload,
+                  _canSave ? _openFile : null,
+                ),
+                if (widget.onEdit case final onEdit?)
+                  FButton(
+                    variant: FButtonVariant.ghost,
+                    size: context.platformVariant.touch
+                        ? FButtonSizeVariant.md
+                        : FButtonSizeVariant.xs,
+                    mainAxisSize: MainAxisSize.min,
+                    onPress: onEdit,
+                    child: const Text('编辑主题'),
+                  ),
+              ],
             ),
-            _action(
-              '复制分享串',
-              FLucideIcons.copy,
-              _enabled && _current != null
-                  ? () => _export(_current!.id, copy: true)
-                  : null,
-            ),
-            _action(
-              '导出文件',
-              FLucideIcons.download,
-              _enabled && _current != null ? () => _export(_current!.id) : null,
-            ),
-            _action('导入文件', FLucideIcons.upload, _canSave ? _openFile : null),
-          ],
-        ),
+          ),
+        ],
+      ),
+      if (!widget.quickSwitch)
         if (_current case final theme?)
           Row(
             children: [
@@ -342,7 +366,6 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
                 ),
             ],
           ),
-      ],
       if (_loading || _working) const FProgress(),
       if (widget.quickSwitch && _themes.isNotEmpty)
         LayoutBuilder(

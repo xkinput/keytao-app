@@ -8,11 +8,12 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
+import 'login.dart';
+import 'rime_sync_dialog.dart';
 import 'system_font_picker.dart';
 import 'theme.dart';
 import 'theme_editor.dart';
 import 'theme_library.dart';
-import 'user_words.dart';
 import 'widgets.dart';
 
 Future<bool?> showCloudPackageTransfer(
@@ -224,11 +225,19 @@ class SettingsCard extends StatefulWidget {
     super.key,
     required this.controller,
     this.hero,
-    this.desktopGridBuilder,
-  });
+    this.inputCells = const [],
+  }) : appearance = false;
+
+  const SettingsCard.skin({super.key, required this.controller})
+    : appearance = true,
+      hero = null,
+      inputCells = const [];
+
   final AppController controller;
   final Widget? hero;
-  final Widget Function(List<Widget> settingsCells)? desktopGridBuilder;
+  final List<Widget> inputCells;
+  final bool appearance;
+
   @override
   State<SettingsCard> createState() => _SettingsCardState();
 }
@@ -320,19 +329,7 @@ class _SettingsCardState extends State<SettingsCard> {
       _previewSource = settings;
       _resetPreview();
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (controller.isMobile) ...[
-          ?widget.hero,
-          const SizedBox(height: 12),
-          _preview(context, keyboard: true),
-          const SizedBox(height: 18),
-          _mobile(context),
-        ] else
-          _desktop(context),
-      ],
-    );
+    return widget.appearance ? _skin(context) : _input(context);
   }
 
   Widget _candidatePageSize() {
@@ -367,72 +364,173 @@ class _SettingsCardState extends State<SettingsCard> {
     );
   }
 
-  Widget _desktop(BuildContext context) {
+  Widget _input(BuildContext context) {
     final c = controller;
     final s = c.uiSettings;
-    final settingsCells = [
-      if (s != null) ...[
-        _settingsCell('候选模式', [
-          BigTextRadioGroup<PanelOrientationDto?>(
-            label: '候选模式',
-            value: s.hideCandidatePanel ? null : s.orientation,
-            options: const {...orientations, null: '隐藏'},
-            onChanged: c.canSaveTheme
-                ? (value) => value == null
-                      ? c.saveHideCandidatePanel(true)
-                      : _savePreview(
-                          orientation: value,
-                          hideCandidatePanel: false,
-                        )
-                : null,
-          ),
-          _candidatePageSize(),
-          if (c.showsEmbeddedComposition)
-            _separated(
-              SwitchSetting(
-                AppStrings.embedded,
-                value: s.effectiveEmbeddedComposition,
-                onChanged: c.canSaveTheme && !s.hideCandidatePanel
-                    ? c.saveEmbedded
-                    : null,
-              ),
-            ),
-          if (c.isWindows)
-            _separated(
-              SwitchSetting(
-                '托盘显示中英状态',
-                value: s.showTrayModeIndicator,
-                onChanged: c.canSaveTheme ? c.saveShowTrayModeIndicator : null,
-              ),
-            ),
-        ]),
-        _desktopAppearance(s),
-      ],
-    ];
+    final preview = c.isMobile
+        ? _preview(context, keyboard: true)
+        : s != null && !s.hideCandidatePanel
+        ? _preview(context)
+        : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (MediaQuery.sizeOf(context).width >= 880 &&
+            widget.hero != null &&
+            preview != null)
+          Row(
+            children: [
+              Expanded(child: widget.hero!),
+              Expanded(child: preview),
+            ],
+          )
+        else ...[
+          ?widget.hero,
+          if (c.isMobile) const SizedBox(height: 12),
+          ?preview,
+        ],
         HairlineGridSection(
-          minCellWidth: 440,
           children: [
-            ?widget.hero,
-            if (s != null && !s.hideCandidatePanel) _preview(context),
+            if (!c.isMobile)
+              if (s == null)
+                HairlineGridCell(
+                  child: SettingRow(
+                    AppStrings.checking,
+                    child: ActionButton(
+                      AppStrings.recheck,
+                      onPress: c.busy ? null : c.refreshState,
+                    ),
+                  ),
+                )
+              else
+                _settingsCell('候选', [
+                  BigTextRadioGroup<PanelOrientationDto?>(
+                    label: '候选模式',
+                    value: s.hideCandidatePanel ? null : s.orientation,
+                    options: const {...orientations, null: '隐藏'},
+                    onChanged: c.canSaveTheme
+                        ? (value) => value == null
+                              ? c.saveHideCandidatePanel(true)
+                              : _savePreview(
+                                  orientation: value,
+                                  hideCandidatePanel: false,
+                                )
+                        : null,
+                  ),
+                  _candidatePageSize(),
+                  if (c.showsEmbeddedComposition)
+                    _separated(
+                      SwitchSetting(
+                        AppStrings.embedded,
+                        value: s.effectiveEmbeddedComposition,
+                        onChanged: c.canSaveTheme && !s.hideCandidatePanel
+                            ? c.saveEmbedded
+                            : null,
+                      ),
+                    ),
+                  if (c.isWindows)
+                    _separated(
+                      SwitchSetting(
+                        '托盘显示中英状态',
+                        value: s.showTrayModeIndicator,
+                        onChanged: c.canSaveTheme
+                            ? c.saveShowTrayModeIndicator
+                            : null,
+                      ),
+                    ),
+                ]),
+            if (c.isMobile) ..._mobile(context),
+            ...widget.inputCells,
+            if (c.imeUiError case final error?)
+              HairlineGridCell(child: ErrorMessage(error)),
           ],
         ),
-        if (s == null)
-          HairlineGridCell(
-            child: SettingRow(
-              AppStrings.checking,
-              child: ActionButton(
-                AppStrings.recheck,
-                onPress: c.busy ? null : c.refreshState,
-              ),
-            ),
+      ],
+    );
+  }
+
+  Widget _skin(BuildContext context) {
+    final c = controller;
+    final settings = c.uiSettings;
+    final showPanel = c.isMobile || settings?.hideCandidatePanel == false;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (showPanel)
+          LayoutBuilder(
+            builder: (context, constraints) {
+              if (!c.isMobile && constraints.maxWidth >= 800) {
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final scheme in const [
+                      UiColorSchemeDto.light,
+                      UiColorSchemeDto.dark,
+                    ])
+                      Expanded(child: _preview(context, appearance: scheme)),
+                  ],
+                );
+              }
+              return _preview(context, keyboard: c.isMobile);
+            },
           ),
-        widget.desktopGridBuilder?.call(settingsCells) ??
-            HairlineGridSection(children: settingsCells),
-        if (c.imeUiError case final error?)
-          HairlineGridCell(child: ErrorMessage(error)),
+        HairlineGridSection(
+          minCellWidth: 420,
+          columnCount: MediaQuery.sizeOf(context).width >= 880 ? 2 : 1,
+          children: [
+            if (settings == null)
+              HairlineGridCell(
+                child: SettingRow(
+                  AppStrings.checking,
+                  child: ActionButton(
+                    AppStrings.recheck,
+                    onPress: c.busy ? null : c.refreshState,
+                  ),
+                ),
+              )
+            else ...[
+              _settingsCell('配色', [
+                BigTextRadioGroup<UiColorSchemeDto>(
+                  label: '配色方案',
+                  value: settings.colorScheme,
+                  options: colorSchemes,
+                  onChanged: c.canSaveTheme
+                      ? (value) => _savePreview(colorScheme: value)
+                      : null,
+                ),
+              ]),
+              HairlineGridCell(
+                child: ThemeLibrarySection(
+                  key: ValueKey(_themeLibraryRevision),
+                  controller: c,
+                  quickSwitch: true,
+                  onEdit: _editTheme,
+                ),
+              ),
+              if (showPanel) ...[
+                _settingsCell('颜色', [_accentPicker(), _backgroundPicker()]),
+                _settingsCell('候选窗', [
+                  if (!c.isMobile)
+                    SliderSetting(
+                      label: AppStrings.candidateFontSize,
+                      value: settings.fontSize,
+                      min: candidateFontMin,
+                      max: candidateFontMax,
+                      divisions: candidateFontDivisions,
+                      onPreview: (value) =>
+                          _schedulePreview(() => _previewFontSize = value),
+                      onChanged: c.canSaveTheme
+                          ? (value) => _savePreview(fontSize: value)
+                          : null,
+                    ),
+                  _cornerRadius(),
+                ]),
+              ],
+            ],
+            if (c.imeUiError case final error?)
+              HairlineGridCell(child: ErrorMessage(error)),
+          ],
+        ),
       ],
     );
   }
@@ -440,68 +538,8 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget _settingsCell(String label, List<Widget> children) => HairlineGridCell(
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 10,
+      spacing: 8,
       children: [EyebrowLabel(label), ...children],
-    ),
-  );
-
-  Widget _desktopAppearance(ImeUiSettingsDto settings) => HairlineGridCell(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.only(bottom: 10),
-              child: EyebrowLabel('外观'),
-            ),
-            FButton(
-              variant: FButtonVariant.ghost,
-              size: FButtonSizeVariant.xs,
-              mainAxisSize: MainAxisSize.min,
-              onPress: _editTheme,
-              child: const Text('编辑主题'),
-            ),
-          ],
-        ),
-        BigTextRadioGroup<UiColorSchemeDto>(
-          label: '配色方案',
-          value: settings.colorScheme,
-          options: colorSchemes,
-          onChanged: controller.canSaveTheme
-              ? (value) => _savePreview(colorScheme: value)
-              : null,
-        ),
-        const SizedBox(height: 16),
-        _themeLibrary(),
-        if (!settings.hideCandidatePanel) ...[
-          const SizedBox(height: 16),
-          const EyebrowLabel('颜色'),
-          const SizedBox(height: 8),
-          _accentPicker(),
-          const SizedBox(height: 8),
-          _backgroundPicker(),
-          const SizedBox(height: 16),
-          const EyebrowLabel('候选窗'),
-          const SizedBox(height: 8),
-          _cornerRadius(),
-          const SizedBox(height: 8),
-          SliderSetting(
-            label: AppStrings.candidateFontSize,
-            value: settings.fontSize,
-            min: candidateFontMin,
-            max: candidateFontMax,
-            divisions: candidateFontDivisions,
-            onPreview: (value) =>
-                _schedulePreview(() => _previewFontSize = value),
-            onChanged: controller.canSaveTheme
-                ? (value) => _savePreview(fontSize: value)
-                : null,
-          ),
-        ],
-      ],
     ),
   );
 
@@ -511,12 +549,6 @@ class _SettingsCardState extends State<SettingsCard> {
       border: Border(top: BorderSide(color: AppPalette.of(context).hairline)),
     ),
     child: child,
-  );
-
-  Widget _themeLibrary() => ThemeLibrarySection(
-    key: ValueKey(_themeLibraryRevision),
-    controller: controller,
-    quickSwitch: true,
   );
 
   Future<void> _editTheme() async {
@@ -576,7 +608,11 @@ class _SettingsCardState extends State<SettingsCard> {
     );
   }
 
-  Widget _preview(BuildContext context, {bool keyboard = false}) {
+  Widget _preview(
+    BuildContext context, {
+    bool keyboard = false,
+    UiColorSchemeDto? appearance,
+  }) {
     final c = controller;
     final s = c.uiSettings;
     final accent =
@@ -592,7 +628,7 @@ class _SettingsCardState extends State<SettingsCard> {
         : _previewRadius ?? s?.cornerRadius;
     final backgroundColor = _previewBackground ?? s?.backgroundColor ?? '';
     final colorScheme =
-        _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto;
+        appearance ?? _previewScheme ?? s?.colorScheme ?? UiColorSchemeDto.auto;
     final preview = CandidatePanelPreview(
       fontCatalog: SystemFontCatalog.forController(c),
       key: ValueKey((colorScheme, orientation)),
@@ -609,6 +645,8 @@ class _SettingsCardState extends State<SettingsCard> {
       candidateCount: c.candidatePageSize ?? c.candidatePreviewPageSize ?? 6,
       candidates: c.candidatePreviewCandidates,
       keyboard: keyboard,
+      showKeyboardCandidates: keyboard && widget.appearance,
+      editorPreview: keyboard && widget.appearance,
       keyboardSettings: keyboard ? c.androidSettings : null,
       keyboardSchemeName:
           c.currentSchemaName ??
@@ -620,13 +658,22 @@ class _SettingsCardState extends State<SettingsCard> {
     return CustomPaint(
       painter: _PreviewDots(AppPalette.of(context).hairline),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 285),
+        constraints: BoxConstraints(minHeight: widget.appearance ? 240 : 128),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 30, 24, 15),
+          padding: EdgeInsets.symmetric(
+            horizontal: MediaQuery.sizeOf(context).width >= 720 ? 24 : 0,
+            vertical: 14,
+          ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
+            crossAxisAlignment: widget.appearance
+                ? CrossAxisAlignment.center
+                : CrossAxisAlignment.end,
             children: [
+              if (appearance != null) ...[
+                EyebrowLabel(colorSchemes[appearance]!),
+                const SizedBox(height: 8),
+              ],
               AnimatedSwitcher(
                 duration: MediaQuery.disableAnimationsOf(context)
                     ? Duration.zero
@@ -635,17 +682,19 @@ class _SettingsCardState extends State<SettingsCard> {
                     current ?? const SizedBox.shrink(),
                 child: preview,
               ),
-              const SizedBox(height: 18),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Text(
-                  '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
-                  textAlign: TextAlign.right,
-                  style: context.theme.typography.body.xs.copyWith(
-                    color: AppPalette.of(context).muted,
+              if (!widget.appearance) ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
+                    textAlign: TextAlign.right,
+                    style: context.theme.typography.body.xs.copyWith(
+                      color: AppPalette.of(context).muted,
+                    ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
         ),
@@ -653,7 +702,7 @@ class _SettingsCardState extends State<SettingsCard> {
     );
   }
 
-  Widget _mobile(BuildContext context) {
+  List<Widget> _mobile(BuildContext context) {
     final c = controller;
     final s = c.androidSettings;
     final enabled = !c.busy && s != null;
@@ -708,22 +757,9 @@ class _SettingsCardState extends State<SettingsCard> {
       options: options,
       onChanged: enabled ? (value) => save(field, value) : null,
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 18,
-      children: [
-        if (c.uiSettings != null)
-          Section(
-            title: '外观',
-            children: [
-              _themeLibrary(),
-              _separated(_accentPicker()),
-              _backgroundPicker(),
-              _cornerRadius(),
-              ActionButton('编辑主题', onPress: _editTheme),
-            ],
-          ),
-        Semantics(
+    return [
+      HairlineGridCell(
+        child: Semantics(
           label: AppStrings.mobileKeyboard,
           child: Section(
             title: '候选与键盘',
@@ -799,22 +835,6 @@ class _SettingsCardState extends State<SettingsCard> {
                 'symbolAutoReturn',
                 s?.symbolAutoReturn ?? false,
               ),
-              SettingRow(
-                AppStrings.phrases,
-                child: ActionButton(
-                  '编辑',
-                  onPress: enabled
-                      ? () => showFDialog<void>(
-                          context: context,
-                          barrierDismissible: false,
-                          builder: (_, _, animation) => _PhrasesEditor(
-                            controller: c,
-                            animation: animation,
-                          ),
-                        )
-                      : null,
-                ),
-              ),
               slider(
                 AppStrings.swipeThreshold,
                 'swipeThresholdDp',
@@ -827,7 +847,9 @@ class _SettingsCardState extends State<SettingsCard> {
             ],
           ),
         ),
-        Section(
+      ),
+      HairlineGridCell(
+        child: Section(
           title: AppStrings.clipboard,
           children: [
             toggle(
@@ -876,7 +898,9 @@ class _SettingsCardState extends State<SettingsCard> {
             ),
           ],
         ),
-        Section(
+      ),
+      HairlineGridCell(
+        child: Section(
           title: AppStrings.layout,
           children: [
             if (c.isAndroid)
@@ -941,8 +965,8 @@ class _SettingsCardState extends State<SettingsCard> {
             ),
           ],
         ),
-      ],
-    );
+      ),
+    ];
   }
 }
 
@@ -964,118 +988,6 @@ class _PreviewDots extends CustomPainter {
   bool shouldRepaint(_PreviewDots oldDelegate) => color != oldDelegate.color;
 }
 
-class _PhrasesEditor extends StatefulWidget {
-  const _PhrasesEditor({required this.controller, required this.animation});
-  final AppController controller;
-  final Animation<double> animation;
-
-  @override
-  State<_PhrasesEditor> createState() => _PhrasesEditorState();
-}
-
-class _PhrasesEditorState extends State<_PhrasesEditor> {
-  late final _phrases = [...widget.controller.androidSettings!.phrases];
-  final _text = TextEditingController();
-  bool _saving = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _text.dispose();
-    super.dispose();
-  }
-
-  void _add() {
-    final phrase = _text.text.trim();
-    if (phrase.isEmpty) return;
-    setState(() => _phrases.add(phrase));
-    _text.clear();
-  }
-
-  Future<void> _save() async {
-    setState(() => _saving = true);
-    final saved = await widget.controller.saveAndroid({'phrases': _phrases});
-    if (!mounted) return;
-    if (saved) {
-      Navigator.pop(context);
-    } else {
-      setState(() {
-        _saving = false;
-        _error = widget.controller.error ?? '保存失败';
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_saving,
-    child: AppDialog(
-      title: AppStrings.phrases,
-      animation: widget.animation,
-      actions: [
-        ActionButton(
-          AppStrings.cancel,
-          onPress: _saving ? null : () => Navigator.pop(context),
-        ),
-        ActionButton('保存', primary: true, onPress: _saving ? null : _save),
-      ],
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: 12,
-        children: [
-          SizedBox(
-            height: 220,
-            child: ReorderableListView.builder(
-              itemCount: _phrases.length,
-              onReorderItem: (from, to) {
-                if (_saving) return;
-                setState(() {
-                  _phrases.insert(to, _phrases.removeAt(from));
-                });
-              },
-              itemBuilder: (context, index) => Padding(
-                key: ValueKey('$index:${_phrases[index]}'),
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  spacing: 8,
-                  children: [
-                    const Icon(
-                      FLucideIcons.gripVertical,
-                      size: 18,
-                      semanticLabel: '拖动排序',
-                    ),
-                    Expanded(child: Text(_phrases[index])),
-                    FButton.icon(
-                      variant: FButtonVariant.ghost,
-                      onPress: _saving
-                          ? null
-                          : () => setState(() => _phrases.removeAt(index)),
-                      child: const Icon(
-                        FLucideIcons.trash2,
-                        size: 18,
-                        semanticLabel: '移除短语',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          FTextField(
-            label: const Text('添加短语'),
-            control: FTextFieldControl.managed(controller: _text),
-            enabled: !_saving,
-            onSubmit: (_) => _add(),
-          ),
-          ActionButton('添加', onPress: _saving ? null : _add),
-          if (_error case final error?) ErrorMessage(error),
-        ],
-      ),
-    ),
-  );
-}
-
 class AccountCard extends StatelessWidget {
   const AccountCard({super.key, required this.controller});
   final AppController controller;
@@ -1085,23 +997,23 @@ class AccountCard extends StatelessWidget {
     return Semantics(
       label: '数据管理',
       child: Section(
-        title: '自造词 · 我的词库',
+        title: '账号与同步',
         icon: FLucideIcons.database,
+        trailing: ActionButton(
+          c.accountUser == null ? AppStrings.login : '我的',
+          onPress: () => showAccountDialog(context, c),
+        ),
         children: [
-          ActionRow(
-            children: [
-              ActionButton(
-                '自造词',
-                icon: FLucideIcons.bookOpen,
-                onPress:
-                    c.busy ||
-                        (c.installedPackages.isEmpty &&
-                            c.local?.installed != true)
-                    ? null
-                    : () => openUserWords(context, c),
-              ),
-            ],
-          ),
+          if (!c.isMobile)
+            ActionRow(
+              children: [
+                ActionButton(
+                  AppStrings.rimeSync(Localizations.localeOf(context)),
+                  key: const ValueKey('rime-sync-button'),
+                  onPress: c.busy ? null : () => showRimeSyncDialog(context, c),
+                ),
+              ],
+            ),
           if (c.accountUser != null) ...[
             if (c.accountMessage case final message?) StatusMessage(message),
             if (c.accountError case final error?) ErrorMessage(error),

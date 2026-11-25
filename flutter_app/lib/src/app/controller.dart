@@ -1435,7 +1435,7 @@ class AppController extends ChangeNotifier {
     }
     activePage = page;
     unawaited(setWindowTitle());
-    if (page == AppPage.debug) {
+    if (page == AppPage.about) {
       sharedLogPath = null;
       unawaited(refreshLogs());
     }

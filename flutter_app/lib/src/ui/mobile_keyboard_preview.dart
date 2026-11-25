@@ -64,6 +64,7 @@ class MobileKeyboardPreview extends StatelessWidget {
     required this.schemeName,
     this.logo,
     this.candidates = const [],
+    this.showCandidates = false,
     this.editorPreview = false,
     this.fontFamily,
     this.highlightPath,
@@ -75,6 +76,7 @@ class MobileKeyboardPreview extends StatelessWidget {
   final String schemeName;
   final Widget? logo;
   final List<({String text, String comment})> candidates;
+  final bool showCandidates;
   final bool editorPreview;
   final String? fontFamily;
   final String? highlightPath;
@@ -678,7 +680,7 @@ class MobileKeyboardPreview extends StatelessWidget {
         ),
         child: Column(
           children: [
-            if (candidateField != null)
+            if (showCandidates || candidateField != null)
               edit(
                 Container(
                   key: const ValueKey('mobile-candidate-bar-preview'),
