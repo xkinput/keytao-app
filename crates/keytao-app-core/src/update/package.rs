@@ -2,6 +2,7 @@ use super::{AppUpdateInfo, RELEASES, includes_prereleases, parse_version};
 use crate::{
     Core,
     download::{download_with_progress, emit_progress},
+    http_client::{ClientProfile, cached_client},
 };
 use reqwest::{Client, redirect::Policy};
 use semver::Version;
@@ -110,32 +111,32 @@ fn asset_digest(page: &str, tag: &str, filename: &str) -> Option<[u8; 32]> {
 }
 
 fn client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent("keytao-app-updater")
-        .connect_timeout(Duration::from_secs(8))
-        .read_timeout(Duration::from_secs(30))
-        .https_only(true)
-        .redirect(Policy::custom(|attempt| {
-            let url = attempt.url();
-            if attempt.previous().len() < 5
-                && url.scheme() == "https"
-                && url.port_or_known_default() == Some(443)
-                && matches!(
-                    url.host_str(),
-                    Some(
-                        "github.com"
-                            | "release-assets.githubusercontent.com"
-                            | "objects.githubusercontent.com"
+    cached_client(ClientProfile::UpdatePackage, || {
+        Client::builder()
+            .user_agent("keytao-app-updater")
+            .connect_timeout(Duration::from_secs(8))
+            .read_timeout(Duration::from_secs(30))
+            .https_only(true)
+            .redirect(Policy::custom(|attempt| {
+                let url = attempt.url();
+                if attempt.previous().len() < 5
+                    && url.scheme() == "https"
+                    && url.port_or_known_default() == Some(443)
+                    && matches!(
+                        url.host_str(),
+                        Some(
+                            "github.com"
+                                | "release-assets.githubusercontent.com"
+                                | "objects.githubusercontent.com"
+                        )
                     )
-                )
-            {
-                attempt.follow()
-            } else {
-                attempt.error("Unexpected KeyTao update redirect")
-            }
-        }))
-        .build()
-        .map_err(|error| error.to_string())
+                {
+                    attempt.follow()
+                } else {
+                    attempt.error("Unexpected KeyTao update redirect")
+                }
+            }))
+    })
 }
 
 async fn fetch_digest(

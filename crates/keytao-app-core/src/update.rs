@@ -1,4 +1,8 @@
-use crate::{Core, CoreError, scheme_types::AppUpdateInfo};
+use crate::{
+    Core, CoreError,
+    http_client::{ClientProfile, cached_client},
+    scheme_types::AppUpdateInfo,
+};
 use reqwest::{Client, Url, header::LOCATION, redirect::Policy};
 use semver::Version;
 use std::time::{Duration, Instant};
@@ -129,13 +133,14 @@ async fn check_app_update_at(
 pub async fn check_app_update(core: &Core) -> Result<AppUpdateInfo, CoreError> {
     let t0 = Instant::now();
     let current = &core.env().app_version;
-    let client = Client::builder()
-        .user_agent(format!("keytao-app/{current}"))
-        .timeout(Duration::from_secs(8))
-        .https_only(true)
-        .redirect(Policy::none())
-        .build()
-        .map_err(|error| CoreError::Other(error.to_string()))?;
+    let client = cached_client(ClientProfile::AppUpdate(current.clone()), || {
+        Client::builder()
+            .user_agent(format!("keytao-app/{current}"))
+            .timeout(Duration::from_secs(8))
+            .https_only(true)
+            .redirect(Policy::none())
+    })
+    .map_err(CoreError::Other)?;
     let result = check_app_update_at(&client, RELEASES, current, includes_prereleases(core)).await;
     match &result {
         Ok(_) => tracing::info!("[check_app_update] done in {}ms", t0.elapsed().as_millis()),
