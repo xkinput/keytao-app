@@ -9,6 +9,25 @@ import 'debug_page.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
+const _licenses = [
+  ('librime', 'BSD-3-Clause', ['assets/licenses/librime-LICENSE.txt']),
+  (
+    'libjd-engine',
+    'GPL-3.0',
+    [
+      'assets/licenses/libjd-engine-SOURCE.txt',
+      'assets/licenses/libjd-engine-LICENSE.txt',
+    ],
+  ),
+  ('Flutter', 'BSD-3-Clause', ['assets/licenses/flutter-LICENSE.txt']),
+  ('OpenCC', 'Apache-2.0', ['assets/licenses/opencc-LICENSE.txt']),
+  (
+    'webview_core',
+    'Apache-2.0',
+    ['third_party/webview_core/NOTICE', 'third_party/webview_core/LICENSE'],
+  ),
+];
+
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key, required this.controller});
   final AppController controller;
@@ -56,6 +75,47 @@ class AboutPage extends StatelessWidget {
         variant: FButtonVariant.ghost,
         onPress: () => controller.open(url),
         child: Icon(FLucideIcons.externalLink, size: 16, semanticLabel: label),
+      ),
+    );
+  }
+
+  Widget _licenseRow(String name, VoidCallback onPress, {String? license}) =>
+      FButton.raw(
+        variant: FButtonVariant.ghost,
+        onPress: onPress,
+        child: SettingRow(
+          name,
+          keepInline: true,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            spacing: 8,
+            children: [
+              if (license != null) Text(license),
+              const Icon(FLucideIcons.chevronRight, size: 16),
+            ],
+          ),
+        ),
+      );
+
+  void _showLicense(BuildContext context, String name, List<String> assets) {
+    final text = Future.wait(assets.map(rootBundle.loadString))
+        .then((parts) => parts.join('\n\n'));
+    showFDialog<void>(
+      context: context,
+      builder: (context, _, animation) => AppDialog(
+        title: name,
+        animation: animation,
+        actions: [
+          ActionButton(AppStrings.close, onPress: () => Navigator.pop(context)),
+        ],
+        child: FutureBuilder<String>(
+          future: text,
+          builder: (_, snapshot) => snapshot.hasError
+              ? ErrorMessage(errorText(snapshot.error!))
+              : snapshot.hasData
+              ? SelectableText(snapshot.data!)
+              : const FCircularProgress(),
+        ),
       ),
     );
   }
@@ -204,40 +264,20 @@ class AboutPage extends StatelessWidget {
             ),
             HairlineGridCell(
               child: Section(
-                title: '许可与声明',
+                title: '开源许可',
                 children: [
-                  ActionButton(
-                    '开源许可证',
-                    onPress: () => showLicensePage(
+                  for (final (name, license, assets) in _licenses)
+                    _licenseRow(
+                      name,
+                      () => _showLicense(context, name, assets),
+                      license: license,
+                    ),
+                  _licenseRow(
+                    '全部开源许可',
+                    () => showLicensePage(
                       context: context,
                       applicationName: 'KeyTao',
                       applicationVersion: c.info.appVersion,
-                    ),
-                  ),
-                  ActionButton(
-                    '第三方声明',
-                    onPress: () => showFDialog<void>(
-                      context: context,
-                      builder: (context, _, animation) => AppDialog(
-                        title: '第三方声明',
-                        animation: animation,
-                        actions: [
-                          ActionButton(
-                            AppStrings.close,
-                            onPress: () => Navigator.pop(context),
-                          ),
-                        ],
-                        child: FutureBuilder<String>(
-                          future: rootBundle.loadString(
-                            'third_party/webview_core/NOTICE',
-                          ),
-                          builder: (_, snapshot) => snapshot.hasError
-                              ? ErrorMessage(errorText(snapshot.error!))
-                              : snapshot.hasData
-                              ? SelectableText(snapshot.data!)
-                              : const FCircularProgress(),
-                        ),
-                      ),
                     ),
                   ),
                 ],

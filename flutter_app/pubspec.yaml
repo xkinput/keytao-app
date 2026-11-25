@@ -29,4 +29,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/logo.png
+    - assets/licenses/
     - third_party/webview_core/NOTICE
+    - third_party/webview_core/LICENSE

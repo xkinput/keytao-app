@@ -1,0 +1,3 @@
+libjd-engine v0.14.0 (GPL-3.0)
+Upstream source: https://github.com/hronro/ime-jd/tree/v0.14.0
+Upstream release: https://github.com/hronro/ime-jd/releases/tag/v0.14.0
