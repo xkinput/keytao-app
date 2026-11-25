@@ -433,6 +433,8 @@ class _PageDeck extends StatefulWidget {
   State<_PageDeck> createState() => _PageDeckState();
 }
 
+enum _PageDragOwner { touch, precise }
+
 class _PageDeckState extends State<_PageDeck>
     with SingleTickerProviderStateMixin {
   late final _slide =
@@ -450,7 +452,7 @@ class _PageDeckState extends State<_PageDeck>
   final _retainedConstraints = <AppPage, BoxConstraints>{};
   double _direction = 1;
   double _dragDistance = 0;
-  bool _dragging = false;
+  _PageDragOwner? _dragOwner;
 
   @override
   void didUpdateWidget(covariant _PageDeck oldWidget) {
@@ -467,13 +469,13 @@ class _PageDeckState extends State<_PageDeck>
     if (targetRemoved ||
         switchingNativeWebsite ||
         (!widget.animate && (switching || _outgoing != null))) {
-      _dragging = false;
+      _dragOwner = null;
       _outgoing = null;
       _incoming = null;
       _slide.value = 1;
     } else if (switching) {
       final progress = _incoming == widget.activePage ? _slide.value : 0.0;
-      _dragging = false;
+      _dragOwner = null;
       _incoming = null;
       _outgoing = oldWidget.activePage;
       _direction = widget.activePage.index > oldWidget.activePage.index
@@ -494,8 +496,9 @@ class _PageDeckState extends State<_PageDeck>
     super.dispose();
   }
 
-  void _startDrag(DragStartDetails _) {
-    _dragging = true;
+  void _startDrag(_PageDragOwner owner) {
+    if (_dragOwner != null && _dragOwner != owner) return;
+    _dragOwner = owner;
     _dragDistance = 0;
     if (_outgoing != null || _incoming != null) {
       setState(() {
@@ -506,9 +509,10 @@ class _PageDeckState extends State<_PageDeck>
     }
   }
 
-  void _updateDrag(DragUpdateDetails details) {
+  void _updateDrag(_PageDragOwner owner, DragUpdateDetails details) {
+    if (_dragOwner != owner) return;
     final width = context.size?.width ?? 0;
-    if (!_dragging || width <= 0) return;
+    if (width <= 0) return;
     _dragDistance += details.primaryDelta ?? 0;
     final direction = _dragDistance < 0 ? 1 : -1;
     final pages = widget.children.keys.toList(growable: false);
@@ -528,20 +532,22 @@ class _PageDeckState extends State<_PageDeck>
         : (_dragDistance.abs() / width).clamp(0.0, 1.0);
   }
 
-  void _endDrag(DragEndDetails details) {
+  void _endDrag(_PageDragOwner owner, DragEndDetails details) {
+    if (_dragOwner != owner) return;
     final target = _incoming;
-    if (!_dragging || target == null) return;
     final velocity = -(details.primaryVelocity ?? 0) * _direction;
-    if (_slide.value >= .35 || (velocity > 500 && _slide.value > .06)) {
-      _dragging = false;
+    if (target != null &&
+        (_slide.value >= .35 || (velocity > 500 && _slide.value > .06))) {
+      _dragOwner = null;
       widget.onSelect(target);
     } else {
-      _cancelDrag();
+      _cancelDrag(owner);
     }
   }
 
-  void _cancelDrag() {
-    _dragging = false;
+  void _cancelDrag(_PageDragOwner owner) {
+    if (_dragOwner != owner) return;
+    _dragOwner = null;
     if (_incoming == null) return;
     if (!widget.animate || _slide.value == 0) {
       setState(() => _incoming = null);
@@ -642,10 +648,11 @@ class _PageDeckState extends State<_PageDeck>
       behavior: HitTestBehavior.opaque,
       supportedDevices: const {PointerDeviceKind.touch},
       dragStartBehavior: DragStartBehavior.down,
-      onHorizontalDragStart: _startDrag,
-      onHorizontalDragUpdate: _updateDrag,
-      onHorizontalDragEnd: _endDrag,
-      onHorizontalDragCancel: _cancelDrag,
+      onHorizontalDragStart: (_) => _startDrag(_PageDragOwner.touch),
+      onHorizontalDragUpdate: (details) =>
+          _updateDrag(_PageDragOwner.touch, details),
+      onHorizontalDragEnd: (details) => _endDrag(_PageDragOwner.touch, details),
+      onHorizontalDragCancel: () => _cancelDrag(_PageDragOwner.touch),
       child: ClipRect(
         child: Stack(
           children: [
@@ -662,19 +669,22 @@ class _PageDeckState extends State<_PageDeck>
         _PageDeckPreciseDragRecognizer:
             GestureRecognizerFactoryWithHandlers<
               _PageDeckPreciseDragRecognizer
-            >(
-              () => _PageDeckPreciseDragRecognizer(debugOwner: this),
-              (recognizer) => recognizer
+            >(() => _PageDeckPreciseDragRecognizer(debugOwner: this), (
+              recognizer,
+            ) {
+              recognizer
                 ..onlyAcceptDragOnThreshold = true
                 ..dragStartBehavior = DragStartBehavior.down
                 ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context)
                 ..multitouchDragStrategy = ScrollConfiguration.of(context)
-                    .getMultitouchDragStrategy(context)
-                ..onStart = _startDrag
-                ..onUpdate = _updateDrag
-                ..onEnd = _endDrag
-                ..onCancel = _cancelDrag,
-            ),
+                    .getMultitouchDragStrategy(context);
+              recognizer.onStart = (_) => _startDrag(_PageDragOwner.precise);
+              recognizer.onUpdate = (details) =>
+                  _updateDrag(_PageDragOwner.precise, details);
+              recognizer.onEnd = (details) =>
+                  _endDrag(_PageDragOwner.precise, details);
+              recognizer.onCancel = () => _cancelDrag(_PageDragOwner.precise);
+            }),
       },
       child: deck,
     );

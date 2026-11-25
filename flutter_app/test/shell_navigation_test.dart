@@ -311,6 +311,39 @@ void main() {
     }
   }, variant: _desktopPlatforms);
 
+  for (final (dragKind, tapKind) in const [
+    (PointerDeviceKind.mouse, PointerDeviceKind.touch),
+    (PointerDeviceKind.touch, PointerDeviceKind.mouse),
+  ]) {
+    testWidgets(
+      'desktop ${dragKind.name} drag survives a ${tapKind.name} tap',
+      (tester) async {
+        final controller = await mountShell(tester, _desktopPlatform);
+        final drag = await tester.startGesture(
+          const Offset(700, 170),
+          kind: dragKind,
+        );
+        await drag.moveBy(const Offset(-160, 0));
+        await tester.pump();
+        expect(offsetOf(tester, 'ime'), inExclusiveRange(-.35, 0));
+
+        final tap = await tester.startGesture(
+          const Offset(950, 200),
+          kind: tapKind,
+        );
+        await tap.up();
+        await tap.removePointer();
+        await drag.moveBy(const Offset(-240, 0));
+        await drag.up();
+        await tester.pumpAndSettle();
+
+        expect(controller.activePage, AppPage.scheme);
+        expect(offsetOf(tester, 'scheme'), 0);
+      },
+      variant: _desktopPlatforms,
+    );
+  }
+
   testWidgets('Windows website receives trackpad pans without switching tabs', (
     tester,
   ) async {
