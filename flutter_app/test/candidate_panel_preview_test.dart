@@ -835,6 +835,8 @@ void main() {
       BoxDecoration decoration(Finder finder) =>
           tester.widget<Container>(finder).decoration! as BoxDecoration;
       final originalColor = decoration(panel).color;
+      final radiusReset = find.bySemanticsLabel('圆角：恢复默认');
+      expect(radiusReset, findsNothing);
       final radius = tester.widget<SliderSetting>(
         find.widgetWithText(SliderSetting, '圆角'),
       );
@@ -936,6 +938,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(controller.uiSettings!.backgroundColor, isEmpty);
       expect(decoration(panel).color, originalColor);
+      await tester.ensureVisible(radiusReset);
+      await tester.tap(radiusReset);
+      await tester.pumpAndSettle();
+      expect(controller.uiSettings!.cornerRadius, isNull);
+      expect(radiusReset, findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     }, variant: TargetPlatformVariant.only(entry.value));

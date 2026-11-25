@@ -175,17 +175,14 @@ class AccentPicker extends StatelessWidget {
     }
     final touch = context.platformVariant.touch;
     final size = touch ? 44.0 : 28.0;
-    const gap = 4.0;
     final presets = background ? themeBackgrounds : themeAccents;
     final current = background && selected.isEmpty ? resolvedColor : selected;
-    Widget swatch(String hex, {bool custom = false, bool reset = false}) {
+    final canSave = controller.canSaveTheme && enabled;
+    Widget swatch(String hex, {bool custom = false}) {
       final isSelected =
-          !reset &&
           current.isNotEmpty &&
           (custom ? !presets.containsKey(current) : current == hex);
-      final label = reset
-          ? '恢复默认'
-          : custom
+      final label = custom
           ? _chooseLabel
           : background
           ? '使用背景色 $hex'
@@ -194,61 +191,49 @@ class AccentPicker extends StatelessWidget {
       return FTooltip(
         tipBuilder: (_, _) => Text(label),
         child: Semantics(
-          selected: reset ? null : isSelected,
+          selected: isSelected,
           label: label,
           child: FTappable(
             focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
               borderRadius: BorderRadius.circular(8),
             ),
-            onPress:
-                !controller.canSaveTheme ||
-                    !enabled ||
-                    (reset && selected.isEmpty)
-                ? null
-                : () => custom ? _pick(context, hex) : _save(reset ? '' : hex),
+            onPress: canSave
+                ? () => custom ? _pick(context, hex) : _save(hex)
+                : null,
             child: SizedBox(
               width: size,
               height: size,
               child: Center(
-                child: reset
-                    ? Icon(
-                        FLucideIcons.rotateCcw,
-                        size: 16,
-                        color: AppPalette.of(context).ink
-                            .withValues(alpha: selected.isEmpty ? .40 : .82),
-                      )
-                    : AnimatedContainer(
-                        duration: MediaQuery.disableAnimationsOf(context)
-                            ? Duration.zero
-                            : const Duration(milliseconds: 150),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(4),
-                          boxShadow: isSelected
-                              ? [
-                                  BoxShadow(
-                                    color: swatchColor.withValues(alpha: .65),
-                                    blurRadius: 6,
-                                    offset: const Offset(0, 2),
-                                  ),
-                                ]
-                              : const [],
-                        ),
-                        child: ThemeColorSwatch(
-                          value: hex,
-                          size: touch ? 26 : 24,
-                          child: custom || isSelected
-                              ? Icon(
-                                  custom
-                                      ? FLucideIcons.pipette
-                                      : FLucideIcons.check,
-                                  size: 14,
-                                  color: swatchColor.computeLuminance() > .179
-                                      ? Colors.black
-                                      : Colors.white,
-                                )
-                              : null,
-                        ),
-                      ),
+                child: AnimatedContainer(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 150),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(4),
+                    boxShadow: isSelected
+                        ? [
+                            BoxShadow(
+                              color: swatchColor.withValues(alpha: .65),
+                              blurRadius: 6,
+                              offset: const Offset(0, 2),
+                            ),
+                          ]
+                        : const [],
+                  ),
+                  child: ThemeColorSwatch(
+                    value: hex,
+                    size: touch ? 26 : 24,
+                    child: custom || isSelected
+                        ? Icon(
+                            custom ? FLucideIcons.pipette : FLucideIcons.check,
+                            size: 14,
+                            color: swatchColor.computeLuminance() > .179
+                                ? Colors.black
+                                : Colors.white,
+                          )
+                        : null,
+                  ),
+                ),
               ),
             ),
           ),
@@ -256,12 +241,42 @@ class AccentPicker extends StatelessWidget {
       );
     }
 
-    return SettingRow(
-      background ? '背景色' : AppStrings.accentColor,
-      controlAlignment: Alignment.centerLeft,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final tiles = [
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: touch ? 8 : 0,
+      children: [
+        ConstrainedBox(
+          constraints: BoxConstraints(minHeight: touch ? 0 : 24),
+          child: Row(
+            spacing: 4,
+            children: [
+              Text(
+                background ? '背景色' : AppStrings.accentColor,
+                style: context.theme.typography.body.sm.copyWith(
+                  color: context.theme.colors.foreground,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+              if (background)
+                FTooltip(
+                  tipBuilder: (_, _) => const Text('恢复默认'),
+                  child: FButton.icon(
+                    variant: FButtonVariant.ghost,
+                    size: touch ? FButtonSizeVariant.md : FButtonSizeVariant.xs,
+                    semanticsLabel: '恢复默认',
+                    onPress: canSave && selected.isNotEmpty
+                        ? () => _save('')
+                        : null,
+                    child: Icon(FLucideIcons.rotateCcw, size: touch ? 16 : 14),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
             for (final hex in presets.keys) swatch(hex),
             swatch(
               (background && value == null) || current.isEmpty
@@ -269,35 +284,9 @@ class AccentPicker extends StatelessWidget {
                   : current,
               custom: true,
             ),
-            if (background) swatch(resolvedColor, reset: true),
-          ];
-          final count = tiles.length;
-          final width = ((themeAccents.length + 1) * (size + 2 * gap) - 2 * gap)
-              .clamp(0.0, constraints.maxWidth);
-          final capacity = ((width + gap) / (size + gap)).floor().clamp(
-            1,
-            count,
-          );
-          final rows = (count / capacity).ceil();
-          final columns = (count / rows).ceil();
-          return Align(
-            alignment: Alignment.centerLeft,
-            child: SizedBox(
-              width: width,
-              child: Column(
-                spacing: gap,
-                children: [
-                  for (var start = 0; start < count; start += columns)
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: tiles.skip(start).take(columns).toList(),
-                    ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
+          ],
+        ),
+      ],
     );
   }
 }

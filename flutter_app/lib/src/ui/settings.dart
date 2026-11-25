@@ -220,9 +220,15 @@ String cloudSyncDate(String? value) {
 }
 
 class SettingsCard extends StatefulWidget {
-  const SettingsCard({super.key, required this.controller, this.hero});
+  const SettingsCard({
+    super.key,
+    required this.controller,
+    this.hero,
+    this.desktopGridBuilder,
+  });
   final AppController controller;
   final Widget? hero;
+  final Widget Function(List<Widget> settingsCells)? desktopGridBuilder;
   @override
   State<SettingsCard> createState() => _SettingsCardState();
 }
@@ -370,6 +376,45 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget _desktop(BuildContext context) {
     final c = controller;
     final s = c.uiSettings;
+    final settingsCells = [
+      if (s != null) ...[
+        _settingsCell('候选模式', [
+          BigTextRadioGroup<PanelOrientationDto?>(
+            label: '候选模式',
+            value: s.hideCandidatePanel ? null : s.orientation,
+            options: const {...orientations, null: '隐藏'},
+            onChanged: c.canSaveTheme
+                ? (value) => value == null
+                      ? c.saveHideCandidatePanel(true)
+                      : _savePreview(
+                          orientation: value,
+                          hideCandidatePanel: false,
+                        )
+                : null,
+          ),
+          _candidatePageSize(),
+          if (c.showsEmbeddedComposition)
+            _separated(
+              SwitchSetting(
+                AppStrings.embedded,
+                value: s.effectiveEmbeddedComposition,
+                onChanged: c.canSaveTheme && !s.hideCandidatePanel
+                    ? c.saveEmbedded
+                    : null,
+              ),
+            ),
+          if (c.isWindows)
+            _separated(
+              SwitchSetting(
+                '托盘显示中英状态',
+                value: s.showTrayModeIndicator,
+                onChanged: c.canSaveTheme ? c.saveShowTrayModeIndicator : null,
+              ),
+            ),
+        ]),
+        _desktopAppearance(s),
+      ],
+    ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -389,90 +434,9 @@ class _SettingsCardState extends State<SettingsCard> {
                 onPress: c.busy ? null : c.refreshState,
               ),
             ),
-          )
-        else
-          HairlineGridSection(
-            children: [
-              _settingsCell('候选模式', [
-                BigTextRadioGroup<PanelOrientationDto?>(
-                  label: '候选模式',
-                  value: s.hideCandidatePanel ? null : s.orientation,
-                  options: const {...orientations, null: '隐藏'},
-                  onChanged: c.canSaveTheme
-                      ? (value) => value == null
-                            ? c.saveHideCandidatePanel(true)
-                            : _savePreview(
-                                orientation: value,
-                                hideCandidatePanel: false,
-                              )
-                      : null,
-                ),
-                if (c.showsEmbeddedComposition)
-                  _separated(
-                    SwitchSetting(
-                      AppStrings.embedded,
-                      value: s.effectiveEmbeddedComposition,
-                      onChanged: c.canSaveTheme && !s.hideCandidatePanel
-                          ? c.saveEmbedded
-                          : null,
-                    ),
-                  ),
-                if (c.isWindows)
-                  _separated(
-                    SwitchSetting(
-                      '托盘显示中英状态',
-                      value: s.showTrayModeIndicator,
-                      onChanged: c.canSaveTheme
-                          ? c.saveShowTrayModeIndicator
-                          : null,
-                    ),
-                  ),
-              ]),
-              _settingsCell(AppStrings.englishMode, [
-                BigTextRadioGroup<EnglishModeDto>(
-                  label: AppStrings.englishMode,
-                  value: c.desktopEnglishMode,
-                  options: const {
-                    EnglishModeDto.ascii: 'ASCII',
-                    EnglishModeDto.schema: AppStrings.englishSchema,
-                  },
-                  semanticLabels: c.englishModes,
-                  disabled: c.disabledEnglishModes,
-                  onChanged: c.busy ? null : c.saveDesktopEnglish,
-                ),
-                if (c.englishModeHint case final hint?)
-                  Text(hint, style: context.theme.typography.body.xs),
-                _separated(_candidatePageSize()),
-              ]),
-              _settingsCell('外观', [
-                _themeLibrary(),
-                BigTextRadioGroup<UiColorSchemeDto>(
-                  label: '配色方案',
-                  value: s.colorScheme,
-                  options: colorSchemes,
-                  onChanged: c.canSaveTheme
-                      ? (value) => _savePreview(colorScheme: value)
-                      : null,
-                ),
-                if (!s.hideCandidatePanel) ...[
-                  ..._appearanceControls(),
-                  SliderSetting(
-                    label: AppStrings.candidateFontSize,
-                    value: s.fontSize,
-                    min: candidateFontMin,
-                    max: candidateFontMax,
-                    divisions: candidateFontDivisions,
-                    onPreview: (value) =>
-                        _schedulePreview(() => _previewFontSize = value),
-                    onChanged: c.canSaveTheme
-                        ? (value) => _savePreview(fontSize: value)
-                        : null,
-                  ),
-                ],
-                ActionButton('编辑主题', onPress: _editTheme),
-              ]),
-            ],
           ),
+        widget.desktopGridBuilder?.call(settingsCells) ??
+            HairlineGridSection(children: settingsCells),
         if (c.imeUiError case final error?)
           HairlineGridCell(child: ErrorMessage(error)),
       ],
@@ -484,6 +448,66 @@ class _SettingsCardState extends State<SettingsCard> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       spacing: 10,
       children: [EyebrowLabel(label), ...children],
+    ),
+  );
+
+  Widget _desktopAppearance(ImeUiSettingsDto settings) => HairlineGridCell(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(bottom: 10),
+              child: EyebrowLabel('外观'),
+            ),
+            FButton(
+              variant: FButtonVariant.ghost,
+              size: FButtonSizeVariant.xs,
+              mainAxisSize: MainAxisSize.min,
+              onPress: _editTheme,
+              child: const Text('编辑主题'),
+            ),
+          ],
+        ),
+        BigTextRadioGroup<UiColorSchemeDto>(
+          label: '配色方案',
+          value: settings.colorScheme,
+          options: colorSchemes,
+          onChanged: controller.canSaveTheme
+              ? (value) => _savePreview(colorScheme: value)
+              : null,
+        ),
+        const SizedBox(height: 16),
+        _themeLibrary(),
+        if (!settings.hideCandidatePanel) ...[
+          const SizedBox(height: 16),
+          const EyebrowLabel('颜色'),
+          const SizedBox(height: 8),
+          _accentPicker(),
+          const SizedBox(height: 8),
+          _backgroundPicker(),
+          const SizedBox(height: 16),
+          const EyebrowLabel('候选窗'),
+          const SizedBox(height: 8),
+          _cornerRadius(),
+          const SizedBox(height: 8),
+          SliderSetting(
+            label: AppStrings.candidateFontSize,
+            value: settings.fontSize,
+            min: candidateFontMin,
+            max: candidateFontMax,
+            divisions: candidateFontDivisions,
+            onPreview: (value) =>
+                _schedulePreview(() => _previewFontSize = value),
+            onChanged: controller.canSaveTheme
+                ? (value) => _savePreview(fontSize: value)
+                : null,
+          ),
+        ],
+      ],
     ),
   );
 
@@ -506,53 +530,56 @@ class _SettingsCardState extends State<SettingsCard> {
     if (mounted) setState(() => _themeLibraryRevision++);
   }
 
-  List<Widget> _appearanceControls() {
-    final c = controller;
-    final settings = c.uiSettings!;
-    return [
-      _separated(
-        AccentPicker(
-          controller: c,
-          onPreview: (value) => _schedulePreview(
-            () => _previewAccent = value,
-            immediate: value == c.uiSettings?.accentColor,
-          ),
-          onChanged: (value) => _savePreview(accentColor: value),
-        ),
-      ),
-      BackgroundPicker(
-        controller: c,
-        onPreview: (value) => _schedulePreview(
-          () => _previewBackground = value,
-          immediate: value == c.uiSettings?.backgroundColor,
-        ),
-        onChanged: (value) => _savePreview(backgroundColor: value),
-      ),
-      SliderSetting(
-        label: '圆角',
-        value: settings.cornerRadius ?? 16,
-        min: 0,
-        max: 28,
-        divisions: 28,
-        onPreview: (value) => _schedulePreview(() {
-          _previewRadius = value;
-          _resetRadius = false;
-        }),
-        onChanged: c.canSaveTheme
-            ? (value) => _savePreview(cornerRadius: value)
-            : null,
-      ),
-      Align(
-        alignment: Alignment.centerRight,
-        child: ActionButton(
-          '恢复默认',
-          icon: FLucideIcons.rotateCcw,
-          onPress: !c.canSaveTheme || settings.cornerRadius == null
-              ? null
-              : () => _savePreview(resetCornerRadius: true),
-        ),
-      ),
-    ];
+  Widget _accentPicker() => AccentPicker(
+    controller: controller,
+    onPreview: (value) => _schedulePreview(
+      () => _previewAccent = value,
+      immediate: value == controller.uiSettings?.accentColor,
+    ),
+    onChanged: (value) => _savePreview(accentColor: value),
+  );
+
+  Widget _backgroundPicker() => BackgroundPicker(
+    controller: controller,
+    onPreview: (value) => _schedulePreview(
+      () => _previewBackground = value,
+      immediate: value == controller.uiSettings?.backgroundColor,
+    ),
+    onChanged: (value) => _savePreview(backgroundColor: value),
+  );
+
+  Widget _cornerRadius() {
+    final radius = controller.uiSettings!.cornerRadius;
+    return SliderSetting(
+      label: '圆角',
+      value: radius ?? 16,
+      min: 0,
+      max: 28,
+      divisions: 28,
+      onPreview: (value) => _schedulePreview(() {
+        _previewRadius = value;
+        _resetRadius = false;
+      }),
+      onChanged: controller.canSaveTheme
+          ? (value) => _savePreview(cornerRadius: value)
+          : null,
+      valueAction: radius == null
+          ? null
+          : FButton.icon(
+              variant: FButtonVariant.ghost,
+              size: context.platformVariant.touch
+                  ? FButtonSizeVariant.md
+                  : FButtonSizeVariant.xs,
+              onPress: controller.canSaveTheme
+                  ? () => _savePreview(resetCornerRadius: true)
+                  : null,
+              child: const Icon(
+                FLucideIcons.rotateCcw,
+                size: 14,
+                semanticLabel: '圆角：恢复默认',
+              ),
+            ),
+    );
   }
 
   Widget _preview(BuildContext context, {bool keyboard = false}) {
@@ -696,7 +723,9 @@ class _SettingsCardState extends State<SettingsCard> {
             title: '外观',
             children: [
               _themeLibrary(),
-              ..._appearanceControls(),
+              _separated(_accentPicker()),
+              _backgroundPicker(),
+              _cornerRadius(),
               ActionButton('编辑主题', onPress: _editTheme),
             ],
           ),

@@ -744,6 +744,7 @@ class SliderSetting extends StatefulWidget {
     this.onChanged,
     this.onPreview,
     this.semanticLabel,
+    this.valueAction,
   });
   final String label;
   final double value;
@@ -754,6 +755,7 @@ class SliderSetting extends StatefulWidget {
   final ValueChanged<double>? onChanged;
   final ValueChanged<double>? onPreview;
   final String? semanticLabel;
+  final Widget? valueAction;
   @override
   State<SliderSetting> createState() => _SliderSettingState();
 }
@@ -778,19 +780,33 @@ class _SliderSettingState extends State<SliderSetting> {
   Widget build(BuildContext context) {
     final value = (_draft ?? widget.value).clamp(widget.min, widget.max);
     final accent = ChromeAccent.of(context);
+    final valueLabel = Text(
+      _label(value),
+      textAlign: TextAlign.right,
+      style: context.theme.typography.body.xs.copyWith(
+        color: context.theme.colors.mutedForeground,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
     return SettingRow(
       widget.label,
-      value: SizedBox(
-        width: 56,
-        child: Text(
-          _label(value),
-          textAlign: TextAlign.right,
-          style: context.theme.typography.body.xs.copyWith(
-            color: context.theme.colors.mutedForeground,
-            fontFeatures: const [FontFeature.tabularFigures()],
-          ),
-        ),
-      ),
+      value: context.platformVariant.touch
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(width: 56, child: valueLabel),
+                ?widget.valueAction,
+              ],
+            )
+          : ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 56, minHeight: 24),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.end,
+                spacing: 4,
+                children: [?widget.valueAction, valueLabel],
+              ),
+            ),
       child: FSlider(
         enabled: widget.onChanged != null,
         style: FSliderStyleDelta.delta(

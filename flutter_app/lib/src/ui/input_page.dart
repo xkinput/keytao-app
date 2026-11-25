@@ -57,122 +57,148 @@ class InputPage extends StatelessWidget {
       SettingsCard(
         controller: controller,
         hero: _CurrentSchemeHero(controller: controller),
+        desktopGridBuilder: (settingsCells) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (controller.isWindows && controller.deploySteps.isNotEmpty)
+              HairlineGridCell(child: DeploySteps(controller: controller)),
+            HairlineGridSection(
+              children: [...settingsCells, ..._homeCells(context)],
+            ),
+          ],
+        ),
       ),
-      if (controller.isWindows && controller.deploySteps.isNotEmpty)
-        HairlineGridCell(child: DeploySteps(controller: controller)),
-      HairlineGridSection(
+      if (controller.isMobile)
+        HairlineGridSection(children: _homeCells(context)),
+    ],
+  );
+
+  List<Widget> _homeCells(BuildContext context) => [
+    HairlineGridCell(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: 18,
         children: [
-          HairlineGridCell(
-            child: Section(
-              title: '应用设置',
-              children: [
-                SwitchSetting(
-                  '显示网站',
-                  value: !controller.websiteHidden,
-                  onChanged: controller.canEditWebsiteSettings
-                      ? (visible) =>
-                            controller.saveWebsiteSettings(hidden: !visible)
-                      : null,
-                ),
-                SwitchSetting(
-                  '减少动画',
-                  value: controller.reduceMotion,
-                  onChanged: controller.canSaveReduceMotion
-                      ? controller.saveReduceMotion
-                      : null,
-                ),
-              ],
-            ),
-          ),
-          HairlineGridCell(child: AccountCard(controller: controller)),
-          if (controller.operationLogs.any(
-            (line) =>
-                line.contains('[DEPLOY]') || line.contains('[DEPLOY ERROR]'),
-          ))
-            HairlineGridCell(
-              child: Section(
-                title: '刚刚',
-                children: [
-                  for (final line
-                      in controller.operationLogs.reversed
-                          .where(
-                            (line) =>
-                                line.contains('[DEPLOY]') ||
-                                line.contains('[DEPLOY ERROR]'),
-                          )
-                          .take(4))
-                    _RecentOperation(line),
-                ],
-              ),
-            ),
-          HairlineGridCell(
-            child: Column(
+          if (controller.isAndroid) AndroidImeCard(controller: controller),
+          if (controller.info.platform == BridgePlatform.macOs)
+            MacosImeCard(controller: controller),
+          if (controller.isWindows) WindowsImeCard(controller: controller),
+          if (controller.isLinux) LinuxImeCard(controller: controller),
+          if (controller.isIos) IosImeCard(controller: controller),
+          if (!controller.isMobile && controller.uiSettings != null)
+            Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              spacing: 18,
+              spacing: 8,
               children: [
-                if (controller.isAndroid)
-                  AndroidImeCard(controller: controller),
-                if (controller.info.platform == BridgePlatform.macOs)
-                  MacosImeCard(controller: controller),
-                if (controller.isWindows)
-                  WindowsImeCard(controller: controller),
-                if (controller.isLinux) LinuxImeCard(controller: controller),
-                if (controller.isIos) IosImeCard(controller: controller),
-                SwitchSetting(
-                  AppStrings.algorithmEngine,
-                  hint: switch (controller.inputEngineTransition) {
-                    true => AppStrings.enablingAlgorithmEngine,
-                    false => AppStrings.disablingAlgorithmEngine,
-                    null =>
-                      controller.info.platform == BridgePlatform.macOs
-                          ? AppStrings.macosAlgorithmEngineHint
-                          : AppStrings.algorithmEngineHint,
+                const EyebrowLabel(AppStrings.englishMode),
+                BigTextRadioGroup<EnglishModeDto>(
+                  label: AppStrings.englishMode,
+                  value: controller.desktopEnglishMode,
+                  options: const {
+                    EnglishModeDto.ascii: 'ASCII',
+                    EnglishModeDto.schema: AppStrings.englishSchema,
                   },
-                  value: controller.inputEngineEnabled,
+                  semanticLabels: controller.englishModes,
+                  disabled: controller.disabledEnglishModes,
                   onChanged: controller.busy
                       ? null
-                      : controller.setInputEngineEnabled,
+                      : controller.saveDesktopEnglish,
                 ),
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: ActionButton(
-                    controller.isDeploying
-                        ? AppStrings.deploying
-                        : AppStrings.redeploy,
-                    onPress:
-                        controller.busy || !controller.activeSchemeDownloaded
-                        ? null
-                        : controller.deploy,
-                  ),
-                ),
-                ValueRow('版本', controller.info.appVersion),
-                if (!controller.isMobile &&
-                    controller.uiSettings?.themePath != null)
-                  ValueRow(
-                    AppStrings.theme,
-                    controller.uiSettings!.themePath!,
-                    trailing: FTooltip(
-                      tipBuilder: (_, _) => const Text(AppStrings.openTheme),
-                      child: FButton.icon(
-                        onPress: controller.canOpenTheme
-                            ? controller.openTheme
-                            : null,
-                        variant: FButtonVariant.ghost,
-                        child: const Icon(
-                          FLucideIcons.folderOpen,
-                          size: 16,
-                          semanticLabel: AppStrings.openTheme,
-                        ),
-                      ),
-                    ),
-                  ),
+                if (controller.englishModeHint case final hint?)
+                  Text(hint, style: context.theme.typography.body.xs),
               ],
             ),
+          SwitchSetting(
+            AppStrings.algorithmEngine,
+            hint: switch (controller.inputEngineTransition) {
+              true => AppStrings.enablingAlgorithmEngine,
+              false => AppStrings.disablingAlgorithmEngine,
+              null =>
+                controller.info.platform == BridgePlatform.macOs
+                    ? AppStrings.macosAlgorithmEngineHint
+                    : AppStrings.algorithmEngineHint,
+            },
+            value: controller.inputEngineEnabled,
+            onChanged: controller.busy
+                ? null
+                : controller.setInputEngineEnabled,
+          ),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: ActionButton(
+              controller.isDeploying
+                  ? AppStrings.deploying
+                  : AppStrings.redeploy,
+              onPress: controller.busy || !controller.activeSchemeDownloaded
+                  ? null
+                  : controller.deploy,
+            ),
+          ),
+          ValueRow('版本', controller.info.appVersion),
+          if (!controller.isMobile && controller.uiSettings?.themePath != null)
+            ValueRow(
+              AppStrings.theme,
+              controller.uiSettings!.themePath!,
+              trailing: FTooltip(
+                tipBuilder: (_, _) => const Text(AppStrings.openTheme),
+                child: FButton.icon(
+                  onPress: controller.canOpenTheme
+                      ? controller.openTheme
+                      : null,
+                  variant: FButtonVariant.ghost,
+                  child: const Icon(
+                    FLucideIcons.folderOpen,
+                    size: 16,
+                    semanticLabel: AppStrings.openTheme,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    ),
+    HairlineGridCell(
+      child: Section(
+        title: '应用设置',
+        children: [
+          SwitchSetting(
+            '显示网站',
+            value: !controller.websiteHidden,
+            onChanged: controller.canEditWebsiteSettings
+                ? (visible) => controller.saveWebsiteSettings(hidden: !visible)
+                : null,
+          ),
+          SwitchSetting(
+            '减少动画',
+            value: controller.reduceMotion,
+            onChanged: controller.canSaveReduceMotion
+                ? controller.saveReduceMotion
+                : null,
           ),
         ],
       ),
-    ],
-  );
+    ),
+    HairlineGridCell(child: AccountCard(controller: controller)),
+    if (controller.operationLogs.any(
+      (line) => line.contains('[DEPLOY]') || line.contains('[DEPLOY ERROR]'),
+    ))
+      HairlineGridCell(
+        child: Section(
+          title: '刚刚',
+          children: [
+            for (final line
+                in controller.operationLogs.reversed
+                    .where(
+                      (line) =>
+                          line.contains('[DEPLOY]') ||
+                          line.contains('[DEPLOY ERROR]'),
+                    )
+                    .take(4))
+              _RecentOperation(line),
+          ],
+        ),
+      ),
+  ];
 }
 
 class _RecentOperation extends StatelessWidget {

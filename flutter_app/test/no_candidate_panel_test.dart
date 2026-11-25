@@ -5,6 +5,7 @@ import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/candidate_panel_preview.dart';
 import 'package:keytao/src/ui/color_picker.dart';
+import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/settings.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
@@ -78,11 +79,13 @@ Future<void> _pumpSettings(
     KeyTaoTheme(
       platform: controller.info.platform,
       home: FScaffold(
-        child: SingleChildScrollView(
-          child: ListenableBuilder(
-            listenable: controller,
-            builder: (_, _) => SettingsCard(controller: controller),
-          ),
+        child: ListenableBuilder(
+          listenable: controller,
+          builder: (_, _) => controller.isMobile
+              ? SingleChildScrollView(
+                  child: SettingsCard(controller: controller),
+                )
+              : InputPage(controller: controller),
         ),
       ),
     ),
@@ -115,7 +118,7 @@ void main() {
           AppStrings.candidateFontSize,
         );
         final hidden = find.text('隐藏');
-        final editor = find.widgetWithText(ActionButton, '编辑主题');
+        final editor = find.widgetWithText(FButton, '编辑主题');
 
         expect(tester.widget<SwitchSetting>(embedded).value, isFalse);
         expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
@@ -123,7 +126,7 @@ void main() {
         expect(find.byType(AccentPicker), findsOneWidget);
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
         expect(editor, findsOneWidget);
-        expect(tester.widget<ActionButton>(editor).onPress, isNotNull);
+        expect(tester.widget<FButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
         expect(
           tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
@@ -151,7 +154,7 @@ void main() {
         expect(find.byType(AccentPicker), findsNothing);
         expect(find.byType(CandidatePanelPreview), findsNothing);
         expect(editor, findsOneWidget);
-        expect(tester.widget<ActionButton>(editor).onPress, isNotNull);
+        expect(tester.widget<FButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
         expect(
           tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,
@@ -182,7 +185,7 @@ void main() {
         expect(find.byType(AccentPicker), findsOneWidget);
         expect(find.byType(CandidatePanelPreview), findsOneWidget);
         expect(editor, findsOneWidget);
-        expect(tester.widget<ActionButton>(editor).onPress, isNotNull);
+        expect(tester.widget<FButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
         expect(
           tester.widget<BigTextRadioGroup<PanelOrientationDto?>>(mode).value,

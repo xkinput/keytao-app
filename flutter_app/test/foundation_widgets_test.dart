@@ -56,15 +56,13 @@ void main() {
     }
   });
 
-  testWidgets('accent swatches fit desktop and balance narrow rows', (
-    tester,
-  ) async {
+  testWidgets('accent swatches wrap at a fixed width and gap', (tester) async {
     final controller = ViewController(BridgePlatform.macOs);
     addTearDown(controller.dispose);
     for (final layout in [
       (width: 356.0, rows: [11]),
-      (width: 300.0, rows: [6, 5]),
-      (width: 180.0, rows: [4, 4, 3]),
+      (width: 300.0, rows: [9, 2]),
+      (width: 180.0, rows: [5, 5, 1]),
     ]) {
       await _pump(
         tester,

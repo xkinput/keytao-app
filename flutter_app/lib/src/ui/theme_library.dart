@@ -296,7 +296,7 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
-    spacing: 4,
+    spacing: widget.quickSwitch ? 8 : 4,
     children: [
       if (widget.quickSwitch)
         const EyebrowLabel('主题')
@@ -348,21 +348,23 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
         LayoutBuilder(
           builder: (context, constraints) {
             const gap = 6.0;
-            const columns = 4;
-            final width = ((constraints.maxWidth + gap) / columns - gap)
+            const minChipWidth = 104.0;
+            const maxChipWidth = 128.0;
+            final availableWidth = constraints.hasBoundedWidth
+                ? constraints.maxWidth
+                : maxChipWidth;
+            final columns = ((availableWidth + gap) / (minChipWidth + gap))
+                .floor()
+                .clamp(1, _themes.length);
+            final width = ((availableWidth + gap) / columns - gap)
                 .floorToDouble()
-                .clamp(0.0, 128.0);
-            return Column(
+                .clamp(0.0, maxChipWidth);
+            return Wrap(
               spacing: gap,
+              runSpacing: gap,
               children: [
-                for (var start = 0; start < _themes.length; start += columns)
-                  Row(
-                    spacing: gap,
-                    children: [
-                      for (final theme in _themes.skip(start).take(columns))
-                        SizedBox(width: width, child: _card(context, theme)),
-                    ],
-                  ),
+                for (final theme in _themes)
+                  SizedBox(width: width, child: _card(context, theme)),
               ],
             );
           },
