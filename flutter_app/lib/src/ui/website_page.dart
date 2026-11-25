@@ -2,7 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show Factory, ValueListenable;
 import 'package:flutter/gestures.dart'
-    show HorizontalDragGestureRecognizer, OneSequenceGestureRecognizer;
+    show
+        GestureBinding,
+        LongPressGestureRecognizer,
+        PointerScrollEvent,
+        TapGestureRecognizer,
+        VerticalDragGestureRecognizer;
 import 'package:flutter/widgets.dart';
 import 'package:forui/forui.dart';
 import 'package:webview_core/webview_core.dart';
@@ -301,6 +306,20 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   Widget build(BuildContext context) {
     final controller = widget.controller;
     final mobileAccount = widget.mobileAccount;
+    final webView = WebViewWidget(
+      controller: _browser,
+      gestureRecognizers: mobileAccount == null
+          ? const {}
+          : const {
+              Factory<VerticalDragGestureRecognizer>(
+                VerticalDragGestureRecognizer.new,
+              ),
+              Factory<TapGestureRecognizer>(TapGestureRecognizer.new),
+              Factory<LongPressGestureRecognizer>(
+                LongPressGestureRecognizer.new,
+              ),
+            },
+    );
     final page = Column(
       key: const PageStorageKey('website'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -334,16 +353,29 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
               : Opacity(
                   opacity: _initializingSession ? 0 : 1,
                   child: ClipRect(
-                    child: WebViewWidget(
-                      controller: _browser,
-                      gestureRecognizers: mobileAccount == null
-                          ? const {}
-                          : const {
-                              Factory<OneSequenceGestureRecognizer>(
-                                HorizontalDragGestureRecognizer.new,
-                              ),
+                    child: controller.isWindows
+                        ? Listener(
+                            // WebView2's texture host forwards scroll signals.
+                            onPointerPanZoomUpdate: (event) {
+                              final delta = event.panDelta;
+                              if (!widget.active || delta == Offset.zero) {
+                                return;
+                              }
+                              GestureBinding.instance.handlePointerEvent(
+                                PointerScrollEvent(
+                                  viewId: event.viewId,
+                                  timeStamp: event.timeStamp,
+                                  kind: event.kind,
+                                  device: event.device,
+                                  position: event.position,
+                                  // Windows wheel axes use opposite signs.
+                                  scrollDelta: Offset(delta.dx, -delta.dy),
+                                ),
+                              );
                             },
-                    ),
+                            child: webView,
+                          )
+                        : webView,
                   ),
                 ),
         ),

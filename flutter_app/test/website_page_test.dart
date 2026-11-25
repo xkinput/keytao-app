@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
@@ -139,6 +140,17 @@ void main() {
     final page = find.byKey(const PageStorageKey('website'));
     expect(tester.getRect(page).top, 32);
     final webView = find.byType(WebViewWidget);
+    expect(
+      tester
+          .widget<WebViewWidget>(webView)
+          .gestureRecognizers
+          .map((f) => f.type),
+      unorderedEquals([
+        VerticalDragGestureRecognizer,
+        TapGestureRecognizer,
+        LongPressGestureRecognizer,
+      ]),
+    );
     final expandedTop = tester.getTopLeft(webView).dy;
     toolbarFraction.value = .6;
     await tester.pump();

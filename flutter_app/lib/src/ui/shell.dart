@@ -1,4 +1,5 @@
-import 'package:flutter/gestures.dart' show DragStartBehavior;
+import 'package:flutter/gestures.dart'
+    show DragStartBehavior, PointerDeviceKind;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/semantics.dart';
 import 'package:forui/forui.dart';
@@ -631,6 +632,7 @@ class _PageDeckState extends State<_PageDeck>
   @override
   Widget build(BuildContext context) => GestureDetector(
     behavior: HitTestBehavior.opaque,
+    supportedDevices: const {PointerDeviceKind.touch},
     dragStartBehavior: DragStartBehavior.down,
     onHorizontalDragStart: _startDrag,
     onHorizontalDragUpdate: _updateDrag,
