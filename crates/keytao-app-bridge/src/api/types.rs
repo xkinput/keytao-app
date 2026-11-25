@@ -42,6 +42,10 @@ pub struct RimeSyncSettingsDto {
     pub installation_id: String,
     pub sync_dir: String,
     pub effective_sync_dir: String,
+    pub default_sync_dir: String,
+    pub package_sync_dir: String,
+    pub last_sync_at: u64,
+    pub last_sync_error: Option<String>,
 }
 
 #[flutter_rust_bridge::frb]

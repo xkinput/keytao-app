@@ -36,14 +36,31 @@ fn fixture() -> (tempfile::TempDir, AddonHost) {
     (directory, host)
 }
 
+const SYNC_SNAPSHOT: &str = "sync/device/keytao.userdb.txt";
+
+fn write_sync_snapshot(runtime: &Path) -> PathBuf {
+    let snapshot = runtime.join(SYNC_SNAPSHOT);
+    fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    fs::write(&snapshot, b"sync snapshot").unwrap();
+    snapshot
+}
+
 #[tokio::test]
 async fn removing_last_active_package_clears_marker_fallback_and_backs_up_learning_cleanly() {
     let (_directory, host) = fixture();
+    let runtime = host.root.join("runtime/keytao");
+    let snapshot = write_sync_snapshot(&runtime);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o555)).unwrap();
+    }
     let paths = remove_scheme_package(&host.core, "keytao", &host)
         .await
         .unwrap();
     assert!(paths.is_empty());
-    assert!(!host.root.join("runtime/keytao").exists());
+    assert_eq!(fs::read(snapshot).unwrap(), b"sync snapshot");
+    assert!(!runtime.join("keytao.userdb").exists());
     let backups: Vec<_> = fs::read_dir(host.root.join("migrations"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -53,6 +70,7 @@ async fn removing_last_active_package_clears_marker_fallback_and_backs_up_learni
         fs::read(backups[0].join("runtime/keytao/keytao.userdb/words")).unwrap(),
         b"learned content"
     );
+    assert!(!backups[0].join("runtime/keytao/sync").exists());
     assert!(RuntimeDirs::active_package_key(&host.root).is_none());
     assert!(RuntimeDirs::migration_complete(&host.root));
     assert!(keytao_core::ReloadStamp::path(&host.root).is_file());
@@ -149,6 +167,34 @@ async fn removing_local_scheme_never_retains_or_backs_up_modified_files() {
 }
 
 #[tokio::test]
+async fn removing_local_scheme_with_malformed_installation_keeps_sync() {
+    let (_directory, host) = fixture();
+    let source = host.root.join("local-source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("fixture.schema.yaml"),
+        b"schema: {schema_id: fixture, name: Fixture}\n",
+    )
+    .unwrap();
+    let key = import_local_scheme(&host.core, &source, "Fixture", None).unwrap();
+    let runtime = host.root.join("runtime").join(&key);
+    let snapshot = write_sync_snapshot(&runtime);
+    fs::write(runtime.join("installation.yaml"), b"sync_dir: [\n").unwrap();
+    let custom = runtime.join("fixture.custom.yaml");
+    fs::write(&custom, b"modified: true\n").unwrap();
+
+    remove_scheme_package(&host.core, &key, &host)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(snapshot).unwrap(), b"sync snapshot");
+    assert!(!runtime.join("installation.yaml").exists());
+    assert!(!custom.exists());
+    assert!(!PackageStore::new(&host.core).package_path(&key).exists());
+    assert!(!host.core.state().installed_packages.contains_key(&key));
+    assert!(!host.root.join("migrations").exists());
+}
+
+#[tokio::test]
 async fn repair_download_failure_preserves_installed_and_active_package() {
     let (_directory, host) = fixture();
     let root = &host.root;
@@ -202,11 +248,9 @@ async fn repair_download_failure_preserves_installed_and_active_package() {
 #[tokio::test]
 async fn repair_package_backs_up_cloud_files() {
     let (_directory, host) = fixture();
-    fs::write(
-        host.root.join("runtime/keytao/keytao.custom.yaml"),
-        b"corrupted: [\n",
-    )
-    .unwrap();
+    let runtime = host.root.join("runtime/keytao");
+    let snapshot = write_sync_snapshot(&runtime);
+    fs::write(runtime.join("keytao.custom.yaml"), b"corrupted: [\n").unwrap();
 
     let clean_archive = archive_from_files(&[(
         "keytao.schema.yaml".into(),
@@ -236,7 +280,9 @@ async fn repair_package_backs_up_cloud_files() {
     let (_, old_meta) =
         PackageStore::read_files_at(&backup.join("package-store/keytao"), "keytao").unwrap();
     assert_eq!(old_meta.version.as_deref(), Some("v1"));
-    assert!(!host.root.join("runtime/keytao").exists());
+    assert_eq!(fs::read(snapshot).unwrap(), b"sync snapshot");
+    assert!(!backup.join("runtime/keytao/sync").exists());
+    assert!(!runtime.join("keytao.userdb").exists());
     assert_eq!(host.core.state().installed_packages["keytao"].version.as_deref(), Some("v2"));
     let (stored, meta) = PackageStore::new(&host.core).read_files("keytao").unwrap();
     assert_eq!(meta.version.as_deref(), Some("v2"));
@@ -256,6 +302,7 @@ async fn repair_state_save_failure_restores_previous_package_and_active_manifest
 async fn assert_repair_rolls_back_after_download(corrupt_manifest: bool) {
     let (_directory, host) = fixture();
     let root = &host.root;
+    let snapshot = write_sync_snapshot(&root.join("runtime/keytao"));
     let store = PackageStore::new(&host.core);
     let (original_files, original_meta) = store.read_files("keytao").unwrap();
     host.core
@@ -305,6 +352,7 @@ async fn assert_repair_rolls_back_after_download(corrupt_manifest: bool) {
         fs::read(root.join("runtime/keytao/keytao.userdb/words")).unwrap(),
         b"learned content"
     );
+    assert_eq!(fs::read(snapshot).unwrap(), b"sync snapshot");
     assert_eq!(fs::read(projected_file).unwrap(), b"last projected source");
     let (files, meta) = store.read_files("keytao").unwrap();
     assert_eq!(files, original_files);

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,20 +12,41 @@ import 'package:keytao/src/ui/settings.dart' show AccountCard;
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
-const _initial = RimeSyncSettingsDto(
+final _initial = RimeSyncSettingsDto(
   installationId: 'desktop',
   syncDir: '',
   effectiveSyncDir: '/isolated/rime-sync/sync',
+  defaultSyncDir: '/isolated/rime-sync/runtime/keytao/sync',
+  packageSyncDir: '/isolated/rime-sync/runtime/keytao/sync',
+  lastSyncAt: BigInt.zero,
 );
+
+const _newId = 'f906573a-85d0-4691-b08e-75b76ea4cd09';
 
 class _SyncCore implements RustLibApi {
   final saves = <({String installationId, String syncDir})>[];
   Completer<void>? sync;
   String? saveFailure;
+  String? lastSyncError;
+  BigInt lastSyncAt = BigInt.zero;
+  String _installationId = _initial.installationId;
+  String _syncDir = '';
+
+  RimeSyncSettingsDto get _settings => RimeSyncSettingsDto(
+    installationId: _installationId,
+    syncDir: _syncDir,
+    effectiveSyncDir: _syncDir.isEmpty ? _initial.effectiveSyncDir : _syncDir,
+    defaultSyncDir: _initial.defaultSyncDir,
+    packageSyncDir: _syncDir.isEmpty
+        ? _initial.packageSyncDir
+        : '$_syncDir/keytao-packages/keytao',
+    lastSyncAt: lastSyncAt,
+    lastSyncError: lastSyncError,
+  );
 
   @override
   Future<RimeSyncSettingsDto> crateApiCoreGetRimeSyncSettings() async =>
-      _initial;
+      _settings;
 
   @override
   Future<RimeSyncSettingsDto> crateApiCoreSaveRimeSyncSettings({
@@ -33,15 +55,16 @@ class _SyncCore implements RustLibApi {
   }) async {
     saves.add((installationId: installationId, syncDir: syncDir));
     if (saveFailure case final failure?) throw StateError(failure);
-    return RimeSyncSettingsDto(
-      installationId: installationId.trim(),
-      syncDir: syncDir,
-      effectiveSyncDir: syncDir.isEmpty ? _initial.effectiveSyncDir : syncDir,
-    );
+    _installationId = installationId.trim();
+    _syncDir = syncDir;
+    return _settings;
   }
 
   @override
   Future<void> crateApiCoreSyncRimeUserData() => sync!.future;
+
+  @override
+  Future<String> crateApiCoreNewRimeInstallationId() async => _newId;
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>
@@ -134,6 +157,151 @@ void main() {
     });
   }
 
+  for (final savedPath in [
+    '',
+    '/isolated/saved-sync',
+    _initial.defaultSyncDir,
+  ]) {
+    testWidgets('ID reset keeps saved path "$savedPath" and path draft', (
+      tester,
+    ) async {
+      core._syncDir = savedPath;
+      await _show(tester, controller);
+      await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+      await tester.pumpAndSettle();
+
+      final path = find.byKey(const ValueKey('rime-sync-directory'));
+      const draft = '/isolated/unsaved-sync';
+      await tester.enterText(path, draft);
+      await tester.tap(
+        find.descendant(
+          of: find.widgetWithText(SettingRow, '同步文件夹名称'),
+          matching: find.text('重置'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(core.saves, [(installationId: _newId, syncDir: savedPath)]);
+      expect(controller.rimeSyncSettings!.syncDir, savedPath);
+      expect(find.text(_newId), findsOneWidget);
+      expect(find.text(draft), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  for (final choose in [true, false]) {
+    final action = choose ? '选择' : '重置';
+    final savedPath = choose ? '/isolated/picked-sync' : '';
+    testWidgets(
+      'path ${choose ? 'choose' : 'reset'} keeps saved ID and draft',
+      (tester) async {
+        core._syncDir = '/isolated/saved-sync';
+        await _show(tester, controller);
+        await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+        await tester.pumpAndSettle();
+
+        const draft = 'unsaved-desktop';
+        final id = find.byKey(const ValueKey('rime-sync-installation-id'));
+        await tester.enterText(id, draft);
+        await tester.tap(
+          find.descendant(
+            of: find.widgetWithText(SettingRow, '同步路径'),
+            matching: find.text(action),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(core.saves, [
+          (installationId: _initial.installationId, syncDir: savedPath),
+        ]);
+        expect(
+          controller.rimeSyncSettings!.installationId,
+          _initial.installationId,
+        );
+        expect(find.text(draft), findsOneWidget);
+        expect(
+          find.text(choose ? savedPath : _initial.defaultSyncDir),
+          findsOneWidget,
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  for (final (label, custom, legacy) in [
+    ('custom', true, false),
+    ('default', false, false),
+    ('legacy fallback', false, true),
+  ]) {
+    test('open $label sync directory', () async {
+      final root = await Directory.systemTemp.createTemp('keytao-rime-sync-');
+      addTearDown(() => root.delete(recursive: true));
+      final opened = <String>[];
+      final openController = AppController(
+        info: controller.info,
+        runDesktopOpen: (_, arguments) async {
+          opened.add(arguments.single);
+          return ProcessResult(0, 0, '', '');
+        },
+      );
+      addTearDown(openController.dispose);
+
+      final runtime = '${root.path}/runtime/keytao';
+      final defaultPath = '$runtime/sync';
+      final customPath = '${root.path}/custom';
+      final packagePath = custom
+          ? '$customPath/keytao-packages/keytao'
+          : legacy
+          ? '${root.path}/sync/keytao-packages/keytao'
+          : defaultPath;
+      final directory = Directory(packagePath);
+      final parent = custom ? Directory(customPath) : directory.parent;
+      openController.rimeSyncSettings = RimeSyncSettingsDto(
+        installationId: _initial.installationId,
+        syncDir: custom ? customPath : '',
+        effectiveSyncDir: custom ? customPath : '${root.path}/sync',
+        defaultSyncDir: defaultPath,
+        packageSyncDir: packagePath,
+        lastSyncAt: BigInt.zero,
+      );
+
+      expect(await openController.openRimeSyncDirectory(), isFalse);
+      expect(
+        openController.rimeSyncError,
+        contains('Sync directory parent does not exist'),
+      );
+      expect(await parent.exists(), isFalse);
+      expect(opened, isEmpty);
+
+      await parent.create(recursive: true);
+      if (legacy) {
+        expect(await openController.openRimeSyncDirectory(), isFalse);
+        expect(await directory.exists(), isFalse);
+        await directory.create();
+      }
+      expect(await openController.openRimeSyncDirectory(), isTrue);
+      expect(await directory.exists(), isTrue);
+      expect(opened, [packagePath]);
+    });
+  }
+
+  testWidgets('sync settings read error leaves path editable', (tester) async {
+    const error = 'Could not read sync result';
+    core.lastSyncError = error;
+    await _show(tester, controller);
+    await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.widgetWithText(ErrorMessage, error), findsOneWidget);
+    final path = find.byKey(const ValueKey('rime-sync-directory'));
+    await tester.enterText(path, '/isolated/replacement-sync');
+    await tester.pump();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(core.saves.single.syncDir, '/isolated/replacement-sync');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets(
     'sync controls save, choose, reset, open and sync through controller',
     (tester) async {
@@ -142,9 +310,16 @@ void main() {
       await tester.pumpAndSettle();
       final id = find.byKey(const ValueKey('rime-sync-installation-id'));
       final path = find.byKey(const ValueKey('rime-sync-directory'));
-      expect(tester.widget<FTextField>(path).hint, _initial.effectiveSyncDir);
+      String pathText() => tester
+          .widget<EditableText>(
+            find.descendant(of: path, matching: find.byType(EditableText)),
+          )
+          .controller
+          .text;
+      expect(pathText(), _initial.defaultSyncDir);
 
       await tester.enterText(id, 'new-desktop');
+      await tester.pump();
       await tester.tap(find.text('保存'));
       await tester.pumpAndSettle();
       expect(core.saves.last.installationId, 'new-desktop');
@@ -152,20 +327,17 @@ void main() {
       await tester.tap(find.text('选择'));
       await tester.pumpAndSettle();
       expect(core.saves.last.syncDir, '/isolated/picked-sync');
-      expect(
-        tester
-            .widget<EditableText>(
-              find.descendant(of: path, matching: find.byType(EditableText)),
-            )
-            .controller
-            .text,
-        '/isolated/picked-sync',
-      );
+      expect(pathText(), '/isolated/picked-sync');
 
-      await tester.tap(find.text('重置'));
+      await tester.tap(
+        find.descendant(
+          of: find.widgetWithText(SettingRow, '同步路径'),
+          matching: find.text('重置'),
+        ),
+      );
       await tester.pumpAndSettle();
       expect(core.saves.last.syncDir, isEmpty);
-      expect(tester.widget<FTextField>(path).hint, _initial.effectiveSyncDir);
+      expect(pathText(), _initial.defaultSyncDir);
 
       await tester.enterText(path, '/isolated/manual-sync');
       await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -186,16 +358,19 @@ void main() {
       expect(find.text('同步中'), findsOneWidget);
       expect(find.byType(FProgress), findsWidgets);
       expect(controller.busy, isTrue);
+      core.lastSyncAt = BigInt.from(
+        DateTime(2026, 11, 25, 10, 20).millisecondsSinceEpoch,
+      );
       core.sync!.complete();
       await tester.pumpAndSettle();
-      expect(find.text('完成'), findsOneWidget);
+      expect(find.text('上次同步 2026-11-25 10:20'), findsOneWidget);
 
       core.sync = Completer<void>();
-      await tester.tap(find.text('完成'));
+      await tester.tap(find.text('立即同步'));
       await tester.pump();
+      core.lastSyncError = 'IME is not running';
       core.sync!.completeError(StateError('IME is not running'));
       await tester.pumpAndSettle();
-      expect(find.text('失败'), findsOneWidget);
       expect(
         find.widgetWithText(ErrorMessage, 'IME is not running'),
         findsOneWidget,
@@ -204,6 +379,7 @@ void main() {
 
       core.saveFailure = 'Invalid installation_id';
       await tester.enterText(id, '../invalid');
+      await tester.pump();
       await tester.tap(find.text('保存'));
       await tester.pumpAndSettle();
       expect(

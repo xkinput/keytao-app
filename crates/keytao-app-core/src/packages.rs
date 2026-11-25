@@ -465,6 +465,14 @@ pub async fn remove_scheme_package(
             return Err("请先切换方案包".into());
         }
         let namespace = if scheme_key.starts_with("local-") { "local" } else { "cloud" };
+        let runtime_relative = format!("runtime/{scheme_key}");
+        let runtime = safe_path(&root, &runtime_relative)?;
+        let cleanup = if crate::scheme::is_local_scheme_key(scheme_key) {
+            RuntimeRemoval::Local(local_runtime_removal_entries(&runtime)?)
+        } else {
+            RuntimeRemoval::Cloud(runtime_backup_sources(&runtime, &runtime_relative)?)
+        };
+        crate::package_fs::clear_readonly(&runtime).map_err(|error| error.to_string())?;
         let projected = safe_path(&root, &format!("scheme-packages/{namespace}/{scheme_key}"))?;
         let owner = safe_path(&projected, ".keytao-source-projection")?;
         let source_backup = match fs::read(&owner) {
@@ -503,7 +511,13 @@ pub async fn remove_scheme_package(
             }
         })
         .map_err(|error| error.to_string())?;
-        cleanup_runtime_on_removal(&root, scheme_key)?;
+        match cleanup {
+            RuntimeRemoval::Local(entries) => remove_local_runtime(&runtime, entries)?,
+            RuntimeRemoval::Cloud(sources) => {
+                backup_removed_runtime(&root, scheme_key, &runtime_relative, sources)?;
+                let _ = prune_runtime_dir(&runtime);
+            }
+        }
         Ok(())
     })
     .map_err(CoreError::Other)?;
@@ -556,7 +570,12 @@ fn strip_ephemeral_runtime_artifacts(dir: &Path) {
         && let Ok(manifest) = serde_json::from_slice::<RuntimeManifest>(&bytes)
     {
         for (relative, expected) in manifest.owned.into_iter().chain(manifest.generated) {
-            if manifest.user_owned.contains_key(&relative) {
+            if manifest.user_owned.contains_key(&relative)
+                || Path::new(&relative)
+                    .iter()
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("sync"))
+            {
                 continue;
             }
             if let Ok(path) = safe_path(dir, &relative)
@@ -572,10 +591,14 @@ fn strip_ephemeral_runtime_artifacts(dir: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
+        if name.eq_ignore_ascii_case("sync") {
+            continue;
+        }
         let name_str = name.to_string_lossy();
         let path = entry.path();
         if name_str == "build"
             || name_str == ".keytao-materialize.lock"
+            || name_str == crate::rime_sync::INSTALLATION_LOCK
             || name_str == keytao_core::RuntimeDirs::MANIFEST_FILE
             || name_str == ".keytao-runtime.pending.json"
             || name_str == ".keytao-runtime-manifest.json"
@@ -596,12 +619,16 @@ fn strip_ephemeral_runtime_artifacts(dir: &Path) {
 }
 
 fn dir_has_any_file(dir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
         let path = entry.path();
-        if path.is_file() {
+        if entry.file_name().eq_ignore_ascii_case("sync") || path.is_file() {
             return true;
         }
         if path.is_dir() && dir_has_any_file(&path) {
@@ -611,35 +638,127 @@ fn dir_has_any_file(dir: &Path) -> bool {
     false
 }
 
-fn move_into_backup(source: &Path, target: &Path) -> Result<bool, String> {
-    if !source.try_exists().map_err(|error| error.to_string())? {
-        return Ok(false);
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    crate::package_fs::rename(source, target).map_err(|error| error.to_string())?;
-    Ok(true)
+type BackupSource = (PathBuf, PathBuf);
+
+enum RuntimeRemoval {
+    Local(Vec<(PathBuf, bool)>),
+    Cloud(Vec<BackupSource>),
 }
 
-fn cleanup_runtime_on_removal(root: &Path, scheme_key: &str) -> Result<Option<PathBuf>, String> {
-    let runtime = safe_path(root, &format!("runtime/{scheme_key}"))?;
-    if !runtime.try_exists().map_err(|error| error.to_string())? {
-        return Ok(None);
+fn runtime_entries_without_sync(runtime: &Path) -> Result<Vec<fs::DirEntry>, String> {
+    let entries = match fs::read_dir(runtime) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    entries
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .map_or(true, |entry| !entry.file_name().eq_ignore_ascii_case("sync"))
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn runtime_backup_sources(runtime: &Path, relative: &str) -> Result<Vec<BackupSource>, String> {
+    Ok(runtime_entries_without_sync(runtime)?
+        .into_iter()
+        .map(|entry| (entry.path(), Path::new(relative).join(entry.file_name())))
+        .collect())
+}
+
+fn local_runtime_removal_entries(runtime: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
+    let entries = runtime_entries_without_sync(runtime)?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
     }
-    if crate::scheme::is_local_scheme_key(scheme_key) {
-        crate::package_fs::remove_dir_all(&runtime).map_err(|error| error.to_string())?;
-        return Ok(None);
+    let sync_dir = match crate::runtime_materialize::legacy_sync_dir(runtime) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%error, "Could not read local scheme sync settings during uninstall");
+            runtime.join("sync")
+        }
+    };
+    let sync_entry = sync_dir
+        .strip_prefix(runtime)
+        .ok()
+        .and_then(|relative| relative.iter().next());
+    entries
+        .into_iter()
+        .filter(|entry| !sync_entry.is_some_and(|name| name.eq_ignore_ascii_case(&entry.file_name())))
+        .map(|entry| {
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            let is_dir = kind.is_dir();
+            #[cfg(windows)]
+            let is_dir = is_dir || std::os::windows::fs::FileTypeExt::is_symlink_dir(&kind);
+            Ok((entry.path(), is_dir))
+        })
+        .collect()
+}
+
+fn remove_local_runtime(runtime: &Path, entries: Vec<(PathBuf, bool)>) -> Result<(), String> {
+    for (path, is_dir) in entries {
+        let remove = if is_dir {
+            crate::package_fs::remove_dir_all
+        } else {
+            crate::package_fs::remove_file
+        };
+        remove(&path).map_err(|error| error.to_string())?;
+    }
+    prune_runtime_dir(runtime)
+}
+
+fn prune_runtime_dir(runtime: &Path) -> Result<(), String> {
+    crate::package_fs::clear_readonly(runtime).map_err(|error| error.to_string())?;
+    match fs::remove_dir(runtime) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn backup_removed_runtime(
+    root: &Path,
+    scheme_key: &str,
+    runtime_relative: &str,
+    sources: Vec<BackupSource>,
+) -> Result<(), String> {
+    if sources.is_empty() {
+        return Ok(());
     }
     let backup_root = unique_migration_dir(root, &format!("removed-{scheme_key}"))?;
-    let target = backup_root.join("runtime").join(scheme_key);
-    move_into_backup(&runtime, &target)?;
-    strip_ephemeral_runtime_artifacts(&target);
+    let mut moves = Vec::new();
+    for (source, relative) in sources {
+        let target = backup_root.join(relative);
+        match backup_repair_path(source, &target, crate::package_fs::rename) {
+            Ok(moved) => moves.push(moved),
+            Err(error) => {
+                let rollback_errors = restore_backup_moves(moves);
+                if rollback_errors.is_empty() {
+                    let _ = crate::package_fs::remove_dir_all(&backup_root);
+                    return Err(error.to_string());
+                }
+                return Err(format!(
+                    "{error}; restore runtime: {}; backup: {}",
+                    rollback_errors.join("; "),
+                    backup_root.display()
+                ));
+            }
+        }
+    }
+    strip_ephemeral_runtime_artifacts(&backup_root.join(runtime_relative));
     if !dir_has_any_file(&backup_root) {
         let _ = crate::package_fs::remove_dir_all(&backup_root);
-        return Ok(None);
     }
-    Ok(Some(backup_root))
+    Ok(())
 }
 
 type ActiveManifestBackup = (PathBuf, Option<Vec<u8>>);
@@ -699,6 +818,14 @@ impl RepairMove {
         }
         result
     }
+}
+
+fn restore_backup_moves(moves: Vec<RepairMove>) -> Vec<String> {
+    moves
+        .into_iter()
+        .rev()
+        .filter_map(|moved| moved.restore().err().map(|error| error.to_string()))
+        .collect()
 }
 
 fn backup_repair_path(
@@ -941,22 +1068,29 @@ pub(crate) async fn repair_package_for_redeploy_with(
         crate::package_migration::move_path(&fresh, &prepared).map_err(|error| error.to_string())?;
 
         // Take care of store paths first because they can be on a different filesystem.
-        let mut sources = vec![(destination.clone(), format!("{namespace}/{key}"))];
+        let mut sources = vec![(destination.clone(), PathBuf::from(format!("{namespace}/{key}")))];
         if key == crate::rime_snow::SCHEMA_ID {
             let addon_dir = store
                 .checked_addon_path(key)
                 .map_err(|error| error.to_string())?;
-            sources.push((addon_dir, format!("addon-store/{key}")));
+            sources.push((addon_dir, PathBuf::from(format!("addon-store/{key}"))));
         }
         let runtime = format!("runtime/{key}");
-        sources.push((safe_path(root, &runtime)?, runtime.clone()));
-        let builtin_runtime = "runtime/builtin/keytao";
+        let mut runtimes = vec![(safe_path(root, &runtime)?, runtime)];
         if package_key == "builtin/keytao" {
-            sources.push((safe_path(root, builtin_runtime)?, builtin_runtime.into()));
+            let builtin_runtime = "runtime/builtin/keytao";
+            runtimes.push((safe_path(root, builtin_runtime)?, builtin_runtime.into()));
+        }
+        for (path, relative) in &runtimes {
+            let entries = runtime_backup_sources(path, relative)?;
+            if !entries.is_empty() {
+                crate::package_fs::clear_readonly(path).map_err(|error| error.to_string())?;
+                sources.extend(entries);
+            }
         }
         let proj_ns = if is_addon { "addons" } else { "cloud" };
         let projected = safe_path(root, &format!("scheme-packages/{proj_ns}/{key}"))?;
-        sources.push((projected, format!("projected/{key}")));
+        sources.push((projected, PathBuf::from(format!("projected/{key}"))));
 
         let mut backup_root = None;
         let mut moves = Vec::new();
@@ -964,10 +1098,13 @@ pub(crate) async fn repair_package_for_redeploy_with(
         let mut active_manifest = None;
         let result = (|| -> Result<(), String> {
             for (source, relative) in sources {
-                if !source.try_exists().map_err(|error| {
-                    crate::package_fs::context("读取文件属性", &source, error).to_string()
-                })? {
-                    continue;
+                match fs::symlink_metadata(&source) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(crate::package_fs::context("读取文件属性", &source, error)
+                            .to_string());
+                    }
                 }
                 let backup = match &backup_root {
                     Some(path) => path,
@@ -1025,11 +1162,7 @@ pub(crate) async fn repair_package_for_redeploy_with(
                     rollback_errors.push(error.to_string());
                 }
             }
-            for moved in moves.into_iter().rev() {
-                if let Err(error) = moved.restore() {
-                    rollback_errors.push(error.to_string());
-                }
-            }
+            rollback_errors.extend(restore_backup_moves(moves));
             if rollback_errors.is_empty() {
                 if let Some(path) = &backup_root
                     && let Err(cleanup) = crate::package_fs::remove_dir_all(path)
@@ -1044,11 +1177,11 @@ pub(crate) async fn repair_package_for_redeploy_with(
             ));
         }
 
-        if let Some(path) = &backup_root {
-            strip_ephemeral_runtime_artifacts(&path.join(runtime));
-            if package_key == "builtin/keytao" {
-                strip_ephemeral_runtime_artifacts(&path.join(builtin_runtime));
+        for (runtime, relative) in runtimes {
+            if let Some(path) = &backup_root {
+                strip_ephemeral_runtime_artifacts(&path.join(relative));
             }
+            let _ = prune_runtime_dir(&runtime);
         }
         Ok(backup_root)
     })

@@ -484,6 +484,9 @@ Future<RimeSyncSettingsDto> saveRimeSyncSettings({
   syncDir: syncDir,
 );
 
+Future<String> newRimeInstallationId() =>
+    RustLib.instance.api.crateApiCoreNewRimeInstallationId();
+
 Future<void> syncRimeUserData() =>
     RustLib.instance.api.crateApiCoreSyncRimeUserData();
 

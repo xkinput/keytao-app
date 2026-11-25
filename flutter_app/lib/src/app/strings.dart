@@ -294,16 +294,17 @@ abstract final class AppStrings {
       locale.languageCode.startsWith('zh') ? '选择' : 'Choose';
   static String syncReset(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '重置' : 'Reset';
+  static String syncDefault(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '默认' : 'Default';
   static String syncOpen(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '打开' : 'Open';
   static String syncNow(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '立即同步' : 'Sync now';
   static String syncing(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '同步中' : 'Syncing';
-  static String syncDone(Locale locale) =>
-      locale.languageCode.startsWith('zh') ? '完成' : 'Complete';
-  static String syncFailed(Locale locale) =>
-      locale.languageCode.startsWith('zh') ? '失败' : 'Failed';
+  static String syncLastAt(Locale locale, DateTime time) =>
+      '${locale.languageCode.startsWith('zh') ? '上次同步' : 'Last sync'} '
+      '${time.toString().substring(0, 16)}';
   static String appUpdateFailure(Locale locale, String message) =>
       locale.languageCode.startsWith('zh')
       ? '检查更新失败：$message'

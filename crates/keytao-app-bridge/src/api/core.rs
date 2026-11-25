@@ -1294,7 +1294,7 @@ pub fn get_schemas() -> Result<SchemaListDto, String> {
 
 pub fn get_rime_sync_settings() -> Result<RimeSyncSettingsDto, String> {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    return runtime::dto(keytao_app_core::rime_sync::read_settings(
+    return runtime::dto(keytao_app_core::rime_sync::read_ui_settings(
         &runtime::state()?.host.user_root()?,
     )?);
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -1307,19 +1307,29 @@ pub async fn save_rime_sync_settings(
 ) -> Result<RimeSyncSettingsDto, String> {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
+        use keytao_app_core::rime_sync;
+
         let state = runtime::state()?;
         let _guard = state.install_lock.lock().await;
-        runtime::dto(keytao_app_core::rime_sync::save_settings(
-            &state.host.user_root()?,
-            &installation_id,
-            &sync_dir,
-        )?)
+        let root = state.host.user_root()?;
+        // An ID-only update must work even when the saved directory is unavailable.
+        if !sync_dir.is_empty()
+            && !rime_sync::read_settings(&root).is_ok_and(|saved| saved.sync_dir == sync_dir)
+        {
+            rime_sync::validate_user_sync_dir(std::path::Path::new(&sync_dir))?;
+        }
+        rime_sync::save_settings(&root, &installation_id, &sync_dir)?;
+        runtime::dto(rime_sync::read_ui_settings(&root)?)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (installation_id, sync_dir);
         Err("Rime user data sync is only available on desktop".into())
     }
+}
+
+pub fn new_rime_installation_id() -> Result<String, String> {
+    keytao_app_core::rime_sync::new_installation_id()
 }
 
 pub async fn sync_rime_user_data() -> Result<(), String> {
