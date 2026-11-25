@@ -17,7 +17,7 @@ KeyTao 是支持 librime 与 libjd 的跨平台输入法。
 | 平台 | 系统输入法形态 | Release 产物 |
 | --- | --- | --- |
 | Linux | `keytao-ime` daemon（Wayland、KDE、GNOME IBus、XIM、IBus） | `keytao-app-<version>-linux-{x64,arm64}.{deb,rpm}` |
-| macOS | IMKit，`/Library/Input Methods/KeyTao.app` | `keytao-app-<version>-macos.dmg`（内含 universal pkg） |
+| macOS | IMKit，`/Library/Input Methods/KeyTao.app` | `keytao-app-<version>-macos-arm64.dmg`、`keytao-app-<version>-macos-x86_64.dmg`、兼容旧更新器的 `keytao-app-<version>-macos.dmg` |
 | Windows | TSF TIP（实验性） | `keytao-app-<version>-windows-x64-setup.exe` |
 | Android | `InputMethodService` | `keytao-app-<version>-android-{arm,arm64,x86_64}-release.apk` |
 | iOS / iPadOS | `UIInputViewController` 键盘扩展 | `keytao-app-<version>-ios-arm64-unsigned.ipa` |
@@ -27,7 +27,7 @@ KeyTao 是支持 librime 与 libjd 的跨平台输入法。
 从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载对应平台的安装包。
 
 - Linux：见 [docs/linux-install.md](docs/linux-install.md)。
-- macOS：打开 DMG，运行其中的 pkg，安装后即可在输入法列表中选择 KeyTao。
+- macOS：Apple 芯片下载 `macos-arm64.dmg`，Intel 芯片下载 `macos-x86_64.dmg`。打开 DMG 并运行其中的 pkg，安装后即可在输入法列表中选择 KeyTao。
 - Windows：运行 setup.exe，安装包说明见 [packaging/windows/README.md](packaging/windows/README.md)。
 - Android：安装 APK；首次打开会先进入系统输入法启用/切换引导，KeyTao 启用并选中后进入主界面。
 - iOS / iPadOS：IPA 未签名，签名与安装见 [docs/ios-install.md](docs/ios-install.md)。
@@ -144,7 +144,7 @@ DYLD_FALLBACK_LIBRARY_PATH=$RIME_LIB_DIR cargo test
 | 平台 | 命令 | 产物 |
 | --- | --- | --- |
 | Linux | `scripts/build-linux.sh`（需要 Docker，按 builder 原生架构构建） | `dist/keytao-app-<version>-linux-{x64,arm64}.{deb,rpm}` |
-| macOS | `scripts/build-macos.sh` | `target/keytao-macos-pkg/keytao-app-<version>-macos.dmg`（内含 pkg） |
+| macOS | `scripts/build-macos.sh --all-archs` | `target/keytao-macos-pkg/` 下的 universal、arm64、x86_64 DMG（均内含对应 pkg） |
 | Windows | `powershell -ExecutionPolicy Bypass -File scripts\build-windows-flutter.ps1 -Arch x64` | `target\release\bundle\nsis\keytao-app-<version>-windows-x64-setup.exe` |
 | Android | `cd flutter_app && flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64` | `flutter_app/build/app/outputs/flutter-apk/app-<abi>-release.apk` |
 | iOS | `scripts/build-ios-librime.sh --target aarch64-apple-ios && scripts/build-flutter-ios.sh` | `flutter_app/build/ios/ipa/keytao-app-<version>-ios-arm64-unsigned.ipa` |

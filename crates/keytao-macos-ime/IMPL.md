@@ -97,9 +97,9 @@ test -x "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME"
 open -a KeyTao
 ```
 
-Release CI 的 macOS 分支执行 `scripts/build-macos.sh` 和 `scripts/verify-macos-pkg.sh`，发布一个 `keytao-app-<version>-macos.dmg`（内含 pkg）；主 App、IME 和 FFI 都包含 x86_64 + arm64。
+Release CI 的 macOS 分支运行 `scripts/build-macos.sh --all-archs`，校验后发布 `keytao-app-<version>-macos-arm64.dmg`、`keytao-app-<version>-macos-x86_64.dmg`，并为旧更新器保留 universal 的 `keytao-app-<version>-macos.dmg`。每个 DMG 均包含对应的 pkg。
 
-macOS 发行包只构建 pkg，不构建 dmg。原因是 KeyTao 同时包含普通 App 和系统输入法 bundle，必须把输入法稳定安装到 `/Library/Input Methods` 并执行 TIS/LaunchServices 注册；dmg 拖拽安装无法可靠表达这个系统输入法安装流程。
+安装时运行 DMG 中的 pkg。安装器将输入法安装到 `/Library/Input Methods` 并执行 TIS/LaunchServices 注册。
 
 `install.sh` 是开发安装脚本，会构建 IME pkg、sudo 安装到系统输入法目录、刷新 LaunchServices/TIS 相关进程，并执行注册命令。
 

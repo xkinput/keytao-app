@@ -5,14 +5,8 @@ import CKeytaoCore
 if let subcommand = CommandLine.arguments.dropFirst().first,
   subcommand == "--deploy" || subcommand == "--preview-candidates"
 {
-  if let resources = Bundle.main.resourceURL {
-    for name in ["rime-data", "SharedSupport"] {
-      let path = resources.appendingPathComponent(name).path
-      if hasDefaultYaml(at: path) {
-        setenv("KEYTAO_RIME_SHARED_DATA_DIR", path, 1)
-        break
-      }
-    }
+  if let sharedDir = bundledSharedDataDir() ?? resolveSharedDataDir() {
+    setenv("KEYTAO_RIME_SHARED_DATA_DIR", sharedDir, 1)
   }
   if subcommand == "--preview-candidates" {
     keytao_run_preview_child_main()

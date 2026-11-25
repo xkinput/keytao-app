@@ -93,7 +93,7 @@ matrix = desktop.dig('strategy', 'matrix', 'include')
 expected = {
   ['linux', 'x64'] => ['ubuntu-22.04', %w[deb rpm].map { |ext| "dist/keytao-app-#{version}-linux-x64.#{ext}" }],
   ['linux', 'arm64'] => ['ubuntu-24.04-arm', %w[deb rpm].map { |ext| "dist/keytao-app-#{version}-linux-arm64.#{ext}" }],
-  ['macos', 'universal'] => ['macos-15', ["target/keytao-macos-pkg/keytao-app-#{version}-macos.dmg"]],
+  ['macos', 'universal'] => ['macos-15', ['', '-arm64', '-x86_64'].map { |suffix| "target/keytao-macos-pkg/keytao-app-#{version}-macos#{suffix}.dmg" }],
   ['windows', 'x64'] => ['windows-latest', ["target/release/bundle/nsis/keytao-app-#{version}-windows-x64-setup.exe"]]
 }
 check(matrix.map { |m| [m['os_name'], m['package_arch']] }.sort == expected.keys.sort, 'Expected exactly four desktop legs')
@@ -115,6 +115,18 @@ end
 check(File.read('scripts/container-build.sh').include?('bash scripts/verify-linux-bundles.sh "$WORK_DIR/packages/bundle" "$VERSION" --inside-container'), 'Linux container entrypoint must verify its bundles')
 check(File.read('scripts/build-windows-flutter.ps1').include?('"verify-windows-bundle.ps1") -ReleaseDir $bundleDir -InstallerPath $installer'), 'Windows entrypoint must verify its installer')
 check(desktop['steps'].any? { |s| s['if'] == "matrix.os_name == 'macos'" && s['run'] == 'bash crates/keytao-macos-ime/test-input-context.sh' }, 'macOS must run input-context regressions before packaging')
+macos_steps = desktop['steps'].select { |s| s['if'] == "matrix.os_name == 'macos'" }
+check(macos_steps.any? { |s| s.fetch('run', '').lines.map(&:strip).include?('scripts/build-macos.sh --all-archs') }, 'Build all three macOS installer variants')
+macos_verify = macos_steps.find { |s| s.fetch('run', '').include?('scripts/verify-macos-pkg.sh') }.fetch('run')
+[
+  "for suffix in '' -arm64 -x86_64; do",
+  'arch="${suffix#-}"',
+  'package="target/keytao-macos-pkg/keytao-app-${VERSION}-macos${suffix}"',
+  'scripts/verify-macos-pkg.sh "$package.pkg" "${arch:-universal}"',
+  'scripts/verify-macos-dmg.sh "$package.dmg" "$package.pkg"'
+].each do |command|
+  check(macos_verify.lines.map(&:strip).include?(command), "Missing macOS verification command: #{command}")
+end
 
 android = jobs.fetch('build-android')
 ios = jobs.fetch('build-ios')
@@ -182,4 +194,5 @@ output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
   })().catch(error => { console.error(error); process.exitCode = 1 })
 JS
 check(status.success?, "Metadata/release decision checks: #{output}")
-puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, 10 asset names, SDK pins, dispatch isolation, version input, prerelease detection and draft publication order"
+asset_count = expected.values.sum { |_, artifacts| artifacts.length } + mobile_paths.values.sum(&:length)
+puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, #{asset_count} asset names, SDK pins, dispatch isolation, version input, prerelease detection and draft publication order"

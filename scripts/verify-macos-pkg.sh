@@ -9,6 +9,11 @@ WORKSPACE_VERSION="$(awk '
     section && /^version[[:space:]]*=/ { gsub(/["]/, "", $3); print $3; exit }
 ' "$PROJECT_DIR/Cargo.toml")"
 PKG_PATH="${1:-$PROJECT_DIR/target/keytao-macos-pkg/keytao-app-${WORKSPACE_VERSION}-macos.pkg}"
+PACKAGE_ARCH="${2:-universal}"
+case "$PACKAGE_ARCH" in
+    universal|arm64|x86_64) ;;
+    *) echo "ERROR: unknown package architecture: $PACKAGE_ARCH" >&2; exit 2 ;;
+esac
 
 require_command() {
     local command_name="$1"
@@ -57,17 +62,19 @@ plist_value() {
     plutil -extract "$key" raw -o - "$plist"
 }
 
-require_universal() {
+require_architectures() {
     local binary="$1"
-    local arch
+    local architectures
     require_file "$binary"
-    echo "Architectures ($binary): $(lipo -archs "$binary")"
-    for arch in x86_64 arm64; do
-        if ! lipo "$binary" -verify_arch "$arch"; then
-            echo "ERROR: release binary must contain x86_64 and arm64: $binary" >&2
+    architectures="$(lipo -archs "$binary")"
+    echo "Architectures ($binary): $architectures"
+    case "$PACKAGE_ARCH:$architectures" in
+        'universal:x86_64 arm64'|'universal:arm64 x86_64'|arm64:arm64|x86_64:x86_64) ;;
+        *)
+            echo "ERROR: expected $PACKAGE_ARCH architecture(s): $binary" >&2
             exit 1
-        fi
-    done
+            ;;
+    esac
 }
 
 check_external_links() {
@@ -120,8 +127,11 @@ payload_contains "$PAYLOAD_FILES" "./Applications/KeyTao.app/Contents/Frameworks
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app"
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME"
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/Resources/default-theme.yaml"
-payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/Resources/rime-data/default.yaml"
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/Frameworks/rime-plugins/librime-lua.dylib"
+if grep -Eq '^\./Library/Input Methods/KeyTao\.app/Contents/Resources/rime-data(/|$)' <<<"$PAYLOAD_FILES"; then
+    echo "ERROR: rime-data must only be packaged in the main app bundle." >&2
+    exit 1
+fi
 
 if grep -E '(^|/)\._|/\.__' <<<"$PAYLOAD_FILES" >/dev/null; then
     echo "WARNING: pkg payload contains AppleDouble metadata entries." >&2
@@ -147,6 +157,12 @@ PACKAGE_INFO="$EXPANDED/PackageInfo"
 require_dir "$MAIN_APP"
 require_dir "$IME_APP"
 require_file "$POSTINSTALL"
+if [[ "$PACKAGE_ARCH" == arm64 ]]; then
+    require_file "$EXPANDED/Scripts/preinstall"
+elif [[ -e "$EXPANDED/Scripts/preinstall" ]]; then
+    echo "ERROR: unexpected preinstall script for $PACKAGE_ARCH package." >&2
+    exit 1
+fi
 require_file "$PACKAGE_INFO"
 require_file "$MAIN_APP/Contents/MacOS/KeyTao"
 require_file "$MAIN_APP/Contents/Info.plist"
@@ -156,27 +172,26 @@ require_file "$MAIN_APP/Contents/Frameworks/rime-plugins/librime-lua.dylib"
 require_file "$IME_APP/Contents/MacOS/KeyTaoIME"
 require_file "$IME_APP/Contents/Info.plist"
 require_file "$IME_APP/Contents/Resources/default-theme.yaml"
-require_file "$IME_APP/Contents/Resources/rime-data/default.yaml"
 require_glob "$IME_APP/Contents/Frameworks/librime*.dylib"
 require_file "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
 require_file "$IME_APP/Contents/Frameworks/rime-plugins/librime-lua.dylib"
 
-require_universal "$MAIN_APP/Contents/MacOS/KeyTao"
-require_universal "$MAIN_APP/Contents/Frameworks/keytao_app_bridge.framework/keytao_app_bridge"
-require_universal "$IME_APP/Contents/MacOS/KeyTaoIME"
-require_universal "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
+require_architectures "$MAIN_APP/Contents/MacOS/KeyTao"
+require_architectures "$MAIN_APP/Contents/Frameworks/keytao_app_bridge.framework/keytao_app_bridge"
+require_architectures "$IME_APP/Contents/MacOS/KeyTaoIME"
+require_architectures "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
 for bundle in "$MAIN_APP" "$IME_APP"; do
-    require_universal "$bundle/Contents/Frameworks/libjd-engine.dylib"
+    require_architectures "$bundle/Contents/Frameworks/libjd-engine.dylib"
     require_file "$bundle/Contents/Resources/libjd-engine-LICENSE.txt"
     require_file "$bundle/Contents/Resources/libjd-engine-SOURCE.txt"
     for dylib in "$bundle/Contents/Frameworks/"librime*.dylib; do
-        require_universal "$dylib"
+        require_architectures "$dylib"
     done
     while IFS= read -r -d '' binary; do
-        if file "$binary" | grep -q 'Mach-O'; then
-            require_universal "$binary"
-        fi
-    done < <(find "$bundle/Contents/Frameworks" -type f -print0)
+        case "$(file -b "$binary")" in
+            Mach-O*) require_architectures "$binary" ;;
+        esac
+    done < <(find "$bundle" -type f -print0)
 done
 
 MAIN_BUNDLE_ID="$(plist_value "$MAIN_APP/Contents/Info.plist" CFBundleIdentifier)"

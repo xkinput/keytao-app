@@ -107,7 +107,10 @@ jobs:
           - platform: macos-15
             os_name: macos
             package_arch: universal
-            artifacts: target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos.dmg
+            artifacts: |
+              target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos.dmg
+              target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos-arm64.dmg
+              target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos-x86_64.dmg
           - platform: windows-latest
             os_name: windows
             package_arch: x64
@@ -259,23 +262,24 @@ jobs:
         shell: bash
         run: bash crates/keytao-macos-ime/test-input-context.sh
 
-      - name: Build macOS universal pkg
+      - name: Build macOS installers
         if: matrix.os_name == 'macos'
         shell: bash
         run: |
-          scripts/build-macos.sh
+          scripts/build-macos.sh --all-archs
           plugin="$(find target/keytao-macos-pkg -path '*/Contents/Frameworks/rime-plugins/librime-octagram.dylib' -print -quit)"
           [[ -n "$plugin" && -f "$plugin" ]] || { echo 'Missing bundled Octagram plugin' >&2; exit 1; }
 
-      - name: Verify macOS universal pkg
+      - name: Verify macOS installers
         if: matrix.os_name == 'macos'
         shell: bash
-        run: scripts/verify-macos-pkg.sh "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.pkg"
-
-      - name: Verify macOS DMG
-        if: matrix.os_name == 'macos'
-        shell: bash
-        run: scripts/verify-macos-dmg.sh "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.dmg" "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.pkg"
+        run: |
+          for suffix in '' -arm64 -x86_64; do
+            arch="${suffix#-}"
+            package="target/keytao-macos-pkg/keytao-app-${VERSION}-macos${suffix}"
+            scripts/verify-macos-pkg.sh "$package.pkg" "${arch:-universal}"
+            scripts/verify-macos-dmg.sh "$package.dmg" "$package.pkg"
+          done
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4

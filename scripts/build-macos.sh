@@ -3,6 +3,15 @@
 set -euo pipefail
 export COPYFILE_DISABLE=1
 
+PACKAGE_ARCHS=(universal)
+case "${1:-}" in
+    --all-archs) PACKAGE_ARCHS+=(arm64 x86_64); shift ;;
+esac
+if (( $# != 0 )); then
+    echo "Usage: $0 [--all-archs]" >&2
+    exit 2
+fi
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBRIME_VERSION="${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}"
 IME_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-ime"
@@ -101,7 +110,7 @@ trap 'rm -rf "$LIBJD_ENGINE_DIR"' EXIT
 python3 "$PROJECT_DIR/scripts/bundle-libjd-engine.py" macos-universal "$LIBJD_ENGINE_DIR" "$LIBJD_ENGINE_DIR"
 KEYTAO_MACOS_BUILD_DIR="$IME_BUILD_DIR" \
     KEYTAO_BUNDLED_LIBJD_DIR="$LIBJD_ENGINE_DIR" \
-    "$PROJECT_DIR/crates/keytao-macos-ime/build.sh" --release --skip-pkg
+    "$PROJECT_DIR/crates/keytao-macos-ime/build.sh" --release --skip-pkg --use-app-rime-data
 
 echo "==> Building KeyTao Flutter macOS app bundle..."
 # Incremental builds can retain an invalid outer seal. Remove only the app,
@@ -150,6 +159,7 @@ cp "$LIBJD_ENGINE_DIR/libjd-engine-LICENSE.txt" "$LIBJD_ENGINE_DIR/libjd-engine-
 
 echo "==> Re-signing KeyTao macOS app bundle..."
 ENTITLEMENTS="$PKG_BUILD_DIR/app.entitlements.plist"
+rm -rf "$PKG_BUILD_DIR"
 mkdir -p "$PKG_BUILD_DIR"
 cat > "$ENTITLEMENTS" << 'ENTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -173,44 +183,24 @@ else
     SIGN_ID="-"
 fi
 echo "    Using signing identity: $SIGN_ID"
-# Sign from the inside out: plugins, other dylibs, nested frameworks, app.
-while IFS= read -r -d '' plugin; do
+sign_bundle() {
+    local bundle="$1" entitlements="$2" code
+    # Sign from the inside out: dylibs, nested frameworks, app.
+    while IFS= read -r -d '' code; do
+        codesign --force --sign "$SIGN_ID" --options runtime \
+            --entitlements "$entitlements" "$code"
+    done < <(find "$bundle/Contents/Frameworks" -depth \( -type f -name '*.dylib' -o -type d -name '*.framework' \) -print0)
     codesign --force --sign "$SIGN_ID" --options runtime \
-        --entitlements "$ENTITLEMENTS" \
-        "$plugin"
-done < <(find "$MAIN_FRAMEWORKS_DIR/rime-plugins" -type f -name '*.dylib' -print0)
-while IFS= read -r -d '' dylib; do
-    codesign --force --sign "$SIGN_ID" --options runtime \
-        --entitlements "$ENTITLEMENTS" \
-        "$dylib"
-done < <(find "$MAIN_FRAMEWORKS_DIR" -type f -name '*.dylib' ! -path '*/rime-plugins/*' -print0)
-while IFS= read -r -d '' framework; do
-    codesign --force --sign "$SIGN_ID" --options runtime \
-        --entitlements "$ENTITLEMENTS" \
-        "$framework"
-done < <(find "$MAIN_FRAMEWORKS_DIR" -depth -type d -name '*.framework' -print0)
-codesign --force --sign "$SIGN_ID" --options runtime \
-    --entitlements "$ENTITLEMENTS" \
-    "$MAIN_APP"
-codesign --verify --deep --strict --verbose=2 "$MAIN_APP"
+        --entitlements "$entitlements" "$bundle"
+    codesign --verify --deep --strict --verbose=2 "$bundle"
+}
+sign_bundle "$MAIN_APP" "$ENTITLEMENTS"
 
-echo "==> Building KeyTao installer pkg..."
 PKG_PAYLOAD="$PKG_BUILD_DIR/payload"
 PKG_SCRIPTS="$PKG_BUILD_DIR/scripts"
 PKG_COMPONENTS="$PKG_BUILD_DIR/KeyTao-components.plist"
-rm -rf "$PKG_BUILD_DIR"
-mkdir -p "$PKG_PAYLOAD/Applications"
-mkdir -p "$PKG_PAYLOAD/Library/Input Methods"
 mkdir -p "$PKG_SCRIPTS"
-
-ditto --noextattr --norsrc "$MAIN_APP" "$PKG_PAYLOAD/Applications/KeyTao.app"
-ditto --noextattr --norsrc "$IME_APP" "$PKG_PAYLOAD/Library/Input Methods/KeyTao.app"
-find "$PKG_PAYLOAD" \( -name '._*' -o -name '.DS_Store' \) -delete
 find "$PKG_SCRIPTS" \( -name '._*' -o -name '.DS_Store' \) -delete
-xattr -cr "$PKG_PAYLOAD" 2>/dev/null || true
-xattr -cr "$PKG_SCRIPTS" 2>/dev/null || true
-find "$PKG_PAYLOAD" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
-find "$PKG_SCRIPTS" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
 
 cat > "$PKG_COMPONENTS" << 'PLISTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -287,55 +277,90 @@ exit 0
 SCRIPTEOF
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-PKG_OUTPUT="$PKG_BUILD_DIR/keytao-app-${PACKAGE_VERSION}-macos.pkg"
-COPYFILE_DISABLE=1 pkgbuild \
-    --root "$PKG_PAYLOAD" \
-    --component-plist "$PKG_COMPONENTS" \
-    --scripts "$PKG_SCRIPTS" \
-    --identifier "ink.rea.keytao-app.pkg" \
-    --version "$PACKAGE_VERSION" \
-    --install-location "/" \
-    "$PKG_OUTPUT"
-
 PKG_REPACK_DIR="$PKG_BUILD_DIR/repack"
 PKG_EXPANDED_DIR="$PKG_REPACK_DIR/expanded"
 PKG_FLAT_DIR="$PKG_REPACK_DIR/flat"
 PKG_CLEAN_OUTPUT="$PKG_REPACK_DIR/KeyTao.clean.pkg"
 
-echo "==> Removing AppleDouble metadata from installer pkg..."
-rm -rf "$PKG_REPACK_DIR"
-mkdir -p "$PKG_FLAT_DIR"
-pkgutil --expand "$PKG_OUTPUT" "$PKG_EXPANDED_DIR"
-cp "$PKG_EXPANDED_DIR/PackageInfo" "$PKG_FLAT_DIR/PackageInfo"
-mkbom -s "$PKG_PAYLOAD" "$PKG_FLAT_DIR/Bom"
-(
-    cd "$PKG_PAYLOAD"
-    find . -print | LC_ALL=C sort | COPYFILE_DISABLE=1 cpio -o --format odc 2>/dev/null | gzip -c
-) > "$PKG_FLAT_DIR/Payload"
-(
-    cd "$PKG_SCRIPTS"
-    find . -print | LC_ALL=C sort | COPYFILE_DISABLE=1 cpio -o --format odc 2>/dev/null | gzip -c
-) > "$PKG_FLAT_DIR/Scripts"
-(
-    cd "$PKG_FLAT_DIR"
-    xar --compression gzip \
-        --no-compress='Payload' \
-        --no-compress='Scripts' \
-        --prop-exclude='.*' \
-        -cf "$PKG_CLEAN_OUTPUT" \
-        Bom Payload Scripts PackageInfo
-)
-mv "$PKG_CLEAN_OUTPUT" "$PKG_OUTPUT"
-rm -rf "$PKG_REPACK_DIR"
+for arch in "${PACKAGE_ARCHS[@]}"; do
+    echo "==> Building KeyTao installer pkg ($arch)..."
+    rm -rf "$PKG_PAYLOAD"
+    mkdir -p "$PKG_PAYLOAD/Applications" "$PKG_PAYLOAD/Library/Input Methods"
+    payload_main_app="$PKG_PAYLOAD/Applications/KeyTao.app"
+    payload_ime_app="$PKG_PAYLOAD/Library/Input Methods/KeyTao.app"
+    output="$PKG_BUILD_DIR/keytao-app-${PACKAGE_VERSION}-macos"
+    if [[ "$arch" == universal ]]; then
+        ditto --noextattr --norsrc "$MAIN_APP" "$payload_main_app"
+        ditto --noextattr --norsrc "$IME_APP" "$payload_ime_app"
+    else
+        output+="-$arch"
+        ditto --noextattr --norsrc --arch "$arch" "$MAIN_APP" "$payload_main_app"
+        ditto --noextattr --norsrc --arch "$arch" "$IME_APP" "$payload_ime_app"
+    fi
+    find "$PKG_PAYLOAD" \( -name '._*' -o -name '.DS_Store' \) -delete
+    xattr -cr "$PKG_PAYLOAD" 2>/dev/null || true
+    xattr -cr "$PKG_SCRIPTS" 2>/dev/null || true
+    find "$PKG_PAYLOAD" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+    find "$PKG_SCRIPTS" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+    if [[ "$arch" != universal ]]; then
+        sign_bundle "$payload_main_app" "$ENTITLEMENTS"
+        sign_bundle "$payload_ime_app" "$PROJECT_DIR/crates/keytao-macos-ime/dev.entitlements.plist"
+    fi
 
-DMG_OUTPUT="$PKG_BUILD_DIR/keytao-app-${PACKAGE_VERSION}-macos.dmg"
-"$PROJECT_DIR/scripts/package-macos-dmg.sh" "$PKG_OUTPUT" "$DMG_OUTPUT"
-case "$SIGN_ID" in
-    -) ;;
-    *) codesign --force --sign "$SIGN_ID" "$DMG_OUTPUT" ;;
-esac
+    if [[ "$arch" == arm64 ]]; then
+        cat > "$PKG_SCRIPTS/preinstall" << 'SCRIPTEOF'
+#!/bin/bash
+if [[ "$(/usr/bin/uname -m)" != arm64 && "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)" != 1 ]]; then
+    echo "ERROR: This KeyTao installer requires an Apple silicon Mac." >&2
+    exit 1
+fi
+SCRIPTEOF
+        chmod +x "$PKG_SCRIPTS/preinstall"
+    else
+        rm -f "$PKG_SCRIPTS/preinstall"
+    fi
 
-echo ""
-echo "==> pkg complete: $PKG_OUTPUT"
+    pkgbuild \
+        --root "$PKG_PAYLOAD" \
+        --component-plist "$PKG_COMPONENTS" \
+        --scripts "$PKG_SCRIPTS" \
+        --identifier "ink.rea.keytao-app.pkg" \
+        --version "$PACKAGE_VERSION" \
+        --install-location "/" \
+        "$output.pkg"
+
+    echo "==> Removing AppleDouble metadata from installer pkg..."
+    rm -rf "$PKG_REPACK_DIR"
+    mkdir -p "$PKG_FLAT_DIR"
+    pkgutil --expand "$output.pkg" "$PKG_EXPANDED_DIR"
+    cp "$PKG_EXPANDED_DIR/PackageInfo" "$PKG_FLAT_DIR/PackageInfo"
+    mkbom -s "$PKG_PAYLOAD" "$PKG_FLAT_DIR/Bom"
+    (
+        cd "$PKG_PAYLOAD"
+        find . -print | LC_ALL=C sort | COPYFILE_DISABLE=1 cpio -o --format odc 2>/dev/null | gzip -c
+    ) > "$PKG_FLAT_DIR/Payload"
+    (
+        cd "$PKG_SCRIPTS"
+        find . -print | LC_ALL=C sort | COPYFILE_DISABLE=1 cpio -o --format odc 2>/dev/null | gzip -c
+    ) > "$PKG_FLAT_DIR/Scripts"
+    (
+        cd "$PKG_FLAT_DIR"
+        xar --compression gzip \
+            --no-compress='Payload' \
+            --no-compress='Scripts' \
+            --prop-exclude='.*' \
+            -cf "$PKG_CLEAN_OUTPUT" \
+            Bom Payload Scripts PackageInfo
+    )
+    mv "$PKG_CLEAN_OUTPUT" "$output.pkg"
+    rm -rf "$PKG_REPACK_DIR"
+
+    "$PROJECT_DIR/scripts/package-macos-dmg.sh" "$output.pkg" "$output.dmg"
+    case "$SIGN_ID" in
+        -) ;;
+        *) codesign --force --sign "$SIGN_ID" "$output.dmg" ;;
+    esac
+    echo "==> pkg complete: $output.pkg"
+done
 echo "    /Applications/KeyTao.app"
 echo "    /Library/Input Methods/KeyTao.app"
