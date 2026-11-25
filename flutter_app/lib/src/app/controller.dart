@@ -4286,8 +4286,19 @@ class AppController extends ChangeNotifier {
   Future<List<SystemFontFamilyDto>> listSystemFontFamilies() =>
       core.listSystemFontFamilies();
 
-  Future<Uint8List> loadSystemFontBytes({required String family}) =>
-      core.loadSystemFontBytes(family: family);
+  Future<String?> systemFontPath({required String family}) =>
+      core.systemFontPath(family: family);
+
+  Future<Uint8List> loadSystemFontBytes({required String family}) async {
+    late Uint8List bytes;
+    await core.loadSystemFontBytes(
+      family: family,
+      receive: (value) {
+        bytes = value;
+      },
+    );
+    return bytes;
+  }
 
   Map<String, dynamic> resolveThemeEditorPreview({
     required Map<String, dynamic> source,

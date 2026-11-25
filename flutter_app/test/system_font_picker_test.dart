@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/ui/candidate_panel_preview.dart';
 import 'package:keytao/src/ui/system_font_picker.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/theme_editor.dart';
@@ -13,13 +14,17 @@ import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
 
+const _fontChannel = MethodChannel('ink.rea.keytao/window');
+
 class _FontController extends ViewController {
-  _FontController() : super(BridgePlatform.macOs);
+  _FontController([super.platform = BridgePlatform.macOs]);
 
   final listing = Completer<List<SystemFontFamilyDto>>();
   final bytes = Completer<Uint8List>();
   int listingCalls = 0;
   final loads = <String>[];
+  final pathRequests = <String>[];
+  final fontPaths = <String, String>{};
   final writes = <(String, Object?)>[];
   final themeSource = <String, dynamic>{
     'version': 3,
@@ -39,6 +44,12 @@ class _FontController extends ViewController {
   Future<Uint8List> loadSystemFontBytes({required String family}) {
     loads.add(family);
     return bytes.future;
+  }
+
+  @override
+  Future<String?> systemFontPath({required String family}) async {
+    pathRequests.add(family);
+    return fontPaths[family];
   }
 
   @override
@@ -109,10 +120,21 @@ void main() {
   );
 
   testWidgets(
-    'listing is lazy, rows are virtual, and font loads are deduplicated',
+    'macOS listing is lazy and rows preview by name without loading bytes',
     (tester) async {
       final controller = _FontController();
       addTearDown(controller.dispose);
+      controller.fontPaths['Font 99'] = '/fixtures/font99.ttf';
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(_fontChannel, (call) async {
+        expect(call.method, 'resolveSystemFontFamily');
+        final family = call.arguments['family'];
+        if (family == 'Font 98') return false;
+        return family != 'Font 99' ||
+            call.arguments['path'] == controller.fontPaths[family];
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(_fontChannel, null));
       final catalog = SystemFontCatalog.forController(controller);
       expect(controller.listingCalls, 0);
       await tester.pumpWidget(
@@ -142,31 +164,64 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('默认'), findsOneWidget);
-      expect(controller.loads, isNotEmpty);
-      expect(controller.loads.length, lessThan(8));
-      expect(controller.loads, isNot(contains('Font 99')));
-      expect(identical(catalog.list(), catalog.list()), isTrue);
-      expect(identical(catalog.load('Font 0'), catalog.load('Font 0')), isTrue);
-      expect(controller.loads.where((font) => font == 'Font 0').length, 1);
-      await tester.drag(find.byType(ListView), const Offset(0, -1200));
-      await tester.pump();
-      expect(controller.loads.length, lessThan(20));
-      expect(controller.loads, isNot(contains('Font 99')));
-      final fontBytes = await rootBundle.load(
-        'packages/forui/assets/fonts/inter/Inter.ttf',
+      expect(
+        tester.widget<Text>(find.text('字体 0')).style?.fontFamily,
+        'Font 0',
       );
-      controller.bytes.complete(fontBytes.buffer.asUint8List());
+      expect(find.text('字体 99'), findsNothing);
+      expect(identical(catalog.list(), catalog.list()), isTrue);
+      await tester.drag(find.byType(ListView), const Offset(0, -1200));
       await tester.pumpAndSettle();
-      expect(catalog.alias('Font 0'), isNotNull);
+      expect(find.text('字体 0'), findsNothing);
+      await tester.enterText(find.byType(EditableText), 'Font 99');
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<Text>(find.text('字体 99')).style?.fontFamily,
+        'Font 99',
+      );
+      expect(controller.pathRequests, ['Font 99']);
+      await tester.enterText(find.byType(EditableText), 'Font 98');
+      await tester.pumpAndSettle();
+      expect(tester.widget<Text>(find.text('字体 98')).style?.fontFamily, isNull);
+      expect(controller.pathRequests, ['Font 99', 'Font 98']);
+      expect(controller.loads, isEmpty);
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('mobile font loads are deduplicated and registered', (
+    tester,
+  ) async {
+    final controller = _FontController(BridgePlatform.android);
+    addTearDown(controller.dispose);
+    final catalog = SystemFontCatalog.forController(controller);
+    await tester.runAsync(() async {
+      final fontBytes = await rootBundle.load(
+        'packages/forui/assets/fonts/inter/Inter.ttf',
+      );
+      controller.bytes.complete(Uint8List.sublistView(fontBytes));
+      final load = catalog.load('Font 0')!;
+      expect(catalog.usesFontLoader, isTrue);
+      expect(catalog.load('Font 0'), same(load));
+      final alias = await load;
+      expect(catalog.alias('Font 0'), alias);
+      expect(controller.loads, ['Font 0']);
+    });
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('picking a family writes its nearest supported weight', (
     tester,
   ) async {
     final controller = _FontController();
     addTearDown(controller.dispose);
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(_fontChannel, (call) async {
+      expect(call.method, 'resolveSystemFontFamily');
+      return true;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(_fontChannel, null));
     controller.listing.complete(const [
       SystemFontFamilyDto(
         family: 'Fixture Sans',
@@ -174,10 +229,10 @@ void main() {
         weights: ['regular', 'medium'],
       ),
     ]);
-    final fontBytes = await rootBundle.load(
-      'packages/forui/assets/fonts/inter/Inter.ttf',
-    );
-    controller.bytes.complete(fontBytes.buffer.asUint8List());
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1150, 1100);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
       KeyTaoTheme(
         platform: BridgePlatform.macOs,
@@ -188,7 +243,10 @@ void main() {
     expect(controller.listingCalls, 0);
     await tester.tap(find.text('字体'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('默认').first);
+    final field = find.byKey(
+      const ValueKey(('theme-control', 'common.font.family')),
+    );
+    await tester.tap(find.descendant(of: field, matching: find.text('默认')));
     await tester.pumpAndSettle();
     expect(controller.listingCalls, 1);
     await tester.tap(find.text('测试字体'));
@@ -213,6 +271,23 @@ void main() {
     );
     expect(medium.onPress, isNotNull);
     expect(medium.primary, isTrue);
+    final preview = find.byType(CandidatePanelPreview);
+    final hint = find.byWidgetPredicate(
+      (widget) => widget is Semantics && widget.properties.label == '模式提示预览',
+    );
+    for (final area in [preview, hint]) {
+      expect(
+        find.descendant(
+          of: area,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Text && widget.style?.fontFamily == 'Fixture Sans',
+          ),
+        ),
+        findsWidgets,
+      );
+    }
+    expect(controller.loads, isEmpty);
     expect(tester.takeException(), isNull);
   });
 }

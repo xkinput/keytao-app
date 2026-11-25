@@ -504,8 +504,16 @@ Future<String> getThemeEditor() =>
 Future<List<SystemFontFamilyDto>> listSystemFontFamilies() =>
     RustLib.instance.api.crateApiCoreListSystemFontFamilies();
 
-Future<Uint8List> loadSystemFontBytes({required String family}) =>
-    RustLib.instance.api.crateApiCoreLoadSystemFontBytes(family: family);
+Future<String?> systemFontPath({required String family}) =>
+    RustLib.instance.api.crateApiCoreSystemFontPath(family: family);
+
+Future<void> loadSystemFontBytes({
+  required String family,
+  required FutureOr<void> Function(Uint8List) receive,
+}) => RustLib.instance.api.crateApiCoreLoadSystemFontBytes(
+  family: family,
+  receive: receive,
+);
 
 Future<String> updateThemeEditor({
   required String target,

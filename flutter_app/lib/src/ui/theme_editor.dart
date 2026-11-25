@@ -1592,10 +1592,14 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
     }
 
     if (family == null || family.isEmpty) return preview(null);
-    return FutureBuilder<String>(
+    final fonts = _fonts;
+    final load = fonts.load(family);
+    if (load == null) return preview(family);
+    return FutureBuilder<String?>(
       key: ValueKey(('mode-hint-font', family)),
-      future: _fonts.load(family),
-      builder: (context, snapshot) => preview(snapshot.data ?? family),
+      future: load,
+      builder: (context, snapshot) =>
+          preview(snapshot.data ?? (fonts.usesFontLoader ? family : null)),
     );
   }
 }

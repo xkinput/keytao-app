@@ -1369,12 +1369,23 @@ pub async fn list_system_font_families() -> Result<Vec<SystemFontFamilyDto>, Str
     .map_err(|error| error.to_string())?
 }
 
-pub async fn load_system_font_bytes(family: String) -> Result<Vec<u8>, String> {
-    tokio::task::spawn_blocking(move || {
+pub async fn system_font_path(family: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || keytao_app_core::system_fonts::system_font_path(&family))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn load_system_font_bytes(
+    family: String,
+    receive: impl Fn(Vec<u8>) -> DartFnFuture<()> + Send + Sync,
+) -> Result<(), String> {
+    let bytes = tokio::task::spawn_blocking(move || {
         keytao_app_core::system_fonts::load_system_font_bytes(family)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    receive(bytes).await;
+    Ok(())
 }
 
 pub fn update_theme_editor(

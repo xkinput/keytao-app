@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use fontdb::{Database, ID, Language, Style};
+use fontdb::{Database, ID, Language, Source, Style};
+use keytao_theme::font_resolution::system_font_database;
 use ttf_parser::{Face, RawFace, Tag, name_id};
 
 #[derive(Clone, Debug)]
@@ -17,7 +18,7 @@ struct FamilyEntry {
 }
 
 struct FontCatalog {
-    database: Database,
+    database: &'static Database,
     families: BTreeMap<String, FamilyEntry>,
 }
 
@@ -74,21 +75,7 @@ fn chinese_family_name(face: &Face<'_>) -> Option<String> {
 
 fn catalog() -> &'static FontCatalog {
     CATALOG.get_or_init(|| {
-        let mut database = Database::new();
-        database.load_system_fonts();
-        #[cfg(target_os = "windows")]
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            database.load_fonts_dir(
-                std::path::PathBuf::from(local_app_data).join("Microsoft/Windows/Fonts"),
-            );
-        }
-        #[cfg(target_os = "android")]
-        {
-            database.load_fonts_dir("/system/fonts");
-            database.load_fonts_dir("/product/fonts");
-        }
-        #[cfg(target_os = "ios")]
-        database.load_fonts_dir("/System/Library/Fonts");
+        let database = system_font_database();
         let mut families = BTreeMap::<String, FamilyEntry>::new();
         for info in database.faces().filter(|info| info.style == Style::Normal) {
             let Some((family, _)) = info.families.first() else {
@@ -162,6 +149,17 @@ pub fn list_system_font_families() -> Result<Vec<SystemFontFamily>, String> {
     Ok(families)
 }
 
+pub fn system_font_path(family: &str) -> Option<String> {
+    let catalog = catalog();
+    let face = catalog
+        .database
+        .face(catalog.families.get(family)?.preview_face)?;
+    match &face.source {
+        Source::File(path) | Source::SharedFile(path, _) => path.to_str().map(str::to_owned),
+        Source::Binary(_) => None,
+    }
+}
+
 pub fn load_system_font_bytes(family: String) -> Result<Vec<u8>, String> {
     let catalog = catalog();
     let entry = catalog
@@ -195,7 +193,23 @@ fn standalone_face(data: &[u8], index: u32) -> Result<Vec<u8>, String> {
     let table_directory_size = count
         .checked_mul(16)
         .ok_or_else(|| "Font has too many tables".to_owned())?;
-    let mut font = vec![0u8; 12 + usize::from(table_directory_size)];
+    let directory_len = 12 + usize::from(table_directory_size);
+    let mut font_len = directory_len;
+    for record in raw.table_records {
+        let table = raw
+            .table(record.tag)
+            .ok_or_else(|| "Invalid font table offset".to_owned())?;
+        font_len = table
+            .len()
+            .checked_next_multiple_of(4)
+            .and_then(|len| font_len.checked_add(len))
+            .filter(|len| u32::try_from(*len).is_ok())
+            .ok_or_else(|| "Font is too large".to_owned())?;
+    }
+    let mut font = Vec::new();
+    font.try_reserve_exact(font_len)
+        .map_err(|error| error.to_string())?;
+    font.resize(directory_len, 0);
     let cff = raw.table(Tag::from_bytes(b"CFF ")).is_some()
         || raw.table(Tag::from_bytes(b"CFF2")).is_some();
     font[..4].copy_from_slice(if cff { b"OTTO" } else { b"\0\x01\0\0" });
@@ -255,7 +269,7 @@ mod tests {
 
     #[test]
     fn collection_preview_extracts_selected_face_and_rebuilds_checksum() {
-        let mut collection = vec![0u8; 92];
+        let mut collection = vec![0u8; 93];
         collection[..4].copy_from_slice(b"ttcf");
         collection[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         collection[8..12].copy_from_slice(&2u32.to_be_bytes());
@@ -270,9 +284,10 @@ mod tests {
         collection[44..48].copy_from_slice(&4u32.to_be_bytes());
         collection[60..64].copy_from_slice(b"head");
         collection[68..72].copy_from_slice(&80u32.to_be_bytes());
-        collection[72..76].copy_from_slice(&12u32.to_be_bytes());
+        collection[72..76].copy_from_slice(&13u32.to_be_bytes());
         collection[80..84].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         collection[88..92].fill(0xff);
+        collection[92] = 0x7f;
 
         let font = standalone_face(&collection, 1).unwrap();
         let raw = RawFace::parse(&font, 0).unwrap();
@@ -282,6 +297,7 @@ mod tests {
             raw.table(Tag::from_bytes(b"head")).unwrap()[..8],
             collection[80..88]
         );
+        assert_eq!(font[40..], [0x7f, 0, 0, 0]);
         assert_eq!(checksum(&font), 0xB1B0_AFBA);
     }
 }
