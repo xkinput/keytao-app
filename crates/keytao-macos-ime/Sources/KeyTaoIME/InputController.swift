@@ -39,9 +39,9 @@ final class KeyTaoInputController: IMKInputController {
     private let chordEventSource = CGEventSource(stateID: .combinedSessionState)
     private var hasMarkedText = false
     private var lastPreeditCursor = 0
-    private var lastCursorRect = NSRect.zero
     private var hasLoggedMissingCursorRect = false
     private var keyPanelQueries: PanelQueries?
+    private var panelQueryRevision: UInt64 = 0
     private var reloadObserver: NSObjectProtocol?
     private var deploymentObserver: NSObjectProtocol?
     private var showingDeploymentHint = false
@@ -134,7 +134,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     override func activateServer(_ sender: Any!) {
-        inputContextGeneration.invalidate()
+        invalidateInputContext()
         resetDeploymentInput()
         clearPendingChordReleases()
         let client = sender as? IMKTextInput
@@ -150,7 +150,7 @@ final class KeyTaoInputController: IMKInputController {
 
     override func deactivateServer(_ sender: Any!) {
         defer { keytao_log_drain_key_stats() }
-        let generation = inputContextGeneration.invalidate()
+        let generation = invalidateInputContext()
         clearPendingChordReleases()
         isActive = false
         resetDeploymentInput()
@@ -356,7 +356,7 @@ final class KeyTaoInputController: IMKInputController {
     // MARK: Commit / cancel
 
     override func commitComposition(_ sender: Any!) {
-        let generation = inputContextGeneration.invalidate()
+        let generation = invalidateInputContext()
         resetDeploymentInput()
         clearPendingChordReleases()
         guard hasComposition else {
@@ -371,7 +371,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     override func cancelComposition() {
-        let generation = inputContextGeneration.invalidate()
+        let generation = invalidateInputContext()
         resetDeploymentInput()
         endComposition(commit: false, client: client())
         guard inputContextGeneration.isCurrent(generation) else { return }
@@ -411,16 +411,18 @@ final class KeyTaoInputController: IMKInputController {
     private func apply(_ state: KeyTaoImeState, to sender: Any?, theme: ImeTheme = ImeThemeManager.shared.theme()) {
         let client = sender as? IMKTextInput
         let generation = inputContextGeneration.current
+        let didCommit = !state.committed.isEmpty
 
-        if !state.committed.isEmpty {
+        if didCommit {
+            invalidatePanelQueries()
+            inputContextGeneration.prepareForCommit(hasComposition: state.hasComposition)
             if hasMarkedText {
                 guard inputContextGeneration.perform(generation, {
-                    clearMarkedText(client: client)
+                    clearMarkedText(client: client, preserveCursorRect: true)
                 }) else { return }
             }
             guard inputContextGeneration.perform(generation, {
-                keyPanelQueries?.invalidate()
-                defer { keyPanelQueries?.invalidate() }
+                defer { invalidatePanelQueries() }
                 measureKeyStage(\.clientIPC) {
                     _ = client?.insertText(
                         state.committed,
@@ -433,6 +435,14 @@ final class KeyTaoInputController: IMKInputController {
         // Publish ownership before the host call, so a reentrant commit/cancel
         // sees the composition being installed and can end it immediately.
         hasComposition = state.hasComposition
+        if hasComposition, !hasMarkedText {
+            // Some clients return invalid caret geometry once marked text is installed.
+            invalidatePanelQueries()
+            let rect = measureKeyStage(\.clientIPC) {
+                cursorRect(for: client, refreshAnchor: didCommit)
+            }
+            guard rect != nil, inputContextGeneration.isCurrent(generation) else { return }
+        }
         guard inputContextGeneration.perform(generation, {
             updateMarkedText(state, client: client, theme: theme)
         }) else { return }
@@ -448,6 +458,7 @@ final class KeyTaoInputController: IMKInputController {
             normalCandidateModel = panelModel(for: state, theme: theme)
         }
         KeyTaoRuntime.shared.refreshDeploymentHint()
+        guard inputContextGeneration.isCurrent(generation) else { return }
         showDeploymentIndicator(client: client, theme: theme)
         if let hint = state.switchHint, inputContextGeneration.isCurrent(generation) {
             showModeIndicator(
@@ -458,13 +469,15 @@ final class KeyTaoInputController: IMKInputController {
         }
     }
 
-    private func clearMarkedText(client: IMKTextInput?) {
+    private func clearMarkedText(client: IMKTextInput?, preserveCursorRect: Bool = false) {
         // Client callbacks can synchronously reenter the controller. Release
         // ownership before asking the client to clear our marked text.
         let ownedMarkedText = hasMarkedText
         hasComposition = false
         lastPreeditCursor = 0
         hasMarkedText = false
+        invalidatePanelQueries()
+        if !preserveCursorRect { inputContextGeneration.clearCursorRect() }
         guard ownedMarkedText, let client else { return }
         setMarkedText(
             "",
@@ -490,8 +503,9 @@ final class KeyTaoInputController: IMKInputController {
         )
         switch decision {
         case .none:
-            if lastPreeditCursor != 0 { keyPanelQueries?.caret = nil }
             lastPreeditCursor = 0
+            invalidatePanelQueries()
+            inputContextGeneration.clearCursorRect()
         case .clear:
             clearMarkedText(client: client)
         case let .placeholder(replacementRange):
@@ -557,8 +571,8 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func setMarkedText(_ text: Any, client: IMKTextInput, selectionRange: NSRange, replacementRange: NSRange) {
-        keyPanelQueries?.invalidate()
-        defer { keyPanelQueries?.invalidate() }
+        invalidatePanelQueries()
+        defer { invalidatePanelQueries() }
         measureKeyStage(\.clientIPC) {
             client.setMarkedText(text, selectionRange: selectionRange, replacementRange: replacementRange)
         }
@@ -599,10 +613,10 @@ final class KeyTaoInputController: IMKInputController {
             hideCandidates()
             return
         }
-        let windowLevel = measureKeyStage(\.clientIPC) { panelLevel(for: client) }
-        guard inputContextGeneration.isCurrent(generation), isActive else { return }
-        let rect = measureKeyStage(\.clientIPC) { cursorRect(for: client) }
-        guard inputContextGeneration.isCurrent(generation), isActive else { return }
+        guard let windowLevel = measureKeyStage(\.clientIPC, { panelLevel(for: client) }),
+              inputContextGeneration.isCurrent(generation), isActive else { return }
+        guard let rect = measureKeyStage(\.clientIPC, { cursorRect(for: client) }),
+              inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = candidatePanel ?? CandidatePanel()
         candidatePanel = panel
 
@@ -629,10 +643,14 @@ final class KeyTaoInputController: IMKInputController {
     private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?, theme: ImeTheme) {
         let generation = inputContextGeneration.current
         guard isActive, !showingDeploymentHint else { return }
-        let windowLevel = measureKeyStage(\.clientIPC) { panelLevel(for: client) }
-        guard inputContextGeneration.isCurrent(generation), isActive else { return }
-        let rect = measureKeyStage(\.clientIPC) { cursorRect(for: client) }
-        guard inputContextGeneration.isCurrent(generation), isActive else { return }
+        guard let windowLevel = measureKeyStage(\.clientIPC, { panelLevel(for: client) }),
+              inputContextGeneration.isCurrent(generation), isActive else { return }
+        guard let rect = measureKeyStage(\.clientIPC, { cursorRect(for: client) }),
+              inputContextGeneration.isCurrent(generation), isActive else { return }
+        guard !hasComposition || rect.isUsableTextInputRect else {
+            hideModeIndicator()
+            return
+        }
         let panel = modeIndicatorPanel ?? ModeIndicatorPanel()
         modeIndicatorPanel = panel
         measureKeyStage(\.panelUpdate) {
@@ -685,11 +703,13 @@ final class KeyTaoInputController: IMKInputController {
 
     /// IMKit tells the input method which level the client's window sits at, and
     /// expects self-drawn candidate windows one level above it.
-    private func panelLevel(for client: IMKTextInput?) -> NSWindow.Level {
+    private func panelLevel(for client: IMKTextInput?) -> NSWindow.Level? {
         guard let client else { return .popUpMenu }
         let queries = panelQueries(for: client)
         if let level = queries?.level { return level }
+        let revision = panelQueryRevision
         let clientLevel = Int(client.windowLevel())
+        guard panelQueryRevision == revision else { return nil }
         let level = clientLevel > 0
             ? NSWindow.Level(rawValue: max(clientLevel + 1, NSWindow.Level.popUpMenu.rawValue))
             : .popUpMenu
@@ -701,6 +721,11 @@ final class KeyTaoInputController: IMKInputController {
         guard let queries = keyPanelQueries, queries.client === client,
               inputContextGeneration.isCurrent(queries.generation) else { return nil }
         return queries
+    }
+
+    private func invalidatePanelQueries() {
+        panelQueryRevision &+= 1
+        keyPanelQueries?.invalidate()
     }
 
     private func handleCandidateSelection(index: Int, client: IMKTextInput?) {
@@ -721,13 +746,16 @@ final class KeyTaoInputController: IMKInputController {
         apply(state, to: client)
     }
 
-    private func cursorRect(for client: IMKTextInput?) -> NSRect {
+    private func cursorRect(for client: IMKTextInput?, refreshAnchor: Bool = false) -> NSRect? {
         let queries = panelQueries(for: client)
         if let rect = queries?.caret { return rect }
-        if let rect = resolveCursorRect(for: client) {
-            lastCursorRect = rect
+        let revision = panelQueryRevision
+        let rect = inputContextGeneration.cursorRect(isComposing: hasComposition, refreshAnchor: refreshAnchor) {
+            let rect = resolveCursorRect(for: client)
+            // A synchronous client callback may have moved on to another composition.
+            return panelQueryRevision == revision ? rect : nil
         }
-        let rect = lastCursorRect.isUsableTextInputRect ? lastCursorRect : .zero
+        guard panelQueryRevision == revision else { return nil }
         queries?.caret = rect
         return rect
     }
@@ -802,6 +830,12 @@ final class KeyTaoInputController: IMKInputController {
     // MARK: Session helpers
 
     @discardableResult
+    private func invalidateInputContext() -> UInt64 {
+        invalidatePanelQueries()
+        return inputContextGeneration.invalidate()
+    }
+
+    @discardableResult
     private func ensureSession() -> UnsafeMutableRawPointer? {
         if let session {
             if isActive { keytao_set_focused_session(session) }
@@ -821,7 +855,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func runtimeDidReload() {
-        let generation = inputContextGeneration.invalidate()
+        let generation = invalidateInputContext()
         clearPendingChordReleases()
         modifierTap.clear()
         guard isActive else {
