@@ -199,7 +199,7 @@ void main() {
       touches = 0;
       await tester.drag(webView, const Offset(160, 0));
       await tester.pumpAndSettle();
-      expect(controller.activePage, AppPage.debug);
+      expect(controller.activePage, AppPage.about);
       expect(touches, 0);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
