@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
@@ -139,6 +140,17 @@ void main() {
     final page = find.byKey(const PageStorageKey('website'));
     expect(tester.getRect(page).top, 32);
     final webView = find.byType(WebViewWidget);
+    expect(
+      tester
+          .widget<WebViewWidget>(webView)
+          .gestureRecognizers
+          .map((f) => f.type),
+      unorderedEquals([
+        VerticalDragGestureRecognizer,
+        TapGestureRecognizer,
+        LongPressGestureRecognizer,
+      ]),
+    );
     final expandedTop = tester.getTopLeft(webView).dy;
     toolbarFraction.value = .6;
     await tester.pump();
@@ -189,11 +201,15 @@ void main() {
       const sessionPath = '/api/auth/app-webview-session';
       const sessionHeader = 'X-KeyTao-App-Session';
       final creations = <Map<Object?, Object?>>[];
+      final disposals = <Object?>[];
       final requests = <Map<Object?, Object?>>[];
       final messenger = tester.binding.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(channel, (call) async {
         if (call.method == 'create') {
           creations.add(call.arguments as Map<Object?, Object?>);
+        }
+        if (call.method == 'dispose') {
+          disposals.add((call.arguments as Map)['controllerId']);
         }
         if (call.method == 'loadRequest') {
           requests.add(call.arguments as Map<Object?, Object?>);
@@ -234,11 +250,30 @@ void main() {
       );
       expect(creations.single['initialHeaders'], {sessionHeader: 'clear'});
       await finishLoading('https://keytao.rea.ink');
-      await tester.tap(find.byKey(const ValueKey('nav-about')));
-      await tester.pumpAndSettle();
+      final firstId = creations.single['controllerId'];
+      final about = find.byKey(const ValueKey('nav-about'));
+      await tester.tap(about);
+      await tester.pump();
+      await tester.pump(const Duration(minutes: 4));
       await tester.tap(website);
       await tester.pumpAndSettle();
       expect(creations, hasLength(1));
+      expect(disposals, isEmpty);
+
+      await tester.tap(about);
+      await tester.pump();
+      await tester.pump(const Duration(minutes: 4, seconds: 59));
+      expect(disposals, isEmpty);
+      await tester.pump(const Duration(seconds: 1));
+      expect(disposals, [firstId]);
+      expect(creations, hasLength(1));
+
+      await tester.tap(website);
+      await tester.pump();
+      expect(creations, hasLength(2));
+      expect(creations.last['controllerId'], isNot(firstId));
+      await finishLoading('https://keytao.rea.ink');
+
       final external = find.ancestor(
         of: find.byWidgetPredicate(
           (widget) => widget is Icon && widget.semanticLabel == '在浏览器中打开',

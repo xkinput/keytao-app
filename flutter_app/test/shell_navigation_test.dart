@@ -1,8 +1,11 @@
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/options.dart' show AppPage;
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:webview_core/webview_core.dart' show WebViewWidget;
 
 import 'view_fixture.dart';
 
@@ -33,6 +36,27 @@ double offsetOf(WidgetTester tester, String page) => tester
     .position
     .value
     .dx;
+
+const _webViewChannel = MethodChannel('com.infradise.webview_core');
+
+Future<Finder> openWebsite(WidgetTester tester) async {
+  await tester.tap(find.byKey(const ValueKey('nav-website')));
+  await tester.pump();
+  final webView = find.byType(WebViewWidget);
+  final browser = tester.widget<WebViewWidget>(webView).controller;
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    _webViewChannel.name,
+    _webViewChannel.codec.encodeMethodCall(
+      MethodCall('onPageFinished', {
+        'controllerId': browser.controllerId,
+        'url': 'https://keytao.rea.ink',
+      }),
+    ),
+    null,
+  );
+  await tester.pumpAndSettle();
+  return webView;
+}
 
 void main() {
   for (final platform in [BridgePlatform.macOs, BridgePlatform.android]) {
@@ -96,6 +120,125 @@ void main() {
       expect(controller.activePage, AppPage.input);
     });
   }
+
+  testWidgets(
+    'mobile website receives vertical drags and yields horizontal swipes',
+    (tester) async {
+      final messenger = tester.binding.defaultBinaryMessenger;
+      var touches = 0;
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+        call,
+      ) async {
+        if (call.method == 'create') return 0;
+        if (call.method == 'resize') return call.arguments;
+        if (call.method == 'touch') touches++;
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          null,
+        ),
+      );
+      final controller = await mountShell(tester, BridgePlatform.android);
+      final webView = await openWebsite(tester);
+
+      await tester.tap(webView);
+      expect(touches, 2);
+
+      touches = 0;
+      final selection = await tester.startGesture(tester.getCenter(webView));
+      await tester.pump(kLongPressTimeout);
+      expect(touches, greaterThan(0));
+      await selection.up();
+
+      touches = 0;
+      final vertical = await tester.startGesture(tester.getCenter(webView));
+      await vertical.moveBy(const Offset(0, -120));
+      expect(touches, greaterThan(0));
+      await vertical.up();
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.website);
+
+      touches = 0;
+      await tester.drag(webView, const Offset(160, 0));
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.debug);
+      expect(touches, 0);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets('desktop trackpad scrolls the page without switching tabs', (
+    tester,
+  ) async {
+    final controller = await mountShell(tester, BridgePlatform.macOs);
+    tester.view.physicalSize = const Size(1000, 500);
+    await tester.pumpAndSettle();
+    final page = find.byKey(const PageStorageKey('ime'));
+    final scroll = tester
+        .state<ScrollableState>(
+          find.descendant(of: page, matching: find.byType(Scrollable)).first,
+        )
+        .position;
+    const start = Offset(200, 250);
+
+    await tester.dragFrom(
+      start,
+      const Offset(0, -140),
+      kind: PointerDeviceKind.trackpad,
+    );
+    await tester.pumpAndSettle();
+    expect(scroll.pixels, greaterThan(0));
+    expect(controller.activePage, AppPage.input);
+
+    for (final kind in [PointerDeviceKind.trackpad, PointerDeviceKind.mouse]) {
+      await tester.dragFrom(
+        const Offset(700, 170),
+        const Offset(-440, 0),
+        kind: kind,
+      );
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.input, reason: kind.name);
+    }
+  });
+
+  testWidgets('Windows website receives trackpad pans without switching tabs', (
+    tester,
+  ) async {
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final wheelEvents = <Map<Object?, Object?>>[];
+    messenger.setMockMethodCallHandler(_webViewChannel, (call) async {
+      if (call.method == 'pointerEvent') {
+        final args = call.arguments as Map<Object?, Object?>;
+        if (args['kind'] == 'wheel') wheelEvents.add(args);
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(_webViewChannel, null),
+    );
+    final controller = await mountShell(tester, BridgePlatform.windows);
+    final webView = await openWebsite(tester);
+
+    await tester.drag(
+      webView,
+      const Offset(0, -140),
+      kind: PointerDeviceKind.trackpad,
+    );
+    await tester.pumpAndSettle();
+    expect(wheelEvents.any((event) => (event['deltaY'] as num) < 0), isTrue);
+    expect(controller.activePage, AppPage.website);
+
+    await tester.drag(
+      webView,
+      const Offset(440, 0),
+      kind: PointerDeviceKind.trackpad,
+    );
+    await tester.pumpAndSettle();
+    expect(wheelEvents.any((event) => (event['deltaX'] as num) < 0), isTrue);
+    expect(controller.activePage, AppPage.website);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('mobile chrome uses less space while scrolling', (tester) async {
     await mountShell(tester, BridgePlatform.android);
