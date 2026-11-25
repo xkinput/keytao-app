@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 var failures: [String] = []
 
@@ -48,6 +51,63 @@ expect(
     effects,
     ["old host", "new context preedit"],
     "a reentrant new context survives while the obsolete outer panel update is stopped"
+)
+
+let caretContext = KeyTaoInputContextGeneration()
+let beforeMarked = CGRect(x: 40, y: 200, width: 0, height: 18)
+let whileMarked = CGRect(x: 60, y: 200, width: 0, height: 18)
+_ = caretContext.cursorRect(isComposing: true) { beforeMarked }
+expect(
+    caretContext.cursorRect(isComposing: true) { nil },
+    beforeMarked,
+    "a rejected marked-text query uses the pre-marked anchor instead of the mouse fallback"
+)
+expect(
+    caretContext.cursorRect(isComposing: true) { whileMarked },
+    whileMarked,
+    "a usable current caret takes priority for the current update"
+)
+expect(
+    caretContext.cursorRect(isComposing: true) { nil },
+    beforeMarked,
+    "a later rejected query still falls back to the composition start"
+)
+
+caretContext.prepareForCommit(hasComposition: true)
+_ = caretContext.cursorRect(isComposing: true, refreshAnchor: true) { nil }
+expect(
+    caretContext.cursorRect(isComposing: true) { nil },
+    beforeMarked,
+    "committing into a new composition keeps the old anchor when the pre-marked query is rejected"
+)
+
+let nextBeforeMarked = CGRect(x: 80, y: 200, width: 0, height: 18)
+caretContext.prepareForCommit(hasComposition: true)
+_ = caretContext.cursorRect(isComposing: true, refreshAnchor: true) { nextBeforeMarked }
+expect(
+    caretContext.cursorRect(isComposing: true) { nil },
+    nextBeforeMarked,
+    "committing into a new composition replaces the anchor when the pre-marked query succeeds"
+)
+
+caretContext.prepareForCommit(hasComposition: false)
+_ = caretContext.cursorRect(isComposing: false) { whileMarked }
+expect(
+    caretContext.cursorRect(isComposing: true) { nil },
+    .zero,
+    "committing clears the anchor and an idle hint does not seed the next composition"
+)
+
+_ = caretContext.cursorRect(isComposing: true) { beforeMarked }
+let obsoleteRect = caretContext.cursorRect(isComposing: true, refreshAnchor: true) {
+    caretContext.invalidate()
+    return whileMarked
+}
+expect(obsoleteRect, .zero, "a query that crosses a context change is discarded")
+expect(
+    caretContext.cursorRect(isComposing: true) { nil },
+    .zero,
+    "a context change clears the old anchor and an obsolete query cannot restore it"
 )
 
 let notFoundRange = NSRange(location: NSNotFound, length: 0)

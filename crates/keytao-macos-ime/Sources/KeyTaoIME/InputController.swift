@@ -39,7 +39,6 @@ final class KeyTaoInputController: IMKInputController {
     private let chordEventSource = CGEventSource(stateID: .combinedSessionState)
     private var hasMarkedText = false
     private var lastPreeditCursor = 0
-    private var lastCursorRect = NSRect.zero
     private var hasLoggedMissingCursorRect = false
     private var reloadObserver: NSObjectProtocol?
     private var deploymentObserver: NSObjectProtocol?
@@ -352,11 +351,13 @@ final class KeyTaoInputController: IMKInputController {
     private func apply(_ state: KeyTaoImeState, to sender: Any?, theme: ImeTheme = ImeThemeManager.shared.theme()) {
         let client = sender as? IMKTextInput
         let generation = inputContextGeneration.current
+        let didCommit = !state.committed.isEmpty
 
-        if !state.committed.isEmpty {
+        if didCommit {
+            inputContextGeneration.prepareForCommit(hasComposition: state.hasComposition)
             if hasMarkedText {
                 guard inputContextGeneration.perform(generation, {
-                    clearMarkedText(client: client)
+                    clearMarkedText(client: client, preserveCursorRect: true)
                 }) else { return }
             }
             guard inputContextGeneration.perform(generation, {
@@ -370,6 +371,13 @@ final class KeyTaoInputController: IMKInputController {
         // Publish ownership before the host call, so a reentrant commit/cancel
         // sees the composition being installed and can end it immediately.
         hasComposition = state.hasComposition
+        if hasComposition, !hasMarkedText {
+            // Some clients return invalid caret geometry once marked text is installed.
+            _ = inputContextGeneration.cursorRect(isComposing: true, refreshAnchor: didCommit) {
+                resolveCursorRect(for: client)
+            }
+            guard inputContextGeneration.isCurrent(generation) else { return }
+        }
         guard inputContextGeneration.perform(generation, {
             updateMarkedText(state, client: client, theme: theme)
         }) else { return }
@@ -385,6 +393,7 @@ final class KeyTaoInputController: IMKInputController {
             normalCandidateModel = panelModel(for: state, theme: theme)
         }
         KeyTaoRuntime.shared.refreshDeploymentHint()
+        guard inputContextGeneration.isCurrent(generation) else { return }
         showDeploymentIndicator(client: client, theme: theme)
         if let hint = state.switchHint, inputContextGeneration.isCurrent(generation) {
             showModeIndicator(
@@ -395,13 +404,14 @@ final class KeyTaoInputController: IMKInputController {
         }
     }
 
-    private func clearMarkedText(client: IMKTextInput?) {
+    private func clearMarkedText(client: IMKTextInput?, preserveCursorRect: Bool = false) {
         // Client callbacks can synchronously reenter the controller. Release
         // ownership before asking the client to clear our marked text.
         let ownedMarkedText = hasMarkedText
         hasComposition = false
         lastPreeditCursor = 0
         hasMarkedText = false
+        if !preserveCursorRect { inputContextGeneration.clearCursorRect() }
         guard ownedMarkedText, let client else { return }
         client.setMarkedText(
             "",
@@ -427,6 +437,7 @@ final class KeyTaoInputController: IMKInputController {
         switch decision {
         case .none:
             lastPreeditCursor = 0
+            inputContextGeneration.clearCursorRect()
         case .clear:
             clearMarkedText(client: client)
         case let .placeholder(replacementRange):
@@ -642,16 +653,9 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func cursorRect(for client: IMKTextInput?) -> NSRect {
-        if let rect = resolveCursorRect(for: client) {
-            lastCursorRect = rect
-            return rect
+        inputContextGeneration.cursorRect(isComposing: hasComposition) {
+            resolveCursorRect(for: client)
         }
-
-        if lastCursorRect.isUsableTextInputRect {
-            return lastCursorRect
-        }
-
-        return .zero
     }
 
     private func resolveCursorRect(for client: IMKTextInput?) -> NSRect? {
