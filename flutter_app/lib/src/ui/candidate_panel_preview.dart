@@ -160,10 +160,15 @@ class CandidatePanelPreview extends StatelessWidget {
     if (family == null || family.isEmpty || catalog == null) {
       return _build(context, family);
     }
-    return FutureBuilder<String>(
+    final load = catalog.load(family);
+    if (load == null) return _build(context, family);
+    return FutureBuilder<String?>(
       key: ValueKey(family),
-      future: catalog.load(family),
-      builder: (context, snapshot) => _build(context, snapshot.data ?? family),
+      future: load,
+      builder: (context, snapshot) => _build(
+        context,
+        snapshot.data ?? (catalog.usesFontLoader ? family : null),
+      ),
     );
   }
 

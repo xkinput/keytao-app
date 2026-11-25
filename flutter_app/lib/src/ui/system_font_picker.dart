@@ -45,8 +45,10 @@ class SystemFontCatalog {
   final AppController controller;
   Future<List<SystemFontFamilyDto>>? _listing;
   List<SystemFontFamilyDto>? families;
-  final _loads = <String, Future<String>>{};
+  final _loads = <String, Future<String?>>{};
   final _aliases = <String, String>{};
+
+  bool get usesFontLoader => controller.isMobile;
 
   String? alias(String family) => _aliases[family];
 
@@ -63,15 +65,46 @@ class SystemFontCatalog {
         },
       );
 
-  Future<String> load(String family) => _loads.putIfAbsent(family, () async {
-    final alias = 'keytao-system-font-${_nextAlias++}';
-    final bytes = await controller.loadSystemFontBytes(family: family);
-    final loader = FontLoader(alias)
-      ..addFont(Future.value(ByteData.sublistView(bytes)));
-    await loader.load();
-    _aliases[family] = alias;
-    return alias;
-  });
+  Future<String?>? load(String family) {
+    if (usesFontLoader) {
+      return _loads.putIfAbsent(family, () async {
+        final alias = 'keytao-system-font-${_nextAlias++}';
+        final bytes = await controller.loadSystemFontBytes(family: family);
+        final loader = FontLoader(alias)
+          ..addFont(Future.value(ByteData.sublistView(bytes)));
+        await loader.load();
+        _aliases[family] = alias;
+        return alias;
+      });
+    }
+    if (controller.info.platform == BridgePlatform.macOs) {
+      return _loads.putIfAbsent(family, () => _resolveMacFamily(family));
+    }
+    return null;
+  }
+
+  Future<String?> _resolveMacFamily(String family) async {
+    const window = MethodChannel('ink.rea.keytao/window');
+    final arguments = {'family': family};
+    try {
+      if (await window.invokeMethod<bool>(
+            'resolveSystemFontFamily',
+            arguments,
+          ) ==
+          true) {
+        return family;
+      }
+      final path = await controller.systemFontPath(family: family);
+      if (path == null) return null;
+      final resolved = await window.invokeMethod<bool>(
+        'resolveSystemFontFamily',
+        {...arguments, 'path': path},
+      );
+      return resolved == true ? family : null;
+    } on MissingPluginException {
+      return family;
+    }
+  }
 }
 
 Future<String?> showThemeFontPicker(
@@ -147,7 +180,8 @@ class _SystemFontPickerState extends State<SystemFontPicker> {
   late final _listing = widget.catalog.list();
   String _query = '';
 
-  Widget _row(String family, String name, String? alias) => Semantics(
+  Widget _row(String family, String name, String? previewFamily) => Semantics(
+    key: ValueKey(family),
     selected: widget.selected == family,
     button: true,
     child: FTappable(
@@ -162,7 +196,7 @@ class _SystemFontPickerState extends State<SystemFontPicker> {
                 name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontFamily: alias),
+                style: TextStyle(fontFamily: previewFamily),
               ),
             ),
             if (widget.selected == family)
@@ -211,9 +245,13 @@ class _SystemFontPickerState extends State<SystemFontPicker> {
               itemBuilder: (context, index) {
                 if (index == 0) return _row('', '默认', null);
                 final font = filtered[index - 1];
-                return FutureBuilder<String>(
+                final load = widget.catalog.load(font.family);
+                if (load == null) {
+                  return _row(font.family, font.displayName, font.family);
+                }
+                return FutureBuilder<String?>(
                   key: ValueKey(font.family),
-                  future: widget.catalog.load(font.family),
+                  future: load,
                   builder: (context, snapshot) =>
                       _row(font.family, font.displayName, snapshot.data),
                 );

@@ -1,8 +1,10 @@
 import Cocoa
+import CoreText
 import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
   private var themeSharePicker: NSSharingServicePicker?
+  private let fontQueue = DispatchQueue(label: "ink.rea.keytao.system-fonts", qos: .userInitiated)
 
   override func awakeFromNib() {
     let windowController = FlutterViewController()
@@ -28,12 +30,39 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "shareThemeFile":
         self?.shareThemeFile(call.arguments, result: result)
+      case "resolveSystemFontFamily":
+        guard let self, let arguments = call.arguments as? [String: String],
+          let family = arguments["family"], !family.isEmpty
+        else {
+          result(false)
+          return
+        }
+        self.fontQueue.async {
+          let resolved = Self.resolveSystemFontFamily(family, path: arguments["path"])
+          DispatchQueue.main.async { result(resolved) }
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
     }
 
     super.awakeFromNib()
+  }
+
+  private static func resolveSystemFontFamily(_ family: String, path: String?) -> Bool {
+    let key = kCTFontFamilyNameAttribute
+    let descriptor = CTFontDescriptorCreateWithAttributes([key: family] as CFDictionary)
+    let mandatory = NSSet(object: key) as CFSet
+    func matches() -> Bool {
+      guard let match = CTFontDescriptorCreateMatchingFontDescriptor(descriptor, mandatory) else {
+        return false
+      }
+      return (CTFontDescriptorCopyAttribute(match, key) as? String) == family
+    }
+    if matches() { return true }
+    guard let path else { return false }
+    CTFontManagerRegisterFontsForURL(URL(fileURLWithPath: path) as CFURL, .process, nil)
+    return matches()
   }
 
   private func shareThemeFile(_ arguments: Any?, result: FlutterResult) {
