@@ -545,6 +545,7 @@ async fn install_package(
     receipt: InstallReceipt,
     progress: impl Fn(u8, &str) + Send + Sync,
 ) -> Result<InstallReceipt, String> {
+    let _operation = keytao_core::runtime_log::AppOperation::start("install_easy_english");
     if let Some(bytes) = receipt.manifest_bytes(MANIFEST)? {
         parse_manifest(&bytes)?;
     }

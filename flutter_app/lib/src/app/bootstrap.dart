@@ -3,9 +3,11 @@ import 'dart:io';
 import '../platform/android_host.dart';
 import '../platform/ios_host.dart';
 import '../rust/api/core.dart' as core;
+import '../rust/api/timing.dart';
 import '../rust/api/types.dart';
 import '../rust/frb_generated.dart';
 import 'controller.dart';
+import 'operation_timing.dart';
 
 const _desktopCommands = {'--deploy', '--disable-engine', '--enable-engine'};
 
@@ -66,18 +68,43 @@ Future<({AppController controller, OnboardingDto onboarding})> bootstrap({
   List<String> args = const [],
   void Function()? onMigratingPackages,
 }) async {
+  final stopwatch = Stopwatch()..start();
   await RustLib.init();
+  final rustLibInitUs = stopwatch.elapsedMicroseconds;
   const android = AndroidHost();
   final platform = hostPlatform();
+  stopwatch.reset();
   final config = await bridgeConfig(platform);
+  final bridgeConfigUs = stopwatch.elapsedMicroseconds;
+  stopwatch.reset();
   final info = await core.initCore(config: config);
+  if (platform != BridgePlatform.android && platform != BridgePlatform.ios) {
+    recordBootstrapTimings(
+      rustLibInitUs: rustLibInitUs,
+      bridgeConfigUs: bridgeConfigUs,
+      initCoreUs: stopwatch.elapsedMicroseconds,
+    );
+    enableAppOperationTiming();
+  }
   if (platform == BridgePlatform.android) await android.adoptAppLogger();
   final controller = AppController(info: info, android: android);
   try {
-    await controller.connectEvents(args: args);
-    await controller.startPackageMigration(onPending: onMigratingPackages);
-    final onboarding = await core.onboarding();
-    await controller.refreshState();
+    await measureAppOperation(
+      AppOperationName.connectEvents,
+      () => controller.connectEvents(args: args),
+    );
+    await measureAppOperation(
+      AppOperationName.startPackageMigration,
+      () => controller.startPackageMigration(onPending: onMigratingPackages),
+    );
+    final onboarding = await measureAppOperation(
+      AppOperationName.onboarding,
+      core.onboarding,
+    );
+    await measureAppOperation(
+      AppOperationName.refreshState,
+      controller.refreshState,
+    );
     return (controller: controller, onboarding: onboarding);
   } catch (_) {
     controller.dispose();

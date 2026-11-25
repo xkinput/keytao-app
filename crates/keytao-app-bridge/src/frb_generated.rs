@@ -27,6 +27,7 @@
 
 // Section: imports
 
+use crate::api::timing::*;
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
 use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
@@ -39,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 874236287;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 592300794;
 
 // Section: executor
 
@@ -3505,6 +3506,44 @@ fn wire__crate__api__core__read_runtime_log_impl(
         },
     )
 }
+fn wire__crate__api__timing__record_bootstrap_timings_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "record_bootstrap_timings",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_rust_lib_init_us = <u32>::sse_decode(&mut deserializer);
+            let api_bridge_config_us = <u32>::sse_decode(&mut deserializer);
+            let api_init_core_us = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Ok::<_, ()>({
+                    crate::api::timing::record_bootstrap_timings(
+                        api_rust_lib_init_us,
+                        api_bridge_config_us,
+                        api_init_core_us,
+                    );
+                })?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__core__release_user_words_stock_cache_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -4772,6 +4811,38 @@ fn wire__crate__api__core__set_website_settings_impl(
         },
     )
 }
+fn wire__crate__api__timing__start_app_operation_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "start_app_operation",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_operation =
+                <crate::api::timing::AppOperationName>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok =
+                    Ok::<_, ()>(crate::api::timing::start_app_operation(api_operation))?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__core__switch_package_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -5469,6 +5540,9 @@ fn decode_DartFn_Inputs_list_prim_u_8_strict_Output_unit_AnyhowException(
         ))
     }
 }
+flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
+    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>
+);
 
 // Section: dart2rust
 
@@ -5477,6 +5551,16 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <String>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode for AppOperationSpan {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <RustOpaqueMoi<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>,
+        >>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
     }
 }
 
@@ -5493,6 +5577,16 @@ impl SseDecode for std::collections::HashMap<String, String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <Vec<(String, String)>>::sse_decode(deserializer);
         return inner.into_iter().collect();
+    }
+}
+
+impl SseDecode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <usize>::sse_decode(deserializer);
+        return decode_rust_opaque_moi(inner);
     }
 }
 
@@ -5640,6 +5734,26 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
             config_path: var_configPath,
             reload_stamp_path: var_reloadStampPath,
             message: var_message,
+        };
+    }
+}
+
+impl SseDecode for crate::api::timing::AppOperationName {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::timing::AppOperationName::ConnectEvents,
+            1 => crate::api::timing::AppOperationName::StartPackageMigration,
+            2 => crate::api::timing::AppOperationName::Onboarding,
+            3 => crate::api::timing::AppOperationName::RefreshState,
+            4 => crate::api::timing::AppOperationName::ReadState,
+            5 => crate::api::timing::AppOperationName::RefreshOnResume,
+            6 => crate::api::timing::AppOperationName::RefreshLiveSchemaSwitches,
+            7 => crate::api::timing::AppOperationName::PreviewCandidates,
+            8 => crate::api::timing::AppOperationName::LoadSystemFont,
+            9 => crate::api::timing::AppOperationName::OpenWebsite,
+            _ => unreachable!("Invalid variant for AppOperationName: {}", inner),
         };
     }
 }
@@ -6421,6 +6535,17 @@ impl SseDecode for Option<String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<AppOperationSpan> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<AppOperationSpan>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -7377,146 +7502,146 @@ fn pde_ffi_dispatcher_primary_impl(
         95 => wire__crate__api__core__preview_theme_import_impl(port, ptr, rust_vec_len, data_len),
         96 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
         97 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__core__release_user_words_stock_cache_impl(
+        99 => wire__crate__api__core__release_user_words_stock_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        99 => wire__crate__api__core__remote_scheme_logo_impl(port, ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__core__remove_downloaded_archive_impl(
+        100 => wire__crate__api__core__remote_scheme_logo_impl(port, ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        101 => {
+        102 => {
             wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        102 => wire__crate__api__core__rename_theme_impl(port, ptr, rust_vec_len, data_len),
-        103 => {
+        103 => wire__crate__api__core__rename_theme_impl(port, ptr, rust_vec_len, data_len),
+        104 => {
             wire__crate__api__core__repair_scheme_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        106 => wire__crate__api__core__rime_frost_status_impl(port, ptr, rust_vec_len, data_len),
-        107 => wire__crate__api__core__rime_ice_status_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__crate__api__core__rime_lssp_status_impl(port, ptr, rust_vec_len, data_len),
-        109 => wire__crate__api__core__rime_mint_status_impl(port, ptr, rust_vec_len, data_len),
-        110 => {
+        107 => wire__crate__api__core__rime_frost_status_impl(port, ptr, rust_vec_len, data_len),
+        108 => wire__crate__api__core__rime_ice_status_impl(port, ptr, rust_vec_len, data_len),
+        109 => wire__crate__api__core__rime_lssp_status_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__crate__api__core__rime_mint_status_impl(port, ptr, rust_vec_len, data_len),
+        111 => {
             wire__crate__api__core__save_rime_sync_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        111 => wire__crate__api__core__search_stock_words_impl(port, ptr, rust_vec_len, data_len),
-        112 => wire__crate__api__core__select_schema_impl(port, ptr, rust_vec_len, data_len),
-        113 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        112 => wire__crate__api__core__search_stock_words_impl(port, ptr, rust_vec_len, data_len),
+        113 => wire__crate__api__core__select_schema_impl(port, ptr, rust_vec_len, data_len),
+        114 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        114 => wire__crate__api__core__set_app_update_prereleases_impl(
+        115 => wire__crate__api__core__set_app_update_prereleases_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        115 => {
+        116 => {
             wire__crate__api__core__set_candidate_page_size_impl(port, ptr, rust_vec_len, data_len)
         }
-        116 => {
+        117 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        117 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        118 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        118 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
+        119 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        119 => wire__crate__api__core__set_ime_show_tray_mode_indicator_impl(
+        120 => wire__crate__api__core__set_ime_show_tray_mode_indicator_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        120 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        121 => wire__crate__api__core__set_input_engine_impl(port, ptr, rust_vec_len, data_len),
-        122 => {
+        121 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        122 => wire__crate__api__core__set_input_engine_impl(port, ptr, rust_vec_len, data_len),
+        123 => {
             wire__crate__api__core__set_input_engine_enabled_impl(port, ptr, rust_vec_len, data_len)
         }
-        123 => {
+        124 => {
             wire__crate__api__core__set_package_easy_english_impl(port, ptr, rust_vec_len, data_len)
         }
-        124 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
-        125 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
-        126 => {
+        125 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
+        126 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
+        127 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        127 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
-        128 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        128 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        129 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        129 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
+        130 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        130 => {
+        131 => {
             wire__crate__api__core__set_user_word_removed_impl(port, ptr, rust_vec_len, data_len)
         }
-        131 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
-        132 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
-        133 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
-        134 => wire__crate__api__core__system_font_path_impl(port, ptr, rust_vec_len, data_len),
-        135 => {
+        132 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
+        134 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
+        135 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
+        136 => wire__crate__api__core__system_font_path_impl(port, ptr, rust_vec_len, data_len),
+        137 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        136 => {
+        138 => {
             wire__crate__api__core__trash_package_orphans_impl(port, ptr, rust_vec_len, data_len)
         }
-        137 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
-        138 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        139 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        140 => {
+        139 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
+        140 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        141 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        142 => {
             wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        141 => {
+        143 => {
             wire__crate__api__core__wanxiang_grammar_status_impl(port, ptr, rust_vec_len, data_len)
         }
-        142 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        143 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        144 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        145 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        144 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        146 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        145 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        146 => wire__crate__api__core__windows_pending_ime_action_impl(
+        147 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        148 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        147 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        149 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        148 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        150 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -7534,19 +7659,36 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        104 => wire__crate__api__core__resolve_candidate_panel_preview_impl(
+        98 => wire__crate__api__timing__record_bootstrap_timings_impl(ptr, rust_vec_len, data_len),
+        105 => wire__crate__api__core__resolve_candidate_panel_preview_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        105 => {
+        106 => {
             wire__crate__api__core__resolve_theme_editor_preview_impl(ptr, rust_vec_len, data_len)
         }
+        133 => wire__crate__api__timing__start_app_operation_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
 
 // Section: rust2dart
+
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<AppOperationSpan> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
+            .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<AppOperationSpan> {}
+
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<AppOperationSpan>> for AppOperationSpan {
+    fn into_into_dart(self) -> FrbWrapper<AppOperationSpan> {
+        self.into()
+    }
+}
 
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::types::AccountStatsDto {
@@ -7678,6 +7820,35 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::AndroidImeInputSetting
     for crate::api::types::AndroidImeInputSettingsDto
 {
     fn into_into_dart(self) -> crate::api::types::AndroidImeInputSettingsDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::timing::AppOperationName {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::ConnectEvents => 0.into_dart(),
+            Self::StartPackageMigration => 1.into_dart(),
+            Self::Onboarding => 2.into_dart(),
+            Self::RefreshState => 3.into_dart(),
+            Self::ReadState => 4.into_dart(),
+            Self::RefreshOnResume => 5.into_dart(),
+            Self::RefreshLiveSchemaSwitches => 6.into_dart(),
+            Self::PreviewCandidates => 7.into_dart(),
+            Self::LoadSystemFont => 8.into_dart(),
+            Self::OpenWebsite => 9.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::timing::AppOperationName
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::timing::AppOperationName>
+    for crate::api::timing::AppOperationName
+{
+    fn into_into_dart(self) -> crate::api::timing::AppOperationName {
         self
     }
 }
@@ -9088,6 +9259,13 @@ impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     }
 }
 
+impl SseEncode for AppOperationSpan {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
+    }
+}
+
 impl SseEncode for flutter_rust_bridge::DartOpaque {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -9099,6 +9277,17 @@ impl SseEncode for std::collections::HashMap<String, String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<(String, String)>>::sse_encode(self.into_iter().collect(), serializer);
+    }
+}
+
+impl SseEncode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        let (ptr, size) = self.sse_encode_raw();
+        <usize>::sse_encode(ptr, serializer);
+        <i32>::sse_encode(size, serializer);
     }
 }
 
@@ -9188,6 +9377,30 @@ impl SseEncode for crate::api::types::AndroidImeInputSettingsDto {
         <Option<String>>::sse_encode(self.config_path, serializer);
         <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
         <String>::sse_encode(self.message, serializer);
+    }
+}
+
+impl SseEncode for crate::api::timing::AppOperationName {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::timing::AppOperationName::ConnectEvents => 0,
+                crate::api::timing::AppOperationName::StartPackageMigration => 1,
+                crate::api::timing::AppOperationName::Onboarding => 2,
+                crate::api::timing::AppOperationName::RefreshState => 3,
+                crate::api::timing::AppOperationName::ReadState => 4,
+                crate::api::timing::AppOperationName::RefreshOnResume => 5,
+                crate::api::timing::AppOperationName::RefreshLiveSchemaSwitches => 6,
+                crate::api::timing::AppOperationName::PreviewCandidates => 7,
+                crate::api::timing::AppOperationName::LoadSystemFont => 8,
+                crate::api::timing::AppOperationName::OpenWebsite => 9,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -9778,6 +9991,16 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<AppOperationSpan> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <AppOperationSpan>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::types::AccountUserDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -10350,6 +10573,7 @@ mod io {
     // Section: imports
 
     use super::*;
+    use crate::api::timing::*;
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
@@ -10359,6 +10583,20 @@ mod io {
     // Section: boilerplate
 
     flutter_rust_bridge::frb_generated_boilerplate_io!();
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_keytao_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>::increment_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_keytao_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>::decrement_strong_count(ptr as _);
+    }
 }
 #[cfg(not(target_family = "wasm"))]
 pub use io::*;
@@ -10372,6 +10610,7 @@ mod web {
     // Section: imports
 
     use super::*;
+    use crate::api::timing::*;
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
@@ -10383,6 +10622,20 @@ mod web {
     // Section: boilerplate
 
     flutter_rust_bridge::frb_generated_boilerplate_web!();
+
+    #[wasm_bindgen]
+    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>::increment_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AppOperationSpan>>::decrement_strong_count(ptr as _);
+    }
 }
 #[cfg(target_family = "wasm")]
 pub use web::*;

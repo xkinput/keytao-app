@@ -11,6 +11,7 @@ use keytao_core::{
         PackageDeployTarget, STAGED_INPUTS_MANIFEST, STAGED_INPUTS_PREFIX, StagedInput,
         preserves_runtime_data,
     },
+    runtime_log::AppOperation,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -443,6 +444,7 @@ fn prepare_targets(
     stage: bool,
     package_key: Option<&str>,
 ) -> Result<(Vec<PackageDeployTarget>, Vec<tempfile::TempDir>), CoreError> {
+    let _operation = AppOperation::start("materialize_runtime");
     let settings = read_settings(control_root)?;
     let store = PackageStore::new(core);
     let addons: BTreeSet<_> = installed_addons(&store)?

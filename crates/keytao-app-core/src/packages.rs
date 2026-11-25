@@ -1,6 +1,6 @@
 use crate::package_store::PackageStore;
 use crate::{Core, CoreError};
-use keytao_core::engine_choice::PackageEngine;
+use keytao_core::{engine_choice::PackageEngine, runtime_log::AppOperation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -153,6 +153,7 @@ pub async fn download_scheme_package(
     source: &str,
     user_root: &Path,
 ) -> Result<(), CoreError> {
+    let _operation = AppOperation::start("download_scheme_package");
     crate::package_migration::ensure_before_write(core, user_root).await?;
     if crate::scheme::is_local_scheme_key(scheme_key) {
         sync_git_scheme(core, user_root, scheme_key).await?;
@@ -303,6 +304,7 @@ pub(crate) fn store_cloud_archive_reader(
     user_root: &Path,
     origin: Option<&str>,
 ) -> Result<String, CoreError> {
+    let _operation = AppOperation::start("store_cloud_archive");
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     let store = PackageStore::new(core);
     let dir = store.checked_root()?;
@@ -851,6 +853,7 @@ pub(crate) async fn repair_package_for_redeploy_with(
     mode: RepairMode,
     download_fresh: impl AsyncFnOnce(&Core, &Path, String) -> Result<(), CoreError>,
 ) -> Result<Option<String>, CoreError> {
+    let _operation = AppOperation::start("repair_scheme_package");
     let key = package_key.strip_prefix("builtin/").unwrap_or(package_key);
     validate_relative(key).map_err(CoreError::Other)?;
     crate::deploy::ensure_not_using_libjd(core, root)?;

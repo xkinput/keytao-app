@@ -5,6 +5,7 @@ use crate::{
     scheme::{api_error_message, client_builder},
     user_words::UserWord,
 };
+use keytao_core::runtime_log::AppOperation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -956,6 +957,7 @@ pub async fn sync_user_dictionary(
     token: String,
     confirmed_deletions: Option<UserDictionaryDeletionConfirmation>,
 ) -> Result<UserDictionarySyncResult, CoreError> {
+    let _operation = AppOperation::start("sync_user_dictionary");
     sync_user_dictionary_at(core, host, token, API_BASE, confirmed_deletions).await
 }
 

@@ -11,11 +11,11 @@ serde_json = "1"
 sha2 = "0.10"
 dirs = { workspace = true }
 
-[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 # The Rust librime API is linked by native platform IME frontends.
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", target_os = "android", target_os = "ios"))'.dependencies]

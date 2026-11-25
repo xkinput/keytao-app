@@ -87,6 +87,7 @@ fn run_librime_test_in_child(name: &str) -> bool {
     true
 }
 
+use keytao_core::runtime_log::AppOperation;
 use std::{
     collections::BTreeMap,
     fs,
@@ -118,9 +119,14 @@ impl Core {
         sink: Arc<dyn EventSink>,
         download_cancel: tokio::sync::watch::Sender<u64>,
     ) -> Result<Arc<Core>, CoreError> {
-        let (state, recovered_state_file) = match AppState::load(&env.data_dir) {
+        let loaded = {
+            let _operation = AppOperation::start("app_state_load");
+            AppState::load(&env.data_dir)
+        };
+        let (state, recovered_state_file) = match loaded {
             Ok(state) => (state, None),
             Err(CoreError::Parse(_)) => {
+                let _operation = AppOperation::start("app_state_quarantine");
                 let mut millis = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|error| CoreError::Other(error.to_string()))?
@@ -152,13 +158,25 @@ impl Core {
             user_words: Mutex::new(user_words::UserWordsState::default()),
             package_word_support: Mutex::default(),
         });
-        package_activation::recover(&core)?;
-        *core.lock_state() = AppState::load(&core.env.data_dir)?;
-        if let Err(error) = package_store::PackageStore::new(&core).migrate() {
-            tracing::warn!(%error, "Package store migration will retry at next startup");
+        {
+            let _operation = AppOperation::start("package_activation_recover");
+            package_activation::recover(&core)?;
         }
-        if let Err(error) = addon_store::migrate_snow_package(&core) {
-            tracing::warn!(%error, "Snow package migration will retry at next startup");
+        {
+            let _operation = AppOperation::start("app_state_reload");
+            *core.lock_state() = AppState::load(&core.env.data_dir)?;
+        }
+        {
+            let _operation = AppOperation::start("package_store_migrate");
+            if let Err(error) = package_store::PackageStore::new(&core).migrate() {
+                tracing::warn!(%error, "Package store migration will retry at next startup");
+            }
+        }
+        {
+            let _operation = AppOperation::start("snow_package_migrate");
+            if let Err(error) = addon_store::migrate_snow_package(&core) {
+                tracing::warn!(%error, "Snow package migration will retry at next startup");
+            }
         }
         Ok(core)
     }
@@ -193,6 +211,7 @@ impl Core {
         let Some(local_schema_dir) = local_schema_dir else {
             return Ok(());
         };
+        let _operation = AppOperation::start("initialize_onboarding");
         let installed = scheme::check_local_schema(self, Some(local_schema_dir))?.installed;
         let mut state = self.lock_state();
         if state.onboarding_initialized {

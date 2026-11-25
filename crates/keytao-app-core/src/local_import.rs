@@ -2,6 +2,7 @@ use super::{PackageMeta, excluded_from_manifest, safe_path, sha256_reader, valid
 use crate::generic_rime::{DEFAULT_MAX_EXPANDED_BYTES, NOMEDIA_FILE, has_excluded_hidden_component};
 use crate::package_store::{PackageStore, Staging};
 use crate::{Core, CoreError, package_fs::context};
+use keytao_core::runtime_log::AppOperation;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -454,6 +455,7 @@ pub(super) fn import_local_scheme_with(
     scheme_key: Option<&str>,
     options: LocalImportOptions<'_>,
 ) -> Result<String, CoreError> {
+    let _operation = AppOperation::start("import_local_scheme");
     let directory = directory
         .canonicalize()
         .map_err(|error| context("读取方案目录", directory, error))?;

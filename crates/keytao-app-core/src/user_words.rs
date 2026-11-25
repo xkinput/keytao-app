@@ -1,4 +1,5 @@
 use crate::{Core, CoreError};
+use keytao_core::runtime_log::AppOperation;
 use serde::Serialize;
 use std::{
     borrow::Cow,
@@ -255,6 +256,7 @@ struct PackageIndex {
 
 impl PackageIndex {
     fn build(package: &PackageData, dictionaries: &DictionaryFiles) -> Result<Self, CoreError> {
+        let _operation = AppOperation::start("build_user_words_index");
         let mut index = Self::default();
         package.visit_stock_entries(dictionaries, |word, code| index.push(word, code))?;
         index.finish();
@@ -584,6 +586,7 @@ pub fn take_user_words_report(core: &Core, scheme: &str) -> Result<UserWordsRepo
 }
 
 pub fn remember_reconciliation(core: &Core, scheme: &str, root: &Path, remove: bool) {
+    let _operation = AppOperation::start("reconcile_user_words");
     let report =
         reconcile_user_words(core, scheme, root, remove).map_err(|error| error.to_string());
     core.user_words
@@ -598,6 +601,7 @@ pub fn compare_user_words(
     scheme: &str,
     root: &Path,
 ) -> Result<Vec<UserWordComparison>, CoreError> {
+    let _operation = AppOperation::start("compare_user_words");
     let mut state = core
         .user_words
         .lock()

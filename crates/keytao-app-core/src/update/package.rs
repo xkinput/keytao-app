@@ -3,6 +3,7 @@ use crate::{
     Core,
     download::{download_with_progress, emit_progress},
 };
+use keytao_core::runtime_log::AppOperation;
 use reqwest::{Client, redirect::Policy};
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -211,6 +212,7 @@ fn persist_verified_package(
 }
 
 pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, String> {
+    let _operation = AppOperation::start("download_app_update");
     let mut package = core.app_update_package.lock().await;
     let version = validate_version(&core.env().app_version, requested, includes_prereleases(core))?;
     let Some(suffix) = tokio::task::spawn_blocking(package_suffix)
@@ -278,6 +280,7 @@ pub async fn open_app_update_package(
     requested: &str,
     restart: bool,
 ) -> Result<String, String> {
+    let _operation = AppOperation::start("open_app_update_package");
     let package = core.app_update_package.lock().await;
     let version = validate_version(&core.env().app_version, requested, includes_prereleases(core))?;
     #[cfg(target_os = "linux")]

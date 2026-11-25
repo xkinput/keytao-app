@@ -3,7 +3,10 @@ use crate::CoreEvent;
 use crate::ime_status::linux::launch_keytao_ime;
 
 use crate::{Core, CoreError, ime_host::ImeHost};
-use keytao_core::{DeployProgress, DeployStep, RuntimeDirs, isolated_deploy::PackageDeployTarget};
+use keytao_core::{
+    DeployProgress, DeployStep, RuntimeDirs, isolated_deploy::PackageDeployTarget,
+    runtime_log::AppOperation,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -145,6 +148,7 @@ async fn deploy_isolated_android<F: std::future::Future<Output = String>>(
     mode: IsolatedDeploy<'_>,
     mut deploy: impl FnMut() -> F,
 ) -> Result<(), String> {
+    let _operation = AppOperation::start("deploy");
     let active_before = RuntimeDirs::active_package_key(root);
     match deploy_isolated_android_once(core, root, mode, &mut deploy).await {
         Ok(()) => Ok(()),
@@ -639,6 +643,7 @@ async fn switch_prepared_package(
     key: &str,
     schema_id: Option<&str>,
 ) -> Result<(), String> {
+    let _operation = AppOperation::start("activate_scheme_package");
     #[cfg(target_os = "windows")]
     let public = if crate::windows_public_schemas::is_default_user_root(root) {
         // Prepare the snapshot before the private reload needs the Windows engine lock.
@@ -871,6 +876,7 @@ pub async fn preview_candidates(
     host: impl ImeHost,
     size: Option<u8>,
 ) -> Result<keytao_core::CandidatePreview, String> {
+    let _operation = AppOperation::start("preview_candidates_native");
     if size.is_some_and(|size| !(1..=10).contains(&size)) {
         return Err("Candidate page size must be between 1 and 10".into());
     }
@@ -963,6 +969,7 @@ async fn deploy_isolated_desktop(
     root: &Path,
     mode: IsolatedDeploy<'_>,
 ) -> Result<DeployResult, String> {
+    let _operation = AppOperation::start("deploy");
     let active_before = RuntimeDirs::active_package_key(root);
     match deploy_isolated_desktop_once(core, root, mode).await {
         Ok(result) => Ok(result),
@@ -1137,6 +1144,7 @@ async fn deploy_isolated_in_process_target(
     shared: std::path::PathBuf,
     mode: IsolatedDeploy<'_>,
 ) -> Result<DeployResult, String> {
+    let _operation = AppOperation::start("deploy");
     deploy_isolated_in_process_with_repair(core, root, shared, mode, |failed| async move {
         repair_failed_packages(core, root, &failed).await
     })

@@ -10,6 +10,7 @@ use crate::{
     package_store::PackageStore,
     scheme::build_client,
 };
+use keytao_core::runtime_log::AppOperation;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -893,6 +894,7 @@ pub async fn import_git_scheme(
     display_name: &str,
     scheme_key: Option<&str>,
 ) -> Result<String, CoreError> {
+    let _operation = AppOperation::start("import_git_scheme");
     crate::package_migration::ensure_before_write(core, user_root).await?;
 
     let (normalized, host) = normalize_config(config)?;

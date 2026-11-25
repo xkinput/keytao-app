@@ -3,6 +3,7 @@ use crate::{
     scheme::build_client,
 };
 use futures_util::StreamExt;
+use keytao_core::runtime_log::AppOperation;
 use std::{
     io::{Seek, Write},
     time::Duration,
@@ -19,6 +20,7 @@ pub(crate) fn emit_progress(core: &Core, stage: &str, percent: u32, message: &st
 }
 
 pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreError> {
+    let _operation = AppOperation::start("download_scheme_archive");
     let mut cancel = core.download_cancel.subscribe();
     cancel.borrow_and_update();
     let result: Result<_, String> = async {
