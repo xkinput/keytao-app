@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 import tarfile
 from tempfile import NamedTemporaryFile, TemporaryDirectory
+from time import sleep
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 import zipfile
 
@@ -47,8 +49,17 @@ def verified_download(url, digest):
         data = cached.read_bytes()
         if hashlib.sha256(data).hexdigest() == digest:
             return data
-    with urlopen(url, timeout=45) as response:
-        data = response.read(MAX_FILE_BYTES + 1)
+    for delay in (2, 4, 8, None):
+        try:
+            with urlopen(url, timeout=45) as response:
+                data = response.read(MAX_FILE_BYTES + 1)
+            break
+        except (URLError, TimeoutError) as error:
+            if delay is None or (
+                isinstance(error, HTTPError) and error.code != 429 and error.code < 500
+            ):
+                raise
+            sleep(delay)
     if len(data) > MAX_FILE_BYTES or hashlib.sha256(data).hexdigest() != digest:
         raise ValueError(f"Unexpected SHA-256 or size for {url}")
     with NamedTemporaryFile(dir=CACHE, delete=False) as staging:
