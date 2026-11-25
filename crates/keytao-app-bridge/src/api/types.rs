@@ -84,6 +84,8 @@ pub struct InstalledPackageDto {
     pub engine: String,
     #[serde(default)]
     pub git: Option<GitSchemeConfigDto>,
+    pub build_cache_bytes: Option<u64>,
+    pub ime_jd_cache_bytes: Option<u64>,
 }
 
 pub struct LibjdStatusDto {

@@ -779,6 +779,8 @@ class InstalledPackageDto {
   final String? logoPath;
   final String engine;
   final GitSchemeConfigDto? git;
+  final BigInt? buildCacheBytes;
+  final BigInt? imeJdCacheBytes;
 
   const InstalledPackageDto({
     required this.schemeKey,
@@ -792,6 +794,8 @@ class InstalledPackageDto {
     this.logoPath,
     this.engine = r"rime",
     this.git,
+    this.buildCacheBytes,
+    this.imeJdCacheBytes,
   });
 
   @override
@@ -806,7 +810,9 @@ class InstalledPackageDto {
       displayName.hashCode ^
       logoPath.hashCode ^
       engine.hashCode ^
-      git.hashCode;
+      git.hashCode ^
+      buildCacheBytes.hashCode ^
+      imeJdCacheBytes.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -823,7 +829,9 @@ class InstalledPackageDto {
           displayName == other.displayName &&
           logoPath == other.logoPath &&
           engine == other.engine &&
-          git == other.git;
+          git == other.git &&
+          buildCacheBytes == other.buildCacheBytes &&
+          imeJdCacheBytes == other.imeJdCacheBytes;
 }
 
 class IsolatedPackageDto {

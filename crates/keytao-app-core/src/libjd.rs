@@ -220,6 +220,7 @@ pub async fn import_package(
             &stage.path().join("schema.json"),
             &serde_json::to_vec(&schema)?,
         )?;
+        let _engine_selection = lock_engine_selection();
         let activate = || {
             emit_progress(&core, "converting", 98, "正在切换方案…");
             update_settings(

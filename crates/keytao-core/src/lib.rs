@@ -853,6 +853,8 @@ mod runtime_libjd;
 pub use runtime_libjd::{android_libjd_enabled, android_libjd_ready, set_android_libjd_data_root};
 #[cfg(target_os = "ios")]
 pub use runtime_libjd::active_libjd_schema;
+#[cfg(target_os = "linux")]
+pub use runtime_libjd::LIBJD_DICTIONARY_MISSING;
 
 // ── Native desktop engine (guarded at the module level) ──────────────────────
 
