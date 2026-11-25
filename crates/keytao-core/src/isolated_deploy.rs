@@ -528,6 +528,19 @@ fn deploy_package(
         }
         return Err(failure);
     }
+    for edit in &edits {
+        if edit.staged_source.is_none()
+            && edit.previous_sha256.is_some()
+            && (edit.relative == Path::new("essay.txt") || edit.relative.starts_with("opencc"))
+        {
+            crate::rt_log!(
+                crate::runtime_log::Level::Info,
+                "app",
+                "runtime_common_file_removed",
+                path = user.join(&edit.relative).display().to_string()
+            );
+        }
+    }
     publish
 }
 

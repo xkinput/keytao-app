@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -756,7 +756,65 @@ fn stage_owner_exited(pid: u32) -> bool {
     }
 }
 
-fn reclaim_abandoned_work(root: &Path) {
+fn stage_lease(root: &Path) -> io::Result<File> {
+    let metadata = fs::symlink_metadata(root)?;
+    if !metadata.is_dir() || is_link(&metadata) {
+        return Err(io::Error::other("invalid add-on staging root"));
+    }
+    crate::package_fs::file_lease(&root.join(".keytao-wanxiang-stage.lock"), false)
+}
+
+pub(crate) fn reclaim_abandoned_work(root: &Path) {
+    let Ok(_operation) = OPERATION.try_lock() else {
+        return;
+    };
+    let Ok(_lease) = stage_lease(root) else {
+        return;
+    };
+    reclaim_abandoned_work_locked(root);
+}
+
+fn is_stage_scratch(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    if is_link(&metadata)
+        || name.contains(".userdb")
+        || name.ends_with(".leveldb")
+        || name == "sync"
+        || crate::install::is_protected_user_file(&name)
+    {
+        return false;
+    }
+    metadata.is_file()
+        || (metadata.is_dir()
+            && fs::read_dir(path).is_ok_and(|mut entries| {
+                entries.all(|entry| entry.is_ok_and(|entry| is_stage_scratch(&entry.path())))
+            }))
+}
+
+fn is_abandoned_stage(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !is_link(&meta))
+        && fs::read_dir(path).is_ok_and(|mut entries| {
+            entries.all(|entry| {
+                entry.is_ok_and(|entry| {
+                    entry.file_name().to_str().is_some_and(|name| {
+                        matches!(
+                            name,
+                            "download.zip" | "wanxiang.zip" | "stroke.zip" | "files" | "commit"
+                                | "manifest.json" | "grammar-schema.yaml"
+                        ) || name.starts_with(".keytao-wanxiang-grammar-")
+                    }) && is_stage_scratch(&entry.path())
+                })
+            })
+        })
+}
+
+fn reclaim_abandoned_work_locked(root: &Path) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -780,14 +838,11 @@ fn reclaim_abandoned_work(root: &Path) {
             continue;
         }
         let path = entry.path();
-        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir() && !is_link(&meta))
-            && ["backup", "source-projection"].into_iter().all(|name| {
-                fs::symlink_metadata(path.join(name))
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            })
-            && let Err(error) = fs::remove_dir_all(&path)
-        {
-            tracing::warn!(path = %path.display(), %error, "failed to reclaim abandoned add-on staging directory");
+        if is_abandoned_stage(&path) {
+            match fs::remove_dir_all(&path) {
+                Ok(()) => tracing::info!(path = %path.display(), "reclaimed abandoned add-on staging directory"),
+                Err(error) => tracing::warn!(path = %path.display(), %error, "failed to reclaim abandoned add-on staging directory"),
+            }
         }
     }
 }
@@ -807,6 +862,7 @@ pub struct InstallReceipt {
     #[cfg(windows)]
     pub(crate) public_sources: Vec<String>,
     _operation: MutexGuard<'static, ()>,
+    _stage_lease: File,
 }
 
 impl InstallReceipt {
@@ -823,8 +879,9 @@ impl InstallReceipt {
             .try_lock()
             .map_err(|_| "附加方案安装或卸载正在进行中")?;
         fs::create_dir_all(root).map_err(|e| format!("创建用户目录失败：{e}"))?;
+        let stage_lease = stage_lease(root).map_err(|e| format!("锁定附加方案暂存目录失败：{e}"))?;
         let root = root.canonicalize().map_err(|e| e.to_string())?;
-        reclaim_abandoned_work(&root);
+        reclaim_abandoned_work_locked(&root);
         let work = loop {
             let path = root.join(format!(
                 "{STAGE_PREFIX}{}-{}",
@@ -850,6 +907,7 @@ impl InstallReceipt {
             #[cfg(windows)]
             public_sources: Vec::new(),
             _operation: operation,
+            _stage_lease: stage_lease,
         })
     }
 
@@ -988,6 +1046,9 @@ impl InstallReceipt {
                     }
                 }
                 return Err(error);
+            }
+            if let Err(error) = crate::package_orphans::prune_runtime_build(&root, id) {
+                tracing::warn!(package = id, %error, "failed to prune uninstalled add-on runtime build");
             }
             Ok(())
         })?;
@@ -1133,7 +1194,31 @@ impl InstallReceipt {
         Ok(())
     }
 
+    fn discard_staged_downloads(&self) {
+        if !fs::symlink_metadata(&self.root).is_ok_and(|meta| meta.is_dir() && !is_link(&meta))
+            || !fs::symlink_metadata(&self.work).is_ok_and(|meta| meta.is_dir() && !is_link(&meta))
+        {
+            return;
+        }
+        for name in ["download.zip", "files", "commit"] {
+            let path = self.work.join(name);
+            if !is_stage_scratch(&path) {
+                continue;
+            }
+            let result = if name == "download.zip" {
+                fs::remove_file(&path)
+            } else {
+                fs::remove_dir_all(&path)
+            };
+            match result {
+                Ok(()) => tracing::info!(path = %path.display(), "removed add-on staging artifact"),
+                Err(error) => tracing::warn!(path = %path.display(), %error, "failed to remove add-on staging artifact"),
+            }
+        }
+    }
+
     fn rollback_inner(&mut self) -> Result<(), String> {
+        self.discard_staged_downloads();
         if let Some(rollback) = self.store_rollback.take() {
             self.store.as_ref().unwrap().rollback_isolated(rollback)?;
         }

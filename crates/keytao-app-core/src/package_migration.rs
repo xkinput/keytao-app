@@ -29,7 +29,12 @@ pub async fn ensure_before_write(core: &Core, root: &Path) -> Result<(), CoreErr
 
 pub fn start_app(core: &Core, root: &Path) -> Result<(), CoreError> {
     let shared = crate::deploy::deploy_shared_data_dir(core, root);
-    migrate_if_needed(core, root, &shared).map(|_| ())
+    migrate_if_needed(core, root, &shared)?;
+    crate::wanxiang::reclaim_abandoned_work(root);
+    if let Err(error) = crate::package_orphans::prune_orphan_runtime_builds(core, root) {
+        tracing::warn!(%error, "Could not prune orphan runtime builds");
+    }
+    Ok(())
 }
 
 pub fn migrate_if_needed(core: &Core, root: &Path, _bundled: &Path) -> Result<bool, CoreError> {

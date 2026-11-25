@@ -12,7 +12,7 @@ mod linux;
 mod package;
 #[cfg(windows)]
 mod windows;
-pub(crate) use package::VerifiedPackage;
+pub(crate) use package::{VerifiedPackage, prune_app_update_cache};
 pub use package::{download_app_update, open_app_update_package};
 
 const RELEASES: &str = "https://github.com/xkinput/keytao-app/releases";

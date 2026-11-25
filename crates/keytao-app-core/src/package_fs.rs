@@ -62,7 +62,7 @@ pub(crate) fn retry_windows<T>(action: impl FnMut() -> io::Result<T>) -> io::Res
     retry_with(action, std::thread::sleep, cfg!(windows))
 }
 
-fn is_link(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -71,6 +71,35 @@ fn is_link(metadata: &fs::Metadata) -> bool {
         }
     }
     metadata.file_type().is_symlink()
+}
+
+pub(crate) fn file_lease(path: &Path, wait: bool) -> io::Result<fs::File> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && !is_link(&meta) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+        _ => return Err(io::Error::other("Invalid file lease")),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+    }
+    let lease = options.open(path)?;
+    let metadata = lease.metadata()?;
+    if !metadata.is_file() || is_link(&metadata) {
+        return Err(io::Error::other("Invalid file lease"));
+    }
+    keytao_core::lock_file(&lease, wait)?;
+    Ok(lease)
 }
 
 pub(crate) fn clear_readonly(path: &Path) -> io::Result<()> {

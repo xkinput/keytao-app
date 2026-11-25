@@ -290,10 +290,15 @@ impl<'a> PackageStore<'a> {
             .pending_package
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let bytes = match self.read_metadata_bytes(key) {
+        let path = self.checked_metadata_path(key).map_err(io::Error::other)?;
+        Self::read_meta_at(&path, key)
+    }
+
+    pub(crate) fn read_meta_at(path: &Path, key: &str) -> Result<Option<PackageMeta>, CoreError> {
+        let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(context("读取", path, error).into()),
         };
         let stored: StoredPackage = serde_json::from_slice(&bytes)?;
         validate_metadata(key, &stored)?;

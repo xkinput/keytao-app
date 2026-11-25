@@ -25,6 +25,49 @@ fn output_id(name: &str) -> Option<&str> {
         .then_some(id)
 }
 
+pub fn is_rime_compiled_output(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let id = output_id(name);
+    if id.is_some_and(|id| {
+        let id = id.to_ascii_lowercase();
+        id.contains("userdb") || id.contains(".user.dict")
+    }) || (name != "default.yaml" && id.is_none()) {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    if name.ends_with(".yaml") {
+        let mut bytes = Vec::new();
+        if file.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes).is_err()
+            || bytes.len() > 8 * 1024 * 1024
+        {
+            return false;
+        }
+        return serde_yaml::from_slice::<Value>(&bytes).is_ok_and(|document| {
+            let source = id.map_or_else(|| "default".to_owned(), |id| format!("{id}.schema"));
+            document["__build_info"]["timestamps"][source.as_str()].as_i64().is_some()
+                && id.is_none_or(|id| document["schema"]["schema_id"].as_str() == Some(id))
+        });
+    }
+    let mut header = [0u8; 32];
+    if (&file).read_exact(&mut header).is_err() {
+        return false;
+    }
+    [
+        (".table.bin", b"Rime::Table/".as_slice()),
+        (".prism.bin", b"Rime::Prism/".as_slice()),
+        (".reverse.bin", b"Rime::Reverse/".as_slice()),
+    ].into_iter().any(|(suffix, magic)| {
+        name.ends_with(suffix) && header.strip_prefix(magic).is_some_and(|version| {
+            let end = version.iter().position(|&byte| byte == 0).unwrap_or(0);
+            end > 0 && version[..end].iter().all(|byte| byte.is_ascii_digit() || *byte == b'.')
+        })
+    })
+}
+
 /// Remove only proven unreachable compiled files after a verified deployment.
 /// Unresolved inputs retain every file; failed deletions never block deployment.
 pub fn prune_rime_build_artifacts(
