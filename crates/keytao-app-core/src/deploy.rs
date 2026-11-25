@@ -849,9 +849,71 @@ fn validate_macos_deploy_signature(
 }
 
 #[cfg(target_os = "macos")]
-fn verified_macos_deploy_executable(app: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let executable =
-        std::path::PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME");
+#[derive(PartialEq, Eq)]
+struct MacosExecutableStamp {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[cfg(target_os = "macos")]
+impl MacosExecutableStamp {
+    fn read(path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| format!("Cannot inspect {}: {error}", path.display()))?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_deploy_signatures(app: &Path, ime: &Path) -> Result<(), String> {
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex},
+    };
+
+    type Signatures = HashMap<(PathBuf, PathBuf), [MacosExecutableStamp; 2]>;
+    static VERIFIED: LazyLock<Mutex<Signatures>> = LazyLock::new(Mutex::default);
+
+    let paths = (app.to_owned(), ime.to_owned());
+    let stamps = || {
+        Ok::<_, String>([
+            MacosExecutableStamp::read(app)?,
+            MacosExecutableStamp::read(ime)?,
+        ])
+    };
+    let mut verified = VERIFIED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = stamps()?;
+    if verified.get(&paths) == Some(&before) {
+        return Ok(());
+    }
+    verified.remove(&paths);
+    let app_team = verified_macos_signing_team(app, true)
+        .map_err(|error| format!("KeyTao App signature is invalid: {error}"))?;
+    let ime_signature = verified_macos_signing_team(ime, app_team.is_some());
+    validate_macos_deploy_signature(app_team.as_deref(), ime_signature)?;
+    if stamps()? != before {
+        return Err("KeyTao executables changed during signature verification".into());
+    }
+    verified.insert(paths, before);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verified_macos_deploy_executable(app: &Path) -> Result<PathBuf, String> {
+    let executable = PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME");
     if !executable.is_file() {
         return Err(
             "KeyTao macOS input method is not installed; install it before deploying".into(),
@@ -863,10 +925,7 @@ fn verified_macos_deploy_executable(app: &std::path::Path) -> Result<std::path::
     if canonical != executable {
         return Err("KeyTao input method path must not contain symlinks".into());
     }
-    let app_team = verified_macos_signing_team(app, true)
-        .map_err(|error| format!("KeyTao App signature is invalid: {error}"))?;
-    let ime_signature = verified_macos_signing_team(&executable, app_team.is_some());
-    validate_macos_deploy_signature(app_team.as_deref(), ime_signature)?;
+    verify_macos_deploy_signatures(app, &executable)?;
     Ok(executable)
 }
 
@@ -875,11 +934,14 @@ pub async fn preview_candidates(
     core: &Core,
     host: impl ImeHost,
     size: Option<u8>,
+    #[cfg(target_os = "macos")] install_lock: &'static tokio::sync::Mutex<()>,
 ) -> Result<keytao_core::CandidatePreview, String> {
     let _operation = AppOperation::start("preview_candidates_native");
     if size.is_some_and(|size| !(1..=10).contains(&size)) {
         return Err("Candidate page size must be between 1 and 10".into());
     }
+    #[cfg(target_os = "macos")]
+    let install_guard = install_lock.lock().await;
     let root = host.user_root()?;
     if !keytao_core::engine_choice::is_enabled(&root) {
         return Err("算法引擎已关闭".into());
@@ -915,6 +977,8 @@ pub async fn preview_candidates(
         .await
         .map_err(|error| format!("Candidate preview task failed: {error}"))?;
     }
+    #[cfg(target_os = "macos")]
+    drop(install_guard);
     #[cfg(target_os = "linux")]
     let (mut command, _) = crate::ime_status::linux::resolve_keytao_ime_command(core);
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -936,10 +1000,21 @@ pub async fn preview_candidates(
             let app = std::env::current_exe()
                 .map_err(|error| format!("Cannot determine the App executable: {error}"))?;
             let executable = verified_macos_deploy_executable(&app)?;
-            keytao_core::deploy_child::run_preview_child(
-                &executable,
+            keytao_core::deploy_child::run_preview_child_command_with_snapshot_lock(
+                &mut std::process::Command::new(executable),
                 &request,
                 std::time::Duration::from_secs(10),
+                || {
+                    let guard = install_lock.blocking_lock();
+                    if !keytao_core::engine_choice::is_enabled(&root)
+                        || crate::libjd::input_engine(&root)
+                            == keytao_core::engine_choice::PackageEngine::LibjdEngine
+                    {
+                        return Err("Candidate preview engine changed before reading inputs".into());
+                    }
+                    Ok(guard)
+                },
+                true,
             )
         }
         #[cfg(target_os = "windows")]
@@ -1572,6 +1647,34 @@ mod tests {
         let executable = dir.path().join("untrusted-ime");
         std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         assert!(verified_macos_signing_team(&executable, true).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cached_macos_signatures_are_invalidated_by_changes_to_either_executable() {
+        use std::fs::{self, File, FileTimes};
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        let ime = dir.path().join("ime");
+        let executable = fs::read("/usr/bin/true").unwrap();
+        fs::write(&app, &executable).unwrap();
+        fs::write(&ime, &executable).unwrap();
+        verify_macos_deploy_signatures(&app, &ime).unwrap();
+
+        let mut invalid = executable.clone();
+        invalid[0] ^= 0xff;
+        for path in [&app, &ime] {
+            let modified = fs::metadata(path).unwrap().modified().unwrap();
+            fs::write(path, &invalid).unwrap();
+            File::open(path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(modified))
+                .unwrap();
+            assert!(verify_macos_deploy_signatures(&app, &ime).is_err());
+            fs::write(path, &executable).unwrap();
+            verify_macos_deploy_signatures(&app, &ime).unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]

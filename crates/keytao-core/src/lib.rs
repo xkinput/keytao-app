@@ -1314,11 +1314,12 @@ mod desktop {
     pub(crate) fn preview_deployed_candidates(
         user_dir: &Path,
         request: &PreviewRequest,
+        snapshot_ready: Option<&mut dyn FnMut() -> Result<(), String>>,
     ) -> Result<CandidatePreview, String> {
         request.validate()?;
-        let schema = deployed_schema_id_from_dir(user_dir).ok_or("no active deployed schema")?;
-        let directory = preview::PreviewDirectory::snapshot(user_dir)?;
         let runtime = RuntimeDirs::resolve(user_dir, user_dir)?;
+        let schema = resolved_deployed_schema_id(&runtime).ok_or("no active deployed schema")?;
+        let directory = preview::PreviewDirectory::snapshot(&runtime)?;
         let _rime = rime_api_lock();
         if *lock_ignore_poison(&RIME_INITIALIZED) {
             return Err("candidate preview requires a fresh child process".into());
@@ -1326,6 +1327,25 @@ mod desktop {
         // Rime's user config and user dictionaries are writable only in this snapshot.
         // Compiled dictionaries/models remain in the original, read-only data search path.
         let dirs = RuntimeDirs::flat(directory.path(), &runtime.user_data_dir);
+        #[cfg(target_os = "macos")]
+        let live_data_stamp = || {
+            use std::os::unix::fs::MetadataExt;
+
+            let identity = |path: &Path| match std::fs::metadata(path) {
+                Ok(meta) => Ok(Some((meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()))),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!("inspect compiled preview data: {error}")),
+            };
+            Ok::<_, String>([
+                identity(&dirs.prebuilt_data_dir)?,
+                identity(&runtime.user_data_dir.join(WANXIANG_GRAMMAR_FILE))?,
+            ])
+        };
+        #[cfg(target_os = "macos")]
+        let live_data_before = snapshot_ready.is_some().then(live_data_stamp).transpose()?;
+        if let Some(ready) = snapshot_ready {
+            ready()?;
+        }
         setup_rime(
             &dirs,
             &directory.path().join("log").to_string_lossy(),
@@ -1335,7 +1355,14 @@ mod desktop {
         *lock_ignore_poison(&RIME_INITIALIZED) = true;
         let result = preview_session(&schema, request, true);
         let finalized = finalize_rime();
-        result.and_then(|preview| finalized.map(|()| preview))
+        let preview = result.and_then(|preview| finalized.map(|()| preview))?;
+        #[cfg(target_os = "macos")]
+        if let Some(before) = live_data_before {
+            if live_data_stamp()? != before {
+                return Err("Compiled preview data changed during candidate preview".into());
+            }
+        }
+        Ok(preview)
     }
 
     pub(crate) fn preview_session(
@@ -6638,7 +6665,11 @@ impl ImeRuntime {
             .unwrap_or_else(PoisonError::into_inner);
         if initialized.is_none() {
             // An App can open settings before its keyboard/IME has started librime.
-            return desktop::preview_deployed_candidates(&dirs.user, &PreviewRequest { page_size });
+            return desktop::preview_deployed_candidates(
+                &dirs.user,
+                &PreviewRequest { page_size },
+                None,
+            );
         }
         if initialized.as_ref() != Some(&dirs) {
             return Err("candidate preview runtime is not initialized".into());

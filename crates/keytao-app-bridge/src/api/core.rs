@@ -1598,9 +1598,16 @@ pub fn get_candidate_page_size() -> Result<Option<u8>, String> {
 
 pub async fn preview_candidates(size: Option<u8>) -> Result<String, String> {
     let state = runtime::state()?;
+    #[cfg(not(target_os = "macos"))]
     let _guard = state.install_lock.lock().await;
-    let preview =
-        keytao_app_core::deploy::preview_candidates(&state.core, state.host.clone(), size).await?;
+    let preview = keytao_app_core::deploy::preview_candidates(
+        &state.core,
+        state.host.clone(),
+        size,
+        #[cfg(target_os = "macos")]
+        &state.install_lock,
+    )
+    .await?;
     serde_json::to_string(&preview).map_err(|error| error.to_string())
 }
 

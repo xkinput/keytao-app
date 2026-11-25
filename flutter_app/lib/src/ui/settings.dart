@@ -247,12 +247,6 @@ class _SettingsCardState extends State<SettingsCard> {
   double? _previewFontSize;
 
   @override
-  void initState() {
-    super.initState();
-    unawaited(controller.refreshCandidatePreview());
-  }
-
-  @override
   void dispose() {
     _previewTimer?.cancel();
     super.dispose();

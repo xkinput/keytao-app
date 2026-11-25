@@ -75,7 +75,7 @@ impl PreviewDirectory {
         Ok(Self(path))
     }
 
-    pub(crate) fn snapshot(source: &std::path::Path) -> Result<Self, String> {
+    pub(crate) fn snapshot(source_dirs: &crate::RuntimeDirs) -> Result<Self, String> {
         use std::fs;
         let directory = match std::env::var(PREVIEW_DIRECTORY_ENV) {
             Ok(name) => {
@@ -99,7 +99,6 @@ impl PreviewDirectory {
             Err(std::env::VarError::NotPresent) => Self::create()?,
             Err(error) => return Err(format!("invalid candidate preview workspace: {error}")),
         };
-        let source_dirs = crate::RuntimeDirs::resolve(source, source)?;
         let preview_dirs = crate::RuntimeDirs::flat(&directory.0, &directory.0);
         fs::create_dir(&preview_dirs.staging_dir).map_err(|e| e.to_string())?;
         fs::create_dir(directory.0.join("log")).map_err(|e| e.to_string())?;
