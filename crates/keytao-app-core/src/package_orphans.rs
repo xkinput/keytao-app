@@ -1,13 +1,17 @@
 use crate::{
     Core, CoreError, Platform, package_activation,
+    package_fs::is_link,
     package_store::PackageStore,
     packages::{safe_path, sha256_reader},
+    runtime_materialize,
 };
+use keytao_core::{RuntimeDirs, isolated_deploy::with_isolated_package_lock};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs,
-    path::Path,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -121,6 +125,45 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
     let flat_live = keytao_core::RuntimeDirs::needs_migration(root);
     let mut files = Vec::new();
     collect(root, root, &sync_dir, &owned, flat_live, &mut files)?;
+    for (key, runtime) in orphan_runtimes(core, root)? {
+        let manifest = match runtime_materialize::orphan_manifest(&runtime, &key) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%key, %error, "Could not verify orphan runtime ownership");
+                continue;
+            }
+        };
+        let protected = |relative: &str| {
+            relative.split('/').any(package_activation::user_file)
+                || relative.split('/').any(|part| part.ends_with(".leveldb"))
+        };
+        for (relative, expected) in manifest.owned.iter().chain(&manifest.generated) {
+            if manifest.user_owned.contains_key(relative) || protected(&relative.to_ascii_lowercase()) {
+                continue;
+            }
+            let Ok(path) = safe_path(&runtime, relative) else {
+                continue;
+            };
+            if path.starts_with(&sync_dir) {
+                continue;
+            }
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.is_file() || is_link(&metadata) {
+                continue;
+            }
+            let sha256 = sha256_reader(fs::File::open(&path)?)?;
+            if &sha256 == expected {
+                files.push(OrphanFile {
+                    path: format!("runtime/{key}/{relative}"),
+                    sha256,
+                    size: metadata.len(),
+                });
+            }
+        }
+    }
     for backup in crate::package_migration::completed_backups(root)? {
         files.push(OrphanFile {
             path: backup.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"),
@@ -133,6 +176,128 @@ pub fn report(core: &Core, root: &Path) -> Result<OrphanReport, CoreError> {
         files,
         kept_backups,
     })
+}
+
+fn orphan_runtimes(core: &Core, root: &Path) -> Result<Vec<(String, PathBuf)>, CoreError> {
+    let runtime = root.join("runtime");
+    if !RuntimeDirs::migration_complete(root)
+        || !fs::symlink_metadata(&runtime).is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata))
+    {
+        return Ok(Vec::new());
+    }
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    let mut installed = runtime_materialize::isolated_package_keys(core, root, &shared)?;
+    let data_dir = &core.env().data_dir;
+    safe_path(data_dir, "app-state.json").map_err(CoreError::Other)?;
+    installed.extend(crate::AppState::load(data_dir)?.installed_packages.into_keys());
+    installed.extend(RuntimeDirs::active_package_key(root));
+    let package_roots = [root, data_dir.as_path()];
+    for package_root in package_roots {
+        let path = safe_path(package_root, "scheme-packages/active-manifest.json")
+            .map_err(CoreError::Other)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !is_link(&metadata) => {
+                let data: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+                match data.get("active_package") {
+                    Some(serde_json::Value::String(key)) => {
+                        installed.insert(key.clone());
+                    }
+                    Some(serde_json::Value::Null) => {}
+                    None if data["root"].is_string() && data["manifest"].is_object() => {
+                        let Some(key) = data["scheme_key"].as_str().filter(|key| !key.is_empty())
+                        else {
+                            return Ok(Vec::new());
+                        };
+                        installed.insert(key.to_owned());
+                    }
+                    _ => return Ok(Vec::new()),
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => return Ok(Vec::new()),
+        }
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(runtime)? {
+        let entry = entry?;
+        let Ok(key) = entry.file_name().into_string() else {
+            continue;
+        };
+        if key == "builtin" || installed.contains(&key)
+            || !fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata))
+            || RuntimeDirs::isolated_user_data_dir(root, &key).as_deref() != Some(entry.path().as_path())
+        {
+            continue;
+        }
+        if package_roots.iter().any(|root| {
+            ["cloud", "local", "addons"].iter().any(|namespace| {
+                safe_path(root, &format!("scheme-packages/{namespace}/{key}")).map_or(true, |path| {
+                    fs::symlink_metadata(path).err().is_none_or(|error| error.kind() != ErrorKind::NotFound)
+                })
+            })
+        }) {
+            continue;
+        }
+        candidates.push((key, entry.path()));
+    }
+    Ok(candidates)
+}
+
+pub(crate) fn prune_orphan_runtime_builds(core: &Core, root: &Path) -> Result<(), CoreError> {
+    if !fs::symlink_metadata(root).is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata))
+        || !RuntimeDirs::migration_complete(root)
+    {
+        return Ok(());
+    }
+    with_isolated_package_lock(root, || {
+        for (key, _) in orphan_runtimes(core, root).map_err(|error| error.to_string())? {
+            if let Err(error) = prune_runtime_build(root, &key) {
+                tracing::warn!(%error, %key, "Could not prune orphan runtime build");
+            }
+        }
+        Ok(())
+    }).map_err(CoreError::Other)
+}
+
+pub(crate) fn prune_runtime_build(root: &Path, key: &str) -> Result<(), CoreError> {
+    let Some(runtime) = RuntimeDirs::isolated_user_data_dir(root, key) else {
+        return Ok(());
+    };
+    let build = safe_path(root, &format!("runtime/{key}/build")).map_err(CoreError::Other)?;
+    if !fs::symlink_metadata(&build).is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata))
+        || build.starts_with(runtime_materialize::legacy_sync_dir(root)?)
+        || runtime_materialize::orphan_manifest(&runtime, key)?.is_none()
+    {
+        return Ok(());
+    }
+    let _lease = runtime_materialize::lock_runtime(&runtime, false)?;
+    if runtime_materialize::orphan_manifest(&runtime, key)?.is_none() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&build)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || is_link(&metadata) {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                continue;
+            }
+        }
+        if keytao_core::is_rime_compiled_output(&path) {
+            fs::remove_file(&path)?;
+            tracing::info!(path = %path.display(), "Removed orphan runtime build artifact");
+        }
+    }
+    if fs::read_dir(&build)?.next().is_none() {
+        fs::remove_dir(&build)?;
+        tracing::info!(path = %build.display(), "Removed empty orphan runtime build directory");
+    }
+    Ok(())
 }
 
 fn backup_fingerprint(path: &Path) -> Result<String, CoreError> {
@@ -245,6 +410,39 @@ pub fn trash_selected_with_backups(
 }
 
 fn trash_with(
+    core: &Core,
+    root: &Path,
+    selected: &[OrphanFile],
+    selected_backups: &[KeptBackup],
+    trash_override: Option<&Path>,
+) -> Result<Vec<String>, CoreError> {
+    let runtime_keys: BTreeSet<_> = selected.iter().filter_map(|file| {
+        file.path.strip_prefix("runtime/")?.split_once('/').map(|(key, _)| key)
+    }).collect();
+    if runtime_keys.is_empty() {
+        return trash_unlocked(core, root, selected, selected_backups, trash_override);
+    }
+    if !fs::symlink_metadata(root).is_ok_and(|metadata| metadata.is_dir() && !is_link(&metadata)) {
+        return Err(CoreError::Other("Invalid runtime cleanup root".into()));
+    }
+    with_isolated_package_lock(root, || {
+        let mut leases = Vec::new();
+        for key in runtime_keys {
+            let runtime = RuntimeDirs::isolated_user_data_dir(root, key)
+                .ok_or_else(|| format!("Invalid runtime package: {key}"))?;
+            if runtime_materialize::orphan_manifest(&runtime, key)
+                .map_err(|error| error.to_string())?.is_none()
+            {
+                return Err(format!("Missing runtime ownership: {key}"));
+            }
+            leases.push(runtime_materialize::lock_runtime(&runtime, false).map_err(|error| error.to_string())?);
+        }
+        trash_unlocked(core, root, selected, selected_backups, trash_override)
+            .map_err(|error| error.to_string())
+    }).map_err(CoreError::Other)
+}
+
+fn trash_unlocked(
     core: &Core,
     root: &Path,
     selected: &[OrphanFile],
@@ -598,6 +796,89 @@ mod tests {
         collect(root, root, &root.join("sync"), &BTreeSet::new(), false, &mut files).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "orphan.yaml");
+    }
+
+    #[test]
+    fn startup_prunes_orphan_runtime_outputs_and_reports_only_proven_package_files() {
+        let (temp, core, root) = setup();
+        let runtime = root.join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        fs::write(root.join(RuntimeDirs::MIGRATION_MARKER), r#"{"version":1}"#).unwrap();
+        fs::create_dir(root.join("scheme-packages")).unwrap();
+        fs::write(root.join("scheme-packages/active-manifest.json"),
+            r#"{"active_package":"active","runtime_migration_version":1}"#).unwrap();
+        let legacy_store = PackageStore::new(&core);
+        fs::create_dir_all(legacy_store.root()).unwrap();
+        let legacy_path = legacy_store.active_manifest_path();
+        let legacy_manifest = serde_json::json!({
+            "root": root.canonicalize().unwrap(),
+            "scheme_key": "keytao",
+            "manifest": {},
+            "packages": {},
+            "rime_lua": null,
+            "lua_owner": null,
+        });
+        core.update_state(|state| {
+            state.installed_packages.insert("xmjd".into(), Default::default());
+        }).unwrap();
+
+        let digest = sha256_reader(b"package source".as_slice()).unwrap();
+        for key in ["orphan", "active", "keytao", "xmjd", "unknown"] {
+            let path = runtime.join(key);
+            fs::create_dir_all(path.join("build")).unwrap();
+            let mut header = [0u8; 32];
+            header[..15].copy_from_slice(b"Rime::Table/4.0");
+            fs::write(path.join("build/scheme.table.bin"), header).unwrap();
+            if key != "unknown" {
+                fs::write(path.join(RuntimeDirs::MANIFEST_FILE), serde_json::to_vec(&serde_json::json!({
+                    "package": key,
+                    "owned": {"essay.txt": digest, "edited.txt": digest, "settings.yaml": digest},
+                    "generated": {},
+                    "user_owned": {"settings.yaml": digest},
+                })).unwrap()).unwrap();
+                for name in ["essay.txt", "settings.yaml"] {
+                    fs::write(path.join(name), b"package source").unwrap();
+                }
+                fs::write(path.join("edited.txt"), b"user edits").unwrap();
+            }
+        }
+        let orphan = runtime.join("orphan");
+        fs::create_dir(orphan.join("orphan.userdb")).unwrap();
+        fs::write(orphan.join("orphan.userdb/CURRENT"), b"learned words").unwrap();
+        fs::write(orphan.join("build/USER.USERDB.table.bin"), b"protected").unwrap();
+        fs::write(orphan.join("build/notes.txt"), b"notes").unwrap();
+        fs::write(orphan.join("build/notes.schema.yaml"), b"schema: {schema_id: notes}").unwrap();
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside.bin");
+            fs::write(&outside, b"outside").unwrap();
+            std::os::unix::fs::symlink(&outside, orphan.join("build/link.table.bin")).unwrap();
+        }
+
+        let mut invalid_manifest = legacy_manifest.clone();
+        invalid_manifest["active_package"] = 42.into();
+        fs::write(&legacy_path, serde_json::to_vec(&invalid_manifest).unwrap()).unwrap();
+        crate::package_migration::start_app(&core, &root).unwrap();
+        assert!(orphan.join("build/scheme.table.bin").is_file());
+        assert!(report(&core, &root).unwrap().files.is_empty());
+
+        fs::write(&legacy_path, serde_json::to_vec(&legacy_manifest).unwrap()).unwrap();
+        crate::package_migration::start_app(&core, &root).unwrap();
+        assert!(!orphan.join("build/scheme.table.bin").exists());
+        for key in ["active", "keytao", "xmjd", "unknown"] {
+            assert!(runtime.join(key).join("build/scheme.table.bin").is_file());
+        }
+        for name in ["orphan.userdb/CURRENT", "build/USER.USERDB.table.bin", "build/notes.txt", "build/notes.schema.yaml", "edited.txt", "settings.yaml"] {
+            assert!(orphan.join(name).is_file(), "{name}");
+        }
+        #[cfg(unix)]
+        assert!(orphan.join("build/link.table.bin").is_symlink());
+        let selected = report(&core, &root).unwrap().files;
+        assert_eq!(selected.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["runtime/orphan/essay.txt"]);
+        assert_eq!(trash_with(&core, &root, &selected, &[], Some(&temp.path().join("trash"))).unwrap(),
+            ["runtime/orphan/essay.txt"]);
+        assert!(!orphan.join("essay.txt").exists());
+        assert!(orphan.join("orphan.userdb/CURRENT").is_file());
     }
 
     #[test]

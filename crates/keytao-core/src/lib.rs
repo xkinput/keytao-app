@@ -3,7 +3,7 @@
 //! platform IMEs) links against this crate as its rime back-end.
 
 mod build_prune;
-pub use build_prune::prune_rime_build_artifacts;
+pub use build_prune::{is_rime_compiled_output, prune_rime_build_artifacts};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub mod deploy_child;
 mod deployment_log;

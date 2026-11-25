@@ -428,6 +428,7 @@ pub(crate) fn excluded_from_manifest(relative: &str) -> bool {
 
 pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>, CoreError> {
     crate::addon_store::migrate_snow_package(core)?;
+    package_logos::prune_package_logo_cache(core);
     PackageStore::new(core).list_installed_packages()
 }
 
@@ -1112,7 +1113,7 @@ pub(crate) fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> 
     for part in relative.split('/') {
         path.push(part);
         match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if crate::package_fs::is_link(&metadata) => {
                 return Err(format!("Package path contains a symlink: {relative}"));
             }
             Ok(_) => {}

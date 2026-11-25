@@ -14,6 +14,7 @@ use keytao_core::{
     runtime_log::AppOperation,
 };
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
@@ -169,19 +170,67 @@ impl RuntimeFile {
         Ok(())
     }
 
-    fn prepare_write(&self, path: &Path) -> Result<tempfile::NamedTempFile, CoreError> {
+    fn write_staged(&self, path: &Path) -> Result<(), CoreError> {
         let parent = path.parent().unwrap();
         fs::create_dir_all(parent)?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        self.copy_to(&mut temp)?;
-        temp.as_file().sync_all()?;
-        Ok(temp)
-    }
 
-    fn publish(&self, path: &Path) -> Result<(), CoreError> {
-        self.prepare_write(path)?
-            .persist(path)
-            .map_err(|error| error.error)?;
+        #[cfg(target_os = "macos")]
+        if let Self::Disk { path: source, size, sha256 } = self {
+            use std::{
+                ffi::CString,
+                os::{
+                    fd::AsRawFd,
+                    unix::{
+                        ffi::OsStrExt,
+                        fs::{OpenOptionsExt, PermissionsExt},
+                    },
+                },
+            };
+            const CLONE_NOOWNERCOPY: u32 = 0x0002;
+
+            let input = fs::File::options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(source)?;
+            if !input.metadata()?.is_file() {
+                return Err(io::Error::other("Runtime source is not a regular file").into());
+            }
+            let directory = fs::File::open(parent)?;
+            let name = CString::new(path.file_name().unwrap().as_bytes())
+                .map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
+            // The destination is a fresh name in the caller's private staging directory.
+            if unsafe {
+                libc::fclonefileat(
+                    input.as_raw_fd(),
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    CLONE_NOOWNERCOPY,
+                )
+            } == 0
+            {
+                let cloned = fs::File::open(path)?;
+                let mut hash = Sha256::new();
+                let length = io::copy(
+                    &mut BufReader::new(&cloned).take(size.saturating_add(1)),
+                    &mut hash,
+                )?;
+                Self::check_digest(source, *size, sha256, length, hash)?;
+                cloned.set_permissions(fs::Permissions::from_mode(0o600))?;
+                fs::File::options().write(true).open(path)?.sync_all()?;
+                return Ok(());
+            }
+        }
+
+        let mut options = fs::File::options();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut staged = options.open(path)?;
+        self.copy_to(&mut staged)?;
+        staged.sync_all()?;
         Ok(())
     }
 }
@@ -202,11 +251,11 @@ fn verified_sources(
 }
 
 #[derive(Default, Deserialize, Serialize)]
-struct Manifest {
+pub(crate) struct Manifest {
     package: String,
-    owned: BTreeMap<String, String>,
-    generated: BTreeMap<String, String>,
-    user_owned: BTreeMap<String, String>,
+    pub(crate) owned: BTreeMap<String, String>,
+    pub(crate) generated: BTreeMap<String, String>,
+    pub(crate) user_owned: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user_default: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -333,7 +382,7 @@ pub fn isolated_packages(
     Ok(list)
 }
 
-fn isolated_package_keys(
+pub(crate) fn isolated_package_keys(
     core: &Core,
     root: &Path,
     shared: &Path,
@@ -648,7 +697,7 @@ fn publish_package_sources(
     }
     let stage = tempfile::Builder::new().prefix(".sources-").tempdir_in(parent)?;
     for (relative, source) in files {
-        source.publish(&safe(stage.path(), relative)?)?;
+        source.write_staged(&safe(stage.path(), relative)?)?;
     }
     crate::package_store::publish_directory(&destination, stage.path(), crate::package_fs::rename)
 }
@@ -893,6 +942,10 @@ fn materialized_path(path: &str) -> bool {
     path == ".nomedia" || !private_path(path.strip_suffix("/.nomedia").unwrap_or(path))
 }
 
+pub(crate) fn lock_runtime(runtime: &Path, wait: bool) -> Result<fs::File, CoreError> {
+    Ok(crate::package_fs::file_lease(&runtime.join(".keytao-materialize.lock"), wait)?)
+}
+
 fn prepare_runtime(
     control_root: &Path,
     bundled: &Path,
@@ -907,12 +960,7 @@ fn prepare_runtime(
         .ok_or_else(|| CoreError::Other("Invalid runtime package key".into()))?;
     safe(control_root, &format!("runtime/{key}"))?;
     fs::create_dir_all(&runtime)?;
-    let lock = fs::File::options()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(safe(&runtime, ".keytao-materialize.lock")?)?;
-    keytao_core::lock_file(&lock, true)?;
+    let _lock = lock_runtime(&runtime, true)?;
     match fs::remove_dir_all(safe(&runtime, COPY_STAGE)?) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -1205,6 +1253,253 @@ fn add_common_files(
     Ok(())
 }
 
+fn is_runtime_config(path: &str) -> bool {
+    (path.ends_with(".yaml") || path.ends_with(".yml"))
+        && !path.ends_with(".dict.yaml")
+        && !path.ends_with(".dict.yml")
+        && !path.starts_with("opencc/")
+}
+
+#[derive(Default)]
+struct CommonUsage {
+    dictionaries: BTreeMap<String, bool>,
+    essay: bool,
+    opencc: BTreeSet<String>,
+    opencc_fallback: bool,
+}
+
+impl CommonUsage {
+    fn scan(&mut self, value: &Value, files: &BTreeMap<&str, &RuntimeFile>) -> Option<()> {
+        match value {
+            Value::Mapping(map) => {
+                for (key, value) in map {
+                    let key = key.as_str().unwrap_or("").rsplit('/')
+                        .find(|part| !part.starts_with('@'))
+                        .unwrap_or("");
+                    match key {
+                        "dictionary" | "packs" | "import_tables" => {
+                            let mut add = |name: &str| {
+                                *self.dictionaries.entry(name.into()).or_default() |=
+                                    key != "import_tables";
+                            };
+                            match value {
+                                Value::String(name) if !name.is_empty() => {
+                                    add(name);
+                                }
+                                Value::Sequence(names) => {
+                                    for name in names {
+                                        add(name.as_str()?);
+                                    }
+                                }
+                                Value::String(_) | Value::Null => {}
+                                _ => return None,
+                            }
+                        }
+                        "__include" | "__patch" | "import_preset" => {
+                            self.reference(value, key == "import_preset", files)?;
+                        }
+                        "dependencies" => {
+                            let schemas = value.as_sequence()?;
+                            for schema in schemas {
+                                let name = format!("{}.schema.yaml", schema.as_str()?);
+                                if !files.contains_key(name.as_str()) {
+                                    return None;
+                                }
+                            }
+                        }
+                        "opencc_config" => {
+                            let name = value.as_str()?;
+                            if !name.is_empty() {
+                                self.opencc.insert(format!("opencc/{name}"));
+                            }
+                        }
+                        _ => self.scan(value, files)?,
+                    }
+                }
+            }
+            Value::Sequence(items) => {
+                for item in items {
+                    self.scan(item, files)?;
+                }
+            }
+            Value::String(text) => {
+                self.essay |= text == "essay.txt";
+                if text.split('@').next() == Some("simplifier")
+                    && files.contains_key("opencc/t2s.json")
+                {
+                    self.opencc.insert("opencc/t2s.json".into());
+                }
+                if text.starts_with("opencc/") {
+                    self.opencc.insert(text.clone());
+                }
+            }
+            Value::Tagged(_) => return None,
+            _ => {}
+        }
+        Some(())
+    }
+
+    fn reference(
+        &mut self,
+        value: &Value,
+        preset: bool,
+        files: &BTreeMap<&str, &RuntimeFile>,
+    ) -> Option<()> {
+        match value {
+            Value::String(reference) => {
+                let id = if preset {
+                    reference.as_str()
+                } else {
+                    reference.split_once(':').map_or("", |(id, _)| id)
+                };
+                if id.is_empty()
+                    || (is_runtime_config(id) && files.contains_key(id))
+                    || files.contains_key(format!("{id}.yaml").as_str())
+                    || (preset && files.contains_key(format!("{id}.symbols.yaml").as_str()))
+                {
+                    return Some(());
+                }
+                None
+            }
+            Value::Sequence(items) => {
+                for item in items {
+                    self.reference(item, preset, files)?;
+                }
+                Some(())
+            }
+            Value::Mapping(_) => self.scan(value, files),
+            _ => None,
+        }
+    }
+}
+
+fn common_usage(files: &BTreeMap<&str, &RuntimeFile>) -> Result<CommonUsage, CoreError> {
+    let mut usage = CommonUsage::default();
+    for (&path, source) in files {
+        if path.ends_with(".lua") {
+            // Lua can choose OpenCC data at runtime.
+            usage.opencc_fallback = true;
+        }
+        if !is_runtime_config(path) {
+            continue;
+        }
+        let config = crate::upload_bundle::yaml(&source.read()?, path);
+        if config
+            .ok()
+            .and_then(|value| usage.scan(&value, files))
+            .is_none()
+        {
+            usage.essay = true;
+            usage.opencc_fallback = true;
+            return Ok(usage);
+        }
+    }
+
+    let mut checked = BTreeMap::new();
+    while !usage.essay && let Some((id, primary)) = usage.dictionaries.pop_first() {
+        if checked.get(&id).is_some_and(|&was_primary| was_primary || !primary) {
+            continue;
+        }
+        checked.insert(id.clone(), primary);
+        let name = format!("{id}.dict.yaml");
+        let Some(source) = files.get(name.as_str()) else {
+            usage.essay = true;
+            break;
+        };
+        let header = crate::upload_bundle::yaml(&source.dictionary_header()?, &name);
+        let Some(header) = header.ok().filter(|header| {
+            header.get("name").and_then(Value::as_str)
+                .is_some_and(|name| !primary || name == id)
+        }) else {
+            usage.essay = true;
+            break;
+        };
+        if usage.scan(&header, files).is_none() {
+            usage.essay = true;
+            usage.opencc_fallback = true;
+            break;
+        }
+        usage.essay |= match header.get("vocabulary") {
+            Some(value) => value.as_str().is_none_or(|name| {
+                name.is_empty() || name.rsplit(['/', '\\']).next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("essay"))
+            }),
+            None => match &header["use_preset_vocabulary"] {
+                Value::Null | Value::Bool(false) => false,
+                Value::String(value) => !value.eq_ignore_ascii_case("false"),
+                _ => true,
+            },
+        };
+    }
+    Ok(usage)
+}
+
+fn opencc_assets(
+    usage: CommonUsage,
+    files: &BTreeMap<&str, &RuntimeFile>,
+) -> Result<Option<BTreeSet<String>>, CoreError> {
+    fn dependencies<'a>(value: &'a serde_json::Value, names: &mut Vec<&'a str>) -> Option<()> {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    if key == "file" {
+                        names.push(value.as_str()?);
+                    } else {
+                        dependencies(value, names)?;
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    dependencies(item, names)?;
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    if usage.opencc_fallback {
+        return Ok(None);
+    }
+    let mut pending = usage.opencc;
+    let mut used = BTreeSet::new();
+    while let Some(path) = pending.pop_first() {
+        if used.contains(&path) {
+            continue;
+        }
+        let Some(source) = files.get(path.as_str()) else {
+            return Ok(None);
+        };
+        if path.ends_with(".json") {
+            let Ok(config) = serde_json::from_slice(&source.read()?) else {
+                return Ok(None);
+            };
+            let mut names = Vec::new();
+            if dependencies(&config, &mut names).is_none() {
+                return Ok(None);
+            }
+            for name in names {
+                let name = name.trim_start_matches("./");
+                let (parent, _) = path.rsplit_once('/').unwrap();
+                let paths = [format!("{parent}/{name}"), format!("opencc/{name}")];
+                let mut found = false;
+                for path in paths {
+                    if files.contains_key(path.as_str()) {
+                        pending.insert(path);
+                        found = true;
+                    }
+                }
+                if !found {
+                    return Ok(None);
+                }
+            }
+        }
+        used.insert(path);
+    }
+    Ok(Some(used))
+}
+
 fn optional_source(path: &Path) -> Result<Option<RuntimeFile>, CoreError> {
     if path.try_exists()? {
         Ok(Some(RuntimeFile::disk(path)?))
@@ -1326,8 +1621,8 @@ fn write_runtime(
     runtime: &Path,
     key: &str,
     previous: Manifest,
-    owned: RuntimeFiles,
-    generated: RuntimeFiles,
+    mut owned: RuntimeFiles,
+    mut generated: RuntimeFiles,
     user: Files,
     runtime_overrides: BTreeSet<String>,
     disk_hashes: &BTreeMap<String, String>,
@@ -1339,6 +1634,27 @@ fn write_runtime(
     let user: RuntimeFiles = user.into_iter()
         .map(|(path, bytes)| (path, RuntimeFile::Bytes(bytes)))
         .collect();
+    let builtin = key.starts_with("builtin/");
+    let common_data = |path: &String| path == "essay.txt" || path.starts_with("opencc/");
+    if generated.keys().any(common_data) || builtin && owned.keys().any(common_data) {
+        let files = owned.iter().chain(&user).chain(&generated)
+            .map(|(path, source)| (path.as_str(), source))
+            .collect();
+        let usage = common_usage(&files)?;
+        let essay = usage.essay;
+        let opencc = opencc_assets(usage, &files)?;
+        let keep_common = |path: &str| match path {
+            "essay.txt" => essay,
+            path if path.starts_with("opencc/") => {
+                opencc.as_ref().is_none_or(|used| used.contains(path))
+            }
+            _ => true,
+        };
+        generated.retain(|path, _| keep_common(path));
+        if builtin {
+            owned.retain(|path, _| keep_common(path));
+        }
+    }
     let fingerprint = |files: &RuntimeFiles| -> Result<BTreeMap<_, _>, CoreError> {
         files
             .iter()
@@ -1449,7 +1765,7 @@ fn write_runtime(
         let mut edits = BTreeMap::new();
         for (path, source, previous_sha256) in writes {
             let relative = path.strip_prefix(runtime).unwrap();
-            source.publish(&stage.path().join(relative))?;
+            source.write_staged(&stage.path().join(relative))?;
             edits.insert(
                 relative.to_owned(),
                 StagedInput {
@@ -1481,28 +1797,59 @@ fn write_runtime(
     };
     let mut staged_writes = Vec::new();
     if let Some(copy_stage) = &copy_stage {
-        for (path, source, _) in writes {
-            let mut temp = tempfile::NamedTempFile::new_in(copy_stage.path())?;
-            source.copy_to(&mut temp)?;
-            temp.as_file().sync_all()?;
-            staged_writes.push((path, temp.into_temp_path()));
+        for (index, (path, source, _)) in writes.into_iter().enumerate() {
+            let staged = copy_stage.path().join(index.to_string());
+            source.write_staged(&staged)?;
+            staged_writes.push((path, staged));
         }
     }
     if !staged_writes.is_empty() || !removals.is_empty() {
         write_file(&pending_path, &serde_json::to_vec(&patch)?)?;
     }
-    for (path, temp) in staged_writes {
+    for (path, staged) in staged_writes {
         fs::create_dir_all(path.parent().unwrap())?;
-        temp.persist(path).map_err(|error| error.error)?;
+        fs::rename(staged, path)?;
     }
     for (path, _) in removals {
-        fs::remove_file(path)?;
+        fs::remove_file(&path)?;
+        let relative = path.strip_prefix(runtime).unwrap();
+        if relative == Path::new("essay.txt") || relative.starts_with("opencc") {
+            keytao_core::rt_log!(
+                keytao_core::runtime_log::Level::Info,
+                "app",
+                "runtime_common_file_removed",
+                path = path.display().to_string()
+            );
+        }
     }
     write_file(&manifest_path, &manifest_bytes)?;
     if pending_path.try_exists()? {
         fs::remove_file(pending_path)?;
     }
     Ok(None)
+}
+
+pub(crate) fn orphan_manifest(runtime: &Path, key: &str) -> Result<Option<Manifest>, CoreError> {
+    let absent = |name| match fs::symlink_metadata(safe(runtime, name)?) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(CoreError::from(error)),
+    };
+    if !absent(PENDING)? {
+        return Ok(None);
+    }
+    let path = safe(runtime, MANIFEST)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || crate::package_fs::is_link(&metadata) {
+        return Ok(None);
+    }
+    let manifest: Manifest = serde_json::from_slice(&fs::read(path)?)?;
+    manifest.validate(key)?;
+    Ok((manifest.package == key).then_some(manifest))
 }
 
 fn current_manifest(runtime: &Path, key: &str) -> Result<Manifest, CoreError> {
@@ -1596,17 +1943,18 @@ mod tests {
     }
 
     #[test]
-    fn changed_source_is_not_published() {
+    fn changed_source_is_rejected_in_a_fresh_stage() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
-        let destination = dir.path().join("destination");
+        let stage = tempfile::tempdir_in(dir.path()).unwrap();
         fs::write(&source, b"original").unwrap();
-        fs::write(&destination, b"previous").unwrap();
         let snapshot = RuntimeFile::disk(&source).unwrap();
+        let first = stage.path().join("first");
+        snapshot.write_staged(&first).unwrap();
         fs::write(&source, b"modified").unwrap();
 
-        assert!(snapshot.publish(&destination).is_err());
-        assert_eq!(fs::read(destination).unwrap(), b"previous");
+        assert_eq!(fs::read(first).unwrap(), b"original");
+        assert!(snapshot.write_staged(&stage.path().join("candidate")).is_err());
     }
 
     #[test]
@@ -1648,6 +1996,50 @@ mod tests {
         })
         .unwrap();
         files
+    }
+
+    #[test]
+    fn optional_common_data_tracks_dictionary_imports_and_preserves_runtime_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        put(&bundled, "essay.txt", "preset vocabulary");
+        put(&bundled, "opencc/t2s.json", r#"{"dicts":[{"file":"obsolete.ocd2"},{"file":"edited.ocd2"}]}"#);
+        put(&bundled, "opencc/obsolete.ocd2", "data");
+        put(&bundled, "opencc/edited.ocd2", "data");
+        put(&bundled, "opencc/unrelated.json", "{}");
+
+        let mut sources = Files::from([
+            (
+                "sample.schema.yaml".into(),
+                b"schema: {schema_id: sample, name: Sample}\n__include: config:/sample\n"
+                    .to_vec(),
+            ),
+            (
+                "config.yaml".into(),
+                b"sample: {translator: {dictionary: sample}, engine: {filters: [simplifier]}}\n"
+                    .to_vec(),
+            ),
+            ("sample.dict.yaml".into(), b"---\nname: sample\nimport_tables: [tables/extra]\n...\n".to_vec()),
+            ("tables/extra.dict.yaml".into(), b"---\nname: tables/extra\nuse_preset_vocabulary: 'TRUE'\n...\n".to_vec()),
+            ("opencc/package.json".into(), b"package data".to_vec()),
+        ]);
+        materialize(root, &bundled, "sample", sources.clone(), None, None).unwrap();
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "sample").unwrap();
+        assert!(runtime.join("essay.txt").is_file());
+        assert!(runtime.join("opencc/t2s.json").is_file());
+        assert!(runtime.join("opencc/obsolete.ocd2").is_file());
+        assert!(!runtime.join("opencc/unrelated.json").exists());
+        put(&runtime, "opencc/edited.ocd2", "user edit");
+
+        sources.insert("config.yaml".into(), b"sample: {translator: {dictionary: sample}}\n".to_vec());
+        sources.insert("tables/extra.dict.yaml".into(), b"---\nname: tables/extra\nuse_preset_vocabulary: false\n...\n".to_vec());
+        materialize(root, &bundled, "sample", sources, None, None).unwrap();
+        assert!(!runtime.join("essay.txt").exists());
+        assert!(!runtime.join("opencc/t2s.json").exists());
+        assert!(!runtime.join("opencc/obsolete.ocd2").exists());
+        assert_eq!(fs::read(runtime.join("opencc/edited.ocd2")).unwrap(), b"user edit");
+        assert_eq!(fs::read(runtime.join("opencc/package.json")).unwrap(), b"package data");
     }
 
     pub(crate) fn hashes(root: &Path) -> BTreeMap<String, String> {

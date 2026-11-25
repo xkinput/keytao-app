@@ -478,7 +478,7 @@ impl Drop for TestRoot {
 }
 
 #[test]
-fn receipt_reclaims_only_abandoned_stages_without_recovery_data() {
+fn startup_reclaims_only_unleased_abandoned_stages_without_recovery_data() {
     let root = TestRoot::new();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--list")
@@ -499,6 +499,8 @@ fn receipt_reclaims_only_abandoned_stages_without_recovery_data() {
         root.path.join(format!("{STAGE_PREFIX}{pid}-2/source-projection")),
         root.path.join(format!("{STAGE_PREFIX}{}-99", std::process::id())),
         root.path.join(format!("{STAGE_PREFIX}{pid}-unknown")),
+        root.path.join(format!("{STAGE_PREFIX}{pid}-4/files/private.userdb")),
+        root.path.join(format!("{STAGE_PREFIX}{pid}-5/private-notes")),
     ];
     for path in &preserved {
         fs::create_dir_all(path).unwrap();
@@ -512,8 +514,19 @@ fn receipt_reclaims_only_abandoned_stages_without_recovery_data() {
         std::os::unix::fs::symlink(&preserved[3], &link).unwrap();
         link
     };
+    #[cfg(unix)]
+    {
+        let linked_root = root.path.join("linked-root");
+        std::os::unix::fs::symlink(&root.path, &linked_root).unwrap();
+        reclaim_abandoned_work(&linked_root);
+        assert!(abandoned.is_dir());
+    }
 
-    InstallReceipt::new(&root.path).unwrap().finish().unwrap();
+    let lease = stage_lease(&root.path).unwrap();
+    reclaim_abandoned_work(&root.path);
+    assert!(abandoned.is_dir());
+    drop(lease);
+    reclaim_abandoned_work(&root.path);
 
     assert!(!abandoned.exists());
     for path in &preserved {
@@ -522,6 +535,34 @@ fn receipt_reclaims_only_abandoned_stages_without_recovery_data() {
     assert_eq!(fs::read(legacy_grammar).unwrap(), b"owner unknown");
     #[cfg(unix)]
     assert!(link.is_symlink());
+}
+
+#[test]
+fn failed_isolated_rollback_discards_download_and_extraction_but_keeps_backups() {
+    use crate::scheme_host::tests::AddonHost;
+
+    let root = TestRoot::new();
+    let host = AddonHost::new(&root.path);
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    receipt.attach_store(&host.core, SCHEMA_ID).unwrap();
+    let work = receipt.work.clone();
+    fs::write(root.path.join("wanxiang.dict.yaml"), b"old source").unwrap();
+    receipt.move_original("wanxiang.dict.yaml").unwrap();
+    fs::create_dir(work.join("files")).unwrap();
+    fs::write(work.join("files/wanxiang.dict.yaml"), b"staged source").unwrap();
+    fs::write(work.join("download.zip"), b"archive").unwrap();
+
+    let store_rollback = tempfile::tempdir_in(&root.path).unwrap();
+    let previous = store_rollback.path().join("previous");
+    fs::create_dir(&previous).unwrap();
+    fs::write(previous.join("keep"), b"rollback data").unwrap();
+    receipt.store_rollback = Some(store_rollback);
+
+    assert!(receipt.rollback().unwrap_err().contains("备份保留"));
+    assert!(!work.join("download.zip").exists());
+    assert!(!work.join("files").exists());
+    assert_eq!(fs::read(work.join("backup/wanxiang.dict.yaml")).unwrap(), b"old source");
+    assert_eq!(fs::read(previous.join("keep")).unwrap(), b"rollback data");
 }
 
 fn archive_at(path: &Path, entries: &[(&str, &str)]) {
@@ -640,12 +681,17 @@ async fn standalone_wanxiang_installs_deploys_and_uninstalls_without_a_main_sche
     assert_eq!(host.deploys.load(Ordering::SeqCst), 1);
     assert_eq!(RuntimeDirs::active_package_key(&root.path).as_deref(), Some(SCHEMA_ID));
     assert!(root.path.join("runtime/wanxiang/build/wanxiang.schema.yaml").is_file());
+    let userdb = root.path.join("runtime/wanxiang/wanxiang.userdb");
+    fs::create_dir_all(&userdb).unwrap();
+    fs::write(userdb.join("00001.log"), b"learned").unwrap();
     assert!(!root.path.join("rime.lua").exists());
     let status = manage_wanxiang(&host.core, false, "base".into(), &host)
         .await
         .unwrap();
     assert!(!status.installed && !status.deployed);
     assert_ne!(RuntimeDirs::active_package_key(&root.path).as_deref(), Some(SCHEMA_ID));
+    assert!(!root.path.join("runtime/wanxiang/build/wanxiang.schema.yaml").exists());
+    assert_eq!(fs::read(userdb.join("00001.log")).unwrap(), b"learned");
 }
 
 #[tokio::test]

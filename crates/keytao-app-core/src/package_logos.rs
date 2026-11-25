@@ -5,8 +5,9 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,6 +15,7 @@ use std::{
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 pub const REMOTE_LOGO_TTL_SECS: u64 = 2 * 24 * 60 * 60;
 const REMOTE_CACHE_NAMESPACE: &str = "remote-scheme-logos-v1";
+const SCHEME_LOGO_CACHE: &str = "scheme-logos-v2";
 
 pub fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
     let store = PackageStore::new(core);
@@ -27,19 +29,211 @@ pub fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
         if stored.files.len() > 10_000 {
             return None;
         }
-        let mut hasher = Sha256::new();
-        for entry in &stored.files {
-            hasher.update(entry.path.as_bytes());
-            hasher.update(b"\0");
-            hasher.update(entry.sha256.as_bytes());
-            hasher.update(b"\n");
-        }
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = addon_logo_digest(&stored);
         return render_inventory_logo(core, &package, &stored, &digest, scheme_key)
             .ok()
             .flatten();
     }
     None
+}
+
+fn addon_logo_digest(stored: &StoredPackage) -> String {
+    let mut hasher = Sha256::new();
+    for entry in &stored.files {
+        hasher.update(entry.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(entry.sha256.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn live_logo_digests(core: &Core) -> Result<BTreeSet<String>, CoreError> {
+    let store = PackageStore::new(core);
+    let root = store.checked_root()?;
+    let mut digests = BTreeSet::new();
+    for namespace in ["cloud", "local", "addons"] {
+        let directory = safe_path(&root, namespace).map_err(CoreError::Other)?;
+        let entries = match fs::symlink_metadata(&directory) {
+            Ok(meta) if meta.is_dir() && !crate::package_fs::is_link(&meta) => {
+                fs::read_dir(&directory)?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            _ => return Err(CoreError::Other("Invalid logo cache package source".into())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if crate::package_fs::is_link(&metadata) {
+                return Err(CoreError::Other(
+                    "Logo cache package source contains a link".into(),
+                ));
+            }
+            if !metadata.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let key = name
+                .to_str()
+                .ok_or_else(|| CoreError::Other("Invalid logo cache package key".into()))?;
+            if key.starts_with(".old-") {
+                return Err(CoreError::Other("Package publication is pending".into()));
+            }
+            if namespace == "addons" {
+                let (stored, _) =
+                    crate::addon_store::file_inventory(&store.checked_addon_path(key)?, key)?;
+                digests.insert(addon_logo_digest(&stored));
+            } else {
+                if store.checked_package_path(key)? != path {
+                    return Err(CoreError::Other("Invalid logo cache package path".into()));
+                }
+                let metadata = store.checked_metadata_path(key)?;
+                if !fs::symlink_metadata(&metadata)
+                    .is_ok_and(|meta| meta.is_file() && !crate::package_fs::is_link(&meta))
+                {
+                    return Err(CoreError::Other(
+                        "Missing logo cache package metadata".into(),
+                    ));
+                }
+                let meta = PackageStore::read_meta_at(&metadata, key)?
+                    .ok_or_else(|| CoreError::Other("Missing logo cache package metadata".into()))?;
+                digests.insert(meta.zip_sha256.to_ascii_lowercase());
+            }
+        }
+    }
+    Ok(digests)
+}
+
+fn cache_file(path: &Path) -> Option<fs::Metadata> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.is_file()
+        || crate::package_fs::is_link(&meta)
+        || crate::package_activation::user_file(&name)
+        || name.contains(".leveldb")
+    {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return None;
+        }
+    }
+    Some(meta)
+}
+
+fn owned_logo_cache_entry(path: &Path) -> Option<()> {
+    let entries: Vec<_> = fs::read_dir(path).ok()?.collect::<Result<_, _>>().ok()?;
+    let mut inputs = BTreeSet::new();
+    let mut outputs = BTreeSet::from([".rendering".to_owned(), ".skipped".to_owned()]);
+    for entry in &entries {
+        let name = entry.file_name().into_string().ok()?;
+        let Some(id) = name.strip_suffix(".schema.yaml") else {
+            continue;
+        };
+        validate_relative(id).ok()?;
+        let path = entry.path();
+        if cache_file(&path)?.len() > MAX_SOURCE_BYTES {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .ok()?
+            .take(MAX_SOURCE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_SOURCE_BYTES {
+            return None;
+        }
+        let schema: serde_yaml::Value = serde_yaml::from_slice(&bytes).ok()?;
+        if schema["schema"]["schema_id"]
+            .as_str()
+            .is_some_and(|value| value != id)
+        {
+            return None;
+        }
+        inputs.extend(keytao_schema_logo::schema_logo_candidates(
+            id,
+            schema["schema"]["name"].as_str().unwrap_or(""),
+            schema["schema"]["icon"].as_str(),
+        ));
+        outputs.insert(format!("{id}.png"));
+        outputs.insert(format!("{id}.source"));
+        inputs.insert(name);
+    }
+    if inputs.is_empty() {
+        return None;
+    }
+    for entry in entries {
+        let name = entry.file_name().into_string().ok()?;
+        if name == ".keytao-logo" {
+            let directory = entry.path();
+            let meta = fs::symlink_metadata(&directory).ok()?;
+            if !meta.is_dir() || crate::package_fs::is_link(&meta) {
+                return None;
+            }
+            for output in fs::read_dir(directory).ok()? {
+                let output = output.ok()?;
+                let filename = output.file_name().into_string().ok()?;
+                if !outputs.contains(&filename) {
+                    return None;
+                }
+                cache_file(&output.path())?;
+            }
+        } else if inputs.contains(&name) {
+            cache_file(&entry.path())?;
+        } else {
+            return None;
+        }
+    }
+    Some(())
+}
+
+pub(crate) fn prune_package_logo_cache(core: &Core) {
+    let cache_root = &core.env().cache_dir;
+    let cache = cache_root.join(SCHEME_LOGO_CACHE);
+    let _package_guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _addon_guard = crate::addon_store::operation();
+    if ![cache_root.as_path(), cache.as_path()].into_iter().all(|dir| {
+        fs::symlink_metadata(dir)
+            .is_ok_and(|meta| meta.is_dir() && !crate::package_fs::is_link(&meta))
+    }) {
+        return;
+    }
+    let Ok(_lease) = crate::package_fs::file_lease(&cache.join(".lease"), false) else {
+        return;
+    };
+    let Ok(digests) = live_logo_digests(core) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&cache) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(digest) = entry.file_name().into_string() else {
+            continue;
+        };
+        let path = entry.path();
+        if digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || digests.contains(&digest.to_ascii_lowercase())
+            || !fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.is_dir() && !crate::package_fs::is_link(&meta))
+            || owned_logo_cache_entry(&path).is_none()
+        {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "Removed package logo cache"),
+            Err(error) => tracing::warn!(path = %path.display(), %error, "Cannot remove package logo cache"),
+        }
+    }
 }
 
 fn stored_package_logo(
@@ -696,7 +890,10 @@ fn render_logo<'a>(
     }
     let name = schema["schema"]["name"].as_str().unwrap_or("");
     let icon = schema["schema"]["icon"].as_str();
-    let cache = safe_path(cache_root, &format!("scheme-logos-v2/{archive_sha}")).ok()?;
+    let base = safe_path(cache_root, SCHEME_LOGO_CACHE).ok()?;
+    fs::create_dir_all(&base).ok()?;
+    let _lease = crate::package_fs::file_lease(&base.join(".lease"), true).ok()?;
+    let cache = safe_path(&base, archive_sha).ok()?;
     fs::create_dir_all(&cache).ok()?;
     let output = safe_path(&cache, &format!(".keytao-logo/{id}.png")).ok()?;
     let parent = Path::new(&selected).parent()?;
@@ -770,24 +967,28 @@ mod tests {
     const RED: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="red"/></svg>"#;
     const BLUE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="blue"/></svg>"#;
 
-    #[test]
-    fn stored_directory_logo_is_verified_before_cached_output_is_reused() {
+    fn test_core(root: &Path) -> std::sync::Arc<Core> {
         struct Sink;
         impl crate::EventSink for Sink {
             fn emit(&self, _: crate::CoreEvent) {}
         }
-        let dir = tempfile::tempdir().unwrap();
-        let core = Core::new(
+        Core::new(
             crate::AppEnv {
-                data_dir: dir.path().join("data"),
-                cache_dir: dir.path().join("cache"),
-                resource_dir: dir.path().join("resources"),
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                resource_dir: root.join("resources"),
                 app_version: "test".into(),
                 platform: crate::Platform::Android,
             },
             std::sync::Arc::new(Sink),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn stored_directory_logo_is_verified_before_cached_output_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = test_core(dir.path());
         let bytes = archive(&[
             ("keytao.schema.yaml", b"schema:\n  schema_id: keytao\n"),
             ("keytao.svg", RED),
@@ -806,6 +1007,39 @@ mod tests {
         assert_eq!(package_logo_path(&core, "keytao"), Some(path));
         fs::write(store.package_path("keytao").join("files/keytao.svg"), BLUE).unwrap();
         assert!(package_logo_path(&core, "keytao").is_none());
+    }
+
+    #[test]
+    fn prunes_unreferenced_logo_digests_and_retains_live_and_protected_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = test_core(dir.path());
+        let schema = b"schema:\n  schema_id: keytao\n";
+        let cache = &core.env().cache_dir;
+        let old = archive(&[("keytao.schema.yaml", schema), ("keytao.svg", RED)]);
+        let current = archive(&[("keytao.schema.yaml", schema), ("keytao.svg", BLUE)]);
+        crate::packages::store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &old, dir.path()).unwrap();
+        let old_logo = package_logo_path(&core, "keytao").unwrap();
+        crate::packages::store_cloud_archive(&core, "keytao", Some("v2"), "official", None, &current, dir.path()).unwrap();
+        let current_logo = package_logo_path(&core, "keytao").unwrap();
+
+        let foreign = archive(&[("other.schema.yaml", b"schema:\n  schema_id: other\n"), ("other.svg", BLUE)]);
+        let foreign_logo = render(cache, &foreign).unwrap();
+        let protected = foreign_logo.parent().unwrap().parent().unwrap().join("personal.userdb");
+        fs::write(&protected, b"dictionary").unwrap();
+        #[cfg(unix)]
+        let linked = {
+            let linked = cache.join(SCHEME_LOGO_CACHE).join("f".repeat(64));
+            std::os::unix::fs::symlink(foreign_logo.parent().unwrap().parent().unwrap(), &linked).unwrap();
+            linked
+        };
+
+        prune_package_logo_cache(&core);
+        assert!(!old_logo.parent().unwrap().parent().unwrap().exists());
+        assert!(current_logo.is_file());
+        assert!(foreign_logo.is_file());
+        assert_eq!(fs::read(&protected).unwrap(), b"dictionary");
+        #[cfg(unix)]
+        assert!(fs::symlink_metadata(linked).unwrap().file_type().is_symlink());
     }
 
     #[test]

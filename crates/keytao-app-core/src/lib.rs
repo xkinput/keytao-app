@@ -178,6 +178,8 @@ impl Core {
                 tracing::warn!(%error, "Snow package migration will retry at next startup");
             }
         }
+        update::prune_app_update_cache(&core);
+        packages::package_logos::prune_package_logo_cache(&core);
         Ok(core)
     }
 

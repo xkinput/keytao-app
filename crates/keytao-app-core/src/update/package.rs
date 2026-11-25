@@ -9,13 +9,14 @@ use semver::Version;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Seek},
+    io::{self, Read, Seek},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ASSET_PAGE_BYTES: usize = 512 * 1024;
+const MACOS_DMG_SUFFIX: &str = "macos.dmg";
 
 pub(crate) struct VerifiedPackage {
     version: Version,
@@ -53,7 +54,7 @@ fn linux_can_upgrade(current: &str, latest: &str) -> bool {
 
 fn package_suffix() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64" | "x86_64") => Some("macos.dmg"),
+        ("macos", "aarch64" | "x86_64") => Some(MACOS_DMG_SUFFIX),
         ("windows", "aarch64" | "x86_64") => Some("windows-x64-setup.exe"),
         ("android", "aarch64") => Some("android-arm64-release.apk"),
         ("android", "arm") => Some("android-arm-release.apk"),
@@ -211,6 +212,88 @@ fn persist_verified_package(
     Ok(())
 }
 
+fn macos_update_cache(cache_root: &Path) -> Result<Option<PathBuf>, String> {
+    let cache = cache_root.join("app-updates");
+    for dir in [cache_root, cache.as_path()] {
+        match fs::symlink_metadata(dir) {
+            Ok(meta) if meta.is_dir() && !crate::package_fs::is_link(&meta) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            _ => return Err("升级包缓存目录无效".into()),
+        }
+    }
+    Ok(Some(cache))
+}
+
+fn cached_dmg_version(name: &str) -> Option<Version> {
+    let release = name
+        .strip_prefix("keytao-app-")?
+        .strip_suffix("-macos.dmg")?;
+    let version = parse_version(release)?;
+    (version.to_string() == release).then_some(version)
+}
+
+fn prune_macos_updates(cache: &Path, installed: &Version, pending: Option<&str>) {
+    if ![cache.parent().unwrap_or(cache), cache].into_iter().all(|dir| {
+        fs::symlink_metadata(dir)
+            .is_ok_and(|meta| meta.is_dir() && !crate::package_fs::is_link(&meta))
+    }) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(cache) else {
+        return;
+    };
+    let candidates: Vec<_> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            let version = cached_dmg_version(&name)?;
+            let meta = fs::symlink_metadata(entry.path()).ok()?;
+            if !meta.is_file() || crate::package_fs::is_link(&meta) {
+                return None;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if meta.nlink() != 1 {
+                    return None;
+                }
+            }
+            Some((version, name, entry.path()))
+        })
+        .collect();
+    let pending = pending.or_else(|| {
+        candidates
+            .iter()
+            .filter(|(version, _, _)| version > installed)
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, name, _)| name.as_str())
+    });
+    for (_, name, path) in &candidates {
+        if pending == Some(name.as_str()) {
+            continue;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => tracing::info!(path = %path.display(), "Removed cached app update"),
+            Err(error) => tracing::warn!(path = %path.display(), %error, "Cannot remove cached app update"),
+        }
+    }
+}
+
+pub(crate) fn prune_app_update_cache(core: &Core) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let Some(installed) = parse_version(&core.env().app_version) else {
+        return;
+    };
+    let Ok(Some(cache)) = macos_update_cache(&core.env().cache_dir) else {
+        return;
+    };
+    if let Ok(_lease) = crate::package_fs::file_lease(&cache.join(".lease"), false) {
+        prune_macos_updates(&cache, &installed, None);
+    }
+}
+
 pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, String> {
     let _operation = AppOperation::start("download_app_update");
     let mut package = core.app_update_package.lock().await;
@@ -227,11 +310,24 @@ pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, S
     let Some(digest) = fetch_digest(&client, &tag, &filename).await? else {
         return Ok(false);
     };
-    let cache = core.env().cache_dir.join("app-updates");
+    let cache_root = &core.env().cache_dir;
+    let cache = cache_root.join("app-updates");
+    if suffix == MACOS_DMG_SUFFIX {
+        macos_update_cache(cache_root)?;
+    }
     fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
     if !fs::symlink_metadata(&cache).is_ok_and(|meta| meta.is_dir()) {
         return Err("升级包缓存目录无效".into());
     }
+    let lease = if suffix == MACOS_DMG_SUFFIX {
+        macos_update_cache(cache_root)?.ok_or("升级包缓存目录无效")?;
+        Some(
+            crate::package_fs::file_lease(&cache.join(".lease"), false)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
     let path = cache.join(&filename);
     let cached = {
         let path = path.clone();
@@ -239,7 +335,9 @@ pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, S
             .await
             .map_err(|error| error.to_string())?
     };
-    if !cached {
+    let temp = if cached {
+        None
+    } else {
         let (_cancel_sender, mut cancel) = tokio::sync::watch::channel(0);
         let url = format!("{RELEASES}/download/{tag}/{filename}");
         let mut last_percent = 0;
@@ -262,11 +360,25 @@ pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, S
         )
         .await?;
         emit_progress(core, "app_update_verifying", 100, "正在校验升级包");
-        let target = path.clone();
-        tokio::task::spawn_blocking(move || persist_verified_package(temp, &target, digest))
-            .await
-            .map_err(|error| error.to_string())??;
-    }
+        Some(temp)
+    };
+    let target = path.clone();
+    let cache_root = cache_root.clone();
+    let installed = parse_version(&core.env().app_version);
+    tokio::task::spawn_blocking(move || {
+        if lease.is_some() {
+            macos_update_cache(&cache_root)?.ok_or("升级包缓存目录无效")?;
+        }
+        if let Some(temp) = temp {
+            persist_verified_package(temp, &target, digest)?;
+        }
+        if let (Some(_lease), Some(installed)) = (lease, installed) {
+            prune_macos_updates(&cache, &installed, Some(&filename));
+        }
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     *package = Some(VerifiedPackage {
         version,
         path,
@@ -363,6 +475,62 @@ mod tests {
         assert!(verified_file(&path, digest).is_ok());
         fs::write(&path, b"tampered!").unwrap();
         assert!(verified_file(&path, digest).is_err());
+    }
+
+    #[test]
+    fn prunes_dmg_versions_but_keeps_pending_downloads_and_foreign_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = Version::parse("1.2.18-alpha.10").unwrap();
+        let [older, current, pending, newest, downloading, foreign, installer] = [
+            "keytao-app-1.2.18-alpha.9-macos.dmg",
+            "keytao-app-1.2.18-alpha.10-macos.dmg",
+            "keytao-app-1.2.18-macos.dmg",
+            "keytao-app-1.2.19-macos.dmg",
+            ".tmp123456",
+            "keytao-app-personal-macos.dmg",
+            "keytao-app-1.2.16-windows-x64-setup.exe",
+        ];
+        for name in [older, current, pending, newest, downloading, foreign, installer] {
+            fs::write(dir.path().join(name), b"test").unwrap();
+        }
+        let protected_dir = dir.path().join("keytao-app-1.2.17-macos.dmg");
+        fs::create_dir(&protected_dir).unwrap();
+        fs::write(protected_dir.join("personal.userdb"), b"dictionary").unwrap();
+
+        prune_macos_updates(dir.path(), &installed, None);
+        for removed in [older, current, pending] {
+            assert!(!dir.path().join(removed).exists(), "{removed}");
+        }
+        assert!(dir.path().join(newest).is_file());
+        fs::write(dir.path().join(pending), b"verified").unwrap();
+        prune_macos_updates(dir.path(), &installed, Some(pending));
+        assert!(!dir.path().join(newest).exists());
+        for retained in [pending, downloading, foreign, installer] {
+            assert!(dir.path().join(retained).is_file(), "{retained}");
+        }
+        assert_eq!(fs::read(protected_dir.join("personal.userdb")).unwrap(), b"dictionary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_symlinked_dmg_and_cache_directory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let protected = outside.path().join("dictionary.userdb");
+        fs::write(&protected, b"dictionary").unwrap();
+        let cache = dir.path().join("app-updates");
+        symlink(outside.path(), &cache).unwrap();
+        assert!(macos_update_cache(dir.path()).is_err());
+        fs::remove_file(&cache).unwrap();
+        fs::create_dir(&cache).unwrap();
+        let linked = cache.join("keytao-app-1.0.0-macos.dmg");
+        symlink(&protected, &linked).unwrap();
+
+        prune_macos_updates(&cache, &Version::parse("2.0.0").unwrap(), None);
+        assert!(fs::symlink_metadata(&linked).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(protected).unwrap(), b"dictionary");
     }
 
     #[test]
