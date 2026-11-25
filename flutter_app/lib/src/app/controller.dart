@@ -2990,6 +2990,20 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<bool> releasePackageCache(String key, {required bool imeJd}) =>
+      run(() async {
+        packageError = null;
+        try {
+          await core.releasePackageCache(schemeKey: key, imeJd: imeJd);
+          _invalidateSchemeUpdates();
+          await _readInstalledPackages();
+          await refreshIsolatedPackages(notify: false);
+        } catch (failure) {
+          packageError = errorText(failure);
+          rethrow;
+        }
+      });
+
   Future<PackageOrphanReportDto> packageOrphanReport() =>
       core.packageOrphanReport();
 

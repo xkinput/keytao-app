@@ -17,7 +17,7 @@ const SUFFIXES: [&str; 5] = [
     ".correction.bin",
 ];
 
-fn output_id(name: &str) -> Option<&str> {
+pub(crate) fn output_id(name: &str) -> Option<&str> {
     let id = SUFFIXES
         .iter()
         .find_map(|suffix| name.strip_suffix(suffix))?;

@@ -130,7 +130,18 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
             }
         }
     }
-    runtime::dto(packages)
+    let mut packages: Vec<InstalledPackageDto> = runtime::dto(packages)?;
+    for package in &mut packages {
+        if let Ok(sizes) = keytao_app_core::package_cache::cache_sizes(
+            &state.core,
+            &root,
+            &package.scheme_key,
+        ) {
+            package.build_cache_bytes = (sizes.build_bytes > 0).then_some(sizes.build_bytes);
+            package.ime_jd_cache_bytes = (sizes.ime_jd_bytes > 0).then_some(sizes.ime_jd_bytes);
+        }
+    }
+    Ok(packages)
 }
 
 fn package_engine(
@@ -729,6 +740,19 @@ pub async fn remove_scheme_package(
     keytao_app_core::packages::remove_scheme_package(&state.core, &scheme_key, &host)
         .await
         .map_err(|error| error.to_string())
+}
+
+pub async fn release_package_cache(scheme_key: String, ime_jd: bool) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    let core = state.core.clone();
+    tokio::task::spawn_blocking(move || {
+        keytao_app_core::package_cache::release(&core, &root, &scheme_key, ime_jd)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn repair_scheme_package(

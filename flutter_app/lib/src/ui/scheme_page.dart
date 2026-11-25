@@ -571,6 +571,40 @@ class SchemePackageRow extends StatelessWidget {
   Widget build(BuildContext context) =>
       _SchemeCardMenu(key: ValueKey(schemeKey), builder: _build);
 
+  Future<void> _confirmCacheRelease(
+    BuildContext context,
+    String label,
+    BigInt bytes, {
+    required bool imeJd,
+  }) async {
+    final confirmed = await showFDialog<bool>(
+      context: context,
+      builder: (context, _, animation) => AppDialog(
+        title: label,
+        animation: animation,
+        actions: [
+          ActionButton(
+            AppStrings.cancel,
+            onPress: () => Navigator.pop(context, false),
+          ),
+          ActionButton(
+            '确认释放',
+            primary: true,
+            onPress: () => Navigator.pop(context, true),
+          ),
+        ],
+        child: Text(
+          '${controller.packageDisplayName(schemeKey)}可释放 ${formatLogBytes(bytes)}。'
+          '此次释放仅涉及可重新生成的文件。'
+          '${imeJd ? '切换到 ime-jd 后可重新转换词库。' : '下次在 App 中启用方案时将重新部署。'}',
+        ),
+      ),
+    );
+    if (confirmed == true) {
+      await controller.releasePackageCache(schemeKey, imeJd: imeJd);
+    }
+  }
+
   Widget _build(BuildContext context, FPopoverController menu) {
     final c = controller;
     final palette = AppPalette.of(context);
@@ -580,6 +614,22 @@ class SchemePackageRow extends StatelessWidget {
     final isLocal = package?.source == 'local';
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
+    final buildCache = active
+        ? BigInt.zero
+        : package?.buildCacheBytes ?? BigInt.zero;
+    final imeJdCache = c.prefersLibjd
+        ? BigInt.zero
+        : package?.imeJdCacheBytes ?? BigInt.zero;
+    final cacheBytes = buildCache + imeJdCache;
+    final cacheSize = cacheBytes > BigInt.zero
+        ? Text(
+            '可释放 ${formatLogBytes(cacheBytes)}',
+            style: context.theme.typography.body.sm.copyWith(
+              color: palette.muted,
+              fontSize: mobile ? 12 : 13,
+            ),
+          )
+        : null;
     final local = c.local;
     final checksCurrentPackage =
         local?.installedScheme == null || local?.installedScheme == schemeKey;
@@ -841,6 +891,26 @@ class SchemePackageRow extends StatelessWidget {
                                 );
                               },
                       ),
+                    for (final (imeJd, bytes, label) in [
+                      (false, buildCache, '释放编译缓存'),
+                      (true, imeJdCache, '释放 ime-jd 词典'),
+                    ])
+                      if (bytes > BigInt.zero)
+                        FItem(
+                          title: Text(label),
+                          suffix: Text(formatLogBytes(bytes)),
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  _confirmCacheRelease(
+                                    context,
+                                    label,
+                                    bytes,
+                                    imeJd: imeJd,
+                                  );
+                                },
+                        ),
                     FItem(
                       title: const Text(AppStrings.uninstall),
                       variant: FItemVariant.destructive,
@@ -962,6 +1032,7 @@ class SchemePackageRow extends StatelessWidget {
       runSpacing: 4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        ?cacheSize,
         if (package?.version?.trim().isNotEmpty == true)
           Text(
             package!.version!,
@@ -1047,6 +1118,7 @@ class SchemePackageRow extends StatelessWidget {
                     spacing: 6,
                     runSpacing: 4,
                     children: [
+                      ?cacheSize,
                       if (package?.version?.trim().isNotEmpty == true)
                         Text(
                           package!.version!,

@@ -31,6 +31,7 @@ mod generic_rime;
 mod pinyin_addons;
 mod shape_addons;
 mod package_activation;
+pub mod package_cache;
 pub mod package_orphans;
 pub mod package_migration;
 #[cfg(test)]

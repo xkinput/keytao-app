@@ -382,11 +382,17 @@ fn main() {
             gate
         });
         let engine = engine::CoreEngine::new().with_ime_host();
-        if let Err(e) = engine.init_without_deploy() {
-            tracing::error!("input engine init failed: {e}");
-            std::process::exit(1);
+        match engine.init_without_deploy() {
+            Ok(()) => tracing::info!("input engine ready"),
+            Err(e) if e == keytao_core::LIBJD_DICTIONARY_MISSING => {
+                tracing::warn!("input engine starting in passthrough: {e}");
+                reload_bus::set_engine_enabled(false);
+            }
+            Err(e) => {
+                tracing::error!("input engine init failed: {e}");
+                std::process::exit(1);
+            }
         }
-        tracing::info!("input engine ready");
         let reload_watcher_ready = install_reload_watcher(engine.clone(), reload_gate);
         if let Some(upgrade) = upgrade {
             if reload_watcher_ready {

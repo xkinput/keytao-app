@@ -1,5 +1,8 @@
 use super::*;
 
+pub const LIBJD_DICTIONARY_MISSING: &str =
+    "ime-jd dictionary is missing or invalid; reconvert the scheme in the KeyTao app";
+
 pub(super) struct ActiveJd {
     source: jd_backend::PreparedJd,
     first_session: Option<jd_backend::JdBackend>,
@@ -69,10 +72,14 @@ impl ImeRuntime {
     }
 
     pub(super) fn activate_libjd(&self, dirs: &RimeDataDirs, reload: bool) -> Result<bool, String> {
-        use engine_choice::PackageEngine;
         if !self.libjd_requested(&dirs.user) {
             return Ok(false);
         }
+        self.activate_requested_libjd(dirs, reload)
+    }
+
+    fn activate_requested_libjd(&self, dirs: &RimeDataDirs, reload: bool) -> Result<bool, String> {
+        use engine_choice::PackageEngine;
         let generation = self.generation();
         let key = engine_choice::active_package(&dirs.user);
         let package_engine = engine_choice::read(&dirs.user, key.as_deref());
@@ -90,8 +97,11 @@ impl ImeRuntime {
             return Ok(true);
         }
         let imported = (package_engine == PackageEngine::LibjdEngine)
-            .then(|| imported_dictionary(&dirs.user, None, key.as_deref()))
-            .flatten();
+            .then(|| {
+                imported_dictionary(&dirs.user, None, key.as_deref())
+                    .ok_or(LIBJD_DICTIONARY_MISSING)
+            })
+            .transpose()?;
         // Start the validated target before releasing the current runtime so
         // an unreadable dictionary or failed allocation leaves typing intact.
         let backend = imported
@@ -225,4 +235,27 @@ fn runtime_data_root(root: &Path) -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     Some(RuntimeDirs::app_data_root(root).unwrap_or_else(|| root.to_path_buf()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_libjd_with_missing_dictionary_returns_error() {
+        let root = std::env::temp_dir().join(format!("keytao-missing-ime-jd-{}", std::process::id()));
+        let manifest = package_store::active_manifest(&root);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(manifest, br#"{"active_package":"xmjd"}"#).unwrap();
+        std::fs::write(
+            root.join(english_mode::SETTINGS_FILE),
+            br#"{"engines":{"xmjd":"libjd_engine"}}"#,
+        )
+        .unwrap();
+        let runtime = ImeRuntime::with_dirs(&root, "").with_ime_host();
+        let result = runtime.activate_requested_libjd(&runtime.data_dirs().unwrap(), true);
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(result.unwrap_err(), LIBJD_DICTIONARY_MISSING);
+    }
 }

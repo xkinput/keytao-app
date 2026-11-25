@@ -131,6 +131,12 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> releasePackageCache(String key, {required bool imeJd}) async {
+    actions.add('release:$key:$imeJd');
+    return true;
+  }
+
+  @override
   Future<bool> installAddon() async {
     actions.add('easy:true');
     return true;
@@ -276,6 +282,76 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  testWidgets('package cache menu shows sizes and requires confirmation', (
+    tester,
+  ) async {
+    const key = 'local-custom';
+    final c = _PackageController();
+    addTearDown(c.dispose);
+    _size(tester, const Size(390, 844));
+    InstalledPackageDto package({bool active = false}) => InstalledPackageDto(
+      schemeKey: key,
+      source: 'local',
+      displayName: 'Custom scheme',
+      active: active,
+      hasPackageZip: true,
+      buildCacheBytes: BigInt.from(2 * 1024 * 1024),
+      imeJdCacheBytes: BigInt.from(1024 * 1024),
+    );
+    final more = find.byIcon(FLucideIcons.ellipsis);
+    final buildCache = find.widgetWithText(FItem, '释放编译缓存');
+    final imeJdCache = find.widgetWithText(FItem, '释放 ime-jd 词典');
+
+    c.installedPackages = [package()];
+    await _pumpRow(tester, c, key);
+    expect(find.text('可释放 3.0 MB'), findsOneWidget);
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: buildCache, matching: find.text('2.0 MB')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: imeJdCache, matching: find.text('1.0 MB')),
+      findsOneWidget,
+    );
+
+    await tester.tap(buildCache);
+    await tester.pumpAndSettle();
+    expect(find.byType(AppDialog), findsOneWidget);
+    expect(find.textContaining('可释放 2.0 MB'), findsOneWidget);
+    expect(c.actions, isEmpty);
+    await tester.tap(find.widgetWithText(ActionButton, AppStrings.cancel));
+    await tester.pumpAndSettle();
+    expect(c.actions, isEmpty);
+
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    await tester.tap(buildCache);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ActionButton, '确认释放'));
+    await tester.pumpAndSettle();
+    expect(c.actions, ['release:$key:false']);
+
+    c.installedPackages = [package(active: true)];
+    await _pumpRow(tester, c, key);
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    expect(buildCache, findsNothing);
+    await tester.tap(imeJdCache);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ActionButton, '确认释放'));
+    await tester.pumpAndSettle();
+    expect(c.actions, ['release:$key:false', 'release:$key:true']);
+
+    c.inputEngine = 'libjd_engine';
+    await _pumpRow(tester, c, key);
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    expect(imeJdCache, findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'every installed card selects named schemas and confirms deployment',
     (tester) async {

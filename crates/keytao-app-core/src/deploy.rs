@@ -1510,11 +1510,13 @@ mod tests {
         let root = temp.path();
         let shared = root.join("rime-data");
         fs::create_dir(&shared).unwrap();
+        let custom = ("keytao.custom.yaml", "patch: {speller/max_code_length: 4}\n");
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (file, content) in [
             ("default.yaml", "config_version: '1'\nschema_list: [{schema: keytao}]\n"),
             ("keytao.schema.yaml", "schema: {schema_id: keytao, name: Fixture, version: '1'}\nengine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\nspeller: {alphabet: abcde}\ntranslator: {dictionary: keytao, enable_user_dict: false}\n"),
             ("keytao.dict.yaml", "---\nname: keytao\nversion: '1'\nsort: by_weight\nuse_preset_vocabulary: false\n...\n甲\ta\t100\n"),
+            custom,
         ] {
             archive.start_file(file, zip::write::SimpleFileOptions::default()).unwrap();
             archive.write_all(content.as_bytes()).unwrap();
@@ -1574,7 +1576,7 @@ mod tests {
         deploy_isolated_in_process_target(
             &core,
             root,
-            shared,
+            shared.clone(),
             IsolatedDeploy::Switch {
                 key,
                 schema_id: None,
@@ -1584,6 +1586,68 @@ mod tests {
             .unwrap();
         assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(key));
         assert!(steps.0.lock().unwrap().is_empty());
+
+        use crate::package_cache::{cache_sizes, release};
+        assert_eq!(cache_sizes(&core, root, key).unwrap().build_bytes, 0);
+        assert!(release(&core, root, key, false).is_err());
+        fs::write(
+            keytao_core::package_store::active_manifest(root),
+            br#"{"active_package":"builtin/other"}"#,
+        ).unwrap();
+        let misplaced = resolved.staging_dir.join("keep.custom.yaml");
+        fs::write(&misplaced, "patch: {}\n").unwrap();
+        assert_eq!(cache_sizes(&core, root, key).unwrap().build_bytes, 0);
+        assert!(release(&core, root, key, false).is_err());
+        assert_eq!(fs::read_to_string(&misplaced).unwrap(), "patch: {}\n");
+        fs::remove_file(misplaced).unwrap();
+        let retained = [
+            ("custom.user.dict.yaml", "name: custom\n"),
+            ("test.userdb.txt", "learned words\n"),
+        ];
+        for (name, contents) in retained {
+            fs::write(resolved.user_data_dir.join(name), contents).unwrap();
+        }
+        assert!(cache_sizes(&core, root, key).unwrap().build_bytes > 0);
+        release(&core, root, key, false).unwrap();
+        assert!(!resolved.staging_dir.exists());
+        assert_eq!(cache_sizes(&core, root, key).unwrap().build_bytes, 0);
+        assert_eq!(
+            keytao_core::switch_ready_package(root, &shared, key).unwrap_err(),
+            "请在键道 App 部署此方案包"
+        );
+        for (name, contents) in std::iter::once(custom).chain(retained) {
+            assert_eq!(fs::read_to_string(resolved.user_data_dir.join(name)).unwrap(), contents);
+        }
+
+        switch_package(&core, root, key).await.unwrap();
+        assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(key));
+        assert!(steps.0.lock().unwrap().contains(&DeployStep::Compile));
+        assert!(keytao_core::isolated_deploy::rime_package_build_ready(root, &resolved));
+        for (name, contents) in std::iter::once(custom).chain(retained) {
+            assert_eq!(fs::read_to_string(resolved.user_data_dir.join(name)).unwrap(), contents);
+        }
+
+        let stable = keytao_core::libjd::dictionary_directory(&core.env().data_dir, key).unwrap();
+        let previous = stable.with_file_name(".old-libjd-dictionary");
+        let schema = br#"{"id":"keytao","name":"Fixture"}"#;
+        for directory in [&stable, &previous] {
+            fs::create_dir_all(directory).unwrap();
+            fs::write(directory.join("schema.json"), schema).unwrap();
+        }
+        fs::write(stable.join("dictionary.bin"), b"converted").unwrap();
+        fs::hard_link(stable.join("dictionary.bin"), previous.join("dictionary.bin")).unwrap();
+        let settings = root.join(keytao_core::english_mode::SETTINGS_FILE);
+        fs::write(&settings, br#"{"engine":"libjd_engine"}"#).unwrap();
+        assert_eq!(cache_sizes(&core, root, key).unwrap().ime_jd_bytes, 0);
+        assert!(release(&core, root, key, true).is_err());
+        fs::write(&settings, br#"{"engine":"rime"}"#).unwrap();
+        assert_eq!(cache_sizes(&core, root, key).unwrap().ime_jd_bytes,
+            (b"converted".len() + schema.len() * 2) as u64);
+        release(&core, root, key, true).unwrap();
+        assert_eq!(RuntimeDirs::active_package_key(root).as_deref(), Some(key));
+        assert_eq!(cache_sizes(&core, root, key).unwrap().ime_jd_bytes, 0);
+        assert!(keytao_core::libjd::imported_dictionary(&core.env().data_dir, key).is_none());
+        assert!(keytao_core::isolated_deploy::rime_package_build_ready(root, &resolved));
     }
 
     #[cfg(target_os = "macos")]

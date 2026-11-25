@@ -74,10 +74,24 @@ pub fn configured(root: &Path, package: Option<&str>) -> PackageEngine {
     configured_in(&settings(root), package)
 }
 
+pub fn can_release_libjd_dictionary(root: &Path, package: &str) -> bool {
+    try_settings(root).is_some_and(|settings| {
+        preferred_in(root, &settings).is_rime()
+            && configured_in(&settings, Some(package)) != PackageEngine::LibjdEngine
+    })
+}
+
 fn settings(root: &Path) -> serde_json::Value {
-    crate::runtime_dirs::read_regular_file(&root.join(crate::english_mode::SETTINGS_FILE))
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    try_settings(root).unwrap_or_default()
+}
+
+fn try_settings(root: &Path) -> Option<serde_json::Value> {
+    let path = root.join(crate::english_mode::SETTINGS_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => serde_json::from_slice(&fs::read(path).ok()?).ok(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(serde_json::Value::Null),
+        _ => None,
+    }
 }
 
 fn preferred_in(root: &Path, settings: &serde_json::Value) -> PackageEngine {

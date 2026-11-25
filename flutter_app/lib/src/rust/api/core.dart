@@ -321,6 +321,14 @@ Future<List<String>> removeSchemePackage({
   androidDeploy: androidDeploy,
 );
 
+Future<void> releasePackageCache({
+  required String schemeKey,
+  required bool imeJd,
+}) => RustLib.instance.api.crateApiCoreReleasePackageCache(
+  schemeKey: schemeKey,
+  imeJd: imeJd,
+);
+
 Future<String?> repairSchemePackage({
   required String packageKey,
   required FutureOr<String> Function() androidDeploy,

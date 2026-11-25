@@ -244,6 +244,80 @@ fn runtime_lock_directory(control_root: &Path) -> Result<PathBuf, String> {
     Ok(runtime)
 }
 
+pub fn rime_build_cache_files(
+    control_root: &Path,
+    key: &str,
+) -> Result<Option<Vec<PathBuf>>, String> {
+    let Some(user) = RuntimeDirs::isolated_user_data_dir(control_root, key) else {
+        return Ok(None);
+    };
+    let Ok(published) = runtime_build_dir(&user) else {
+        return Ok(None);
+    };
+    let directories = std::collections::BTreeSet::from([
+        published,
+        user.join("build"),
+        user.join(PREVIOUS_BUILD),
+    ]);
+    let files = (|| -> io::Result<Option<Vec<_>>> {
+        let mut files = Vec::new();
+        for directory in directories {
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+            for entry in fs::read_dir(&directory)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { return Ok(None) };
+                let compiled = crate::build_prune::output_id(name).is_some_and(|id| {
+                    let id = id.to_ascii_lowercase();
+                    id != "user.dict" && !id.contains("userdb") && !id.contains(".user.dict")
+                });
+                let generated = compiled || matches!(name, RECEIPT | SCHEMA_RECEIPT | "default.yaml"
+                    | crate::DEPLOYED_FILE | crate::DEPLOYING_FILE | crate::SKIPPED_SCHEMAS_FILE
+                    | ".keytao-deploy-failed");
+                if !generated || !entry.file_type()?.is_file() {
+                    return Ok(None);
+                }
+                files.push(entry.path());
+            }
+        }
+        files.sort_unstable_by_key(|path| {
+            !matches!(path.file_name().and_then(|name| name.to_str()), Some(RECEIPT | crate::DEPLOYED_FILE))
+        });
+        Ok(Some(files))
+    })();
+    files.map_err(|error| format!("read Rime build cache: {error}"))
+}
+
+pub fn release_rime_build_cache(control_root: &Path, key: &str) -> Result<(), String> {
+    let files = rime_build_cache_files(control_root, key)?
+        .ok_or("编译目录含无法确认可重建的内容")?;
+    let mut flat_builds = std::collections::BTreeSet::new();
+    for file in files {
+        if let Some(parent) = file.parent() {
+            if matches!(
+                parent.file_name().and_then(|name| name.to_str()),
+                Some("build" | PREVIOUS_BUILD)
+            ) {
+                flat_builds.insert(parent.to_owned());
+            }
+        }
+        crate::remove_rime_build_artifact(&file)?;
+    }
+    for directory in flat_builds {
+        match fs::remove_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty) => {}
+            Err(error) => return Err(format!("remove {}: {error}", directory.display())),
+        }
+    }
+    Ok(())
+}
+
 pub fn package_build_ready(control_root: &Path, dirs: &RuntimeDirs) -> bool {
     package_build_ready_in_store(control_root, None, dirs)
 }
