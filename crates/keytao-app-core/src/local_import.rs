@@ -1,12 +1,12 @@
-use super::{PackageMeta, excluded_from_manifest, validate_relative};
-use crate::generic_rime::{NOMEDIA_FILE, has_excluded_hidden_component};
-use crate::package_store::PackageStore;
+use super::{PackageMeta, excluded_from_manifest, safe_path, sha256_reader, validate_relative};
+use crate::generic_rime::{DEFAULT_MAX_EXPANDED_BYTES, NOMEDIA_FILE, has_excluded_hidden_component};
+use crate::package_store::{PackageStore, Staging};
 use crate::{Core, CoreError, package_fs::context};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::{Cursor, Write},
+    io::{BufRead, BufReader, Read, Seek, Take, Write},
     path::Path,
 };
 
@@ -52,6 +52,46 @@ fn import_io<T>(
     result.map_err(|error| context(operation, path, error).into())
 }
 
+enum ImportFile {
+    Disk(u64),
+    Bytes(Vec<u8>),
+}
+
+fn changed_source(path: &Path) -> CoreError {
+    CoreError::Other(format!("导入期间方案文件已更改：{}", path.display()))
+}
+
+fn open_source(path: &Path, size: u64) -> Result<BufReader<Take<fs::File>>, CoreError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+    }
+    let file = import_io(options.open(path), "读取文件", path)?;
+    let metadata = import_io(file.metadata(), "读取文件属性", path)?;
+    if !metadata.is_file() || metadata.len() != size {
+        return Err(changed_source(path));
+    }
+    Ok(BufReader::with_capacity(64 * 1024, file.take(size + 1)))
+}
+
+fn read_source(path: &Path, size: u64) -> Result<Vec<u8>, CoreError> {
+    let mut bytes = Vec::new();
+    import_io(open_source(path, size)?.read_to_end(&mut bytes), "读取文件", path)?;
+    if bytes.len() as u64 != size {
+        return Err(changed_source(path));
+    }
+    Ok(bytes)
+}
+
 pub(super) fn has_root_schema(directory: &Path) -> Result<bool, CoreError> {
     let entries = fs::read_dir(directory).map_err(|error| context("读取目录", directory, error))?;
     for entry in entries {
@@ -81,7 +121,7 @@ pub(super) fn has_root_schema(directory: &Path) -> Result<bool, CoreError> {
 fn collect(
     directory: &Path,
     prefix: &str,
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut BTreeMap<String, ImportFile>,
     size: &mut u64,
     skip_trime_assets: bool,
 ) -> Result<(), CoreError> {
@@ -130,24 +170,35 @@ fn collect(
                 return Err(CoreError::Other("方案包文件过多".into()));
             }
             let next_size = size.saturating_add(metadata.len());
-            if next_size > 512 * 1024 * 1024 {
+            if next_size > DEFAULT_MAX_EXPANDED_BYTES {
                 return Err(CoreError::Other("方案包解压后过大".into()));
             }
-            let mut bytes = import_io(fs::read(&path), "读取文件", &path)?;
             *size = next_size;
-            if relative.ends_with(".custom.yaml") {
+            let file = if relative.ends_with(".custom.yaml") {
+                let bytes = read_source(&path, metadata.len())?;
                 let content = std::str::from_utf8(&bytes)
                     .map_err(|error| CoreError::Other(error.to_string()))?;
-                bytes = crate::managed_custom::strip(content)
+                let bytes = crate::managed_custom::strip(content)
                     .map_err(CoreError::Other)?
                     .into_bytes();
                 if bytes.is_empty() {
                     continue;
                 }
-            } else if crate::managed_custom::is_generated(&relative, &bytes) {
-                continue;
-            }
-            files.insert(relative, bytes);
+                ImportFile::Bytes(bytes)
+            } else if !relative.contains('/') && relative.ends_with(".schema.yaml") {
+                ImportFile::Bytes(read_source(&path, metadata.len())?)
+            } else if relative == crate::remove_filter::SCRIPT_PATH
+                && metadata.len() == crate::remove_filter::SCRIPT.len() as u64
+            {
+                let bytes = read_source(&path, metadata.len())?;
+                if crate::managed_custom::is_generated(&relative, &bytes) {
+                    continue;
+                }
+                ImportFile::Bytes(bytes)
+            } else {
+                ImportFile::Disk(metadata.len())
+            };
+            files.insert(relative, file);
         }
     }
     Ok(())
@@ -155,7 +206,7 @@ fn collect(
 
 fn collect_orphan_prebuilt_bins(
     directory: &Path,
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut BTreeMap<String, ImportFile>,
     size: &mut u64,
 ) -> Result<(), CoreError> {
     let build_dir = directory.join("build");
@@ -209,12 +260,11 @@ fn collect_orphan_prebuilt_bins(
             return Err(CoreError::Other("方案包文件过多".into()));
         }
         let next_size = size.saturating_add(entry_meta.len());
-        if next_size > 512 * 1024 * 1024 {
+        if next_size > DEFAULT_MAX_EXPANDED_BYTES {
             return Err(CoreError::Other("方案包解压后过大".into()));
         }
-        let bytes = import_io(fs::read(&path), "读取文件", &path)?;
         *size = next_size;
-        files.insert(relative, bytes);
+        files.insert(relative, ImportFile::Disk(entry_meta.len()));
     }
     Ok(())
 }
@@ -295,9 +345,12 @@ fn slug(directory: &Path) -> String {
     )
 }
 
-fn infer_schema_display_name(files: &BTreeMap<String, Vec<u8>>, schemas: &[String]) -> Option<String> {
+fn infer_schema_display_name(
+    files: &BTreeMap<String, ImportFile>,
+    schemas: &[String],
+) -> Option<String> {
     for schema_id in schemas {
-        let Some(bytes) = files.get(&format!("{schema_id}.schema.yaml")) else {
+        let Some(ImportFile::Bytes(bytes)) = files.get(&format!("{schema_id}.schema.yaml")) else {
             continue;
         };
         let Ok(value) = serde_yaml::from_slice::<serde_yaml::Value>(bytes) else {
@@ -314,6 +367,61 @@ fn infer_schema_display_name(files: &BTreeMap<String, Vec<u8>>, schemas: &[Strin
         }
     }
     None
+}
+
+fn build_archive(
+    directory: &Path,
+    files: BTreeMap<String, ImportFile>,
+    output: &mut fs::File,
+) -> Result<BTreeMap<String, String>, CoreError> {
+    let mut manifest = BTreeMap::new();
+    let mut archive = zip::ZipWriter::new(output);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    for (name, file) in files {
+        archive
+            .start_file(&name, options)
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        let digest = match file {
+            ImportFile::Bytes(bytes) => {
+                archive.write_all(&bytes)?;
+                format!("{:x}", Sha256::digest(&bytes))
+            }
+            ImportFile::Disk(size) => {
+                let path = safe_path(directory, &name).map_err(CoreError::Other)?;
+                let mut input = open_source(&path, size)?;
+                let mut digest = Sha256::new();
+                let mut written = 0;
+                loop {
+                    let bytes = import_io(input.fill_buf(), "读取文件", &path)?;
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    let len = bytes.len();
+                    written += len as u64;
+                    if written > size {
+                        return Err(changed_source(&path));
+                    }
+                    archive.write_all(bytes)?;
+                    digest.update(bytes);
+                    input.consume(len);
+                }
+                if written != size {
+                    return Err(changed_source(&path));
+                }
+                format!("{:x}", digest.finalize())
+            }
+        };
+        if !excluded_from_manifest(&name) {
+            manifest.insert(name, digest);
+        }
+    }
+    archive
+        .finish()
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    Ok(manifest)
 }
 
 #[derive(Default)]
@@ -392,9 +500,17 @@ pub(super) fn import_local_scheme_with(
     if !schema_order.is_empty() {
         schemas.retain(|schema| schema_order.contains(schema));
     } else {
-        let candidates = crate::package_schemas::enumerate("local-import", &files.iter()
-            .filter(|(path, _)| path.ends_with(".schema.yaml"))
-            .map(|(path, bytes)| (path.clone(), bytes.clone())).collect::<Vec<_>>(), None)?;
+        let schema_files = schemas
+            .iter()
+            .filter_map(|id| {
+                let path = format!("{id}.schema.yaml");
+                match files.get(&path) {
+                    Some(ImportFile::Bytes(bytes)) => Some((path, bytes.clone())),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let candidates = crate::package_schemas::enumerate("local-import", &schema_files, None)?;
         schemas.retain(|id| candidates.iter().any(|schema| schema.selected && &schema.id == id));
     }
     schemas.sort_by_key(|schema| {
@@ -409,44 +525,24 @@ pub(super) fn import_local_scheme_with(
         None
     };
     let config = build_default_custom(&defaults, &schemas)?;
-    files.insert("default.custom.yaml".into(), config);
-    let manifest = files
-        .iter()
-        .filter(|(name, _)| !excluded_from_manifest(name))
-        .map(|(name, bytes)| (name.clone(), format!("{:x}", Sha256::digest(bytes))))
-        .collect();
-    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for (name, bytes) in files {
-        archive
-            .start_file(
-                name,
-                zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored)
-                    .last_modified_time(zip::DateTime::default())
-                    .unix_permissions(0o644),
-            )
-            .map_err(|error| CoreError::Other(error.to_string()))?;
-        archive.write_all(&bytes)?;
-    }
-    let bytes = archive
-        .finish()
-        .map_err(|error| CoreError::Other(error.to_string()))?
-        .into_inner();
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    files.insert("default.custom.yaml".into(), ImportFile::Bytes(config));
+    let store = PackageStore::new(core);
+    let existing_meta = scheme_key.and_then(|key| store.read_meta(key).ok().flatten());
+    let _guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut temporary = store.staging_file(Staging::ImportArchive)?;
+    let archive = temporary.as_file_mut();
+    let manifest = build_archive(&directory, files, archive)?;
+    archive.rewind()?;
+    let digest = sha256_reader(&mut *archive)?;
+    archive.rewind()?;
     let version = match options.version_override.map(str::trim).filter(|s| !s.is_empty()) {
         Some(tag) if matches!(tag, "latest" | "nightly") => format!("{tag}-{}", &digest[..8]),
         Some(tag) => tag.to_owned(),
         None => digest[..12].to_owned(),
     };
-    let store = PackageStore::new(core);
-    let store_root = store.checked_root()?;
-    let existing_meta = scheme_key
-        .and_then(|key| store.read_meta(key).ok().flatten());
-    let _guard = core
-        .pending_package
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    fs::create_dir_all(&store_root).map_err(|error| context("创建方案存储目录", &store_root, error))?;
     let state = core.state();
     let scheme_key = if let Some(key) = scheme_key {
         if !crate::scheme::is_local_scheme_key(key) || !state.installed_packages.contains_key(key) {
@@ -507,7 +603,7 @@ pub(super) fn import_local_scheme_with(
     };
     let default_origin = directory.to_string_lossy().into_owned();
     store.write_archive(
-        Cursor::new(bytes),
+        archive,
         &metadata,
         Some(options.origin.unwrap_or(&default_origin)),
     )?;

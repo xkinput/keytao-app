@@ -5,15 +5,17 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use keytao_core::engine_choice::{PACKAGE_KEY, PackageEngine};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
-    io::{Read, Seek, Write},
+    io::{self, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
 pub(crate) enum Staging {
     Metadata,
+    ImportArchive,
     #[cfg(test)]
     Pending,
     #[cfg(test)]
@@ -247,6 +249,7 @@ impl<'a> PackageStore<'a> {
     pub(crate) fn staging_file(&self, staging: Staging) -> std::io::Result<StagingFile> {
         let prefix = match staging {
             Staging::Metadata => ".meta-",
+            Staging::ImportArchive => ".import-",
             #[cfg(test)]
             Staging::Pending => ".pending-",
             #[cfg(test)]
@@ -382,6 +385,26 @@ impl<'a> PackageStore<'a> {
         Ok(bytes)
     }
 
+    pub(crate) fn verify_file(path: &Path, file: &PackageFile) -> Result<(), CoreError> {
+        let input = fs::File::open(path).map_err(|error| context("打开文件", path, error))?;
+        let mut input = BufReader::new(input.take(file.size.saturating_add(1)));
+        let mut digest = Sha256::new();
+        let size = io::copy(&mut input, &mut digest)
+            .map_err(|error| context("读取文件校验和", path, error))?;
+        if size != file.size || format!("{:x}", digest.finalize()) != file.sha256 {
+            return Err(CoreError::Other("Package file checksum mismatch".into()));
+        }
+        Ok(())
+    }
+
+    fn verify_files_at(path: &Path, key: &str) -> Result<(), CoreError> {
+        let (stored, paths) = Self::file_inventory_at(path, key, false)?;
+        for (file, path) in stored.files.iter().zip(paths) {
+            Self::verify_file(&path, file)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn read_files(
         &self,
         key: &str,
@@ -509,9 +532,10 @@ impl<'a> PackageStore<'a> {
             .transpose()?;
         let selected_schemas = previous.as_ref().and_then(|stored| stored.selected_schemas.as_ref())
             .map(|selected| {
-                let incoming = files.iter().map(|file| {
-                    Ok((file.path.clone(), fs::read(files_root.join(&file.path))?))
-                }).collect::<Result<Vec<_>, CoreError>>()?;
+                let incoming = files.iter()
+                    .filter(|file| crate::package_schemas::is_schema_config(&file.path))
+                    .map(|file| Ok((file.path.clone(), fs::read(files_root.join(&file.path))?)))
+                    .collect::<Result<Vec<_>, CoreError>>()?;
                 crate::package_schemas::reconcile_selection(
                     &meta.scheme_key, &incoming, selected,
                     &previous.as_ref().unwrap().files.iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
@@ -553,7 +577,7 @@ impl<'a> PackageStore<'a> {
             .map_err(|error| context("同步文件", &metadata_path, error))?;
         // Windows refuses to rename a directory while any file beneath it is open.
         drop(metadata);
-        Self::read_files_at(&stage.0, &meta.scheme_key)?;
+        Self::verify_files_at(&stage.0, &meta.scheme_key)?;
         sync_package_directories(&stage.0)?;
         let parent = destination.parent().unwrap();
         fs::create_dir_all(parent).map_err(|error| context("创建目录", parent, error))?;
@@ -580,7 +604,7 @@ impl<'a> PackageStore<'a> {
         if destination
             .try_exists()
             .map_err(|error| context("读取文件属性", &destination, error))?
-            && Self::read_files_at(&destination, key).is_ok()
+            && Self::verify_files_at(&destination, key).is_ok()
         {
             package_fs::remove_dir_all(&old)?;
         } else {
@@ -729,7 +753,7 @@ impl<'a> PackageStore<'a> {
                     .map_err(|error| {
                         context("读取文件属性", &root.join(format!("{key}.zip")), error)
                     })?
-                && Self::read_files_at(&self.checked_package_path(key)?, key).is_ok()
+                && Self::verify_files_at(&self.checked_package_path(key)?, key).is_ok()
             {
                 let path = safe_path(&root, &format!("{key}.json")).map_err(CoreError::Other)?;
                 let legacy: PackageMeta = serde_json::from_slice(
@@ -756,7 +780,7 @@ impl<'a> PackageStore<'a> {
                 let zip_path = safe_path(&root, &format!("{key}.zip")).map_err(CoreError::Other)?;
                 let json_path =
                     safe_path(&root, &format!("{key}.json")).map_err(CoreError::Other)?;
-                let installed = Self::read_files_at(&self.checked_package_path(key)?, key).is_ok();
+                let installed = Self::verify_files_at(&self.checked_package_path(key)?, key).is_ok();
                 let metadata = match fs::read(&json_path) {
                     Ok(bytes) => Some(bytes),
                     // A published directory is authoritative, including updates after migration.
@@ -799,7 +823,7 @@ impl<'a> PackageStore<'a> {
                     }
                 }
                 // Keep the archive until the new directory has passed a complete read-back.
-                Self::read_files_at(&self.checked_package_path(key)?, key)?;
+                Self::verify_files_at(&self.checked_package_path(key)?, key)?;
                 match package_fs::remove_file(&json_path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -893,7 +917,7 @@ impl<'a> PackageStore<'a> {
                 } else { None },
                 active,
                 in_use: active,
-                supports_user_words: crate::user_words::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
+                supports_user_words: crate::package_schemas::supports_user_words(core, &scheme_key).unwrap_or_else(|error| {
                     tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
                     false
                 }),

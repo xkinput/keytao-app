@@ -546,6 +546,7 @@ mod tests {
             recovered_state_file: None,
             pending_package: Mutex::new(()),
             user_words: Mutex::new(crate::user_words::UserWordsState::default()),
+            package_word_support: Mutex::default(),
         }
     }
 

@@ -192,6 +192,23 @@ fn local_import_root_error_names_operation_and_path() {
 }
 
 #[test]
+fn local_import_archive_rejects_source_growth_after_collection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = source(directory.path(), "source");
+    let dictionary = path.join("example.dict.yaml");
+    fs::write(&dictionary, b"dictionary").unwrap();
+    let mut files = BTreeMap::new();
+    collect(&path, "", &mut files, &mut 0, false).unwrap();
+    assert!(matches!(files.get("example.dict.yaml"), Some(ImportFile::Disk(10))));
+    fs::write(&dictionary, b"larger dictionary").unwrap();
+
+    let mut archive = tempfile::tempfile_in(directory.path()).unwrap();
+    let error = build_archive(&path, files, &mut archive).unwrap_err().to_string();
+    assert!(error.contains("导入期间方案文件已更改"), "{error}");
+    assert!(error.contains(&dictionary.display().to_string()), "{error}");
+}
+
+#[test]
 fn local_import_propagates_permission_denied_and_other_errors() {
     use std::io::{Error, ErrorKind};
     for path in [Path::new("source"), Path::new("source/child")] {

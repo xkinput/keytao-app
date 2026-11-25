@@ -88,6 +88,7 @@ fn run_librime_test_in_child(name: &str) -> bool {
 }
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, Weak},
@@ -104,6 +105,7 @@ pub struct Core {
     recovered_state_file: Option<PathBuf>,
     pub(crate) pending_package: Mutex<()>,
     pub(crate) user_words: Mutex<user_words::UserWordsState>,
+    package_word_support: Mutex<BTreeMap<String, package_schemas::PackageWordSupport>>,
 }
 
 impl Core {
@@ -148,6 +150,7 @@ impl Core {
             recovered_state_file,
             pending_package: Mutex::new(()),
             user_words: Mutex::new(user_words::UserWordsState::default()),
+            package_word_support: Mutex::default(),
         });
         package_activation::recover(&core)?;
         *core.lock_state() = AppState::load(&core.env.data_dir)?;

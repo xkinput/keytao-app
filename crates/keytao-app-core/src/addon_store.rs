@@ -27,7 +27,7 @@ const LEGACY_RECEIPTS: &[&str] = &[
 const GRAMMAR: &str = "wanxiang-lts-zh-hans.gram";
 static STORE_OPERATION: Mutex<()> = Mutex::new(());
 
-fn operation() -> MutexGuard<'static, ()> {
+pub(crate) fn operation() -> MutexGuard<'static, ()> {
     STORE_OPERATION
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -583,9 +583,25 @@ fn read_stored(path: &Path, id: &str) -> Result<StoredPackage, CoreError> {
 }
 
 pub(crate) fn validate_directory(path: &Path, id: &str) -> Result<(), CoreError> {
+    let (stored, paths) = file_inventory(path, id)?;
+    for (file, source) in stored.files.iter().zip(paths) {
+        if sha256_reader(fs::File::open(source)?)? != file.sha256 {
+            return Err(CoreError::Other(
+                "Add-on source fingerprint mismatch".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn file_inventory(
+    path: &Path,
+    id: &str,
+) -> Result<(StoredPackage, Vec<PathBuf>), CoreError> {
     let stored = read_stored(path, id)?;
     let root = safe_path(path, "files").map_err(CoreError::Other)?;
     let mut expected = BTreeSet::new();
+    let mut paths = Vec::with_capacity(stored.files.len());
     let mut total = 0u64;
     for file in &stored.files {
         validate_file(id, &file.path, &file.sha256).map_err(CoreError::Other)?;
@@ -595,15 +611,12 @@ pub(crate) fn validate_directory(path: &Path, id: &str) -> Result<(), CoreError>
         let source = safe_path(&root, &file.path).map_err(CoreError::Other)?;
         let metadata = fs::symlink_metadata(&source)?;
         total = total.saturating_add(metadata.len());
-        if !metadata.is_file()
-            || metadata.len() != file.size
-            || total > 512 * 1024 * 1024
-            || sha256_reader(fs::File::open(source)?)? != file.sha256
-        {
+        if !metadata.is_file() || metadata.len() != file.size || total > 512 * 1024 * 1024 {
             return Err(CoreError::Other(
                 "Add-on source fingerprint mismatch".into(),
             ));
         }
+        paths.push(source);
     }
     let mut actual = BTreeSet::new();
     collect_official(&root, &root, &mut actual).map_err(CoreError::Other)?;
@@ -619,7 +632,7 @@ pub(crate) fn validate_directory(path: &Path, id: &str) -> Result<(), CoreError>
     for file in active.owned.iter().chain(&active.generated) {
         validate_file(id, &file.path, &file.sha256).map_err(CoreError::Other)?;
     }
-    Ok(())
+    Ok((stored, paths))
 }
 
 pub(crate) fn manifest(core: &Core, root: &Path, id: &str) -> Result<Option<Vec<u8>>, String> {

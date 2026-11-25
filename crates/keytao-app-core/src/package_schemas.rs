@@ -1,13 +1,16 @@
 use crate::{
     Core, CoreError,
-    package_store::{PackageStore, StoredPackage},
+    package_store::{PackageFile, PackageStore, StoredPackage},
+    packages::sha256_reader,
 };
+use keytao_core::isolated_deploy::{InputStat, stable_input_stat};
 use serde::Serialize;
 use serde_yaml::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    io::{BufRead, BufReader, Read},
+    path::{Component, Path, PathBuf},
 };
 
 fn yaml_error(error: serde_yaml::Error) -> CoreError {
@@ -260,6 +263,15 @@ pub(crate) fn read_selection(path: &Path) -> Result<Option<Vec<String>>, CoreErr
     Ok(stored.selected_schemas)
 }
 
+pub(crate) fn is_schema_config(name: &str) -> bool {
+    !name.contains('/')
+        && (name.ends_with(".schema.yaml")
+            || matches!(
+                name,
+                "default.yaml" | "default.custom.yaml" | "default-custom.yaml"
+            ))
+}
+
 pub(crate) fn directory_schemas(root: &Path) -> Result<Vec<(String, Vec<u8>)>, CoreError> {
     let mut files = Vec::new();
     if !root.try_exists()? {
@@ -268,12 +280,7 @@ pub(crate) fn directory_schemas(root: &Path) -> Result<Vec<(String, Vec<u8>)>, C
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".schema.yaml")
-            || matches!(
-                name.as_str(),
-                "default.yaml" | "default.custom.yaml" | "default-custom.yaml"
-            )
-        {
+        if is_schema_config(&name) {
             files.push((
                 name.clone(),
                 fs::read(crate::packages::safe_path(root, &name).map_err(CoreError::Other)?)?,
@@ -283,30 +290,195 @@ pub(crate) fn directory_schemas(root: &Path) -> Result<Vec<(String, Vec<u8>)>, C
     Ok(files)
 }
 
-fn files(core: &Core, key: &str) -> Result<Vec<(String, Vec<u8>)>, CoreError> {
-    if crate::addon_store::IDS.contains(&key) && key != "snow_jiandao" {
-        crate::addon_store::source_files(core, key)
-            .map_err(CoreError::Other)?
-            .into_iter()
-            .map(|(source, relative)| {
-                Ok((
-                    relative.to_string_lossy().replace('\\', "/"),
-                    fs::read(source)?,
-                ))
-            })
-            .collect()
+pub fn package_schemas(core: &Core, key: &str) -> Result<Vec<PackageSchema>, CoreError> {
+    let store = PackageStore::new(core);
+    let _guard;
+    let (stored, paths) = if is_addon_package_key(key) {
+        _guard = crate::addon_store::operation();
+        store.recover_addon(key)?;
+        crate::addon_store::file_inventory(&store.checked_addon_path(key)?, key)?
     } else {
-        Ok(PackageStore::new(core).read_files(key)?.0)
+        _guard = core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        PackageStore::file_inventory_at(&store.checked_package_path(key)?, key, false)?
+    };
+    let files = stored
+        .files
+        .into_iter()
+        .zip(paths)
+        .filter(|(file, _)| is_schema_config(&file.path))
+        .map(|(file, path)| {
+            let bytes = PackageStore::read_verified_file(&path, &file)?;
+            Ok((file.path, bytes))
+        })
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    enumerate(key, &files, stored.selected_schemas.as_deref())
+}
+
+pub(crate) struct PackageWordSupport {
+    manifest: InputStat,
+    sources: Vec<(PathBuf, Option<InputStat>)>,
+    supported: bool,
+}
+
+impl PackageWordSupport {
+    fn matches(&self, path: &Path) -> bool {
+        stable_input_stat(path).is_ok_and(|stat| stat == self.manifest)
+            && self.sources.iter().all(|(path, stat)| {
+                stat.as_ref()
+                    .is_some_and(|stat| stable_input_stat(path).is_ok_and(|current| current == *stat))
+            })
     }
 }
 
-pub fn package_schemas(core: &Core, key: &str) -> Result<Vec<PackageSchema>, CoreError> {
-    let files = files(core, key)?;
-    enumerate(
-        key,
-        &files,
-        read_selection(&metadata_path(core, key)?)?.as_deref(),
-    )
+pub(crate) fn supports_user_words(core: &Core, key: &str) -> Result<bool, CoreError> {
+    let key = match key {
+        "keytao-dz" | "keytao-bj" => "keytao",
+        _ => key,
+    };
+    let store = PackageStore::new(core);
+    let guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let path = store.checked_package_path(key)?;
+    if !path.try_exists()? {
+        drop(guard);
+        return crate::user_words::supports_user_words(core, key);
+    }
+    let metadata = store.checked_metadata_path(key)?;
+    let manifest = stable_input_stat(&metadata).ok();
+    let (stored, paths) = PackageStore::file_inventory_at(&path, key, false)?;
+    let mut cache = core
+        .package_word_support
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(cached) = cache.get(key)
+        && manifest.as_ref() == Some(&cached.manifest)
+        && cached.matches(&metadata)
+    {
+        return Ok(cached.supported);
+    }
+    cache.remove(key);
+
+    let base = match key {
+        "xmjd" | "xmjd-feiding" => "xmjd6",
+        _ => key,
+    };
+    let mut sources = Vec::new();
+    let mut names = Vec::new();
+    if let Some((file, path)) = dictionary_source(&stored, &paths, base, ".schema.yaml")? {
+        sources.push((path.to_owned(), stable_input_stat(path).ok()));
+        let bytes = PackageStore::read_verified_file(path, file)?;
+        std::str::from_utf8(&bytes).map_err(|error| CoreError::Other(error.to_string()))?;
+        if let Some(name) = parse_header(&header_bytes(bytes.as_slice())?)?
+            .get("translator")
+            .and_then(|value| value.get("dictionary"))
+            .and_then(Value::as_str)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.extend([format!("{base}.extended"), base.into()]);
+    let mut supported = false;
+    for name in names {
+        let Some((file, path)) = dictionary_source(&stored, &paths, &name, ".dict.yaml")? else {
+            continue;
+        };
+        sources.push((path.to_owned(), stable_input_stat(path).ok()));
+        let input = fs::File::open(path)?;
+        let mut input = BufReader::new(input.take(file.size.saturating_add(1)));
+        let header = header_bytes(&mut input)?;
+        if sha256_reader(header.as_slice().chain(&mut input))? != file.sha256
+            || input.get_ref().limit() != 1
+        {
+            return Err(CoreError::Other("Package file checksum mismatch".into()));
+        }
+        let config = parse_header(&header)?;
+        if let Some(name) = config
+            .get("import_tables")
+            .and_then(Value::as_sequence)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find(|name| name.ends_with(".user"))
+        {
+            if name.contains('/') {
+                return Err(CoreError::Unsupported(
+                    "Nested user dictionary paths are not supported".into(),
+                ));
+            }
+            if name.contains('\\')
+                || name.chars().any(char::is_whitespace)
+                || !Path::new(name)
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            {
+                return Err(CoreError::Other(
+                    "Invalid user dictionary name in package".into(),
+                ));
+            }
+            dictionary_source(&stored, &paths, name, ".dict.yaml")?;
+            supported = true;
+        }
+        break;
+    }
+    if let Some(manifest) = manifest {
+        let cached = PackageWordSupport {
+            manifest,
+            sources,
+            supported,
+        };
+        if cached.matches(&metadata) {
+            cache.insert(key.to_owned(), cached);
+        }
+    }
+    Ok(supported)
+}
+
+fn dictionary_source<'a>(
+    stored: &'a StoredPackage,
+    paths: &'a [PathBuf],
+    name: &str,
+    extension: &str,
+) -> Result<Option<(&'a PackageFile, &'a Path)>, CoreError> {
+    let filename = format!("{name}{extension}");
+    let files = stored
+        .files
+        .iter()
+        .zip(paths)
+        .map(|(file, path)| (file, path.as_path()));
+    if let Some(file) = files.clone().find(|(file, _)| file.path == filename) {
+        return Ok(Some(file));
+    }
+    let suffix = format!("/{filename}");
+    let mut matches = files.filter(|(file, _)| file.path.ends_with(&suffix));
+    let found = matches.next();
+    if matches.next().is_some() {
+        return Err(CoreError::Other(format!(
+            "Package dictionary path is ambiguous: {name}"
+        )));
+    }
+    Ok(found)
+}
+
+fn header_bytes(mut input: impl BufRead) -> Result<Vec<u8>, CoreError> {
+    let mut bytes = Vec::new();
+    loop {
+        let offset = bytes.len();
+        if input.read_until(b'\n', &mut bytes)? == 0
+            || std::str::from_utf8(&bytes[offset..]).is_ok_and(|line| line.trim() == "...")
+        {
+            return Ok(bytes);
+        }
+    }
+}
+
+fn parse_header(bytes: &[u8]) -> Result<Value, CoreError> {
+    let text = std::str::from_utf8(bytes).map_err(|error| CoreError::Other(error.to_string()))?;
+    serde_yaml::from_str(text.trim_start_matches('\u{feff}')).map_err(yaml_error)
 }
 
 pub fn is_addon_package_key(key: &str) -> bool {
@@ -338,6 +510,61 @@ pub fn set_package_schemas(core: &Core, key: &str, ids: &[String]) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_checks_consumed_files_without_reading_unrelated_sources() {
+        struct Sink;
+        impl crate::EventSink for Sink {
+            fn emit(&self, _: crate::CoreEvent) {}
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                resource_dir: root.join("resources"),
+                app_version: "test".into(),
+                platform: crate::Platform::Android,
+            },
+            std::sync::Arc::new(Sink),
+        )
+        .unwrap();
+        let schema = b"schema: {schema_id: xmjd6, name: XMJD}\ntranslator: {dictionary: nested/stock}\n";
+        let dictionary = b"---\nname: stock\nimport_tables: [xmjd6.user]\n...\nword\tab\n";
+        let files = vec![
+            ("xmjd6.schema.yaml".into(), schema.to_vec()),
+            ("nested/stock.dict.yaml".into(), dictionary.to_vec()),
+            ("unused.dict.yaml".into(), b"original".to_vec()),
+        ];
+        let archive = crate::packages::archive_from_files(&files).unwrap();
+        crate::packages::store_cloud_archive(
+            &core,
+            "xmjd",
+            Some("v1"),
+            "official",
+            None,
+            &archive,
+            root,
+        )
+        .unwrap();
+        let files = PackageStore::new(&core).package_path("xmjd").join("files");
+        let dictionary_path = files.join("nested/stock.dict.yaml");
+        fs::write(files.join("unused.dict.yaml"), b"modified").unwrap();
+        assert!(supports_user_words(&core, "xmjd").unwrap());
+        assert_eq!(package_schemas(&core, "xmjd").unwrap()[0].id, "xmjd6");
+
+        let mut changed = dictionary.to_vec();
+        changed[dictionary.len() - 2] = b'c';
+        fs::write(dictionary_path, changed).unwrap();
+        assert!(supports_user_words(&core, "xmjd").is_err());
+        assert!(package_schemas(&core, "xmjd").is_ok());
+
+        let mut changed = schema.to_vec();
+        changed[0] = b'S';
+        fs::write(files.join("xmjd6.schema.yaml"), changed).unwrap();
+        assert!(package_schemas(&core, "xmjd").is_err());
+    }
 
     fn fixture() -> Vec<(String, Vec<u8>)> {
         [

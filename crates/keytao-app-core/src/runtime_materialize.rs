@@ -13,15 +13,18 @@ use keytao_core::{
     },
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{ErrorKind, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
 
 const MANIFEST: &str = RuntimeDirs::MANIFEST_FILE;
 const PENDING: &str = ".keytao-runtime.pending.json";
+const COPY_STAGE: &str = ".keytao-materialize-copy";
 const DEFAULT_CUSTOM: [&str; 2] = ["default.custom.yaml", "default-custom.yaml"];
 const COMMON: [&str; 6] = [
     "default.yaml",
@@ -33,6 +36,169 @@ const COMMON: [&str; 6] = [
 ];
 
 type Files = BTreeMap<String, Vec<u8>>;
+type RuntimeFiles = BTreeMap<String, RuntimeFile>;
+
+#[derive(Clone)]
+enum RuntimeFile {
+    Bytes(Vec<u8>),
+    Disk {
+        path: PathBuf,
+        size: u64,
+        sha256: String,
+    },
+}
+
+impl RuntimeFile {
+    fn disk(path: &Path) -> Result<Self, CoreError> {
+        let file = fs::File::open(path)?;
+        let mut hash = Sha256::new();
+        let size = io::copy(&mut BufReader::new(file), &mut hash)?;
+        Ok(Self::Disk {
+            path: path.to_owned(),
+            size,
+            sha256: format!("{:x}", hash.finalize()),
+        })
+    }
+
+    fn sha256(&self) -> Result<Cow<'_, str>, CoreError> {
+        match self {
+            Self::Bytes(bytes) => Ok(Cow::Owned(sha256_reader(bytes.as_slice())?)),
+            Self::Disk { sha256, .. } => Ok(Cow::Borrowed(sha256)),
+        }
+    }
+
+    fn read(&self) -> Result<Cow<'_, [u8]>, CoreError> {
+        match self {
+            Self::Bytes(bytes) => Ok(Cow::Borrowed(bytes)),
+            source => {
+                let mut bytes = Vec::new();
+                source.copy_to(&mut bytes)?;
+                Ok(Cow::Owned(bytes))
+            }
+        }
+    }
+
+    fn dictionary_header(&self) -> Result<Cow<'_, [u8]>, CoreError> {
+        let Self::Disk { path, size, sha256 } = self else {
+            return self.read();
+        };
+        let mut input = BufReader::new(fs::File::open(path)?.take(size.saturating_add(1)));
+        let mut hash = Sha256::new();
+        let mut header = Vec::new();
+        let mut line = String::new();
+        let mut length = 0;
+        loop {
+            let read = input.read_line(&mut line)?;
+            if read == 0 {
+                break;
+            }
+            hash.update(line.as_bytes());
+            length += read as u64;
+            header.extend_from_slice(line.as_bytes());
+            if line.trim() == "..." {
+                break;
+            }
+            line.clear();
+        }
+        let mut buffer = [0u8; 16 * 1024];
+        let mut carry = 0;
+        loop {
+            let read = match input.read(&mut buffer[carry..]) {
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if read == 0 {
+                utf8(&buffer[..carry])?;
+                break;
+            }
+            let end = carry + read;
+            hash.update(&buffer[carry..end]);
+            length += read as u64;
+            carry = match std::str::from_utf8(&buffer[..end]) {
+                Ok(_) => 0,
+                Err(error) if error.error_len().is_none() => {
+                    let start = error.valid_up_to();
+                    buffer.copy_within(start..end, 0);
+                    end - start
+                }
+                Err(error) => return Err(CoreError::Other(error.to_string())),
+            };
+        }
+        Self::check_digest(path, *size, sha256, length, hash)?;
+        Ok(Cow::Owned(header))
+    }
+
+    fn copy_to(&self, output: &mut impl Write) -> Result<(), CoreError> {
+        match self {
+            Self::Bytes(bytes) => output.write_all(bytes)?,
+            Self::Disk { path, size, sha256 } => {
+                let mut input = BufReader::new(fs::File::open(path)?.take(size.saturating_add(1)));
+                let mut hash = Sha256::new();
+                let mut length = 0;
+                loop {
+                    let bytes = input.fill_buf()?;
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    hash.update(bytes);
+                    output.write_all(bytes)?;
+                    let read = bytes.len();
+                    length += read as u64;
+                    input.consume(read);
+                }
+                Self::check_digest(path, *size, sha256, length, hash)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_digest(
+        path: &Path,
+        size: u64,
+        sha256: &str,
+        length: u64,
+        hash: Sha256,
+    ) -> Result<(), CoreError> {
+        if length != size || format!("{:x}", hash.finalize()) != sha256 {
+            return Err(CoreError::Other(format!(
+                "Runtime source fingerprint mismatch: {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn prepare_write(&self, path: &Path) -> Result<tempfile::NamedTempFile, CoreError> {
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        self.copy_to(&mut temp)?;
+        temp.as_file().sync_all()?;
+        Ok(temp)
+    }
+
+    fn publish(&self, path: &Path) -> Result<(), CoreError> {
+        self.prepare_write(path)?
+            .persist(path)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
+fn verified_sources(
+    stored: StoredPackage,
+    paths: Vec<PathBuf>,
+) -> Result<(RuntimeFiles, Option<Vec<String>>), CoreError> {
+    let files = stored.files.into_iter().zip(paths).map(|(file, path)| {
+        PackageStore::verify_file(&path, &file)?;
+        Ok((file.path, RuntimeFile::Disk {
+            path,
+            size: file.size,
+            sha256: file.sha256,
+        }))
+    }).collect::<Result<_, CoreError>>()?;
+    Ok((files, stored.selected_schemas))
+}
 
 #[derive(Default, Deserialize, Serialize)]
 struct Manifest {
@@ -286,10 +452,8 @@ fn prepare_targets(
         .collect();
     let load_addon = |id: &str| -> Result<_, CoreError> {
         let package = store.checked_addon_path(id)?;
-        crate::addon_store::validate_directory(&package, id)?;
-        let metadata: StoredPackage =
-            serde_json::from_slice(&fs::read(safe(&package, "package.json")?)?)?;
-        Ok((addon_files(&package, &metadata)?, metadata.selected_schemas))
+        let (stored, paths) = crate::addon_store::file_inventory(&package, id)?;
+        verified_sources(stored, paths)
     };
     let english = std::cell::OnceCell::new();
     let overlay_for = |key: &str| {
@@ -346,18 +510,19 @@ fn prepare_targets(
             let name = package_name(core, &key);
             let result: Result<Option<String>, CoreError> = (|| {
                 let (files, selection) = if key.starts_with("builtin/") {
-                    let mut files = Files::new();
+                    let mut files = RuntimeFiles::new();
                     walk_files(bundled, "", private_path, &mut |source, name| {
-                        files.insert(name.to_owned(), fs::read(source)?);
+                        files.insert(name.to_owned(), RuntimeFile::disk(source)?);
                         Ok(())
                     })?;
                     (files, None)
                 } else if installed.contains(&key) {
-                    let (files, _) = store.read_files(&key)?;
-                    let selection = crate::package_schemas::read_selection(
-                        &store.checked_metadata_path(&key)?,
+                    let _guard = core.pending_package.lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    let (stored, paths) = PackageStore::file_inventory_at(
+                        &store.checked_package_path(&key)?, &key, false,
                     )?;
-                    (files.into_iter().collect(), selection)
+                    verified_sources(stored, paths)?
                 } else if addons.contains(&key) {
                     load_addon(&key)?
                 } else {
@@ -444,7 +609,7 @@ fn publish_package_sources(
     namespace: &str,
     key: &str,
     display_name: &str,
-    files: &Files,
+    files: &RuntimeFiles,
 ) -> Result<(), CoreError> {
     let destination = safe(root, &format!("scheme-packages/{namespace}/{key}/files"))?;
     let parent = destination.parent().unwrap();
@@ -472,16 +637,16 @@ fn publish_package_sources(
             && files.iter().all(|(name, expected)| {
                 safe(&destination, name)
                     .ok()
-                    .and_then(|path| fs::read(path).ok())
-                    .is_some_and(|bytes| bytes == *expected)
+                    .and_then(|path| optional_sha256(&path).ok().flatten())
+                    .is_some_and(|digest| expected.sha256().is_ok_and(|sha256| digest == sha256))
             })
         {
             return Ok(());
         }
     }
     let stage = tempfile::Builder::new().prefix(".sources-").tempdir_in(parent)?;
-    for (relative, bytes) in files {
-        write_file(&safe(stage.path(), relative)?, bytes)?;
+    for (relative, source) in files {
+        source.publish(&safe(stage.path(), relative)?)?;
     }
     crate::package_store::publish_directory(&destination, stage.path(), crate::package_fs::rename)
 }
@@ -506,23 +671,6 @@ pub(crate) fn package_name(core: &Core, key: &str) -> String {
         .and_then(|meta| meta.display_name)
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| keytao_core::switcher_model::default_package_name(key).into())
-}
-
-fn addon_files(package: &Path, metadata: &StoredPackage) -> Result<Files, CoreError> {
-    let source = safe(package, "files")?;
-    metadata
-        .files
-        .iter()
-        .map(|file| {
-            let bytes = fs::read(safe(&source, &file.path)?)?;
-            if sha256_reader(bytes.as_slice())? != file.sha256 {
-                return Err(CoreError::Other(
-                    "Add-on source fingerprint mismatch".into(),
-                ));
-            }
-            Ok((file.path.clone(), bytes))
-        })
-        .collect()
 }
 
 fn safe(root: &Path, path: &str) -> Result<PathBuf, CoreError> {
@@ -747,9 +895,9 @@ fn prepare_runtime(
     control_root: &Path,
     bundled: &Path,
     key: &str,
-    sources: Files,
+    sources: RuntimeFiles,
     selection: Option<&[String]>,
-    overlay: Option<&Files>,
+    overlay: Option<&RuntimeFiles>,
     stage: bool,
     windows_lua: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
@@ -763,52 +911,49 @@ fn prepare_runtime(
         .truncate(false)
         .open(safe(&runtime, ".keytao-materialize.lock")?)?;
     keytao_core::lock_file(&lock, true)?;
+    match fs::remove_dir_all(safe(&runtime, COPY_STAGE)?) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let previous = current_manifest(&runtime, key)?;
 
     let mut selected = selected_schemas(key, &sources, selection)?;
     let mut generated = Files::new();
-    let mut owned = Files::new();
+    let mut owned = RuntimeFiles::new();
     let mut schema_sources = Files::new();
-    let mut dictionaries = Files::new();
-    add_common_files(bundled, &sources, &mut generated)?;
+    let mut bundled_files = RuntimeFiles::new();
+    add_common_files(bundled, &sources, &mut bundled_files)?;
     if let Some(overlay) = overlay {
-        for (path, bytes) in overlay
+        for (path, source) in overlay
             .iter()
             .filter(|(path, _)| materialized_path(path) && crate::addon::is_package_file(path))
         {
             match sources.get(path) {
-                Some(own) if own == bytes => continue,
+                Some(own) if own.sha256()? == source.sha256()? => continue,
                 Some(_) => {
                     return Err(CoreError::Other(format!(
                         "文件 {path} 与 Easy English 冲突"
                     )));
                 }
-                None => {
-                    if path.ends_with(".dict.yaml") {
-                        dictionaries.insert(path.clone(), bytes.clone());
-                    }
-                    owned.insert(path.clone(), bytes.clone())
-                }
+                None => owned.insert(path.clone(), source.clone()),
             };
         }
-        if let Some(bytes) = owned.get("easy_en.schema.yaml") {
-            schema_sources.insert("easy_en.schema.yaml".into(), bytes.clone());
+        if let Some(source) = owned.get("easy_en.schema.yaml") {
+            schema_sources.insert("easy_en.schema.yaml".into(), source.read()?.into_owned());
         }
     }
-    for (path, bytes) in sources {
+    for (path, source) in sources {
         if !materialized_path(&path) {
             continue;
         }
-        if path == "default.yaml" && !has_preset_default(&bytes) {
+        if path == "default.yaml" && !has_preset_default(source.read()?.as_ref()) {
             continue;
         }
         if path.ends_with(".schema.yaml") && !path.contains('/') {
-            schema_sources.insert(path.clone(), bytes.clone());
+            schema_sources.insert(path.clone(), source.read()?.into_owned());
         }
-        if path.ends_with(".dict.yaml") {
-            dictionaries.insert(path.clone(), bytes.clone());
-        }
-        owned.insert(path, bytes);
+        owned.insert(path, source);
     }
     if overlay.is_some() {
         if !schema_sources.contains_key("easy_en.schema.yaml") {
@@ -819,7 +964,7 @@ fn prepare_runtime(
         }
     }
     if let Some(entry) = owned.remove("rime.lua") {
-        if let Some(lua) = crate::install::prepare_rime_lua_install(Some(utf8(&entry)?), &[]) {
+        if let Some(lua) = crate::install::prepare_rime_lua_install(Some(utf8(&entry.read()?)?), &[]) {
             generated.insert("rime.lua".into(), lua.into_bytes());
         }
     }
@@ -831,7 +976,9 @@ fn prepare_runtime(
     walk_files(&runtime, "", private_path, &mut |path, relative| {
         let tracked = previous.fingerprint(relative);
         let preserve = preserves_runtime_data(Path::new(relative));
-        let seeds_file = owned.contains_key(relative) || generated.contains_key(relative);
+        let seeds_file = owned.contains_key(relative)
+            || bundled_files.contains_key(relative)
+            || generated.contains_key(relative);
         if relative == crate::account::USER_WORD_REMOVALS
             || relative == keytao_core::english_mode::SETTINGS_FILE
             || (relative == crate::account::USER_DICTIONARY
@@ -873,6 +1020,7 @@ fn prepare_runtime(
     })?;
 
     let incoming = take_default_custom(&mut owned);
+    let incoming = incoming.as_ref().map(RuntimeFile::read).transpose()?;
     let existing = take_default_custom(&mut user);
     let default = default_custom(incoming.as_deref(), existing.as_deref(), &selected)?;
     if let Some(existing) = existing {
@@ -886,6 +1034,7 @@ fn prepare_runtime(
         owned.remove(path);
         if preserves_runtime_data(Path::new(path)) {
             generated.remove(path);
+            bundled_files.remove(path);
         }
         if path.ends_with(".schema.yaml") && !path.contains('/') {
             schema_sources.insert(path.clone(), bytes.clone());
@@ -901,38 +1050,63 @@ fn prepare_runtime(
         &mut generated,
         &user,
     )?;
-    for (path, bytes) in &user {
-        if path.ends_with(".dict.yaml") {
-            dictionaries.insert(path.clone(), bytes.clone());
+    let schema_custom = |path: &str| {
+        path.strip_suffix(".custom.yaml")
+            .is_some_and(|schema| schema_sources.contains_key(&format!("{schema}.schema.yaml")))
+    };
+    let owned_custom = owned.iter()
+        .filter(|(path, _)| schema_custom(path))
+        .map(|(_, source)| source.read())
+        .collect::<Result<Vec<_>, _>>()?;
+    let user_and_generated_custom = user.iter().chain(&generated)
+        .filter(|(path, _)| schema_custom(path))
+        .map(|(_, bytes)| bytes.as_slice());
+    let schema_configs = schema_sources.values().map(Vec::as_slice)
+        .chain(owned_custom.iter().map(Cow::as_ref))
+        .chain(user_and_generated_custom);
+    let used = crate::account::runtime_dictionary_usage(schema_configs, |name| {
+        if let Some(bytes) = user.get(name) {
+            return Ok(Some(Cow::Borrowed(bytes.as_slice())));
         }
-    }
-    let schema_configs = schema_sources.values().chain(
-        owned.iter().chain(&user).chain(&generated)
-            .filter(|(path, _)| path.strip_suffix(".custom.yaml").is_some_and(|schema| {
-                schema_sources.contains_key(&format!("{schema}.schema.yaml"))
-            }))
-            .map(|(_, bytes)| bytes),
-    );
-    let used = crate::account::runtime_dictionary_usage(schema_configs.map(Vec::as_slice), &dictionaries)?;
-    crate::account::add_runtime_user_dictionary(control_root, &dictionaries, &used, &mut generated)?;
+        owned.get(name).map(RuntimeFile::dictionary_header).transpose()
+    })?;
+    crate::account::add_runtime_user_dictionary(
+        control_root,
+        |name| {
+            if let Some(bytes) = user.get(name) {
+                return Ok(Some(Cow::Borrowed(bytes.as_slice())));
+            }
+            owned.get(name).map(RuntimeFile::read).transpose()
+        },
+        &used,
+        &mut generated,
+    )?;
     if windows_lua
         && let Some(entry) = user.get("rime.lua").or_else(|| generated.get("rime.lua"))
     {
         // Publish the same Lua inputs that the deployment receipt covers.
         let compatibility = keytao_core::WindowsLuaCompatibility::new(utf8(entry)?);
-        for (path, bytes) in owned.iter_mut().chain(&mut generated).chain(&mut user) {
+        for (path, source) in &mut owned {
+            if (path.eq_ignore_ascii_case("lua/helpers.lua") || (path.ends_with(".schema.yaml") && !path.contains('/')))
+                && let Some(patched) = compatibility.patch_source(path, &source.read()?)
+            {
+                *source = RuntimeFile::Bytes(patched.into_bytes());
+            }
+        }
+        for (path, bytes) in generated.iter_mut().chain(&mut user) {
             if let Some(patched) = compatibility.patch_source(path, bytes) {
                 *bytes = patched.into_bytes();
             }
         }
     }
     runtime_overrides.retain(|path| user.contains_key(path));
+    bundled_files.extend(generated.into_iter().map(|(path, bytes)| (path, RuntimeFile::Bytes(bytes))));
     write_runtime(
         &runtime,
         key,
         previous,
         owned,
-        generated,
+        bundled_files,
         user,
         runtime_overrides,
         &disk_hashes,
@@ -942,7 +1116,7 @@ fn prepare_runtime(
 
 fn selected_schemas(
     key: &str,
-    sources: &Files,
+    sources: &RuntimeFiles,
     selection: Option<&[String]>,
 ) -> Result<Vec<String>, CoreError> {
     let configs: Vec<_> = sources
@@ -952,8 +1126,8 @@ fn selected_schemas(
                 || *path == "default.yaml"
                 || (!path.contains('/') && path.ends_with(".schema.yaml"))
         })
-        .map(|(path, bytes)| (path.clone(), bytes.clone()))
-        .collect();
+        .map(|(path, source)| Ok((path.clone(), source.read()?.into_owned())))
+        .collect::<Result<_, CoreError>>()?;
     let available = |id: &str| id != EASY_EN_ADDON_ID && sources.contains_key(&format!("{id}.schema.yaml"));
     let mut schemas: Vec<_> = crate::package_schemas::enumerate(key, &configs, selection)?
         .into_iter()
@@ -986,8 +1160,8 @@ fn has_preset_default(bytes: &[u8]) -> bool {
 
 fn add_common_files(
     bundled: &Path,
-    sources: &Files,
-    generated: &mut Files,
+    sources: &RuntimeFiles,
+    generated: &mut RuntimeFiles,
 ) -> Result<(), CoreError> {
     if bundled.as_os_str().is_empty() && !sources.contains_key("default.yaml") {
         return Ok(());
@@ -1003,34 +1177,41 @@ fn add_common_files(
                 private_path,
                 &mut |source, relative| {
                     if !sources.contains_key(relative) {
-                        generated.insert(relative.to_owned(), fs::read(source)?);
+                        generated.insert(relative.to_owned(), RuntimeFile::disk(source)?);
                     }
                     Ok(())
                 },
             )?;
         } else if path == "default.yaml" {
-            if !sources
-                .get("default.yaml")
-                .is_some_and(|bytes| has_preset_default(bytes))
+            if !sources.get("default.yaml").map(RuntimeFile::read).transpose()?
+                .is_some_and(|bytes| has_preset_default(&bytes))
             {
                 if !bundled.as_os_str().is_empty()
-                    && let Some(bytes) = read_optional(&bundled.join(path))?
+                    && let Some(source) = optional_source(&bundled.join(path))?
                 {
-                    generated.insert(path.to_owned(), bytes);
+                    generated.insert(path.to_owned(), source);
                 } else if sources.contains_key("default.yaml") {
-                    generated.insert(path.to_owned(), include_bytes!("addon-default.yaml").to_vec());
+                    generated.insert(path.to_owned(), RuntimeFile::Bytes(include_bytes!("addon-default.yaml").to_vec()));
                 }
             }
         } else if !sources.contains_key(path) && !bundled.as_os_str().is_empty() {
-            if let Some(bytes) = read_optional(&bundled.join(path))? {
-                generated.insert(path.to_owned(), bytes);
+            if let Some(source) = optional_source(&bundled.join(path))? {
+                generated.insert(path.to_owned(), source);
             }
         }
     }
     Ok(())
 }
 
-fn take_default_custom(files: &mut Files) -> Option<Vec<u8>> {
+fn optional_source(path: &Path) -> Result<Option<RuntimeFile>, CoreError> {
+    if path.try_exists()? {
+        Ok(Some(RuntimeFile::disk(path)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn take_default_custom<T>(files: &mut BTreeMap<String, T>) -> Option<T> {
     let current = files.remove(DEFAULT_CUSTOM[0]);
     let legacy = files.remove(DEFAULT_CUSTOM[1]);
     current.or(legacy)
@@ -1083,7 +1264,7 @@ fn regenerate_custom(
     sources: &Files,
     schemas: &[String],
     page_size: Option<u8>,
-    owned: &mut Files,
+    owned: &mut RuntimeFiles,
     generated: &mut Files,
     user: &Files,
 ) -> Result<(), CoreError> {
@@ -1093,14 +1274,19 @@ fn regenerate_custom(
     let stage = staging.path();
     for (path, bytes) in sources
         .iter()
-        .chain(owned.iter().filter(|(path, _)| {
-            path.ends_with(".custom.yaml") || *path == crate::remove_filter::SCRIPT_PATH
-        }))
-        .chain(
-            user.iter()
-                .filter(|(path, _)| path.ends_with(".custom.yaml")),
-        )
     {
+        let destination = safe(stage, path)?;
+        fs::create_dir_all(destination.parent().unwrap())?;
+        fs::write(destination, bytes)?;
+    }
+    for (path, source) in owned.iter().filter(|(path, _)|
+        path.ends_with(".custom.yaml") || *path == crate::remove_filter::SCRIPT_PATH
+    ) {
+        let destination = safe(stage, path)?;
+        fs::create_dir_all(destination.parent().unwrap())?;
+        source.copy_to(&mut fs::File::create(destination)?)?;
+    }
+    for (path, bytes) in user.iter().filter(|(path, _)| path.ends_with(".custom.yaml")) {
         let destination = safe(stage, path)?;
         fs::create_dir_all(destination.parent().unwrap())?;
         fs::write(destination, bytes)?;
@@ -1116,7 +1302,9 @@ fn regenerate_custom(
         .map_err(CoreError::Other)?;
     for path in managed_custom::generated_paths(stage).map_err(CoreError::Other)? {
         let bytes = fs::read(safe(stage, &path)?)?;
-        if owned.get(&path) != Some(&bytes) {
+        if owned.get(&path).map(RuntimeFile::sha256).transpose()?.as_deref()
+            != Some(sha256_reader(bytes.as_slice())?.as_str())
+        {
             owned.remove(&path);
             generated.insert(path, bytes);
         }
@@ -1136,17 +1324,23 @@ fn write_runtime(
     runtime: &Path,
     key: &str,
     previous: Manifest,
-    owned: Files,
-    generated: Files,
+    owned: RuntimeFiles,
+    generated: RuntimeFiles,
     user: Files,
     runtime_overrides: BTreeSet<String>,
     disk_hashes: &BTreeMap<String, String>,
     stage: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
-    let fingerprint = |files: &Files| -> Result<BTreeMap<_, _>, CoreError> {
+    let user_default = user.get(DEFAULT_CUSTOM[0])
+        .map(|bytes| utf8(bytes).map(str::to_owned))
+        .transpose()?;
+    let user: RuntimeFiles = user.into_iter()
+        .map(|(path, bytes)| (path, RuntimeFile::Bytes(bytes)))
+        .collect();
+    let fingerprint = |files: &RuntimeFiles| -> Result<BTreeMap<_, _>, CoreError> {
         files
             .iter()
-            .map(|(name, bytes)| Ok((name.clone(), sha256_reader(bytes.as_slice())?)))
+            .map(|(name, source)| Ok((name.clone(), source.sha256()?.into_owned())))
             .collect()
     };
     let mut manifest = Manifest {
@@ -1154,19 +1348,21 @@ fn write_runtime(
         owned: fingerprint(&owned)?,
         generated: fingerprint(&generated)?,
         user_owned: fingerprint(&user)?,
-        user_default: user.get(DEFAULT_CUSTOM[0]).map(|bytes| utf8(bytes).map(str::to_owned)).transpose()?,
+        user_default,
         runtime_overrides,
     };
     let is_local = crate::scheme::is_local_scheme_key(key);
     let mut files = owned;
     files.extend(user);
-    files.extend(generated);
-    let mut writes = Vec::new();
-    for (relative, bytes) in files {
-        let path = safe(runtime, &relative)?;
-        if let Some(digest) = manifest.user_owned.get_mut(&relative) {
-            *digest = sha256_reader(bytes.as_slice())?;
+    for (path, source) in generated {
+        if let Some(digest) = manifest.user_owned.get_mut(&path) {
+            *digest = manifest.generated[&path].clone();
         }
+        files.insert(path, source);
+    }
+    let mut writes = Vec::new();
+    for (relative, source) in files {
+        let path = safe(runtime, &relative)?;
         let target_sha256 = manifest.fingerprint(&relative).cloned();
         let existing_sha256 = match disk_hashes.get(&relative) {
             Some(digest) => Some(digest.clone()),
@@ -1188,7 +1384,7 @@ fn write_runtime(
         } else {
             None
         };
-        writes.push((path, bytes, previous_sha256));
+        writes.push((path, source, previous_sha256));
     }
     let mut removals = Vec::new();
     let mut scheduled_removals = BTreeSet::new();
@@ -1240,7 +1436,7 @@ fn write_runtime(
             let digest = existing
                 .map(|bytes| sha256_reader(bytes.as_slice()))
                 .transpose()?;
-            writes.push((manifest_path, manifest_bytes, digest));
+            writes.push((manifest_path, RuntimeFile::Bytes(manifest_bytes), digest));
         }
         if writes.is_empty() && removals.is_empty() {
             return Ok(None);
@@ -1249,9 +1445,9 @@ fn write_runtime(
             .prefix(STAGED_INPUTS_PREFIX)
             .tempdir_in(runtime)?;
         let mut edits = BTreeMap::new();
-        for (path, bytes, previous_sha256) in writes {
+        for (path, source, previous_sha256) in writes {
             let relative = path.strip_prefix(runtime).unwrap();
-            write_file(&stage.path().join(relative), &bytes)?;
+            source.publish(&stage.path().join(relative))?;
             edits.insert(
                 relative.to_owned(),
                 StagedInput {
@@ -1276,11 +1472,26 @@ fn write_runtime(
         )?;
         return Ok(Some(stage));
     }
-    if !writes.is_empty() || !removals.is_empty() {
+    let copy_stage = if writes.is_empty() {
+        None
+    } else {
+        Some(tempfile::Builder::new().prefix(COPY_STAGE).rand_bytes(0).tempdir_in(runtime)?)
+    };
+    let mut staged_writes = Vec::new();
+    if let Some(copy_stage) = &copy_stage {
+        for (path, source, _) in writes {
+            let mut temp = tempfile::NamedTempFile::new_in(copy_stage.path())?;
+            source.copy_to(&mut temp)?;
+            temp.as_file().sync_all()?;
+            staged_writes.push((path, temp.into_temp_path()));
+        }
+    }
+    if !staged_writes.is_empty() || !removals.is_empty() {
         write_file(&pending_path, &serde_json::to_vec(&patch)?)?;
     }
-    for (path, bytes, _) in writes {
-        write_file(&path, &bytes)?;
+    for (path, temp) in staged_writes {
+        fs::create_dir_all(path.parent().unwrap())?;
+        temp.persist(path).map_err(|error| error.error)?;
     }
     for (path, _) in removals {
         fs::remove_file(path)?;
@@ -1304,9 +1515,7 @@ fn current_manifest(runtime: &Path, key: &str) -> Result<Manifest, CoreError> {
             .chain(next.generated.keys())
             .chain(next.user_owned.keys())
         {
-            let current = read(path)?
-                .map(|bytes| sha256_reader(bytes.as_slice()))
-                .transpose()?;
+            let current = optional_sha256(&safe(runtime, path)?)?;
             if current.as_ref() != next.fingerprint(path) {
                 continue;
             }
@@ -1366,17 +1575,51 @@ mod tests {
         selection: Option<&[String]>,
         overlay: Option<&Files>,
     ) -> Result<(), CoreError> {
+        let overlay = overlay.cloned().map(runtime_files);
         prepare_runtime(
             control_root,
             bundled,
             key,
-            sources,
+            runtime_files(sources),
             selection,
-            overlay,
+            overlay.as_ref(),
             false,
             cfg!(windows),
         )
         .map(|_| ())
+    }
+
+    fn runtime_files(files: Files) -> RuntimeFiles {
+        files.into_iter().map(|(path, bytes)| (path, RuntimeFile::Bytes(bytes))).collect()
+    }
+
+    #[test]
+    fn changed_source_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        fs::write(&source, b"original").unwrap();
+        fs::write(&destination, b"previous").unwrap();
+        let snapshot = RuntimeFile::disk(&source).unwrap();
+        fs::write(&source, b"modified").unwrap();
+
+        assert!(snapshot.publish(&destination).is_err());
+        assert_eq!(fs::read(destination).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn dictionary_body_validation_spans_buffer_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.dict.yaml");
+        let header = b"---\nname: sample\n...\n";
+        let mut dictionary = header.to_vec();
+        dictionary.extend(std::iter::repeat_n(b'a', 16 * 1024 - 1));
+        dictionary.extend_from_slice("字\tzi".as_bytes());
+        fs::write(&path, &dictionary).unwrap();
+        assert_eq!(RuntimeFile::disk(&path).unwrap().dictionary_header().unwrap().as_ref(), header);
+        dictionary.push(0xff);
+        fs::write(&path, dictionary).unwrap();
+        assert!(RuntimeFile::disk(&path).unwrap().dictionary_header().is_err());
     }
 
     fn put(root: &Path, path: &str, content: &str) {
@@ -1462,6 +1705,7 @@ mod tests {
         };
         run(sources.clone());
         let runtime = RuntimeDirs::isolated_user_data_dir(root, key).unwrap();
+        put(&runtime, &format!("{COPY_STAGE}/orphan"), "interrupted copy");
         for (path, _, current) in edited {
             put(&runtime, path, current);
         }
@@ -1471,10 +1715,11 @@ mod tests {
         sources.remove("lua/TJ/stats.txt");
 
         let stage = prepare_runtime(
-            root, &bundled, key, sources.clone(), None, None, true, false,
+            root, &bundled, key, runtime_files(sources.clone()), None, None, true, false,
         )
         .unwrap()
         .unwrap();
+        assert!(!runtime.join(COPY_STAGE).exists());
         let staged: BTreeMap<PathBuf, StagedInput> = serde_json::from_slice(
             &fs::read(stage.path().join(STAGED_INPUTS_MANIFEST)).unwrap(),
         )

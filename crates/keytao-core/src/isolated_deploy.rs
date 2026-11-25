@@ -8,7 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -425,14 +425,34 @@ fn deploy_package(
         .map(|name| read_input_edits(user, name))
         .transpose()?
         .unwrap_or_default();
+    let live_stats = input_stat_signature(control_root, dirs).ok();
+    let cutoff = input_stat_cutoff().ok();
+    let mut file_hashes = HashMap::<PathBuf, (InputStat, [u8; 32])>::new();
+    let mut hash_file = |path: &Path| {
+        let before = cutoff.and_then(|cutoff| cacheable_input_stat(path, cutoff).ok());
+        if let Some((stat, hash)) = file_hashes.get(path) {
+            if before.as_ref() == Some(stat) {
+                return Ok(*hash);
+            }
+        }
+        let hash = file_hash(path)?;
+        if let Some(stat) = before.filter(|stat| input_stat(path).is_ok_and(|after| &after == stat))
+        {
+            file_hashes.insert(path.to_path_buf(), (stat, hash));
+        }
+        Ok(hash)
+    };
     let live_inputs = if edits.is_empty() && !cfg!(target_os = "ios") {
-        let (inputs, matches) = check_package_receipt(control_root, dirs, &build)?;
+        let (inputs, matches) =
+            check_package_receipt_with(control_root, dirs, &build, live_stats, || {
+                input_signature(control_root, dirs, &mut hash_file)
+            })?;
         if matches {
             return Ok(DeployStep::Skip);
         }
         inputs
     } else {
-        input_signature(control_root, dirs)?
+        input_signature(control_root, dirs, &mut hash_file)?
     };
 
     let stage = Stage::create(user.join(STAGE))?;
@@ -457,14 +477,17 @@ fn deploy_package(
     let inputs = if edits.is_empty() {
         live_inputs
     } else {
-        input_signature(control_root, &staged_dirs)?
+        input_signature(control_root, &staged_dirs, &mut hash_file)?
     };
-    let skip = !cfg!(target_os = "ios") && receipt_matches(&build, &inputs);
+    let skip = !edits.is_empty() && !cfg!(target_os = "ios") && receipt_matches(&build, &inputs);
     if !skip {
         compile(&staged_dirs)?;
         write_receipt(&staged_dirs.staging_dir, inputs)?;
     }
-    if input_signature(control_root, dirs)? != live_inputs {
+    let unchanged = live_stats.is_some_and(|before| {
+        input_stat_signature(control_root, dirs).is_ok_and(|after| after == before)
+    });
+    if !unchanged && input_signature(control_root, dirs, &mut hash_file)? != live_inputs {
         return Err("package inputs changed during deployment".into());
     }
     for edit in &edits {
@@ -842,9 +865,24 @@ fn check_package_receipt(
     dirs: &RuntimeDirs,
     build: &Path,
 ) -> Result<([u8; 32], bool), String> {
-    let stats = input_stat_signature(control_root, dirs);
+    check_package_receipt_with(
+        control_root,
+        dirs,
+        build,
+        input_stat_signature(control_root, dirs).ok(),
+        || input_signature(control_root, dirs, file_hash),
+    )
+}
+
+fn check_package_receipt_with(
+    control_root: &Path,
+    dirs: &RuntimeDirs,
+    build: &Path,
+    stats: Option<[u8; 32]>,
+    content_signature: impl FnOnce() -> Result<[u8; 32], String>,
+) -> Result<([u8; 32], bool), String> {
     let cache_path = dirs.user_data_dir.join(INPUT_CACHE);
-    if let Ok(stats) = stats.as_ref() {
+    if let Some(stats) = stats.as_ref() {
         if let Some(cache) = regular_file(&cache_path)
             .ok()
             .and_then(|file| serde_json::from_reader::<_, InputCache>(file).ok())
@@ -853,11 +891,11 @@ fn check_package_receipt(
             return Ok((cache.inputs, true));
         }
     }
-    let inputs = input_signature(control_root, dirs)?;
+    let inputs = content_signature()?;
     if !receipt_matches(build, &inputs) {
         return Ok((inputs, false));
     }
-    if let Ok(stats) = stats {
+    if let Some(stats) = stats {
         // Never pair the content digest with metadata from a concurrent edit.
         if input_stat_signature(control_root, dirs).is_ok_and(|current| current == stats) {
             if let Ok(bytes) = serde_json::to_vec(&InputCache { stats, inputs }) {
@@ -924,14 +962,18 @@ fn outputs(build: &Path) -> io::Result<BTreeMap<PathBuf, u64>> {
 
 fn file_hash(path: &Path) -> io::Result<[u8; 32]> {
     let mut hash = Sha256::new();
-    io::copy(&mut regular_file(path)?, &mut hash)?;
+    io::copy(&mut io::BufReader::new(regular_file(path)?), &mut hash)?;
     Ok(hash.finalize().into())
 }
 
-fn input_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 32], String> {
+fn input_signature(
+    control_root: &Path,
+    dirs: &RuntimeDirs,
+    hash_file: impl FnMut(&Path) -> io::Result<[u8; 32]>,
+) -> Result<[u8; 32], String> {
     #[cfg(test)]
     FULL_INPUT_CHECKS.with(|checks| checks.set(checks.get() + 1));
-    input_signature_with(control_root, dirs, b"keytao-package-inputs/v1\0", file_hash)
+    input_signature_with(control_root, dirs, b"keytao-package-inputs/v1\0", hash_file)
 }
 
 #[cfg(test)]
@@ -939,25 +981,42 @@ thread_local! {
     static FULL_INPUT_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn input_stat_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 32], String> {
-    let cutoff = SystemTime::now()
+fn input_stat_cutoff() -> Result<i64, String> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|now| i64::try_from(now.as_secs()).ok())
         .and_then(|now| now.checked_sub(2))
-        .ok_or("cannot determine input metadata cutoff")?;
-    input_signature_with(control_root, dirs, b"keytao-package-input-stats/v1\0", |path| {
-        let stat = input_stat(path)?;
-        // Coarse timestamps can hide same-tick rewrites.
-        if stat.changed[0] <= 0 || stat.changed[0] >= cutoff || stat.modified[0] >= cutoff {
-            return Err(io::Error::other("input metadata cannot be cached"));
-        }
-        Ok(stat)
-    })
+        .ok_or_else(|| "cannot determine input metadata cutoff".into())
 }
 
-#[derive(Clone, Serialize)]
-struct InputStat {
+fn input_stat_signature(control_root: &Path, dirs: &RuntimeDirs) -> Result<[u8; 32], String> {
+    let cutoff = input_stat_cutoff()?;
+    input_signature_with(
+        control_root,
+        dirs,
+        b"keytao-package-input-stats/v1\0",
+        |path| cacheable_input_stat(path, cutoff),
+    )
+}
+
+fn cacheable_input_stat(path: &Path, cutoff: i64) -> io::Result<InputStat> {
+    let stat = input_stat(path)?;
+    // Coarse timestamps can hide same-tick rewrites.
+    if stat.changed[0] <= 0 || stat.changed[0] >= cutoff || stat.modified[0] >= cutoff {
+        return Err(io::Error::other("input metadata cannot be cached"));
+    }
+    Ok(stat)
+}
+
+#[doc(hidden)]
+pub fn stable_input_stat(path: &Path) -> io::Result<InputStat> {
+    cacheable_input_stat(path, input_stat_cutoff().map_err(io::Error::other)?)
+}
+
+#[doc(hidden)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct InputStat {
     volume: u64,
     file_id: [u8; 16],
     length: u64,
@@ -1440,6 +1499,22 @@ mod tests {
             );
             assert_eq!(FULL_INPUT_CHECKS.get(), full_checks);
 
+            let empty = root.join("empty");
+            fs::create_dir(&empty).unwrap();
+            let empty_dirs = RuntimeDirs::flat(&empty, &shared);
+            assert_eq!(
+                deploy_package(root, &empty_dirs, None, |stage| {
+                    fs::create_dir(&stage.staging_dir).unwrap();
+                    for name in [crate::DEPLOYED_FILE, "default.yaml", SCHEMA_RECEIPT] {
+                        fs::write(stage.staging_dir.join(name), b"build").unwrap();
+                    }
+                    Ok(())
+                }),
+                Ok(DeployStep::Done)
+            );
+            assert_eq!(FULL_INPUT_CHECKS.get(), full_checks + 1);
+            let full_checks = FULL_INPUT_CHECKS.get();
+
             let modified = fs::metadata(&source).unwrap().modified().unwrap();
             let mut writer = fs::File::options()
                 .write(true)
@@ -1527,6 +1602,38 @@ mod tests {
             "receipt missing"
         );
         assert!(crate::schema_build_is_available(root));
+    }
+
+    #[test]
+    fn changed_input_during_compile_preserves_live_build() {
+        let fixture = crate::preview::PreviewDirectory::create().unwrap();
+        let root = fixture.path();
+        let shared = root.join("shared");
+        fs::create_dir(&shared).unwrap();
+        let source = shared.join("default.yaml");
+        fs::write(&source, b"old input").unwrap();
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+        let dirs = RuntimeDirs::flat(&root.join("runtime"), &shared);
+        fs::create_dir_all(&dirs.staging_dir).unwrap();
+        fs::write(dirs.staging_dir.join("default.yaml"), b"old build").unwrap();
+
+        assert_eq!(
+            deploy_package(root, &dirs, None, |stage| {
+                let mut writer = fs::File::options().write(true).open(&source).unwrap();
+                io::Write::write_all(&mut writer, b"new input").unwrap();
+                writer.set_modified(modified).unwrap();
+                fs::create_dir(&stage.staging_dir).unwrap();
+                for name in [crate::DEPLOYED_FILE, "default.yaml", SCHEMA_RECEIPT] {
+                    fs::write(stage.staging_dir.join(name), b"new build").unwrap();
+                }
+                Ok(())
+            }),
+            Err("package inputs changed during deployment".into())
+        );
+        assert_eq!(
+            fs::read(dirs.staging_dir.join("default.yaml")).unwrap(),
+            b"old build"
+        );
     }
 
     #[test]

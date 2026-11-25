@@ -807,14 +807,15 @@ fn utf8_bom_dictionary_headers_parse_without_modifying_archive_bytes() {
     fs::write(root.join("xkjd6.fuhao.dict.yaml"), fuhao).unwrap();
     fs::write(root.join("xkjd6.user.dict.yaml"), user).unwrap();
 
-    let dictionaries = BTreeMap::from([
+    let dictionaries = BTreeMap::<String, _>::from([
         ("xkjd6.extended.dict.yaml".into(), extended.to_vec()),
         ("xkjd6.fuhao.dict.yaml".into(), fuhao.to_vec()),
         ("xkjd6.user.dict.yaml".into(), user.to_vec()),
     ]);
-    let used =
-        crate::account::runtime_dictionary_usage([schema.as_slice()].into_iter(), &dictionaries)
-            .unwrap();
+    let used = crate::account::runtime_dictionary_usage([schema.as_slice()].into_iter(), |name| {
+        Ok(dictionaries.get(name).map(|bytes| std::borrow::Cow::Borrowed(bytes.as_slice())))
+    })
+    .unwrap();
     assert_eq!(
         used.into_iter().collect::<Vec<_>>(),
         ["xkjd6.extended", "xkjd6.fuhao", "xkjd6.user"]

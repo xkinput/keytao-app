@@ -871,7 +871,7 @@ pub(crate) fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String
 
 pub(crate) fn runtime_dictionary_usage<'a>(
     schemas: impl Iterator<Item = &'a [u8]>,
-    dictionaries: &BTreeMap<String, Vec<u8>>,
+    dictionary_header: impl Fn(&str) -> Result<Option<std::borrow::Cow<'a, [u8]>>, CoreError>,
 ) -> Result<BTreeSet<String>, CoreError> {
     fn dictionary_references(config: &serde_yaml::Value, names: &mut BTreeSet<String>) {
         match config {
@@ -902,8 +902,8 @@ pub(crate) fn runtime_dictionary_usage<'a>(
     }
     let mut used = BTreeSet::new();
     while let Some(name) = pending.pop_first() {
-        if let Some(bytes) = dictionaries.get(&format!("{name}.dict.yaml")) {
-            let config = crate::upload_bundle::yaml(bytes, &name)?;
+        if let Some(bytes) = dictionary_header(&format!("{name}.dict.yaml"))? {
+            let config = crate::upload_bundle::yaml(&bytes, &name)?;
             if let Some(imports) = config["import_tables"].as_sequence() {
                 pending.extend(imports.iter().filter_map(serde_yaml::Value::as_str)
                     .filter(|import| *import != name && !used.contains(*import))
@@ -915,9 +915,9 @@ pub(crate) fn runtime_dictionary_usage<'a>(
     Ok(used)
 }
 
-pub(crate) fn add_runtime_user_dictionary(
+pub(crate) fn add_runtime_user_dictionary<'a>(
     control_root: &Path,
-    dictionaries: &BTreeMap<String, Vec<u8>>,
+    dictionary: impl Fn(&str) -> Result<Option<std::borrow::Cow<'a, [u8]>>, CoreError>,
     used: &BTreeSet<String>,
     generated: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), CoreError> {
@@ -934,12 +934,12 @@ pub(crate) fn add_runtime_user_dictionary(
         }
     }
     if generated.contains_key(USER_DICTIONARY) {
-        for dictionary in used.iter().filter(|name| {
+        for id in used.iter().filter(|name| {
             name.starts_with("keytao") && name.ends_with(".extended")
         }) {
-            let name = format!("{dictionary}.dict.yaml");
-            if let Some(bytes) = dictionaries.get(&name) {
-                let content = std::str::from_utf8(bytes)
+            let name = format!("{id}.dict.yaml");
+            if let Some(bytes) = dictionary(&name)? {
+                let content = std::str::from_utf8(&bytes)
                     .map_err(|error| CoreError::Other(format!("{name}: {error}")))?;
                 if let Some(patched) = patch_import_table(content, "keytao.user") {
                     generated.insert(name, patched.into_bytes());
@@ -1315,14 +1315,17 @@ mod tests {
         let removals = b"removed\tbb\n";
         std::fs::write(root.path().join(USER_DICTIONARY), source).unwrap();
         std::fs::write(root.path().join(USER_WORD_REMOVALS), removals).unwrap();
-        let dictionaries = BTreeMap::from([
+        let dictionaries = BTreeMap::<String, _>::from([
             ("wrapper.dict.yaml".into(), b"import_tables: [keytao.extended]\n".to_vec()),
             ("keytao.extended.dict.yaml".into(), b"import_tables:\n  - keytao.phrase\n".to_vec()),
         ]);
         let schema: &[u8] = b"patch: {translator/dictionary: wrapper}";
-        let used = runtime_dictionary_usage(std::iter::once(schema), &dictionaries).unwrap();
+        let dictionary = |name: &str| {
+            Ok(dictionaries.get(name).map(|bytes| std::borrow::Cow::Borrowed(bytes.as_slice())))
+        };
+        let used = runtime_dictionary_usage(std::iter::once(schema), dictionary).unwrap();
         let mut generated = BTreeMap::new();
-        add_runtime_user_dictionary(root.path(), &dictionaries, &used, &mut generated).unwrap();
+        add_runtime_user_dictionary(root.path(), dictionary, &used, &mut generated).unwrap();
         assert_eq!(generated[USER_DICTIONARY], source);
         assert_eq!(generated[USER_WORD_REMOVALS], removals);
         assert_eq!(generated["keytao.extended.dict.yaml"], b"import_tables:\n  - keytao.user\n  - keytao.phrase\n");
@@ -1330,8 +1333,8 @@ mod tests {
 
         generated.clear();
         let schema: &[u8] = b"translator: {dictionary: other}";
-        let unrelated = runtime_dictionary_usage(std::iter::once(schema), &dictionaries).unwrap();
-        add_runtime_user_dictionary(root.path(), &dictionaries, &unrelated, &mut generated).unwrap();
+        let unrelated = runtime_dictionary_usage(std::iter::once(schema), dictionary).unwrap();
+        add_runtime_user_dictionary(root.path(), dictionary, &unrelated, &mut generated).unwrap();
         assert!(generated.is_empty());
     }
 

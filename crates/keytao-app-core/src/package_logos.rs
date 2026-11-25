@@ -21,26 +21,23 @@ pub fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
         return logo;
     }
     if crate::addon_store::IDS.contains(&scheme_key) {
+        let _guard = crate::addon_store::operation();
         let package = store.checked_addon_path(scheme_key).ok()?;
-        crate::addon_store::validate_directory(&package, scheme_key).ok()?;
-        let meta_bytes = fs::read(safe_path(&package, "package.json").ok()?).ok()?;
-        let metadata: StoredPackage = serde_json::from_slice(&meta_bytes).ok()?;
-        let source_dir = safe_path(&package, "files").ok()?;
+        let (stored, _) = crate::addon_store::file_inventory(&package, scheme_key).ok()?;
+        if stored.files.len() > 10_000 {
+            return None;
+        }
         let mut hasher = Sha256::new();
-        let mut files = Vec::with_capacity(metadata.files.len());
-        for entry in &metadata.files {
-            let bytes = fs::read(safe_path(&source_dir, &entry.path).ok()?).ok()?;
-            if format!("{:x}", Sha256::digest(&bytes)) != entry.sha256 {
-                return None;
-            }
+        for entry in &stored.files {
             hasher.update(entry.path.as_bytes());
             hasher.update(b"\0");
             hasher.update(entry.sha256.as_bytes());
             hasher.update(b"\n");
-            files.push((entry.path.clone(), bytes));
         }
         let digest = format!("{:x}", hasher.finalize());
-        return render_files_logo(&core.env().cache_dir, files, &digest, scheme_key);
+        return render_inventory_logo(core, &package, &stored, &digest, scheme_key)
+            .ok()
+            .flatten();
     }
     None
 }
@@ -56,6 +53,16 @@ fn stored_package_logo(
         .unwrap_or_else(|error| error.into_inner());
     let path = store.checked_package_path(scheme_key)?;
     let (stored, _) = PackageStore::file_inventory_at(&path, scheme_key, false)?;
+    render_inventory_logo(core, &path, &stored, &stored.meta.zip_sha256, scheme_key)
+}
+
+fn render_inventory_logo(
+    core: &Core,
+    path: &Path,
+    stored: &StoredPackage,
+    archive_sha: &str,
+    scheme_key: &str,
+) -> Result<Option<PathBuf>, CoreError> {
     let files: BTreeMap<_, _> = stored
         .files
         .iter()
@@ -72,13 +79,13 @@ fn stored_package_logo(
             if file.size > MAX_SOURCE_BYTES {
                 return Ok(None);
             }
-            safe_path(&path, &format!("files/{name}"))
+            safe_path(path, &format!("files/{name}"))
                 .map_err(CoreError::Other)
                 .and_then(|path| PackageStore::read_verified_file(&path, file))
                 .map(Some)
                 .map_err(|error| read_failure = Some(error))
         },
-        &stored.meta.zip_sha256,
+        archive_sha,
         scheme_key,
     );
     match read_failure {
@@ -89,14 +96,22 @@ fn stored_package_logo(
 
 fn has_installed_real_files(core: &Core, scheme_key: &str) -> bool {
     let store = PackageStore::new(core);
-    if store.read_files(scheme_key).is_ok() {
-        return true;
+    {
+        let _guard = core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if store.checked_package_path(scheme_key).is_ok_and(|path| {
+            PackageStore::file_inventory_at(&path, scheme_key, false).is_ok()
+        }) {
+            return true;
+        }
     }
     if crate::addon_store::IDS.contains(&scheme_key) {
         return store
             .checked_addon_path(scheme_key)
             .ok()
-            .is_some_and(|dir| crate::addon_store::validate_directory(&dir, scheme_key).is_ok());
+            .is_some_and(|dir| crate::addon_store::file_inventory(&dir, scheme_key).is_ok());
     }
     false
 }
@@ -612,12 +627,14 @@ where
     Ok(None)
 }
 
+#[cfg(test)]
 fn read_entry<'a>(files: &'a BTreeMap<String, Vec<u8>>, name: &str) -> Option<&'a [u8]> {
     validate_relative(name).ok()?;
     let bytes = files.get(name)?;
     (bytes.len() as u64 <= MAX_SOURCE_BYTES).then_some(bytes)
 }
 
+#[cfg(test)]
 fn render_files_logo(
     cache_root: &Path,
     files: Vec<(String, Vec<u8>)>,
