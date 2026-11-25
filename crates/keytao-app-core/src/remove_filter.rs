@@ -163,7 +163,11 @@ mod tests {
         assert!(ensure_for_schemas(dir.path(), &ids).unwrap());
         assert!(!dir.path().join("keytao.custom.yaml").exists());
         assert!(dir.path().join("keytao-cx.custom.yaml").is_file());
-        assert!(dir.path().join(SCRIPT_PATH).is_file());
+        let script = fs::read_to_string(dir.path().join(SCRIPT_PATH)).unwrap();
+        assert!(
+            script
+                .contains("function M.tags_match(_, env)\n  return next(env.removed) ~= nil\nend")
+        );
         fs::write(
             dir.path().join("keytao-cx.schema.yaml"),
             "engine: {filters: [uniquifier]}\n",

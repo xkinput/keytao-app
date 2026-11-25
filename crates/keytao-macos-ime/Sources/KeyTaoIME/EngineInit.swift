@@ -102,10 +102,12 @@ final class KeyTaoRuntime {
     /// How long to wait before looking for a user directory that does not exist yet.
     private static let watchRetryInterval: TimeInterval = 5
 
-    private let queue = DispatchQueue(label: "ink.rea.keytao.runtime")
-    private let deploymentQueue = DispatchQueue(label: "ink.rea.keytao.deployment")
+    private let queue = DispatchQueue(label: "ink.rea.keytao.runtime", qos: .utility)
+    private let deploymentQueue = DispatchQueue(label: "ink.rea.keytao.deployment", qos: .utility)
     private let startLock = NSLock()
     private var started = false
+    private let sessionPoolLock = NSLock()
+    private var spareSession: (handle: UnsafeMutableRawPointer, generation: UInt64)?
 
     private var lastInitializationAttempt: Date?
     private var shutdownScheduled = false
@@ -147,6 +149,50 @@ final class KeyTaoRuntime {
         queue.async { self.initializeIfNeeded() }
     }
 
+    func takeSession() -> UnsafeMutableRawPointer? {
+        guard let spare = removeSpareSession() else { return nil }
+        if spare.generation == keytao_session_pool_generation() {
+            DispatchQueue.main.async { self.queue.async { self.fillSessionPool() } }
+            return spare.handle
+        }
+        releaseSession(spare.handle)
+        return nil
+    }
+
+    func releaseSession(_ session: UnsafeMutableRawPointer) {
+        queue.async { [address = UInt(bitPattern: session)] in
+            keytao_destroy_session(UnsafeMutableRawPointer(bitPattern: address))
+            self.fillSessionPool()
+        }
+    }
+
+    private func removeSpareSession() -> (handle: UnsafeMutableRawPointer, generation: UInt64)? {
+        sessionPoolLock.withLock {
+            let spare = spareSession
+            spareSession = nil
+            return spare
+        }
+    }
+
+    private func fillSessionPool() {
+        guard !shutdownScheduled else { return }
+        let generation = keytao_session_pool_generation()
+        guard generation != UInt64.max else { return }
+        let stale: UnsafeMutableRawPointer? = sessionPoolLock.withLock {
+            guard let spare = spareSession, spare.generation != generation else { return nil }
+            spareSession = nil
+            return spare.handle
+        }
+        if let stale { keytao_destroy_session(stale) }
+        guard sessionPoolLock.withLock({ spareSession == nil }),
+              let session = keytao_try_create_spare_session() else { return }
+        guard generation == keytao_session_pool_generation() else {
+            keytao_destroy_session(session)
+            return
+        }
+        sessionPoolLock.withLock { spareSession = (session, generation) }
+    }
+
     /// Focus changes are a good moment to notice a deployment, and the check is
     /// cheap because it happens off the caller's thread.
     func checkForReload() {
@@ -157,6 +203,7 @@ final class KeyTaoRuntime {
         queue.async {
             guard !self.stopIfDisabled() else { return }
             if keytao_prewarm() {
+                self.fillSessionPool()
                 self.postDidReload()
             }
         }
@@ -188,7 +235,9 @@ final class KeyTaoRuntime {
                 }
             }
             if reloaded {
+                self.discardSpareSession()
                 _ = keytao_prewarm()
+                self.fillSessionPool()
                 self.postDidReload()
             }
             let succeeded = reloaded
@@ -206,7 +255,11 @@ final class KeyTaoRuntime {
     }
 
     private func initializeIfNeeded() {
-        if stopIfDisabled() || keytao_is_initialized() {
+        if stopIfDisabled() {
+            return
+        }
+        if keytao_is_initialized() {
+            fillSessionPool()
             return
         }
         if let last = lastInitializationAttempt,
@@ -216,6 +269,7 @@ final class KeyTaoRuntime {
         lastInitializationAttempt = Date()
         initializeEngine()
         if keytao_is_initialized() {
+            fillSessionPool()
             postDidReload()
         }
     }
@@ -226,10 +280,17 @@ final class KeyTaoRuntime {
             initializeIfNeeded()
             return
         }
-        if keytao_reload_if_stamp_changed() {
+        let reloaded = keytao_reload_if_stamp_changed()
+        if reloaded {
+            discardSpareSession()
             _ = keytao_prewarm()
-            postDidReload()
         }
+        fillSessionPool()
+        if reloaded { postDidReload() }
+    }
+
+    private func discardSpareSession() {
+        if let spare = removeSpareSession() { keytao_destroy_session(spare.handle) }
     }
 
     private func stopIfDisabled() -> Bool {
@@ -243,6 +304,7 @@ final class KeyTaoRuntime {
             }
             KeyTaoInputController.prepareForShutdown()
             self.queue.async {
+                self.discardSpareSession()
                 _ = keytao_reload()
                 keytao_log_flush(200)
                 DispatchQueue.main.async {
@@ -262,6 +324,7 @@ final class KeyTaoRuntime {
         queue.async {
             self.shutdownScheduled = false
             self.consumeReloadRequest()
+            self.fillSessionPool()
         }
     }
 
