@@ -1,4 +1,5 @@
 use crate::account::{API_BASE, ApiClient, account_id, same_account};
+use crate::http_client::{ClientProfile, cached_client};
 use crate::{Core, CoreError, CoreEvent, events::CloudTransferProgress};
 use keytao_core::runtime_log::AppOperation;
 use serde::{Deserialize, Serialize};
@@ -495,11 +496,12 @@ async fn upload_prepared_at(
 }
 
 fn storage_client() -> Result<reqwest::Client, CoreError> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(8))
-        .build()
-        .map_err(|error| CoreError::Other(error.to_string()))
+    cached_client(ClientProfile::CloudStorage, || {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(8))
+    })
+    .map_err(CoreError::Other)
 }
 
 fn storage_url(value: &str) -> Result<reqwest::Url, CoreError> {

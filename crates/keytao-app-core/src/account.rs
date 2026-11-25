@@ -2,7 +2,7 @@ use crate::{
     Core, CoreError,
     ime_host::ImeHost,
     ime_paths::path_string,
-    scheme::{api_error_message, client_builder},
+    scheme::{api_error_message, build_client, build_client_with_redirects},
     user_words::UserWord,
 };
 use keytao_core::runtime_log::AppOperation;
@@ -74,13 +74,6 @@ pub struct UserDictionaryDeletionConfirmation {
 
 pub(crate) const API_BASE: &str = "https://keytao.rea.ink";
 
-fn account_client_builder(core: &Core) -> reqwest::ClientBuilder {
-    let builder = client_builder(core);
-    #[cfg(test)]
-    let builder = builder.no_proxy();
-    builder
-}
-
 async fn throttle(api_base: &str) {
     static REQUESTS: OnceLock<tokio::sync::Mutex<HashMap<String, Instant>>> = OnceLock::new();
     let mut requests = REQUESTS.get_or_init(Default::default).lock().await;
@@ -121,9 +114,7 @@ impl<'a> ApiClient<'a> {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, CoreError> {
-        let client = account_client_builder(self.core)
-            .build()
-            .map_err(|error| CoreError::Other(error.to_string()))?;
+        let client = build_client(self.core).map_err(CoreError::Other)?;
         self.request_with_client(&client, method, path, body).await
     }
 
@@ -186,10 +177,7 @@ impl<'a> ApiClient<'a> {
     }
 
     pub(crate) async fn download_url(&self, path: &str) -> Result<String, CoreError> {
-        let client = account_client_builder(self.core)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| CoreError::Other(error.to_string()))?;
+        let client = build_client_with_redirects(self.core, false).map_err(CoreError::Other)?;
         for attempt in 0..2 {
             let token = self.token()?;
             throttle(self.api_base).await;
@@ -235,9 +223,7 @@ impl<'a> ApiClient<'a> {
             clear_token(self.core, token)?;
             return Err(CoreError::Permission("登录已过期，请重新登录".into()));
         };
-        let client = account_client_builder(self.core)
-            .build()
-            .map_err(|error| CoreError::Other(error.to_string()))?;
+        let client = build_client(self.core).map_err(CoreError::Other)?;
         throttle(self.api_base).await;
         if self.token()? != token {
             return Err(CoreError::Permission("登录状态已更改".into()));
@@ -591,9 +577,7 @@ async fn keytao_login_at(
             return Err("用户名和密码不能为空".into());
         }
 
-        let client = account_client_builder(core)
-            .build()
-            .map_err(|error| error.to_string())?;
+        let client = build_client(core)?;
         throttle(api_base).await;
         let response = client
             .post(format!("{api_base}/api/auth/login"))
@@ -671,10 +655,7 @@ async fn issue_website_session_at(
     if api.account_id != Some(account_id) {
         return Err(CoreError::Permission("登录账号已变化".into()));
     }
-    let client = account_client_builder(core)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| CoreError::Network(error.to_string()))?;
+    let client = build_client_with_redirects(core, false).map_err(CoreError::Network)?;
     let response = api
         .request_with_client(
             &client,
@@ -742,9 +723,7 @@ async fn keytao_me_at(
         return Err(CoreError::Other("未登录".into()));
     }
 
-    let client = account_client_builder(core)
-        .build()
-        .map_err(|error| CoreError::Other(error.to_string()))?;
+    let client = build_client(core).map_err(CoreError::Other)?;
     let response = client
         .get(format!("{api_base}/api/auth/me"))
         .bearer_auth(token)

@@ -18,6 +18,7 @@ pub mod theme_library;
 pub mod system_fonts;
 pub mod rime_sync;
 pub mod ime_status;
+mod http_client;
 pub mod download;
 pub mod libjd;
 mod libjd_dictionary;

@@ -1,4 +1,8 @@
-use crate::{Core, CoreError, scheme_types::*};
+use crate::{
+    Core, CoreError,
+    http_client::{ClientProfile, cached_client},
+    scheme_types::*,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 const API_BASE: &str = "https://keytao.rea.ink";
@@ -9,18 +13,32 @@ struct ReleaseCache {
     release: ReleaseInfo,
 }
 
-pub(crate) fn client_builder(core: &Core) -> reqwest::ClientBuilder {
-    let builder = reqwest::Client::builder()
-        .user_agent(format!("keytao-app/{}", core.env().app_version))
-        .connect_timeout(std::time::Duration::from_secs(8));
-    // Loopback HTTP fixtures must bypass the host's system proxy.
-    #[cfg(test)]
-    let builder = builder.no_proxy();
-    builder
+pub fn build_client(core: &Core) -> Result<reqwest::Client, String> {
+    build_client_with_redirects(core, true)
 }
 
-pub fn build_client(core: &Core) -> Result<reqwest::Client, String> {
-    client_builder(core).build().map_err(|e| e.to_string())
+pub(crate) fn build_client_with_redirects(
+    core: &Core,
+    follow_redirects: bool,
+) -> Result<reqwest::Client, String> {
+    let version = &core.env().app_version;
+    let profile = ClientProfile::App {
+        version: version.clone(),
+        follow_redirects,
+    };
+    cached_client(profile, || {
+        let builder = reqwest::Client::builder()
+            .user_agent(format!("keytao-app/{version}"))
+            .connect_timeout(std::time::Duration::from_secs(8));
+        // Loopback HTTP fixtures must bypass the host's system proxy.
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        if follow_redirects {
+            builder
+        } else {
+            builder.redirect(reqwest::redirect::Policy::none())
+        }
+    })
 }
 
 fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
@@ -293,6 +311,69 @@ mod tests {
     struct NullSink;
     impl crate::EventSink for NullSink {
         fn emit(&self, _: crate::CoreEvent) {}
+    }
+
+    #[tokio::test]
+    async fn shared_clients_reuse_one_tcp_connection_across_cores() {
+        use tokio::{
+            io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+            net::TcpListener,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::AppEnv {
+            data_dir: dir.path().join("first"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: "keep-alive-test".into(),
+            platform: crate::Platform::MacOs,
+        };
+        let first = Core::new(env.clone(), std::sync::Arc::new(NullSink)).unwrap();
+        env.data_dir = dir.path().join("second");
+        let second = Core::new(env, std::sync::Arc::new(NullSink)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serve = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            for request in ["GET /first HTTP/1.1\r\n", "GET /second HTTP/1.1\r\n"] {
+                line.clear();
+                socket.read_line(&mut line).await.unwrap();
+                assert_eq!(line, request);
+                loop {
+                    line.clear();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                socket
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await
+                    .unwrap();
+            }
+        };
+        let request = async {
+            for (core, path) in [(&first, "first"), (&second, "second")] {
+                let body = build_client(core)
+                    .unwrap()
+                    .get(format!("http://{address}/{path}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert_eq!(body, "ok");
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(serve, request);
+        })
+        .await
+        .expect("both requests must complete over the one accepted connection");
     }
 
     #[tokio::test]

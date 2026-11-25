@@ -487,10 +487,10 @@ async fn download_grammar(
         available_disk_space(root)?,
         package.download_bytes.unwrap_or(GRAMMAR_SIZE),
     )?;
-    let client = client(
+    let client = addon_client(
         // Slow links need hours for 407 MB; save_grammar_stream enforces a 30 s idle timeout.
         Duration::from_secs(24 * 60 * 60),
-        reqwest::redirect::Policy::limited(10),
+        true,
     )?;
     let response = tokio::select! {
         biased;
@@ -1202,31 +1202,39 @@ impl Drop for InstallReceipt {
     }
 }
 
-fn client(
+pub(crate) fn addon_client(
     timeout: Duration,
-    redirects: reqwest::redirect::Policy,
+    follow_redirects: bool,
 ) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .user_agent("KeyTao-Addon-Installer")
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(timeout)
-        .https_only(true)
-        .redirect(redirects)
-        .build()
-        .map_err(|e| e.to_string())
+    use crate::http_client::{ClientProfile, cached_client};
+    use reqwest::redirect::Policy;
+
+    let profile = ClientProfile::Addon {
+        timeout,
+        follow_redirects,
+    };
+    cached_client(profile, || {
+        reqwest::Client::builder()
+            .user_agent("KeyTao-Addon-Installer")
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(timeout)
+            .https_only(true)
+            .redirect(if follow_redirects {
+                Policy::limited(10)
+            } else {
+                Policy::none()
+            })
+    })
 }
 
 pub(crate) async fn github_text(url: &str) -> Result<String, String> {
-    let response = client(
-        Duration::from_secs(30),
-        reqwest::redirect::Policy::limited(10),
-    )?
-    .get(url)
-    .send()
-    .await
-    .map_err(|e| format!("查询附加方案更新失败：{e}"))?
-    .error_for_status()
-    .map_err(|e| format!("查询附加方案更新失败：{e}"))?;
+    let response = addon_client(Duration::from_secs(30), true)?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("查询附加方案更新失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("查询附加方案更新失败：{e}"))?;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -1274,7 +1282,7 @@ fn release_package(version: &str, variant: &str) -> Result<RemotePackage, String
 }
 
 async fn latest_package(variant: &str) -> Result<RemotePackage, String> {
-    let response = client(Duration::from_secs(30), reqwest::redirect::Policy::none())?
+    let response = addon_client(Duration::from_secs(30), false)?
         .get(RELEASE_LATEST)
         .send()
         .await
@@ -1326,10 +1334,7 @@ pub(crate) async fn download_with_limit(
     progress: &(impl Fn(u8, &str) + Send + Sync),
     max_bytes: u64,
 ) -> Result<(), String> {
-    let client = client(
-        Duration::from_secs(15 * 60),
-        reqwest::redirect::Policy::limited(10),
-    )?;
+    let client = addon_client(Duration::from_secs(15 * 60), true)?;
     let response = client
         .get(&package.download_url)
         .send()

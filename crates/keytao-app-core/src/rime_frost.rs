@@ -59,14 +59,7 @@ async fn latest_package() -> Result<RemotePackage, String> {
 }
 
 pub(crate) async fn latest_release(repo: &str, asset: &str) -> Result<RemotePackage, String> {
-    let response = reqwest::Client::builder()
-        .user_agent("KeyTao-Addon-Installer")
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(30))
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| e.to_string())?
+    let response = crate::wanxiang::addon_client(Duration::from_secs(30), false)?
         .get(format!("https://github.com/{repo}/releases/latest"))
         .send()
         .await
