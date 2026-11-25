@@ -6897,9 +6897,11 @@ impl SseDecode for crate::api::types::PlatformReleaseDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_version = <String>::sse_decode(deserializer);
+        let mut var_downloadUrl = <Option<String>>::sse_decode(deserializer);
         let mut var_downloadUrls = <crate::api::types::DownloadUrlsDto>::sse_decode(deserializer);
         return crate::api::types::PlatformReleaseDto {
             version: var_version,
+            download_url: var_downloadUrl,
             download_urls: var_downloadUrls,
         };
     }
@@ -8717,6 +8719,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::PlatformReleaseDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.version.into_into_dart().into_dart(),
+            self.download_url.into_into_dart().into_dart(),
             self.download_urls.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -10325,6 +10328,7 @@ impl SseEncode for crate::api::types::PlatformReleaseDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.version, serializer);
+        <Option<String>>::sse_encode(self.download_url, serializer);
         <crate::api::types::DownloadUrlsDto>::sse_encode(self.download_urls, serializer);
     }
 }

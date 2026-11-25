@@ -302,6 +302,8 @@ pub struct DownloadUrlsDto {
 #[derive(serde::Deserialize)]
 pub struct PlatformReleaseDto {
     pub version: String,
+    #[serde(default)]
+    pub download_url: Option<String>,
     pub download_urls: DownloadUrlsDto,
 }
 

@@ -464,6 +464,21 @@ void main() {
       );
       other.dispose();
     }
+    const universal =
+        'https://github.com/xkinput/KeyTao/releases/download/v1.3.35/keytao-v1.3.35.zip';
+    c.latestRelease = const ReleaseInfoDto(
+      version: 'v1.3.35',
+      name: 'KeyTao v1.3.35',
+      publishedAt: '',
+      body: '',
+      gitee: PlatformReleaseDto(
+        version: 'v1.3.35',
+        downloadUrl: universal,
+        downloadUrls: DownloadUrlsDto(),
+      ),
+    );
+    expect(c.downloadUrl, universal);
+    expect(c.selectedSchemeAsset, 'keytao-v1.3.35.zip');
   });
 
   for (final platform in [BridgePlatform.ios, BridgePlatform.android]) {
