@@ -1,5 +1,10 @@
 import 'package:flutter/gestures.dart'
-    show DragStartBehavior, PointerDeviceKind;
+    show
+        DragStartBehavior,
+        HorizontalDragGestureRecognizer,
+        PointerDeviceKind,
+        computePanSlop,
+        kTouchSlop;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/semantics.dart';
 import 'package:forui/forui.dart';
@@ -372,6 +377,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             child: _PageDeck(
               activePage: c.activePage,
               animate: !reduceMotion,
+              touchOnly: c.isMobile,
               nativeWebsiteOverlay: c.isLinux,
               onSelect: (page) => select(page.index),
               children: {
@@ -408,6 +414,7 @@ class _PageDeck extends StatefulWidget {
   const _PageDeck({
     required this.activePage,
     required this.animate,
+    required this.touchOnly,
     required this.nativeWebsiteOverlay,
     required this.onSelect,
     required this.children,
@@ -416,6 +423,7 @@ class _PageDeck extends StatefulWidget {
 
   final AppPage activePage;
   final bool animate;
+  final bool touchOnly;
   final bool nativeWebsiteOverlay;
   final ValueChanged<AppPage> onSelect;
   final Map<AppPage, Widget> children;
@@ -629,23 +637,71 @@ class _PageDeckState extends State<_PageDeck>
   }
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-    behavior: HitTestBehavior.opaque,
-    supportedDevices: const {PointerDeviceKind.touch},
-    dragStartBehavior: DragStartBehavior.down,
-    onHorizontalDragStart: _startDrag,
-    onHorizontalDragUpdate: _updateDrag,
-    onHorizontalDragEnd: _endDrag,
-    onHorizontalDragCancel: _cancelDrag,
-    child: ClipRect(
-      child: Stack(
-        children: [
-          for (final entry in widget.children.entries)
-            _page(entry.key, entry.value),
-        ],
+  Widget build(BuildContext context) {
+    final deck = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      supportedDevices: const {PointerDeviceKind.touch},
+      dragStartBehavior: DragStartBehavior.down,
+      onHorizontalDragStart: _startDrag,
+      onHorizontalDragUpdate: _updateDrag,
+      onHorizontalDragEnd: _endDrag,
+      onHorizontalDragCancel: _cancelDrag,
+      child: ClipRect(
+        child: Stack(
+          children: [
+            for (final entry in widget.children.entries)
+              _page(entry.key, entry.value),
+          ],
+        ),
       ),
-    ),
-  );
+    );
+    if (widget.touchOnly) return deck;
+    return RawGestureDetector(
+      excludeFromSemantics: true,
+      gestures: {
+        _PageDeckPreciseDragRecognizer:
+            GestureRecognizerFactoryWithHandlers<
+              _PageDeckPreciseDragRecognizer
+            >(
+              () => _PageDeckPreciseDragRecognizer(debugOwner: this),
+              (recognizer) => recognizer
+                ..onlyAcceptDragOnThreshold = true
+                ..dragStartBehavior = DragStartBehavior.down
+                ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context)
+                ..multitouchDragStrategy = ScrollConfiguration.of(context)
+                    .getMultitouchDragStrategy(context)
+                ..onStart = _startDrag
+                ..onUpdate = _updateDrag
+                ..onEnd = _endDrag
+                ..onCancel = _cancelDrag,
+            ),
+      },
+      child: deck,
+    );
+  }
+}
+
+class _PageDeckPreciseDragRecognizer extends HorizontalDragGestureRecognizer {
+  _PageDeckPreciseDragRecognizer({super.debugOwner})
+    : super(
+        supportedDevices: const {
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.stylus,
+          PointerDeviceKind.invertedStylus,
+        },
+      );
+
+  // Give text selection, clicks, and scrollbar thumbs time to claim the drag.
+  @override
+  bool hasSufficientGlobalDistanceToAccept(
+    PointerDeviceKind pointerDeviceKind,
+    double? deviceTouchSlop,
+  ) {
+    // A stylus needs kPanSlop before text selection starts.
+    final panSlop = computePanSlop(pointerDeviceKind, gestureSettings);
+    return globalDistanceMoved.abs() >
+        (panSlop > kTouchSlop ? panSlop : kTouchSlop);
+  }
 }
 
 class _DesktopNavigation extends StatelessWidget {

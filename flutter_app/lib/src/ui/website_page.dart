@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart'
     show
         GestureBinding,
         LongPressGestureRecognizer,
+        PointerDeviceKind,
         PointerScrollEvent,
         TapGestureRecognizer,
         VerticalDragGestureRecognizer;
@@ -391,7 +392,17 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
                                 ),
                               );
                             },
-                            child: webView,
+                            child: GestureDetector(
+                              // The texture host forwards raw pointer events.
+                              supportedDevices: const {
+                                PointerDeviceKind.mouse,
+                                PointerDeviceKind.stylus,
+                                PointerDeviceKind.invertedStylus,
+                              },
+                              excludeFromSemantics: true,
+                              onHorizontalDragUpdate: (_) {},
+                              child: webView,
+                            ),
                           )
                         : webView,
                   ),

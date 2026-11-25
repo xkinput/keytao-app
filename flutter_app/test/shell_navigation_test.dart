@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -38,6 +39,15 @@ double offsetOf(WidgetTester tester, String page) => tester
     .dx;
 
 const _webViewChannel = MethodChannel('com.infradise.webview_core');
+const _desktopPlatforms = TargetPlatformVariant({
+  TargetPlatform.macOS,
+  TargetPlatform.windows,
+});
+
+BridgePlatform get _desktopPlatform =>
+    defaultTargetPlatform == TargetPlatform.windows
+    ? BridgePlatform.windows
+    : BridgePlatform.macOs;
 
 Future<Finder> openWebsite(WidgetTester tester) async {
   await tester.tap(find.byKey(const ValueKey('nav-website')));
@@ -196,6 +206,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(controller.activePage, AppPage.website);
 
+      await tester.drag(
+        webView,
+        const Offset(160, 0),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.website);
+
       touches = 0;
       await tester.drag(webView, const Offset(160, 0));
       await tester.pumpAndSettle();
@@ -205,10 +223,61 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
 
-  testWidgets('desktop trackpad scrolls the page without switching tabs', (
+  testWidgets('desktop slow mouse drag selects page text', (tester) async {
+    final controller = await mountShell(tester, _desktopPlatform);
+    final editable = find.byWidgetPredicate(
+      (widget) =>
+          widget is EditableText &&
+          widget.controller.text == controller.uiSettings!.themePath,
+    );
+    await tester.ensureVisible(editable);
+    await tester.pumpAndSettle();
+    final bounds = tester.getRect(editable);
+    final drag = await tester.startGesture(
+      Offset(bounds.left + 75, bounds.center.dy),
+      kind: PointerDeviceKind.mouse,
+    );
+    await drag.moveBy(const Offset(-1.5, 0));
+    for (var step = 0; step < 8; step++) {
+      await tester.pump(const Duration(milliseconds: 30));
+      await drag.moveBy(const Offset(-7.5, 0));
+    }
+    await tester.pump();
+    expect(offsetOf(tester, 'ime'), 0);
+    await drag.up();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<EditableText>(editable).controller.selection.isCollapsed,
+      isFalse,
+    );
+    expect(controller.activePage, AppPage.input);
+  }, variant: _desktopPlatforms);
+
+  testWidgets('desktop button fires after five pixels of mouse jitter', (
     tester,
   ) async {
-    final controller = await mountShell(tester, BridgePlatform.macOs);
+    final controller = await mountShell(tester, _desktopPlatform);
+    await tester.tap(find.byKey(const ValueKey('nav-about')));
+    await tester.pumpAndSettle();
+    final button = find.text('全部开源许可');
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    final route = ModalRoute.of(tester.element(button))!;
+    final click = await tester.startGesture(
+      tester.getCenter(button),
+      kind: PointerDeviceKind.mouse,
+    );
+    await click.moveBy(const Offset(5, 0));
+    await click.up();
+    await tester.pumpAndSettle();
+    expect(route.isCurrent, isFalse);
+    expect(controller.activePage, AppPage.about);
+  }, variant: _desktopPlatforms);
+
+  testWidgets('desktop trackpad scrolls and mouse drags switch tabs', (
+    tester,
+  ) async {
+    final controller = await mountShell(tester, _desktopPlatform);
     tester.view.physicalSize = const Size(1000, 500);
     await tester.pumpAndSettle();
     final page = find.byKey(const PageStorageKey('ime'));
@@ -228,16 +297,19 @@ void main() {
     expect(scroll.pixels, greaterThan(0));
     expect(controller.activePage, AppPage.input);
 
-    for (final kind in [PointerDeviceKind.trackpad, PointerDeviceKind.mouse]) {
+    for (final (kind, page) in [
+      (PointerDeviceKind.trackpad, AppPage.input),
+      (PointerDeviceKind.mouse, AppPage.scheme),
+    ]) {
       await tester.dragFrom(
         const Offset(700, 170),
         const Offset(-440, 0),
         kind: kind,
       );
       await tester.pumpAndSettle();
-      expect(controller.activePage, AppPage.input, reason: kind.name);
+      expect(controller.activePage, page, reason: kind.name);
     }
-  });
+  }, variant: _desktopPlatforms);
 
   testWidgets('Windows website receives trackpad pans without switching tabs', (
     tester,
@@ -274,6 +346,44 @@ void main() {
     await tester.pumpAndSettle();
     expect(wheelEvents.any((event) => (event['deltaX'] as num) < 0), isTrue);
     expect(controller.activePage, AppPage.website);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('Windows website keeps mouse and pen drags within the WebView', (
+    tester,
+  ) async {
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final pointerEvents = <Object?>[];
+    messenger.setMockMethodCallHandler(_webViewChannel, (call) async {
+      if (call.method == 'pointerEvent') {
+        pointerEvents.add((call.arguments as Map<Object?, Object?>)['kind']);
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(_webViewChannel, null),
+    );
+    final controller = await mountShell(tester, BridgePlatform.windows);
+    final webView = await openWebsite(tester);
+
+    for (final kind in const [
+      PointerDeviceKind.mouse,
+      PointerDeviceKind.stylus,
+      PointerDeviceKind.invertedStylus,
+    ]) {
+      pointerEvents.clear();
+      await tester.drag(webView, const Offset(440, 0), kind: kind);
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.website, reason: kind.name);
+      expect(pointerEvents, containsAllInOrder(['down', 'move', 'up']));
+    }
+
+    await tester.dragFrom(
+      tester.getRect(webView).topCenter - const Offset(0, 16),
+      const Offset(440, 0),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(controller.activePage, AppPage.about);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('mobile chrome uses less space while scrolling', (tester) async {
