@@ -1,7 +1,7 @@
 use crate::{
     Core, CoreError, package_activation, package_store::PackageStore, packages::safe_path,
 };
-use keytao_core::{ReloadStamp, RuntimeDirs, isolated_deploy};
+use keytao_core::{ReloadStamp, RuntimeDirs, isolated_deploy, runtime_log::AppOperation};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -39,6 +39,7 @@ pub fn migrate_if_needed(core: &Core, root: &Path, _bundled: &Path) -> Result<bo
     if RuntimeDirs::migration_complete(root) {
         return Ok(false);
     }
+    let _operation = AppOperation::start("migrate_scheme_packages");
     if !RuntimeDirs::needs_migration(root) {
         if fs::symlink_metadata(root).is_ok_and(|meta| meta.is_dir()) {
             if let Ok(root) = checked_root(root) {

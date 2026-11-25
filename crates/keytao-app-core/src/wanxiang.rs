@@ -16,7 +16,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use keytao_core::RuntimeDirs;
+use keytao_core::{RuntimeDirs, runtime_log::AppOperation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -467,6 +467,7 @@ async fn download_grammar(
     root: &Path,
     cancel: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Result<(tempfile::TempPath, RemotePackage), String> {
+    let _operation = AppOperation::start("download_wanxiang_grammar");
     verify_disk_space(available_disk_space(root)?, GRAMMAR_SIZE)?;
     let package = tokio::select! {
         biased;
@@ -1516,6 +1517,7 @@ fn extract(
     package: &RemotePackage,
     variant: &str,
 ) -> Result<Vec<InstalledFile>, String> {
+    let _operation = AppOperation::start("unpack_wanxiang_package");
     variant_source(variant)?;
     let mut files = extract_package(archive, stage, package_destination, |name, path| {
         adapt_source(name, path, variant)
@@ -1789,6 +1791,7 @@ async fn install_receipt(
     variant: &str,
     progress: impl Fn(u8, &str) + Send + Sync + 'static,
 ) -> Result<InstallReceipt, String> {
+    let _operation = AppOperation::start("install_wanxiang_package");
     variant_source(variant)?;
     let variant = variant.to_owned();
     // Detect an invalid ownership record before spending bandwidth.
@@ -1796,7 +1799,10 @@ async fn install_receipt(
     let package = package_for_install(latest_package(&variant).await, &variant)?;
     progress(5, "正在下载万象拼音词库…");
     let archive = receipt.work.join("download.zip");
-    download(&package, &archive, &progress).await?;
+    {
+        let _operation = AppOperation::start("download_wanxiang_package");
+        download(&package, &archive, &progress).await?;
+    }
     progress(52, "正在校验并解压万象拼音词库…");
     tokio::task::spawn_blocking(move || {
         let mut receipt = receipt;

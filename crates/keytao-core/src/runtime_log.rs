@@ -1,7 +1,7 @@
 //! Bounded, opt-out runtime diagnostics. Never pass input text or key values.
 use serde_json::{Map, Value};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -11,6 +11,8 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+mod memory;
 
 // Re-export for macros invoked by crates without a direct serde_json import.
 #[doc(hidden)]
@@ -24,6 +26,7 @@ const ROTATE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = ROTATE_BYTES as usize - 4096;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const SETTINGS_INTERVAL: Duration = Duration::from_secs(5);
+const APP_OPERATION_INTERVAL: Duration = Duration::from_millis(250);
 static LEVEL: AtomicU8 = AtomicU8::new(0);
 static LOGGER: OnceLock<Arc<Logger>> = OnceLock::new();
 
@@ -41,17 +44,32 @@ pub fn enabled(level: Level) -> bool {
     level != Level::Off && current >= level as u8
 }
 
-/// Start at most one writer. All filesystem work happens on that thread.
+/// Start at most one writer. Log file writes happen on that thread.
 /// An initialization or write failure is terminal for this process.
 pub fn init(user_data_dir: &Path, tag: &str) {
     init_with_settings_path(user_data_dir, tag, None);
+}
+
+pub fn init_desktop_app(user_data_dir: &Path) {
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux"
+    )) && process_tag() == "desktop-app"
+    {
+        init(user_data_dir, "desktop-app");
+    }
 }
 
 /// Read settings from a separate path while keeping the log in the usual directory.
 /// An explicit settings path must be readable and enabled for logging to turn on.
 pub fn init_with_settings_path(user_data_dir: &Path, tag: &str, settings_path: Option<&Path>) {
     LOGGER.get_or_init(|| {
-        let logger = Arc::new(Logger::new(&LEVEL));
+        let mut logger = Logger::new(&LEVEL);
+        if tag == "desktop-app" {
+            logger.app_operations = Some(Mutex::new(HashMap::new()));
+        }
+        let logger = Arc::new(logger);
         let _ = logger.start(
             user_data_dir.to_owned(),
             tag.to_owned(),
@@ -76,6 +94,99 @@ pub fn log_event(level: Level, cat: &str, ev: &str, dur_ms: Option<f64>, kv: Map
     if let Some(logger) = LOGGER.get() {
         logger.event(level, cat, ev, dur_ms, kv);
     }
+}
+
+pub struct AppOperation {
+    op: &'static str,
+    calls: u64,
+    started: Instant,
+    before: Option<memory::Snapshot>,
+}
+
+impl AppOperation {
+    pub fn start(op: &'static str) -> Option<Self> {
+        Self::reserve(op).map(|calls| Self {
+            op,
+            calls,
+            before: memory::snapshot(),
+            started: Instant::now(),
+        })
+    }
+
+    pub fn record_timing(op: &'static str, duration: Duration) {
+        if let Some(calls) = Self::reserve(op) {
+            crate::rt_log!(
+                Level::Info,
+                "lifecycle",
+                "app_timing",
+                dur_ms = duration.as_secs_f64() * 1000.0,
+                op = op,
+                n = 1,
+                calls = calls,
+            );
+        }
+    }
+
+    fn reserve(op: &'static str) -> Option<u64> {
+        if !enabled(Level::Info) {
+            return None;
+        }
+        let operations = LOGGER.get()?.app_operations.as_ref()?;
+        reserve_operation(
+            &mut super::lock_ignore_poison(operations),
+            op,
+            Instant::now(),
+        )
+    }
+}
+
+impl Drop for AppOperation {
+    fn drop(&mut self) {
+        if !enabled(Level::Info) {
+            return;
+        }
+        let duration = self.started.elapsed().as_secs_f64() * 1000.0;
+        let after = memory::snapshot();
+        crate::rt_log!(
+            Level::Info,
+            "memory",
+            "mem",
+            dur_ms = duration,
+            op = self.op,
+            n = 1,
+            calls = self.calls,
+            memory_metric = memory::METRIC,
+            phys_footprint_before_bytes = self.before.map(|sample| sample.current),
+            phys_footprint_after_bytes = after.map(|sample| sample.current),
+            lifetime_peak_before_bytes = self.before.and_then(|sample| sample.peak),
+            lifetime_peak_bytes = after.and_then(|sample| sample.peak),
+        );
+    }
+}
+
+struct AppOperationRate {
+    calls: u64,
+    last_sample: Option<Instant>,
+}
+
+fn reserve_operation(
+    operations: &mut HashMap<&'static str, AppOperationRate>,
+    op: &'static str,
+    now: Instant,
+) -> Option<u64> {
+    let rate = operations.entry(op).or_insert(AppOperationRate {
+        calls: 0,
+        last_sample: None,
+    });
+    rate.calls += 1;
+    if rate
+        .last_sample
+        .is_some_and(|last| now.duration_since(last) < APP_OPERATION_INTERVAL)
+    {
+        return None;
+    }
+    rate.last_sample = Some(now);
+    Some(rate.calls)
 }
 
 /// Wait for the queue watermark observed on entry, without fsync.
@@ -171,6 +282,7 @@ impl Queue {
 
 struct Logger {
     level: &'static AtomicU8,
+    app_operations: Option<Mutex<HashMap<&'static str, AppOperationRate>>>,
     start: Instant,
     queue: Mutex<Queue>,
     wake: Condvar,
@@ -181,6 +293,7 @@ impl Logger {
     fn new(level: &'static AtomicU8) -> Self {
         Self {
             level,
+            app_operations: None,
             start: Instant::now(),
             queue: Mutex::new(Queue {
                 lines: VecDeque::with_capacity(CAPACITY),
@@ -199,12 +312,21 @@ impl Logger {
         directory: fn(&Path) -> Option<PathBuf>,
     ) -> io::Result<std::thread::JoinHandle<()>> {
         let worker = Arc::clone(self);
-        self.level.store(Level::Info as u8, Ordering::Relaxed);
+        let required = settings_path.is_some();
+        let mut settings = Settings::new(
+            settings_path.unwrap_or_else(|| user_dir.join(SETTINGS_FILE)),
+            required,
+        );
+        let initial_level = (tag == "desktop-app").then(|| settings.read());
+        self.level.store(
+            initial_level.unwrap_or(Level::Info) as u8,
+            Ordering::Relaxed,
+        );
         let result = std::thread::Builder::new()
             .name("keytao-log".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker.run(&user_dir, &tag, settings_path, directory)
+                    worker.run(&user_dir, &tag, settings, initial_level, directory)
                 }));
                 if !matches!(result, Ok(Ok(()))) {
                     worker.disable();
@@ -321,7 +443,8 @@ impl Logger {
         &self,
         user_dir: &Path,
         tag: &str,
-        settings_path: Option<PathBuf>,
+        mut settings: Settings,
+        initial_level: Option<Level>,
         directory: fn(&Path) -> Option<PathBuf>,
     ) -> io::Result<()> {
         let tag = if tag == "engine" { process_tag() } else { tag };
@@ -342,12 +465,7 @@ impl Logger {
                 "invalid logger tag",
             ));
         }
-        let required = settings_path.is_some();
-        let mut settings = Settings::new(
-            settings_path.unwrap_or_else(|| user_dir.join(SETTINGS_FILE)),
-            required,
-        );
-        let initial_level = settings.read();
+        let initial_level = initial_level.unwrap_or_else(|| settings.read());
         {
             let mut queue = super::lock_ignore_poison(&self.queue);
             self.level.store(initial_level as u8, Ordering::Relaxed);
@@ -437,7 +555,13 @@ impl Logger {
         kv.insert("abi".into(), std::env::consts::ARCH.into());
         // Unknown is explicit; never infer a model from a user-supplied device name.
         kv.insert("device".into(), Value::Null);
-        kv.insert("mem_class_mb".into(), Value::Null);
+        kv.insert(
+            "mem_class_mb".into(),
+            (tag == "desktop-app")
+                .then(memory::mem_class_mb)
+                .flatten()
+                .into(),
+        );
         kv.insert("locale".into(), Value::Null);
         // Diagnostics can start before the engine is loaded. Querying its version
         // here would trigger Windows' delay-load import before the IME has
@@ -464,20 +588,22 @@ fn process_tag() -> &'static str {
     }
     #[cfg(not(target_os = "android"))]
     {
-        if std::env::current_exe()
-            .ok()
-            .and_then(|path| path.file_stem().map(|s| s == "keytao-app"))
-            .unwrap_or(false)
-        {
-            return "desktop-app";
-        }
-        match std::env::consts::OS {
-            "ios" => "ios-ime",
-            "macos" => "macos-ime",
-            "windows" => "windows-ime",
-            "linux" => "linux-ime",
-            _ => "desktop-app",
-        }
+        let exe = std::env::current_exe().ok();
+        executable_tag(std::env::consts::OS, exe.as_deref())
+    }
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn executable_tag(os: &str, exe: Option<&Path>) -> &'static str {
+    let stem = exe.and_then(Path::file_stem).and_then(|s| s.to_str());
+    match (os, stem) {
+        ("macos", Some("KeyTao" | "keytao-app")) | ("linux", Some("keytao-app")) => "desktop-app",
+        ("windows", Some(stem)) if stem.eq_ignore_ascii_case("keytao-app") => "desktop-app",
+        ("ios", _) => "ios-ime",
+        ("macos", _) => "macos-ime",
+        ("windows", _) => "windows-ime",
+        ("linux", _) => "linux-ime",
+        _ => "desktop-app",
     }
 }
 
@@ -1592,4 +1718,45 @@ mod tests {
             0o600
         );
     }
+}
+#[test]
+fn desktop_app_executables_have_a_separate_log() {
+    for (os, exe, expected) in [
+        ("macos", "KeyTao.app/Contents/MacOS/KeyTao", "desktop-app"),
+        (
+            "macos",
+            "KeyTaoIME.app/Contents/MacOS/KeyTaoIME",
+            "macos-ime",
+        ),
+        ("windows", "KeyTao-App.exe", "desktop-app"),
+        ("windows", "keytao-windows-ime-server.exe", "windows-ime"),
+        ("linux", "keytao-app", "desktop-app"),
+        ("linux", "keytao-linux-ime", "linux-ime"),
+        ("ios", "KeyTao.app/KeyTao", "ios-ime"),
+    ] {
+        assert_eq!(executable_tag(os, Some(Path::new(exe))), expected);
+    }
+    assert_eq!(executable_tag("macos", None), "macos-ime");
+}
+
+#[test]
+fn app_operation_throttle_is_per_operation() {
+    let now = Instant::now();
+    let mut starts = HashMap::new();
+    assert_eq!(reserve_operation(&mut starts, "deploy", now), Some(1));
+    assert_eq!(reserve_operation(&mut starts, "deploy", now), None);
+    assert_eq!(reserve_operation(&mut starts, "install", now), Some(1));
+    assert_eq!(
+        reserve_operation(&mut starts, "deploy", now + APP_OPERATION_INTERVAL),
+        Some(3)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+#[test]
+fn reads_current_and_lifetime_process_memory() {
+    let sample = memory::snapshot().unwrap();
+    assert!(sample.current > 0);
+    assert!(sample.peak.unwrap() > 0);
+    assert!(memory::mem_class_mb().unwrap() > 0);
 }

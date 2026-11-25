@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
+import '../app/operation_timing.dart';
+import '../rust/api/timing.dart' show AppOperationName;
 import '../rust/api/types.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -63,15 +65,18 @@ class SystemFontCatalog {
         },
       );
 
-  Future<String> load(String family) => _loads.putIfAbsent(family, () async {
-    final alias = 'keytao-system-font-${_nextAlias++}';
-    final bytes = await controller.loadSystemFontBytes(family: family);
-    final loader = FontLoader(alias)
-      ..addFont(Future.value(ByteData.sublistView(bytes)));
-    await loader.load();
-    _aliases[family] = alias;
-    return alias;
-  });
+  Future<String> load(String family) => _loads.putIfAbsent(
+    family,
+    () => measureAppOperation(AppOperationName.loadSystemFont, () async {
+      final alias = 'keytao-system-font-${_nextAlias++}';
+      final bytes = await controller.loadSystemFontBytes(family: family);
+      final loader = FontLoader(alias)
+        ..addFont(Future.value(ByteData.sublistView(bytes)));
+      await loader.load();
+      _aliases[family] = alias;
+      return alias;
+    }),
+  );
 }
 
 Future<String?> showThemeFontPicker(

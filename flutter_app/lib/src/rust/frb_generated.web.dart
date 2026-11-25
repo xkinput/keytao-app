@@ -7,6 +7,7 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api/core.dart';
+import 'api/timing.dart';
 import 'api/types.dart';
 
 import 'dart:async';
@@ -24,8 +25,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     required super.portManager,
   });
 
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_AppOperationSpanPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan;
+
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  AppOperationSpan
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    dynamic raw,
+  );
 
   @protected
   FutureOr<String> Function()
@@ -36,6 +47,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Map<String, String> dco_decode_Map_String_String_None(dynamic raw);
+
+  @protected
+  AppOperationSpan
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    dynamic raw,
+  );
 
   @protected
   RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
@@ -60,10 +77,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AppOperationName dco_decode_app_operation_name(dynamic raw);
+
+  @protected
   AppUpdateDto dco_decode_app_update_dto(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AppOperationSpan
+  dco_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    dynamic raw,
+  );
 
   @protected
   AccountUserDto dco_decode_box_autoadd_account_user_dto(dynamic raw);
@@ -277,6 +303,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  AppOperationSpan?
+  dco_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    dynamic raw,
+  );
+
+  @protected
   AccountUserDto? dco_decode_opt_box_autoadd_account_user_dto(dynamic raw);
 
   @protected
@@ -464,10 +496,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
+  AppOperationSpan
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Object sse_decode_DartOpaque(SseDeserializer deserializer);
 
   @protected
   Map<String, String> sse_decode_Map_String_String_None(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AppOperationSpan
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
     SseDeserializer deserializer,
   );
 
@@ -494,10 +538,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AppOperationName sse_decode_app_operation_name(SseDeserializer deserializer);
+
+  @protected
   AppUpdateDto sse_decode_app_update_dto(SseDeserializer deserializer);
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AppOperationSpan
+  sse_decode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    SseDeserializer deserializer,
+  );
 
   @protected
   AccountUserDto sse_decode_box_autoadd_account_user_dto(
@@ -769,6 +822,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  AppOperationSpan?
+  sse_decode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   AccountUserDto? sse_decode_opt_box_autoadd_account_user_dto(
     SseDeserializer deserializer,
   );
@@ -1009,6 +1068,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    AppOperationSpan self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_DartFn_Inputs__Output_String_AnyhowException(
     FutureOr<String> Function() self,
     SseSerializer serializer,
@@ -1020,6 +1086,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_Map_String_String_None(
     Map<String, String> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    AppOperationSpan self,
     SseSerializer serializer,
   );
 
@@ -1057,10 +1130,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_app_operation_name(
+    AppOperationName self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_app_update_dto(AppUpdateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void
+  sse_encode_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    AppOperationSpan self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_account_user_dto(
@@ -1405,6 +1491,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void
+  sse_encode_opt_box_autoadd_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    AppOperationSpan? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_account_user_dto(
     AccountUserDto? self,
     SseSerializer serializer,
@@ -1700,6 +1793,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
 class RustLibWire implements BaseWire {
   RustLibWire.fromExternalLibrary(ExternalLibrary lib);
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+        ptr,
+      );
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+        ptr,
+      );
 }
 
 @JS('wasm_bindgen')
@@ -1707,4 +1816,14 @@ external RustLibWasmModule get wasmModule;
 
 @JS()
 @anonymous
-extension type RustLibWasmModule._(JSObject _) implements JSObject {}
+extension type RustLibWasmModule._(JSObject _) implements JSObject {
+  external void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    int ptr,
+  );
+
+  external void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerAppOperationSpan(
+    int ptr,
+  );
+}

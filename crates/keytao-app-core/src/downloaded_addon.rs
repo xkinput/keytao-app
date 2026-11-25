@@ -261,6 +261,7 @@ impl Addon {
         package: impl std::future::Future<Output = Result<RemotePackage, String>>,
         progress: impl Fn(u8, &str) + Send + Sync + 'static,
     ) -> Result<InstallReceipt, String> {
+        let _operation = keytao_core::runtime_log::AppOperation::start("install_rime_addon");
         if let Some(bytes) = receipt.manifest_bytes(self.manifest)? {
             self.parse_manifest(&receipt.source_dir()?, &bytes)?;
         }

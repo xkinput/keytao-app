@@ -1,5 +1,6 @@
 use crate::scheme_types::VerifyEntry;
 use crate::{Core, CoreError, scheme_types::InstallResult};
+use keytao_core::runtime_log::AppOperation;
 use serde::Deserialize;
 use std::{
     fs::{self, File},
@@ -136,6 +137,7 @@ pub async fn install_live_scheme(
     scheme_key: &str,
     version: Option<&str>,
 ) -> Result<InstallResult, CoreError> {
+    let _operation = AppOperation::start("install_scheme_package");
     crate::deploy::ensure_not_using_libjd(core, root)?;
     crate::package_migration::ensure_before_write(core, root).await?;
     crate::packages::store_cloud_archive_reader(

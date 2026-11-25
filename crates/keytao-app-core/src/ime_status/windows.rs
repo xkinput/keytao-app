@@ -1121,6 +1121,7 @@ fn windows_repair_ime_data_blocking(core: &Core) -> Result<WindowsImeStatus, Str
         ));
     }
 
+    let _operation = keytao_core::runtime_log::AppOperation::start("repair_windows_ime_data");
     let shared = crate::deploy::deploy_shared_data_dir(core, &user_dir);
     crate::package_migration::migrate_if_needed(core, &user_dir, &shared)
         .map_err(|error| error.to_string())?;

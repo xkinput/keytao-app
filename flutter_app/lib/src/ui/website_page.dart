@@ -8,8 +8,10 @@ import 'package:forui/forui.dart';
 import 'package:webview_core/webview_core.dart';
 
 import '../app/controller.dart';
+import '../app/operation_timing.dart';
 import '../app/options.dart';
 import '../rust/api/core.dart' as core;
+import '../rust/api/timing.dart' show AppOperationName, AppOperationSpan;
 import 'widgets.dart';
 
 const _sessionPath = '/api/auth/app-webview-session';
@@ -94,6 +96,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   late WebViewController _browser;
   late String _currentUrl = widget.origin;
   Timer? _timeout;
+  AppOperationSpan? _openOperation;
   bool _loading = true;
   bool _failed = false;
   bool _initializingSession = true;
@@ -112,7 +115,14 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   }
 
   void _startBrowser() {
-    final browser = WebViewController();
+    _openOperation = beginAppOperation(AppOperationName.openWebsite);
+    final WebViewController browser;
+    try {
+      browser = WebViewController();
+    } catch (_) {
+      _finishOpenOperation();
+      rethrow;
+    }
     _browser = browser;
     _currentUrl = widget.origin;
     _initializingSession = true;
@@ -120,6 +130,11 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
     _publishScrollAfterFrame(browser);
     unawaited(_initialize(browser));
     _trackLoad();
+  }
+
+  void _finishOpenOperation() {
+    _openOperation?.dispose();
+    _openOperation = null;
   }
 
   Future<void> _initialize(WebViewController browser) async {
@@ -164,6 +179,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
               _initializingSession = false;
               _loading = false;
             });
+            _finishOpenOperation();
           },
           onWebResourceError: (error) {
             if (error.isForMainFrame == true) _showFailure(browser);
@@ -233,6 +249,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
       _loading = false;
       _failed = true;
     });
+    _finishOpenOperation();
   }
 
   Future<void> _reload() async {
@@ -268,6 +285,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   @override
   void dispose() {
     _timeout?.cancel();
+    _finishOpenOperation();
     unawaited(_browser.dispose());
     super.dispose();
   }

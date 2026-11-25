@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use fontdb::{Database, ID, Language, Style};
+use keytao_core::runtime_log::AppOperation;
 use ttf_parser::{Face, RawFace, Tag, name_id};
 
 #[derive(Clone, Debug)]
@@ -74,6 +75,7 @@ fn chinese_family_name(face: &Face<'_>) -> Option<String> {
 
 fn catalog() -> &'static FontCatalog {
     CATALOG.get_or_init(|| {
+        let _operation = AppOperation::start("load_system_font_catalog");
         let mut database = Database::new();
         database.load_system_fonts();
         #[cfg(target_os = "windows")]
@@ -163,6 +165,7 @@ pub fn list_system_font_families() -> Result<Vec<SystemFontFamily>, String> {
 }
 
 pub fn load_system_font_bytes(family: String) -> Result<Vec<u8>, String> {
+    let _operation = AppOperation::start("load_system_font_bytes");
     let catalog = catalog();
     let entry = catalog
         .families

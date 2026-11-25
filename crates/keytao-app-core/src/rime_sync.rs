@@ -1,4 +1,5 @@
 use crate::{Core, CoreError, ime_host::ImeHost, scheme_files::write_file_atomic};
+use keytao_core::runtime_log::AppOperation;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
@@ -269,6 +270,7 @@ pub fn save_settings(
 }
 
 pub async fn sync_user_data(host: impl ImeHost) -> Result<(), String> {
+    let _operation = AppOperation::start("sync_rime_user_data");
     sync_user_data_with_timeout(host, Duration::from_secs(120)).await
 }
 

@@ -64,6 +64,8 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
             reduce_motion: preferences.reduce_motion,
         });
     }
+    keytao_core::runtime_log::init_desktop_app(&root);
+    let _operation = keytao_core::runtime_log::AppOperation::start("bridge_initialize");
     let events = Arc::new(BridgeEvents::default());
     let core = Core::new(env, events.clone()).map_err(|error| error.to_string())?;
     core.initialize_onboarding(Some(root.clone()))

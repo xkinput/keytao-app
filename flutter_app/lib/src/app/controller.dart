@@ -10,8 +10,10 @@ import 'package:flutter/services.dart';
 import '../platform/android_host.dart';
 import '../platform/ios_host.dart';
 import '../rust/api/core.dart' as core;
+import '../rust/api/timing.dart' show AppOperationName;
 import '../rust/api/types.dart';
 import '../settings/android_settings.dart';
+import 'operation_timing.dart';
 import 'options.dart'
     show
         AppPage,
@@ -1666,6 +1668,7 @@ class AppController extends ChangeNotifier {
       _refreshSchemasWhenIdle = true;
       return;
     }
+    final span = beginAppOperation(AppOperationName.refreshLiveSchemaSwitches);
     try {
       final previous = _activePreviewTarget;
       await _readSchemas();
@@ -1676,6 +1679,8 @@ class AppController extends ChangeNotifier {
       _changed();
     } catch (failure) {
       debugPrint('Live schema refresh failed: ${errorText(failure)}');
+    } finally {
+      span?.dispose();
     }
   }
 
@@ -1776,7 +1781,16 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _readState({bool quiet = false, bool refreshPreview = true}) async {
+  Future<void> _readState({bool quiet = false, bool refreshPreview = true}) =>
+      measureAppOperation(
+        AppOperationName.readState,
+        () => _readStateSnapshot(quiet: quiet, refreshPreview: refreshPreview),
+      );
+
+  Future<void> _readStateSnapshot({
+    required bool quiet,
+    required bool refreshPreview,
+  }) async {
     final errors = <String>[];
     Future<void> read(Future<void> Function() action) async {
       try {
@@ -2164,6 +2178,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _refreshOnResume() async {
     if (busy || _resumeRefreshInFlight || _disposed) return;
+    final span = beginAppOperation(AppOperationName.refreshOnResume);
     _resumeRefreshInFlight = true;
     try {
       final previousSize = candidatePageSize;
@@ -2178,6 +2193,7 @@ class AppController extends ChangeNotifier {
     } catch (failure) {
       debugPrint('Resume refresh failed: ${errorText(failure)}');
     } finally {
+      span?.dispose();
       _resumeRefreshInFlight = false;
       _changed();
       _deployChangedScheme();
@@ -4202,6 +4218,7 @@ class AppController extends ChangeNotifier {
       }
       final size = candidatePageSize;
       final target = _activePreviewTarget;
+      final span = beginAppOperation(AppOperationName.previewCandidates);
       try {
         final result =
             jsonDecode(await core.previewCandidates(size: size)) as Map;
@@ -4238,6 +4255,8 @@ class AppController extends ChangeNotifier {
           _candidatePreviewTarget = null;
           _changed();
         }
+      } finally {
+        span?.dispose();
       }
     }
     return request;

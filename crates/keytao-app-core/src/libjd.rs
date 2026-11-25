@@ -3,6 +3,7 @@ use keytao_core::{
     RuntimeDirs,
     engine_choice::{self, PackageEngine},
     libjd::{self, BUNDLED_ENGINE_VERSION},
+    runtime_log::AppOperation,
 };
 use std::{
     fs,
@@ -167,6 +168,7 @@ pub async fn import_package(
     key: &str,
     schema_id: Option<&str>,
 ) -> Result<usize, CoreError> {
+    let _operation = AppOperation::start("import_libjd_package");
     if engine_choice::preferred(root) != PackageEngine::LibjdEngine {
         return Err(CoreError::Other("请先在首页选择 ime-jd 引擎".into()));
     }
@@ -185,6 +187,7 @@ pub async fn import_package(
             &root,
             crate::runtime_materialize::package_name(&core, &key),
         );
+        let conversion = AppOperation::start("convert_libjd_dictionary");
         emit_progress(&core, "converting", 0, "正在准备转换词库…");
         let converted = crate::libjd_dictionary::convert(
             &core,
@@ -208,6 +211,7 @@ pub async fn import_package(
             .tempdir_in(parent)?;
         emit_progress(&core, "converting", 92, "正在编译并校验 ime-jd 词库…");
         build_dictionary(&library, &converted.text, stage.path())?;
+        drop(conversion);
         let schema = keytao_core::SchemaInfo {
             id: converted.schema_id,
             name: converted.schema_name,

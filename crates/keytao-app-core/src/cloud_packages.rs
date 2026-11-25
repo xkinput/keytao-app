@@ -1,5 +1,6 @@
 use crate::account::{API_BASE, ApiClient, account_id, same_account};
 use crate::{Core, CoreError, CoreEvent, events::CloudTransferProgress};
+use keytao_core::runtime_log::AppOperation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -520,6 +521,7 @@ pub(crate) async fn download_at(
 ) -> Result<(), CoreError> {
     use futures_util::StreamExt;
     use std::io::{BufReader, Seek, Write};
+    let _operation = AppOperation::start("download_cloud_package");
     let account = account_id(core);
     valid_id(id).map_err(CoreError::Other)?;
     let package = list_at(core, api_base)
