@@ -146,6 +146,7 @@ fn write_ignore_poison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 struct EngineBuildLock {
     busy: Mutex<bool>,
+    foreground_waiters: std::sync::atomic::AtomicUsize,
     ready: Condvar,
 }
 
@@ -153,20 +154,44 @@ impl EngineBuildLock {
     const fn new() -> Self {
         Self {
             busy: Mutex::new(false),
+            foreground_waiters: std::sync::atomic::AtomicUsize::new(0),
             ready: Condvar::new(),
         }
     }
 
     fn acquire(&self) -> Option<EngineBuildGuard<'_>> {
+        self.acquire_with_priority(true)
+    }
+
+    fn acquire_background(&self) -> Option<EngineBuildGuard<'_>> {
+        self.acquire_with_priority(false)
+    }
+
+    fn try_acquire_background(&self) -> Option<EngineBuildGuard<'_>> {
+        let mut busy = try_lock_ignore_poison(&self.busy)?;
+        if *busy || self.foreground_waiters.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+        *busy = true;
+        Some(EngineBuildGuard(self))
+    }
+
+    fn acquire_with_priority(&self, foreground: bool) -> Option<EngineBuildGuard<'_>> {
+        let busy = lock_ignore_poison(&self.busy);
+        if foreground {
+            self.foreground_waiters.fetch_add(1, Ordering::Relaxed);
+        }
+        let unavailable = |busy: &mut bool| {
+            *busy || (!foreground && self.foreground_waiters.load(Ordering::Relaxed) > 0)
+        };
         let (mut busy, _) = self
             .ready
-            .wait_timeout_while(
-                lock_ignore_poison(&self.busy),
-                Duration::from_secs(20),
-                |busy| *busy,
-            )
+            .wait_timeout_while(busy, Duration::from_secs(20), unavailable)
             .unwrap_or_else(PoisonError::into_inner);
-        if *busy {
+        if foreground {
+            self.foreground_waiters.fetch_sub(1, Ordering::Relaxed);
+        }
+        if unavailable(&mut busy) {
             return None;
         }
         *busy = true;
@@ -918,6 +943,7 @@ pub(crate) trait ImeBackend: Send + Sync + english_mode::EnglishBackend {
 mod desktop {
     use super::english_mode::EnglishBackend;
     use super::*;
+
     use librime_sys::{
         rime_get_api, RimeApi, RimeCandidateListIterator, RimeConfig, RimeConfigIterator,
         RimeContext, RimeLeversApi, RimeUserDictIterator,
@@ -938,6 +964,7 @@ mod desktop {
     /// that also take it. Runtime UI entry points take it without waiting,
     /// across engine rebuilding and shared input-state restoration as well.
     static RIME_API_LOCK: Mutex<()> = Mutex::new(());
+    static USER_CONFIG_NEEDS_FLUSH: AtomicBool = AtomicBool::new(false);
     thread_local! {
         static RIME_API_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
     }
@@ -3315,7 +3342,14 @@ mod desktop {
             if let Some(schema_id) = &preferred {
                 // ascii_mode is left to the schema switches and to ascii_composer;
                 // a session must not silently override the user's mode.
-                select_schema_checked(&session, schema_id)?;
+                if USER_CONFIG_NEEDS_FLUSH.load(Ordering::Relaxed)
+                    || !session
+                        .status()
+                        .is_ok_and(|status| !status.is_disabled && status.schema_id() == schema_id)
+                {
+                    select_schema_checked(&session, schema_id)?;
+                    USER_CONFIG_NEEDS_FLUSH.store(false, Ordering::Relaxed);
+                }
             } else {
                 validate_active_schema(&session)?;
             }
@@ -4439,6 +4473,8 @@ mod desktop {
             if user_open(c"user".as_ptr(), &mut config) == 0 {
                 return Err("cannot open Rime user config".into());
             }
+            // Live switchers can keep ConfigData alive after config_close.
+            USER_CONFIG_NEEDS_FLUSH.store(true, Ordering::Relaxed);
             let mut result = values
                 .iter()
                 .all(|(key, value)| set(&mut config, key.as_ptr(), i32::from(*value)) != 0);
@@ -6043,6 +6079,7 @@ struct ProcessRimeState {
     /// engines before finalizing librime; entries die with their session.
     sessions: Mutex<Vec<WeakRuntimeSession>>,
     build: EngineBuildLock,
+    prewarm_pass: EngineBuildLock,
     package_reload: Mutex<Option<(PathBuf, String, u64)>>,
     prewarm_scheduled: AtomicBool,
     lua_retry_after: Mutex<Option<(PathBuf, Instant)>>,
@@ -6064,6 +6101,7 @@ static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     reload_barrier: RwLock::new(()),
     sessions: Mutex::new(Vec::new()),
     build: EngineBuildLock::new(),
+    prewarm_pass: EngineBuildLock::new(),
     package_reload: Mutex::new(None),
     prewarm_scheduled: AtomicBool::new(false),
     lua_retry_after: Mutex::new(None),
@@ -6826,23 +6864,28 @@ impl ImeRuntime {
 
     /// Rebuild the focused engine first on the caller's worker. Rime also
     /// rebuilds its peers, while ime-jd can restart idle sessions as needed.
-    /// Keys wait for this worker without holding engine/native locks.
+    /// Keys can take the build gate between session rebuilds.
     /// Returns whether any session was rebuilt.
     pub fn prewarm(&self, focused: Option<&ImeRuntimeSession>) -> Result<bool, String> {
         let dirs = self.data_dirs()?;
-        let Some(worker) = PROCESS_RIME.build.acquire() else {
-            PROCESS_RIME
-                .prewarm_scheduled
-                .store(false, Ordering::Release);
-            return Err("Rime engine build timed out".into());
-        };
+        let pass = PROCESS_RIME
+            .prewarm_pass
+            .acquire()
+            .ok_or("Rime engine build timed out")?;
         PROCESS_RIME
             .prewarm_scheduled
             .store(true, Ordering::Release);
-        let initial_generation = self.generation();
-        let mut generation = initial_generation;
         let mut changed = Vec::new();
         let result = (|| {
+            let acquire = || {
+                PROCESS_RIME
+                    .build
+                    .acquire_background()
+                    .ok_or("Rime engine build timed out")
+            };
+            let mut worker = acquire()?;
+            let initial_generation = self.generation();
+            let mut generation = initial_generation;
             if self.stop_if_disabled(&dirs)? {
                 return Ok(self.generation() != initial_generation);
             }
@@ -6874,8 +6917,10 @@ impl ImeRuntime {
                     session.try_finish_lua_reload();
                     generation = self.generation();
                 }
+                drop(worker);
                 let mut worked = false;
                 for session in sessions {
+                    let _worker = acquire()?;
                     if self.generation() != generation {
                         return Err("Rime generation changed".into());
                     }
@@ -6890,9 +6935,6 @@ impl ImeRuntime {
                     drop(initialized);
                     let mut inner = lock_ignore_poison(&session.inner);
                     if inner.generation != generation || inner.engine.is_none() {
-                        if deployment_in_progress(&dirs.user) {
-                            return Err("Rime deployment is busy".into());
-                        }
                         let rime = (!libjd).then(desktop::rime_api_lock);
                         if self.generation() != generation {
                             return Err("Rime generation changed".into());
@@ -6907,17 +6949,17 @@ impl ImeRuntime {
                     }
                     drop(inner);
                     drop(barrier);
-                    std::thread::yield_now();
                 }
                 if !worked || libjd {
                     return Ok(generation != initial_generation || !changed.is_empty());
                 }
+                worker = acquire()?;
             }
         })();
         PROCESS_RIME
             .prewarm_scheduled
             .store(false, Ordering::Release);
-        drop(worker);
+        drop(pass);
         for session in changed {
             let callback = lock_ignore_poison(&session.pending).state_callback.clone();
             if let Some(callback) = callback {
@@ -7012,14 +7054,36 @@ impl ImeRuntime {
     /// Create a session after a worker initialized this runtime. UI callers
     /// wait for an in-flight engine build, or receive an error after 20 seconds.
     pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
+        self.create_session_inner(false)
+    }
+
+    pub fn try_create_spare_session(&self) -> Result<ImeRuntimeSession, String> {
+        self.create_session_inner(true)
+    }
+
+    fn create_session_inner(&self, spare: bool) -> Result<ImeRuntimeSession, String> {
         let dirs = self.data_dirs()?;
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let result = (|| {
-            let _build = PROCESS_RIME
-                .build
-                .acquire()
-                .ok_or("Rime engine build timed out")?;
-            let disabled = self.stop_if_disabled(&dirs)?;
+            let _build = if spare {
+                PROCESS_RIME
+                    .build
+                    .try_acquire_background()
+                    .ok_or("Rime engine build is busy")?
+            } else {
+                PROCESS_RIME
+                    .build
+                    .acquire()
+                    .ok_or("Rime engine build timed out")?
+            };
+            let disabled = if spare {
+                if !engine_choice::is_enabled(&dirs.user) || deployment_in_progress(&dirs.user) {
+                    return Err("Rime is disabled or deployment is busy".into());
+                }
+                false
+            } else {
+                self.stop_if_disabled(&dirs)?
+            };
             // Pin the read barrier before releasing the directory check, so
             // teardown cannot race creation or block peers behind this session.
             let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)
@@ -7028,7 +7092,7 @@ impl ImeRuntime {
             // Frontends keep a session while the engine is off or ime-jd is waiting for a scheme.
             if !has_backend
                 && !disabled
-                && !(initialized.is_none() && self.libjd_requested(&dirs.user))
+                && (spare || initialized.is_some() || !self.libjd_requested(&dirs.user))
             {
                 return Err("librime is running for other data directories".into());
             }
@@ -7060,10 +7124,8 @@ impl ImeRuntime {
                     None
                 };
                 let engine = PROCESS_RIME.create_backend(&dirs.user)?;
-                english_mode.configure(
-                    english_mode::read_english_mode(&dirs.user),
-                    engine.list_schemas(),
-                );
+                let mode = english_mode::read_english_mode(&dirs.user);
+                let schemas = engine.list_schemas();
                 if self.0.ime_host {
                     engine.apply_reset_switch_request(&schema_root)?;
                 }
@@ -7072,12 +7134,10 @@ impl ImeRuntime {
                     let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
                     let global =
                         global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
-                    global.english_mode.configure(
-                        english_mode::read_english_mode(&dirs.user),
-                        engine.list_schemas(),
-                    );
+                    global.english_mode.configure(mode, schemas.clone());
                     global.apply(engine.as_ref(), &schema_root)?;
                 }
+                english_mode.configure(mode, schemas);
                 if request.is_some() {
                     PROCESS_RIME.apply_switch_request(
                         &dirs.user,
@@ -7282,6 +7342,14 @@ impl ImeRuntimeSession {
         }
         let focused = self.clone();
         std::thread::spawn(move || {
+            #[cfg(target_os = "macos")]
+            {
+                extern "C" {
+                    fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
+                }
+                const QOS_CLASS_UTILITY: u32 = 0x11;
+                unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+            }
             let runtime =
                 ImeRuntime::with_dirs(focused.dirs.user.clone(), focused.dirs.shared.clone());
             if let Err(error) = runtime.prewarm(Some(&focused)) {
@@ -10770,6 +10838,33 @@ mod tests {
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn waiting_foreground_build_precedes_the_next_background_build() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let lock = super::EngineBuildLock::new();
+        let first = lock.acquire_background().unwrap();
+        let ran = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _foreground = lock.acquire().unwrap();
+                ran.store(true, Ordering::Release);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while lock.foreground_waiters.load(Ordering::Relaxed) == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "foreground did not wait for the build gate"
+                );
+                std::thread::yield_now();
+            }
+            drop(first);
+            let _second = lock.acquire_background().unwrap();
+            assert!(ran.load(Ordering::Acquire));
+        });
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

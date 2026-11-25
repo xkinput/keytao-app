@@ -41,11 +41,35 @@ final class KeyTaoInputController: IMKInputController {
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
     private var hasLoggedMissingCursorRect = false
+    private var keyPanelQueries: PanelQueries?
     private var reloadObserver: NSObjectProtocol?
     private var deploymentObserver: NSObjectProtocol?
     private var showingDeploymentHint = false
     private var normalCandidateModel: KeyTaoPanelModel?
     private let inputContextGeneration = KeyTaoInputContextGeneration()
+    private var keyTiming: KeyTiming?
+
+    private struct KeyTiming {
+        var clientIPC: UInt64 = 0
+        var panelUpdate: UInt64 = 0
+    }
+
+    private final class PanelQueries {
+        let generation: UInt64
+        let client: IMKTextInput?
+        var level: NSWindow.Level?
+        var caret: NSRect?
+
+        func invalidate() {
+            level = nil
+            caret = nil
+        }
+
+        init(generation: UInt64, client: IMKTextInput?) {
+            self.generation = generation
+            self.client = client
+        }
+    }
 
     // MARK: Lifecycle
 
@@ -68,9 +92,7 @@ final class KeyTaoInputController: IMKInputController {
         super.init(server: server, delegate: delegate, client: client)
         Self.controllers.add(self)
         KeyTaoRuntime.shared.start()
-        // Null until the runtime is up; ensureSession() picks it up later
-        // instead of blocking this callback on librime initialization.
-        session = keytao_create_session()
+        session = KeyTaoRuntime.shared.takeSession()
         reloadObserver = NotificationCenter.default.addObserver(
             forName: KeyTaoRuntime.didReloadNotification,
             object: nil,
@@ -97,7 +119,7 @@ final class KeyTaoInputController: IMKInputController {
             NotificationCenter.default.removeObserver(deploymentObserver)
         }
         if let session {
-            keytao_destroy_session(session)
+            KeyTaoRuntime.shared.releaseSession(session)
         }
     }
 
@@ -167,10 +189,22 @@ final class KeyTaoInputController: IMKInputController {
 
     /// Called for key events in the client app. Return true only when librime consumes it.
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
+        let recordsTiming = event?.type == .keyDown && keytao_log_enabled(1)
+        let keyStarted = recordsTiming ? DispatchTime.now().uptimeNanoseconds : 0
         guard !Self.shuttingDown else { return false }
         Self.keyHandlingDepth += 1
         defer { Self.keyHandlingDepth -= 1 }
         guard let event else { return false }
+
+        let previousPanelQueries = keyPanelQueries
+        let previousKeyTiming = keyTiming
+        keyPanelQueries = PanelQueries(generation: inputContextGeneration.current, client: sender as? IMKTextInput)
+        keyTiming = recordsTiming ? KeyTiming() : nil
+        defer {
+            previousPanelQueries?.invalidate()
+            keyPanelQueries = previousPanelQueries
+            keyTiming = previousKeyTiming
+        }
 
         if event.type == .flagsChanged {
             return handleFlagsChanged(event, client: sender as? IMKTextInput)
@@ -234,7 +268,7 @@ final class KeyTaoInputController: IMKInputController {
         let usesEnterPath = keytao_key_policy_is_enter(keyval)
             && modifiers & (rimeModifierControl | rimeModifierAlt) == 0
         let theme = deploymentTheme ?? ImeThemeManager.shared.theme()
-        let keyStarted = DispatchTime.now().uptimeNanoseconds
+        let ffiStarted = recordsTiming ? DispatchTime.now().uptimeNanoseconds : 0
         let json = usesEnterPath
             ? keytao_session_process_enter_json(session)
             : keytao_session_process_key_with_panel_json(
@@ -243,7 +277,9 @@ final class KeyTaoInputController: IMKInputController {
                     && (!theme.ui.hideCandidatePanel || normalCandidateModel?.isPackageSwitcher == true),
                 theme.panel.orientation == .vertical
             )
+        let decodeStarted = recordsTiming ? DispatchTime.now().uptimeNanoseconds : 0
         guard let state = KeyTaoImeState.consuming(json) else { return false }
+        let decoded = recordsTiming ? DispatchTime.now().uptimeNanoseconds : 0
 
         chordReleases.record(
             keyCode: event.keyCode, keyval: keyval,
@@ -261,8 +297,29 @@ final class KeyTaoInputController: IMKInputController {
             RunLoop.main.add(timer, forMode: .common)
         }
         apply(state, to: sender, theme: theme)
-        keytao_log_keystroke(Double(DispatchTime.now().uptimeNanoseconds - keyStarted) / 1_000_000)
+        if let timing = keyTiming {
+            let elapsed = DispatchTime.now().uptimeNanoseconds - keyStarted
+            state.schemaId.withCString { schema in
+                keytao_log_keystroke_stages(
+                    schema, Double(elapsed) / 1_000_000,
+                    Double(decodeStarted - ffiStarted) / 1_000_000,
+                    Double(decoded - decodeStarted) / 1_000_000,
+                    timing.clientIPC == 0 ? .nan : Double(timing.clientIPC) / 1_000_000,
+                    timing.panelUpdate == 0 ? .nan : Double(timing.panelUpdate) / 1_000_000
+                )
+            }
+        }
         return state.accepted
+    }
+
+    private func measureKeyStage<T>(_ stage: WritableKeyPath<KeyTiming, UInt64>, _ work: () -> T) -> T {
+        guard var timing = keyTiming else { return work() }
+        keyTiming = nil
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result = work()
+        timing[keyPath: stage] += DispatchTime.now().uptimeNanoseconds - started
+        keyTiming = timing
+        return result
     }
 
     private func pollPendingChordReleases() {
@@ -284,6 +341,8 @@ final class KeyTaoInputController: IMKInputController {
             guard let state = KeyTaoImeState.consuming(
                 keytao_session_process_key_json(session, keyval, rimeReleaseMask)
             ) else { continue }
+            keyPanelQueries = PanelQueries(generation: generation, client: client)
+            defer { keyPanelQueries = nil }
             apply(state, to: client)
         }
     }
@@ -360,10 +419,14 @@ final class KeyTaoInputController: IMKInputController {
                 }) else { return }
             }
             guard inputContextGeneration.perform(generation, {
-                _ = client?.insertText(
-                    state.committed,
-                    replacementRange: NSRange(location: NSNotFound, length: 0)
-                )
+                keyPanelQueries?.invalidate()
+                defer { keyPanelQueries?.invalidate() }
+                measureKeyStage(\.clientIPC) {
+                    _ = client?.insertText(
+                        state.committed,
+                        replacementRange: NSRange(location: NSNotFound, length: 0)
+                    )
+                }
             }) else { return }
         }
 
@@ -403,8 +466,9 @@ final class KeyTaoInputController: IMKInputController {
         lastPreeditCursor = 0
         hasMarkedText = false
         guard ownedMarkedText, let client else { return }
-        client.setMarkedText(
+        setMarkedText(
             "",
+            client: client,
             selectionRange: NSRange(location: 0, length: 0),
             replacementRange: NSRange(location: NSNotFound, length: 0)
         )
@@ -412,7 +476,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func updateMarkedText(_ state: KeyTaoImeState, client: IMKTextInput?, theme: ImeTheme) {
         let selectedRange = !hasMarkedText && state.hasComposition && state.preedit.isEmpty
-            ? (client?.selectedRange() ?? NSRange(location: NSNotFound, length: 0))
+            ? measureKeyStage(\.clientIPC) { client?.selectedRange() ?? NSRange(location: NSNotFound, length: 0) }
             : NSRange(location: NSNotFound, length: 0)
         let decision = KeyTaoMarkedTextPolicy.decide(
             preedit: state.preedit,
@@ -426,6 +490,7 @@ final class KeyTaoInputController: IMKInputController {
         )
         switch decision {
         case .none:
+            if lastPreeditCursor != 0 { keyPanelQueries?.caret = nil }
             lastPreeditCursor = 0
         case .clear:
             clearMarkedText(client: client)
@@ -434,8 +499,9 @@ final class KeyTaoInputController: IMKInputController {
             guard let client else { return }
             // Keep a non-empty marked range so clients suppress default key actions.
             hasMarkedText = true
-            client.setMarkedText(
+            setMarkedText(
                 KeyTaoMarkedTextPolicy.placeholderText,
+                client: client,
                 selectionRange: NSRange(location: 0, length: 0),
                 replacementRange: replacementRange
             )
@@ -481,11 +547,20 @@ final class KeyTaoInputController: IMKInputController {
             }
 
             hasMarkedText = true
-            client.setMarkedText(
+            setMarkedText(
                 marked,
+                client: client,
                 selectionRange: NSRange(location: min(lastPreeditCursor, length), length: 0),
                 replacementRange: NSRange(location: NSNotFound, length: 0)
             )
+        }
+    }
+
+    private func setMarkedText(_ text: Any, client: IMKTextInput, selectionRange: NSRange, replacementRange: NSRange) {
+        keyPanelQueries?.invalidate()
+        defer { keyPanelQueries?.invalidate() }
+        measureKeyStage(\.clientIPC) {
+            client.setMarkedText(text, selectionRange: selectionRange, replacementRange: replacementRange)
         }
     }
 
@@ -524,9 +599,9 @@ final class KeyTaoInputController: IMKInputController {
             hideCandidates()
             return
         }
-        let windowLevel = panelLevel(for: client)
+        let windowLevel = measureKeyStage(\.clientIPC) { panelLevel(for: client) }
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
-        let rect = cursorRect(for: client)
+        let rect = measureKeyStage(\.clientIPC) { cursorRect(for: client) }
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = candidatePanel ?? CandidatePanel()
         candidatePanel = panel
@@ -540,12 +615,9 @@ final class KeyTaoInputController: IMKInputController {
             self.handlePageChange(backward: backward, client: client)
         }
 
-        panel.update(
-            model: model,
-            theme: theme,
-            windowLevel: windowLevel,
-            near: rect
-        )
+        measureKeyStage(\.panelUpdate) {
+            panel.update(model: model, theme: theme, windowLevel: windowLevel, near: rect)
+        }
     }
 
     private func hideCandidates() {
@@ -557,18 +629,15 @@ final class KeyTaoInputController: IMKInputController {
     private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?, theme: ImeTheme) {
         let generation = inputContextGeneration.current
         guard isActive, !showingDeploymentHint else { return }
-        let windowLevel = panelLevel(for: client)
+        let windowLevel = measureKeyStage(\.clientIPC) { panelLevel(for: client) }
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
-        let rect = cursorRect(for: client)
+        let rect = measureKeyStage(\.clientIPC) { cursorRect(for: client) }
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = modeIndicatorPanel ?? ModeIndicatorPanel()
         modeIndicatorPanel = panel
-        panel.show(
-            modeHint: modeHint,
-            theme: theme,
-            windowLevel: windowLevel,
-            near: rect
-        )
+        measureKeyStage(\.panelUpdate) {
+            panel.show(modeHint: modeHint, theme: theme, windowLevel: windowLevel, near: rect)
+        }
     }
 
     private func showDeploymentIndicator(
@@ -618,9 +687,20 @@ final class KeyTaoInputController: IMKInputController {
     /// expects self-drawn candidate windows one level above it.
     private func panelLevel(for client: IMKTextInput?) -> NSWindow.Level {
         guard let client else { return .popUpMenu }
+        let queries = panelQueries(for: client)
+        if let level = queries?.level { return level }
         let clientLevel = Int(client.windowLevel())
-        guard clientLevel > 0 else { return .popUpMenu }
-        return NSWindow.Level(rawValue: max(clientLevel + 1, NSWindow.Level.popUpMenu.rawValue))
+        let level = clientLevel > 0
+            ? NSWindow.Level(rawValue: max(clientLevel + 1, NSWindow.Level.popUpMenu.rawValue))
+            : .popUpMenu
+        queries?.level = level
+        return level
+    }
+
+    private func panelQueries(for client: IMKTextInput?) -> PanelQueries? {
+        guard let queries = keyPanelQueries, queries.client === client,
+              inputContextGeneration.isCurrent(queries.generation) else { return nil }
+        return queries
     }
 
     private func handleCandidateSelection(index: Int, client: IMKTextInput?) {
@@ -642,16 +722,14 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func cursorRect(for client: IMKTextInput?) -> NSRect {
+        let queries = panelQueries(for: client)
+        if let rect = queries?.caret { return rect }
         if let rect = resolveCursorRect(for: client) {
             lastCursorRect = rect
-            return rect
         }
-
-        if lastCursorRect.isUsableTextInputRect {
-            return lastCursorRect
-        }
-
-        return .zero
+        let rect = lastCursorRect.isUsableTextInputRect ? lastCursorRect : .zero
+        queries?.caret = rect
+        return rect
     }
 
     private func resolveCursorRect(for client: IMKTextInput?) -> NSRect? {
@@ -662,7 +740,7 @@ final class KeyTaoInputController: IMKInputController {
         // text, zero requests the current selection, not document character 0.
         let inlineCursor = hasMarkedText ? lastPreeditCursor : 0
         _ = client.attributes(forCharacterIndex: inlineCursor, lineHeightRectangle: &lineRect)
-        if let normalizedLineRect = normalizeTextInputRect(lineRect, source: "lineHeight") {
+        if let normalizedLineRect = normalizeTextInputRect(lineRect) {
             return normalizedLineRect
         }
 
@@ -670,10 +748,11 @@ final class KeyTaoInputController: IMKInputController {
         if !hasLoggedMissingCursorRect {
             attemptedRects.append("lineHeight=\(NSStringFromRect(lineRect))")
         }
-        for query in cursorRectQueries(for: client) {
+        var triedRanges: Set<NSRange> = []
+        for query in cursorRectQueries(for: client) where triedRanges.insert(query.range).inserted {
             var actualRange = NSRange(location: NSNotFound, length: 0)
             let rect = client.firstRect(forCharacterRange: query.range, actualRange: &actualRange)
-            if let normalizedRect = normalizeTextInputRect(rect, source: query.source) {
+            if let normalizedRect = normalizeTextInputRect(rect) {
                 return normalizedRect
             }
             if !hasLoggedMissingCursorRect {
@@ -691,13 +770,15 @@ final class KeyTaoInputController: IMKInputController {
     private func cursorRectQueries(for client: IMKTextInput) -> [(source: String, range: NSRange)] {
         var queries: [(source: String, range: NSRange)] = []
 
-        let markedRange = client.markedRange()
-        if hasMarkedText, markedRange.location != NSNotFound {
-            let cursor = min(lastPreeditCursor, max(markedRange.length, 0))
-            queries.append((
-                source: "markedRange",
-                range: NSRange(location: markedRange.location + cursor, length: 0)
-            ))
+        if hasMarkedText {
+            let markedRange = client.markedRange()
+            if markedRange.location != NSNotFound {
+                let cursor = min(lastPreeditCursor, max(markedRange.length, 0))
+                queries.append((
+                    source: "markedRange",
+                    range: NSRange(location: markedRange.location + cursor, length: 0)
+                ))
+            }
         }
 
         let selectedRange = client.selectedRange()
@@ -712,17 +793,9 @@ final class KeyTaoInputController: IMKInputController {
         return queries
     }
 
-    private func normalizeTextInputRect(_ rect: NSRect, source: String) -> NSRect? {
-        guard rect.isUsableTextInputRect else { return nil }
-        guard NSScreen.screen(containing: rect) != nil else {
-            NSLog("KeyTao: rejected cursor rect %@ %@ outside screens", source, NSStringFromRect(rect))
-            return nil
-        }
-        guard !rect.isLikelyMissingTextInputRect else {
-            NSLog("KeyTao: rejected cursor rect %@ %@ near screen corner", source, NSStringFromRect(rect))
-            return nil
-        }
-
+    private func normalizeTextInputRect(_ rect: NSRect) -> NSRect? {
+        guard rect.isUsableTextInputRect, NSScreen.screen(containing: rect) != nil,
+              !rect.isLikelyMissingTextInputRect else { return nil }
         return rect
     }
 
@@ -734,7 +807,7 @@ final class KeyTaoInputController: IMKInputController {
             if isActive { keytao_set_focused_session(session) }
             return session
         }
-        session = keytao_create_session()
+        session = KeyTaoRuntime.shared.takeSession() ?? keytao_create_session()
         if session == nil {
             // The runtime is not up yet; retrying happens in the background so
             // this callback stays cheap and keys keep reaching the application.

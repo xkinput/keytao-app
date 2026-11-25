@@ -908,10 +908,11 @@ fn utc_timestamp(time: SystemTime) -> String {
 /// Approximate duration percentiles in eleven logarithmic buckets.
 pub struct DurationHistogram {
     data: Mutex<HistogramData>,
+    bounds: &'static [f64],
 }
 
 struct HistogramData {
-    buckets: [u32; 11],
+    buckets: [u32; STAGE_BUCKETS.len()],
     max: f64,
     count: u32,
 }
@@ -930,6 +931,10 @@ const BUCKETS: [f64; 11] = [
     f64::INFINITY,
 ];
 
+const STAGE_BUCKETS: [f64; 13] = [
+    0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 64.0, 128.0, f64::INFINITY,
+];
+
 impl Default for DurationHistogram {
     fn default() -> Self {
         Self::new()
@@ -938,12 +943,17 @@ impl Default for DurationHistogram {
 
 impl DurationHistogram {
     pub const fn new() -> Self {
+        Self::with_bounds(&BUCKETS)
+    }
+
+    const fn with_bounds(bounds: &'static [f64]) -> Self {
         Self {
             data: Mutex::new(HistogramData {
-                buckets: [0; 11],
+                buckets: [0; STAGE_BUCKETS.len()],
                 max: 0.0,
                 count: 0,
             }),
+            bounds,
         }
     }
 
@@ -952,7 +962,7 @@ impl DurationHistogram {
             return;
         }
         let mut data = super::lock_ignore_poison(&self.data);
-        let bucket = BUCKETS.iter().position(|bound| ms <= *bound).unwrap_or(10);
+        let bucket = self.bounds.iter().position(|bound| ms <= *bound).unwrap();
         data.buckets[bucket] = data.buckets[bucket].saturating_add(1);
         data.count = data.count.saturating_add(1);
         data.max = data.max.max(ms);
@@ -969,7 +979,7 @@ impl DurationHistogram {
             for (index, count) in data.buckets.iter().enumerate() {
                 cumulative += u64::from(*count);
                 if cumulative >= rank {
-                    return BUCKETS[index].min(data.max);
+                    return self.bounds[index].min(data.max);
                 }
             }
             data.max
@@ -979,9 +989,9 @@ impl DurationHistogram {
         kv.insert("p50".into(), percentile(50).into());
         kv.insert("p95".into(), percentile(95).into());
         kv.insert("max".into(), data.max.into());
-        kv.insert("buckets".into(), json::json!(data.buckets));
+        kv.insert("buckets".into(), json::json!(data.buckets[..self.bounds.len()]));
         *data = HistogramData {
-            buckets: [0; 11],
+            buckets: [0; STAGE_BUCKETS.len()],
             max: 0.0,
             count: 0,
         };
@@ -1012,8 +1022,12 @@ struct KeyStats {
     schema: String,
     engine: DurationHistogram,
     e2e: DurationHistogram,
+    stages: [DurationHistogram; KEY_STAGES.len()],
     keys: u32,
+    staged_keys: u32,
 }
+
+const KEY_STAGES: [&str; 4] = ["ffi", "decode", "client_ipc", "panel_update"];
 
 impl KeyStats {
     const fn new() -> Self {
@@ -1021,7 +1035,9 @@ impl KeyStats {
             schema: String::new(),
             engine: DurationHistogram::new(),
             e2e: DurationHistogram::new(),
+            stages: [const { DurationHistogram::with_bounds(&STAGE_BUCKETS) }; KEY_STAGES.len()],
             keys: 0,
+            staged_keys: 0,
         }
     }
 
@@ -1043,9 +1059,43 @@ impl KeyStats {
         }
     }
 
+    fn record_stages(
+        &mut self,
+        schema: &str,
+        ms: f64,
+        stages: [f64; KEY_STAGES.len()],
+        mut emit: impl FnMut(&str, Map<String, Value>),
+    ) {
+        if !schema.is_empty() && self.schema != schema {
+            self.drain(&mut emit);
+            self.schema.clear();
+            self.schema.push_str(schema);
+        }
+        self.e2e.record(ms);
+        for (histogram, elapsed) in self.stages.iter().zip(stages) {
+            histogram.record(elapsed);
+        }
+        self.staged_keys += 1;
+        if self.staged_keys == 100 {
+            self.drain(emit);
+        }
+    }
+
     fn drain(&mut self, mut emit: impl FnMut(&str, Map<String, Value>)) {
         for (ev, histogram) in [("process_key", &self.engine), ("keystroke", &self.e2e)] {
             if let Some(mut kv) = histogram.take() {
+                if ev == "keystroke" {
+                    let mut stages = Map::new();
+                    for (name, histogram) in KEY_STAGES.iter().zip(&self.stages) {
+                        if let Some(stage) = histogram.take() {
+                            stages.insert((*name).into(), Value::Object(stage));
+                        }
+                    }
+                    if !stages.is_empty() {
+                        stages.insert("bucket_upper_ms".into(), json::json!(STAGE_BUCKETS));
+                        kv.insert("stages".into(), Value::Object(stages));
+                    }
+                }
                 if self.schema.is_empty() {
                     continue;
                 }
@@ -1054,6 +1104,7 @@ impl KeyStats {
             }
         }
         self.keys = 0;
+        self.staged_keys = 0;
     }
 }
 
@@ -1076,6 +1127,12 @@ pub(crate) fn record_engine_key(schema: &str, ms: f64) {
 pub fn record_keystroke(ms: f64) {
     if enabled(Level::Info) {
         super::lock_ignore_poison(&KEY_STATS).e2e.record(ms);
+    }
+}
+
+pub fn record_keystroke_stages(schema: &str, ms: f64, stages: [f64; KEY_STAGES.len()]) {
+    if enabled(Level::Info) && ms.is_finite() && ms >= 0.0 {
+        super::lock_ignore_poison(&KEY_STATS).record_stages(schema, ms, stages, emit_key_stats);
     }
 }
 
@@ -1643,6 +1700,26 @@ mod tests {
         assert_eq!(events[2].1["schema"], "new");
         assert_eq!(events[2].1["n"], 1);
         assert_eq!(events[2].1["max"], 2.0);
+    }
+
+    #[test]
+    fn staged_keystrokes_drain_with_their_schema_and_finer_buckets() {
+        let mut stats = KeyStats::new();
+        let mut events = Vec::new();
+        for ms in [11.0, 15.0, 21.0] {
+            stats.record_stages("old", 30.0, [ms, 1.0, 2.0, 3.0], |_, kv| events.push(kv));
+        }
+        for _ in 0..100 {
+            stats.record_stages("new", 2.0, [1.0, 0.5, 0.5, f64::NAN], |_, kv| events.push(kv));
+        }
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["schema"], "old");
+        assert_eq!(events[0]["stages"]["ffi"]["n"], 3);
+        assert_eq!(events[0]["stages"]["ffi"]["buckets"][6], 1);
+        assert_eq!(events[0]["stages"]["ffi"]["buckets"][8], 1);
+        assert_eq!(events[1]["schema"], "new");
+        assert_eq!(events[1]["n"], 100);
+        assert!(events[1]["stages"].get("panel_update").is_none());
     }
 
     #[test]

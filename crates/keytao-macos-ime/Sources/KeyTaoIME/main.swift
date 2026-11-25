@@ -11,6 +11,7 @@ if let subcommand = CommandLine.arguments.dropFirst().first,
   if subcommand == "--preview-candidates" {
     keytao_run_preview_child_main()
   } else {
+    _ = pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)
     keytao_run_deploy_child_main()
   }
 }
@@ -59,6 +60,7 @@ let connectionName =
   Bundle.main.infoDictionary?["InputMethodConnectionName"] as? String
   ?? "KeyTao_Connection"
 
+_ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
 let imkServer = IMKServer(
   name: connectionName,
   bundleIdentifier: Bundle.main.bundleIdentifier ?? KeyTaoInputSource.bundleID

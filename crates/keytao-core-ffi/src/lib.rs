@@ -6,7 +6,7 @@ use std::os::raw::c_char;
 use std::os::raw::c_void;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 use keytao_core::{
     key_policy, DeploymentState, EngineCapabilities, ImeRuntime, ImeRuntimeSession, ImeState,
@@ -249,6 +249,7 @@ fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
             "keytao_log_enabled"
                 | "keytao_log_event"
                 | "keytao_log_keystroke"
+                | "keytao_log_keystroke_stages"
                 | "keytao_log_drain_key_stats"
                 | "keytao_log_flush"
         ) && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
@@ -377,6 +378,29 @@ pub extern "C" fn keytao_log_event(
 pub extern "C" fn keytao_log_keystroke(ms: f64) {
     guard("keytao_log_keystroke", (), || {
         keytao_core::runtime_log::record_keystroke(ms);
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn keytao_log_keystroke_stages(
+    schema: *const c_char,
+    ms: f64,
+    ffi_ms: f64,
+    decode_ms: f64,
+    client_ms: f64,
+    panel_ms: f64,
+) {
+    guard("keytao_log_keystroke_stages", (), || {
+        if schema.is_null() {
+            return;
+        }
+        if let Ok(schema) = unsafe { CStr::from_ptr(schema) }.to_str() {
+            keytao_core::runtime_log::record_keystroke_stages(
+                schema,
+                ms,
+                [ffi_ms, decode_ms, client_ms, panel_ms],
+            );
+        }
     });
 }
 
@@ -589,6 +613,16 @@ fn clear_global() {
 pub extern "C" fn keytao_is_initialized() -> bool {
     guard("keytao_is_initialized", false, || {
         lock_ignore_poison(&GLOBAL).initialized
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn keytao_session_pool_generation() -> u64 {
+    guard("keytao_session_pool_generation", u64::MAX, || {
+        lock_ignore_poison(&GLOBAL)
+            .runtime
+            .as_ref()
+            .map_or(u64::MAX, ImeRuntime::generation)
     })
 }
 
@@ -936,6 +970,32 @@ pub extern "C" fn keytao_create_session() -> *mut c_void {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn keytao_try_create_spare_session() -> *mut c_void {
+    guard(
+        "keytao_try_create_spare_session",
+        std::ptr::null_mut(),
+        || {
+            let epoch = match SESSION_EPOCH.try_write() {
+                Ok(epoch) => epoch,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return std::ptr::null_mut(),
+            };
+            let Some(runtime) = lock_ignore_poison(&GLOBAL).runtime.clone() else {
+                return std::ptr::null_mut();
+            };
+            match runtime.try_create_spare_session() {
+                Ok(session) => Box::into_raw(Box::new(SessionHandle {
+                    session,
+                    epoch: *epoch,
+                }))
+                .cast(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        },
+    )
+}
+
 /// Destroy a session created by keytao_create_session(). Retired handles are
 /// freed too; only their librime session is already gone.
 #[no_mangle]
@@ -948,6 +1008,9 @@ pub extern "C" fn keytao_destroy_session(session: *mut c_void) {
         // while keytao_init() is finalizing librime: a destroy that lands after
         // the finalize would be handing a stale id to a fresh librime, which
         // recycles session ids.
+        #[cfg(target_os = "macos")]
+        let _epoch = write_ignore_poison(&SESSION_EPOCH);
+        #[cfg(not(target_os = "macos"))]
         let _epoch = read_ignore_poison(&SESSION_EPOCH);
         unsafe {
             drop(Box::from_raw(session as *mut SessionHandle));
@@ -1925,6 +1988,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spare_session_creation_skips_in_flight_session_calls() {
+        let _active_session = read_ignore_poison(&SESSION_EPOCH);
+        assert!(keytao_try_create_spare_session().is_null());
+    }
+
+    #[test]
     fn isolated_keyboard_readiness_uses_the_selected_engine() {
         let rime_ready = || {
             Some(keytao_core::SchemaInstallState {
@@ -2068,6 +2137,16 @@ mod tests {
             assert!(!state.is_null());
             unsafe { keytao_free_string(state) };
         }
+        let generation = keytao_session_pool_generation();
+        let spare = keytao_try_create_spare_session();
+        assert!(!spare.is_null());
+        assert_eq!(keytao_session_pool_generation(), generation);
+        let state = keytao_session_state_json(spare);
+        assert!(!state.is_null());
+        let state_json: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(state) }.to_str().unwrap()).unwrap();
+        assert_eq!(state_json["preedit"], "");
+        unsafe { keytao_free_string(state) };
         let undeployed = dir.join("undeployed");
         smoke_fixture::write(&undeployed).unwrap();
         for invalid in [dir.join("uninstalled"), undeployed] {
@@ -2099,6 +2178,9 @@ mod tests {
         let arg = CString::new(second.to_string_lossy().as_ref()).unwrap();
         assert!(keytao_init(arg.as_ptr(), arg.as_ptr()));
         assert!(keytao_session_state_json(session).is_null());
+        assert_ne!(keytao_session_pool_generation(), generation);
+        assert!(keytao_session_state_json(spare).is_null());
+        keytao_destroy_session(spare);
         let replacement = keytao_create_session();
         assert!(!replacement.is_null());
         let state = keytao_session_process_key_json(replacement, b'a' as u32, 0);

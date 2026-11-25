@@ -68,6 +68,13 @@ void keytao_log_event(int32_t level,
 
 void keytao_log_keystroke(double ms);
 
+void keytao_log_keystroke_stages(const char *schema,
+                                 double ms,
+                                 double ffi_ms,
+                                 double decode_ms,
+                                 double client_ms,
+                                 double panel_ms);
+
 void keytao_log_drain_key_stats(void);
 
 /**
@@ -111,6 +118,8 @@ bool keytao_engine_enabled_at(const char *user_dir);
 bool keytao_init(const char *user_dir, const char *shared_dir);
 
 bool keytao_is_initialized(void);
+
+uint64_t keytao_session_pool_generation(void);
 
 /**
  * Redeploy Rime data through the shared runtime. Every session created through
@@ -189,6 +198,8 @@ bool keytao_prewarm(void);
  * returns null or false.
  */
 void *keytao_create_session(void);
+
+void *keytao_try_create_spare_session(void);
 
 /**
  * Destroy a session created by keytao_create_session(). Retired handles are

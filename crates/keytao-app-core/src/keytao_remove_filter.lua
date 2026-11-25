@@ -23,6 +23,10 @@ function M.init(env)
   end)
 end
 
+function M.tags_match(_, env)
+  return next(env.removed) ~= nil
+end
+
 function M.func(translation, env)
   local input = env.engine.context.input
   for cand in translation:iter() do

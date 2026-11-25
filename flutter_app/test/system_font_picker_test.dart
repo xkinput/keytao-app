@@ -130,9 +130,13 @@ void main() {
       messenger.setMockMethodCallHandler(_fontChannel, (call) async {
         expect(call.method, 'resolveSystemFontFamily');
         final family = call.arguments['family'];
-        if (family == 'Font 98') return false;
-        return family != 'Font 99' ||
-            call.arguments['path'] == controller.fontPaths[family];
+        if (family == '宋体-简') return 'Songti SC';
+        if (family == 'Font 98' ||
+            (family == 'Font 99' &&
+                call.arguments['path'] != controller.fontPaths[family])) {
+          return null;
+        }
+        return family;
       });
       addTearDown(() => messenger.setMockMethodCallHandler(_fontChannel, null));
       final catalog = SystemFontCatalog.forController(controller);
@@ -156,7 +160,7 @@ void main() {
       controller.listing.complete([
         for (var index = 0; index < 100; index++)
           SystemFontFamilyDto(
-            family: 'Font $index',
+            family: index == 0 ? '宋体-简' : 'Font $index',
             displayName: '字体 $index',
             weights: const ['regular'],
           ),
@@ -166,7 +170,7 @@ void main() {
       expect(find.text('默认'), findsOneWidget);
       expect(
         tester.widget<Text>(find.text('字体 0')).style?.fontFamily,
-        'Font 0',
+        'Songti SC',
       );
       expect(find.text('字体 99'), findsNothing);
       expect(identical(catalog.list(), catalog.list()), isTrue);
@@ -219,7 +223,7 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(_fontChannel, (call) async {
       expect(call.method, 'resolveSystemFontFamily');
-      return true;
+      return call.arguments['family'];
     });
     addTearDown(() => messenger.setMockMethodCallHandler(_fontChannel, null));
     controller.listing.complete(const [

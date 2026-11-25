@@ -98,20 +98,17 @@ class SystemFontCatalog {
     const window = MethodChannel('ink.rea.keytao/window');
     final arguments = {'family': family};
     try {
-      if (await window.invokeMethod<bool>(
-            'resolveSystemFontFamily',
-            arguments,
-          ) ==
-          true) {
-        return family;
-      }
+      final resolved = await window.invokeMethod<String>(
+        'resolveSystemFontFamily',
+        arguments,
+      );
+      if (resolved != null) return resolved;
       final path = await controller.systemFontPath(family: family);
       if (path == null) return null;
-      final resolved = await window.invokeMethod<bool>(
-        'resolveSystemFontFamily',
-        {...arguments, 'path': path},
-      );
-      return resolved == true ? family : null;
+      return await window.invokeMethod<String>('resolveSystemFontFamily', {
+        ...arguments,
+        'path': path,
+      });
     } on MissingPluginException {
       return family;
     }

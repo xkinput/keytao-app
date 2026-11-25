@@ -34,7 +34,7 @@ class MainFlutterWindow: NSWindow {
         guard let self, let arguments = call.arguments as? [String: String],
           let family = arguments["family"], !family.isEmpty
         else {
-          result(false)
+          result(nil)
           return
         }
         self.fontQueue.async {
@@ -49,20 +49,72 @@ class MainFlutterWindow: NSWindow {
     super.awakeFromNib()
   }
 
-  private static func resolveSystemFontFamily(_ family: String, path: String?) -> Bool {
+  private static func resolveSystemFontFamily(_ family: String, path: String?) -> String? {
     let key = kCTFontFamilyNameAttribute
     let descriptor = CTFontDescriptorCreateWithAttributes([key: family] as CFDictionary)
     let mandatory = NSSet(object: key) as CFSet
-    func matches() -> Bool {
-      guard let match = CTFontDescriptorCreateMatchingFontDescriptor(descriptor, mandatory) else {
-        return false
+    func matchedFamily() -> String? {
+      guard let match = CTFontDescriptorCreateMatchingFontDescriptor(descriptor, mandatory),
+        let canonical = CTFontDescriptorCopyAttribute(match, key) as? String
+      else {
+        return nil
       }
-      return (CTFontDescriptorCopyAttribute(match, key) as? String) == family
+      if canonical == family ||
+        (CTFontDescriptorCopyLocalizedAttribute(match, key, nil) as? String) == family
+      {
+        return canonical
+      }
+      let font = CTFontCreateWithFontDescriptor(match, 0, nil)
+      return hasFamilyName(family, in: font) ? canonical : nil
     }
-    if matches() { return true }
-    guard let path else { return false }
+    if let canonical = matchedFamily() { return canonical }
+    guard let path else { return nil }
     CTFontManagerRegisterFontsForURL(URL(fileURLWithPath: path) as CFURL, .process, nil)
-    return matches()
+    return matchedFamily()
+  }
+
+  // CoreText returns one localized name. The name table also covers other locales.
+  private static func hasFamilyName(_ family: String, in font: CTFont) -> Bool {
+    guard let table = CTFontCopyTable(font, CTFontTableTag(kCTFontTableName), []) as Data?,
+      table.count >= 6
+    else { return false }
+    func uint16(at offset: Int) -> Int {
+      Int(table[offset]) << 8 | Int(table[offset + 1])
+    }
+    let count = uint16(at: 2)
+    let storage = uint16(at: 4)
+    guard 6 + count * 12 <= storage, storage <= table.count else { return false }
+    for index in 0..<count {
+      let record = 6 + index * 12
+      let nameID = uint16(at: record + 6)
+      guard nameID == 1 || nameID == 16 || nameID == 21 else { continue }
+      let platform = uint16(at: record)
+      let encodingID = uint16(at: record + 2)
+      let encoding: String.Encoding
+      switch platform {
+      case 0, 3:
+        let legacyWindowsCodepages: [Int: UInt32] = [3: 936, 4: 950, 5: 949]
+        if platform == 3, let codepage = legacyWindowsCodepages[encodingID] {
+          let cfEncoding = CFStringConvertWindowsCodepageToEncoding(codepage)
+          encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding))
+        } else {
+          encoding = .utf16BigEndian
+        }
+      case 1:
+        guard encodingID <= 32, CFStringIsEncodingAvailable(CFStringEncoding(encodingID)) else {
+          continue
+        }
+        let rawEncoding = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(encodingID))
+        encoding = String.Encoding(rawValue: rawEncoding)
+      default:
+        continue
+      }
+      let start = storage + uint16(at: record + 10)
+      let end = start + uint16(at: record + 8)
+      guard end <= table.count else { continue }
+      if String(data: table[start..<end], encoding: encoding) == family { return true }
+    }
+    return false
   }
 
   private func shareThemeFile(_ arguments: Any?, result: FlutterResult) {
