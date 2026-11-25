@@ -88,6 +88,7 @@ class _ThemePresetApi implements RustLibApi {
         showTrayModeIndicator: true,
         effectiveEmbeddedComposition: false,
         accentColor: '#178E73',
+        accentColorOverride: '#178E73',
         fontSize: 18,
         backgroundColor: '',
         themeExists: true,
@@ -126,12 +127,13 @@ Future<void> _pump(WidgetTester tester, ViewController c, Size size) async {
 
 void main() {
   testWidgets(
-    'home motion setting keeps the navigator and honors system preference',
+    'library motion setting keeps the navigator and honors system preference',
     (tester) async {
       final api = _ThemePresetApi();
       RustLib.initMock(api: api);
       addTearDown(RustLib.dispose);
-      final c = ViewController(BridgePlatform.ios);
+      final c = ViewController(BridgePlatform.ios)
+        ..activePage = AppPage.library;
       await _pump(tester, c, const Size(390, 844));
       final navigator = find.byType(Navigator);
       final original = tester.state<NavigatorState>(navigator);
@@ -172,15 +174,19 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
-  testWidgets('applying a keyboard theme on the mobile home keeps app colors', (
+  testWidgets('applying a keyboard theme on the skin page tints app colors', (
     tester,
   ) async {
     final api = _ThemePresetApi();
     RustLib.initMock(api: api);
     addTearDown(RustLib.dispose);
-    final controller = ViewController(BridgePlatform.ios);
+    final controller = ViewController(BridgePlatform.ios)
+      ..activePage = AppPage.skin;
     await _pump(tester, controller, const Size(390, 844));
     final library = find.byType(ThemeLibrarySection);
+    final originalContext = tester.element(library);
+    expect(ChromeAccent.of(originalContext), ChromeAccent.defaultColor);
+    final originalGround = AppPalette.of(originalContext).ground;
     final mint = find.descendant(of: library, matching: find.text('薄荷'));
     await tester.ensureVisible(mint);
     await tester.tap(mint);
@@ -188,7 +194,8 @@ void main() {
     expect(api.current, 'mint');
     expect(controller.uiSettings?.accentColor, '#178E73');
     final context = tester.element(library);
-    expect(ChromeAccent.of(context), ChromeAccent.defaultColor);
+    expect(ChromeAccent.of(context), const Color(0xFF178E73));
+    expect(AppPalette.of(context).ground, isNot(originalGround));
     expect(Theme.of(context).brightness, Brightness.light);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
@@ -230,7 +237,8 @@ void main() {
   testWidgets('custom color rejects invalid hex and applies uppercase RGB', (
     tester,
   ) async {
-    final c = _EditingController(BridgePlatform.macOs);
+    final c = _EditingController(BridgePlatform.macOs)
+      ..activePage = AppPage.skin;
     await _pump(tester, c, const Size(720, 520));
     final picker = find.descendant(
       of: find.byType(AccentPicker),
@@ -295,7 +303,8 @@ void main() {
   testWidgets('mobile phrases editor adds removes and reorders before saving', (
     tester,
   ) async {
-    final c = _EditingController(BridgePlatform.android);
+    final c = _EditingController(BridgePlatform.android)
+      ..activePage = AppPage.library;
     await _pump(tester, c, const Size(400, 860));
     final row = find.widgetWithText(SettingRow, AppStrings.phrases);
     await tester.ensureVisible(row);

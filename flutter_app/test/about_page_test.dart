@@ -268,17 +268,22 @@ void main() {
     expect(find.byType(FDeterminateProgress), findsNothing);
     expect(find.text('重启并安装'), findsOneWidget);
 
-    await tester.tap(find.text('重启并安装'));
+    final restart = find.text('重启并安装');
+    await tester.ensureVisible(restart);
+    await tester.tap(restart);
     await tester.pumpAndSettle();
     expect(core.installerCalls, isEmpty);
     deploy.complete();
     expect(await deployment, isTrue);
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('重启并安装'));
+    await tester.ensureVisible(restart);
+    await tester.tap(restart);
     await tester.pumpAndSettle();
     expect(find.text('安装请求已取消'), findsOneWidget);
-    await tester.tap(find.text('打开升级包'));
+    final open = find.text('打开升级包');
+    await tester.ensureVisible(open);
+    await tester.tap(open);
     await tester.pumpAndSettle();
     expect(core.installerCalls, [
       (version: '2', restart: true),

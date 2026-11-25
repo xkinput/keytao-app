@@ -6,7 +6,8 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
-import 'package:keytao/src/ui/scheme_page.dart';
+import 'package:keytao/src/ui/library_page.dart';
+import 'package:keytao/src/ui/settings.dart' show AccountCard;
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -74,7 +75,7 @@ Future<void> _show(WidgetTester tester, AppController controller) async {
       home: FScaffold(
         child: ListenableBuilder(
           listenable: controller,
-          builder: (_, _) => SchemePage(controller: controller),
+          builder: (_, _) => LibraryPage(controller: controller),
         ),
       ),
     ),
@@ -116,12 +117,8 @@ void main() {
       expect(find.text('同步路径'), findsNothing);
       if (!mobile) {
         expect(
-          tester.getTopLeft(button).dx,
-          greaterThan(
-            tester
-                .getTopRight(find.byKey(const ValueKey('addon-schemes-button')))
-                .dx,
-          ),
+          find.descendant(of: find.byType(AccountCard), matching: button),
+          findsOneWidget,
         );
         await tester.tap(button);
         await tester.pumpAndSettle();

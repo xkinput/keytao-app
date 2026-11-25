@@ -419,27 +419,29 @@ void main() {
       addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
       const accent = Color(0xFF0F9F8F);
       tester.platformDispatcher.platformBrightnessTestValue = brightness;
-      final palette = brightness == Brightness.dark
-          ? AppPalette.dark
-          : AppPalette.light;
-      await _pump(
-        tester,
-        ChromeAccent(
-          color: accent,
-          child: Builder(
-            builder: (context) {
-              expect(AppPalette.of(context), same(palette));
-              expect(ChromeAccent.of(context), accent);
-              expect(Theme.of(context).scaffoldBackgroundColor, palette.ground);
-              expect(Theme.of(context).colorScheme.surface, palette.surface);
-              expect(context.theme.colors.brightness, brightness);
-              expect(context.theme.colors.background, palette.ground);
-              expect(context.theme.colors.card, palette.surface);
-              return const SizedBox.shrink();
-            },
+      final probe = GlobalKey();
+      final home = SizedBox(key: probe);
+      final grounds = <Color>{};
+      for (final color in [ChromeAccent.defaultColor, accent]) {
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: BridgePlatform.macOs,
+            accent: color,
+            home: home,
           ),
-        ),
-      );
+        );
+        await tester.pumpAndSettle();
+        final context = probe.currentContext!;
+        final palette = AppPalette.of(context);
+        grounds.add(palette.ground);
+        expect(ChromeAccent.of(context), color);
+        expect(Theme.of(context).scaffoldBackgroundColor, palette.ground);
+        expect(Theme.of(context).colorScheme.surface, palette.surface);
+        expect(context.theme.colors.brightness, brightness);
+        expect(context.theme.colors.background, palette.ground);
+        expect(context.theme.colors.card, palette.surface);
+      }
+      expect(grounds, hasLength(2));
       await _finish(tester);
     });
   }

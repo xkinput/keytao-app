@@ -9,11 +9,13 @@ abstract final class AppStrings {
   static const retryPackageMigration = '迁移失败，重试';
   static const appUpdate = 'KeyTao 有新版本可用';
   static const allowAppUpdatePackage = '请允许安装来自此来源的应用，然后再打开升级包';
-  static const ime = '输入法';
+  static const input = '输入';
   static const scheme = '方案';
+  static const skin = '皮肤';
+  static const library = '词库与设置';
   static const selectSchemas = '选择方案';
   static const about = '关于';
-  static const debug = '调试';
+  static const website = '网站';
   static const localSchemeTitle = '本地方案';
   static const addonTitle = '附加方案';
   static const imeSettings = '输入法设置';

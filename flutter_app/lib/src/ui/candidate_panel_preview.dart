@@ -61,7 +61,7 @@ extension CandidatePanelPreviewCache on AppController {
           fontSize: fontSize,
           systemDark: systemDark,
         );
-    if (themes.length == 2) themes.remove(themes.keys.first);
+    if (themes.length == 4) themes.remove(themes.keys.first);
     return themes[key] = theme;
   }
 }
@@ -91,6 +91,7 @@ class CandidatePanelPreview extends StatelessWidget {
     this.candidateCount = 6,
     this.candidates = const [],
     this.keyboard = false,
+    this.showKeyboardCandidates = false,
     this.keyboardSchemeName = 'KeyTao',
     this.keyboardLogo,
     this.keyboardSettings,
@@ -105,6 +106,7 @@ class CandidatePanelPreview extends StatelessWidget {
   final int candidateCount;
   final List<({String text, String comment})> candidates;
   final bool keyboard;
+  final bool showKeyboardCandidates;
   final String keyboardSchemeName;
   final Widget? keyboardLogo;
   final AndroidImeInputSettingsDto? keyboardSettings;
@@ -180,6 +182,7 @@ class CandidatePanelPreview extends StatelessWidget {
         logo: keyboardLogo,
         keyboardSettings: keyboardSettings,
         candidates: this.candidates,
+        showCandidates: showKeyboardCandidates,
         editorPreview: editorPreview,
         fontFamily: family,
         highlightPath: highlightPath,

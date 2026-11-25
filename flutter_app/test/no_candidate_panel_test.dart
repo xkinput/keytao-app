@@ -6,7 +6,7 @@ import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/candidate_panel_preview.dart';
 import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/ui/input_page.dart';
-import 'package:keytao/src/ui/settings.dart';
+import 'package:keytao/src/ui/skin_page.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -82,10 +82,13 @@ Future<void> _pumpSettings(
         child: ListenableBuilder(
           listenable: controller,
           builder: (_, _) => controller.isMobile
-              ? SingleChildScrollView(
-                  child: SettingsCard(controller: controller),
-                )
-              : InputPage(controller: controller),
+              ? InputPage(controller: controller)
+              : Column(
+                  children: [
+                    Expanded(child: InputPage(controller: controller)),
+                    Expanded(child: SkinPage(controller: controller)),
+                  ],
+                ),
         ),
       ),
     ),
@@ -124,7 +127,7 @@ void main() {
         expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
         expect(font, findsOneWidget);
         expect(find.byType(AccentPicker), findsOneWidget);
-        expect(find.byType(CandidatePanelPreview), findsOneWidget);
+        expect(find.byType(CandidatePanelPreview), findsNWidgets(2));
         expect(editor, findsOneWidget);
         expect(tester.widget<FButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
@@ -183,7 +186,7 @@ void main() {
         expect(tester.widget<SwitchSetting>(embedded).onChanged, isNotNull);
         expect(font, findsOneWidget);
         expect(find.byType(AccentPicker), findsOneWidget);
-        expect(find.byType(CandidatePanelPreview), findsOneWidget);
+        expect(find.byType(CandidatePanelPreview), findsNWidgets(2));
         expect(editor, findsOneWidget);
         expect(tester.widget<FButton>(editor).onPress, isNotNull);
         expect(mode, findsOneWidget);
@@ -206,7 +209,10 @@ void main() {
       tester,
     ) async {
       await _pumpSettings(tester, ViewController(entry.key));
-      expect(find.text('候选模式'), findsNothing);
+      expect(
+        find.byType(BigTextRadioGroup<PanelOrientationDto?>),
+        findsNothing,
+      );
       expect(find.text(AppStrings.embedded), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());

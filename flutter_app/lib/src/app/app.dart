@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
 
 import '../rust/api/types.dart';
+import '../ui/color_picker.dart';
 import '../ui/menus.dart';
 import '../ui/onboarding.dart';
 import '../ui/package_schema_selection.dart';
@@ -26,7 +27,16 @@ class KeyTaoApp extends StatefulWidget {
 
 class _KeyTaoAppState extends State<KeyTaoApp> {
   late bool _completed = widget.initialOnboarding.completed;
+  late String? _accent = _selectedAccent;
   late final AppLifecycleListener _lifecycle;
+
+  String? get _selectedAccent => widget.controller.uiSettings?.accentColor;
+
+  void _accentChanged() {
+    final accent = _selectedAccent;
+    if (accent != _accent) setState(() => _accent = accent);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -36,6 +46,7 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
         c.activePage == AppPage.input) {
       c.selectPage(AppPage.scheme);
     }
+    c.addListener(_accentChanged);
     _lifecycle = AppLifecycleListener(
       onResume: widget.controller.onResume,
       onHide: widget.controller.onPause,
@@ -45,7 +56,18 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
   }
 
   @override
+  void didUpdateWidget(covariant KeyTaoApp oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.controller != oldWidget.controller) {
+      oldWidget.controller.removeListener(_accentChanged);
+      widget.controller.addListener(_accentChanged);
+      _accent = _selectedAccent;
+    }
+  }
+
+  @override
   void dispose() {
+    widget.controller.removeListener(_accentChanged);
     _lifecycle.dispose();
     super.dispose();
   }
@@ -64,6 +86,10 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
     },
     child: KeyTaoTheme(
       platform: widget.controller.info.platform,
+      accent: switch (_accent) {
+        final value? => parseAccentColor(value),
+        null => ChromeAccent.defaultColor,
+      },
       home: AppMenus(
         platform: widget.controller.info.platform,
         controller: widget.controller,

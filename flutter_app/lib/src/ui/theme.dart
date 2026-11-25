@@ -68,7 +68,29 @@ class AppPalette {
   );
 
   static AppPalette of(BuildContext context) =>
-      Theme.of(context).brightness == Brightness.dark ? dark : light;
+      forAccent(Theme.of(context).brightness, ChromeAccent.of(context));
+
+  static AppPalette forAccent(Brightness brightness, Color accent) {
+    final night = brightness == Brightness.dark;
+    final base = night ? dark : light;
+    Color tint(Color color, double amount) =>
+        Color.alphaBlend(accent.withValues(alpha: accent.a * amount), color);
+
+    return AppPalette._(
+      ground: tint(base.ground, night ? .07 : .04),
+      surface: tint(base.surface, night ? .02 : .015),
+      hairline: tint(base.hairline, .025),
+      ink: base.ink,
+      muted: base.muted,
+      mutedSecondary: base.mutedSecondary,
+      unselected: base.unselected,
+      success: base.success,
+      successBackground: base.successBackground,
+      successForeground: base.successForeground,
+      error: base.error,
+      controlSurface: tint(base.controlSurface, .02),
+    );
+  }
 }
 
 class ChromeAccent extends InheritedTheme {
@@ -77,6 +99,11 @@ class ChromeAccent extends InheritedTheme {
   final Color color;
 
   static const defaultColor = Color(0xFF3B73D9);
+
+  static Color foreground(Color accent) =>
+      1.05 / (accent.computeLuminance() + .05) >= 4.5
+      ? Colors.white
+      : Colors.black;
 
   static Color of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<ChromeAccent>()?.color ??
@@ -91,9 +118,15 @@ class ChromeAccent extends InheritedTheme {
 }
 
 class KeyTaoTheme extends StatelessWidget {
-  const KeyTaoTheme({super.key, required this.platform, required this.home});
+  const KeyTaoTheme({
+    super.key,
+    required this.platform,
+    required this.home,
+    this.accent = ChromeAccent.defaultColor,
+  });
   final BridgePlatform platform;
   final Widget home;
+  final Color accent;
 
   static const _windowsFontFamily = 'Microsoft YaHei UI';
   static const _windowsFontFallback = [
@@ -264,41 +297,46 @@ class KeyTaoTheme extends StatelessWidget {
   Widget build(BuildContext context) {
     final touch =
         platform == BridgePlatform.android || platform == BridgePlatform.ios;
+    final lightPalette = AppPalette.forAccent(Brightness.light, accent);
+    final darkPalette = AppPalette.forAccent(Brightness.dark, accent);
     final light = _platformTheme(
-      AppPalette.light,
+      lightPalette,
       brightness: Brightness.light,
       touch: touch,
     );
     final dark = _platformTheme(
-      AppPalette.dark,
+      darkPalette,
       brightness: Brightness.dark,
       touch: touch,
     );
-    return MaterialApp(
-      title: 'KeyTao',
-      debugShowCheckedModeBanner: false,
-      locale: const Locale('zh', 'CN'),
-      localizationsDelegates: const [
-        ...FLocalizations.localizationsDelegates,
-        GlobalMaterialLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales: FLocalizations.supportedLocales,
-      theme: _materialTheme(AppPalette.light, Brightness.light),
-      darkTheme: _materialTheme(AppPalette.dark, Brightness.dark),
-      themeMode: ThemeMode.system,
-      builder: (context, child) => FTheme(
-        data: Theme.of(context).brightness == Brightness.dark ? dark : light,
-        platform: switch (platform) {
-          BridgePlatform.macOs => FPlatformVariant.macOS,
-          BridgePlatform.android => FPlatformVariant.android,
-          BridgePlatform.ios => FPlatformVariant.iOS,
-          BridgePlatform.windows => FPlatformVariant.windows,
-          _ => FPlatformVariant.linux,
-        },
-        child: FTooltipGroup(child: FToaster(child: child!)),
+    return ChromeAccent(
+      color: accent,
+      child: MaterialApp(
+        title: 'KeyTao',
+        debugShowCheckedModeBanner: false,
+        locale: const Locale('zh', 'CN'),
+        localizationsDelegates: const [
+          ...FLocalizations.localizationsDelegates,
+          GlobalMaterialLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        supportedLocales: FLocalizations.supportedLocales,
+        theme: _materialTheme(lightPalette, Brightness.light),
+        darkTheme: _materialTheme(darkPalette, Brightness.dark),
+        themeMode: ThemeMode.system,
+        builder: (context, child) => FTheme(
+          data: Theme.of(context).brightness == Brightness.dark ? dark : light,
+          platform: switch (platform) {
+            BridgePlatform.macOs => FPlatformVariant.macOS,
+            BridgePlatform.android => FPlatformVariant.android,
+            BridgePlatform.ios => FPlatformVariant.iOS,
+            BridgePlatform.windows => FPlatformVariant.windows,
+            _ => FPlatformVariant.linux,
+          },
+          child: FTooltipGroup(child: FToaster(child: child!)),
+        ),
+        home: home,
       ),
-      home: home,
     );
   }
 }

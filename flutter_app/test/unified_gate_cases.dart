@@ -140,12 +140,13 @@ void unifiedGateCases(BridgePlatform platform) {
             expect(AppPage.values.map((page) => page.id), [
               'ime',
               'scheme',
+              'skin',
+              'library',
               'about',
-              'debug',
               'website',
             ]);
-            expect(AppPage.about.shortcutDigit, 3);
-            expect(AppPage.debug.shortcutDigit, 4);
+            expect(AppPage.about.shortcutDigit, 5);
+            expect(AppPage.library.shortcutDigit, 4);
             expect(find.byKey(const ValueKey('nav-extension')), findsNothing);
             expect(find.byKey(const ValueKey('nav-website')), findsOneWidget);
             if (platform == BridgePlatform.windows) {
@@ -187,8 +188,9 @@ void unifiedGateCases(BridgePlatform platform) {
             final offset = scroll.position.pixels;
             for (final page in [
               AppPage.scheme,
+              AppPage.skin,
+              AppPage.library,
               AppPage.about,
-              AppPage.debug,
               AppPage.input,
             ]) {
               await tester.tap(find.byKey(ValueKey('nav-${page.id}')));
@@ -235,15 +237,18 @@ void unifiedGateCases(BridgePlatform platform) {
                 );
               }
             }
-            if (platform == BridgePlatform.windows ||
-                platform == BridgePlatform.linux) {
+            if (platform != BridgePlatform.macOs) {
               Focus.of(tester.element(find.byType(AppShell))).requestFocus();
               await tester.pump();
-              await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+              final modifier = platform == BridgePlatform.ios
+                  ? LogicalKeyboardKey.metaLeft
+                  : LogicalKeyboardKey.controlLeft;
+              await tester.sendKeyDownEvent(modifier);
               try {
                 for (final (key, character, page) in const [
-                  (LogicalKeyboardKey.digit3, '3', AppPage.about),
-                  (LogicalKeyboardKey.digit4, '4', AppPage.debug),
+                  (LogicalKeyboardKey.digit3, '3', AppPage.skin),
+                  (LogicalKeyboardKey.digit4, '4', AppPage.library),
+                  (LogicalKeyboardKey.digit5, '5', AppPage.about),
                   (LogicalKeyboardKey.digit1, '1', AppPage.input),
                 ]) {
                   await tester.sendKeyEvent(key, character: character);
@@ -253,7 +258,7 @@ void unifiedGateCases(BridgePlatform platform) {
                   expect(tester.takeException(), isNull);
                 }
               } finally {
-                await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+                await tester.sendKeyUpEvent(modifier);
               }
             }
           }

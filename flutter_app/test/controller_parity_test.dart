@@ -1635,7 +1635,7 @@ void main() {
         controller.runtimeLog = null;
         controller.systemLogs = null;
         controller.selectPage(AppPage.input);
-        controller.selectPage(AppPage.debug);
+        controller.selectPage(AppPage.about);
         await settle();
         expect(core.calls, containsAll(['settings', 'runtime', 'system']));
         expect(controller.logSettings != null, failure != 'settings');
@@ -1648,7 +1648,7 @@ void main() {
       final running = controller.run(() => gate.future);
       core.logFailures.clear();
       core.calls.clear();
-      controller.selectPage(AppPage.debug);
+      controller.selectPage(AppPage.about);
       await settle();
       expect(controller.busy, isTrue);
       expect(core.calls, containsAll(['settings', 'runtime', 'system']));

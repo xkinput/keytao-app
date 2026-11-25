@@ -17,9 +17,8 @@ import 'package:keytao/src/ui/widgets.dart';
 
 import '../view_fixture.dart';
 
-const _directory =
-    '/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/'
-    '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/snowfix/scheme-page';
+final _directory =
+    Platform.environment['SCREENSHOTS_DIR'] ?? '../target/scheme-shots';
 const _cjkFamily = 'SchemeScreenshotCjk';
 const _captureKey = ValueKey('scheme-page-screenshot');
 
@@ -284,15 +283,20 @@ void main() {
           greaterThan(tester.getTopLeft(cards[0]).dx),
         );
       } else {
-        for (var index = 1; index < cards.length; index++) {
-          expect(
-            tester.getTopLeft(cards[index]).dx,
-            tester.getTopLeft(cards[0]).dx,
-          );
-          expect(
-            tester.getTopLeft(cards[index]).dy,
-            greaterThanOrEqualTo(tester.getBottomLeft(cards[index - 1]).dy),
-          );
+        for (var index = 0; index < cards.length; index++) {
+          final rect = tester.getRect(cards[index]);
+          expect(rect.left, tester.getTopLeft(cards[index % 2]).dx);
+          if (index.isOdd) {
+            final left = tester.getRect(cards[index - 1]);
+            expect(rect.top, left.top);
+            expect(rect.left, greaterThanOrEqualTo(left.right));
+          }
+          if (index >= 2) {
+            expect(
+              rect.top,
+              greaterThanOrEqualTo(tester.getBottomLeft(cards[index - 2]).dy),
+            );
+          }
         }
       }
       expect(tester.takeException(), isNull);

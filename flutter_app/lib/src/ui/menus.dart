@@ -28,14 +28,15 @@ class AppMenus extends StatelessWidget {
   Widget _buildMenus() {
     final pages = controller?.visiblePages ?? AppPage.values;
     if (platform != BridgePlatform.macOs) {
-      if (platform == BridgePlatform.android ||
-          platform == BridgePlatform.ios) {
-        return child;
-      }
+      final usesCommand = platform == BridgePlatform.ios;
       return CallbackShortcuts(
         bindings: {
           for (final page in pages)
-            CharacterActivator('${page.shortcutDigit}', control: true): () =>
+            CharacterActivator(
+              '${page.shortcutDigit}',
+              meta: usesCommand,
+              control: !usesCommand,
+            ): () =>
                 controller?.selectPage(page),
         },
         child: Focus(autofocus: true, child: child),

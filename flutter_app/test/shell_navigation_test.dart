@@ -59,7 +59,43 @@ Future<Finder> openWebsite(WidgetTester tester) async {
 }
 
 void main() {
+  test('page IDs stay stable and legacy debug IDs open about', () {
+    expect(AppPage.fromId('debug'), AppPage.about);
+    for (final page in AppPage.values) {
+      expect(AppPage.fromId(page.id), page);
+    }
+    expect(AppPage.fromId('unknown'), isNull);
+  });
+
   for (final platform in [BridgePlatform.macOs, BridgePlatform.android]) {
+    testWidgets('tabs are visible in order on ${platform.name}', (
+      tester,
+    ) async {
+      await mountShell(tester, platform);
+
+      var previousCenter = 0.0;
+      for (final (id, label) in const [
+        ('ime', '输入'),
+        ('scheme', '方案'),
+        ('skin', '皮肤'),
+        ('library', '词库与设置'),
+        ('about', '关于'),
+        ('website', '网站'),
+      ]) {
+        final tab = find.byKey(ValueKey('nav-$id'));
+        expect(tab.hitTestable(), findsOneWidget);
+        expect(
+          find.descendant(of: tab, matching: find.text(label)),
+          findsOneWidget,
+        );
+        final center = tester.getCenter(tab).dx;
+        expect(center, greaterThan(previousCenter));
+        previousCenter = center;
+      }
+      expect(find.byKey(const ValueKey('nav-debug')), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('tabs slide in navigation order on ${platform.name}', (
       tester,
     ) async {

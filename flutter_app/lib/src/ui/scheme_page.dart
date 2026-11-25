@@ -9,7 +9,6 @@ import 'git_scheme_dialog.dart';
 import 'progress.dart';
 import 'package_orphans.dart';
 import 'package_schema_selection.dart';
-import 'rime_sync_dialog.dart';
 import 'settings.dart' show SchemaSwitchesSection, showCloudPackageTransfer;
 import 'theme.dart';
 import 'user_words.dart';
@@ -216,11 +215,8 @@ class _SchemePageState extends State<SchemePage> {
         .map((package) => package.schemeKey)
         .firstOrNull;
     final localKeys = schemeKeys.where(c.isLocalScheme);
-    return AppPageBody(
-      controller: c,
-      page: AppPage.scheme,
-      fullWidth: true,
-      spacing: 0,
+    final grid = HairlineGridSection(
+      columnCount: 1,
       children: [
         if (c.deployWarning case final warning?)
           HairlineGridCell(
@@ -252,16 +248,9 @@ class _SchemePageState extends State<SchemePage> {
                     ActionButton(
                       AppStrings.addonTitle,
                       key: const ValueKey('addon-schemes-button'),
+                      compact: !desktop,
                       onPress: () => _showAddonSchemes(context, c),
                     ),
-                    if (!c.isMobile)
-                      ActionButton(
-                        AppStrings.rimeSync(Localizations.localeOf(context)),
-                        key: const ValueKey('rime-sync-button'),
-                        onPress: c.busy
-                            ? null
-                            : () => showRimeSyncDialog(context, c),
-                      ),
                     FTooltip(
                       tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
                       child: FButton.icon(
@@ -333,136 +322,125 @@ class _SchemePageState extends State<SchemePage> {
             );
           },
         ),
-        HairlineGridSection(
-          minCellWidth: 360,
-          columnCount: mobile ? 1 : null,
-          children: [
-            HairlineGridCell(
-              child: Section(
-                key: const ValueKey('local-schemes'),
-                title: AppStrings.localSchemeTitle,
-                trailing: ActionButton(
-                  '添加本地方案',
-                  icon: FLucideIcons.plus,
-                  onPress: c.busy ? null : c.importLocalScheme,
-                ),
+        HairlineGridCell(
+          child: Section(
+            key: const ValueKey('local-schemes'),
+            title: AppStrings.localSchemeTitle,
+            trailing: ActionButton(
+              '添加本地方案',
+              icon: FLucideIcons.plus,
+              onPress: c.busy ? null : c.importLocalScheme,
+            ),
+            children: [
+              HairlineGridSection(
+                minCellWidth: 320,
+                columnCount: mobile ? 2 : null,
                 children: [
-                  HairlineGridSection(
-                    minCellWidth: 320,
-                    columnCount: mobile ? 2 : null,
-                    children: [
-                      for (final key in localKeys)
-                        HairlineGridCell(
-                          color: !mobile && key == activeKey
-                              ? palette.surface
-                              : null,
-                          padding: EdgeInsets.symmetric(
-                            horizontal: mobile ? 8 : (desktop ? 20 : 12),
-                            vertical: mobile ? 8 : 16,
-                          ),
-                          child: _package(key),
-                        ),
-                    ],
+                  for (final key in localKeys)
+                    HairlineGridCell(
+                      color: !mobile && key == activeKey
+                          ? palette.surface
+                          : null,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: mobile ? 8 : (desktop ? 20 : 12),
+                        vertical: mobile ? 8 : 16,
+                      ),
+                      child: _package(key),
+                    ),
+                ],
+              ),
+              ActionRow(
+                children: [
+                  ActionButton(
+                    '从 Git 添加',
+                    key: const ValueKey('add-git-scheme-button'),
+                    icon: FLucideIcons.download,
+                    onPress: c.busy
+                        ? null
+                        : () => showGitSchemeDialog(context, c),
                   ),
-                  ActionRow(
-                    children: [
-                      ActionButton(
-                        '从 Git 添加',
-                        key: const ValueKey('add-git-scheme-button'),
-                        icon: FLucideIcons.download,
-                        onPress: c.busy
-                            ? null
-                            : () => showGitSchemeDialog(context, c),
-                      ),
-                      ActionButton(
-                        '清理残留文件',
-                        icon: FLucideIcons.trash2,
-                        onPress: c.busy
-                            ? null
-                            : () => showPackageOrphans(context, c),
-                      ),
-                    ],
+                  ActionButton(
+                    '清理残留文件',
+                    icon: FLucideIcons.trash2,
+                    onPress: c.busy
+                        ? null
+                        : () => showPackageOrphans(context, c),
                   ),
                 ],
               ),
-            ),
-            HairlineGridCell(
-              child: Section(
-                title: c.prefersLibjd ? '词库转换' : AppStrings.deploy,
+            ],
+          ),
+        ),
+        HairlineGridCell(
+          child: Section(
+            title: c.prefersLibjd ? '词库转换' : AppStrings.deploy,
+            children: [
+              if (c.packageError case final error?) ErrorMessage(error),
+              if (c.schemeSyncError case final error?) ErrorMessage(error),
+              if (!c.prefersLibjd)
+                ValueRow(AppStrings.directory, c.activeSchemeDir),
+              if (c.prefersLibjd)
+                StatusMessage(c.isUsingLibjd ? '当前方案已转换' : '下载或导入方案后自动转换')
+              else if (c.localStatusLine case final status?)
+                StatusMessage(
+                  '$status${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
+                  icon: c.local!.deployed
+                      ? FLucideIcons.circleCheck
+                      : c.local!.installed
+                      ? FLucideIcons.triangleAlert
+                      : FLucideIcons.info,
+                  color: c.local!.deployed
+                      ? successColor(context)
+                      : c.local!.installed
+                      ? warningColor(context)
+                      : null,
+                ),
+              ActionRow(
                 children: [
-                  if (c.packageError case final error?) ErrorMessage(error),
-                  if (c.schemeSyncError case final error?) ErrorMessage(error),
+                  if (c.canCancelDownload && !c.isManagingLibjd)
+                    ActionButton(AppStrings.cancel, onPress: c.cancelDownload),
                   if (!c.prefersLibjd)
-                    ValueRow(AppStrings.directory, c.activeSchemeDir),
-                  if (c.prefersLibjd)
-                    StatusMessage(c.isUsingLibjd ? '当前方案已转换' : '下载或导入方案后自动转换')
-                  else if (c.localStatusLine case final status?)
-                    StatusMessage(
-                      '$status${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
-                      icon: c.local!.deployed
-                          ? FLucideIcons.circleCheck
-                          : c.local!.installed
-                          ? FLucideIcons.triangleAlert
-                          : FLucideIcons.info,
-                      color: c.local!.deployed
-                          ? successColor(context)
-                          : c.local!.installed
-                          ? warningColor(context)
+                    ActionButton(
+                      c.isDeploying ? AppStrings.deploying : AppStrings.deploy,
+                      icon: FLucideIcons.play,
+                      tooltip: c.deployTooltip,
+                      onPress: c.canDeploy ? c.deploy : null,
+                    ),
+                  ActionButton(
+                    AppStrings.checkLocal,
+                    icon: FLucideIcons.refreshCw,
+                    onPress: c.busy ? null : c.refreshState,
+                  ),
+                  ActionButton(
+                    AppStrings.openDirectory,
+                    icon: FLucideIcons.folderOpen,
+                    onPress: c.isAndroid || c.busy
+                        ? null
+                        : c.openActiveSchemeDirectory,
+                  ),
+                  if (!c.isMobile && !c.prefersLibjd)
+                    ActionButton(
+                      AppStrings.dictManager,
+                      onPress: c.canOpenDictionaryManager
+                          ? c.openDictionaryManager
                           : null,
                     ),
-                  ActionRow(
-                    children: [
-                      if (c.canCancelDownload && !c.isManagingLibjd)
-                        ActionButton(
-                          AppStrings.cancel,
-                          onPress: c.cancelDownload,
-                        ),
-                      if (!c.prefersLibjd)
-                        ActionButton(
-                          c.isDeploying
-                              ? AppStrings.deploying
-                              : AppStrings.deploy,
-                          icon: FLucideIcons.play,
-                          tooltip: c.deployTooltip,
-                          onPress: c.canDeploy ? c.deploy : null,
-                        ),
-                      ActionButton(
-                        AppStrings.checkLocal,
-                        icon: FLucideIcons.refreshCw,
-                        onPress: c.busy ? null : c.refreshState,
-                      ),
-                      ActionButton(
-                        AppStrings.openDirectory,
-                        icon: FLucideIcons.folderOpen,
-                        onPress: c.isAndroid || c.busy
-                            ? null
-                            : c.openActiveSchemeDirectory,
-                      ),
-                      if (!c.isMobile && !c.prefersLibjd)
-                        ActionButton(
-                          AppStrings.dictManager,
-                          onPress: c.canOpenDictionaryManager
-                              ? c.openDictionaryManager
-                              : null,
-                        ),
-                    ],
-                  ),
-                  if (c.installError case final error?) ErrorMessage(error),
-                  if (c.isInstalling || c.checkingStorage)
-                    InstallProgressView(
-                      active: true,
-                      progress: c.installProgress,
-                      fraction: c.installFraction,
-                      message: c.progress,
-                    ),
-                  if (!c.prefersLibjd && c.deploySteps.isNotEmpty)
-                    DeploySteps(controller: c),
-                  if (c.operationLogCount > 0)
-                    ActionRow(children: [OperationLogButton(controller: c)]),
                 ],
               ),
-            ),
-          ],
+              if (c.installError case final error?) ErrorMessage(error),
+              if (c.isInstalling || c.checkingStorage)
+                InstallProgressView(
+                  active: true,
+                  progress: c.installProgress,
+                  fraction: c.installFraction,
+                  message: c.progress,
+                ),
+              if (!c.prefersLibjd && c.deploySteps.isNotEmpty)
+                DeploySteps(controller: c),
+              if (c.operationLogCount > 0)
+                ActionRow(children: [OperationLogButton(controller: c)]),
+            ],
+          ),
         ),
         if (c.hasUsableBuild &&
             !c.usesLibjd(c.activeSchemeKey) &&
@@ -476,6 +454,13 @@ class _SchemePageState extends State<SchemePage> {
           ),
         ),
       ],
+    );
+    return AppPageBody(
+      controller: c,
+      page: AppPage.scheme,
+      fullWidth: true,
+      spacing: 0,
+      children: [grid],
     );
   }
 }
