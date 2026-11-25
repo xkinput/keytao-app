@@ -28,6 +28,32 @@ const _licenses = [
   ),
 ];
 
+const _librimeLicenses = [
+  ('librime-lua', 'BSD-3-Clause', ['assets/licenses/librime-lua-LICENSE.txt']),
+  ('Lua', 'MIT', ['assets/licenses/lua-LICENSE.txt']),
+  (
+    'librime-octagram',
+    'GPL-3.0',
+    [
+      'assets/licenses/librime-octagram-SOURCE.txt',
+      'assets/licenses/librime-octagram-LICENSE.txt',
+    ],
+  ),
+  (
+    'librime-predict',
+    'BSD-3-Clause',
+    ['assets/licenses/librime-predict-LICENSE.txt'],
+  ),
+  ('leveldb', 'BSD-3-Clause', ['assets/licenses/leveldb-LICENSE.txt']),
+  (
+    'marisa-trie',
+    'BSD-2-Clause OR LGPL-2.1-or-later',
+    ['assets/licenses/marisa-trie-LICENSE.txt'],
+  ),
+  ('yaml-cpp', 'MIT', ['assets/licenses/yaml-cpp-LICENSE.txt']),
+  ('glog', 'BSD-3-Clause', ['assets/licenses/glog-LICENSE.txt']),
+];
+
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key, required this.controller});
   final AppController controller;
@@ -97,9 +123,17 @@ class AboutPage extends StatelessWidget {
         ),
       );
 
+  Future<String> _loadLicenseAssets(List<String> assets) async =>
+      (await Future.wait(assets.map(rootBundle.loadString))).join('\n\n');
+
   void _showLicense(BuildContext context, String name, List<String> assets) {
-    final text = Future.wait(assets.map(rootBundle.loadString))
-        .then((parts) => parts.join('\n\n'));
+    final text = Future.wait([
+      _loadLicenseAssets(assets),
+      if (name == 'librime')
+        for (final (component, license, files) in _librimeLicenses)
+          _loadLicenseAssets(files)
+              .then((body) => '$component · $license\n$body'),
+    ]).then((parts) => parts.join('\n\n'));
     showFDialog<void>(
       context: context,
       builder: (context, _, animation) => AppDialog(

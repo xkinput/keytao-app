@@ -1,0 +1,2 @@
+librime-octagram dfcc15115788c828d9dd7b4bff68067d3ce2ffb8 (GPL-3.0)
+Upstream source: https://github.com/lotem/librime-octagram/tree/dfcc15115788c828d9dd7b4bff68067d3ce2ffb8
