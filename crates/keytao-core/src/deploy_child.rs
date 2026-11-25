@@ -19,6 +19,8 @@ pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
 const PACKAGE_DEPLOY_ARG: &str = "--packages";
 const PROGRESS_VERSION_ENV: &str = "KEYTAO_DEPLOY_PROGRESS_VERSION";
 const STRUCTURED_PROGRESS_VERSION: &str = "2";
+const PREVIEW_SNAPSHOT_PROGRESS_ENV: &str = "KEYTAO_PREVIEW_SNAPSHOT_PROGRESS";
+const PREVIEW_SNAPSHOT_READY: &str = "candidate preview snapshot ready";
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
 const LOCK_FD_ENV: &str = "KEYTAO_LIBRIME_UPGRADE_LOCK_FD";
@@ -171,10 +173,13 @@ pub fn run_preview_child_main() -> i32 {
         std::env::args_os().skip(1),
         &mut io::stdin().lock(),
         &mut io::stdout().lock(),
-        |request| {
+        |request, snapshot_ready| {
             let user_dir = crate::default_user_data_dir()
                 .ok_or("cannot determine the librime user data directory")?;
-            crate::desktop::preview_deployed_candidates(&user_dir, request)
+            let snapshot_ready = (std::env::var(PREVIEW_SNAPSHOT_PROGRESS_ENV).as_deref()
+                == Ok("1"))
+                .then_some(snapshot_ready);
+            crate::desktop::preview_deployed_candidates(&user_dir, request, snapshot_ready)
         },
     )
 }
@@ -183,7 +188,10 @@ fn preview_child_main(
     args: impl Iterator<Item = OsString>,
     input: &mut impl Read,
     output: &mut impl Write,
-    action: impl FnOnce(&PreviewRequest) -> Result<CandidatePreview, String>,
+    action: impl FnOnce(
+        &PreviewRequest,
+        &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<CandidatePreview, String>,
 ) -> i32 {
     let valid_args = args.eq([OsString::from(PREVIEW_SUBCOMMAND)]);
     let result = (|| {
@@ -203,7 +211,14 @@ fn preview_child_main(
         let request: PreviewRequest = serde_json::from_slice(&request)
             .map_err(|e| format!("invalid candidate preview request: {e}"))?;
         request.validate()?;
-        let preview = action(&request)?;
+        let preview = action(&request, &mut || {
+            write_message(
+                output,
+                &Message::LegacyProgress {
+                    progress: PREVIEW_SNAPSHOT_READY.into(),
+                },
+            )
+        })?;
         write_message(output, &Message::Preview { preview })
     })();
     let code = if !valid_args {
@@ -410,12 +425,26 @@ pub fn run_preview_child_command(
     request: &PreviewRequest,
     timeout: Duration,
 ) -> Result<CandidatePreview, String> {
+    run_preview_child_command_with_snapshot_lock(command, request, timeout, || Ok(()), false)
+}
+
+pub fn run_preview_child_command_with_snapshot_lock<G>(
+    command: &mut Command,
+    request: &PreviewRequest,
+    timeout: Duration,
+    lock_snapshot: impl FnOnce() -> Result<G, String>,
+    snapshot_progress: bool,
+) -> Result<CandidatePreview, String> {
     request.validate()?;
     let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
     // The parent owns cleanup even when the bounded child is forcibly terminated.
     let workspace = crate::preview::PreviewDirectory::create()?;
     let mut child = command
         .arg(PREVIEW_SUBCOMMAND)
+        .env(
+            PREVIEW_SNAPSHOT_PROGRESS_ENV,
+            if snapshot_progress { "1" } else { "0" },
+        )
         .env(
             crate::preview::PREVIEW_DIRECTORY_ENV,
             workspace
@@ -428,7 +457,10 @@ pub fn run_preview_child_command(
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("cannot spawn preview child: {e}"))?;
+    // The child cannot read live inputs until it receives the request.
+    let mut snapshot_guard;
     let guard = ChildGuard(&mut child);
+    snapshot_guard = Some(lock_snapshot()?);
     guard
         .0
         .stdin
@@ -440,7 +472,16 @@ pub fn run_preview_child_command(
         expect_preview: true,
         ..Protocol::default()
     };
-    wait_for_child_protocol(guard.0, timeout, &mut |_| {}, &mut protocol)?;
+    wait_for_child_protocol(
+        guard.0,
+        timeout,
+        &mut |progress| {
+            if snapshot_progress && progress.message() == PREVIEW_SNAPSHOT_READY {
+                drop(snapshot_guard.take());
+            }
+        },
+        &mut protocol,
+    )?;
     protocol
         .preview
         .ok_or("preview child did not emit candidates".into())
@@ -707,7 +748,7 @@ mod tests {
                 [OsString::from(PREVIEW_SUBCOMMAND)].into_iter(),
                 &mut &input[..],
                 &mut output,
-                |_| panic!("invalid request must not initialize librime"),
+                |_, _| panic!("invalid request must not initialize librime"),
             );
             assert_eq!(code, 1);
             assert!(String::from_utf8(output).unwrap().contains("\"ok\":false"));
@@ -742,6 +783,19 @@ mod tests {
                 exit_deploy_child(0);
             }
             let before = std::fs::read(directory.join("user.yaml")).unwrap();
+            #[cfg(target_os = "macos")]
+            if mode == "changed-model" {
+                let model = directory.join(crate::WANXIANG_GRAMMAR_FILE);
+                let result = crate::desktop::preview_deployed_candidates(
+                    &directory,
+                    &PreviewRequest::default(),
+                    Some(&mut || std::fs::write(&model, b"new model").map_err(|e| e.to_string())),
+                );
+                assert_eq!(result, Err("Compiled preview data changed during candidate preview".into()));
+                assert_eq!(std::fs::read(directory.join("user.yaml")).unwrap(), before);
+                std::fs::remove_file(model).unwrap();
+                exit_deploy_child(0);
+            }
             let preview = if mode == "live" {
                 crate::desktop::setup_only(
                     directory.to_string_lossy().into_owned(),
@@ -766,7 +820,9 @@ mod tests {
                         [OsString::from(PREVIEW_SUBCOMMAND)].into_iter(),
                         &mut input.as_bytes(),
                         &mut output,
-                        |request| crate::desktop::preview_deployed_candidates(&directory, request),
+                        |request, _| {
+                            crate::desktop::preview_deployed_candidates(&directory, request, None)
+                        },
                     ),
                     0,
                     "{}",
@@ -870,6 +926,16 @@ mod tests {
             for (path, bytes) in &originals {
                 assert_eq!(std::fs::read(path).unwrap(), *bytes, "{}", path.display());
             }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let changed = child("changed-model");
+            assert!(
+                changed.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&changed.stdout),
+                String::from_utf8_lossy(&changed.stderr)
+            );
         }
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1490,6 +1556,59 @@ printf '%s\n' '{"preview":{"candidates":[{"text":"real","comment":"actual"}],"pa
         assert!(started.elapsed() < Duration::from_secs(5));
         let workspace = std::fs::read_to_string(exe.with_extension("workspace")).unwrap();
         assert!(!std::env::temp_dir().join(workspace).exists());
+        std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_snapshot_lock_releases_on_progress_and_supports_older_children() {
+        struct SnapshotGuard(std::path::PathBuf);
+
+        impl Drop for SnapshotGuard {
+            fn drop(&mut self) {
+                std::fs::remove_file(&self.0).unwrap();
+            }
+        }
+
+        let exe = helper_script(
+            "preview-snapshot",
+            r#"
+touch "$0.spawned"
+cat >/dev/null
+test -f "$0.lock" || exit 1
+if test "$PREVIEW_TEST_MODE" = modern; then
+    test "$KEYTAO_PREVIEW_SNAPSHOT_PROGRESS" = 1 || exit 1
+    printf '%s\n' '{"progress":"candidate preview snapshot ready"}'
+    while test -f "$0.lock"; do sleep 0.01; done
+fi
+printf '%s\n' '{"preview":{"candidates":[],"page_size":1}}' '{"ok":true}'
+"#,
+        );
+        let spawned = exe.with_extension("spawned");
+        let lock = exe.with_extension("lock");
+        for mode in ["modern", "legacy"] {
+            let preview = run_preview_child_command_with_snapshot_lock(
+                Command::new(&exe).env("PREVIEW_TEST_MODE", mode),
+                &PreviewRequest::default(),
+                Duration::from_secs(5),
+                || {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !spawned.is_file() {
+                        if Instant::now() >= deadline {
+                            return Err("child did not start before acquiring snapshot lock".into());
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    std::fs::write(&lock, "").unwrap();
+                    Ok(SnapshotGuard(lock.clone()))
+                },
+                true,
+            )
+            .unwrap();
+            assert_eq!(preview.page_size, 1);
+            assert!(!lock.exists());
+            std::fs::remove_file(&spawned).unwrap();
+        }
         std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
     }
 
