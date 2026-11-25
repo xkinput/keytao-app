@@ -52,7 +52,8 @@ fn linux_can_upgrade(current: &str, latest: &str) -> bool {
 
 fn package_suffix() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64" | "x86_64") => Some("macos.dmg"),
+        ("macos", "aarch64") => Some("macos-arm64.dmg"),
+        ("macos", "x86_64") => Some("macos-x86_64.dmg"),
         ("windows", "aarch64" | "x86_64") => Some("windows-x64-setup.exe"),
         ("android", "aarch64") => Some("android-arm64-release.apk"),
         ("android", "arm") => Some("android-arm-release.apk"),
@@ -76,9 +77,13 @@ fn validate_version(
     Ok(requested)
 }
 
+fn asset_href(tag: &str, filename: &str) -> String {
+    format!("href=\"/xkinput/keytao-app/releases/download/{tag}/{filename}\"")
+}
+
 fn asset_digest(page: &str, tag: &str, filename: &str) -> Option<[u8; 32]> {
     // shortcut: read GitHub's asset markup until releases provide a checksum file.
-    let href = format!("href=\"/xkinput/keytao-app/releases/download/{tag}/{filename}\"");
+    let href = asset_href(tag, filename);
     let label = format!("aria-label=\"Copy to clipboard digest for {filename}\"");
     let mut items = page.split("<li ").skip(1).filter_map(|item| {
         let item = item.split_once("</li>")?.0;
@@ -107,6 +112,22 @@ fn asset_digest(page: &str, tag: &str, filename: &str) -> Option<[u8; 32]> {
         *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16).ok()?;
     }
     Some(bytes)
+}
+
+fn package_asset(
+    page: &str,
+    tag: &str,
+    version: &Version,
+    suffix: &str,
+) -> Option<(String, [u8; 32])> {
+    let mut filename = format!("keytao-app-{version}-{suffix}");
+    if matches!(suffix, "macos-arm64.dmg" | "macos-x86_64.dmg")
+        && !page.contains(&asset_href(tag, &filename))
+    {
+        filename = format!("keytao-app-{version}-macos.dmg");
+    }
+    let digest = asset_digest(page, tag, &filename)?;
+    Some((filename, digest))
 }
 
 fn client() -> Result<Client, String> {
@@ -138,11 +159,12 @@ fn client() -> Result<Client, String> {
         .map_err(|error| error.to_string())
 }
 
-async fn fetch_digest(
+async fn fetch_package_asset(
     client: &Client,
     tag: &str,
-    filename: &str,
-) -> Result<Option<[u8; 32]>, String> {
+    version: &Version,
+    suffix: &str,
+) -> Result<Option<(String, [u8; 32])>, String> {
     let mut response = client
         .get(format!("{RELEASES}/expanded_assets/{tag}"))
         .timeout(Duration::from_secs(12))
@@ -166,7 +188,12 @@ async fn fetch_digest(
         }
         page.extend_from_slice(&chunk);
     }
-    Ok(asset_digest(&String::from_utf8_lossy(&page), tag, filename))
+    Ok(package_asset(
+        &String::from_utf8_lossy(&page),
+        tag,
+        version,
+        suffix,
+    ))
 }
 
 fn verified_file(path: &Path, digest: [u8; 32]) -> Result<File, String> {
@@ -221,8 +248,8 @@ pub async fn download_app_update(core: &Core, requested: &str) -> Result<bool, S
     };
     let client = client()?;
     let tag = format!("v{version}");
-    let filename = format!("keytao-app-{version}-{suffix}");
-    let Some(digest) = fetch_digest(&client, &tag, &filename).await? else {
+    let Some((filename, digest)) = fetch_package_asset(&client, &tag, &version, suffix).await?
+    else {
         return Ok(false);
     };
     let cache = core.env().cache_dir.join("app-updates");
@@ -313,14 +340,18 @@ pub async fn open_app_update_package(
 mod tests {
     use super::*;
 
+    fn release_asset(tag: &str, filename: &str, checksum: &str) -> String {
+        format!(
+            "<li class=\"asset\"><a href=\"/xkinput/keytao-app/releases/download/{tag}/{filename}\"></a><clipboard-copy aria-label=\"Copy to clipboard digest for {filename}\" value=\"sha256:{checksum}\"></clipboard-copy></li>"
+        )
+    }
+
     #[test]
     fn digest_must_belong_to_the_exact_published_asset() {
         let tag = "v1.2.16";
         let filename = "keytao-app-1.2.16-macos.dmg";
         let checksum = "ab".repeat(32);
-        let item = format!(
-            "<li class=\"asset\"><a href=\"/xkinput/keytao-app/releases/download/{tag}/{filename}\"></a><clipboard-copy aria-label=\"Copy to clipboard digest for {filename}\" value=\"sha256:{checksum}\"></clipboard-copy></li>"
-        );
+        let item = release_asset(tag, filename, &checksum);
         assert_eq!(asset_digest(&item, tag, filename), Some([0xab; 32]));
         assert_eq!(
             asset_digest(
@@ -339,6 +370,36 @@ mod tests {
             None
         );
         assert_eq!(asset_digest(&item.repeat(2), tag, filename), None);
+    }
+
+    #[test]
+    fn macos_falls_back_to_universal_only_when_the_architecture_asset_is_missing() {
+        let version = Version::new(1, 2, 16);
+        let tag = "v1.2.16";
+        let universal_name = "keytao-app-1.2.16-macos.dmg";
+        let universal = release_asset(tag, universal_name, &"ab".repeat(32));
+        for suffix in ["macos-arm64.dmg", "macos-x86_64.dmg"] {
+            let filename = format!("keytao-app-{version}-{suffix}");
+            let arch_asset = release_asset(tag, &filename, &"cd".repeat(32));
+            assert_eq!(
+                package_asset(&format!("{universal}{arch_asset}"), tag, &version, suffix),
+                Some((filename.clone(), [0xcd; 32]))
+            );
+            assert_eq!(
+                package_asset(&universal, tag, &version, suffix),
+                Some((universal_name.to_owned(), [0xab; 32]))
+            );
+            let invalid_arch_asset = release_asset(tag, &filename, "invalid");
+            assert_eq!(
+                package_asset(
+                    &format!("{universal}{invalid_arch_asset}"),
+                    tag,
+                    &version,
+                    suffix
+                ),
+                None
+            );
+        }
     }
 
     #[test]

@@ -141,7 +141,7 @@ scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-<version>-macos.p
 产物：
 
 - `target/keytao-macos-pkg/keytao-app-<version>-macos.pkg`
-- GitHub Release 发布一个 `keytao-app-<version>-macos.dmg`（内含上述 pkg），包含 x86_64 + arm64。
+- GitHub Release 发布 `keytao-app-<version>-macos-arm64.dmg`、`keytao-app-<version>-macos-x86_64.dmg`，并为旧更新器保留 universal 的 `keytao-app-<version>-macos.dmg`。运行 `scripts/build-macos.sh --all-archs` 可同时生成三种 DMG 及对应 pkg。
 
 测试安装：
 
@@ -165,7 +165,7 @@ crates/keytao-macos-ime/build.sh --skip-pkg
 crates/keytao-macos-ime/install.sh --release
 ```
 
-正式发行走仓库根目录的 `scripts/build-macos.sh`，产物是 pkg，不产出 dmg。pkg 同时安装主 App 和系统输入法 bundle，安装完成后无需注销，并保证两者都带完整 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
+正式发行的 DMG 内含同时安装主 App 和系统输入法 bundle 的 pkg。安装后无需注销。两个 bundle 均保留 `librime`、`rime-plugins` 和 `libjd-engine`，基础 `rime-data` 及其中的 OpenCC 数据由主 App 提供。
 
 常用路径：
 

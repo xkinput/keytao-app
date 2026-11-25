@@ -2,19 +2,7 @@ import Cocoa
 import InputMethodKit
 import CKeytaoCore
 
-/// Called once when the OS first launches (or reactivates) the input method process.
-func initializeEngine() {
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let userDir = resolveUserDataDir(home: home)
-    let sharedDir = resolveSharedDataDir()
-
-    let ok = keytao_init(userDir, sharedDir)
-    if ok {
-        NSLog("KeyTao: engine initialized (user=%@, shared=%@)", userDir, sharedDir)
-    } else {
-        NSLog("KeyTao: engine initialization FAILED")
-    }
-}
+private let appSharedDataDir = "/Applications/KeyTao.app/Contents/Resources/rime-data"
 
 /// Prefer an explicit development override, otherwise use KeyTao's own profile.
 func resolveUserDataDir(home: String) -> String {
@@ -38,7 +26,7 @@ func hasKeyTaoSchema(at path: String) -> Bool {
 }
 
 /// Finds the best shared rime-data directory available on this machine.
-func resolveSharedDataDir() -> String {
+func resolveSharedDataDir() -> String? {
     let environment = ProcessInfo.processInfo.environment
     for key in ["KEYTAO_RIME_SHARED_DATA_DIR", "RIME_SHARED_DATA_DIR", "RIME_DATA_DIR"] {
         if let value = environment[key], hasDefaultYaml(at: value) {
@@ -46,24 +34,27 @@ func resolveSharedDataDir() -> String {
         }
     }
 
-    let candidates = [
-        "/Applications/KeyTao.app/Contents/Resources/rime-data",
+    let candidates: [String?] = [
+        appSharedDataDir,
         "/Applications/KeyTao.app/Contents/SharedSupport",
+        bundledSharedDataDir(),
         "/Library/Input Methods/KeyTao.app/Contents/Resources/rime-data",
         "/Library/Input Methods/KeyTao.app/Contents/SharedSupport",
         "/Library/Input Methods/Squirrel.app/Contents/SharedSupport",
         "/opt/homebrew/share/rime-data",
         "/usr/local/share/rime-data",
     ]
-    for path in candidates {
-        if hasDefaultYaml(at: path) {
-            return path
-        }
-    }
-    return ""
+    return candidates.compactMap { $0 }.first(where: hasDefaultYaml(at:))
 }
 
-func hasDefaultYaml(at path: String) -> Bool {
+func bundledSharedDataDir() -> String? {
+    guard let resources = Bundle.main.resourceURL else { return nil }
+    return ["rime-data", "SharedSupport"]
+        .map { resources.appendingPathComponent($0).path }
+        .first(where: hasDefaultYaml(at:))
+}
+
+private func hasDefaultYaml(at path: String) -> Bool {
     FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent("default.yaml"))
 }
 
@@ -95,6 +86,7 @@ final class KeyTaoRuntime {
     static let deploymentDidChangeNotification = Notification.Name("ink.rea.keytao.deploymentDidChange")
 
     private(set) var deploymentHint: String?
+    private var missingSharedData = false
 
     /// How long to wait before retrying an initialization that failed, so a
     /// machine without deployed data does not rescan on every activation.
@@ -183,7 +175,7 @@ final class KeyTaoRuntime {
                 if keytao_is_initialized() {
                     reloaded = keytao_reload()
                 } else {
-                    initializeEngine()
+                    self.initializeEngine()
                     reloaded = keytao_is_initialized()
                 }
             }
@@ -203,6 +195,30 @@ final class KeyTaoRuntime {
         // tracks the mouse and casts a shadow. Without this the shared theme
         // layer assumes the soft-keyboard candidate bar shape.
         keytao_set_ui_capabilities(true, true, true, true, true, false)
+    }
+
+    private func initializeEngine() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let userDir = resolveUserDataDir(home: home)
+        let sharedDir = resolveSharedDataDir()
+        refreshSharedDataStatus()
+        if keytao_init(userDir, sharedDir ?? "") {
+            NSLog("KeyTao: engine initialized (user=%@, shared=%@)", userDir, sharedDir ?? "")
+        } else {
+            NSLog("KeyTao: engine initialization FAILED")
+        }
+    }
+
+    private func refreshSharedDataStatus() {
+        let missing = !hasDefaultYaml(at: appSharedDataDir) && bundledSharedDataDir() == nil
+        DispatchQueue.main.async {
+            guard self.missingSharedData != missing else { return }
+            self.missingSharedData = missing
+            if missing {
+                NSLog("KeyTao: shared rime-data is missing; reinstall KeyTao.app in /Applications")
+            }
+            self.refreshDeploymentHint()
+        }
     }
 
     private func initializeIfNeeded() {
@@ -226,6 +242,7 @@ final class KeyTaoRuntime {
             initializeIfNeeded()
             return
         }
+        refreshSharedDataStatus()
         if keytao_reload_if_stamp_changed() {
             _ = keytao_prewarm()
             postDidReload()
@@ -275,7 +292,7 @@ final class KeyTaoRuntime {
             hint = String(cString: pointer)
             keytao_free_string(pointer)
         } else {
-            hint = nil
+            hint = missingSharedData ? "缺少键道输入法资源，请重新安装键道 App" : nil
         }
         guard deploymentHint != hint else { return }
         deploymentHint = hint

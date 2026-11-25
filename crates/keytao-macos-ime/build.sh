@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build.sh - builds KeyTao.app and, by default, an IME-only KeyTao.pkg package.
-# Usage: ./build.sh [--release | --debug] [--skip-pkg]
+# Usage: ./build.sh [--release | --debug] [--skip-pkg] [--use-app-rime-data]
 set -euo pipefail
 export COPYFILE_DISABLE=1
 
@@ -10,6 +10,7 @@ LIBRIME_VERSION="${LIBRIME_VERSION:-$(source "$WORKSPACE_DIR/scripts/librime-ver
 BUILD_DIR="${KEYTAO_MACOS_BUILD_DIR:-$SCRIPT_DIR/build}"
 PROFILE="release"
 BUILD_PKG=1
+BUNDLE_RIME_DATA=1
 while [ $# -gt 0 ]; do
     case "$1" in
         release|--release)
@@ -24,8 +25,12 @@ while [ $# -gt 0 ]; do
             BUILD_PKG=0
             shift
             ;;
+        --use-app-rime-data)
+            BUNDLE_RIME_DATA=0
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--release | --debug] [--skip-pkg]" >&2
+            echo "Usage: $0 [--release | --debug] [--skip-pkg] [--use-app-rime-data]" >&2
             exit 2
             ;;
     esac
@@ -211,8 +216,7 @@ find_rime_data_dir() {
     return 1
 }
 
-RIME_DATA_DIR_RESOLVED="$(find_rime_data_dir || true)"
-if [ -z "$RIME_DATA_DIR_RESOLVED" ]; then
+if [[ $BUNDLE_RIME_DATA -eq 1 ]] && ! RIME_DATA_DIR_RESOLVED="$(find_rime_data_dir)"; then
     echo "ERROR: rime-data was not found." >&2
     echo "Set KEYTAO_RIME_SHARED_DATA_DIR or run scripts/fetch-librime.sh --platform macos." >&2
     exit 1
@@ -253,7 +257,9 @@ echo "    IME bundle version: $PACKAGE_VERSION (CFBundleVersion $BUNDLE_VERSION)
 cp "$SCRIPT_DIR/Resources/keytao-menu-icon.pdf" "$APP/Contents/Resources/"
 cp "$SCRIPT_DIR/Resources/KeyTaoInputSource.icns" "$APP/Contents/Resources/"
 cp "$WORKSPACE_DIR/crates/keytao-theme/default-theme.yaml" "$APP/Contents/Resources/"
-ditto "$RIME_DATA_DIR_RESOLVED" "$APP/Contents/Resources/rime-data"
+if [[ $BUNDLE_RIME_DATA -eq 1 ]]; then
+    ditto "$RIME_DATA_DIR_RESOLVED" "$APP/Contents/Resources/rime-data"
+fi
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 mkdir -p "$APP/Contents/Resources/en.lproj"

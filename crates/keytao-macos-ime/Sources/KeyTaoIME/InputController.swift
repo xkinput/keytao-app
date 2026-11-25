@@ -764,7 +764,12 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func refreshSessionState(from client: IMKTextInput?) {
-        guard let session = ensureSession() else { return }
+        guard let session = ensureSession() else {
+            if KeyTaoRuntime.shared.deploymentHint != nil {
+                showDeploymentIndicator(client: client)
+            }
+            return
+        }
         guard let state = KeyTaoImeState.consuming(keytao_session_state_json(session)) else { return }
         apply(state, to: client)
     }

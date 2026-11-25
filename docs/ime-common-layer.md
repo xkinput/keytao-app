@@ -517,7 +517,7 @@ App 的方案安装只写文件；部署才调用 `keytao_core::deploy()`。任�
 
 Android 的 `android-librime-runtime.sh import-fcitx5-rime --abi ABI` 保留为回滚入口，默认固定到 env 文件的 `FCITX5_ANDROID_VERSION`，并仅在该路径使用 `ANDROID_LIBRIME_EXPECTED`。回滚后运行 `scripts/android-librime-runtime.sh sync --abi ABI --assets-dir flutter_app/build/app/generated/keytao/assets`，通过 Gradle 默认 `jniLibs` 打包旧 runtime 的完整 Fcitx5 依赖闭包，并将 assets 写入 Gradle 使用的生成目录，避免重复打包。
 
-macOS release CI 必须执行 `scripts/build-macos.sh`、`scripts/verify-macos-pkg.sh` 和 `scripts/verify-macos-dmg.sh`，再上传一个 `keytao-app-<version>-macos.dmg`（内含 pkg），主 App、IME 与 FFI 均为 x86_64 + arm64 universal。
+macOS release CI 执行 `scripts/build-macos.sh --all-archs`，逐包运行 `scripts/verify-macos-pkg.sh` 和 `scripts/verify-macos-dmg.sh` 后上传 `keytao-app-<version>-macos-arm64.dmg`、`keytao-app-<version>-macos-x86_64.dmg`，并为旧更新器保留 universal 的 `keytao-app-<version>-macos.dmg`。每个 DMG 均包含对应架构的 pkg。
 
 `keytao-core` 不关心打包格式；它只要求传入可靠的 shared data dir。平台 App/IME 启动代码必须优先选择包内 runtime，再 fallback 到环境变量或系统目录。
 
