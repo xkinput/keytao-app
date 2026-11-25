@@ -162,6 +162,17 @@ fn converted_engines(
         .ok_or_else(|| CoreError::Other("输入引擎设置格式无效".into()))
 }
 
+pub(crate) fn clear_package_engine(root: &Path, key: &str) -> Result<(), CoreError> {
+    update_settings(
+        root,
+        |settings| {
+            converted_engines(settings)?.remove(key);
+            Ok(())
+        },
+        || Ok(()),
+    )
+}
+
 pub async fn import_package(
     core: &Arc<Core>,
     root: &Path,

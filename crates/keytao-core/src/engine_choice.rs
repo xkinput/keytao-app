@@ -74,10 +74,11 @@ pub fn configured(root: &Path, package: Option<&str>) -> PackageEngine {
     configured_in(&settings(root), package)
 }
 
-pub fn can_release_libjd_dictionary(root: &Path, package: &str) -> bool {
+pub fn can_release_libjd_dictionary(root: &Path) -> bool {
     try_settings(root).is_some_and(|settings| {
-        preferred_in(root, &settings).is_rime()
-            && configured_in(&settings, Some(package)) != PackageEngine::LibjdEngine
+        settings.is_object()
+            && settings.get("engines").is_none_or(serde_json::Value::is_object)
+            && preferred_in(root, &settings).is_rime()
     })
 }
 
@@ -89,7 +90,7 @@ fn try_settings(root: &Path) -> Option<serde_json::Value> {
     let path = root.join(crate::english_mode::SETTINGS_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => serde_json::from_slice(&fs::read(path).ok()?).ok(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(serde_json::Value::Null),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(serde_json::json!({})),
         _ => None,
     }
 }
@@ -165,9 +166,11 @@ mod tests {
         assert_eq!(configured(&root, Some(PACKAGE_KEY)), PackageEngine::Libjd);
         assert_eq!(read(&root, Some(PACKAGE_KEY)), PackageEngine::Rime);
         assert_eq!(read(&root, Some("xmjd")), PackageEngine::Rime);
+        assert!(can_release_libjd_dictionary(&root));
         std::fs::write(&active, br#"{"active_package":"xmjd"}"#).unwrap();
         assert_eq!(preferred(&root), PackageEngine::LibjdEngine);
         assert_eq!(read(&root, Some("xmjd")), PackageEngine::LibjdEngine);
+        assert!(!can_release_libjd_dictionary(&root));
         std::fs::write(
             &settings,
             br#"{"engine":"rime","engines":{"xmjd":"libjd_engine"}}"#,
@@ -176,9 +179,11 @@ mod tests {
         assert_eq!(preferred(&root), PackageEngine::Rime);
         assert_eq!(read(&root, Some("xmjd")), PackageEngine::Rime);
         assert_eq!(configured(&root, Some("xmjd")), PackageEngine::LibjdEngine);
+        assert!(can_release_libjd_dictionary(&root));
         std::fs::write(&settings, br#"{"engine":"libjd_engine"}"#).unwrap();
         assert_eq!(preferred(&root), PackageEngine::LibjdEngine);
         assert_eq!(read(&root, Some("xmjd")), PackageEngine::Rime);
+        assert!(!can_release_libjd_dictionary(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
