@@ -31,6 +31,9 @@ class _WebsiteCore implements RustLibApi {
   }
 
   @override
+  Future<AccountUserDto?> crateApiCoreAccountSession() async => null;
+
+  @override
   Future<void> crateApiCoreSetWebsiteSettings({
     required String origin,
     required bool hidden,
@@ -336,6 +339,109 @@ void main() {
         ('https://keytao.vercel.app', true),
         ('https://keytao.vercel.app', false),
       ]);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.linux),
+  );
+
+  testWidgets(
+    'login dialog register button opens /register in the built-in website tab',
+    (tester) async {
+      final core = _WebsiteCore();
+      RustLib.initMock(api: core);
+      addTearDown(RustLib.dispose);
+      final controller = _WebsiteController();
+      addTearDown(controller.dispose);
+      const channel = MethodChannel('com.infradise.webview_core');
+      const sessionPath = '/api/auth/app-webview-session';
+      final creations = <Map<Object?, Object?>>[];
+      final requests = <Map<Object?, Object?>>[];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'create') {
+          creations.add(call.arguments as Map<Object?, Object?>);
+        }
+        if (call.method == 'loadRequest') {
+          requests.add(call.arguments as Map<Object?, Object?>);
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      Future<void> finishLoading(String url, {bool settle = true}) async {
+        final view = creations.last;
+        await messenger.handlePlatformMessage(
+          channel.name,
+          channel.codec.encodeMethodCall(
+            MethodCall('onPageFinished', {
+              'controllerId': view['controllerId'],
+              'url': url,
+            }),
+          ),
+          null,
+        );
+        if (settle) {
+          await tester.pumpAndSettle();
+        } else {
+          await tester.pump();
+        }
+      }
+
+      await tester.pumpWidget(
+        KeyTaoApp(
+          controller: controller,
+          initialOnboarding: const OnboardingDto(completed: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final accountButton = find.byIcon(FLucideIcons.user);
+
+      // Open login dialog from shell header.
+      await tester.tap(accountButton);
+      await tester.pumpAndSettle();
+      final registerButton = find.byKey(const ValueKey('login-register-button'));
+      expect(registerButton, findsOneWidget);
+
+      // Click 注册: closes dialog, switches to website tab, runs session init then /register.
+      await tester.tap(registerButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(registerButton, findsNothing);
+      expect(creations, hasLength(1));
+      expect(
+        creations.single['initialUrl'],
+        'https://keytao.rea.ink$sessionPath',
+      );
+      await finishLoading('https://keytao.rea.ink', settle: false);
+      expect(requests, hasLength(1));
+      expect(requests.last['url'], 'https://keytao.rea.ink/register');
+      await finishLoading('https://keytao.rea.ink/register');
+
+      // When website tab is already loaded, clicking 注册 again navigates directly.
+      await tester.tap(accountButton);
+      await tester.pumpAndSettle();
+      await tester.tap(registerButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(creations, hasLength(1));
+      expect(requests, hasLength(2));
+      expect(requests.last['url'], 'https://keytao.rea.ink/register');
+      await finishLoading('https://keytao.rea.ink/register');
+
+      // When website tab is hidden, clicking 注册 unhides it and opens /register.
+      await controller.saveWebsiteSettings(hidden: true);
+      await tester.pumpAndSettle();
+      expect(controller.websiteHidden, isTrue);
+      await tester.tap(accountButton);
+      await tester.pumpAndSettle();
+      await tester.tap(registerButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(controller.websiteHidden, isFalse);
+      expect(creations, hasLength(2));
+      await finishLoading('https://keytao.rea.ink', settle: false);
+      expect(requests.last['url'], 'https://keytao.rea.ink/register');
+      await finishLoading('https://keytao.rea.ink/register');
     },
     variant: TargetPlatformVariant.only(TargetPlatform.linux),
   );

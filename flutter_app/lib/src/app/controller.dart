@@ -344,6 +344,34 @@ class AppController extends ChangeNotifier {
   late final _websiteHidden = ValueNotifier(info.websiteHidden);
   ValueListenable<bool> get websiteHiddenChanges => _websiteHidden;
   bool get websiteHidden => _websiteHidden.value;
+  String? _pendingWebsitePath;
+  int websiteNavigationRevision = 0;
+
+  String? takePendingWebsitePath() {
+    final path = _pendingWebsitePath;
+    _pendingWebsitePath = null;
+    return path;
+  }
+
+  Future<void> openWebsitePath(String path) async {
+    if (_disposed) return;
+    final normalized = path.startsWith('/') ? path : '/$path';
+    if (websiteHidden) {
+      final unhidden = await saveWebsiteSettings(hidden: false);
+      if (_disposed) return;
+      if (!unhidden || websiteHidden) {
+        open(Uri.parse(websiteOrigin).replace(path: normalized).toString());
+        return;
+      }
+    }
+    _pendingWebsitePath = normalized;
+    websiteNavigationRevision++;
+    if (activePage == AppPage.website) {
+      _changed();
+    } else {
+      selectPage(AppPage.website);
+    }
+  }
   late final _reduceMotion = ValueNotifier(info.reduceMotion);
   ValueListenable<bool> get reduceMotionChanges => _reduceMotion;
   bool get reduceMotion => _reduceMotion.value;

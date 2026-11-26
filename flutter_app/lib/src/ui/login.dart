@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
@@ -60,6 +62,12 @@ class _LoginDialogState extends State<_LoginDialog> {
     }
   }
 
+  void _register() {
+    if (widget.controller.loggingIn) return;
+    Navigator.pop(context);
+    unawaited(widget.controller.openWebsitePath('/register'));
+  }
+
   Future<void> _logout() async {
     await widget.controller.logout();
     if (mounted && widget.controller.accountUser == null) {
@@ -108,6 +116,11 @@ class _LoginDialogState extends State<_LoginDialog> {
           title: AppStrings.login,
           animation: widget.animation,
           actions: [
+            ActionButton(
+              '注册',
+              key: const ValueKey('login-register-button'),
+              onPress: c.loggingIn ? null : _register,
+            ),
             ActionButton(
               AppStrings.cancel,
               onPress: c.loggingIn ? null : () => Navigator.pop(context),

@@ -81,6 +81,7 @@ class _WebsitePageState extends State<WebsitePage> {
       controller: controller,
       origin: origin,
       active: widget.active,
+      navigationRevision: controller.websiteNavigationRevision,
       mobileAccount: widget.mobileAccount,
       mobileToolbarVisible: widget.mobileToolbarVisible,
       mobileToolbarFraction: widget.mobileToolbarFraction,
@@ -95,6 +96,7 @@ class _WebsiteBrowser extends StatefulWidget {
     required this.controller,
     required this.origin,
     required this.active,
+    required this.navigationRevision,
     required this.mobileAccount,
     required this.mobileToolbarVisible,
     required this.mobileToolbarFraction,
@@ -104,6 +106,7 @@ class _WebsiteBrowser extends StatefulWidget {
   final AppController controller;
   final String origin;
   final bool active;
+  final int navigationRevision;
   final Widget? mobileAccount;
   final bool mobileToolbarVisible;
   final ValueListenable<double>? mobileToolbarFraction;
@@ -122,6 +125,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   bool _loading = true;
   bool _failed = false;
   bool _initializingSession = true;
+  bool _navigatingInitialPath = false;
   double _scrollOffset = 0;
 
   @override
@@ -134,6 +138,24 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
   void didUpdateWidget(covariant _WebsiteBrowser oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.active && !oldWidget.active) _publishScrollAfterFrame(_browser);
+    if (widget.active &&
+        (widget.navigationRevision != oldWidget.navigationRevision ||
+            !oldWidget.active)) {
+      if (_failed) {
+        final previous = _browser;
+        setState(() {
+          _loading = true;
+          _failed = false;
+          _startBrowser();
+        });
+        unawaited(previous.dispose());
+      } else if (!_initializingSession) {
+        final pending = widget.controller.takePendingWebsitePath();
+        if (pending != null) {
+          unawaited(_navigateToPath(_browser, pending));
+        }
+      }
+    }
   }
 
   void _startBrowser() {
@@ -148,6 +170,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
     _browser = browser;
     _currentUrl = widget.origin;
     _initializingSession = true;
+    _navigatingInitialPath = false;
     _scrollOffset = 0;
     _publishScrollAfterFrame(browser);
     unawaited(_initialize(browser));
@@ -195,10 +218,22 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
                     (uri.path.isNotEmpty && uri.path != '/'))) {
               return;
             }
+            if (_initializingSession) {
+              final pending = widget.controller.takePendingWebsitePath();
+              if (pending != null) {
+                setState(() {
+                  _initializingSession = false;
+                  _navigatingInitialPath = true;
+                });
+                unawaited(_navigateToPath(browser, pending));
+                return;
+              }
+            }
             _currentUrl = url;
             _timeout?.cancel();
             setState(() {
               _initializingSession = false;
+              _navigatingInitialPath = false;
               _loading = false;
             });
             _finishOpenOperation();
@@ -233,6 +268,17 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
       Uri.parse(widget.origin).replace(path: _sessionPath),
       headers: {_sessionHeader: grant},
     );
+  }
+
+  Future<void> _navigateToPath(WebViewController browser, String path) async {
+    final target = Uri.parse(widget.origin).replace(path: path);
+    _currentUrl = target.toString();
+    _trackLoad();
+    try {
+      await browser.loadRequest(target);
+    } catch (_) {
+      _showFailure(browser);
+    }
   }
 
   bool _isHttps(Uri? uri) =>
@@ -370,7 +416,7 @@ class _WebsiteBrowserState extends State<_WebsiteBrowser> {
           child: _failed
               ? const Center(child: Text('无法在 App 内加载网站'))
               : Opacity(
-                  opacity: _initializingSession ? 0 : 1,
+                  opacity: _initializingSession || _navigatingInitialPath ? 0 : 1,
                   child: ClipRect(
                     child: controller.isWindows
                         ? Listener(
