@@ -1300,6 +1300,43 @@ mod tests {
         assert_eq!(committed.committed.as_deref(), Some("乙"));
     }
 
+    #[test]
+    fn wrapped_jd_backend_supports_inline_ascii_while_keeping_existing_jd_rules() {
+        let backend = crate::inline_ascii::wrap_if_needed(Box::new(
+            JdBackend::from_api(fake_api(), None, 2).unwrap(),
+        ));
+        let peer = crate::inline_ascii::wrap_if_needed(Box::new(
+            JdBackend::from_api(fake_api(), None, 2).unwrap(),
+        ));
+
+        // Idle Chinese mode: Shift+A -> b -> Enter commits "Ab" without touching peer.
+        backend.process_key_result(XK_SHIFT_L, 0);
+        let started = backend.process_key_result(b'A'.into(), RIME_MOD_SHIFT);
+        assert!(started.accepted);
+        assert_eq!(started.state.preedit, "A");
+        assert!(peer.state().preedit.is_empty());
+        assert!(!backend.process_key_result(XK_SHIFT_L, RIME_RELEASE_MASK).state.ascii_mode);
+        let cont = backend.process_key_result(b'b'.into(), 0);
+        assert_eq!(cont.state.preedit, "Ab");
+        let committed = backend.process_enter();
+        assert_eq!(committed.state.committed.as_deref(), Some("Ab"));
+        assert!(!backend.is_composing());
+
+        // Active Chinese candidates: Shift+B delegates to libjd rather than starting inline ASCII.
+        backend.process_key_result(b'a'.into(), 0);
+        let topped = backend.process_key_result(b'B'.into(), RIME_MOD_SHIFT);
+        assert_eq!(topped.state.committed.as_deref(), Some("B"));
+        assert!(topped.state.preedit.is_empty());
+        assert!(!backend.is_composing());
+
+        // Inline ASCII followed by punctuation merges inline buffer + libjd commit atomically.
+        backend.process_key_result(b'G'.into(), RIME_MOD_SHIFT);
+        backend.process_key_result(b'o'.into(), 0);
+        let punct = backend.process_key_result(b'!'.into(), RIME_MOD_SHIFT);
+        assert_eq!(punct.state.committed.as_deref(), Some("Go一二!"));
+        assert!(!backend.is_composing());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn real_macos_engine_import_smoke() {
@@ -1320,11 +1357,10 @@ mod tests {
             JdBackend::build_dictionary(library, "测试词\ta\n第二词\ta\n".as_bytes(), &dictionary)
                 .unwrap();
             let backend = JdBackend::load_dictionary(library, &dictionary, 5, schema).unwrap();
-            let typed = backend
-                .new_session()
-                .unwrap()
-                .process_key_result(b'a'.into(), 0)
-                .state;
+            let session = crate::inline_ascii::wrap_if_needed(Box::new(
+                backend.new_session().unwrap(),
+            ));
+            let typed = session.process_key_result(b'a'.into(), 0).state;
             assert_eq!(typed.schema_id, "converted");
             assert_eq!(
                 typed
@@ -1334,6 +1370,28 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["测试词", "第二词"]
             );
+            // Active Chinese candidates + Shift+B preserves libjd's commit-and-literal rule.
+            let topped = session.process_key_result(b'B'.into(), RIME_MOD_SHIFT).state;
+            assert_eq!(topped.committed.as_deref(), Some("测试词B"));
+            assert!(!session.is_composing());
+
+            // Idle Chinese mode + Shift+A -> b -> Enter commits "Ab" via session inline ASCII.
+            session.process_key_result(XK_SHIFT_L, 0);
+            let started = session.process_key_result(b'A'.into(), RIME_MOD_SHIFT);
+            assert!(started.accepted);
+            assert_eq!(started.state.preedit, "A");
+            assert!(!session.process_key_result(XK_SHIFT_L, RIME_RELEASE_MASK).state.ascii_mode);
+            assert_eq!(session.process_key_result(b'b'.into(), 0).state.preedit, "Ab");
+            assert_eq!(session.process_enter().state.committed.as_deref(), Some("Ab"));
+            assert!(!session.is_composing());
+
+            // Inline ASCII followed by ',' commits the English buffer + libjd's Chinese comma atomically.
+            session.process_key_result(b'G'.into(), RIME_MOD_SHIFT);
+            session.process_key_result(b'o'.into(), 0);
+            let punct = session.process_key_result(b','.into(), 0);
+            assert!(punct.accepted);
+            assert_eq!(punct.state.committed.as_deref(), Some("Go，"));
+            assert!(!session.is_composing());
         }
         std::fs::remove_dir_all(root).unwrap();
     }

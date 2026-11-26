@@ -39,10 +39,13 @@ impl ProcessRimeState {
     }
 
     pub(super) fn create_backend(&self, root: &Path) -> Result<Box<dyn ImeBackend>, String> {
-        if let Some(backend) = lock_ignore_poison(&self.libjd).as_mut() {
-            return Ok(Box::new(backend.new_session()?));
-        }
-        Ok(Box::new(RimeBackend::new_with_user_data_dir(root)?))
+        let backend: Box<dyn ImeBackend> =
+            if let Some(backend) = lock_ignore_poison(&self.libjd).as_mut() {
+                Box::new(backend.new_session()?)
+            } else {
+                Box::new(RimeBackend::new_with_user_data_dir(root)?)
+            };
+        Ok(inline_ascii::wrap_if_needed(backend))
     }
 
     pub(super) fn schema_root(&self, root: &Path) -> PathBuf {

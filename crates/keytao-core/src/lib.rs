@@ -870,6 +870,9 @@ pub mod engine_choice;
 pub mod libjd;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android", target_os = "ios"))]
+mod inline_ascii;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android", target_os = "ios"))]
 pub mod jd_backend;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "android", target_os = "ios"))]
@@ -932,6 +935,9 @@ pub(crate) trait ImeBackend: Send + Sync + english_mode::EnglishBackend {
     fn apply_reset_switch_request(&self, root: &Path) -> Result<(), String>;
     fn is_ascii_mode(&self) -> bool;
     fn is_composing(&self) -> bool;
+    fn supports_native_inline_ascii(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> EngineCapabilities;
 }
 
@@ -3543,6 +3549,10 @@ mod desktop {
                 .flatten()
             })
             .unwrap_or(false)
+        }
+
+        fn supports_native_inline_ascii(&self) -> bool {
+            true
         }
 
         /// What this librime can do natively, see [`EngineCapabilities`].
