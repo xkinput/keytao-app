@@ -1172,15 +1172,16 @@ class AppController extends ChangeNotifier {
       : schemeRelease?.downloadUrl;
 
   String? _platformDownloadUrl(PlatformReleaseDto? release) {
-    final universal = release?.downloadUrl;
-    if (universal != null && universal.isNotEmpty) return universal;
-    return switch (info.platform) {
+    final platformUrl = switch (info.platform) {
       BridgePlatform.android => release?.downloadUrls.android,
       BridgePlatform.ios => release?.downloadUrls.ios,
       BridgePlatform.windows => release?.downloadUrls.windows,
       BridgePlatform.linux => release?.downloadUrls.linux,
       BridgePlatform.macOs => release?.downloadUrls.macos,
     };
+    if (platformUrl != null && platformUrl.isNotEmpty) return platformUrl;
+    final universal = release?.downloadUrl;
+    return universal != null && universal.isNotEmpty ? universal : null;
   }
 
   void _changed() {
