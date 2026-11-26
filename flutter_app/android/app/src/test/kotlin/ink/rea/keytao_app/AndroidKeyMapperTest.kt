@@ -105,6 +105,33 @@ class AndroidKeyMapperTest {
     }
 
     @Test
+    fun `Alt-produced digits and punctuation drop Alt while preserving other modifiers`() {
+        val alt = AndroidKeyMapper.RIME_MOD_ALT
+        val shift = AndroidKeyMapper.RIME_MOD_SHIFT
+        assertEquals(0, AndroidKeyMapper.modifiersForUnicode(alt, '1'.code, 'w'.code))
+        assertEquals(shift, AndroidKeyMapper.modifiersForUnicode(alt or shift, '！'.code, 'Q'.code))
+        assertEquals(0, AndroidKeyMapper.modifiersForUnicode(alt, '!'.code, 0))
+    }
+
+    @Test
+    fun `Alt remains when it produces the same character or no character`() {
+        val alt = AndroidKeyMapper.RIME_MOD_ALT
+        assertEquals(alt, AndroidKeyMapper.modifiersForUnicode(alt, 'w'.code, 'w'.code))
+        assertEquals(alt, AndroidKeyMapper.modifiersForUnicode(alt, 0, 'w'.code))
+        assertEquals(alt, AndroidKeyMapper.modifiersForUnicode(alt, 0, 0))
+    }
+
+    @Test
+    fun `consumed Alt-produced characters clear only the editor Alt bits`() {
+        val alt = AndroidKeyMapper.RIME_MOD_ALT
+        val shift = AndroidKeyMapper.RIME_MOD_SHIFT
+        val stripped = AndroidKeyMapper.modifiersForUnicode(alt or shift, '!'.code, 'Q'.code)
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.consumedAltMetaStates(true, stripped))
+        assertEquals(0, AndroidKeyMapper.consumedAltMetaStates(true, alt or shift))
+        assertEquals(0, AndroidKeyMapper.consumedAltMetaStates(false, shift))
+    }
+
+    @Test
     fun `hardware modifiers retain CapsLock and Meta independently of Shift`() {
         for (shift in listOf(false, true)) {
             for (capsLock in listOf(false, true)) {

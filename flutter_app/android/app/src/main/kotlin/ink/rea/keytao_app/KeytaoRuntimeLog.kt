@@ -162,8 +162,10 @@ internal class KeytaoInputCounts {
         KeyCommandTypes.FLOATING to "floating",
         KeyCommandTypes.SETTING to "setting",
     )
-    private val types = (listOf("key_down", "key_up", "commit_direct", "clipboard_read", "clipboard_write") +
-        commandCounters.values + "other").distinct()
+    private val types = (listOf(
+        "key_down", "key_up", "commit_direct", "clipboard_read", "clipboard_write",
+        "hw_unavailable", "hw_unmapped", "hw_bypass", "hw_rejected", "hw_accepted", "candidates_hidden",
+    ) + commandCounters.values + "other").distinct()
     private val counts = LongArray(types.size)
 
     fun recordCommand(type: String) {
