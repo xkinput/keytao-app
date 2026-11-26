@@ -288,6 +288,103 @@ void main() {
     },
   );
 
+  testWidgets('hairline grids stack cells below the shorter column', (
+    tester,
+  ) async {
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    _setViewport(tester, 1000);
+    await _pump(
+      tester,
+      const SizedBox(
+        width: 640,
+        child: HairlineGridSection(
+          minCellWidth: 320,
+          children: [
+            HairlineGridCell(
+              key: ValueKey('cell-0'),
+              child: SizedBox(height: 40),
+            ),
+            HairlineGridCell(
+              key: ValueKey('cell-1'),
+              child: SizedBox(height: 200),
+            ),
+            HairlineGridCell(
+              key: ValueKey('cell-2'),
+              child: SizedBox(height: 40),
+            ),
+          ],
+        ),
+      ),
+    );
+    final first = tester.getRect(find.byKey(const ValueKey('cell-0')));
+    final second = tester.getRect(find.byKey(const ValueKey('cell-1')));
+    final third = tester.getRect(find.byKey(const ValueKey('cell-2')));
+    expect(third.top, lessThan(second.bottom));
+    expect(third.left, first.left);
+    await _finish(tester);
+  });
+
+  testWidgets('hairline grids align near-equal cells to a shared row top', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      SizedBox(
+        width: 640,
+        child: HairlineGridSection(
+          columnCount: 2,
+          children: [
+            for (final height in [40.0, 39.5, 40.0, 40.0])
+              HairlineGridCell(
+                padding: EdgeInsets.zero,
+                child: SizedBox(height: height),
+              ),
+          ],
+        ),
+      ),
+    );
+    final finder = find.byType(HairlineGridCell);
+    final cells = [for (var i = 0; i < 4; i++) tester.getRect(finder.at(i))];
+    expect(cells[1].height, 39.5);
+    expect(cells[2].top, 40);
+    expect(cells[3].top, 40);
+    expect(cells[2].left, cells[0].left);
+    expect(cells[3].left, cells[1].left);
+    await _finish(tester);
+  });
+
+  testWidgets('hairline grids align the last row hairlines', (tester) async {
+    await _pump(
+      tester,
+      const SizedBox(
+        width: 640,
+        child: HairlineGridSection(
+          columnCount: 2,
+          children: [
+            HairlineGridCell(
+              padding: EdgeInsets.zero,
+              child: SizedBox(height: 100),
+            ),
+            HairlineGridCell(
+              padding: EdgeInsets.zero,
+              child: SizedBox(height: 112),
+            ),
+          ],
+        ),
+      ),
+    );
+    expect(
+      tester.renderObject(find.byType(HairlineGridSection)),
+      paints
+        ..line(p1: const Offset(320, 0), p2: const Offset(320, 112))
+        ..line(p1: const Offset(320, 112), p2: const Offset(640, 112))
+        ..line(p1: const Offset(0, 112), p2: const Offset(320, 112)),
+    );
+    expect(tester.getSize(find.byType(HairlineGridCell).first).height, 100);
+    await _finish(tester);
+  });
+
   testWidgets('schema switches use two columns only when both widths fit', (
     tester,
   ) async {

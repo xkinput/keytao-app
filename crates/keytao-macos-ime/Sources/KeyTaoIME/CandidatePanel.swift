@@ -179,7 +179,7 @@ class CandidatePanel: NSPanel {
         let distance = CGFloat(max(0, itemCount - 1)) * gap + CGFloat(visibleSeparators)
         let optionWidths = visibleOptions.map { $0.1 }
         let candidateSize = horizontal
-            ? NSSize(width: min(innerWidth, (optionWidths.reduce(navigationWidth, +) + distance).rounded()),
+            ? NSSize(width: min(innerWidth, (optionWidths.reduce(navigationWidth, +) + distance).rounded(.up)),
                      height: max(rowHeight, navHeight, visibleSeparators > 0 ? separatorHeight : 0))
             : NSSize(width: min(innerWidth, max(optionWidths.max() ?? 0, navigationWidth + navigationGaps)),
                      height: optionHeights.reduce(navHeight, +) + distance)
@@ -237,9 +237,10 @@ class CandidatePanel: NSPanel {
                 offset += 1 + gap
             }
             let height = alignsFirstRow ? rowHeight : optionHeights[position]
+            let x = offset.rounded(.down)
             option.frame = horizontal
-                ? NSRect(x: offset.rounded(), y: ((candidateSize.height - height) / 2).rounded(),
-                         width: (offset + width).rounded() - offset.rounded(), height: height)
+                ? NSRect(x: x, y: ((candidateSize.height - height) / 2).rounded(),
+                         width: (offset + width).rounded(.up) - x, height: height)
                 : NSRect(x: 0, y: candidateSize.height - offset - height, width: width, height: height)
             option.placeFields(alignsFirstRow: alignsFirstRow)
             offset += (horizontal ? width : height) + gap

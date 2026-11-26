@@ -1999,6 +1999,20 @@ mod tests {
     }
 
     #[test]
+    fn materialize_keeps_comment_only_schema_custom() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut sources = fixture(root, "keydo");
+        let custom = b"# Optional settings\n";
+        sources.insert("keydo.custom.yaml".into(), custom.to_vec());
+
+        materialize(root, &root.join("rime-data"), "keydo", sources, None, None).unwrap();
+
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "keydo").unwrap();
+        assert_eq!(fs::read(runtime.join("keydo.custom.yaml")).unwrap(), custom);
+    }
+
+    #[test]
     fn optional_common_data_tracks_dictionary_imports_and_preserves_runtime_edits() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

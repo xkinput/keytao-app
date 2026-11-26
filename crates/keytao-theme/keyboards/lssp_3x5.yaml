@@ -1,0 +1,84 @@
+version: 2
+
+meta:
+  id: "keytao.lssp_3x5"
+  name: "李氏三拼 3×5"
+  author: "KeyTao"
+  description: "李氏三拼 3×5 十五宫格布局，含顶部数字行与左侧快捷符号列"
+  recommendedSchemas:
+    - "triple_pinyin_lssp"
+
+inheritsDefaultLayers: true
+numberRow: embedded
+height: 300
+
+keyGroups:
+  row1:
+    light: { background: "#F5DEB3", foreground: "#263442", hintForeground: "#6B5A3E", borderColor: "#E0C48D" }
+    dark:  { background: "#4A3F2B", foreground: "#F5E9D3", hintForeground: "#C9B48C", borderColor: "#63543A" }
+  row2:
+    light: { background: "#CBE8FA", foreground: "#263442", hintForeground: "#3C5E73", borderColor: "#A6D4F0" }
+    dark:  { background: "#263E4D", foreground: "#E3F2FC", hintForeground: "#92BCD4", borderColor: "#385A6E" }
+  row3:
+    light: { background: "#FBE6EC", foreground: "#263442", hintForeground: "#734B57", borderColor: "#ECC5D0" }
+    dark:  { background: "#4A2E38", foreground: "#FCE8EE", hintForeground: "#D4A3B2", borderColor: "#66404D" }
+  spaceTint:
+    light: { background: "#D4EEFD", foreground: "#263442", hintForeground: "#3C5E73", borderColor: "#A6D4F0" }
+    dark:  { background: "#253F52", foreground: "#E3F2FC", hintForeground: "#92BCD4", borderColor: "#385A6E" }
+
+rows:
+  - [
+      { label: "1", value: "1", slots: { topCenter: "!" }, longPress: { type: input, value: "!" }, alternates: [ { label: "!", value: "!" } ] },
+      { label: "2", value: "2", slots: { topCenter: "@" }, longPress: { type: input, value: "@" }, alternates: [ { label: "@", value: "@" } ] },
+      { label: "3", value: "3", slots: { topCenter: "#" }, longPress: { type: input, value: "#" }, alternates: [ { label: "#", value: "#" } ] },
+      { label: "4", value: "4", slots: { topCenter: "$" }, longPress: { type: input, value: "$" }, alternates: [ { label: "$", value: "$" } ] },
+      { label: "5", value: "5", slots: { topCenter: "%" }, longPress: { type: input, value: "%" }, alternates: [ { label: "%", value: "%" } ] },
+      { label: "6", value: "6", slots: { topCenter: "^" }, longPress: { type: input, value: "^" }, alternates: [ { label: "^", value: "^" } ] },
+      { label: "7", value: "7", slots: { topCenter: "&" }, longPress: { type: input, value: "&" }, alternates: [ { label: "&", value: "&" } ] },
+      { label: "8", value: "8", slots: { topCenter: "*" }, longPress: { type: input, value: "*" }, alternates: [ { label: "*", value: "*" } ] },
+      { label: "9", value: "9", slots: { topCenter: "(" }, longPress: { type: input, value: "(" }, alternates: [ { label: "(", value: "(" } ] },
+      { label: "0", value: "0", slots: { topCenter: ")" }, longPress: { type: input, value: ")" }, alternates: [ { label: ")", value: ")" } ] }
+    ]
+  - [
+      {
+        label: "，",
+        value: "，",
+        weight: 1.05,
+        rowSpan: 3,
+        stack: [
+          { label: "，", value: "，", asciiLabel: ",", asciiValue: "," },
+          { label: "。", value: "。", asciiLabel: ".", asciiValue: "." },
+          { label: "？", value: "？", asciiLabel: "?", asciiValue: "?" },
+          { label: "！", value: "！", asciiLabel: "!", asciiValue: "!" }
+        ]
+      },
+      { label: "b", value: "q", rimeValue: "q", asciiLabel: "q", asciiValue: "q", weight: 1.0, group: row1, slots: { topLeft: "Q", topCenter: "ˉ", topRight: "↑", bottomCenter: "a,an,ang 一" }, swipeUp: { type: edit, value: cursorUp } },
+      { label: "p", value: "w", rimeValue: "w", asciiLabel: "w", asciiValue: "w", weight: 1.0, group: row1, slots: { topLeft: "W", topCenter: "ˊ", topRight: "↓", bottomCenter: "ai,ei,ao 丨" }, swipeUp: { type: edit, value: cursorDown } },
+      { label: "m", value: "e", rimeValue: "e", asciiLabel: "e", asciiValue: "e", weight: 1.0, group: row1, slots: { topLeft: "E", topCenter: "ˇ", topRight: "«", bottomCenter: "o,ou,ong 丿" }, swipeUp: { type: edit, value: lineStart } },
+      { label: "r", value: "r", rimeValue: "r", asciiLabel: "r", asciiValue: "r", weight: 1.0, group: row1, slots: { topLeft: "R", topCenter: "ˋ", topRight: "»", labelSub: "f", bottomCenter: "e,en,eng" }, swipeUp: { type: edit, value: lineEnd } },
+      { label: "zh", value: "t", rimeValue: "t", asciiLabel: "t", asciiValue: "t", weight: 1.0, group: row1, slots: { topLeft: "T", topCenter: "轻声", labelSub: "z", bottomCenter: "er,üan,_" } },
+      { label: "⌫", weight: 1.05, action: { type: backspace }, slots: { bottomCenter: "Del" } }
+    ]
+  - [
+      { label: "d", value: "a", rimeValue: "a", asciiLabel: "a", asciiValue: "a", weight: 1.0, group: row2, slots: { topLeft: "A", topCenter: "ˉ", topRight: "←", bottomCenter: "ia,ian,iang 丶" }, swipeUp: { type: edit, value: cursorLeft } },
+      { label: "t", value: "s", rimeValue: "s", asciiLabel: "s", asciiValue: "s", weight: 1.0, group: row2, slots: { topLeft: "S", topCenter: "ˊ", topRight: "→", bottomCenter: "iai,i,iao フ" }, swipeUp: { type: edit, value: cursorRight } },
+      { label: "n", value: "d", rimeValue: "d", asciiLabel: "d", asciiValue: "d", weight: 1.0, group: row2, slots: { topLeft: "D", topCenter: "ˇ", topRight: "<", bottomCenter: "io,iu,iong" }, swipeUp: { type: previousPage } },
+      { label: "l", value: "f", rimeValue: "f", asciiLabel: "f", asciiValue: "f", weight: 1.0, group: row2, slots: { topLeft: "F", topCenter: "ˋ", topRight: ">", bottomCenter: "ie,in,ing" }, swipeUp: { type: nextPage } },
+      { label: "ch", value: "g", rimeValue: "g", asciiLabel: "g", asciiValue: "g", weight: 1.0, group: row2, slots: { topLeft: "G", topCenter: "轻声", labelSub: "c", bottomCenter: "_,_,ü" } },
+      { label: "←", weight: 1.05, action: { type: edit, value: cursorLeft }, slots: { topCenter: "↞" }, swipeUp: { type: edit, value: lineStart }, longPress: { type: edit, value: lineStart } }
+    ]
+  - [
+      { label: "g", value: "z", rimeValue: "z", asciiLabel: "z", asciiValue: "z", weight: 1.0, group: row3, slots: { topLeft: "Z", topCenter: "ˉ", topRight: "☑", labelSub: "j", bottomCenter: "ua,uan,uang" }, swipeUp: { type: edit, value: selectAll } },
+      { label: "k", value: "x", rimeValue: "x", asciiLabel: "x", asciiValue: "x", weight: 1.0, group: row3, slots: { topLeft: "X", topCenter: "ˊ", topRight: "✂", labelSub: "q", bottomCenter: "uai,ui,_" }, swipeUp: { type: edit, value: cut } },
+      { label: "h", value: "c", rimeValue: "c", asciiLabel: "c", asciiValue: "c", weight: 1.0, group: row3, slots: { topLeft: "C", topCenter: "ˇ", topRight: "❐", labelSub: "x", bottomCenter: "uo,_,u" }, swipeUp: { type: edit, value: copy } },
+      { label: "ˊyw", value: "v", rimeValue: "v", asciiLabel: "v", asciiValue: "v", weight: 1.0, group: row3, slots: { topLeft: "V", topCenter: "ˋ", topRight: "▣", bottomCenter: "_,un,ueng" }, swipeUp: { type: edit, value: paste } },
+      { label: "sh", value: "b", rimeValue: "b", asciiLabel: "b", asciiValue: "b", weight: 1.0, group: row3, slots: { topLeft: "B", topCenter: "轻声", labelSub: "s", bottomCenter: "üe,ün,_" } },
+      { label: "→", weight: 1.05, action: { type: edit, value: cursorRight }, slots: { topCenter: "↠" }, swipeUp: { type: edit, value: lineEnd }, longPress: { type: edit, value: lineEnd } }
+    ]
+  - [
+      { label: "中", weight: 1.05, action: { type: mode, value: toggle }, longPress: { type: nextInputMethod } },
+      { label: "!?#", weight: 1.0, slots: { topCenter: "123" }, action: { type: keyboardMode, value: "symbols:last" }, swipeUp: { type: keyboardMode, value: numbers }, longPress: { type: keyboardMode, value: numbers } },
+      { label: "李氏三拼", weight: 3.0, group: spaceTint, action: { type: space }, swipeDown: { type: reset } },
+      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", weight: 1.0, slots: { topCenter: "。" }, swipeUp: { type: directInput, value: "。" }, longPress: { type: directInput, value: "。" } },
+      { label: "↵", weight: 1.05, action: { type: enter } }
+    ]

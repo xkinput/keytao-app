@@ -38,33 +38,33 @@ class AppPalette {
   final Color controlSurface;
 
   static const light = AppPalette._(
-    ground: Color(0xFFF3F2EE),
-    surface: Color(0xFFFAF9F6),
-    hairline: Color(0xFFDEDCD5),
-    ink: Color(0xFF17171A),
-    muted: Color(0xFF5F5D58),
-    mutedSecondary: Color(0xFF6E6C66),
-    unselected: Color(0xFF8A8780),
+    ground: Color(0xFFF4F5F7),
+    surface: Color(0xFFFBFBFC),
+    hairline: Color(0xFFDCDEE2),
+    ink: Color(0xFF17181B),
+    muted: Color(0xFF5A5C63),
+    mutedSecondary: Color(0xFF6A6C73),
+    unselected: Color(0xFF85878E),
     success: Color(0xFF1F8A4C),
     successBackground: Color(0xFFDCEFE3),
     successForeground: Color(0xFF145C33),
     error: Color(0xFFB3412F),
-    controlSurface: Color(0xFFE7E5DF),
+    controlSurface: Color(0xFFE8E9ED),
   );
 
   static const dark = AppPalette._(
-    ground: Color(0xFF121214),
-    surface: Color(0xFF1A1A1D),
-    hairline: Color(0xFF2C2C30),
-    ink: Color(0xFFF2F1EE),
-    muted: Color(0xFFA3A19B),
-    mutedSecondary: Color(0xFF8D8B85),
-    unselected: Color(0xFF6F6D68),
+    ground: Color(0xFF111214),
+    surface: Color(0xFF19191C),
+    hairline: Color(0xFF2B2C30),
+    ink: Color(0xFFF1F2F4),
+    muted: Color(0xFFA2A4AA),
+    mutedSecondary: Color(0xFF8C8E94),
+    unselected: Color(0xFF6E7076),
     success: Color(0xFF58B67C),
     successBackground: Color(0xFF163A26),
     successForeground: Color(0xFFA4DFBA),
     error: Color(0xFFE08573),
-    controlSurface: Color(0xFF242427),
+    controlSurface: Color(0xFF232428),
   );
 
   static AppPalette of(BuildContext context) =>
@@ -77,9 +77,9 @@ class AppPalette {
         Color.alphaBlend(accent.withValues(alpha: accent.a * amount), color);
 
     return AppPalette._(
-      ground: tint(base.ground, night ? .07 : .04),
-      surface: tint(base.surface, night ? .02 : .015),
-      hairline: tint(base.hairline, .025),
+      ground: tint(base.ground, .07),
+      surface: tint(base.surface, night ? .03 : .02),
+      hairline: tint(base.hairline, .04),
       ink: base.ink,
       muted: base.muted,
       mutedSecondary: base.mutedSecondary,
@@ -88,7 +88,7 @@ class AppPalette {
       successBackground: base.successBackground,
       successForeground: base.successForeground,
       error: base.error,
-      controlSurface: tint(base.controlSurface, .02),
+      controlSurface: tint(base.controlSurface, night ? .04 : .05),
     );
   }
 }

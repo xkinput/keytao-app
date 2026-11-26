@@ -17,6 +17,67 @@ import 'widgets.dart';
 const _homeSchemeKeys = {'keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'};
 const _homeAddonKeys = ['rime_ice', 'easy_en'];
 
+void _showLocalSchemeImportDialog(
+  BuildContext context,
+  AppController c, {
+  String? schemeKey,
+}) {
+  showFDialog<void>(
+    context: context,
+    builder: (dialogContext, _, animation) => AppDialog(
+      title: schemeKey == null ? '添加本地方案' : '重新导入本地方案',
+      animation: animation,
+      actions: [
+        ActionButton(
+          AppStrings.cancel,
+          onPress: () => Navigator.pop(dialogContext),
+        ),
+        ActionButton(
+          '选择 .zip 压缩包',
+          key: const ValueKey('import-local-zip-button'),
+          icon: FLucideIcons.fileArchive,
+          onPress: () {
+            Navigator.pop(dialogContext);
+            unawaited(
+              c.importLocalScheme(schemeKey: schemeKey, fromArchive: true),
+            );
+          },
+        ),
+        ActionButton(
+          '选择 Rime 文件夹',
+          key: const ValueKey('import-local-folder-button'),
+          primary: true,
+          icon: FLucideIcons.folderOpen,
+          onPress: () {
+            Navigator.pop(dialogContext);
+            unawaited(
+              c.importLocalScheme(schemeKey: schemeKey, fromArchive: false),
+            );
+          },
+        ),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            '请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包，选择 .zip 压缩包后将自动解压。',
+            style: dialogContext.theme.typography.body.sm,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '系统会自动过滤 build、sync、log 等运行目录。导入后的方案上限为 512 MB 和 10,000 个文件。'
+            '${c.isMobile ? '手机端选取的 ZIP 文件另有 1 GB 上限。' : ''}',
+            style: dialogContext.theme.typography.body.sm.copyWith(
+              color: AppPalette.of(dialogContext).muted,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 void _showAddonSchemes(BuildContext context, AppController c) {
   showFDialog<void>(
     context: context,
@@ -209,7 +270,7 @@ class _SchemePageState extends State<SchemePage> {
       for (final key in _homeSchemeKeys)
         if (!c.isLocalScheme(key)) key == 'xmjd' ? xmjdScheme : key,
     ];
-    final addons = _addonCells(context, c);
+    final addons = _addonCells(context, c, keys: _homeAddonKeys);
     final activeKey = c.installedPackages
         .where((package) => package.active)
         .map((package) => package.schemeKey)
@@ -326,12 +387,32 @@ class _SchemePageState extends State<SchemePage> {
           child: Section(
             key: const ValueKey('local-schemes'),
             title: AppStrings.localSchemeTitle,
-            trailing: ActionButton(
-              '添加本地方案',
-              icon: FLucideIcons.plus,
-              onPress: c.busy ? null : c.importLocalScheme,
+            trailing: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ActionButton(
+                  '从目录导入',
+                  icon: FLucideIcons.plus,
+                  onPress: c.busy
+                      ? null
+                      : () => _showLocalSchemeImportDialog(context, c),
+                ),
+                ActionButton(
+                  '从 Git 添加',
+                  key: const ValueKey('add-git-scheme-button'),
+                  icon: FLucideIcons.download,
+                  onPress: c.busy
+                      ? null
+                      : () => showGitSchemeDialog(context, c),
+                ),
+              ],
             ),
             children: [
+              StatusMessage(
+                '请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包（自动过滤 build 目录，上限 512 MB）',
+                icon: FLucideIcons.info,
+              ),
               HairlineGridSection(
                 minCellWidth: 320,
                 columnCount: mobile ? 2 : null,
@@ -351,14 +432,6 @@ class _SchemePageState extends State<SchemePage> {
               ),
               ActionRow(
                 children: [
-                  ActionButton(
-                    '从 Git 添加',
-                    key: const ValueKey('add-git-scheme-button'),
-                    icon: FLucideIcons.download,
-                    onPress: c.busy
-                        ? null
-                        : () => showGitSchemeDialog(context, c),
-                  ),
                   ActionButton(
                     '清理残留文件',
                     icon: FLucideIcons.trash2,
@@ -636,7 +709,8 @@ class SchemePackageRow extends StatelessWidget {
     final inUse = c.prefersLibjd
         ? c.isUsingLibjd && c.activeSchemeKey == schemeKey
         : active && package!.inUse && checksCurrentPackage && c.hasUsableBuild;
-    if (package == null || !package.hasPackageZip) {
+    if ((package == null || !package.hasPackageZip) &&
+        c.shouldFetchRemoteSchemeLogo(schemeKey)) {
       unawaited(c.ensureRemoteSchemeLogo(schemeKey));
     }
     final hasLogo = c.effectiveSchemeLogoPath(schemeKey) != null;
@@ -871,7 +945,11 @@ class SchemePackageRow extends StatelessWidget {
                             ? null
                             : () {
                                 popover.hide();
-                                c.importLocalScheme(schemeKey: schemeKey);
+                                _showLocalSchemeImportDialog(
+                                  context,
+                                  c,
+                                  schemeKey: schemeKey,
+                                );
                               },
                       ),
                     if (c.accountUser != null)
@@ -1436,7 +1514,9 @@ Map<String, Widget> _addonCells(
   BuildContext context,
   AppController c, {
   bool compact = false,
+  Iterable<String>? keys,
 }) {
+  final allowedKeys = keys?.toSet();
   Widget addon({
     required String key,
     required String packageKey,
@@ -1498,13 +1578,19 @@ Map<String, Widget> _addonCells(
       fontWeight: FontWeight.w700,
       letterSpacing: cloudCard ? -.34 : null,
     );
-    unawaited(
-      c.ensureRemoteSchemeLogo(
-        packageKey,
-        repoUrl: repositoryUrl,
-        addonInstalled: installed,
-      ),
-    );
+    if (c.shouldFetchRemoteSchemeLogo(
+      packageKey,
+      repoUrl: repositoryUrl,
+      addonInstalled: installed,
+    )) {
+      unawaited(
+        c.ensureRemoteSchemeLogo(
+          packageKey,
+          repoUrl: repositoryUrl,
+          addonInstalled: installed,
+        ),
+      );
+    }
     final hasAddonLogo = c.effectiveSchemeLogoPath(packageKey) != null;
     final cardState =
         cloudCard &&
@@ -1802,7 +1888,8 @@ Map<String, Widget> _addonCells(
   }
 
   return {
-    'easy_en': addon(
+    if (allowedKeys == null || allowedKeys.contains('easy_en'))
+      'easy_en': addon(
       key: 'addon-easy-en',
       packageKey: 'easy_en',
       title: schemeDisplayName('easy_en'),
@@ -1821,7 +1908,8 @@ Map<String, Widget> _addonCells(
       ),
       error: c.addonError,
     ),
-    'wanxiang': addon(
+    if (allowedKeys == null || allowedKeys.contains('wanxiang'))
+      'wanxiang': addon(
       key: 'addon-wanxiang',
       packageKey: 'wanxiang',
       title: AppStrings.wanxiang,
@@ -1915,6 +2003,7 @@ Map<String, Widget> _addonCells(
           : null,
     ),
     for (final entry in c.rimeAddons.entries)
-      entry.key: rimeAddon(entry.key, entry.value),
+      if (allowedKeys == null || allowedKeys.contains(entry.key))
+        entry.key: rimeAddon(entry.key, entry.value),
   };
 }

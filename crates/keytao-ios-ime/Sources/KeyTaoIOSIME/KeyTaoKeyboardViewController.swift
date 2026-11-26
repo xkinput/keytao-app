@@ -943,6 +943,27 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             persistThemeSetting(key: key, value: value)
             return
         }
+        if key == "keyboardProfile" || key == "keyboardProfileCycle" {
+            let targetId: String
+            if key == "keyboardProfileCycle" {
+                let ids = engine.listKeyboardIds()
+                guard ids.count > 1 else { return }
+                let idx = ids.firstIndex(of: value) ?? -1
+                targetId = ids[(idx + 1) % ids.count]
+            } else {
+                targetId = value
+            }
+            guard engine.applyKeyboard(id: targetId) else {
+                showMessage("切换键盘方案失败")
+                return
+            }
+            engine.releaseCaches()
+            let reloaded = engine.loadConfig()
+            baseKeyboardConfig = reloaded
+            applyKeyboardPresentation(config: reloaded)
+            showMessage("已切换：\(reloaded.name)")
+            return
+        }
         if key == "reset" {
             let patch = defaultPanelSettingsPatch()
             var next = baseKeyboardConfig ?? engine.loadConfig()

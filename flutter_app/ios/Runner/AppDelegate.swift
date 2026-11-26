@@ -122,11 +122,17 @@ enum KeyTaoIOSBundledData {
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
+  private enum PendingLocalImportKind {
+    case directory
+    case archive
+  }
+
   private static let appGroupIdentifier = "group.ink.rea.keytao-app"
   private var iosChannel: FlutterMethodChannel?
   private let pathsQueue = DispatchQueue(label: "ink.rea.keytao-app.paths")
   private var preparedPaths: [String: String]?
   private var pendingDirectoryImport: FlutterResult?
+  private var pendingImportKind: PendingLocalImportKind?
 
   override func application(
     _ application: UIApplication,
@@ -182,7 +188,9 @@ enum KeyTaoIOSBundledData {
           ))
         }
       case "importLocalSchemeDirectory":
-        importLocalSchemeDirectory(result)
+        presentLocalSchemePicker(result, kind: .directory)
+      case "importLocalSchemeArchive":
+        presentLocalSchemePicker(result, kind: .archive)
       case "shareThemeFile":
         shareThemeFile(call.arguments, result: result)
       default:
@@ -261,9 +269,11 @@ enum KeyTaoIOSBundledData {
     }
   }
 
-  private func importLocalSchemeDirectory(_ result: @escaping FlutterResult) {
+  private func presentLocalSchemePicker(
+    _ result: @escaping FlutterResult, kind: PendingLocalImportKind
+  ) {
     guard pendingDirectoryImport == nil else {
-      result(FlutterError(code: "DIRECTORY_PICKER_OPEN", message: "目录选择器已打开", details: nil))
+      result(FlutterError(code: "DIRECTORY_PICKER_OPEN", message: "文件选择器已打开", details: nil))
       return
     }
     guard var presenter = UIApplication.shared.connectedScenes
@@ -272,36 +282,43 @@ enum KeyTaoIOSBundledData {
       .flatMap({ $0.windows })
       .first(where: { $0.isKeyWindow })?.rootViewController
     else {
-      result(FlutterError(code: "DIRECTORY_PICKER_UNAVAILABLE", message: "无法打开目录选择器", details: nil))
+      result(FlutterError(code: "DIRECTORY_PICKER_UNAVAILABLE", message: "无法打开文件选择器", details: nil))
       return
     }
     while let presented = presenter.presentedViewController {
       presenter = presented
     }
-    let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+    let contentTypes: [UTType] = kind == .archive ? [.zip] : [.folder]
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes)
     picker.delegate = self
     picker.allowsMultipleSelection = false
     pendingDirectoryImport = result
+    pendingImportKind = kind
     presenter.present(picker, animated: true)
   }
 
   func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
     let result = pendingDirectoryImport
     pendingDirectoryImport = nil
+    pendingImportKind = nil
     result?(nil)
   }
 
   func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
     guard let result = pendingDirectoryImport else { return }
+    let kind = pendingImportKind ?? .directory
     guard let source = urls.first else {
       pendingDirectoryImport = nil
+      pendingImportKind = nil
       result(nil)
       return
     }
     pathsQueue.async {
       let response: Any
       do {
-        response = try Self.copyLocalSchemeDirectory(source)
+        response = kind == .archive
+          ? try Self.copyLocalSchemeArchive(source)
+          : try Self.copyLocalSchemeDirectory(source)
       } catch {
         response = FlutterError(
           code: "DIRECTORY_IMPORT_FAILED", message: error.localizedDescription, details: nil
@@ -309,7 +326,74 @@ enum KeyTaoIOSBundledData {
       }
       DispatchQueue.main.async {
         self.pendingDirectoryImport = nil
+        self.pendingImportKind = nil
         result(response)
+      }
+    }
+  }
+
+  private static let localImportMaxBytes: Int64 = 512 * 1024 * 1024
+  private static let localArchiveStagingMaxBytes: Int64 = 1024 * 1024 * 1024
+
+  private static func isExcludedLocalImportEntry(_ name: String, topLevel: Bool) -> Bool {
+    if topLevel && ["build", "sync", "log", "logs", "installation.yaml", "user.yaml", "__MACOSX"].contains(name) {
+      return true
+    }
+    if name.hasPrefix(".") && name != ".nomedia" {
+      return true
+    }
+    let lower = name.lowercased()
+    return name == "__MACOSX"
+      || lower == "system volume information"
+      || lower == "$recycle.bin"
+      || lower == "app-state.json"
+      || name.hasSuffix(".userdb")
+      || name.hasSuffix(".leveldb")
+  }
+
+  private static func copyFilteredDirectory(
+    from source: URL,
+    to destination: URL,
+    manager: FileManager,
+    copiedBytes: inout Int64,
+    topLevel: Bool
+  ) throws {
+    try manager.createDirectory(at: destination, withIntermediateDirectories: false)
+    let items = try manager.contentsOfDirectory(
+      at: source,
+      includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey],
+      options: []
+    )
+    for item in items {
+      let name = item.lastPathComponent
+      if isExcludedLocalImportEntry(name, topLevel: topLevel) {
+        continue
+      }
+      let values = try item.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey])
+      if values.isSymbolicLink == true {
+        throw NSError(domain: "keytao/ios", code: 4, userInfo: [
+          NSLocalizedDescriptionKey: "方案包不能包含符号链接：\(name)"
+        ])
+      }
+      let target = destination.appendingPathComponent(name, isDirectory: values.isDirectory == true)
+      if values.isDirectory == true {
+        try copyFilteredDirectory(
+          from: item,
+          to: target,
+          manager: manager,
+          copiedBytes: &copiedBytes,
+          topLevel: false
+        )
+      } else {
+        let size = Int64(values.fileSize ?? 0)
+        if size > localImportMaxBytes - copiedBytes {
+          throw NSError(domain: "keytao/ios", code: 5, userInfo: [
+            NSLocalizedDescriptionKey:
+              "方案体积超过 512 MB 限制（在 \(name) 处超出）。请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包（系统会自动过滤 build 目录）"
+          ])
+        }
+        copiedBytes += size
+        try manager.copyItem(at: item, to: target)
       }
     }
   }
@@ -338,7 +422,14 @@ enum KeyTaoIOSBundledData {
       NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) {
         coordinatedSource in
         do {
-          try manager.copyItem(at: coordinatedSource, to: destination)
+          var copiedBytes: Int64 = 0
+          try copyFilteredDirectory(
+            from: coordinatedSource,
+            to: destination,
+            manager: manager,
+            copiedBytes: &copiedBytes,
+            topLevel: true
+          )
         } catch {
           copyError = error
         }
@@ -346,6 +437,54 @@ enum KeyTaoIOSBundledData {
       if let error = coordinationError { throw error }
       if let error = copyError { throw error }
       return ["path": destination.path, "name": name, "temporaryDirectory": temporaryRoot.path]
+    } catch {
+      try? manager.removeItem(at: temporaryRoot)
+      throw error
+    }
+  }
+
+  private static func copyLocalSchemeArchive(_ source: URL) throws -> [String: String] {
+    let scoped = source.startAccessingSecurityScopedResource()
+    defer {
+      if scoped { source.stopAccessingSecurityScopedResource() }
+    }
+    let manager = FileManager.default
+    let fileName = source.lastPathComponent
+    let values = try source.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+    guard !fileName.isEmpty, fileName != ".", fileName != "..", !fileName.contains("/"),
+      values.isDirectory != true
+    else {
+      throw NSError(domain: "keytao/ios", code: 3, userInfo: [
+        NSLocalizedDescriptionKey: "请选择纯 Rime 文件夹或 Rime 方案 .zip 压缩包"
+      ])
+    }
+    if let size = values.fileSize, Int64(size) > localArchiveStagingMaxBytes {
+      throw NSError(domain: "keytao/ios", code: 5, userInfo: [
+        NSLocalizedDescriptionKey:
+          "方案压缩包过大（单包暂不支持超过 1 GB，解压过滤 build 目录后上限为 512 MB）。请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包"
+      ])
+    }
+    let temporaryRoot = manager.temporaryDirectory
+      .appendingPathComponent("local-scheme-\(UUID().uuidString)", isDirectory: true)
+    let destination = temporaryRoot.appendingPathComponent(fileName, isDirectory: false)
+    do {
+      try manager.createDirectory(at: temporaryRoot, withIntermediateDirectories: false)
+      var coordinationError: NSError?
+      var copyError: Error?
+      NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) {
+        coordinatedSource in
+        do {
+          try manager.copyItem(at: coordinatedSource, to: destination)
+        } catch {
+          copyError = error
+        }
+      }
+      if let error = coordinationError { throw error }
+      if let error = copyError { throw error }
+      let displayName = fileName.lowercased().hasSuffix(".zip") && fileName.count > 4
+        ? String(fileName.dropLast(4))
+        : fileName
+      return ["path": destination.path, "name": displayName, "temporaryDirectory": temporaryRoot.path]
     } catch {
       try? manager.removeItem(at: temporaryRoot)
       throw error

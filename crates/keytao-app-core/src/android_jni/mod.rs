@@ -747,6 +747,49 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeListKeyboardsJson(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_keyboard_path: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeListKeyboardsJson", std::ptr::null_mut(), || {
+        let Some(user_path) = optional_jni_path(&mut env, user_keyboard_path) else {
+            return jni_string(&mut env, "[]");
+        };
+        match keytao_theme::keyboard_store::list_keyboards(&user_path)
+            .and_then(|list| serde_json::to_string(&list).map_err(|e| e.to_string()))
+        {
+            Ok(json) => jni_string(&mut env, &json),
+            Err(_) => jni_string(&mut env, "[]"),
+        }
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeApplyKeyboard(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_keyboard_path: JString<'_>,
+    keyboard_id: JString<'_>,
+) -> jint {
+    android_jni_guard("nativeApplyKeyboard", 0, || {
+        let Some(user_path) = optional_jni_path(&mut env, user_keyboard_path) else {
+            return 0;
+        };
+        let Ok(id) = env.get_string(&keyboard_id).map(|s| s.to_string_lossy().into_owned()) else {
+            return 0;
+        };
+        if keytao_theme::keyboard_store::apply_keyboard(&user_path, &id).is_ok() {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineEnabled(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

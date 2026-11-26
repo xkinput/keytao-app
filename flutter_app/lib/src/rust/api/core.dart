@@ -575,6 +575,36 @@ Future<ThemeImportResultDto> importTheme({
   overwrite: overwrite,
 );
 
+Future<List<KeyboardSummaryDto>> getKeyboardLibrary() =>
+    RustLib.instance.api.crateApiCoreGetKeyboardLibrary();
+
+Future<KeyboardSummaryDto> applyKeyboard({required String id}) =>
+    RustLib.instance.api.crateApiCoreApplyKeyboard(id: id);
+
+Future<void> deleteKeyboard({required String id}) =>
+    RustLib.instance.api.crateApiCoreDeleteKeyboard(id: id);
+
+Future<KeyboardExportDto> exportKeyboard({required String id}) =>
+    RustLib.instance.api.crateApiCoreExportKeyboard(id: id);
+
+Future<KeyboardImportPreviewDto> previewKeyboardImport({
+  required String text,
+}) => RustLib.instance.api.crateApiCorePreviewKeyboardImport(text: text);
+
+Future<KeyboardImportResultDto> importKeyboard({
+  required String text,
+  required bool overwrite,
+}) => RustLib.instance.api.crateApiCoreImportKeyboard(
+  text: text,
+  overwrite: overwrite,
+);
+
+Future<KeyboardSummaryDto?> getRecommendedKeyboardForSchema({
+  required String schemaId,
+}) => RustLib.instance.api.crateApiCoreGetRecommendedKeyboardForSchema(
+  schemaId: schemaId,
+);
+
 Future<ImeUiSettingsDto> getImeUiSettings() =>
     RustLib.instance.api.crateApiCoreGetImeUiSettings();
 

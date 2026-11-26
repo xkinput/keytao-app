@@ -58,11 +58,19 @@ public struct KeyTaoThemeColor: Codable, Equatable {
 
     static func from(hex value: String) -> KeyTaoThemeColor? {
         let hex = value.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
-        guard hex.count == 6, let number = Int(hex, radix: 16) else { return nil }
+        guard (hex.count == 6 || hex.count == 8), let number = UInt64(hex, radix: 16) else { return nil }
+        if hex.count == 8 {
+            return KeyTaoThemeColor(
+                red: Int((number >> 24) & 0xFF),
+                green: Int((number >> 16) & 0xFF),
+                blue: Int((number >> 8) & 0xFF),
+                alpha: Int(number & 0xFF)
+            )
+        }
         return KeyTaoThemeColor(
-            red: (number >> 16) & 0xFF,
-            green: (number >> 8) & 0xFF,
-            blue: number & 0xFF,
+            red: Int((number >> 16) & 0xFF),
+            green: Int((number >> 8) & 0xFF),
+            blue: Int(number & 0xFF),
             alpha: 0xFF
         )
     }
@@ -181,6 +189,27 @@ public struct KeyTaoImeTheme: Codable {
             style.fontScale = overlay.fontScale ?? fontScale
             style.hintFontScale = overlay.hintFontScale ?? hintFontScale
             style.fontWeight = overlay.fontWeight ?? fontWeight
+            return style
+        }
+
+        func applying(groupStyle: KeyTaoKeyGroupStyle?) -> KeyStyle {
+            guard let groupStyle else { return self }
+            var style = self
+            if let hex = groupStyle.background, let color = KeyTaoThemeColor.from(hex: hex) {
+                style.background = color
+            }
+            if let hex = groupStyle.foreground, let color = KeyTaoThemeColor.from(hex: hex) {
+                style.foreground = color
+            }
+            if let hex = groupStyle.hintForeground, let color = KeyTaoThemeColor.from(hex: hex) {
+                style.hintForeground = color
+            }
+            if let hex = groupStyle.borderColor, let color = KeyTaoThemeColor.from(hex: hex) {
+                style.borderColor = color
+                if style.borderWidth <= 0 {
+                    style.borderWidth = 1
+                }
+            }
             return style
         }
     }

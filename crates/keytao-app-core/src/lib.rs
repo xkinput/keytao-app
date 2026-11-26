@@ -14,6 +14,7 @@ pub mod deploy;
 pub mod ime_host;
 pub mod ime_paths;
 pub mod ime_settings;
+pub mod keyboard_library;
 pub mod theme_library;
 pub mod system_fonts;
 pub mod rime_sync;

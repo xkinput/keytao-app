@@ -1494,6 +1494,49 @@ pub extern "C" fn keytao_resolve_keyboard_json(
     })
 }
 
+#[no_mangle]
+pub extern "C" fn keytao_list_keyboards_json(user_keyboard_path: *const c_char) -> *mut c_char {
+    guard("keytao_list_keyboards_json", std::ptr::null_mut(), || {
+        let Some(user_path) = optional_path_arg(user_keyboard_path) else {
+            return to_cstring("[]");
+        };
+        match keytao_theme::keyboard_store::list_keyboards(&user_path)
+            .and_then(|list| serde_json::to_string(&list).map_err(|e| e.to_string()))
+        {
+            Ok(json) => to_cstring(&json),
+            Err(e) => {
+                log_error(format_args!("keytao_list_keyboards_json failed: {e}"));
+                to_cstring("[]")
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn keytao_apply_keyboard(
+    user_keyboard_path: *const c_char,
+    keyboard_id: *const c_char,
+) -> bool {
+    guard("keytao_apply_keyboard", false, || {
+        let Some(user_path) = optional_path_arg(user_keyboard_path) else {
+            return false;
+        };
+        if keyboard_id.is_null() {
+            return false;
+        }
+        let Ok(id) = unsafe { std::ffi::CStr::from_ptr(keyboard_id) }.to_str() else {
+            return false;
+        };
+        match keytao_theme::keyboard_store::apply_keyboard(&user_path, id) {
+            Ok(_) => true,
+            Err(e) => {
+                log_error(format_args!("keytao_apply_keyboard failed: {e}"));
+                false
+            }
+        }
+    })
+}
+
 fn theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
     match resolved_theme_json(theme) {
         Ok(json) => to_cstring(&json),

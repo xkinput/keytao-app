@@ -208,6 +208,9 @@ pub(crate) fn yaml(bytes: &[u8], name: &str) -> Result<Value, CoreError> {
                 fn visit_unit<E: serde::de::Error>(self) -> Result<Loose, E> {
                     Ok(Loose(Value::Null))
                 }
+                fn visit_none<E: serde::de::Error>(self) -> Result<Loose, E> {
+                    self.visit_unit()
+                }
                 fn visit_seq<A: serde::de::SeqAccess<'de>>(
                     self,
                     mut seq: A,

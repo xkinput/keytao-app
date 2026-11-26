@@ -1,0 +1,23 @@
+version: 2
+
+meta:
+  id: "keytao.qwerty26"
+  name: "标准 26 键"
+  author: "KeyTao"
+  description: "默认 26 键全键盘，适用于拼音及通用方案（无助记）"
+  recommendedSchemas:
+    - "rime_mint"
+    - "wanxiang"
+    - "wanxiang_pro"
+    - "luna_pinyin"
+    - "luna_pinyin_simp"
+    - "double_pinyin"
+    - "double_pinyin_flypy"
+    - "double_pinyin_abc"
+    - "double_pinyin_mspy"
+    - "double_pinyin_pyjj"
+    - "double_pinyin_sogou"
+    - "double_pinyin_ziguang"
+
+inheritsDefaultLayers: true
+numberRow: auto

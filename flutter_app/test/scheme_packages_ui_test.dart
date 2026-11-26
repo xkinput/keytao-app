@@ -167,8 +167,11 @@ class _PackageController extends ViewController {
   }
 
   @override
-  Future<bool> importLocalScheme({String? schemeKey}) async {
-    actions.add('import:$schemeKey');
+  Future<bool> importLocalScheme({
+    String? schemeKey,
+    bool fromArchive = false,
+  }) async {
+    actions.add('import:$schemeKey:${fromArchive ? 'zip' : 'folder'}');
     return true;
   }
 
@@ -1785,14 +1788,12 @@ void main() {
             findsNothing,
           );
         }
-        final rows = tester
-            .widget<Table>(
-              find.descendant(of: grid, matching: find.byType(Table)),
-            )
-            .children;
+        final tops = cards.map(tester.getTopLeft).toList();
+        final columns = tops.map((top) => top.dx).toSet();
+        final rows = tops.map((top) => top.dy).toSet();
         if (width == 1200) {
           expect(rows, hasLength(1));
-          expect(rows.single.children, hasLength(4));
+          expect(columns, hasLength(4));
           for (var index = 1; index < cards.length; index++) {
             expect(
               tester.getTopLeft(cards[index]).dy,
@@ -1805,7 +1806,7 @@ void main() {
           }
         } else {
           expect(rows.length, greaterThan(1));
-          expect(rows.first.children.length, lessThan(5));
+          expect(columns.length, lessThan(5));
         }
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
@@ -2050,16 +2051,18 @@ void main() {
       hasLength(7),
     );
     await _openAddons(tester);
-    final rows = tester
-        .widget<Table>(
-          find.descendant(
-            of: find.byKey(const ValueKey('addon-schemes')),
-            matching: find.byType(Table),
-          ),
-        )
-        .children;
+    final cells = find.descendant(
+      of: find.byKey(const ValueKey('addon-schemes')),
+      matching: find.byType(HairlineGridCell),
+    );
+    final tops = [
+      for (final cell in tester.widgetList<HairlineGridCell>(cells))
+        tester.getTopLeft(find.byWidget(cell)),
+    ];
+    final columns = tops.map((top) => top.dx).toSet();
+    final rows = tops.map((top) => top.dy).toSet();
     expect(rows, hasLength(2));
-    expect(rows.first.children, hasLength(5));
+    expect(columns, hasLength(5));
     expect(
       find.byKey(const ValueKey('scheme-package-future-addon-2')),
       findsOneWidget,
@@ -2157,10 +2160,20 @@ void main() {
       _size(tester, Size(layout.width, 1000));
       await _pumpSchemePage(tester, c);
       final catalogue = find.byKey(const ValueKey('cloud-schemes'));
-      final table = find.descendant(
+      final cells = find.descendant(
         of: catalogue,
-        matching: find.byType(Table),
+        matching: find.byType(HairlineGridCell),
       );
+      Set<double> rowTops() => {
+        for (final cell in tester.widgetList<HairlineGridCell>(cells))
+          tester.getTopLeft(find.byWidget(cell)).dy,
+      };
+
+      final columns = {
+        for (final cell in tester.widgetList<HairlineGridCell>(cells))
+          tester.getTopLeft(find.byWidget(cell)).dx,
+      };
+      expect(columns, hasLength(layout.columns));
       final expand = find.bySemanticsLabel('展开全部方案');
       final collapsible = layout.columns > 1 && 7 > layout.columns * 2;
       if (!collapsible) {
@@ -2169,7 +2182,7 @@ void main() {
           hasLength(7),
         );
         expect(
-          tester.widget<Table>(table).children,
+          rowTops(),
           hasLength((7 / layout.columns).ceil()),
         );
         expect(expand, findsNothing);
@@ -2179,12 +2192,12 @@ void main() {
           tester.widget<HairlineGridSection>(catalogue).children,
           hasLength(visibleCount),
         );
-        expect(tester.widget<Table>(table).children, hasLength(2));
+        expect(rowTops(), hasLength(2));
         expect(find.text('+${7 - visibleCount + 1}'), findsOneWidget);
         expect(find.byKey(const ValueKey('addon-rime-lssp')), findsNothing);
         expect(
           tester.getSize(expand).width,
-          closeTo(tester.getSize(table).width / layout.columns, .01),
+          closeTo(tester.getSize(catalogue).width / layout.columns, .01),
         );
         await tester.ensureVisible(expand);
         await tester.tap(expand);
@@ -2194,7 +2207,7 @@ void main() {
           hasLength(8),
         );
         expect(
-          tester.widget<Table>(table).children,
+          rowTops(),
           hasLength((8 / layout.columns).ceil()),
         );
       }
@@ -2224,7 +2237,7 @@ void main() {
         await tester.ensureVisible(collapse);
         await tester.tap(collapse);
         await tester.pumpAndSettle();
-        expect(tester.widget<Table>(table).children, hasLength(2));
+        expect(rowTops(), hasLength(2));
       }
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -2606,11 +2619,34 @@ void main() {
       findsNothing,
     );
     expect(tester.takeException(), isNull);
-    final add = find.widgetWithText(ActionButton, '添加本地方案');
+    final add = find.widgetWithText(ActionButton, '从目录导入');
     expect(find.descendant(of: local, matching: add), findsOneWidget);
+    expect(
+      find.descendant(
+        of: local,
+        matching: find.textContaining('请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: local, matching: find.textContaining('512 MB')),
+      findsOneWidget,
+    );
     await tester.ensureVisible(add);
     await tester.tap(add);
-    expect(c.actions, ['import:null']);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('自动过滤 build'), findsAtLeastNWidgets(1));
+    expect(find.textContaining('512 MB'), findsAtLeastNWidgets(1));
+    expect(find.byKey(const ValueKey('import-local-folder-button')), findsOneWidget);
+    expect(find.byKey(const ValueKey('import-local-zip-button')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('import-local-folder-button')));
+    await tester.pumpAndSettle();
+    expect(c.actions, ['import:null:folder']);
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('import-local-zip-button')));
+    await tester.pumpAndSettle();
+    expect(c.actions, ['import:null:folder', 'import:null:zip']);
     c.installedPackages = [];
     c.rebuild();
     await tester.pumpAndSettle();
@@ -2672,7 +2708,10 @@ void main() {
       );
       await tester.tap(find.widgetWithText(FItem, '重新导入'));
       await tester.pumpAndSettle();
-      expect(c.actions.last, 'import:local-custom');
+      expect(find.text('重新导入本地方案'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('import-local-zip-button')));
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'import:local-custom:zip');
       await tester.tap(more);
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FItem, '卸载'));

@@ -13,6 +13,9 @@ class IosHost {
   Future<Map<String, dynamic>?> importLocalSchemeDirectory() =>
       channel.invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
 
+  Future<Map<String, dynamic>?> importLocalSchemeArchive() =>
+      channel.invokeMapMethod<String, dynamic>('importLocalSchemeArchive');
+
   Future<void> openSettings() => channel.invokeMethod<void>('openSettings');
 
   Future<void> openUrl(String url) =>

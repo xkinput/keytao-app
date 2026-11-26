@@ -283,19 +283,18 @@ void main() {
           greaterThan(tester.getTopLeft(cards[0]).dx),
         );
       } else {
-        for (var index = 0; index < cards.length; index++) {
-          final rect = tester.getRect(cards[index]);
-          expect(rect.left, tester.getTopLeft(cards[index % 2]).dx);
-          if (index.isOdd) {
-            final left = tester.getRect(cards[index - 1]);
-            expect(rect.top, left.top);
-            expect(rect.left, greaterThanOrEqualTo(left.right));
-          }
-          if (index >= 2) {
-            expect(
-              rect.top,
-              greaterThanOrEqualTo(tester.getBottomLeft(cards[index - 2]).dy),
-            );
+        final rects = cards.map(tester.getRect).toList();
+        final columnLefts = {rects[0].left, rects[1].left};
+        expect(columnLefts, hasLength(2));
+        expect(rects[1].left, greaterThanOrEqualTo(rects[0].right));
+        for (var index = 0; index < rects.length; index++) {
+          final rect = rects[index];
+          expect(columnLefts, contains(rect.left));
+          for (final previous in rects.take(index)) {
+            expect(rect.overlaps(previous), isFalse);
+            if (rect.left == previous.left) {
+              expect(rect.top, greaterThan(previous.top));
+            }
           }
         }
       }

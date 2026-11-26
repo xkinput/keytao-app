@@ -340,15 +340,90 @@ fn local_import_preserves_package_schema_order() {
             .unwrap();
         }
         let key = import_local_scheme(&core, &path, "Local", None).unwrap();
-        let files = stored_files(&core, &key);
-        let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
         let expected: &[&str] = if config_name.is_some() {
             &["keytao", "keytao-dz", "keytao-bj"]
         } else {
             &["keytao-aa", "keytao-bj", "keytao-cx", "keytao-dz", "keytao"]
         };
-        assert_eq!(crate::scheme_files::parse_schema_list(config), expected);
+        assert_eq!(key, format!("local-{}", expected[0]));
+        let installed: Vec<String> = core.state().installed_packages.keys().cloned().collect();
+        let expected_keys: Vec<String> = expected.iter().map(|s| format!("local-{s}")).collect();
+        let mut sorted_expected = expected_keys.clone();
+        sorted_expected.sort();
+        assert_eq!(installed, sorted_expected);
+        for schema in expected {
+            let files = stored_files(&core, &format!("local-{schema}"));
+            let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
+            assert_eq!(crate::scheme_files::parse_schema_list(config), [*schema]);
+        }
     }
+}
+
+#[test]
+fn local_import_splits_multi_schema_directory_separating_dicts_and_sharing_lua() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = directory.path().join("multi-rime");
+    fs::create_dir_all(path.join("lua")).unwrap();
+    fs::create_dir_all(path.join("cn_dicts")).unwrap();
+    fs::write(
+        path.join("alpha.schema.yaml"),
+        "schema:\n  schema_id: alpha\n  name: 方案甲\ntranslator:\n  dictionary: alpha\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("beta.schema.yaml"),
+        "schema:\n  schema_id: beta\n  name: 方案乙\ntranslator:\n  dictionary: beta\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("alpha.dict.yaml"),
+        "---\nname: alpha\nversion: '1'\nimport_tables:\n  - alpha_extra\n...\n甲\ta\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("cn_dicts/alpha_extra.dict.yaml"),
+        "---\nname: alpha_extra\n...\n额外甲\taa\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("beta.dict.yaml"),
+        "---\nname: beta\nversion: '1'\n...\n乙\tb\n",
+    )
+    .unwrap();
+    fs::write(path.join("rime.lua"), "return {}\n").unwrap();
+    fs::write(path.join("lua/common.lua"), "-- shared lua\n").unwrap();
+
+    let first = import_local_scheme(&core, &path, "多方案目录", None).unwrap();
+    assert_eq!(first, "local-alpha");
+
+    let alpha_files = stored_files(&core, "local-alpha");
+    assert!(alpha_files.contains_key("alpha.schema.yaml"));
+    assert!(alpha_files.contains_key("alpha.dict.yaml"));
+    assert!(alpha_files.contains_key("cn_dicts/alpha_extra.dict.yaml"));
+    assert!(alpha_files.contains_key("rime.lua"));
+    assert!(alpha_files.contains_key("lua/common.lua"));
+    assert!(!alpha_files.contains_key("beta.schema.yaml"));
+    assert!(!alpha_files.contains_key("beta.dict.yaml"));
+
+    let beta_files = stored_files(&core, "local-beta");
+    assert!(beta_files.contains_key("beta.schema.yaml"));
+    assert!(beta_files.contains_key("beta.dict.yaml"));
+    assert!(beta_files.contains_key("rime.lua"));
+    assert!(beta_files.contains_key("lua/common.lua"));
+    assert!(!beta_files.contains_key("alpha.schema.yaml"));
+    assert!(!beta_files.contains_key("alpha.dict.yaml"));
+    assert!(!beta_files.contains_key("cn_dicts/alpha_extra.dict.yaml"));
+
+    let store = PackageStore::new(&core);
+    assert_eq!(
+        store.read_meta("local-alpha").unwrap().unwrap().display_name.as_deref(),
+        Some("方案甲")
+    );
+    assert_eq!(
+        store.read_meta("local-beta").unwrap().unwrap().display_name.as_deref(),
+        Some("方案乙")
+    );
 }
 
 #[test]
@@ -537,4 +612,217 @@ fn local_reimport_replaces_sources_and_preserves_runtime_user_files() {
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(PackageStore::new(&core).metadata_path(&key)).unwrap()).unwrap();
     assert_eq!(metadata["origin"], path.canonicalize().unwrap().to_str().unwrap());
+}
+
+fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+    let mut writer = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, content) in entries {
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(content).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+#[test]
+fn local_import_filters_all_build_artifacts_including_orphan_bins() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = source(directory.path(), "with-build");
+    fs::create_dir_all(path.join("build")).unwrap();
+    fs::create_dir_all(path.join("logs")).unwrap();
+    fs::create_dir_all(path.join("example.leveldb")).unwrap();
+    fs::write(path.join("build/example.table.bin"), b"compiled table").unwrap();
+    fs::write(path.join("build/orphan.reverse.bin"), b"orphan compiled bin").unwrap();
+    fs::write(path.join("build/example.schema.yaml"), b"built schema").unwrap();
+    fs::write(path.join("logs/rime.log"), b"runtime log").unwrap();
+    fs::write(path.join("example.leveldb/CURRENT"), b"leveldb").unwrap();
+
+    let key = import_local_scheme(&core, &path, "WithBuild", None).unwrap();
+    let files = stored_files(&core, &key);
+    assert!(files.contains_key("example.schema.yaml"));
+    assert!(
+        files.keys().all(|name| !name.starts_with("build/")),
+        "expected build/ to be filtered out, got {:?}",
+        files.keys().collect::<Vec<_>>()
+    );
+    assert!(!files.contains_key("logs/rime.log"));
+    assert!(!files.contains_key("example.leveldb/CURRENT"));
+}
+
+#[test]
+fn local_import_reports_size_limit_when_generated_config_exceeds_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = source(directory.path(), "at-limit");
+    let schema_bytes = fs::metadata(path.join("example.schema.yaml")).unwrap().len();
+    fs::File::create(path.join("example.dict.yaml"))
+        .unwrap()
+        .set_len(DEFAULT_MAX_EXPANDED_BYTES - schema_bytes)
+        .unwrap();
+
+    let error = import_local_scheme(&core, &path, "AtLimit", None).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("512 MB"), "{message}");
+    assert!(message.contains("default.custom.yaml"), "{message}");
+}
+
+#[test]
+fn local_zip_import_preserves_non_ascii_display_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let zip = directory.path().join("中文.ZIP");
+    write_zip(
+        &zip,
+        &[(
+            "demo.schema.yaml",
+            b"schema:\n  schema_id: demo\n  name: Demo\n",
+        )],
+    );
+
+    let key = import_local_scheme(&core, &zip, "中文", None).unwrap();
+    let (_, meta) = PackageStore::new(&core).read_files(&key).unwrap();
+    assert_eq!(meta.display_name.as_deref(), Some("中文"));
+}
+
+#[test]
+fn local_zip_import_rejects_unicode_case_conflicts() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let zip = directory.path().join("duplicate.zip");
+    write_zip(
+        &zip,
+        &[
+            ("demo.schema.yaml", b"schema:\n  schema_id: demo\n  name: Demo\n"),
+            ("É.dict.yaml", b"first"),
+            ("é.dict.yaml", b"second"),
+        ],
+    );
+
+    let error = import_local_scheme(&core, &zip, "Duplicate", None).unwrap_err();
+    assert!(error.to_string().contains("大小写冲突文件"));
+}
+
+#[test]
+fn local_import_auto_extracts_zip_and_filters_build_before_size_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+
+    // 1. Wrapped zip (with __MACOSX junk, default.custom.yaml, and build/ dir) auto-unwraps and filters build/.
+    let wrapped_zip = directory.path().join("My-Rime-Pack.zip");
+    write_zip(
+        &wrapped_zip,
+        &[
+            (
+                "my-rime-main/demo.schema.yaml",
+                b"schema:\n  schema_id: demo\n  name: Demo\n",
+            ),
+            (
+                "my-rime-main/default.custom.yaml",
+                b"patch:\n  schema_list:\n    - schema: demo\n",
+            ),
+            ("my-rime-main/lua/helper.lua", b"return {}\n"),
+            ("my-rime-main/build/demo.table.bin", b"compiled huge binary"),
+            ("my-rime-main/build/orphan.reverse.bin", b"orphan binary"),
+            ("my-rime-main/logs/rime.log", b"log"),
+            ("__MACOSX/my-rime-main/._demo.schema.yaml", b"apple double"),
+        ],
+    );
+
+    let key = import_local_scheme(&core, &wrapped_zip, "My-Rime-Pack.zip", None).unwrap();
+    assert_eq!(key, "local-my-rime-pack");
+    let (file_list, meta) = PackageStore::new(&core).read_files(&key).unwrap();
+    let files: BTreeMap<String, Vec<u8>> = file_list.into_iter().collect();
+    assert_eq!(meta.display_name.as_deref(), Some("My-Rime-Pack"));
+    assert!(files.contains_key("demo.schema.yaml"));
+    assert!(files.contains_key("lua/helper.lua"));
+    assert!(files.keys().all(|name| !name.starts_with("build/")));
+    assert!(!files.contains_key("logs/rime.log"));
+
+    // 2. Zip whose build/ claims > 512 MiB in central directory still imports because build/ is skipped before size counting.
+    let mut build_bomb_zip = {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .start_file("wrapper/build/huge.table.bin", options)
+                .unwrap();
+            writer.write_all(b"x").unwrap();
+            writer
+                .start_file("wrapper/demo.schema.yaml", options)
+                .unwrap();
+            writer
+                .write_all(b"schema:\n  schema_id: demo\n  name: Demo\n")
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    };
+    let entry_pos = build_bomb_zip
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .unwrap();
+    build_bomb_zip[entry_pos + 24..entry_pos + 28]
+        .copy_from_slice(&(512u32 * 1024 * 1024 + 1).to_le_bytes());
+    let build_bomb_path = directory.path().join("with-huge-build.zip");
+    fs::write(&build_bomb_path, build_bomb_zip).unwrap();
+    let key2 = import_local_scheme(&core, &build_bomb_path, "", None).unwrap();
+    assert_eq!(key2, "local-with-huge-build");
+
+    // 3. Zip whose non-build file claims > 512 MiB fails with explicit 512 MB limit + pure Rime/zip hint.
+    let mut oversized_zip = {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("demo.schema.yaml", options).unwrap();
+            writer
+                .write_all(b"schema:\n  schema_id: demo\n  name: Demo\n")
+                .unwrap();
+            writer.start_file("huge.dict.yaml", options).unwrap();
+            writer.write_all(b"x").unwrap();
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    };
+    let second_cd = oversized_zip
+        .windows(4)
+        .enumerate()
+        .filter_map(|(idx, window)| (window == b"PK\x01\x02").then_some(idx))
+        .nth(1)
+        .unwrap();
+    oversized_zip[second_cd + 24..second_cd + 28]
+        .copy_from_slice(&(512u32 * 1024 * 1024 + 1).to_le_bytes());
+    let oversized_path = directory.path().join("oversized.zip");
+    fs::write(&oversized_path, oversized_zip).unwrap();
+    let err = import_local_scheme(&core, &oversized_path, "Oversized", None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("512 MB"), "{err}");
+    assert!(err.contains("huge.dict.yaml"), "{err}");
+    assert!(err.contains("纯 Rime 文件夹"), "{err}");
+    assert!(err.contains(".zip"), "{err}");
+    assert!(err.contains("build"), "{err}");
+
+    // 4. Non-zip file returns clear prompt.
+    let plain_file = directory.path().join("notes.txt");
+    fs::write(&plain_file, b"not a zip").unwrap();
+    let err = import_local_scheme(&core, &plain_file, "Notes", None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("纯 Rime 文件夹"), "{err}");
+    assert!(err.contains(".zip"), "{err}");
+
+    // 5. Zip containing only build/*.schema.yaml is rejected as missing real schema.
+    let build_only_zip = directory.path().join("build-only.zip");
+    write_zip(
+        &build_only_zip,
+        &[("build/demo.schema.yaml", b"schema: {schema_id: demo}\n")],
+    );
+    let err = import_local_scheme(&core, &build_only_zip, "BuildOnly", None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("未找到"), "{err}");
+    assert!(err.contains("纯 Rime 文件夹"), "{err}");
 }

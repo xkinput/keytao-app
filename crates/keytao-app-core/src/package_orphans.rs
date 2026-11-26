@@ -323,7 +323,10 @@ fn collect(
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let name_lower = name.to_ascii_lowercase();
-        if matches!(name_lower.as_str(), "app-state.json" | "sync")
+        if matches!(
+            name_lower.as_str(),
+            "app-state.json" | "sync" | ".ds_store" | "thumbs.db" | "desktop.ini"
+        )
             || name_lower.contains(".userdb")
             || name_lower.ends_with(".leveldb")
             || path.starts_with(sync_dir)
@@ -355,7 +358,9 @@ fn collect(
                     | ".keytao-package-deploy.lock"
                     | keytao_core::english_mode::SETTINGS_FILE
                     | "theme.yaml"
+                    | "themes"
                     | "keyboard.yaml"
+                    | "keyboards"
                     | "log"
             )
         {
@@ -1020,7 +1025,12 @@ mod tests {
         let protected = [
             keytao_core::english_mode::SETTINGS_FILE,
             "theme.yaml",
+            "themes/my.default-2.yaml",
+            "themes/my.paper-ink-2.yaml",
             "keyboard.yaml",
+            "keyboards/my.custom.yaml",
+            ".DS_Store",
+            "lua/.DS_Store",
             "rime.lua",
             "log/a.log",
             "log/nested/debug.yaml",

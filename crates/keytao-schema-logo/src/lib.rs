@@ -270,8 +270,8 @@ fn render_schema_logo_inner(
             limits.max_image_height = Some(size);
             reader.limits(limits);
             if reader
-                .decode()
-                .is_ok_and(|image| image.width() == size && image.height() == size)
+                .into_dimensions()
+                .is_ok_and(|(width, height)| width == size && height == size)
             {
                 return Ok(Some(LogoRender::Cached));
             }

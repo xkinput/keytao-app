@@ -723,6 +723,28 @@ final class KeyTaoIOSEngine {
         }
     }
 
+    func listKeyboardIds() -> [String] {
+        let path = KeyTaoIOSPaths.keyboardFile(userRoot: userRoot).path
+        guard let ptr = path.withCString({ keytao_list_keyboards_json($0) }) else {
+            return []
+        }
+        defer { keytao_free_string(ptr) }
+        guard let data = String(cString: ptr).data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+    }
+
+    func applyKeyboard(id: String) -> Bool {
+        let path = KeyTaoIOSPaths.keyboardFile(userRoot: userRoot).path
+        return path.withCString { pathPtr in
+            id.withCString { idPtr in
+                keytao_apply_keyboard(pathPtr, idPtr)
+            }
+        }
+    }
+
     func persistThemeUi(colorScheme: String, accentHex: String?, resetAppearance: Bool = false) -> Bool {
         let path = KeyTaoIOSPaths.themeFile(userRoot: userRoot).path
         let written = path.withCString { pathPointer in

@@ -16,11 +16,123 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use crate::{assign, clamp};
 
+pub const KEYBOARD_SOURCE_VERSION: u32 = 2;
+pub const DEFAULT_KEYBOARD_ID: &str = "keytao.qwerty26";
+pub const DEFAULT_KEYBOARD_NAME: &str = "标准 26 键";
 pub const DEFAULT_MOBILE_LAYOUT_YAML: &str = include_str!("../default-keyboard.yaml");
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MobileNumberRowMode {
+    #[default]
+    Auto,
+    Embedded,
+    Hidden,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileKeyGroupStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_foreground: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileKeyGroup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<MobileKeyGroupStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark: Option<MobileKeyGroupStyle>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileKeySlots {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_left: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_center: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_right: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_sub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom_left: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom_center: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom_right: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bottom_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileKeyMnemonic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_badge: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bottom_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default = "default_true")]
+    pub hide_regular_slots: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl MobileKeyMnemonic {
+    pub fn is_non_empty(&self) -> bool {
+        self.top.as_deref().is_some_and(|s| !s.is_empty())
+            || self.top_badge.as_deref().is_some_and(|s| !s.is_empty())
+            || self.bottom_lines.iter().any(|line| !line.is_empty())
+            || self.group.as_deref().is_some_and(|s| !s.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileKeyboardMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended_schemas: Vec<String>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileLayout {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended_schemas: Vec<String>,
+    pub has_mnemonics: bool,
+    pub number_row: MobileNumberRowMode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub key_groups: BTreeMap<String, MobileKeyGroup>,
     pub height: f32,
     pub candidate_bar_height: f32,
     /// Fixed cross-platform row height for clipboard-history entries.
@@ -76,6 +188,12 @@ pub struct MobileKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<MobileKeySlots>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemonic: Option<MobileKeyMnemonic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<MobileCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ascii_action: Option<MobileCommand>,
@@ -83,6 +201,10 @@ pub struct MobileKey {
     pub swipe_up: Option<MobileCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swipe_down: Option<MobileCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swipe_left: Option<MobileCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swipe_right: Option<MobileCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub long_press: Option<MobileCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +263,14 @@ pub struct MobileCommand {
 impl Default for MobileLayout {
     fn default() -> Self {
         Self {
+            id: DEFAULT_KEYBOARD_ID.into(),
+            name: DEFAULT_KEYBOARD_NAME.into(),
+            author: None,
+            description: None,
+            recommended_schemas: Vec::new(),
+            has_mnemonics: false,
+            number_row: MobileNumberRowMode::Auto,
+            key_groups: BTreeMap::new(),
             height: 266.0,
             candidate_bar_height: 52.0,
             clipboard_row_height: 44.0,
@@ -198,6 +328,62 @@ pub fn resolve_mobile_layout_from_paths(
     sanitize(layout)
 }
 
+/// Resolves a mobile keyboard layout directly from a YAML or JSON document
+/// overlaid onto the bundled default layout (unless `inheritsDefaultLayers` is false).
+pub fn resolve_mobile_layout_from_yaml(content: &str) -> MobileLayout {
+    let mut layout = MobileLayout::default();
+    let overlay = parse_mobile_layout_yaml(content);
+    let inherits_default = overlay
+        .as_ref()
+        .and_then(|partial| partial.inherits_default_layers)
+        .unwrap_or(true);
+    if inherits_default {
+        if let Some(base) = parse_mobile_layout_yaml(DEFAULT_MOBILE_LAYOUT_YAML) {
+            layout.apply(base);
+        }
+    }
+    if let Some(partial) = overlay {
+        layout.apply(partial);
+    }
+    sanitize(layout)
+}
+
+/// Compact JSON containing only the fields needed for keyboard card previews
+/// (omitting symbolRows/numberRows/layers to keep library responses fast and tiny).
+pub fn mobile_layout_preview_json(layout: &MobileLayout) -> Result<String, serde_json::Error> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PreviewLayout<'a> {
+        id: &'a str,
+        name: &'a str,
+        has_mnemonics: bool,
+        number_row: MobileNumberRowMode,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        key_groups: &'a BTreeMap<String, MobileKeyGroup>,
+        height: f32,
+        candidate_bar_height: f32,
+        horizontal_gap: f32,
+        vertical_gap: f32,
+        outer_inset: f32,
+        max_key_height: f32,
+        rows: &'a [Vec<MobileKey>],
+    }
+    serde_json::to_string(&PreviewLayout {
+        id: &layout.id,
+        name: &layout.name,
+        has_mnemonics: layout.has_mnemonics,
+        number_row: layout.number_row,
+        key_groups: &layout.key_groups,
+        height: layout.height,
+        candidate_bar_height: layout.candidate_bar_height,
+        horizontal_gap: layout.horizontal_gap,
+        vertical_gap: layout.vertical_gap,
+        outer_inset: layout.outer_inset,
+        max_key_height: layout.max_key_height,
+        rows: &layout.rows,
+    })
+}
+
 pub fn mobile_layout_json(layout: &MobileLayout) -> Result<String, serde_json::Error> {
     serde_json::to_string(layout)
 }
@@ -238,6 +424,12 @@ fn parse_mobile_layout_yaml(content: &str) -> Option<PartialMobileLayout> {
 }
 
 fn sanitize(mut layout: MobileLayout) -> MobileLayout {
+    if layout.id.trim().is_empty() {
+        layout.id = DEFAULT_KEYBOARD_ID.into();
+    }
+    if layout.name.trim().is_empty() {
+        layout.name = DEFAULT_KEYBOARD_NAME.into();
+    }
     layout.height = clamp(layout.height, 160.0, 420.0);
     layout.candidate_bar_height = clamp(layout.candidate_bar_height, 36.0, 96.0);
     layout.bottom_inset = clamp(layout.bottom_inset, 0.0, 80.0);
@@ -254,6 +446,15 @@ fn sanitize(mut layout: MobileLayout) -> MobileLayout {
             && name != "numbers"
             && name != "symbols"
             && !rows.is_empty()
+    });
+    layout.has_mnemonics = layout.rows.iter().flatten().any(|key| {
+        key.mnemonic
+            .as_ref()
+            .is_some_and(MobileKeyMnemonic::is_non_empty)
+    }) || layout.layers.values().flatten().flatten().any(|key| {
+        key.mnemonic
+            .as_ref()
+            .is_some_and(MobileKeyMnemonic::is_non_empty)
     });
     layout
 }
@@ -277,6 +478,12 @@ impl MobileLayoutFile {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PartialMobileLayout {
     version: Option<u32>,
+    meta: Option<MobileKeyboardMeta>,
+    keyboard_id: Option<String>,
+    keyboard_name: Option<String>,
+    inherits_default_layers: Option<bool>,
+    number_row: Option<MobileNumberRowMode>,
+    key_groups: Option<BTreeMap<String, MobileKeyGroup>>,
     #[serde(alias = "keyboardHeightDp")]
     height: Option<f32>,
     #[serde(alias = "candidateBarHeightDp")]
@@ -358,6 +565,15 @@ where
 impl PartialMobileLayout {
     fn has_any_value(&self) -> bool {
         self.version.is_some()
+            || self.meta.is_some()
+            || self.keyboard_id.is_some()
+            || self.keyboard_name.is_some()
+            || self.inherits_default_layers.is_some()
+            || self.number_row.is_some()
+            || self
+                .key_groups
+                .as_ref()
+                .is_some_and(|groups| !groups.is_empty())
             || self.height.is_some()
             || self.candidate_bar_height.is_some()
             || self.bottom_inset.is_some()
@@ -380,6 +596,33 @@ impl PartialMobileLayout {
 
 impl MobileLayout {
     fn apply(&mut self, partial: PartialMobileLayout) {
+        if let Some(meta) = partial.meta {
+            if let Some(id) = meta.id.filter(|s| !s.trim().is_empty()) {
+                self.id = id;
+            }
+            if let Some(name) = meta.name.filter(|s| !s.trim().is_empty()) {
+                self.name = name;
+            }
+            if meta.author.is_some() {
+                self.author = meta.author;
+            }
+            if meta.description.is_some() {
+                self.description = meta.description;
+            }
+            if !meta.recommended_schemas.is_empty() {
+                self.recommended_schemas = meta.recommended_schemas;
+            }
+        }
+        if let Some(id) = partial.keyboard_id.filter(|s| !s.trim().is_empty()) {
+            self.id = id;
+        }
+        if let Some(name) = partial.keyboard_name.filter(|s| !s.trim().is_empty()) {
+            self.name = name;
+        }
+        assign(&mut self.number_row, partial.number_row);
+        if let Some(groups) = partial.key_groups {
+            self.key_groups.extend(groups);
+        }
         assign(&mut self.height, partial.height);
         assign(&mut self.candidate_bar_height, partial.candidate_bar_height);
         assign(&mut self.bottom_inset, partial.bottom_inset);

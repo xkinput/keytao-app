@@ -10,6 +10,7 @@
 
 pub mod editor;
 pub mod font_resolution;
+pub mod keyboard_store;
 pub mod mobile_layout;
 pub mod mobile_theme;
 pub mod panel_hit;

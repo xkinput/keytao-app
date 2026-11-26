@@ -79,6 +79,76 @@ public struct KeyTaoKeyAlternate: Codable, Equatable {
     }
 }
 
+public struct KeyTaoKeyGroupStyle: Codable, Equatable {
+    public var background: String?
+    public var foreground: String?
+    public var hintForeground: String?
+    public var borderColor: String?
+}
+
+public struct KeyTaoKeyGroup: Codable, Equatable {
+    public var light: KeyTaoKeyGroupStyle?
+    public var dark: KeyTaoKeyGroupStyle?
+
+    public func resolve(isDark: Bool) -> KeyTaoKeyGroupStyle? {
+        isDark ? (dark ?? light) : (light ?? dark)
+    }
+}
+
+public struct KeyTaoKeySlots: Codable, Equatable {
+    public var topLeft: String?
+    public var topCenter: String?
+    public var topRight: String?
+    public var labelSub: String?
+    public var bottomLeft: String?
+    public var bottomCenter: String?
+    public var bottomRight: String?
+    public var bottomLines: [String]?
+
+    public var resolvedBottomLines: [String] {
+        if let lines = bottomLines, !lines.isEmpty {
+            return lines
+        }
+        if let center = bottomCenter, !center.isEmpty {
+            return [center]
+        }
+        return []
+    }
+
+    public var hasContent: Bool {
+        !(topLeft?.isEmpty ?? true)
+            || !(topCenter?.isEmpty ?? true)
+            || !(topRight?.isEmpty ?? true)
+            || !(labelSub?.isEmpty ?? true)
+            || !(bottomLeft?.isEmpty ?? true)
+            || !(bottomCenter?.isEmpty ?? true)
+            || !(bottomRight?.isEmpty ?? true)
+            || !(bottomLines?.isEmpty ?? true)
+    }
+}
+
+public struct KeyTaoKeyMnemonic: Codable, Equatable {
+    public var top: String?
+    public var topBadge: String?
+    public var bottomLines: [String]?
+    public var tone: String?
+    public var group: String?
+    public var hideRegularSlots: Bool?
+
+    public var topText: String? {
+        let parts = [top, topBadge].compactMap { $0?.isEmpty == false ? $0 : nil }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    public var resolvedBottomLines: [String] {
+        bottomLines?.filter { !$0.isEmpty } ?? []
+    }
+
+    public var isNonEmpty: Bool {
+        topText != nil || !resolvedBottomLines.isEmpty || !(group?.isEmpty ?? true)
+    }
+}
+
 public struct KeyTaoKeySpec: Codable, Equatable {
     public var label: String
     public var value: String?
@@ -86,9 +156,14 @@ public struct KeyTaoKeySpec: Codable, Equatable {
     public var hint: String?
     public var weight: CGFloat?
     public var style: String?
+    public var group: String?
+    public var slots: KeyTaoKeySlots?
+    public var mnemonic: KeyTaoKeyMnemonic?
     public var action: KeyTaoKeyCommand?
     public var swipeUp: KeyTaoKeyCommand?
     public var swipeDown: KeyTaoKeyCommand?
+    public var swipeLeft: KeyTaoKeyCommand?
+    public var swipeRight: KeyTaoKeyCommand?
     public var longPress: KeyTaoKeyCommand?
     public var asciiLongPress: KeyTaoKeyCommand?
     public var asciiLabel: String?
@@ -106,9 +181,14 @@ public struct KeyTaoKeySpec: Codable, Equatable {
         hint: String? = nil,
         weight: CGFloat? = nil,
         style: String? = nil,
+        group: String? = nil,
+        slots: KeyTaoKeySlots? = nil,
+        mnemonic: KeyTaoKeyMnemonic? = nil,
         action: KeyTaoKeyCommand? = nil,
         swipeUp: KeyTaoKeyCommand? = nil,
         swipeDown: KeyTaoKeyCommand? = nil,
+        swipeLeft: KeyTaoKeyCommand? = nil,
+        swipeRight: KeyTaoKeyCommand? = nil,
         longPress: KeyTaoKeyCommand? = nil,
         asciiLongPress: KeyTaoKeyCommand? = nil,
         asciiLabel: String? = nil,
@@ -125,9 +205,14 @@ public struct KeyTaoKeySpec: Codable, Equatable {
         self.hint = hint
         self.weight = weight
         self.style = style
+        self.group = group
+        self.slots = slots
+        self.mnemonic = mnemonic
         self.action = action
         self.swipeUp = swipeUp
         self.swipeDown = swipeDown
+        self.swipeLeft = swipeLeft
+        self.swipeRight = swipeRight
         self.longPress = longPress
         self.asciiLongPress = asciiLongPress
         self.asciiLabel = asciiLabel
@@ -245,10 +330,15 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var numberRows: [[KeyTaoKeySpec]]
     public var symbolRows: [[KeyTaoKeySpec]]
     public var customRows: [String: [[KeyTaoKeySpec]]]
+    public var id: String
+    public var name: String
+    public var hasMnemonics: Bool
+    public var numberRow: String
+    public var keyGroups: [String: KeyTaoKeyGroup]
 
     public var effectiveKeyboardHeightDp: CGFloat {
         let baseHeight: CGFloat
-        if numberRowEnabled, !rows.isEmpty {
+        if numberRowEnabled, numberRow == "auto", !rows.isEmpty {
             baseHeight = keyboardHeightDp * CGFloat(rows.count + 1) / CGFloat(rows.count)
         } else {
             baseHeight = keyboardHeightDp
@@ -307,6 +397,11 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case layers
         case pages
         case keyboards
+        case id
+        case name
+        case hasMnemonics
+        case numberRow
+        case keyGroups
     }
 
     private enum HapticsCodingKeys: String, CodingKey {
@@ -357,7 +452,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         rows: [[KeyTaoKeySpec]],
         numberRows: [[KeyTaoKeySpec]],
         symbolRows: [[KeyTaoKeySpec]],
-        customRows: [String: [[KeyTaoKeySpec]]] = [:]
+        customRows: [String: [[KeyTaoKeySpec]]] = [:],
+        id: String = "keytao.qwerty26",
+        name: String = "标准 26 键",
+        hasMnemonics: Bool = false,
+        numberRow: String = "auto",
+        keyGroups: [String: KeyTaoKeyGroup] = [:]
     ) {
         self.keyboardHeightDp = keyboardHeightDp
         self.candidateBarHeightDp = candidateBarHeightDp
@@ -406,6 +506,11 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.numberRows = Self.normalizeNumberRows(numberRows)
         self.symbolRows = Self.normalizeRows(symbolRows)
         self.customRows = Self.normalizeCustomRows(customRows)
+        self.id = id.isEmpty ? "keytao.qwerty26" : id
+        self.name = name.isEmpty ? "标准 26 键" : name
+        self.hasMnemonics = hasMnemonics || self.rows.contains { row in row.contains { $0.mnemonic?.isNonEmpty == true } }
+        self.numberRow = ["auto", "embedded", "hidden"].contains(numberRow) ? numberRow : "auto"
+        self.keyGroups = keyGroups
     }
 
     public init(from decoder: Decoder) throws {
@@ -552,6 +657,16 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 ?? Self.decodeLayerRows(from: container, forKey: .keyboards)
                 ?? Self.fallback.customRows
         )
+        let decodedId = (try? container.decode(String.self, forKey: .id)) ?? ""
+        self.id = decodedId.isEmpty ? "keytao.qwerty26" : decodedId
+        let decodedName = (try? container.decode(String.self, forKey: .name)) ?? ""
+        self.name = decodedName.isEmpty ? "标准 26 键" : decodedName
+        let decodedHasMnemonics = (try? container.decode(Bool.self, forKey: .hasMnemonics)) ?? false
+        self.hasMnemonics = decodedHasMnemonics
+            || self.rows.contains { row in row.contains { $0.mnemonic?.isNonEmpty == true } }
+        let decodedNumberRow = (try? container.decode(String.self, forKey: .numberRow)) ?? "auto"
+        self.numberRow = ["auto", "embedded", "hidden"].contains(decodedNumberRow) ? decodedNumberRow : "auto"
+        self.keyGroups = (try? container.decode([String: KeyTaoKeyGroup].self, forKey: .keyGroups)) ?? [:]
     }
 
     // theme.yaml no longer carries the mobile layout; keyboard.yaml resolved
@@ -661,6 +776,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(symbolRows, forKey: .symbolRows)
         if !customRows.isEmpty {
             try container.encode(customRows, forKey: .layers)
+        }
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(hasMnemonics, forKey: .hasMnemonics)
+        try container.encode(numberRow, forKey: .numberRow)
+        if !keyGroups.isEmpty {
+            try container.encode(keyGroups, forKey: .keyGroups)
         }
     }
 

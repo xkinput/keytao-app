@@ -2696,11 +2696,26 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             )
             add(slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8f, 1.4f, 0.1f, "%.1f×".format(settingsConfig.candidateFontScale)))
             add(toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible))
-            add(toggle("键位助记", "mnemonicHintsEnabled", settingsConfig.mnemonicHintsEnabled))
+            if (settingsConfig.hasMnemonics) {
+                add(toggle("键位助记", "mnemonicHintsEnabled", settingsConfig.mnemonicHintsEnabled))
+            }
             add(section("布局"))
+            add(
+                CandidateDrawItem(
+                    index = nextIndex(),
+                    label = "键盘方案",
+                    text = settingsConfig.keyboardName,
+                    selected = settingsConfig.keyboardId != "keytao.qwerty26",
+                    command = KeyCommand(KeyCommandTypes.SETTING, "keyboardProfileCycle", settingsConfig.keyboardId),
+                    style = PanelItemStyle.OPTION,
+                    statusLabel = "切换",
+                )
+            )
             add(slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp.toFloat(), 160f, 420f, 2f, "${settingsConfig.keyboardHeightDp} dp"))
             add(slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp.toFloat(), 36f, 96f, 1f, "${settingsConfig.candidateBarHeightDp} dp"))
-            add(toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled))
+            if (settingsConfig.numberRowMode == "auto") {
+                add(toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled))
+            }
             add(section("反馈"))
             add(toggle("震动", "haptics.enabled", settingsConfig.hapticsEnabled))
             add(slider("强度", "haptics.intensity", settingsConfig.hapticIntensity.toFloat(), 1f, 100f, 1f, "${settingsConfig.hapticIntensity}"))
@@ -4137,7 +4152,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             keyRect.offset(0f, dp(1f) * pressProgress)
         }
         val command = actionForMode(key)
-        val style = resolvedKeyStyle(key, command)
+        val mnemonicActive = config.mnemonicHintsEnabled &&
+            config.hasMnemonics &&
+            keyboardLayer == "letters" &&
+            !isEnglishMode &&
+            !state.asciiMode
+        val activeMnemonic = if (mnemonicActive) KeytaoMnemonicHints.forKey(key) else null
+        val groupName = activeMnemonic?.group ?: key.group
+        val groupStyle = groupName?.let { config.keyGroups[it]?.resolve(theme.isDark) }
+        val style = resolvedKeyStyle(key, command).withGroupStyle(groupStyle)
         textPaint.typeface = style.typeface
         drawKeyShadow(canvas, keyRect, style)
 
@@ -4148,14 +4171,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (command.type == KeyCommandTypes.SHIFT) drawShiftStateDecoration(canvas, keyRect, style)
 
         val label = displayLabel(key)
-        if (config.mnemonicHintsEnabled && keyboardLayer == "letters" &&
-            currentRimeSchemaId == "keytao" && !isEnglishMode && !state.asciiMode
-        ) {
-            val mnemonic = KeytaoMnemonicHints.forKey(key)
-            if (mnemonic != null && (mnemonic.topText != null || mnemonic.bottomLines.isNotEmpty())) {
-                drawMnemonicKeyContent(canvas, keyRect, label, mnemonic, style, pressProgress)
-                return
-            }
+        if (activeMnemonic != null && (activeMnemonic.topText != null || activeMnemonic.bottomLines.isNotEmpty())) {
+            drawMnemonicKeyContent(canvas, keyRect, label, activeMnemonic, style, pressProgress)
+            return
+        }
+        val slots = key.slots
+        if (slots != null && slots.hasContent() && !isEnglishMode && !state.asciiMode) {
+            drawSlottedKeyContent(canvas, keyRect, label, slots, style, pressProgress)
+            return
         }
         textPaint.textAlign = Paint.Align.CENTER
         var labelSize = sp(keyLabelSizeSp(label) * style.fontScale)
@@ -4169,8 +4192,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.drawText(label, keyRect.centerX(), keyRect.centerY() + textBaselineOffset(textPaint), textPaint)
 
         val voiceHint = isVoiceInputOffered(key)
-        val swipeHint = !voiceHint && key.hint?.length == 1
-        (if (voiceHint) "🎤" else key.hint)?.takeIf {
+        val effectiveHint = key.slots?.topRight ?: key.hint
+        val swipeHint = !voiceHint && effectiveHint?.length == 1
+        (if (voiceHint) "🎤" else effectiveHint)?.takeIf {
             config.keyHintVisible && (!swipeHint || style.swipeHintVisible)
         }?.let { hint ->
             textPaint.textAlign = Paint.Align.RIGHT
@@ -4180,11 +4204,88 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    private fun drawSlottedKeyContent(
+        canvas: Canvas,
+        rect: RectF,
+        label: String,
+        slots: KeySlots,
+        style: KeytaoKeyStyle,
+        pressProgress: Float,
+    ) {
+        val inset = min(dp(3f), min(rect.width(), rect.height()) * 0.1f)
+        val content = RectF(rect).apply { inset(inset, inset) }
+        val hasTop = !slots.topLeft.isNullOrBlank() || !slots.topCenter.isNullOrBlank() || !slots.topRight.isNullOrBlank()
+        val bottomLines = slots.resolvedBottomLines
+        val hasBottom = bottomLines.isNotEmpty() || !slots.bottomLeft.isNullOrBlank() || !slots.bottomRight.isNullOrBlank()
+        val topBand = if (hasTop) content.height() * 0.25f else 0f
+        val bottomBand = if (hasBottom) content.height() * 0.27f else 0f
+        val centerTop = content.top + topBand
+        val centerBottom = content.bottom - bottomBand
+        val centerHeight = (centerBottom - centerTop).coerceAtLeast(1f)
+
+        val mainText = if (!slots.labelSub.isNullOrBlank()) "$label ${slots.labelSub}" else label
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(keyLabelSizeSp(mainText) * style.fontScale)
+        val lm = textPaint.fontMetrics
+        val labelScale = minOf(
+            1f,
+            (content.width() - dp(2f)) / textPaint.measureText(mainText).coerceAtLeast(1f),
+            centerHeight / (lm.bottom - lm.top).coerceAtLeast(1f),
+        )
+        textPaint.textSize *= labelScale
+        textPaint.color = keyForegroundColor(style, pressProgress)
+        val flm = textPaint.fontMetrics
+        canvas.drawText(
+            mainText,
+            rect.centerX(),
+            (centerTop + centerBottom - flm.top - flm.bottom) / 2f,
+            textPaint,
+        )
+
+        if (hasTop && config.keyHintVisible) {
+            textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9.5f) * style.hintFontScale)
+            textPaint.color = style.hintForeground.toArgb()
+            val tm = textPaint.fontMetrics
+            val topY = content.top + topBand / 2f - (tm.top + tm.bottom) / 2f
+            slots.topLeft?.takeIf { it.isNotBlank() }?.let {
+                textPaint.textAlign = Paint.Align.LEFT
+                canvas.drawText(it, content.left + dp(1f), topY, textPaint)
+            }
+            slots.topCenter?.takeIf { it.isNotBlank() }?.let {
+                textPaint.textAlign = Paint.Align.CENTER
+                canvas.drawText(it, rect.centerX(), topY, textPaint)
+            }
+            slots.topRight?.takeIf { it.isNotBlank() }?.let {
+                textPaint.textAlign = Paint.Align.RIGHT
+                canvas.drawText(it, content.right - dp(1f), topY, textPaint)
+            }
+        }
+
+        if (bottomLines.isNotEmpty()) {
+            val lineHeight = (bottomBand / bottomLines.size).coerceAtLeast(1f)
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f) * style.hintFontScale)
+            textPaint.color = style.hintForeground.toArgb()
+            val bm = textPaint.fontMetrics
+            val scale = minOf(
+                1f,
+                content.width() / bottomLines.maxOf { textPaint.measureText(it) }.coerceAtLeast(1f),
+                lineHeight / (bm.bottom - bm.top).coerceAtLeast(1f),
+            )
+            textPaint.textSize *= scale
+            val fbm = textPaint.fontMetrics
+            bottomLines.forEachIndexed { idx, line ->
+                val cy = centerBottom + lineHeight * (idx + 0.5f)
+                canvas.drawText(line, rect.centerX(), cy - (fbm.top + fbm.bottom) / 2f, textPaint)
+            }
+        }
+    }
+
     private fun drawMnemonicKeyContent(
         canvas: Canvas,
         rect: RectF,
         label: String,
-        mnemonic: KeytaoMnemonicHints.Hint,
+        mnemonic: KeyMnemonic,
         style: KeytaoKeyStyle,
         pressProgress: Float,
     ) {
@@ -4723,11 +4824,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (keyboardLayer != "letters") {
             return rows
         }
-        if (config.numberRowEnabled && rows.isNotEmpty()) {
-            rows = listOf(persistentNumberRow(rows.first())) + rows
-        }
-        if (shouldUseInlineNumberRow()) rows = rows.mapIndexed { index, row ->
-            if (index == 0) inlineNumberRow(row) else row
+        if (config.numberRowEnabled && config.numberRowMode == "auto" && rows.isNotEmpty()) {
+            rows = listOf(persistentNumberRow()) + rows
         }
         val query = emojiSearchQuery ?: return rows
         val preedit = state.preedit.takeIf(String::isNotEmpty)?.let { " [$it]" }.orEmpty()
@@ -4742,39 +4840,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return searchRows + rows
     }
 
-    private fun shouldUseInlineNumberRow(): Boolean {
-        return !isEnglishMode && state.hasComposition && state.preedit.contains("=")
-    }
-
-    private fun inlineNumberRow(sourceRow: List<KeySpec>): List<KeySpec> {
+    private fun persistentNumberRow(): List<KeySpec> {
         val digits = "1234567890"
-        return sourceRow.mapIndexed { index, source ->
-            val digit = digits.getOrNull(index)?.toString() ?: source.label
-            source.copy(
+        val symbols = "!@#$%^&*()"
+        return digits.mapIndexed { index, ch ->
+            val digit = ch.toString()
+            val symbol = symbols[index].toString()
+            KeySpec(
                 label = digit,
                 value = digit,
                 asciiLabel = digit,
                 asciiValue = digit,
-                rimeValue = null,
-                hint = null,
+                hint = symbol,
                 action = KeyCommand.input(digit),
                 asciiAction = KeyCommand.input(digit),
-                swipeUp = null,
-                swipeDown = null,
-                longPress = null,
-                asciiLongPress = null,
-                alternates = emptyList(),
-                asciiAlternates = emptyList(),
-            )
-        }
-    }
-
-    private fun persistentNumberRow(sourceRow: List<KeySpec>): List<KeySpec> {
-        val symbols = "!@#$%^&*()"
-        return inlineNumberRow(sourceRow).mapIndexed { index, key ->
-            val symbol = symbols.getOrNull(index)?.toString() ?: return@mapIndexed key
-            key.copy(
-                hint = symbol,
                 longPress = KeyCommand.input(symbol),
                 asciiLongPress = KeyCommand.input(symbol),
                 alternates = listOf(KeyAlternate(label = symbol, value = symbol)),

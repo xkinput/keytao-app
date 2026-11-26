@@ -77,57 +77,82 @@ pub fn fit_candidate_widths(
     available: f32,
 ) -> Vec<f32> {
     assert_eq!(natural.len(), minimum.len());
-    let available = available.max(0.0);
-    if natural.iter().sum::<f32>() <= available {
+    let available = f64::from(available.max(0.0));
+    if natural.iter().copied().map(f64::from).sum::<f64>() <= available {
         return natural.to_vec();
     }
     let selected = selected.min(natural.len() - 1);
-    let mut widths: Vec<_> = natural.iter().zip(minimum).map(|(natural, minimum)| {
-        minimum.min(*natural)
-    }).collect();
+    let mut widths: Vec<_> = natural
+        .iter()
+        .zip(minimum)
+        .map(|(natural, minimum)| minimum.min(*natural))
+        .collect();
     let mut distant: Vec<_> = (0..widths.len())
         .filter(|index| index.abs_diff(selected) > 1)
         .collect();
     distant.sort_by_key(|index| index.abs_diff(selected));
-    let mut used = widths.iter().sum::<f32>();
-    for index in distant.iter().rev().copied() {
-        if used <= available {
-            break;
+    let mut used = widths.iter().copied().map(f64::from).sum::<f64>();
+    let mut drop_distant = |widths: &mut [f32], used: &mut f64, growth: f64| {
+        while *used + growth > available {
+            let Some(index) = distant.pop() else { break };
+            *used -= f64::from(std::mem::take(&mut widths[index]));
         }
-        used -= widths[index];
-        widths[index] = 0.0;
-    }
+    };
+    drop_distant(&mut widths, &mut used, 0.0);
     if used > available {
         for width in &mut widths {
-            *width *= available / used;
+            *width *= (available / used) as f32;
         }
         return widths;
     }
 
-    // Share the remaining text room among the highlighted item and its two
-    // neighbors, reclaiming the share of any short item that already fits.
-    let mut nearby: Vec<_> = (selected.saturating_sub(1)..=(selected + 1).min(natural.len() - 1))
-        .map(|index| (index, if index == selected { 2.0 } else { 1.0 }))
+    let grow = |width: &mut f32, added: f64| {
+        let before = f64::from(*width);
+        let target = before + added;
+        let rounded = target as f32;
+        // Keep conversion to f32 within the remaining budget.
+        *width = if f64::from(rounded) > target {
+            rounded.next_down()
+        } else {
+            rounded
+        };
+        f64::from(*width) - before
+    };
+    let selected_deficit = f64::from(natural[selected]) - f64::from(widths[selected]);
+    drop_distant(&mut widths, &mut used, selected_deficit);
+    let selected_growth = (available - used).min(selected_deficit);
+    used += grow(&mut widths[selected], selected_growth);
+
+    let mut neighbors: Vec<_> = (selected.saturating_sub(1)
+        ..=(selected + 1).min(natural.len() - 1))
+        .filter(|&index| index != selected)
+        .map(|index| (index, f64::from(natural[index]) - f64::from(widths[index])))
         .collect();
-    nearby.sort_by(|&(left, left_weight), &(right, right_weight)| {
-        ((natural[left] - widths[left]) / left_weight)
-            .total_cmp(&((natural[right] - widths[right]) / right_weight))
-    });
+    drop_distant(
+        &mut widths,
+        &mut used,
+        neighbors.iter().map(|&(_, deficit)| deficit).sum(),
+    );
+    // Fill the shorter deficit first so its unused share goes to the other neighbor.
+    neighbors.sort_by(|(_, left), (_, right)| left.total_cmp(right));
     let mut remaining = available - used;
-    let mut weight = nearby.iter().map(|(_, weight)| weight).sum::<f32>();
-    for (index, share) in nearby {
-        let added = (remaining * share / weight).min(natural[index] - widths[index]);
-        widths[index] += added;
-        remaining = (remaining - added).max(0.0);
-        weight -= share;
+    let mut unfilled = neighbors.len();
+    for (index, deficit) in neighbors {
+        let added = (remaining / unfilled as f64).min(deficit);
+        remaining -= grow(&mut widths[index], added);
+        unfilled -= 1;
     }
     for index in distant {
         if widths[index] == 0.0 {
             continue;
         }
-        let added = remaining.min(natural[index] - widths[index]);
-        widths[index] += added;
-        remaining -= added;
+        let width = f64::from(widths[index]);
+        let added = remaining.min(f64::from(natural[index]) - width);
+        remaining -= grow(&mut widths[index], added);
+        if widths[index] < natural[index] {
+            // Leave any rounding remainder unused to keep farther items at minimum.
+            break;
+        }
     }
     widths
 }
@@ -179,14 +204,128 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selected_candidate_fits_before_short_neighbor() {
+        assert_eq!(
+            fit_candidate_widths(&[100.0, 250.0], &[40.0, 45.0], 1, 300.0),
+            [50.0, 250.0]
+        );
+    }
+
+    #[test]
+    fn drops_the_farthest_candidate_to_fit_the_selected_candidate() {
+        let natural = [20.0, 150.0, 20.0, 90.0, 110.0];
+        let minimum = [20.0, 40.0, 20.0, 30.0, 25.0];
+        assert_eq!(
+            fit_candidate_widths(&natural, &minimum, 1, 220.0),
+            [20.0, natural[1], 20.0, 30.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn drops_more_distant_candidates_to_fit_both_neighbors() {
+        let natural = [90.0, 45.0, 100.0, 65.0, 90.0, 90.0];
+        let minimum = [20.0, 20.0, 30.0, 25.0, 30.0, 25.0];
+        assert_eq!(
+            fit_candidate_widths(&natural, &minimum, 2, 235.0),
+            [25.0, 45.0, 100.0, 65.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn selected_candidate_gets_all_spare_room_when_it_cannot_fit() {
+        let natural = [90.0, 70.0, 250.0, 90.0, 80.0];
+        let minimum = [30.0, 20.0, 40.0, 25.0, 35.0];
+        assert_eq!(
+            fit_candidate_widths(&natural, &minimum, 2, 145.0),
+            [0.0, 20.0, 100.0, 25.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn neighbors_share_spare_room_up_to_their_natural_widths() {
+        let natural = [50.0, 100.0, 160.0];
+        let minimum = [40.0, 50.0, 40.0];
+        assert_eq!(
+            fit_candidate_widths(&natural, &minimum, 1, 190.0),
+            [45.0, 100.0, 45.0]
+        );
+        assert_eq!(
+            fit_candidate_widths(&natural, &minimum, 1, 210.0),
+            [50.0, 100.0, 60.0]
+        );
+    }
+
+    #[test]
+    fn neighbor_width_rounding_stays_within_budget() {
+        let fitted = fit_candidate_widths(&[30000.0, 20.0015, 30000.0], &[10.0; 3], 1, 40000.0);
+        assert_eq!(fitted[1], 20.0015);
+        assert!(fitted.iter().copied().map(f64::from).sum::<f64>() <= 40000.0 + 1e-3);
+    }
+
+    #[test]
+    fn farther_candidates_stay_at_minimum_when_nearer_candidate_stops_short() {
+        let natural = [
+            123.06186, 46.97938, 135.3299, 55.742268, 99.81443, 57.62887, 333.69073, 164.12372,
+            112.65979,
+        ];
+        let minimum = [32.0, 32.0, 42.0, 32.0, 39.0, 36.0, 31.0, 34.0, 34.0];
+        let available = 704.4336;
+        let fitted = fit_candidate_widths(&natural, &minimum, 4, available);
+
+        assert!(fitted[6] > minimum[6] && fitted[6] < natural[6]);
+        assert_eq!(fitted[1], minimum[1]);
+        assert!(fitted.iter().copied().map(f64::from).sum::<f64>() <= f64::from(available) + 1e-3);
+    }
+
+    #[test]
+    fn fitted_widths_preserve_bounds_and_selected_priority() {
+        let mut seed = 42_u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as usize
+        };
+        for _ in 0..2048 {
+            let count = 1 + random() % 12;
+            let selected = random() % count;
+            let natural: Vec<_> = (0..count)
+                .map(|_| (1 + random() % 2400) as f32 / 8.0)
+                .collect();
+            let minimum: Vec<_> = (0..count)
+                .map(|_| (1 + random() % 800) as f32 / 8.0)
+                .collect();
+            let available = (1 + random() % 12_000) as f32 / 8.0;
+            let fitted = fit_candidate_widths(&natural, &minimum, selected, available);
+            let nearby = selected.saturating_sub(1)..=(selected + 1).min(count - 1);
+            let nearby_minimum: f32 = nearby.clone().map(|i| minimum[i].min(natural[i])).sum();
+            assert_eq!(fitted.len(), count);
+            assert!(
+                fitted.iter().copied().map(f64::from).sum::<f64>() <= f64::from(available) + 1e-3
+            );
+            for (i, &width) in fitted.iter().enumerate() {
+                assert!((0.0..=natural[i]).contains(&width));
+                if width == 0.0 {
+                    assert!(i.abs_diff(selected) > 1);
+                } else if nearby_minimum <= available {
+                    assert!(width >= minimum[i].min(natural[i]));
+                }
+            }
+            let neighbor_minimum = nearby_minimum - minimum[selected].min(natural[selected]);
+            if natural[selected] + neighbor_minimum <= available {
+                assert_eq!(fitted[selected], natural[selected]);
+            }
+            if nearby.clone().map(|i| natural[i]).sum::<f32>() <= available {
+                assert!(nearby.into_iter().all(|i| fitted[i] == natural[i]));
+            }
+        }
+    }
+
+    #[test]
     fn overflowing_candidates_allocate_room_around_the_highlight() {
         let natural = [900.0, 130.0, 900.0, 120.0, 800.0];
         let minimum = [26.0, 42.0, 42.0, 42.0, 26.0];
         assert_eq!(fit_candidate_widths(&natural, &minimum, 2, 4000.0), natural);
         let fitted = fit_candidate_widths(&natural, &minimum, 2, 260.0);
-        assert!(fitted[2] > fitted[1] && fitted[1] > fitted[0]);
-        assert!(fitted[3] > fitted[4]);
-        assert_eq!((fitted[0], fitted[4]), (26.0, 26.0));
+        assert_eq!(fitted, [0.0, 42.0, 176.0, 42.0, 0.0]);
         assert!((fitted.iter().sum::<f32>() - 260.0).abs() < 0.01);
 
         let narrow = fit_candidate_widths(&natural, &minimum, 2, 126.0);

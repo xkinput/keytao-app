@@ -131,6 +131,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw);
 
   @protected
+  KeyboardSummaryDto dco_decode_box_autoadd_keyboard_summary_dto(dynamic raw);
+
+  @protected
   PlatformReleaseDto dco_decode_box_autoadd_platform_release_dto(dynamic raw);
 
   @protected
@@ -230,6 +233,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IsolatedPackageDto dco_decode_isolated_package_dto(dynamic raw);
 
   @protected
+  KeyboardExportDto dco_decode_keyboard_export_dto(dynamic raw);
+
+  @protected
+  KeyboardImportPreviewDto dco_decode_keyboard_import_preview_dto(dynamic raw);
+
+  @protected
+  KeyboardImportResultDto dco_decode_keyboard_import_result_dto(dynamic raw);
+
+  @protected
+  KeyboardSummaryDto dco_decode_keyboard_summary_dto(dynamic raw);
+
+  @protected
   LibjdStatusDto dco_decode_libjd_status_dto(dynamic raw);
 
   @protected
@@ -243,6 +258,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<IsolatedPackageDto> dco_decode_list_isolated_package_dto(dynamic raw);
+
+  @protected
+  List<KeyboardSummaryDto> dco_decode_list_keyboard_summary_dto(dynamic raw);
 
   @protected
   List<PackageKeptBackupDto> dco_decode_list_package_kept_backup_dto(
@@ -345,6 +363,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   InstallProgressDto? dco_decode_opt_box_autoadd_install_progress_dto(
+    dynamic raw,
+  );
+
+  @protected
+  KeyboardSummaryDto? dco_decode_opt_box_autoadd_keyboard_summary_dto(
     dynamic raw,
   );
 
@@ -612,6 +635,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  KeyboardSummaryDto sse_decode_box_autoadd_keyboard_summary_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformReleaseDto sse_decode_box_autoadd_platform_release_dto(
     SseDeserializer deserializer,
   );
@@ -733,6 +761,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  KeyboardExportDto sse_decode_keyboard_export_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  KeyboardImportPreviewDto sse_decode_keyboard_import_preview_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  KeyboardImportResultDto sse_decode_keyboard_import_result_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  KeyboardSummaryDto sse_decode_keyboard_summary_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LibjdStatusDto sse_decode_libjd_status_dto(SseDeserializer deserializer);
 
   @protected
@@ -750,6 +798,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<IsolatedPackageDto> sse_decode_list_isolated_package_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<KeyboardSummaryDto> sse_decode_list_keyboard_summary_dto(
     SseDeserializer deserializer,
   );
 
@@ -876,6 +929,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   InstallProgressDto? sse_decode_opt_box_autoadd_install_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  KeyboardSummaryDto? sse_decode_opt_box_autoadd_keyboard_summary_dto(
     SseDeserializer deserializer,
   );
 
@@ -1228,6 +1286,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_keyboard_summary_dto(
+    KeyboardSummaryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_platform_release_dto(
     PlatformReleaseDto self,
     SseSerializer serializer,
@@ -1384,6 +1448,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_keyboard_export_dto(
+    KeyboardExportDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_keyboard_import_preview_dto(
+    KeyboardImportPreviewDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_keyboard_import_result_dto(
+    KeyboardImportResultDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_keyboard_summary_dto(
+    KeyboardSummaryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_libjd_status_dto(
     LibjdStatusDto self,
     SseSerializer serializer,
@@ -1407,6 +1495,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_isolated_package_dto(
     List<IsolatedPackageDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_keyboard_summary_dto(
+    List<KeyboardSummaryDto> self,
     SseSerializer serializer,
   );
 
@@ -1564,6 +1658,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_install_progress_dto(
     InstallProgressDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_keyboard_summary_dto(
+    KeyboardSummaryDto? self,
     SseSerializer serializer,
   );
 

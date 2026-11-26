@@ -14,6 +14,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'about_page.dart';
 import 'input_page.dart';
+import 'keyboard_library.dart';
 import 'library_page.dart';
 import 'login.dart';
 import 'scheme_page.dart';
@@ -73,6 +74,7 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _cloudDialogOpen = false;
+  bool _recommendedKeyboardDialogOpen = false;
   late AppPage _chromePage = widget.controller.activePage;
   final _mobileChrome = ValueNotifier(1.0);
   double? _scrollAnchor;
@@ -116,6 +118,37 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       _chromePage = c.activePage;
       _mobileChrome.value = 1;
       _scrollAnchor = null;
+    }
+    if (c.isMobile &&
+        !_recommendedKeyboardDialogOpen &&
+        !_cloudDialogOpen &&
+        !c.busy &&
+        !c.loggingIn &&
+        c.pendingRecommendedKeyboard != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted ||
+            _recommendedKeyboardDialogOpen ||
+            _cloudDialogOpen ||
+            c.busy ||
+            c.loggingIn) {
+          return;
+        }
+        final recommended = c.pendingRecommendedKeyboard;
+        if (recommended == null) return;
+        _recommendedKeyboardDialogOpen = true;
+        final confirmed = await showRecommendedKeyboardDialog(
+          context,
+          c,
+          recommended,
+        );
+        _recommendedKeyboardDialogOpen = false;
+        if (confirmed == true) {
+          await c.applyKeyboardProfile(recommended.id);
+        } else {
+          c.dismissRecommendedKeyboard();
+        }
+      });
+      return;
     }
     if (_cloudDialogOpen ||
         c.busy ||

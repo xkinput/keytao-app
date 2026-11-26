@@ -350,6 +350,10 @@ bool keytao_fit_candidate_widths(const float *natural,
 char *keytao_resolve_keyboard_json(const char *default_keyboard_path,
                                    const char *user_keyboard_path);
 
+char *keytao_list_keyboards_json(const char *user_keyboard_path);
+
+bool keytao_apply_keyboard(const char *user_keyboard_path, const char *keyboard_id);
+
 char *keytao_session_state_json(void *session);
 
 char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t modifiers);

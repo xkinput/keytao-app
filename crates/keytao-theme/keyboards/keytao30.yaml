@@ -1,0 +1,69 @@
+version: 2
+
+meta:
+  id: "keytao.keytao30"
+  name: "键道6 键盘"
+  author: "KeyTao"
+  description: "键道 30 键布局（含 ; , . / 编码键与常用编辑滑键），支持键道6 音形助记"
+  recommendedSchemas:
+    - "keytao"
+    - "xmjd"
+    - "xmjd-feiding"
+    - "txjx"
+    - "snow_jiandao"
+
+inheritsDefaultLayers: true
+numberRow: auto
+
+keyGroups:
+  stroke:
+    light: { borderColor: "#9D7AD9", foreground: "#6F42C1" }
+    dark:  { borderColor: "#B794F4", foreground: "#D6BCFA" }
+  guide:
+    light: { borderColor: "#6BA3FF" }
+    dark:  { borderColor: "#6BA3FF" }
+
+rows:
+  - [
+      { label: "q", hint: "1", value: "q", swipeUp: { type: input, value: "1" }, longPress: { type: input, value: "1" }, alternates: [ { label: "1", value: "1" }, { label: "!", value: "!" } ], mnemonic: { top: "zh", bottomLines: ["iu ua"], tone: outer } },
+      { label: "w", hint: "2", value: "w", swipeUp: { type: input, value: "2" }, longPress: { type: input, value: "2" }, alternates: [ { label: "2", value: "2" }, { label: "@", value: "@" } ], mnemonic: { top: "ch", bottomLines: ["ei un"], tone: outer } },
+      { label: "e", hint: "3", value: "e", swipeUp: { type: input, value: "3" }, longPress: { type: input, value: "3" }, alternates: [ { label: "3", value: "3" }, { label: "#", value: "#" } ], mnemonic: { top: "sh", bottomLines: ["e"], tone: outer } },
+      { label: "r", hint: "4", value: "r", swipeUp: { type: input, value: "4" }, longPress: { type: input, value: "4" }, alternates: [ { label: "4", value: "4" }, { label: "$", value: "$" } ], mnemonic: { bottomLines: ["eng"], tone: outer } },
+      { label: "t", hint: "5", value: "t", swipeUp: { type: input, value: "5" }, longPress: { type: input, value: "5" }, alternates: [ { label: "5", value: "5" }, { label: "%", value: "%" } ], mnemonic: { bottomLines: ["uan"], tone: outer } },
+      { label: "y", hint: "6", value: "y", swipeUp: { type: input, value: "6" }, longPress: { type: input, value: "6" }, alternates: [ { label: "6", value: "6" }, { label: "^", value: "^" } ], mnemonic: { bottomLines: ["iong ong"], tone: outer } },
+      { label: "u", hint: "7", value: "u", swipeUp: { type: input, value: "7" }, longPress: { type: input, value: "7" }, alternates: [ { label: "7", value: "7" }, { label: "&", value: "&" } ], mnemonic: { top: "丿", bottomLines: ["月 十o"], tone: special, group: stroke } },
+      { label: "i", hint: "8", value: "i", swipeUp: { type: input, value: "8" }, longPress: { type: input, value: "8" }, alternates: [ { label: "8", value: "8" }, { label: "*", value: "*" } ], mnemonic: { top: "丨", bottomLines: ["人 手u", "草i 金o"], tone: special, group: stroke } },
+      { label: "o", hint: "9", value: "o", swipeUp: { type: input, value: "9" }, longPress: { type: input, value: "9" }, alternates: [ { label: "9", value: "9" }, { label: "(", value: "(" } ], mnemonic: { top: "丶", bottomLines: ["口 日i"], tone: special, group: stroke } },
+      { label: "p", hint: "0", value: "p", swipeUp: { type: input, value: "0" }, longPress: { type: input, value: "0" }, alternates: [ { label: "0", value: "0" }, { label: ")", value: ")" } ], mnemonic: { bottomLines: ["ang"], tone: outer } }
+    ]
+  - [
+      { label: "a", hint: "☑", value: "a", swipeUp: { type: edit, value: selectAll }, longPress: { type: edit, value: selectAll }, mnemonic: { top: "㇕", bottomLines: ["水 贝o"], tone: special, group: stroke } },
+      { label: "s", hint: "|←", value: "s", swipeUp: { type: edit, value: lineStart }, longPress: { type: edit, value: lineStart }, mnemonic: { bottomLines: ["a ia"], tone: outer } },
+      { label: "d", hint: "→|", value: "d", swipeUp: { type: edit, value: lineEnd }, longPress: { type: edit, value: lineEnd }, mnemonic: { bottomLines: ["ie ou"], tone: outer } },
+      { label: "f", hint: "?", value: "f", swipeUp: { type: input, value: "?" }, longPress: { type: input, value: "?" }, mnemonic: { top: "zh", bottomLines: ["an"], tone: outer } },
+      { label: "g", hint: "反", value: "g", swipeUp: { type: rimeInput, value: "i" }, longPress: { type: rimeInput, value: "i" }, mnemonic: { bottomLines: ["ing uai"], tone: outer } },
+      { label: "h", hint: "⇥", value: "h", swipeUp: { type: edit, value: cursorRight }, longPress: { type: edit, value: cursorRight }, mnemonic: { bottomLines: ["ai üe"], tone: outer } },
+      { label: "j", hint: "✓", value: "j", swipeUp: { type: edit, value: toggleSelection }, longPress: { type: edit, value: toggleSelection }, mnemonic: { top: "ch", bottomLines: ["er u"], tone: outer } },
+      { label: "k", hint: "[", value: "k", swipeUp: { type: input, value: "[" }, longPress: { type: input, value: "[" }, mnemonic: { bottomLines: ["i"], tone: outer } },
+      { label: "l", hint: "]", value: "l", swipeUp: { type: input, value: "]" }, longPress: { type: input, value: "]" }, mnemonic: { bottomLines: ["o uo", "ü"], tone: outer } },
+      { label: ";", hint: ":", value: ";", asciiLabel: ";", asciiValue: ";", swipeUp: { type: input, value: ":" }, longPress: { type: input, value: ":" }, mnemonic: { bottomLines: ["引导"], tone: guide, group: guide } }
+    ]
+  - [
+      { label: "⇧", hint: "TAB", weight: 1.3, action: { type: shift }, swipeUp: { type: edit, value: tab }, longPress: { type: edit, value: tab } },
+      { label: "z", hint: "`", value: "z", swipeUp: { type: input, value: "`" }, longPress: { type: input, value: "`" }, mnemonic: { bottomLines: ["ao"], tone: outer } },
+      { label: "x", hint: "✂", value: "x", swipeUp: { type: edit, value: cut }, longPress: { type: edit, value: cut }, mnemonic: { top: "~", bottomLines: ["iang uang"], tone: outer } },
+      { label: "c", hint: "❐", value: "c", swipeUp: { type: edit, value: copy }, longPress: { type: edit, value: copy }, mnemonic: { bottomLines: ["iao"], tone: outer } },
+      { label: "v", hint: "▣", value: "v", swipeUp: { type: edit, value: paste }, longPress: { type: edit, value: paste }, mnemonic: { top: "一", bottomLines: ["木 土o"], tone: special, group: stroke } },
+      { label: "b", hint: "~", value: "b", swipeUp: { type: input, value: "~" }, longPress: { type: input, value: "~" }, mnemonic: { bottomLines: ["in ui"], tone: outer } },
+      { label: "n", hint: "\"", value: "n", swipeUp: { type: input, value: "\"" }, longPress: { type: input, value: "\"" }, mnemonic: { bottomLines: ["en"], tone: outer } },
+      { label: "m", hint: "'", value: "m", swipeUp: { type: input, value: "'" }, longPress: { type: input, value: "'" }, mnemonic: { bottomLines: ["ian uang"], tone: outer } },
+      { label: "⌫", hint: "行", weight: 1.3, action: { type: backspace }, swipeUp: { type: edit, value: clearAll }, longPress: { type: edit, value: clearAll } }
+    ]
+  - [
+      { label: "数", hint: "符", weight: 1.35, action: { type: keyboardMode, value: numbers }, swipeUp: { type: keyboardMode, value: "symbols:last" }, longPress: { type: keyboardMode, value: "symbols:last" }, alternates: [ { label: "符号", action: { type: keyboardMode, value: "symbols:last" } }, { label: "123", action: { type: keyboardMode, value: numbers } }, { label: "切换输入法", action: { type: nextInputMethod } } ] },
+      { label: "/", hint: "\\", value: "/", asciiLabel: "/", asciiValue: "/", weight: 1.0, swipeUp: { type: input, value: "\\" }, longPress: { type: input, value: "\\" }, mnemonic: { bottomLines: ["键道6"], tone: brand, group: guide } },
+      { label: "空格", weight: 3.65, action: { type: space }, swipeDown: { type: reset } },
+      { label: ",", hint: "<", value: ",", asciiLabel: ",", asciiValue: ",", weight: 1.0, swipeUp: { type: input, value: "<" }, longPress: { type: input, value: "<" } },
+      { label: ".", hint: ">", value: ".", asciiLabel: ".", asciiValue: ".", weight: 1.0, swipeUp: { type: input, value: ">" }, longPress: { type: input, value: ">" } },
+      { label: "↵", hint: "☆", weight: 1.6, action: { type: enter }, swipeUp: { type: keyboardMode, value: "emoji:last" }, alternates: [ { label: "↵", action: { type: enter } }, { label: "表情", action: { type: keyboardMode, value: "emoji:last" } }, { label: "悬浮", action: { type: floating } } ] }
+    ]

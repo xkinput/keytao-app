@@ -10,6 +10,11 @@ import 'theme.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
+bool _showActiveDeploySteps(AppController controller) =>
+    controller.deploySteps.isNotEmpty &&
+    (controller.isDeploying ||
+        (controller.busy && controller.hasPackageDeployProgress));
+
 class _StatusBadge extends StatelessWidget {
   const _StatusBadge(this.label, {required this.ready, this.failed = false});
   final String label;
@@ -143,7 +148,9 @@ class InputPage extends StatelessWidget {
         ],
       ),
     ),
-    if (controller.isWindows && controller.deploySteps.isNotEmpty)
+    if (controller.isWindows &&
+        controller.deploySteps.isNotEmpty &&
+        !_showActiveDeploySteps(controller))
       HairlineGridCell(child: DeploySteps(controller: controller)),
     if (controller.operationLogs.any(
       (line) => line.contains('[DEPLOY]') || line.contains('[DEPLOY ERROR]'),
@@ -595,6 +602,7 @@ class _CurrentSchemeHero extends StatelessWidget {
                 if (source != null) Text('来自 $source'),
               ],
             ),
+          if (_showActiveDeploySteps(c)) DeploySteps(controller: c),
           if (c.prefersLibjd && !c.hasConvertedSchemes) ...[
             const Text('请前往方案页下载并转换你的方案。ime-jd 目前仅支持键道方案。'),
             ActionRow(

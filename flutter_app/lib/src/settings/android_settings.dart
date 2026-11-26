@@ -16,6 +16,7 @@ const androidDefaults = <String, Object>{
   'keySoundEnabled': true,
   'keySoundVolume': 100,
   'keyHintVisible': true,
+  'mnemonicHintsEnabled': false,
   'flickKeysEnabled': true,
   'numberRowEnabled': false,
   'candidateFontScale': 1.0,
@@ -125,6 +126,10 @@ AndroidImeInputSettingsDto patchAndroidSettings(
     keySoundEnabled: flag('keySoundEnabled', original.keySoundEnabled),
     keySoundVolume: integer('keySoundVolume', original.keySoundVolume, 0, 100),
     keyHintVisible: flag('keyHintVisible', original.keyHintVisible),
+    mnemonicHintsEnabled: flag(
+      'mnemonicHintsEnabled',
+      original.mnemonicHintsEnabled,
+    ),
     flickKeysEnabled: flag('flickKeysEnabled', original.flickKeysEnabled),
     numberRowEnabled: flag('numberRowEnabled', original.numberRowEnabled),
     candidateFontScale: patch.containsKey('candidateFontScale')

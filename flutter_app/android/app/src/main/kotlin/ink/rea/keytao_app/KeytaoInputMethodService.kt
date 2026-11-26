@@ -1494,6 +1494,34 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             persistThemeSetting(key, value)
             return
         }
+        if (key == "keyboardProfile" || key == "keyboardProfileCycle") {
+            val keyboardFile = KeytaoAndroidPaths.keyboardFileOrNull(this) ?: run {
+                showUnavailableMessage()
+                return
+            }
+            val targetId = if (key == "keyboardProfileCycle") {
+                val listJson = KeytaoNativeBridge.listKeyboardsJson(keyboardFile.absolutePath)
+                val ids = runCatching {
+                    val arr = org.json.JSONArray(listJson ?: "[]")
+                    (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.optString("id")?.takeIf(String::isNotBlank) }
+                }.getOrDefault(emptyList())
+                if (ids.size <= 1) return
+                val idx = ids.indexOf(value)
+                ids[(idx + 1) % ids.size]
+            } else {
+                value
+            }
+            if (!KeytaoNativeBridge.applyKeyboard(keyboardFile.absolutePath, targetId)) {
+                keyboardView?.showMessage("切换键盘方案失败")
+                return
+            }
+            KeytaoAndroidImeConfig.invalidateCache()
+            val reloaded = loadPresentationConfig()
+            baseKeyboardConfig = reloaded
+            applyKeyboardPresentation(reloaded, keyboardLayoutState)
+            keyboardView?.showMessage("已切换：${reloaded.keyboardName}")
+            return
+        }
         if (key == "reset") {
             val themeFile = KeytaoAndroidPaths.themeFileOrNull(this) ?: run {
                 showUnavailableMessage()

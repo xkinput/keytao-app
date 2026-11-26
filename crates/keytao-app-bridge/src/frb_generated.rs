@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1198212423;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1184622639;
 
 // Section: executor
 
@@ -529,6 +529,39 @@ fn wire__crate__api__core__addon_schema_uninstall_impl(
         },
     )
 }
+fn wire__crate__api__core__apply_keyboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "apply_keyboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::apply_keyboard(api_id)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__apply_scheme_profile_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -977,6 +1010,39 @@ fn wire__crate__api__core__delete_cloud_package_impl(
         },
     )
 }
+fn wire__crate__api__core__delete_keyboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "delete_keyboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::delete_keyboard(api_id)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__delete_theme_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1334,6 +1400,39 @@ fn wire__crate__api__core__duplicate_theme_impl(
             move |context| {
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::api::core::duplicate_theme(api_id)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__export_keyboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "export_keyboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::export_keyboard(api_id)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -1784,6 +1883,72 @@ fn wire__crate__api__core__get_ime_ui_settings_impl(
         },
     )
 }
+fn wire__crate__api__core__get_keyboard_library_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_keyboard_library",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::get_keyboard_library()?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__get_recommended_keyboard_for_schema_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_recommended_keyboard_for_schema",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_schema_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::core::get_recommended_keyboard_for_schema(api_schema_id)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__get_rime_sync_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2089,6 +2254,40 @@ fn wire__crate__api__core__import_git_scheme_impl(
                     })()
                     .await,
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__import_keyboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "import_keyboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_text = <String>::sse_decode(&mut deserializer);
+            let api_overwrite = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::import_keyboard(api_text, api_overwrite)?;
+                    std::result::Result::Ok(output_ok)
+                })())
             }
         },
     )
@@ -3430,6 +3629,39 @@ fn wire__crate__api__core__preview_cloud_package_impl(
                     })()
                     .await,
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__preview_keyboard_import_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "preview_keyboard_import",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_text = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::preview_keyboard_import(api_text)?;
+                    std::result::Result::Ok(output_ok)
+                })())
             }
         },
     )
@@ -5749,6 +5981,7 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
         let mut var_keySoundEnabled = <bool>::sse_decode(deserializer);
         let mut var_keySoundVolume = <u8>::sse_decode(deserializer);
         let mut var_keyHintVisible = <bool>::sse_decode(deserializer);
+        let mut var_mnemonicHintsEnabled = <bool>::sse_decode(deserializer);
         let mut var_flickKeysEnabled = <bool>::sse_decode(deserializer);
         let mut var_numberRowEnabled = <bool>::sse_decode(deserializer);
         let mut var_candidateFontScale = <f32>::sse_decode(deserializer);
@@ -5785,6 +6018,7 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
             key_sound_enabled: var_keySoundEnabled,
             key_sound_volume: var_keySoundVolume,
             key_hint_visible: var_keyHintVisible,
+            mnemonic_hints_enabled: var_mnemonicHintsEnabled,
             flick_keys_enabled: var_flickKeysEnabled,
             number_row_enabled: var_numberRowEnabled,
             candidate_font_scale: var_candidateFontScale,
@@ -6277,6 +6511,90 @@ impl SseDecode for crate::api::types::IsolatedPackageDto {
     }
 }
 
+impl SseDecode for crate::api::types::KeyboardExportDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_fileName = <String>::sse_decode(deserializer);
+        let mut var_json = <String>::sse_decode(deserializer);
+        let mut var_shareString = <String>::sse_decode(deserializer);
+        let mut var_useFile = <bool>::sse_decode(deserializer);
+        return crate::api::types::KeyboardExportDto {
+            id: var_id,
+            file_name: var_fileName,
+            json: var_json,
+            share_string: var_shareString,
+            use_file: var_useFile,
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::KeyboardImportPreviewDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_suggestedId = <String>::sse_decode(deserializer);
+        let mut var_suggestedName = <String>::sse_decode(deserializer);
+        let mut var_conflict = <bool>::sse_decode(deserializer);
+        let mut var_builtInConflict = <bool>::sse_decode(deserializer);
+        let mut var_hasMnemonics = <bool>::sse_decode(deserializer);
+        let mut var_warnings = <Vec<String>>::sse_decode(deserializer);
+        let mut var_previewLayoutJson = <String>::sse_decode(deserializer);
+        return crate::api::types::KeyboardImportPreviewDto {
+            id: var_id,
+            name: var_name,
+            suggested_id: var_suggestedId,
+            suggested_name: var_suggestedName,
+            conflict: var_conflict,
+            built_in_conflict: var_builtInConflict,
+            has_mnemonics: var_hasMnemonics,
+            warnings: var_warnings,
+            preview_layout_json: var_previewLayoutJson,
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::KeyboardImportResultDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_disposition = <String>::sse_decode(deserializer);
+        let mut var_warnings = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::types::KeyboardImportResultDto {
+            id: var_id,
+            name: var_name,
+            disposition: var_disposition,
+            warnings: var_warnings,
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::KeyboardSummaryDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <Option<String>>::sse_decode(deserializer);
+        let mut var_builtIn = <bool>::sse_decode(deserializer);
+        let mut var_current = <bool>::sse_decode(deserializer);
+        let mut var_hasMnemonics = <bool>::sse_decode(deserializer);
+        let mut var_recommendedSchemas = <Vec<String>>::sse_decode(deserializer);
+        let mut var_previewLayoutJson = <String>::sse_decode(deserializer);
+        return crate::api::types::KeyboardSummaryDto {
+            id: var_id,
+            name: var_name,
+            description: var_description,
+            built_in: var_builtIn,
+            current: var_current,
+            has_mnemonics: var_hasMnemonics,
+            recommended_schemas: var_recommendedSchemas,
+            preview_layout_json: var_previewLayoutJson,
+        };
+    }
+}
+
 impl SseDecode for crate::api::types::LibjdStatusDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -6346,6 +6664,20 @@ impl SseDecode for Vec<crate::api::types::IsolatedPackageDto> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::types::IsolatedPackageDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::types::KeyboardSummaryDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::types::KeyboardSummaryDto>::sse_decode(
                 deserializer,
             ));
         }
@@ -6719,6 +7051,19 @@ impl SseDecode for Option<crate::api::types::InstallProgressDto> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::types::InstallProgressDto>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::types::KeyboardSummaryDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::types::KeyboardSummaryDto>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -7449,301 +7794,317 @@ fn pde_ffi_dispatcher_primary_impl(
         13 => {
             wire__crate__api__core__addon_schema_uninstall_impl(port, ptr, rust_vec_len, data_len)
         }
-        14 => wire__crate__api__core__apply_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__core__apply_theme_impl(port, ptr, rust_vec_len, data_len),
-        16 => {
+        14 => wire__crate__api__core__apply_keyboard_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__core__apply_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__core__apply_theme_impl(port, ptr, rust_vec_len, data_len),
+        17 => {
             wire__crate__api__core__cancel_scheme_download_impl(port, ptr, rust_vec_len, data_len)
         }
-        17 => wire__crate__api__core__cancel_wanxiang_grammar_download_impl(
+        18 => wire__crate__api__core__cancel_wanxiang_grammar_download_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        18 => wire__crate__api__core__check_addon_update_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__core__check_app_update_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__core__check_local_schema_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__core__check_scheme_updates_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__core__clear_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__core__compare_user_words_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__core__complete_onboarding_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__core__core_events_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__core__delete_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__core__delete_theme_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__core__delete_user_word_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__core__deploy_android_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__core__deploy_default_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__core__dismiss_migration_backup_notice_impl(
+        19 => wire__crate__api__core__check_addon_update_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__core__check_app_update_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__core__check_local_schema_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__core__check_scheme_updates_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__core__clear_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__core__compare_user_words_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__core__complete_onboarding_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__core__core_events_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__core__delete_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__core__delete_keyboard_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__core__delete_theme_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__core__delete_user_word_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__core__deploy_android_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__core__deploy_default_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__core__dismiss_migration_backup_notice_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__api__core__dismiss_scheme_update_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__core__download_app_update_impl(port, ptr, rust_vec_len, data_len),
-        34 => {
+        34 => wire__crate__api__core__dismiss_scheme_update_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__core__download_app_update_impl(port, ptr, rust_vec_len, data_len),
+        36 => {
             wire__crate__api__core__download_cloud_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        35 => {
+        37 => {
             wire__crate__api__core__download_scheme_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        36 => wire__crate__api__core__duplicate_theme_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__core__export_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__core__export_theme_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__core__fetch_latest_release_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__core__fetch_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__core__fetch_scheme_release_impl(port, ptr, rust_vec_len, data_len),
-        42 => {
+        38 => wire__crate__api__core__duplicate_theme_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__core__export_keyboard_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__core__export_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__core__export_theme_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__core__fetch_latest_release_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__core__fetch_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__core__fetch_scheme_release_impl(port, ptr, rust_vec_len, data_len),
+        45 => {
             wire__crate__api__core__finish_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        43 => wire__crate__api__core__get_account_stats_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__core__get_android_ime_input_settings_impl(
+        46 => wire__crate__api__core__get_account_stats_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__core__get_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => {
+        48 => {
             wire__crate__api__core__get_candidate_page_size_impl(port, ptr, rust_vec_len, data_len)
         }
-        46 => {
+        49 => {
             wire__crate__api__core__get_component_versions_impl(port, ptr, rust_vec_len, data_len)
         }
-        47 => {
+        50 => {
             wire__crate__api__core__get_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        48 => wire__crate__api__core__get_dismissed_scheme_updates_impl(
+        51 => wire__crate__api__core__get_dismissed_scheme_updates_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__api__core__get_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        50 => {
+        52 => wire__crate__api__core__get_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__core__get_keyboard_library_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__core__get_recommended_keyboard_for_schema_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        55 => {
             wire__crate__api__core__get_rime_sync_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        51 => {
+        56 => {
             wire__crate__api__core__get_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        52 => wire__crate__api__core__get_schema_switches_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__core__get_schemas_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__core__get_scheme_sync_state_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__core__get_theme_editor_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__core__get_theme_library_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__core__import_git_scheme_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__core__import_libjd_package_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__core__import_local_scheme_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__core__import_theme_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__core__input_engine_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__core__input_engine_enabled_impl(port, ptr, rust_vec_len, data_len),
-        66 => {
+        57 => wire__crate__api__core__get_schema_switches_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__core__get_schemas_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__core__get_scheme_sync_state_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__core__get_theme_editor_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__core__get_theme_library_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__core__import_git_scheme_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__core__import_keyboard_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__core__import_libjd_package_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__core__import_local_scheme_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__core__import_theme_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__core__input_engine_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__core__input_engine_enabled_impl(port, ptr, rust_vec_len, data_len),
+        72 => {
             wire__crate__api__core__install_scheme_from_url_impl(port, ptr, rust_vec_len, data_len)
         }
-        67 => wire__crate__api__core__isolated_packages_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__core__issue_website_session_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__core__libjd_status_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__core__list_cloud_packages_impl(port, ptr, rust_vec_len, data_len),
-        73 => {
+        73 => wire__crate__api__core__isolated_packages_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__core__issue_website_session_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__core__libjd_status_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__core__list_cloud_packages_impl(port, ptr, rust_vec_len, data_len),
+        79 => {
             wire__crate__api__core__list_installed_packages_impl(port, ptr, rust_vec_len, data_len)
         }
-        74 => wire__crate__api__core__list_system_font_families_impl(
+        80 => wire__crate__api__core__list_system_font_families_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__api__core__list_user_words_impl(port, ptr, rust_vec_len, data_len),
-        76 => {
+        81 => wire__crate__api__core__list_user_words_impl(port, ptr, rust_vec_len, data_len),
+        82 => {
             wire__crate__api__core__load_system_font_bytes_impl(port, ptr, rust_vec_len, data_len)
         }
-        77 => wire__crate__api__core__lookup_user_word_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__core__manage_rime_frost_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__core__manage_rime_ice_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__core__manage_rime_lssp_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__core__manage_rime_mint_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
-        84 => {
+        83 => wire__crate__api__core__lookup_user_word_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__core__manage_rime_frost_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__core__manage_rime_ice_impl(port, ptr, rust_vec_len, data_len),
+        87 => wire__crate__api__core__manage_rime_lssp_impl(port, ptr, rust_vec_len, data_len),
+        88 => wire__crate__api__core__manage_rime_mint_impl(port, ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
+        90 => {
             wire__crate__api__core__manage_wanxiang_grammar_impl(port, ptr, rust_vec_len, data_len)
         }
-        85 => wire__crate__api__core__migrate_to_isolated_impl(port, ptr, rust_vec_len, data_len),
-        86 => {
+        91 => wire__crate__api__core__migrate_to_isolated_impl(port, ptr, rust_vec_len, data_len),
+        92 => {
             wire__crate__api__core__new_rime_installation_id_impl(port, ptr, rust_vec_len, data_len)
         }
-        87 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
-        88 => {
+        93 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
+        94 => {
             wire__crate__api__core__open_app_update_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        89 => wire__crate__api__core__package_migration_pending_impl(
+        95 => wire__crate__api__core__package_migration_pending_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        90 => wire__crate__api__core__package_orphan_report_impl(port, ptr, rust_vec_len, data_len),
-        91 => wire__crate__api__core__package_schemas_impl(port, ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__core__pending_migration_backup_dir_impl(
+        96 => wire__crate__api__core__package_orphan_report_impl(port, ptr, rust_vec_len, data_len),
+        97 => wire__crate__api__core__package_schemas_impl(port, ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__core__pending_migration_backup_dir_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        93 => {
+        99 => {
             wire__crate__api__core__prepare_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        94 => wire__crate__api__core__preview_candidates_impl(port, ptr, rust_vec_len, data_len),
-        95 => wire__crate__api__core__preview_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        96 => wire__crate__api__core__preview_theme_import_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        100 => {
+        100 => wire__crate__api__core__preview_candidates_impl(port, ptr, rust_vec_len, data_len),
+        101 => {
+            wire__crate__api__core__preview_cloud_package_impl(port, ptr, rust_vec_len, data_len)
+        }
+        102 => {
+            wire__crate__api__core__preview_keyboard_import_impl(port, ptr, rust_vec_len, data_len)
+        }
+        103 => wire__crate__api__core__preview_theme_import_impl(port, ptr, rust_vec_len, data_len),
+        104 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
+        105 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        107 => {
             wire__crate__api__core__release_package_cache_impl(port, ptr, rust_vec_len, data_len)
         }
-        101 => wire__crate__api__core__release_user_words_stock_cache_impl(
+        108 => wire__crate__api__core__release_user_words_stock_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        102 => wire__crate__api__core__remote_scheme_logo_impl(port, ptr, rust_vec_len, data_len),
-        103 => wire__crate__api__core__remove_downloaded_archive_impl(
+        109 => wire__crate__api__core__remote_scheme_logo_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        104 => {
+        111 => {
             wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        105 => wire__crate__api__core__rename_theme_impl(port, ptr, rust_vec_len, data_len),
-        106 => {
+        112 => wire__crate__api__core__rename_theme_impl(port, ptr, rust_vec_len, data_len),
+        113 => {
             wire__crate__api__core__repair_scheme_package_impl(port, ptr, rust_vec_len, data_len)
         }
-        109 => wire__crate__api__core__rime_frost_status_impl(port, ptr, rust_vec_len, data_len),
-        110 => wire__crate__api__core__rime_ice_status_impl(port, ptr, rust_vec_len, data_len),
-        111 => wire__crate__api__core__rime_lssp_status_impl(port, ptr, rust_vec_len, data_len),
-        112 => wire__crate__api__core__rime_mint_status_impl(port, ptr, rust_vec_len, data_len),
-        113 => {
+        116 => wire__crate__api__core__rime_frost_status_impl(port, ptr, rust_vec_len, data_len),
+        117 => wire__crate__api__core__rime_ice_status_impl(port, ptr, rust_vec_len, data_len),
+        118 => wire__crate__api__core__rime_lssp_status_impl(port, ptr, rust_vec_len, data_len),
+        119 => wire__crate__api__core__rime_mint_status_impl(port, ptr, rust_vec_len, data_len),
+        120 => {
             wire__crate__api__core__save_rime_sync_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        114 => wire__crate__api__core__search_stock_words_impl(port, ptr, rust_vec_len, data_len),
-        115 => wire__crate__api__core__select_schema_impl(port, ptr, rust_vec_len, data_len),
-        116 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        121 => wire__crate__api__core__search_stock_words_impl(port, ptr, rust_vec_len, data_len),
+        122 => wire__crate__api__core__select_schema_impl(port, ptr, rust_vec_len, data_len),
+        123 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        117 => wire__crate__api__core__set_app_update_prereleases_impl(
+        124 => wire__crate__api__core__set_app_update_prereleases_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        118 => {
+        125 => {
             wire__crate__api__core__set_candidate_page_size_impl(port, ptr, rust_vec_len, data_len)
         }
-        119 => {
+        126 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        120 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        127 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        121 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
+        128 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        122 => wire__crate__api__core__set_ime_show_tray_mode_indicator_impl(
+        129 => wire__crate__api__core__set_ime_show_tray_mode_indicator_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        123 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        124 => wire__crate__api__core__set_input_engine_impl(port, ptr, rust_vec_len, data_len),
-        125 => {
+        130 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        131 => wire__crate__api__core__set_input_engine_impl(port, ptr, rust_vec_len, data_len),
+        132 => {
             wire__crate__api__core__set_input_engine_enabled_impl(port, ptr, rust_vec_len, data_len)
         }
-        126 => {
+        133 => {
             wire__crate__api__core__set_package_easy_english_impl(port, ptr, rust_vec_len, data_len)
         }
-        127 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
-        128 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
-        129 => {
+        134 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
+        135 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
+        136 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        130 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
-        131 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        137 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        138 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        132 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
+        139 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        133 => {
+        140 => {
             wire__crate__api__core__set_user_word_removed_impl(port, ptr, rust_vec_len, data_len)
         }
-        134 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
-        136 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
-        137 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
-        138 => wire__crate__api__core__system_font_path_impl(port, ptr, rust_vec_len, data_len),
-        139 => {
+        141 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
+        143 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
+        144 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
+        145 => wire__crate__api__core__system_font_path_impl(port, ptr, rust_vec_len, data_len),
+        146 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        140 => {
+        147 => {
             wire__crate__api__core__trash_package_orphans_impl(port, ptr, rust_vec_len, data_len)
         }
-        141 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
-        142 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        143 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        144 => {
+        148 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
+        149 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        150 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        151 => {
             wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        145 => {
+        152 => {
             wire__crate__api__core__wanxiang_grammar_status_impl(port, ptr, rust_vec_len, data_len)
         }
-        146 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        147 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        153 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        154 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        148 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        155 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        149 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        150 => wire__crate__api__core__windows_pending_ime_action_impl(
+        156 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        157 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        151 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        158 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        152 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        159 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -7761,16 +8122,16 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        99 => wire__crate__api__timing__record_bootstrap_timings_impl(ptr, rust_vec_len, data_len),
-        107 => wire__crate__api__core__resolve_candidate_panel_preview_impl(
+        106 => wire__crate__api__timing__record_bootstrap_timings_impl(ptr, rust_vec_len, data_len),
+        114 => wire__crate__api__core__resolve_candidate_panel_preview_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        108 => {
+        115 => {
             wire__crate__api__core__resolve_theme_editor_preview_impl(ptr, rust_vec_len, data_len)
         }
-        135 => wire__crate__api__timing__start_app_operation_impl(ptr, rust_vec_len, data_len),
+        142 => wire__crate__api__timing__start_app_operation_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -7882,6 +8243,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::AndroidImeInputSetting
             self.key_sound_enabled.into_into_dart().into_dart(),
             self.key_sound_volume.into_into_dart().into_dart(),
             self.key_hint_visible.into_into_dart().into_dart(),
+            self.mnemonic_hints_enabled.into_into_dart().into_dart(),
             self.flick_keys_enabled.into_into_dart().into_dart(),
             self.number_row_enabled.into_into_dart().into_dart(),
             self.candidate_font_scale.into_into_dart().into_dart(),
@@ -8489,6 +8851,108 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::IsolatedPackageDto>
     for crate::api::types::IsolatedPackageDto
 {
     fn into_into_dart(self) -> crate::api::types::IsolatedPackageDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::KeyboardExportDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.file_name.into_into_dart().into_dart(),
+            self.json.into_into_dart().into_dart(),
+            self.share_string.into_into_dart().into_dart(),
+            self.use_file.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::KeyboardExportDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::KeyboardExportDto>
+    for crate::api::types::KeyboardExportDto
+{
+    fn into_into_dart(self) -> crate::api::types::KeyboardExportDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::KeyboardImportPreviewDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.suggested_id.into_into_dart().into_dart(),
+            self.suggested_name.into_into_dart().into_dart(),
+            self.conflict.into_into_dart().into_dart(),
+            self.built_in_conflict.into_into_dart().into_dart(),
+            self.has_mnemonics.into_into_dart().into_dart(),
+            self.warnings.into_into_dart().into_dart(),
+            self.preview_layout_json.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::KeyboardImportPreviewDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::KeyboardImportPreviewDto>
+    for crate::api::types::KeyboardImportPreviewDto
+{
+    fn into_into_dart(self) -> crate::api::types::KeyboardImportPreviewDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::KeyboardImportResultDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.disposition.into_into_dart().into_dart(),
+            self.warnings.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::KeyboardImportResultDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::KeyboardImportResultDto>
+    for crate::api::types::KeyboardImportResultDto
+{
+    fn into_into_dart(self) -> crate::api::types::KeyboardImportResultDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::KeyboardSummaryDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+            self.built_in.into_into_dart().into_dart(),
+            self.current.into_into_dart().into_dart(),
+            self.has_mnemonics.into_into_dart().into_dart(),
+            self.recommended_schemas.into_into_dart().into_dart(),
+            self.preview_layout_json.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::KeyboardSummaryDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::KeyboardSummaryDto>
+    for crate::api::types::KeyboardSummaryDto
+{
+    fn into_into_dart(self) -> crate::api::types::KeyboardSummaryDto {
         self
     }
 }
@@ -9466,6 +9930,7 @@ impl SseEncode for crate::api::types::AndroidImeInputSettingsDto {
         <bool>::sse_encode(self.key_sound_enabled, serializer);
         <u8>::sse_encode(self.key_sound_volume, serializer);
         <bool>::sse_encode(self.key_hint_visible, serializer);
+        <bool>::sse_encode(self.mnemonic_hints_enabled, serializer);
         <bool>::sse_encode(self.flick_keys_enabled, serializer);
         <bool>::sse_encode(self.number_row_enabled, serializer);
         <f32>::sse_encode(self.candidate_font_scale, serializer);
@@ -9859,6 +10324,56 @@ impl SseEncode for crate::api::types::IsolatedPackageDto {
     }
 }
 
+impl SseEncode for crate::api::types::KeyboardExportDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.file_name, serializer);
+        <String>::sse_encode(self.json, serializer);
+        <String>::sse_encode(self.share_string, serializer);
+        <bool>::sse_encode(self.use_file, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::KeyboardImportPreviewDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.suggested_id, serializer);
+        <String>::sse_encode(self.suggested_name, serializer);
+        <bool>::sse_encode(self.conflict, serializer);
+        <bool>::sse_encode(self.built_in_conflict, serializer);
+        <bool>::sse_encode(self.has_mnemonics, serializer);
+        <Vec<String>>::sse_encode(self.warnings, serializer);
+        <String>::sse_encode(self.preview_layout_json, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::KeyboardImportResultDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.disposition, serializer);
+        <Vec<String>>::sse_encode(self.warnings, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::KeyboardSummaryDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <Option<String>>::sse_encode(self.description, serializer);
+        <bool>::sse_encode(self.built_in, serializer);
+        <bool>::sse_encode(self.current, serializer);
+        <bool>::sse_encode(self.has_mnemonics, serializer);
+        <Vec<String>>::sse_encode(self.recommended_schemas, serializer);
+        <String>::sse_encode(self.preview_layout_json, serializer);
+    }
+}
+
 impl SseEncode for crate::api::types::LibjdStatusDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -9907,6 +10422,16 @@ impl SseEncode for Vec<crate::api::types::IsolatedPackageDto> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::types::IsolatedPackageDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::types::KeyboardSummaryDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::types::KeyboardSummaryDto>::sse_encode(item, serializer);
         }
     }
 }
@@ -10188,6 +10713,16 @@ impl SseEncode for Option<crate::api::types::InstallProgressDto> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::types::InstallProgressDto>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::types::KeyboardSummaryDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::types::KeyboardSummaryDto>::sse_encode(value, serializer);
         }
     }
 }

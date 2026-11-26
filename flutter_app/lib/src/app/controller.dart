@@ -192,12 +192,28 @@ class AppController extends ChangeNotifier {
     required this.info,
     this.android = const AndroidHost(),
     this.pickDesktopDirectory = getDirectoryPath,
+    this.pickDesktopArchive = _pickDesktopZip,
     this.runDesktopOpen = Process.run,
   });
   final BridgeInfo info;
   final AndroidHost android;
   final Future<String?> Function() pickDesktopDirectory;
+  final Future<String?> Function() pickDesktopArchive;
   final Future<ProcessResult> Function(String, List<String>) runDesktopOpen;
+
+  static Future<String?> _pickDesktopZip() async {
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(
+          label: 'Rime 方案压缩包',
+          extensions: ['zip'],
+          uniformTypeIdentifiers: ['public.zip-archive'],
+          mimeTypes: ['application/zip', 'application/x-zip-compressed'],
+        ),
+      ],
+    );
+    return file?.path;
+  }
   bool get isAndroid => info.platform == BridgePlatform.android;
   bool get isWindows => info.platform == BridgePlatform.windows;
   bool get isLinux => info.platform == BridgePlatform.linux;
@@ -479,6 +495,9 @@ class AppController extends ChangeNotifier {
   WindowsImeStatusDto? windowsIme;
   LinuxImeStatusDto? linuxIme;
   AndroidImeInputSettingsDto? androidSettings;
+  List<KeyboardSummaryDto> keyboards = [];
+  KeyboardSummaryDto? recommendedKeyboard;
+  KeyboardSummaryDto? pendingRecommendedKeyboard;
   ImeUiSettingsDto? uiSettings;
   int? candidatePageSize;
   List<({String text, String comment})> candidatePreviewCandidates = [];
@@ -497,6 +516,7 @@ class AppController extends ChangeNotifier {
   bool get hasUsableBuild =>
       local?.deployed == true || local?.buildAvailable == true;
   String? _attemptedAutoDeployKey;
+  String? _attemptedAutoConvertKey;
   bool get _activeBuildHasChanges =>
       !prefersLibjd &&
       !packageMigrationFailed &&
@@ -504,11 +524,33 @@ class AppController extends ChangeNotifier {
       local?.installed == true &&
       local?.buildAvailable == true &&
       local?.deployed == false;
+  bool get _activeLibjdNeedsAutoConvert =>
+      prefersLibjd &&
+      !isUsingLibjd &&
+      !packageMigrationFailed &&
+      _localSchemaError == null &&
+      (installedPackageFor(activeSchemeKey) != null ||
+          isolatedPackages.any((p) => p.packageKey == activeSchemeKey));
   bool get autoDeployQueued =>
       _activeBuildHasChanges && _attemptedAutoDeployKey != activeSchemeKey;
 
   void _deployChangedScheme() {
     if (_disposed || busy || _resumeRefreshInFlight) return;
+    if (_activeLibjdNeedsAutoConvert &&
+        _attemptedAutoConvertKey != activeSchemeKey) {
+      final key = activeSchemeKey;
+      _attemptedAutoConvertKey = key;
+      unawaited(
+        run(() async {
+          packageError = null;
+          await _convertSchemePackage(key);
+        }),
+      );
+      return;
+    }
+    if (!_activeLibjdNeedsAutoConvert) {
+      _attemptedAutoConvertKey = null;
+    }
     if (!_activeBuildHasChanges) {
       _attemptedAutoDeployKey = null;
       return;
@@ -549,8 +591,10 @@ class AppController extends ChangeNotifier {
       schemas.where((schema) => schema.id == currentSchemaId).firstOrNull?.name;
 
   static const Duration remoteLogoCacheTtl = Duration(days: 2);
+  static const Duration remoteLogoFailureCooldown = Duration(minutes: 5);
   final Map<String, String?> _remoteSchemeLogos = {};
   final Map<String, DateTime> _remoteSchemeLogoFetchedAt = {};
+  final Map<String, DateTime> _remoteSchemeLogoFailedAt = {};
   final Map<String, bool> _addonLogoInstalledState = {};
   final Set<String> _remoteSchemeLogoInFlight = {};
   final _schemaLogoVersions = <String, (DateTime, DateTime, int)>{};
@@ -561,6 +605,36 @@ class AppController extends ChangeNotifier {
     final package = installedPackageFor(key);
     return package?.logoPath ??
         (package?.hasPackageZip == true ? null : _remoteSchemeLogos[key]);
+  }
+
+  bool shouldFetchRemoteSchemeLogo(
+    String key, {
+    String? repoUrl,
+    bool? addonInstalled,
+  }) {
+    if (_disposed || _remoteSchemeLogoInFlight.contains(key)) return false;
+    final package = installedPackageFor(key);
+    if (package?.hasPackageZip == true) return false;
+    final url =
+        repoUrl ??
+        package?.git?.repoUrl ??
+        schemeRepositoryUrls[key == 'triple_pinyin_lssp' ? 'rime_lssp' : key];
+    if (url == null || url.isEmpty) return false;
+    if (addonInstalled != null &&
+        _addonLogoInstalledState[key] != addonInstalled) {
+      return true;
+    }
+    final now = DateTime.now();
+    final fetchedAt = _remoteSchemeLogoFetchedAt[key];
+    if (fetchedAt != null && now.difference(fetchedAt) < remoteLogoCacheTtl) {
+      return false;
+    }
+    final failedAt = _remoteSchemeLogoFailedAt[key];
+    if (failedAt != null &&
+        now.difference(failedAt) < remoteLogoFailureCooldown) {
+      return false;
+    }
+    return true;
   }
 
   Future<bool> _readSchemaLogoVersion(String path) async {
@@ -584,6 +658,7 @@ class AppController extends ChangeNotifier {
       if (package?.logoPath != null) {
         _remoteSchemeLogos.remove(key);
         _remoteSchemeLogoFetchedAt.remove(key);
+        _remoteSchemeLogoFailedAt.remove(key);
       }
       return;
     }
@@ -591,10 +666,16 @@ class AppController extends ChangeNotifier {
         _addonLogoInstalledState[key] != addonInstalled) {
       _addonLogoInstalledState[key] = addonInstalled;
       _remoteSchemeLogoFetchedAt.remove(key);
+      _remoteSchemeLogoFailedAt.remove(key);
     }
+    final now = DateTime.now();
     final fetchedAt = _remoteSchemeLogoFetchedAt[key];
-    if (fetchedAt != null &&
-        DateTime.now().difference(fetchedAt) < remoteLogoCacheTtl) {
+    if (fetchedAt != null && now.difference(fetchedAt) < remoteLogoCacheTtl) {
+      return;
+    }
+    final failedAt = _remoteSchemeLogoFailedAt[key];
+    if (failedAt != null &&
+        now.difference(failedAt) < remoteLogoFailureCooldown) {
       return;
     }
     final url =
@@ -612,6 +693,7 @@ class AppController extends ChangeNotifier {
       if (_disposed) return;
       final imageChanged = path != null && await _readSchemaLogoVersion(path);
       if (_disposed) return;
+      _remoteSchemeLogoFailedAt.remove(key);
       _remoteSchemeLogoFetchedAt[key] = DateTime.now();
       final latestPkg = installedPackageFor(key);
       if (latestPkg?.hasPackageZip == true && latestPkg?.logoPath != null) {
@@ -624,7 +706,9 @@ class AppController extends ChangeNotifier {
         _changed();
       }
     } catch (_) {
-      // Uninstalled preview icon lookup is best-effort and never blocks UI.
+      // Uninstalled preview icon lookup is best-effort; cool down before retry
+      // so offline/rate-limited rebuilds do not hammer the bridge or flicker UI.
+      if (!_disposed) _remoteSchemeLogoFailedAt[key] = DateTime.now();
     } finally {
       _remoteSchemeLogoInFlight.remove(key);
     }
@@ -1871,6 +1955,10 @@ class AppController extends ChangeNotifier {
         read(() async {
           androidSettings = await core.getAndroidImeInputSettings();
         }),
+      if (isIos || (isAndroid && storageReady))
+        read(() async {
+          await _refreshKeyboardLibrary();
+        }),
       if (!isAndroid || storageReady)
         read(() async {
           uiSettings = await core.getImeUiSettings();
@@ -2115,11 +2203,19 @@ class AppController extends ChangeNotifier {
     }
     if (_disposed || request != _schemeUpdatesRequest) return;
     installedPackages = packages;
+    final logoVersionReads = <Future<bool>>[];
     for (final package in packages) {
-      if (package.logoPath != null) {
+      final logoPath = package.logoPath;
+      if (logoPath != null) {
         _remoteSchemeLogos.remove(package.schemeKey);
         _remoteSchemeLogoFetchedAt.remove(package.schemeKey);
+        _remoteSchemeLogoFailedAt.remove(package.schemeKey);
+        logoVersionReads.add(_readSchemaLogoVersion(logoPath));
       }
+    }
+    if (logoVersionReads.isNotEmpty) {
+      await Future.wait(logoVersionReads);
+      if (_disposed || request != _schemeUpdatesRequest) return;
     }
     libjd = libjdStatus;
     schemeUpdates = [
@@ -2365,6 +2461,20 @@ class AppController extends ChangeNotifier {
       if (engine == 'libjd_engine') _pendingSchemaSelectionPrompt = null;
       await _readInstalledPackages();
       await _readLocal();
+      final key = activeSchemeKey;
+      final hasInstalledPackage =
+          installedPackageFor(key) != null ||
+          isolatedPackages.any((p) => p.packageKey == key);
+      if (engine == 'libjd_engine' && !isUsingLibjd && hasInstalledPackage) {
+        _attemptedAutoConvertKey = key;
+        await _convertSchemePackage(key);
+        return;
+      }
+      if (engine == 'rime' && !hasUsableBuild && hasInstalledPackage) {
+        _attemptedAutoDeployKey = key;
+        await _deploy();
+        return;
+      }
       unawaited(refreshCandidatePreview());
     } catch (failure) {
       packageError = errorText(failure);
@@ -2583,7 +2693,10 @@ class AppController extends ChangeNotifier {
     });
   }
 
-  Future<bool> importLocalScheme({String? schemeKey}) async {
+  Future<bool> importLocalScheme({
+    String? schemeKey,
+    bool fromArchive = false,
+  }) async {
     final wasActive = installedPackageFor(schemeKey ?? '')?.active == true;
     String? importedKey;
     var deferred = false;
@@ -2591,29 +2704,45 @@ class AppController extends ChangeNotifier {
       packageError = null;
       String? temporaryDirectory;
       try {
-        final String directoryPath;
+        final String sourcePath;
         final String displayName;
         if (isMobile) {
-          final selected = isAndroid
-              ? await android.importLocalSchemeDirectory()
-              : await const IosHost().importLocalSchemeDirectory();
+          final selected = fromArchive
+              ? (isAndroid
+                    ? await android.importLocalSchemeArchive()
+                    : await const IosHost().importLocalSchemeArchive())
+              : (isAndroid
+                    ? await android.importLocalSchemeDirectory()
+                    : await const IosHost().importLocalSchemeDirectory());
           if (selected == null) return;
           temporaryDirectory =
               selected['temporaryDirectory'] as String? ??
               selected['path'] as String;
-          directoryPath = selected['path'] as String;
+          sourcePath = selected['path'] as String;
           displayName = selected['name'] as String;
-        } else {
-          final selected = await getDirectoryPath();
+        } else if (fromArchive) {
+          final selected = await pickDesktopArchive();
           if (selected == null) return;
-          directoryPath = selected;
+          sourcePath = selected;
+          final segments = selected
+              .split(RegExp(r'[/\\]'))
+              .where((segment) => segment.isNotEmpty);
+          final rawName = segments.isEmpty ? 'local-scheme' : segments.last;
+          displayName =
+              rawName.toLowerCase().endsWith('.zip') && rawName.length > 4
+              ? rawName.substring(0, rawName.length - 4)
+              : rawName;
+        } else {
+          final selected = await pickDesktopDirectory();
+          if (selected == null) return;
+          sourcePath = selected;
           final segments = selected
               .split(RegExp(r'[/\\]'))
               .where((segment) => segment.isNotEmpty);
           displayName = segments.isEmpty ? 'local-scheme' : segments.last;
         }
         final key = await core.importLocalScheme(
-          directoryPath: directoryPath,
+          directoryPath: sourcePath,
           displayName: displayName,
           schemeKey: schemeKey,
         );
@@ -2858,6 +2987,11 @@ class AppController extends ChangeNotifier {
     _invalidateSchemeUpdates();
     await _readInstalledPackages();
     await _readLocal();
+    if (isMobile) {
+      await _checkRecommendedKeyboardAfterSchemaSwitch(
+        currentSchemaId ?? key,
+      );
+    }
     if (key == 'wanxiang') {
       wanxiang = await core.wanxiangStatus();
       await _readWanxiangGrammar();
@@ -3003,6 +3137,9 @@ class AppController extends ChangeNotifier {
           _invalidateSchemeUpdates();
           await _readInstalledPackages();
           await refreshIsolatedPackages(notify: false);
+          if (key == activeSchemeKey) {
+            await _readLocal();
+          }
         } catch (failure) {
           packageError = errorText(failure);
           rethrow;
@@ -3313,6 +3450,7 @@ class AppController extends ChangeNotifier {
           'key_sound_enabled': input.keySoundEnabled,
           'key_sound_volume': input.keySoundVolume,
           'key_hint_visible': input.keyHintVisible,
+          'mnemonic_hints_enabled': input.mnemonicHintsEnabled,
           'flick_keys_enabled': input.flickKeysEnabled,
           'number_row_enabled': input.numberRowEnabled,
           'candidate_font_scale': input.candidateFontScale,
@@ -4195,8 +4333,128 @@ class AppController extends ChangeNotifier {
     await core.selectSchema(schemaId: schemaId);
     await _readLocal();
     await _readInstalledPackages();
+    if (isMobile) {
+      await _checkRecommendedKeyboardAfterSchemaSwitch(schemaId);
+    }
     unawaited(refreshCandidatePreview());
   }
+
+  String get _recommendationSchemaKey => currentSchemaId ?? activeSchemeKey;
+
+  bool get currentKeyboardHasMnemonics {
+    final active = keyboards.where((k) => k.current).firstOrNull;
+    if (active != null) return active.hasMnemonics;
+    final raw = androidSettings?.keyboardLayoutJson;
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, dynamic> && decoded['hasMnemonics'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _refreshKeyboardLibrary() async {
+    try {
+      keyboards = await core.getKeyboardLibrary();
+      recommendedKeyboard = await core.getRecommendedKeyboardForSchema(
+        schemaId: _recommendationSchemaKey,
+      );
+    } catch (failure) {
+      debugPrint('Keyboard library refresh failed: ${errorText(failure)}');
+    }
+  }
+
+  Future<void> _checkRecommendedKeyboardAfterSchemaSwitch(
+    String schemaId,
+  ) async {
+    try {
+      keyboards = await core.getKeyboardLibrary();
+      final recommended = await core.getRecommendedKeyboardForSchema(
+        schemaId: schemaId,
+      );
+      recommendedKeyboard = recommended;
+      if (recommended != null && !recommended.current) {
+        pendingRecommendedKeyboard = recommended;
+      } else {
+        pendingRecommendedKeyboard = null;
+      }
+      _changed();
+    } catch (failure) {
+      debugPrint('Recommended keyboard lookup failed: ${errorText(failure)}');
+    }
+  }
+
+  void dismissRecommendedKeyboard() {
+    if (pendingRecommendedKeyboard == null) return;
+    pendingRecommendedKeyboard = null;
+    _changed();
+  }
+
+  Future<bool> applyKeyboardProfile(String id) => run(() async {
+    if (isAndroid) await _requireStorage();
+    await core.applyKeyboard(id: id);
+    pendingRecommendedKeyboard = null;
+    if (isIos || (isAndroid && storageReady)) {
+      androidSettings = await core.getAndroidImeInputSettings();
+    }
+    await _refreshKeyboardLibrary();
+  });
+
+  Future<bool> deleteKeyboardProfile(String id) => run(() async {
+    if (isAndroid) await _requireStorage();
+    await core.deleteKeyboard(id: id);
+    if (isIos || (isAndroid && storageReady)) {
+      androidSettings = await core.getAndroidImeInputSettings();
+    }
+    await _refreshKeyboardLibrary();
+  });
+
+  Future<KeyboardExportDto> exportKeyboardProfile(String id) =>
+      core.exportKeyboard(id: id);
+
+  Future<KeyboardImportPreviewDto> previewKeyboardImport(String text) =>
+      core.previewKeyboardImport(text: text);
+
+  Future<KeyboardImportResultDto> importKeyboardProfile(
+    String text, {
+    bool overwrite = false,
+  }) async {
+    final result = await core.importKeyboard(text: text, overwrite: overwrite);
+    if (isIos || (isAndroid && storageReady)) {
+      androidSettings = await core.getAndroidImeInputSettings();
+    }
+    await _refreshKeyboardLibrary();
+    _changed();
+    return result;
+  }
+
+  Future<void> shareKeyboardFile(KeyboardExportDto keyboard) =>
+      themeLibraryAction(() async {
+        if (isAndroid) {
+          await android.shareThemeFile(keyboard.fileName, keyboard.json);
+        } else if (isIos) {
+          await const IosHost().shareThemeFile(
+            keyboard.fileName,
+            keyboard.json,
+          );
+        } else if (info.platform == BridgePlatform.macOs) {
+          await const MethodChannel('ink.rea.keytao/window').invokeMethod<void>(
+            'shareThemeFile',
+            {'fileName': keyboard.fileName, 'json': keyboard.json},
+          );
+        } else {
+          final location = await getSaveLocation(
+            suggestedName: keyboard.fileName,
+          );
+          if (location == null) return;
+          await XFile.fromData(
+            Uint8List.fromList(utf8.encode(keyboard.json)),
+            mimeType: 'application/json',
+            name: keyboard.fileName,
+          ).saveTo(location.path);
+        }
+      });
 
   Future<bool> saveCandidatePageSize(int? size) => run(() async {
     if (isAndroid) await _requireStorage();

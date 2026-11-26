@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 class AccountStatsDto {
   final int batchesCount;
@@ -84,6 +84,7 @@ class AndroidImeInputSettingsDto {
   final bool keySoundEnabled;
   final int keySoundVolume;
   final bool keyHintVisible;
+  final bool mnemonicHintsEnabled;
   final bool flickKeysEnabled;
   final bool numberRowEnabled;
   final double candidateFontScale;
@@ -121,6 +122,7 @@ class AndroidImeInputSettingsDto {
     required this.keySoundEnabled,
     required this.keySoundVolume,
     required this.keyHintVisible,
+    required this.mnemonicHintsEnabled,
     required this.flickKeysEnabled,
     required this.numberRowEnabled,
     required this.candidateFontScale,
@@ -160,6 +162,7 @@ class AndroidImeInputSettingsDto {
       keySoundEnabled.hashCode ^
       keySoundVolume.hashCode ^
       keyHintVisible.hashCode ^
+      mnemonicHintsEnabled.hashCode ^
       flickKeysEnabled.hashCode ^
       numberRowEnabled.hashCode ^
       candidateFontScale.hashCode ^
@@ -201,6 +204,7 @@ class AndroidImeInputSettingsDto {
           keySoundEnabled == other.keySoundEnabled &&
           keySoundVolume == other.keySoundVolume &&
           keyHintVisible == other.keyHintVisible &&
+          mnemonicHintsEnabled == other.mnemonicHintsEnabled &&
           flickKeysEnabled == other.flickKeysEnabled &&
           numberRowEnabled == other.numberRowEnabled &&
           candidateFontScale == other.candidateFontScale &&
@@ -871,6 +875,167 @@ class IsolatedPackageDto {
           ready == other.ready &&
           engine == other.engine &&
           schemas == other.schemas;
+}
+
+class KeyboardExportDto {
+  final String id;
+  final String fileName;
+  final String json;
+  final String shareString;
+  final bool useFile;
+
+  const KeyboardExportDto({
+    required this.id,
+    required this.fileName,
+    required this.json,
+    required this.shareString,
+    required this.useFile,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      fileName.hashCode ^
+      json.hashCode ^
+      shareString.hashCode ^
+      useFile.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeyboardExportDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          fileName == other.fileName &&
+          json == other.json &&
+          shareString == other.shareString &&
+          useFile == other.useFile;
+}
+
+class KeyboardImportPreviewDto {
+  final String id;
+  final String name;
+  final String suggestedId;
+  final String suggestedName;
+  final bool conflict;
+  final bool builtInConflict;
+  final bool hasMnemonics;
+  final List<String> warnings;
+  final String previewLayoutJson;
+
+  const KeyboardImportPreviewDto({
+    required this.id,
+    required this.name,
+    required this.suggestedId,
+    required this.suggestedName,
+    required this.conflict,
+    required this.builtInConflict,
+    required this.hasMnemonics,
+    required this.warnings,
+    required this.previewLayoutJson,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      suggestedId.hashCode ^
+      suggestedName.hashCode ^
+      conflict.hashCode ^
+      builtInConflict.hashCode ^
+      hasMnemonics.hashCode ^
+      warnings.hashCode ^
+      previewLayoutJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeyboardImportPreviewDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          suggestedId == other.suggestedId &&
+          suggestedName == other.suggestedName &&
+          conflict == other.conflict &&
+          builtInConflict == other.builtInConflict &&
+          hasMnemonics == other.hasMnemonics &&
+          warnings == other.warnings &&
+          previewLayoutJson == other.previewLayoutJson;
+}
+
+class KeyboardImportResultDto {
+  final String id;
+  final String name;
+  final String disposition;
+  final List<String> warnings;
+
+  const KeyboardImportResultDto({
+    required this.id,
+    required this.name,
+    required this.disposition,
+    required this.warnings,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ name.hashCode ^ disposition.hashCode ^ warnings.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeyboardImportResultDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          disposition == other.disposition &&
+          warnings == other.warnings;
+}
+
+class KeyboardSummaryDto {
+  final String id;
+  final String name;
+  final String? description;
+  final bool builtIn;
+  final bool current;
+  final bool hasMnemonics;
+  final List<String> recommendedSchemas;
+  final String previewLayoutJson;
+
+  const KeyboardSummaryDto({
+    required this.id,
+    required this.name,
+    this.description,
+    required this.builtIn,
+    required this.current,
+    required this.hasMnemonics,
+    required this.recommendedSchemas,
+    required this.previewLayoutJson,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      description.hashCode ^
+      builtIn.hashCode ^
+      current.hashCode ^
+      hasMnemonics.hashCode ^
+      recommendedSchemas.hashCode ^
+      previewLayoutJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeyboardSummaryDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          description == other.description &&
+          builtIn == other.builtIn &&
+          current == other.current &&
+          hasMnemonics == other.hasMnemonics &&
+          recommendedSchemas == other.recommendedSchemas &&
+          previewLayoutJson == other.previewLayoutJson;
 }
 
 class LibjdStatusDto {

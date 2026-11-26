@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
 
@@ -30,6 +32,7 @@ class SchemaLogo extends StatelessWidget {
             logoAsset,
             width: size,
             height: size,
+            filterQuality: FilterQuality.medium,
             excludeFromSemantics: true,
             gaplessPlayback: true,
           )
@@ -44,15 +47,18 @@ class SchemaLogo extends StatelessWidget {
     if (path == null) return fallback();
     final file = File(path);
     final version = controller.schemaLogoVersion(path);
-    return Image(
-      image: version == null
-          ? FileImage(file)
-          : _VersionedLogoImage(file, version),
-      width: size,
-      height: size,
-      excludeFromSemantics: true,
-      gaplessPlayback: true,
-      errorBuilder: (_, _, _) => fallback(),
+    return RepaintBoundary(
+      child: Image(
+        image: version == null
+            ? FileImage(file)
+            : _VersionedLogoImage(file, version),
+        width: size,
+        height: size,
+        filterQuality: FilterQuality.medium,
+        excludeFromSemantics: true,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => fallback(),
+      ),
     );
   }
 }
@@ -269,30 +275,229 @@ class HairlineGridSection extends StatelessWidget {
                       )
                     : 1)
           : 1;
-      final border = BorderSide(color: AppPalette.of(context).hairline);
-      return Table(
-        defaultColumnWidth: constraints.hasBoundedWidth
+      return _HairlineMasonry(
+        columns: columns,
+        columnSizing: constraints.hasBoundedWidth
             ? const FlexColumnWidth()
             : const IntrinsicColumnWidth(),
-        border: TableBorder(
-          bottom: border,
-          horizontalInside: border,
-          verticalInside: border,
-        ),
+        border: BorderSide(color: AppPalette.of(context).hairline),
         children: [
-          for (var start = 0; start < children.length; start += columns)
-            TableRow(
-              children: [
-                for (var column = 0; column < columns; column++)
-                  start + column < children.length
-                      ? children[start + column]
-                      : const SizedBox.shrink(),
-              ],
-            ),
+          for (final child in children)
+            // The catalogue toggle still supplies a TableCell.
+            if (child is TableCell)
+              KeyedSubtree(key: child.key, child: child.child)
+            else
+              child,
         ],
       );
     },
   );
+}
+
+class _HairlineMasonry extends MultiChildRenderObjectWidget {
+  const _HairlineMasonry({
+    required this.columns,
+    required this.columnSizing,
+    required this.border,
+    required super.children,
+  });
+
+  final int columns;
+  final TableColumnWidth columnSizing;
+  final BorderSide border;
+
+  @override
+  _RenderHairlineMasonry createRenderObject(BuildContext context) =>
+      _RenderHairlineMasonry(columns, columnSizing, border);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderHairlineMasonry renderObject,
+  ) => renderObject.update(columns, columnSizing, border);
+}
+
+class _MasonryParentData extends ContainerBoxParentData<RenderBox> {
+  late int column;
+}
+
+class _RenderHairlineMasonry extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _MasonryParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _MasonryParentData> {
+  _RenderHairlineMasonry(this._columns, this._columnSizing, this._border);
+
+  static const _slotTolerance = 16.0;
+
+  int _columns;
+  TableColumnWidth _columnSizing;
+  BorderSide _border;
+  late double _columnWidth;
+  late List<double> _bottoms;
+
+  void update(int columns, TableColumnWidth columnSizing, BorderSide border) {
+    if (_columns != columns || _columnSizing != columnSizing) {
+      _columns = columns;
+      _columnSizing = columnSizing;
+      markNeedsLayout();
+    }
+    if (_border != border) {
+      _border = border;
+      markNeedsPaint();
+    }
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _MasonryParentData) {
+      child.parentData = _MasonryParentData();
+    }
+  }
+
+  Iterable<RenderBox> get _cells sync* {
+    for (var child = firstChild; child != null; child = childAfter(child)) {
+      yield child;
+    }
+  }
+
+  double _widthFor(BoxConstraints constraints) => constraints.hasBoundedWidth
+      ? constraints.maxWidth / _columns
+      : constraints.constrainWidth(computeMaxIntrinsicWidth(double.infinity));
+
+  List<double> _stack(
+    double Function(RenderBox child, int column, double top) place,
+  ) {
+    final bottoms = List<double>.filled(_columns, 0);
+    for (final child in _cells) {
+      // ponytail: Align near-equal slot ends and fill the band from the left.
+      final limit = bottoms.reduce(math.min) + _slotTolerance;
+      final band = [
+        for (var column = 0; column < _columns; column++)
+          if (bottoms[column] <= limit) column,
+      ];
+      final top = band.map((column) => bottoms[column]).reduce(math.max);
+      for (final column in band) {
+        bottoms[column] = top;
+      }
+      final column = band.first;
+      bottoms[column] = top + place(child, column, top);
+    }
+    if (_columns == 1) return bottoms;
+    final columnsByBottom = List<int>.generate(_columns, (column) => column)
+      ..sort((a, b) => bottoms[b].compareTo(bottoms[a]));
+    var previousBottom = bottoms[columnsByBottom.first];
+    var groupMax = previousBottom;
+    for (final column in columnsByBottom.skip(1)) {
+      final bottom = bottoms[column];
+      if (previousBottom - bottom > _slotTolerance) groupMax = bottom;
+      bottoms[column] = groupMax;
+      previousBottom = bottom;
+    }
+    return bottoms;
+  }
+
+  @override
+  void performLayout() {
+    _columnWidth = _widthFor(constraints);
+    final childConstraints = BoxConstraints.tightFor(width: _columnWidth);
+    _bottoms = _stack((child, column, top) {
+      child.layout(childConstraints, parentUsesSize: true);
+      (child.parentData! as _MasonryParentData)
+        ..column = column
+        ..offset = Offset(column * _columnWidth, top);
+      return child.size.height;
+    });
+    size = constraints.constrain(
+      Size(_columnWidth * _columns, _bottoms.reduce(math.max)),
+    );
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final width = _widthFor(constraints);
+    final childConstraints = BoxConstraints.tightFor(width: width);
+    final bottoms = _stack(
+      (child, _, _) => child.getDryLayout(childConstraints).height,
+    );
+    return constraints.constrain(
+      Size(width * _columns, bottoms.reduce(math.max)),
+    );
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) =>
+      _columnSizing.minIntrinsicWidth(_cells, double.infinity);
+
+  @override
+  double computeMaxIntrinsicWidth(double height) =>
+      _columnSizing.maxIntrinsicWidth(_cells, double.infinity);
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      computeMaxIntrinsicHeight(width);
+
+  @override
+  double computeMaxIntrinsicHeight(double width) {
+    final columnWidth = _widthFor(BoxConstraints.tightForFinite(width: width));
+    return _stack(
+      (child, _, _) => child.getMaxIntrinsicHeight(columnWidth),
+    ).reduce(math.max);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  bool _isNestedGrid(RenderBox? child) => switch (child) {
+    _RenderHairlineMasonry() => true,
+    RenderAbstractLayoutBuilderMixin<BoxConstraints, RenderBox>(:final child) =>
+      _isNestedGrid(child),
+    _ => false,
+  };
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    defaultPaint(context, offset);
+    final canvas = context.canvas;
+    if (_columns == 1) {
+      // TableBorder centers inside strokes and insets the final stroke.
+      TableBorder(
+        horizontalInside: _border,
+        bottom: _isNestedGrid(lastChild) ? BorderSide.none : _border,
+      ).paint(
+        canvas,
+        offset & Size(_columnWidth, _bottoms.single),
+        columns: const [],
+        rows: [
+          for (final child in _cells)
+            if (child != lastChild && !_isNestedGrid(child))
+              (child.parentData! as _MasonryParentData).offset.dy +
+                  child.size.height,
+        ],
+      );
+      return;
+    }
+
+    final paint = _border.toPaint();
+    for (var column = 1; column < _columns; column++) {
+      final x = column * _columnWidth;
+      canvas.drawLine(
+        offset + Offset(x, 0),
+        offset + Offset(x, math.max(_bottoms[column - 1], _bottoms[column])),
+        paint,
+      );
+    }
+    // Each slot ends at the next cell's top or the final column bottom.
+    final slotEnds = _bottoms.toList();
+    for (var child = lastChild; child != null; child = childBefore(child)) {
+      final data = child.parentData! as _MasonryParentData;
+      final slotEnd = slotEnds[data.column];
+      slotEnds[data.column] = data.offset.dy;
+      if (_isNestedGrid(child)) continue;
+      final start = offset + Offset(data.offset.dx, slotEnd);
+      canvas.drawLine(start, start + Offset(_columnWidth, 0), paint);
+    }
+  }
 }
 
 class HairlineGridCell extends StatelessWidget {
@@ -421,17 +626,26 @@ class Section extends StatelessWidget {
     children: [
       Padding(
         padding: const EdgeInsets.only(bottom: 8),
-        child: Row(
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 6,
           children: [
-            if (icon != null) ...[
-              Icon(
-                icon,
-                size: context.platformVariant.touch ? 18 : 16,
-                color: context.theme.colors.mutedForeground,
-              ),
-              const SizedBox(width: 8),
-            ],
-            Expanded(child: EyebrowLabel(title)),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (icon != null) ...[
+                  Icon(
+                    icon,
+                    size: context.platformVariant.touch ? 18 : 16,
+                    color: context.theme.colors.mutedForeground,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                EyebrowLabel(title),
+              ],
+            ),
             ?trailing,
           ],
         ),
@@ -442,6 +656,9 @@ class Section extends StatelessWidget {
           children: [
             for (final child in children)
               DecoratedBox(
+                key: child.key == null
+                    ? null
+                    : ValueKey(('section-row', child.key)),
                 decoration: BoxDecoration(
                   border: Border(
                     top: BorderSide(color: AppPalette.of(context).hairline),
@@ -629,6 +846,7 @@ class ChoiceSetting<T> extends StatelessWidget {
               child: IgnorePointer(
                 ignoring: onChanged == null,
                 child: FTabs(
+                  key: ValueKey((label, options.length)),
                   control: FTabControl.lifted(
                     index: options.keys
                         .toList()

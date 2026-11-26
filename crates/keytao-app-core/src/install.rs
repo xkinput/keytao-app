@@ -190,7 +190,7 @@ pub fn export_scheme(
             .map_err(|error| CoreError::Other(error.to_string()))?;
         let expected = entry.size();
         if expected > remaining {
-            return Err(CoreError::Other("方案包解压后过大".into()));
+            return Err(CoreError::Other("方案包解压后过大（超过 512 MB 限制）".into()));
         }
         let mut content = Vec::new();
         entry

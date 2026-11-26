@@ -15,7 +15,7 @@ class _CandidatePanelPreviewCache {
     var settings = controller.uiSettings;
     controller.addListener(() {
       if ((savingTheme && !controller.savingTheme) ||
-          !identical(settings, controller.uiSettings)) {
+          settings != controller.uiSettings) {
         themes.clear();
       }
       savingTheme = controller.savingTheme;

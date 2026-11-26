@@ -55,6 +55,8 @@ class AndroidHost {
       _channel.invokeMethod<void>('setKeyboardFlushBottom', {'enabled': enabled});
   Future<Map<String, dynamic>?> importLocalSchemeDirectory() =>
       _channel.invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
+  Future<Map<String, dynamic>?> importLocalSchemeArchive() =>
+      _channel.invokeMapMethod<String, dynamic>('importLocalSchemeArchive');
   Future<Map<String, dynamic>> smartExtractZipToPrivate(String zipPath) =>
       _map('smartExtractZipToPrivate', {'zipPath': zipPath});
   Future<Map<String, dynamic>> deployImeData() => _map('deployImeData');

@@ -163,6 +163,7 @@ async fn git_release_auto_picks_targz_unwraps_folder_and_detects_updates() {
             mode: GitSchemeMode::Release,
             branch: None,
             asset_name: None,
+            schema_id: None,
         },
         "",
         None,
@@ -258,6 +259,7 @@ async fn git_fixed_latest_asset_survives_rate_limit_and_branch_tree_url_syncs_in
             mode: GitSchemeMode::Release,
             branch: None,
             asset_name: Some("full.zip".into()),
+            schema_id: None,
         },
         "",
         None,
@@ -292,6 +294,7 @@ async fn git_fixed_latest_asset_survives_rate_limit_and_branch_tree_url_syncs_in
             mode: GitSchemeMode::Release, // Auto-switched to Branch because of /tree/dev!
             branch: None,
             asset_name: None,
+            schema_id: None,
         },
         "自定义分支方案",
         None,
@@ -380,6 +383,7 @@ async fn engine_preference_does_not_deploy_downloads_or_discard_converted_words(
             mode: GitSchemeMode::Release,
             branch: None,
             asset_name: Some("full.zip".into()),
+            schema_id: None,
         },
         "",
         None,
@@ -410,6 +414,7 @@ async fn engine_preference_does_not_deploy_downloads_or_discard_converted_words(
             mode: GitSchemeMode::Release,
             branch: None,
             asset_name: Some("full.zip".into()),
+            schema_id: None,
         },
         "",
         Some(&other),
@@ -424,4 +429,172 @@ async fn engine_preference_does_not_deploy_downloads_or_discard_converted_words(
     assert!(!dictionary.exists());
     assert!(!converted.exists());
     assert!(keytao_core::libjd::imported_dictionary(&core.env().data_dir, &other).is_none());
+}
+
+#[tokio::test]
+async fn git_archive_import_filters_build_directory_in_zip_and_targz() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    let user_root = dir.path().join("rime");
+    fs::create_dir_all(&user_root).unwrap();
+
+    let zip_payload = zip_bytes(&[
+        (
+            "repo-main/demo.schema.yaml",
+            b"schema:\n  schema_id: demo\n  name: ZipDemo\n",
+        ),
+        ("repo-main/build/demo.table.bin", b"compiled zip artifact"),
+        ("repo-main/nested/build/data", b"scheme resource"),
+    ]);
+    let tar_payload = targz_bytes(&[
+        (
+            "demo.schema.yaml",
+            b"schema:\n  schema_id: demo\n  name: TarDemo\n",
+        ),
+        ("build/demo.table.bin", b"compiled tar artifact"),
+        ("nested/build/data", b"scheme resource"),
+    ]);
+    let routes = Arc::new(Mutex::new(HashMap::from([
+        (
+            "/github/api/repos/acme/build-zip/releases/latest".into(),
+            MockRoute {
+                status: "403 Forbidden",
+                headers: "x-ratelimit-remaining: 0\r\nContent-Type: application/json\r\n",
+                body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+            },
+        ),
+        (
+            "/github/api/repos/acme/build-tar/releases/latest".into(),
+            MockRoute {
+                status: "403 Forbidden",
+                headers: "x-ratelimit-remaining: 0\r\nContent-Type: application/json\r\n",
+                body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+            },
+        ),
+        (
+            "/github/acme/build-zip/releases/latest/download/scheme.zip".into(),
+            MockRoute {
+                status: "200 OK",
+                headers: "Content-Type: application/zip\r\n",
+                body: zip_payload,
+            },
+        ),
+        (
+            "/github/acme/build-tar/releases/latest/download/scheme.tar.gz".into(),
+            MockRoute {
+                status: "200 OK",
+                headers: "Content-Type: application/gzip\r\n",
+                body: tar_payload,
+            },
+        ),
+    ])));
+    let origin = spawn_mock_github(routes).await;
+
+    for (repo, asset) in [("build-zip", "scheme.zip"), ("build-tar", "scheme.tar.gz")] {
+        let key = import_git_scheme(
+            &core,
+            &user_root,
+            GitSchemeConfig {
+                repo_url: format!("{origin}/github/acme/{repo}"),
+                mode: GitSchemeMode::Release,
+                branch: None,
+                asset_name: Some(asset.into()),
+                schema_id: None,
+            },
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+        let (files, _) = PackageStore::new(&core).read_files(&key).unwrap();
+        assert!(files.iter().any(|(path, _)| path == "nested/build/data"));
+        assert!(
+            files.iter().all(|(path, _)| !path.starts_with("build/")),
+            "expected build/ to be filtered for {repo}, got {:?}",
+            files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
+async fn git_import_splits_multi_schema_archive_and_syncs_single_split_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    let user_root = dir.path().join("rime");
+    fs::create_dir_all(&user_root).unwrap();
+
+    let payload = zip_bytes(&[
+        (
+            "bundle-main/one.schema.yaml",
+            "schema:\n  schema_id: one\n  name: 方案一\ntranslator:\n  dictionary: one\n".as_bytes(),
+        ),
+        (
+            "bundle-main/two.schema.yaml",
+            "schema:\n  schema_id: two\n  name: 方案二\ntranslator:\n  dictionary: two\n".as_bytes(),
+        ),
+        ("bundle-main/one.dict.yaml", b"---\nname: one\n...\na\ta\n"),
+        ("bundle-main/two.dict.yaml", b"---\nname: two\n...\nb\tb\n"),
+        ("bundle-main/lua/shared.lua", b"return 1\n"),
+    ]);
+    let routes = Arc::new(Mutex::new(HashMap::from([
+        (
+            "/github/api/repos/acme/multi/releases/latest".into(),
+            MockRoute {
+                status: "403 Forbidden",
+                headers: "x-ratelimit-remaining: 0\r\nContent-Type: application/json\r\n",
+                body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+            },
+        ),
+        (
+            "/github/acme/multi/releases/latest/download/multi.zip".into(),
+            MockRoute {
+                status: "200 OK",
+                headers: "Content-Type: application/zip\r\n",
+                body: payload,
+            },
+        ),
+    ])));
+    let origin = spawn_mock_github(routes).await;
+
+    let first = import_git_scheme(
+        &core,
+        &user_root,
+        GitSchemeConfig {
+            repo_url: format!("{origin}/github/acme/multi"),
+            mode: GitSchemeMode::Release,
+            branch: None,
+            asset_name: Some("multi.zip".into()),
+            schema_id: None,
+        },
+        "",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first, "local-one");
+
+    let store = PackageStore::new(&core);
+    let (one_files, one_meta) = store.read_files("local-one").unwrap();
+    let (two_files, two_meta) = store.read_files("local-two").unwrap();
+    let one_names: Vec<_> = one_files.iter().map(|(p, _)| p.as_str()).collect();
+    let two_names: Vec<_> = two_files.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(one_names.contains(&"one.schema.yaml"));
+    assert!(one_names.contains(&"one.dict.yaml"));
+    assert!(one_names.contains(&"lua/shared.lua"));
+    assert!(!one_names.contains(&"two.schema.yaml"));
+    assert!(!one_names.contains(&"two.dict.yaml"));
+    assert_eq!(one_meta.git.as_ref().unwrap().schema_id.as_deref(), Some("one"));
+
+    assert!(two_names.contains(&"two.schema.yaml"));
+    assert!(two_names.contains(&"two.dict.yaml"));
+    assert!(two_names.contains(&"lua/shared.lua"));
+    assert!(!two_names.contains(&"one.schema.yaml"));
+    assert!(!two_names.contains(&"one.dict.yaml"));
+    assert_eq!(two_meta.git.as_ref().unwrap().schema_id.as_deref(), Some("two"));
+
+    // Syncing local-two updates only local-two without re-introducing one.schema.yaml.
+    sync_git_scheme(&core, &user_root, "local-two").await.unwrap();
+    let (two_after, _) = store.read_files("local-two").unwrap();
+    assert!(two_after.iter().all(|(p, _)| p != "one.schema.yaml" && p != "one.dict.yaml"));
+    assert!(two_after.iter().any(|(p, _)| p == "two.schema.yaml"));
 }

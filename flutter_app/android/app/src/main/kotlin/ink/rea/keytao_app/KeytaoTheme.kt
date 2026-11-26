@@ -17,9 +17,13 @@ data class KeytaoColor(val red: Int, val green: Int, val blue: Int, val alpha: I
     companion object {
         fun fromHex(value: String): KeytaoColor? {
             val hex = value.trim().removePrefix("#")
-            if (hex.length != 6 || hex.any { !it.isDigit() && it.lowercaseChar() !in 'a'..'f' }) return null
+            if ((hex.length != 6 && hex.length != 8) || hex.any { !it.isDigit() && it.lowercaseChar() !in 'a'..'f' }) return null
             return runCatching {
-                KeytaoColor(hex.substring(0, 2).toInt(16), hex.substring(2, 4).toInt(16), hex.substring(4, 6).toInt(16))
+                val r = hex.substring(0, 2).toInt(16)
+                val g = hex.substring(2, 4).toInt(16)
+                val b = hex.substring(4, 6).toInt(16)
+                val a = if (hex.length == 8) hex.substring(6, 8).toInt(16) else 255
+                KeytaoColor(r, g, b, a)
             }.getOrNull()
         }
     }
@@ -49,22 +53,56 @@ private fun themeTypeface(weight: String, family: Typeface): Typeface {
     }
 }
 
-class KeytaoKeyStyle(json: JSONObject, family: Typeface) {
-    val background = json.themeColor("background")
-    val foreground = json.themeColor("foreground")
-    val hintForeground = json.themeColor("hintForeground")
-    val pressedBackground = json.themeColor("pressedBackground")
-    val pressedForeground = json.themeColor("pressedForeground")
-    val borderColor = json.themeColor("borderColor")
-    val borderWidth = json.getDouble("borderWidth").toFloat()
-    val cornerRadius = json.getDouble("cornerRadius").toFloat()
-    val shadowColor = json.themeColor("shadowColor")
-    val shadowOffsetY = json.getDouble("shadowOffsetY").toFloat()
-    val fontScale = json.getDouble("fontScale").toFloat()
-    val hintFontScale = json.getDouble("hintFontScale").toFloat()
-    val swipeHintForeground = json.themeColor("swipeHintForeground")
-    val swipeHintVisible = json.getBoolean("swipeHintVisible")
-    val typeface = themeTypeface(json.getString("fontWeight"), family)
+data class KeytaoKeyStyle(
+    val background: KeytaoColor,
+    val foreground: KeytaoColor,
+    val hintForeground: KeytaoColor,
+    val pressedBackground: KeytaoColor,
+    val pressedForeground: KeytaoColor,
+    val borderColor: KeytaoColor,
+    val borderWidth: Float,
+    val cornerRadius: Float,
+    val shadowColor: KeytaoColor,
+    val shadowOffsetY: Float,
+    val fontScale: Float,
+    val hintFontScale: Float,
+    val swipeHintForeground: KeytaoColor,
+    val swipeHintVisible: Boolean,
+    val typeface: Typeface,
+) {
+    constructor(json: JSONObject, family: Typeface) : this(
+        background = json.themeColor("background"),
+        foreground = json.themeColor("foreground"),
+        hintForeground = json.themeColor("hintForeground"),
+        pressedBackground = json.themeColor("pressedBackground"),
+        pressedForeground = json.themeColor("pressedForeground"),
+        borderColor = json.themeColor("borderColor"),
+        borderWidth = json.getDouble("borderWidth").toFloat(),
+        cornerRadius = json.getDouble("cornerRadius").toFloat(),
+        shadowColor = json.themeColor("shadowColor"),
+        shadowOffsetY = json.getDouble("shadowOffsetY").toFloat(),
+        fontScale = json.getDouble("fontScale").toFloat(),
+        hintFontScale = json.getDouble("hintFontScale").toFloat(),
+        swipeHintForeground = json.themeColor("swipeHintForeground"),
+        swipeHintVisible = json.getBoolean("swipeHintVisible"),
+        typeface = themeTypeface(json.getString("fontWeight"), family),
+    )
+
+    fun withGroupStyle(group: KeyGroupStyle?): KeytaoKeyStyle {
+        if (group == null) return this
+        val bg = group.background?.let(KeytaoColor::fromHex) ?: background
+        val fg = group.foreground?.let(KeytaoColor::fromHex) ?: foreground
+        val hint = group.hintForeground?.let(KeytaoColor::fromHex) ?: hintForeground
+        val border = group.borderColor?.let(KeytaoColor::fromHex) ?: borderColor
+        val nextBorderWidth = if (group.borderColor != null && borderWidth <= 0f) 1f else borderWidth
+        return copy(
+            background = bg,
+            foreground = fg,
+            hintForeground = hint,
+            borderColor = border,
+            borderWidth = nextBorderWidth,
+        )
+    }
 }
 
 class KeytaoImeTheme private constructor(root: JSONObject, context: Context) {

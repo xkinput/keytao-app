@@ -142,6 +142,19 @@ object KeytaoNativeBridge {
             ?.takeIf { it.isNotBlank() }
     }
 
+    fun listKeyboardsJson(userKeyboardPath: String?): String? {
+        if (!loaded || userKeyboardPath.isNullOrBlank()) return null
+        return runCatching { nativeListKeyboardsJson(userKeyboardPath) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    fun applyKeyboard(userKeyboardPath: String?, keyboardId: String): Boolean {
+        if (!loaded || userKeyboardPath.isNullOrBlank()) return false
+        return runCatching { nativeApplyKeyboard(userKeyboardPath, keyboardId) == 1 }
+            .getOrDefault(false)
+    }
+
     fun hasDeployedSchema(userDir: String): Boolean {
         if (!loaded) return false
         return runCatching { nativeHasDeployedSchema(userDir) }.getOrDefault(false)
@@ -466,6 +479,10 @@ object KeytaoNativeBridge {
         defaultKeyboardPath: String?,
         userKeyboardPath: String?,
     ): String
+
+    external fun nativeListKeyboardsJson(userKeyboardPath: String?): String
+
+    external fun nativeApplyKeyboard(userKeyboardPath: String?, keyboardId: String): Int
 
     private external fun nativeEngineEnabled(userDir: String): Boolean
 

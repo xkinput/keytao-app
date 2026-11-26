@@ -428,12 +428,12 @@ async fn snow_pinyin_zip_renders_shape_and_ss_comment_when_present() {
     assert!(rt_dir.join("snow_flyjd.fixed.txt").is_file());
     assert!(rt_dir.join("snow_jiandao.fixed.txt").is_file());
     assert!(
-        fixture
+        !fixture
             .core
             .env()
             .data_dir
-            .join(format!("scheme-packages/local/{key}/files/build/kMandarin17.reverse.bin"))
-            .is_file()
+            .join(format!("scheme-packages/local/{key}/files/build"))
+            .exists()
     );
 
     let runtime = fixture.runtime();

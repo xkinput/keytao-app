@@ -3861,7 +3861,16 @@ final class KeyTaoIOSKeyboardView: UIView {
         if isUnsupportedEditKey(key) {
             context?.setAlpha(0.38)
         }
-        let style = resolvedKeyStyle(key, selected: isActiveKey(key))
+        let mnemonicActive = config.mnemonicHintsEnabled
+            && config.hasMnemonics
+            && layerMode == .letters
+            && !isEnglishMode
+            && !state.asciiMode
+        let activeMnemonic = mnemonicActive ? KeyTaoMnemonicHints.forKey(key) : nil
+        let groupName = activeMnemonic?.group ?? key.group
+        let isDarkTheme = theme.ui.effectiveColorScheme == "dark"
+        let groupStyle = groupName.flatMap { config.keyGroups[$0]?.resolve(isDark: isDarkTheme) }
+        let style = resolvedKeyStyle(key, selected: isActiveKey(key)).applying(groupStyle: groupStyle)
         if let stack = key.stack, !stack.isEmpty {
             drawStackKey(
                 stack,
@@ -3887,13 +3896,13 @@ final class KeyTaoIOSKeyboardView: UIView {
         let baseSize = keyLabelSize(for: label, keySize: keyRect.size) * style.fontScale
         let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10, weight: style.fontWeight)
         let color = keyForegroundColor(style, pressProgress: pressProgress)
-        if config.mnemonicHintsEnabled,
-           layerMode == .letters,
-           currentRimeSchemaID == "keytao",
-           !state.asciiMode,
-           let mnemonic = mnemonicHint(for: key),
-           mnemonic.topText != nil || !mnemonic.bottomLines.isEmpty {
+        if let mnemonic = activeMnemonic,
+           mnemonic.topText != nil || !mnemonic.resolvedBottomLines.isEmpty {
             drawMnemonicKeyLabel(label, mnemonic: mnemonic, rect: keyRect, color: color, font: font, style: style)
+            return
+        }
+        if let slots = key.slots, slots.hasContent, !isEnglishMode, !state.asciiMode {
+            drawSlottedKeyLabel(label, slots: slots, rect: keyRect, color: color, font: font, style: style)
             return
         }
         if key.action?.type == KeyTaoCommandType.keyboardPicker {
@@ -3913,7 +3922,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawText(label, in: keyRect, color: color, font: font, alignment: .center)
         }
 
-        if config.keyHintVisible, let hint = key.hint, !hint.isEmpty,
+        let effectiveHint = key.slots?.topRight ?? key.hint
+        if config.keyHintVisible, let hint = effectiveHint, !hint.isEmpty,
            hint.count != 1 || style.swipeHintVisible {
             let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size) * style.hintFontScale, weight: style.fontWeight)
             let attributes: [NSAttributedString.Key: Any] = [
@@ -3928,18 +3938,66 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
     }
 
-    private func mnemonicHint(for key: KeyTaoKeySpec) -> KeyTaoMnemonicHints.Hint? {
-        let command = key.primaryCommand(asciiMode: false, shiftState: .off)
-        guard [KeyTaoCommandType.input, KeyTaoCommandType.directInput, KeyTaoCommandType.rimeInput]
-            .contains(command.type) else { return nil }
-        let value = command.value ?? key.label
-        return KeyTaoMnemonicHints.byKey[value.uppercased()]
-            ?? key.asciiValue.flatMap { KeyTaoMnemonicHints.byKey[$0.uppercased()] }
+    private func drawSlottedKeyLabel(
+        _ label: String,
+        slots: KeyTaoKeySlots,
+        rect: CGRect,
+        color: UIColor,
+        font: UIFont,
+        style: KeyTaoImeTheme.KeyStyle
+    ) {
+        let content = rect.insetBy(dx: 3, dy: 2.5)
+        let hasTop = !(slots.topLeft?.isEmpty ?? true)
+            || !(slots.topCenter?.isEmpty ?? true)
+            || !(slots.topRight?.isEmpty ?? true)
+        let bottomLines = slots.resolvedBottomLines
+        let hasBottom = !bottomLines.isEmpty
+        let topBand = hasTop ? content.height * 0.25 : 0
+        let bottomBand = hasBottom ? content.height * 0.27 : 0
+        let centerRect = CGRect(
+            x: content.minX,
+            y: content.minY + topBand,
+            width: content.width,
+            height: max(1, content.height - topBand - bottomBand)
+        )
+        let mainText = (slots.labelSub?.isEmpty == false) ? "\(label) \(slots.labelSub!)" : label
+        func fitting(_ text: String, font: UIFont, rect: CGRect) -> UIFont {
+            let size = text.size(withAttributes: [.font: font])
+            let scale = min(1, rect.width / max(1, size.width), rect.height / max(1, size.height))
+            return font.withSize(font.pointSize * max(0.01, scale))
+        }
+        drawText(mainText, in: centerRect, color: color, font: fitting(mainText, font: font, rect: centerRect), alignment: .center)
+        let hintFont = themedFont(size: min(9.5, keyHintSize(keySize: rect.size)) * style.hintFontScale, weight: style.fontWeight)
+        let hintColor = style.hintForeground.uiColor
+        if hasTop, config.keyHintVisible {
+            let topRect = CGRect(x: content.minX, y: content.minY, width: content.width, height: topBand)
+            if let tl = slots.topLeft, !tl.isEmpty {
+                drawText(tl, in: topRect, color: hintColor, font: fitting(tl, font: hintFont, rect: topRect), alignment: .left)
+            }
+            if let tc = slots.topCenter, !tc.isEmpty {
+                drawText(tc, in: topRect, color: hintColor, font: fitting(tc, font: hintFont, rect: topRect), alignment: .center)
+            }
+            if let tr = slots.topRight, !tr.isEmpty {
+                drawText(tr, in: topRect, color: hintColor, font: fitting(tr, font: hintFont, rect: topRect), alignment: .right)
+            }
+        }
+        if !bottomLines.isEmpty {
+            let lineHeight = max(1, bottomBand / CGFloat(bottomLines.count))
+            for (index, line) in bottomLines.enumerated() {
+                let lineRect = CGRect(
+                    x: content.minX,
+                    y: centerRect.maxY + CGFloat(index) * lineHeight,
+                    width: content.width,
+                    height: lineHeight
+                )
+                drawText(line, in: lineRect, color: hintColor, font: fitting(line, font: hintFont, rect: lineRect), alignment: .center)
+            }
+        }
     }
 
     private func drawMnemonicKeyLabel(
         _ label: String,
-        mnemonic: KeyTaoMnemonicHints.Hint,
+        mnemonic: KeyTaoKeyMnemonic,
         rect: CGRect,
         color: UIColor,
         font: UIFont,
@@ -3947,7 +4005,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     ) {
         let contentRect = rect.insetBy(dx: 3, dy: 3)
         let hintFont = themedFont(size: min(10, keyHintSize(keySize: rect.size)) * style.hintFontScale, weight: style.fontWeight)
-        let bottomLines = mnemonic.bottomLines
+        let bottomLines = mnemonic.resolvedBottomLines
         let lineHeight = min(hintFont.lineHeight, contentRect.height * 0.22)
         let bodyHeight = lineHeight * CGFloat(bottomLines.count)
         let labelRect = CGRect(
@@ -5373,7 +5431,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             let id = nextIndex()
             return makeItem(id)
         }
-        return [
+        let items: [CandidateDrawItem?] = [
             section("外观"),
             indexed { id in CandidateDrawItem(
                 identifierIndex: id, selectIndex: id, label: "主题色", text: currentAccent,
@@ -5389,11 +5447,17 @@ final class KeyTaoIOSKeyboardView: UIView {
             ) },
             slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8, 1.4, 0.1, String(format: "%.1f×", Double(settingsConfig.candidateFontScale))),
             toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible),
-            toggle("键位助记", "mnemonicHintsEnabled", settingsConfig.mnemonicHintsEnabled),
+            settingsConfig.hasMnemonics ? toggle("键位助记", "mnemonicHintsEnabled", settingsConfig.mnemonicHintsEnabled) : nil,
             section("布局"),
+            indexed { id in CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: "键盘方案", text: settingsConfig.name,
+                comment: nil, selected: settingsConfig.id != "keytao.qwerty26", global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: "keyboardProfileCycle", fallbackValue: settingsConfig.id),
+                style: .option, statusLabel: "切换"
+            ) },
             slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp, 160, 420, 2, "\(Int(settingsConfig.keyboardHeightDp.rounded())) dp"),
             slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp, 36, 96, 1, "\(Int(settingsConfig.candidateBarHeightDp.rounded())) dp"),
-            toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled),
+            settingsConfig.numberRow == "auto" ? toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled) : nil,
             section("反馈"),
             toggle("震动", "haptics.enabled", settingsConfig.hapticsEnabled),
             slider("强度", "haptics.intensity", CGFloat(settingsConfig.hapticIntensity), 1, 100, 1, "\(settingsConfig.hapticIntensity)"),
@@ -5413,6 +5477,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 style: .option
             ) },
         ]
+        return items.compactMap { $0 }
     }
 
     private func schemeLabel(_ value: String) -> String {
@@ -5502,12 +5567,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             rows.insert(contentsOf: recentRows, at: 1)
         }
         if layerMode == .letters {
-            if config.numberRowEnabled, let firstRow = rows.first {
-                rows.insert(persistentNumberRow(firstRow), at: 0)
-            } else if shouldUseInlineNumberRow() {
-                rows = rows.enumerated().map { index, row in
-                    index == 0 ? inlineNumberRow(row) : row
-                }
+            if config.numberRowEnabled, config.numberRow == "auto", !rows.isEmpty {
+                rows.insert(persistentNumberRow(), at: 0)
             }
         }
         rows = applyEngineCapabilities(to: rows)
@@ -5578,50 +5639,30 @@ final class KeyTaoIOSKeyboardView: UIView {
         return next
     }
 
-    private func shouldUseInlineNumberRow() -> Bool {
-        !isEnglishMode && state.hasComposition && state.preedit.contains("=")
-    }
-
-    private func inlineNumberRow(_ row: [KeyTaoKeySpec]) -> [KeyTaoKeySpec] {
+    private func persistentNumberRow() -> [KeyTaoKeySpec] {
         let digits = Array("1234567890")
-        return row.enumerated().map { index, key in
-            guard index < digits.count else {
-                return key
-            }
-            let digit = String(digits[index])
+        let symbols = Array("!@#$%^&*()")
+        return digits.enumerated().map { index, ch in
+            let digit = String(ch)
+            let symbol = String(symbols[index])
             return KeyTaoKeySpec(
                 label: digit,
                 value: digit,
                 rimeValue: nil,
-                hint: nil,
-                weight: key.weight,
-                style: key.style,
+                hint: symbol,
+                weight: 1,
+                style: nil,
                 action: .input(digit),
                 swipeUp: nil,
                 swipeDown: nil,
-                longPress: nil,
-                asciiLongPress: nil,
+                longPress: .input(symbol),
+                asciiLongPress: .input(symbol),
                 asciiLabel: digit,
                 asciiValue: digit,
-                asciiAction: .input(digit)
+                asciiAction: .input(digit),
+                alternates: [KeyTaoKeyAlternate(label: symbol, value: symbol)],
+                asciiAlternates: [KeyTaoKeyAlternate(label: symbol, value: symbol)]
             )
-        }
-    }
-
-    private func persistentNumberRow(_ row: [KeyTaoKeySpec]) -> [KeyTaoKeySpec] {
-        let symbols = Array("!@#$%^&*()")
-        return inlineNumberRow(row).enumerated().map { index, key in
-            guard index < symbols.count else {
-                return key
-            }
-            let symbol = String(symbols[index])
-            var next = key
-            next.hint = symbol
-            next.longPress = .input(symbol)
-            next.asciiLongPress = .input(symbol)
-            next.alternates = [KeyTaoKeyAlternate(label: symbol, value: symbol)]
-            next.asciiAlternates = [KeyTaoKeyAlternate(label: symbol, value: symbol)]
-            return next
         }
     }
 

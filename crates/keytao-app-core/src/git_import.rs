@@ -1,6 +1,9 @@
 use super::{
     PackageMeta,
-    local_import::{LocalImportOptions, has_root_schema, import_local_scheme_with},
+    local_import::{
+        LocalImportOptions, has_root_schema, import_local_scheme_with, oversized_local_error,
+        too_many_files_local_error,
+    },
     validate_relative,
 };
 use crate::{
@@ -57,6 +60,8 @@ pub struct GitSchemeConfig {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -271,6 +276,7 @@ fn normalize_config(raw: GitSchemeConfig) -> Result<(GitSchemeConfig, ParsedHost
             } else {
                 None
             },
+            schema_id: clean_optional(raw.schema_id),
         };
         return Ok((normalized, parsed));
     }
@@ -313,6 +319,7 @@ fn normalize_config(raw: GitSchemeConfig) -> Result<(GitSchemeConfig, ParsedHost
         } else {
             None
         },
+        schema_id: clean_optional(raw.schema_id),
     };
     Ok((
         normalized,
@@ -761,44 +768,7 @@ fn extract_archive_to_dir(archive_path: &Path, dest: &Path) -> Result<(), CoreEr
 }
 
 fn extract_zip(file: File, dest: &Path) -> Result<(), CoreError> {
-    let mut archive = zip::ZipArchive::new(BufReader::new(file))
-        .map_err(|error| CoreError::Other(format!("无法读取压缩包：{error}")))?;
-    if archive.len() > MAX_ARCHIVE_FILES {
-        return Err(CoreError::Other("方案包文件过多".into()));
-    }
-    let mut total = 0u64;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| CoreError::Other(format!("读取压缩包条目失败：{error}")))?;
-        let Some(relative) = sanitize_archive_entry(entry.name())? else {
-            continue;
-        };
-        if entry
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            continue;
-        }
-        if entry.is_dir() {
-            continue;
-        }
-        let target = super::safe_path(dest, &relative).map_err(CoreError::Other)?;
-        let expected = entry.size();
-        total = total.saturating_add(expected);
-        if total > MAX_EXPANDED_BYTES {
-            return Err(CoreError::Other("方案包解压后过大".into()));
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut out = File::create(&target)?;
-        let written = std::io::copy(&mut entry.by_ref().take(expected.saturating_add(1)), &mut out)?;
-        if written != expected {
-            return Err(CoreError::Other("压缩包文件大小不符".into()));
-        }
-    }
-    Ok(())
+    super::local_import::extract_filtered_zip(file, dest, false)
 }
 
 fn extract_tar(reader: impl Read, dest: &Path) -> Result<(), CoreError> {
@@ -812,7 +782,7 @@ fn extract_tar(reader: impl Read, dest: &Path) -> Result<(), CoreError> {
         let mut entry = entry.map_err(|error| CoreError::Other(format!("读取归档条目失败：{error}")))?;
         count += 1;
         if count > MAX_ARCHIVE_FILES {
-            return Err(CoreError::Other("方案包文件过多".into()));
+            return Err(too_many_files_local_error());
         }
         let kind = entry.header().entry_type();
         if kind.is_dir() || kind.is_pax_global_extensions() || kind.is_pax_local_extensions() {
@@ -833,7 +803,7 @@ fn extract_tar(reader: impl Read, dest: &Path) -> Result<(), CoreError> {
         let expected = entry.size();
         total = total.saturating_add(expected);
         if total > MAX_EXPANDED_BYTES {
-            return Err(CoreError::Other("方案包解压后过大".into()));
+            return Err(oversized_local_error(&relative, total));
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;

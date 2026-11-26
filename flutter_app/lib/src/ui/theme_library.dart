@@ -30,6 +30,8 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   List<ThemeSummaryDto> _themes = [];
   ImeUiSettingsDto? _settings;
   bool _storageReady = false;
+  bool _savingTheme = false;
+  bool _canSaveTheme = false;
   bool _reloadPending = true;
   bool _loading = false;
   bool _working = false;
@@ -50,6 +52,8 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
     super.initState();
     _settings = _controller.uiSettings;
     _storageReady = _ready;
+    _savingTheme = _controller.savingTheme;
+    _canSaveTheme = _controller.canSaveTheme;
     _controller.addListener(_controllerChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
@@ -62,16 +66,21 @@ class _ThemeLibrarySectionState extends State<ThemeLibrarySection> {
   }
 
   void _controllerChanged() {
-    final changed =
-        !identical(_settings, _controller.uiSettings) ||
-        _storageReady != _ready;
+    final reloadNeeded =
+        _settings != _controller.uiSettings || _storageReady != _ready;
+    final uiChanged =
+        reloadNeeded ||
+        _savingTheme != _controller.savingTheme ||
+        _canSaveTheme != _controller.canSaveTheme;
     _settings = _controller.uiSettings;
     _storageReady = _ready;
-    if (changed) _reloadPending = true;
+    _savingTheme = _controller.savingTheme;
+    _canSaveTheme = _controller.canSaveTheme;
+    if (reloadNeeded) _reloadPending = true;
     if (_reloadPending && !_working && !_loading && !_controller.savingTheme) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _load());
     }
-    if (mounted) setState(() {});
+    if (uiChanged && mounted) setState(() {});
   }
 
   Future<void> _load() async {

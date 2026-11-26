@@ -254,13 +254,18 @@ pub async fn import_local_scheme(
     keytao_app_core::package_migration::ensure_before_write(&state.core, &root)
         .await
         .map_err(|error| error.to_string())?;
-    keytao_app_core::packages::import_local_scheme(
-        &state.core,
-        std::path::Path::new(&directory_path),
-        &display_name,
-        scheme_key.as_deref(),
-    )
-    .map_err(|error| error.to_string())
+    let core = state.core.clone();
+    tokio::task::spawn_blocking(move || {
+        keytao_app_core::packages::import_local_scheme(
+            &core,
+            std::path::Path::new(&directory_path),
+            &display_name,
+            scheme_key.as_deref(),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("导入任务失败：{error}"))?
 }
 
 pub async fn import_git_scheme(
@@ -284,6 +289,7 @@ pub async fn import_git_scheme(
             mode: parsed_mode,
             branch,
             asset_name,
+            schema_id: None,
         },
         &display_name,
         scheme_key.as_deref(),
@@ -1263,6 +1269,7 @@ pub async fn set_android_ime_input_settings(
             settings.key_sound_enabled,
             settings.key_sound_volume,
             settings.key_hint_visible,
+            settings.mnemonic_hints_enabled,
             settings.flick_keys_enabled,
             settings.number_row_enabled,
             settings.candidate_font_scale,
@@ -1487,6 +1494,56 @@ pub fn import_theme(text: String, overwrite: bool) -> Result<ThemeImportResultDt
         &text,
         overwrite,
     )?)
+}
+
+pub fn get_keyboard_library() -> Result<Vec<KeyboardSummaryDto>, String> {
+    runtime::dto(keytao_app_core::keyboard_library::get_keyboard_library(
+        theme_library_host()?,
+    )?)
+}
+
+pub fn apply_keyboard(id: String) -> Result<KeyboardSummaryDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::apply_keyboard(
+        theme_library_host()?,
+        &id,
+    )?)
+}
+
+pub fn delete_keyboard(id: String) -> Result<(), String> {
+    keytao_app_core::keyboard_library::delete_keyboard(theme_library_host()?, &id)
+}
+
+pub fn export_keyboard(id: String) -> Result<KeyboardExportDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::export_keyboard(
+        theme_library_host()?,
+        &id,
+    )?)
+}
+
+pub fn preview_keyboard_import(text: String) -> Result<KeyboardImportPreviewDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::preview_keyboard_import(
+        theme_library_host()?,
+        &text,
+    )?)
+}
+
+pub fn import_keyboard(text: String, overwrite: bool) -> Result<KeyboardImportResultDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::import_keyboard(
+        theme_library_host()?,
+        &text,
+        overwrite,
+    )?)
+}
+
+pub fn get_recommended_keyboard_for_schema(
+    schema_id: String,
+) -> Result<Option<KeyboardSummaryDto>, String> {
+    runtime::dto(
+        keytao_app_core::keyboard_library::recommended_keyboard_for_schema(
+            theme_library_host()?,
+            &schema_id,
+        )?,
+    )
 }
 
 pub fn get_ime_ui_settings() -> Result<ImeUiSettingsDto, String> {

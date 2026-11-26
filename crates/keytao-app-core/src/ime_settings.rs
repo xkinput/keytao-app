@@ -236,6 +236,7 @@ pub struct AndroidImeInputSettings {
     pub key_sound_enabled: bool,
     pub key_sound_volume: u8,
     pub key_hint_visible: bool,
+    pub mnemonic_hints_enabled: bool,
     pub flick_keys_enabled: bool,
     pub number_row_enabled: bool,
     pub candidate_font_scale: f32,
@@ -500,6 +501,10 @@ fn android_ime_haptics_settings_from_config(
         .get("keyHintVisible")
         .and_then(|value| value.as_bool())
         .unwrap_or(true);
+    let mnemonic_hints_enabled = config
+        .get("mnemonicHintsEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let flick_keys_enabled = config
         .get("flickKeysEnabled")
         .and_then(|value| value.as_bool())
@@ -565,6 +570,7 @@ fn android_ime_haptics_settings_from_config(
         key_sound_enabled,
         key_sound_volume,
         key_hint_visible,
+        mnemonic_hints_enabled,
         flick_keys_enabled,
         number_row_enabled,
         candidate_font_scale,
@@ -655,6 +661,7 @@ pub async fn set_android_ime_input_settings(
     key_sound_enabled: bool,
     key_sound_volume: u8,
     key_hint_visible: bool,
+    mnemonic_hints_enabled: bool,
     flick_keys_enabled: bool,
     number_row_enabled: bool,
     candidate_font_scale: f32,
@@ -751,6 +758,10 @@ pub async fn set_android_ime_input_settings(
             config.insert(
                 "keyHintVisible".into(),
                 serde_json::Value::Bool(key_hint_visible),
+            );
+            config.insert(
+                "mnemonicHintsEnabled".into(),
+                serde_json::Value::Bool(mnemonic_hints_enabled),
             );
             config.insert(
                 "flickKeysEnabled".into(),
@@ -854,6 +865,9 @@ pub async fn set_android_ime_input_settings(
             let _ = keyboard_height_scale;
             let _ = delete_speed;
             let _ = english_mode;
+            let _ = key_hint_visible;
+            let _ = mnemonic_hints_enabled;
+            let _ = flick_keys_enabled;
             let _ = floating_portrait_enabled;
             let _ = floating_portrait_scale;
             let _ = floating_landscape_enabled;

@@ -122,6 +122,7 @@ class ViewController extends AppController {
       keySoundEnabled: true,
       keySoundVolume: 100,
       keyHintVisible: true,
+      mnemonicHintsEnabled: false,
       flickKeysEnabled: true,
       numberRowEnabled: false,
       candidateFontScale: 1,

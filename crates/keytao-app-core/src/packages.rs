@@ -331,7 +331,7 @@ pub(crate) fn store_cloud_archive_reader(
             .map_err(|error| CoreError::Other(error.to_string()))?;
         expanded = expanded.saturating_add(file.size());
         if expanded > 512 * 1024 * 1024 {
-            return Err(CoreError::Other("方案包解压后过大".into()));
+            return Err(CoreError::Other("方案包解压后过大（超过 512 MB 限制）".into()));
         }
     }
     let mut reader = archive.into_inner();
@@ -1752,7 +1752,7 @@ mod tests {
         }
         let many_files = zip.finish().unwrap().into_inner();
         for (bytes, expected) in [
-            (oversized, "方案包解压后过大"),
+            (oversized, "方案包解压后过大（超过 512 MB 限制）"),
             (many_files, "方案包文件过多"),
         ] {
             let dir = tempfile::tempdir().unwrap();

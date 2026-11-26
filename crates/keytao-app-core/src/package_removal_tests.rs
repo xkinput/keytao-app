@@ -492,6 +492,7 @@ async fn local_git_repair_preserves_live_runtime_on_download_success_and_failure
                     mode: GitSchemeMode::Release,
                     branch: None,
                     asset_name: None,
+                    schema_id: None,
                 }),
                 ..Default::default()
             },

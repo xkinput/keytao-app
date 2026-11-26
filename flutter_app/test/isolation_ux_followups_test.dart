@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -275,6 +276,7 @@ class _FollowupsCore extends FakeCore {
   }
 
   final Map<String, String?> remoteLogos = {};
+  final Set<String> failingRemoteLogos = {};
 
   @override
   Future<String?> crateApiCoreRemoteSchemeLogo({
@@ -283,8 +285,30 @@ class _FollowupsCore extends FakeCore {
     String? branch,
   }) async {
     calls.add('remoteLogo:$schemeKey:$repoUrl');
+    if (failingRemoteLogos.contains(schemeKey)) {
+      throw StateError('network unavailable');
+    }
     return remoteLogos[schemeKey];
   }
+
+  @override
+  String crateApiCoreResolveCandidatePanelPreview({
+    required UiColorSchemeDto colorScheme,
+    required String accentColor,
+    double? cornerRadius,
+    required String backgroundColor,
+    required double fontSize,
+    required bool systemDark,
+  }) => jsonEncode(
+    ViewController(BridgePlatform.macOs).resolveCandidatePanelPreview(
+      colorScheme: colorScheme,
+      accentColor: accentColor,
+      cornerRadius: cornerRadius,
+      backgroundColor: backgroundColor,
+      fontSize: fontSize,
+      systemDark: systemDark,
+    ),
+  );
 
   @override
   Future<String?> crateApiCoreRepairSchemePackage({
@@ -778,18 +802,19 @@ void main() {
       api.engineSwitchGate!.complete();
       await tester.pumpAndSettle();
       expect(c.prefersLibjd, isTrue);
-      expect(c.isUsingLibjd, isFalse);
-      expect(c.hasUsableBuild, isTrue);
+      // Active downloaded scheme without ime-jd cache auto-converts immediately
+      // instead of leaving the user on a manual "未转换 / 前往方案页" prompt.
+      expect(api.calls, contains('importLibjd:keytao'));
+      expect(c.isUsingLibjd, isTrue);
       expect(find.descendant(of: engineSelector, matching: find.text('ime-jd')),
           findsOneWidget);
       expect(c.candidatePreviewCandidates.single.text, 'ime-jd预览');
-      expect(find.text('未转换'), findsOneWidget);
+      expect(find.text('未转换'), findsNothing);
       expect(find.text('已部署'), findsNothing);
       expect(find.text('未部署'), findsNothing);
       expect(find.text('改动待部署'), findsNothing);
-      expect(macosReady, findsNothing);
-      expect(find.textContaining('请前往方案页下载并转换你的方案'), findsOneWidget);
-      expect(find.text('了解 ime-jd'), findsOneWidget);
+      expect(macosReady, findsOneWidget);
+      expect(find.textContaining('请前往方案页下载并转换你的方案'), findsNothing);
 
       final stalePreview = Completer<String>();
       api.previewGate = stalePreview;
@@ -887,6 +912,8 @@ void main() {
       );
       c.selectPage(AppPage.input);
       await tester.pumpAndSettle();
+      // Switching to Rime when active package has no Rime build cache auto-deploys.
+      api.calls.clear();
       api.local = const LocalSchemaDto(
         installed: false,
         deployed: false,
@@ -894,12 +921,36 @@ void main() {
       );
       expect(await c.setInputEngine('rime'), isTrue);
       await tester.pumpAndSettle();
+      expect(api.calls, contains('deployDefault'));
       expect(find.descendant(of: engineSelector, matching: find.text('Rime')),
           findsOneWidget);
-      expect(find.text('未部署'), findsOneWidget);
+      expect(find.text('未部署'), findsNothing);
       expect(find.text('请先安装输入方案。'), findsNothing);
       expect(c.canDeploy, isTrue);
       expect(c.usesImportedLibjd('xmjd'), isTrue);
+
+      // Switching back to ime-jd when active scheme already has cache reuses it
+      // without re-converting.
+      api.calls.clear();
+      expect(await c.setInputEngine('libjd_engine'), isTrue);
+      await tester.pumpAndSettle();
+      expect(api.calls, isNot(contains('importLibjd:xmjd')));
+      expect(c.isUsingLibjd, isTrue);
+
+      // Switching back to Rime when active scheme already has a usable build
+      // reuses the cached build without re-deploying.
+      api.calls.clear();
+      api.local = const LocalSchemaDto(
+        installed: true,
+        deployed: true,
+        buildAvailable: true,
+        installedScheme: 'xmjd',
+        schemas: ['xmjd6'],
+      );
+      expect(await c.setInputEngine('rime'), isTrue);
+      await tester.pumpAndSettle();
+      expect(api.calls, isNot(contains('deployDefault')));
+      expect(c.hasUsableBuild, isTrue);
     },
   );
 
@@ -1172,6 +1223,61 @@ void main() {
         c.effectiveSchemeLogoPath('txjx'),
         '/cache/scheme-logos-v2/real-sha/.keytao-logo/txjx.png',
       );
+    },
+  );
+
+  test(
+    'failed remote logo lookup cools down instead of retrying every build and installed package logos preload versions',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'keytao-test-logo-stability-',
+      );
+      addTearDown(() => directory.deleteSync(recursive: true));
+      final pkgLogo = File('${directory.path}/keytao.png')
+        ..writeAsBytesSync([0x89, 0x50, 0x4E, 0x47]);
+      final api = _FollowupsCore()
+        ..failingRemoteLogos.add('txjx')
+        ..customInstalledPackages = [
+          InstalledPackageDto(
+            schemeKey: 'keytao',
+            version: '1.0.0',
+            active: true,
+            hasPackageZip: true,
+            logoPath: pkgLogo.path,
+          ),
+        ];
+      RustLib.initMock(api: api);
+      final c = AppController(
+        info: const BridgeInfo(
+          platform: BridgePlatform.windows,
+          appVersion: '1.2.22',
+          userRoot: '/rime',
+        ),
+      );
+      addTearDown(() async {
+        c.dispose();
+        await api.events.close();
+        RustLib.dispose();
+      });
+
+      expect(c.shouldFetchRemoteSchemeLogo('txjx'), isTrue);
+      await c.ensureRemoteSchemeLogo('txjx');
+      expect(
+        api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length,
+        1,
+      );
+      // Immediately after a network failure, cooldown prevents tight retry storms.
+      expect(c.shouldFetchRemoteSchemeLogo('txjx'), isFalse);
+      await c.ensureRemoteSchemeLogo('txjx');
+      expect(
+        api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length,
+        1,
+      );
+
+      // Refreshing installed packages preloads schemaLogoVersion so SchemaLogo
+      // does not toggle ImageProvider types on subsequent builds.
+      await c.refreshSchemeUpdates();
+      expect(c.schemaLogoVersion(pkgLogo.path), isNotNull);
     },
   );
 }

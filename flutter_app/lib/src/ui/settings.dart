@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
@@ -8,6 +9,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
+import 'keyboard_library.dart';
 import 'login.dart';
 import 'rime_sync_dialog.dart';
 import 'system_font_picker.dart';
@@ -655,9 +657,12 @@ class _SettingsCardState extends State<SettingsCard> {
       keyboardLogo: SchemaLogo(controller: c, size: 28),
     );
     if (keyboard) return preview;
-    return CustomPaint(
-      painter: _PreviewDots(AppPalette.of(context).hairline),
-      child: ConstrainedBox(
+    return RepaintBoundary(
+      child: CustomPaint(
+        isComplex: true,
+        willChange: false,
+        painter: _PreviewDots(AppPalette.of(context).hairline),
+        child: ConstrainedBox(
         constraints: BoxConstraints(minHeight: widget.appearance ? 240 : 128),
         child: Padding(
           padding: EdgeInsets.symmetric(
@@ -699,6 +704,7 @@ class _SettingsCardState extends State<SettingsCard> {
           ),
         ),
       ),
+    ),
     );
   }
 
@@ -725,6 +731,7 @@ class _SettingsCardState extends State<SettingsCard> {
       bool available = true,
       String? semanticLabel,
     }) => SliderSetting(
+      key: ValueKey('mobile-slider-$field'),
       label: label,
       value: value.toDouble(),
       min: min,
@@ -742,6 +749,7 @@ class _SettingsCardState extends State<SettingsCard> {
       bool available = true,
     }) => SwitchSetting(
       label,
+      key: ValueKey('mobile-toggle-$field'),
       value: value,
       hint: hint,
       onChanged: enabled && available ? (value) => save(field, value) : null,
@@ -752,18 +760,51 @@ class _SettingsCardState extends State<SettingsCard> {
       String value,
       Map<String, String> options,
     ) => ChoiceSetting<String>(
+      key: ValueKey('mobile-choice-$field'),
       label: label,
       value: value,
       options: options,
       onChanged: enabled ? (value) => save(field, value) : null,
     );
+    final previewUi = c.uiSettings;
+    final previewAccent =
+        _previewAccent ??
+        previewUi?.accentColor ??
+        '#${(ChromeAccent.of(context).toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+    final keyboardPreviewTheme = c.cachedCandidatePanelPreview(
+      colorScheme:
+          _previewScheme ?? previewUi?.colorScheme ?? UiColorSchemeDto.auto,
+      accentColor: previewAccent,
+      cornerRadius: _resetRadius ? null : _previewRadius ?? previewUi?.cornerRadius,
+      backgroundColor: _previewBackground ?? previewUi?.backgroundColor ?? '',
+      fontSize: _previewFontSize ?? previewUi?.fontSize ?? 18,
+      systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+    );
+    final keyboardSchemeName =
+        c.currentSchemaName ??
+        c.installedPackageFor(c.activeSchemeKey)?.displayName ??
+        schemeDisplayName(c.activeSchemeKey);
     return [
+      HairlineGridCell(
+        child: KeyboardLibrarySection(
+          controller: c,
+          previewTheme: keyboardPreviewTheme,
+          schemeName: keyboardSchemeName,
+        ),
+      ),
       HairlineGridCell(
         child: Semantics(
           label: AppStrings.mobileKeyboard,
           child: Section(
             title: '候选与键盘',
             children: [
+              if (c.currentKeyboardHasMnemonics)
+                toggle(
+                  '开启键盘助记',
+                  'mnemonicHintsEnabled',
+                  s?.mnemonicHintsEnabled ?? false,
+                  hint: '在键面上显示当前键盘方案内置的音形助记',
+                ),
               Text(AppStrings.englishMode),
               BigTextRadioGroup<String>(
                 label: AppStrings.englishMode,
@@ -976,11 +1017,18 @@ class _PreviewDots extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = color;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round;
+    final points = <Offset>[];
     for (var y = 7.0; y < size.height; y += 14) {
       for (var x = 7.0; x < size.width; x += 14) {
-        canvas.drawCircle(Offset(x, y), 1, paint);
+        points.add(Offset(x, y));
       }
+    }
+    if (points.isNotEmpty) {
+      canvas.drawPoints(ui.PointMode.points, points, paint);
     }
   }
 

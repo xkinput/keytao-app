@@ -72,6 +72,60 @@ data class KeyAlternate(
     val action: KeyCommand = KeyCommand.input(value ?: label),
 )
 
+data class KeyGroupStyle(
+    val background: String? = null,
+    val foreground: String? = null,
+    val hintForeground: String? = null,
+    val borderColor: String? = null,
+)
+
+data class KeyGroup(
+    val light: KeyGroupStyle? = null,
+    val dark: KeyGroupStyle? = null,
+) {
+    fun resolve(isDark: Boolean): KeyGroupStyle? = if (isDark) dark ?: light else light ?: dark
+}
+
+data class KeySlots(
+    val topLeft: String? = null,
+    val topCenter: String? = null,
+    val topRight: String? = null,
+    val labelSub: String? = null,
+    val bottomLeft: String? = null,
+    val bottomCenter: String? = null,
+    val bottomRight: String? = null,
+    val bottomLines: List<String> = emptyList(),
+) {
+    val resolvedBottomLines: List<String>
+        get() = if (bottomLines.isNotEmpty()) bottomLines else listOfNotNull(bottomCenter?.takeIf { it.isNotBlank() })
+
+    fun hasContent(): Boolean =
+        !topLeft.isNullOrBlank() ||
+            !topCenter.isNullOrBlank() ||
+            !topRight.isNullOrBlank() ||
+            !labelSub.isNullOrBlank() ||
+            !bottomLeft.isNullOrBlank() ||
+            !bottomCenter.isNullOrBlank() ||
+            !bottomRight.isNullOrBlank() ||
+            bottomLines.isNotEmpty()
+}
+
+data class KeyMnemonic(
+    val top: String? = null,
+    val topBadge: String? = null,
+    val bottomLines: List<String> = emptyList(),
+    val tone: String? = null,
+    val group: String? = null,
+    val hideRegularSlots: Boolean = true,
+) {
+    val topText: String?
+        get() = listOfNotNull(top?.takeIf { it.isNotBlank() }, topBadge?.takeIf { it.isNotBlank() })
+            .joinToString(" ")
+            .takeIf { it.isNotBlank() }
+
+    fun isNonEmpty(): Boolean = topText != null || bottomLines.any { it.isNotBlank() } || !group.isNullOrBlank()
+}
+
 data class KeySpec(
     val label: String,
     val value: String,
@@ -80,11 +134,16 @@ data class KeySpec(
     val rimeValue: String? = null,
     val weight: Float = 1f,
     val style: String? = null,
+    val group: String? = null,
     val hint: String? = null,
+    val slots: KeySlots? = null,
+    val mnemonic: KeyMnemonic? = null,
     val action: KeyCommand = KeyCommand.input(value),
     val asciiAction: KeyCommand? = null,
     val swipeUp: KeyCommand? = null,
     val swipeDown: KeyCommand? = null,
+    val swipeLeft: KeyCommand? = null,
+    val swipeRight: KeyCommand? = null,
     val longPress: KeyCommand? = null,
     val asciiLongPress: KeyCommand? = null,
     val alternates: List<KeyAlternate> = emptyList(),
@@ -153,10 +212,15 @@ data class KeytaoAndroidImeConfig(
     val clipboardSuggestionTimeoutSec: Int = 30,
     val clipboardReturnAfterPaste: Boolean = true,
     val clipboardHideSensitive: Boolean = true,
+    val keyboardId: String = "keytao.qwerty26",
+    val keyboardName: String = "标准 26 键",
+    val hasMnemonics: Boolean = false,
+    val numberRowMode: String = "auto",
+    val keyGroups: Map<String, KeyGroup> = emptyMap(),
 ) {
     val effectiveKeyboardHeightDp: Float
         get() {
-            val baseHeight = if (!numberRowEnabled || rows.isEmpty()) {
+            val baseHeight = if (!numberRowEnabled || numberRowMode != "auto" || rows.isEmpty()) {
                 keyboardHeightDp.toFloat()
             } else {
                 keyboardHeightDp * (rows.size + 1f) / rows.size
@@ -292,6 +356,12 @@ data class KeytaoAndroidImeConfig(
          * JNI twice, so the result is cached until one of those files changes.
          * Only the cache miss touches the disk; the steady state costs two stats.
          */
+        @Synchronized
+        fun invalidateCache() {
+            cachedSignature = null
+            cachedConfig = null
+        }
+
         @Synchronized
         fun load(context: Context): KeytaoAndroidImeConfig {
             val userConfig = KeytaoAndroidPaths.imeConfigFileOrNull(context)
@@ -491,6 +561,12 @@ data class KeytaoAndroidImeConfig(
                     mergedStringList(root, fallbackRoot, "toolbarSymbolActionOrder"),
                 ),
                 toolbarSymbolPinnedCount = mergedInt(root, fallbackRoot, "toolbarSymbolPinnedCount", 5).coerceIn(1, 12),
+                keyboardId = root.optString("id").takeIf { it.isNotBlank() } ?: "keytao.qwerty26",
+                keyboardName = root.optString("name").takeIf { it.isNotBlank() } ?: "标准 26 键",
+                hasMnemonics = root.optBoolean("hasMnemonics", false) ||
+                    rows.any { row -> row.any { it.mnemonic?.isNonEmpty() == true } },
+                numberRowMode = root.optString("numberRow").takeIf { it in setOf("auto", "embedded", "hidden") } ?: "auto",
+                keyGroups = parseKeyGroups(root.optJSONObject("keyGroups")),
             )
         }
 
@@ -1168,17 +1244,85 @@ data class KeytaoAndroidImeConfig(
                 rimeValue = json.optString("rimeValue").takeIf { it.isNotBlank() },
                 weight = json.optDouble("weight", 1.0).toFloat().coerceIn(0.25f, 8f),
                 style = json.optString("style").takeIf { it.isNotBlank() },
+                group = json.optString("group").takeIf { it.isNotBlank() },
                 hint = json.optString("hint").takeIf { it.isNotBlank() },
+                slots = parseKeySlots(json.optJSONObject("slots")),
+                mnemonic = parseKeyMnemonic(json.optJSONObject("mnemonic")),
                 action = parseCommand(json.opt("action"), value),
                 asciiAction = parseOptionalCommand(json.opt("asciiAction")),
                 swipeUp = parseOptionalCommand(json.opt("swipeUp")),
                 swipeDown = parseOptionalCommand(json.opt("swipeDown")),
+                swipeLeft = parseOptionalCommand(json.opt("swipeLeft")),
+                swipeRight = parseOptionalCommand(json.opt("swipeRight")),
                 longPress = parseOptionalCommand(json.opt("longPress")),
                 asciiLongPress = parseOptionalCommand(json.opt("asciiLongPress")),
                 alternates = parseAlternates(json.optJSONArray("alternates")),
                 asciiAlternates = parseAlternates(json.optJSONArray("asciiAlternates")),
                 rowSpan = json.optInt("rowSpan", 1).coerceIn(1, 8),
                 stack = parseKeyStack(json.optJSONArray("stack")),
+            )
+        }
+
+        private fun parseKeySlots(json: JSONObject?): KeySlots? {
+            if (json == null) return null
+            val lines = mutableListOf<String>()
+            json.optJSONArray("bottomLines")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    arr.optString(i).takeIf { it.isNotBlank() }?.let(lines::add)
+                }
+            }
+            val slots = KeySlots(
+                topLeft = json.optString("topLeft").takeIf { it.isNotBlank() },
+                topCenter = json.optString("topCenter").takeIf { it.isNotBlank() },
+                topRight = json.optString("topRight").takeIf { it.isNotBlank() },
+                labelSub = json.optString("labelSub").takeIf { it.isNotBlank() },
+                bottomLeft = json.optString("bottomLeft").takeIf { it.isNotBlank() },
+                bottomCenter = json.optString("bottomCenter").takeIf { it.isNotBlank() },
+                bottomRight = json.optString("bottomRight").takeIf { it.isNotBlank() },
+                bottomLines = lines,
+            )
+            return slots.takeIf { it.hasContent() }
+        }
+
+        private fun parseKeyMnemonic(json: JSONObject?): KeyMnemonic? {
+            if (json == null) return null
+            val lines = mutableListOf<String>()
+            json.optJSONArray("bottomLines")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    arr.optString(i).takeIf { it.isNotBlank() }?.let(lines::add)
+                }
+            }
+            val mnemonic = KeyMnemonic(
+                top = json.optString("top").takeIf { it.isNotBlank() },
+                topBadge = json.optString("topBadge").takeIf { it.isNotBlank() },
+                bottomLines = lines,
+                tone = json.optString("tone").takeIf { it.isNotBlank() },
+                group = json.optString("group").takeIf { it.isNotBlank() },
+                hideRegularSlots = json.optBoolean("hideRegularSlots", true),
+            )
+            return mnemonic.takeIf { it.isNonEmpty() }
+        }
+
+        private fun parseKeyGroups(json: JSONObject?): Map<String, KeyGroup> {
+            if (json == null) return emptyMap()
+            val result = linkedMapOf<String, KeyGroup>()
+            json.keys().forEach { name ->
+                val obj = json.optJSONObject(name) ?: return@forEach
+                result[name] = KeyGroup(
+                    light = parseKeyGroupStyle(obj.optJSONObject("light")),
+                    dark = parseKeyGroupStyle(obj.optJSONObject("dark")),
+                )
+            }
+            return result
+        }
+
+        private fun parseKeyGroupStyle(json: JSONObject?): KeyGroupStyle? {
+            if (json == null) return null
+            return KeyGroupStyle(
+                background = json.optString("background").takeIf { it.isNotBlank() },
+                foreground = json.optString("foreground").takeIf { it.isNotBlank() },
+                hintForeground = json.optString("hintForeground").takeIf { it.isNotBlank() },
+                borderColor = json.optString("borderColor").takeIf { it.isNotBlank() },
             )
         }
 

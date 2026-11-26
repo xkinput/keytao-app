@@ -369,6 +369,7 @@ pub struct AndroidImeInputSettingsDto {
     pub key_sound_enabled: bool,
     pub key_sound_volume: u8,
     pub key_hint_visible: bool,
+    pub mnemonic_hints_enabled: bool,
     pub flick_keys_enabled: bool,
     pub number_row_enabled: bool,
     pub candidate_font_scale: f32,
@@ -583,6 +584,7 @@ mod tests {
             key_sound_enabled: false,
             key_sound_volume: 73,
             key_hint_visible: false,
+            mnemonic_hints_enabled: true,
             flick_keys_enabled: false,
             number_row_enabled: true,
             candidate_font_scale: 1.25,
@@ -612,8 +614,54 @@ mod tests {
             crate::runtime::dto(edited).unwrap();
         let actual: AndroidImeInputSettingsDto = crate::runtime::dto(saved).unwrap();
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
-        assert_eq!(expected.as_object().unwrap().len(), 35);
+        assert_eq!(expected.as_object().unwrap().len(), 36);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardSummaryDto {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub built_in: bool,
+    pub current: bool,
+    pub has_mnemonics: bool,
+    pub recommended_schemas: Vec<String>,
+    pub preview_layout_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardExportDto {
+    pub id: String,
+    pub file_name: String,
+    pub json: String,
+    pub share_string: String,
+    pub use_file: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardImportPreviewDto {
+    pub id: String,
+    pub name: String,
+    pub suggested_id: String,
+    pub suggested_name: String,
+    pub conflict: bool,
+    pub built_in_conflict: bool,
+    pub has_mnemonics: bool,
+    pub warnings: Vec<String>,
+    pub preview_layout_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardImportResultDto {
+    pub id: String,
+    pub name: String,
+    pub disposition: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]

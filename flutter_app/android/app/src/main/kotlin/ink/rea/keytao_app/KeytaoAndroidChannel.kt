@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
@@ -44,6 +45,7 @@ class KeytaoAndroidChannel(
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
     private var pendingDirectoryPick: Reply? = null
     private var pendingDirectoryImport = false
+    private var pendingArchivePick: Reply? = null
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val reply = Reply(result, mainHandler)
@@ -62,6 +64,7 @@ class KeytaoAndroidChannel(
                     reply.success()
                 }
                 "importLocalSchemeDirectory" -> pickDirectory(reply, importLocalScheme = true)
+                "importLocalSchemeArchive" -> pickArchive(reply)
                 "smartExtractZipToPrivate" -> smartExtractZipToPrivate(call, reply)
                 "prepareRimeData" -> prepareRimeData(reply)
                 "deployImeData" -> deployImeData(reply)
@@ -552,8 +555,8 @@ class KeytaoAndroidChannel(
     }
 
     private fun pickDirectory(reply: Reply, importLocalScheme: Boolean = false) {
-        if (pendingDirectoryPick != null) {
-            return reply.error("Directory picker is already open")
+        if (pendingDirectoryPick != null || pendingArchivePick != null) {
+            return reply.error("文件选择器已打开")
         }
         pendingDirectoryPick = reply
         pendingDirectoryImport = importLocalScheme
@@ -566,7 +569,43 @@ class KeytaoAndroidChannel(
         }
     }
 
+    private fun pickArchive(reply: Reply) {
+        if (pendingDirectoryPick != null || pendingArchivePick != null) {
+            return reply.error("文件选择器已打开")
+        }
+        pendingArchivePick = reply
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(
+                    Intent.EXTRA_MIME_TYPES,
+                    arrayOf(
+                        "application/zip",
+                        "application/x-zip-compressed",
+                        "multipart/x-zip",
+                        "application/octet-stream",
+                    ),
+                )
+            }
+            activity.startActivityForResult(intent, archivePickRequestCode)
+        } catch (ex: Exception) {
+            pendingArchivePick = null
+            throw ex
+        }
+    }
+
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode == archivePickRequestCode) {
+            val reply = pendingArchivePick ?: return false
+            pendingArchivePick = null
+            try {
+                importLocalSchemeArchive(reply, resultCode, data)
+            } catch (ex: Exception) {
+                reply.error(ex.message ?: "无法导入所选压缩包")
+            }
+            return true
+        }
         if (requestCode != directoryPickRequestCode) return false
         val reply = pendingDirectoryPick ?: return false
         val importLocalScheme = pendingDirectoryImport
@@ -582,6 +621,60 @@ class KeytaoAndroidChannel(
             reply.error(ex.message ?: "Failed to pick directory")
         }
         return true
+    }
+
+    private fun importLocalSchemeArchive(reply: Reply, resultCode: Int, data: Intent?) {
+        if (resultCode != Activity.RESULT_OK) return reply.success(null)
+        val uri = data?.data ?: return reply.error("未返回所选压缩包")
+        Thread {
+            val temporaryRoot = File(activity.cacheDir, "local-scheme-${UUID.randomUUID()}")
+            try {
+                val resolver = activity.contentResolver
+                var fileName = "scheme.zip"
+                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val candidate = cursor.getString(0)?.trim()
+                        if (!candidate.isNullOrEmpty()) {
+                            fileName = candidate
+                        }
+                    }
+                }
+                validateDirectoryEntryName(fileName)
+                check(temporaryRoot.mkdir()) { "无法创建临时目录" }
+                val output = safePrivateFile(temporaryRoot, fileName)
+                val input = resolver.openInputStream(uri)
+                    ?: throw IllegalStateException("无法读取所选压缩包：$fileName")
+                var copiedBytes = 0L
+                val maxStagingBytes = 1024L * 1024 * 1024
+                input.use { source ->
+                    output.outputStream().use { target ->
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = source.read(buffer)
+                            if (count < 0) break
+                            check(count.toLong() <= maxStagingBytes - copiedBytes) {
+                                "方案压缩包过大（单包暂不支持超过 1 GB，解压过滤 build 目录后上限为 512 MB）。请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包"
+                            }
+                            copiedBytes += count
+                            target.write(buffer, 0, count)
+                        }
+                    }
+                }
+                val displayName = if (fileName.lowercase(Locale.ROOT).endsWith(".zip") && fileName.length > 4) {
+                    fileName.dropLast(4)
+                } else {
+                    fileName
+                }
+                reply.success(mapOf(
+                    "path" to output.absolutePath,
+                    "name" to displayName,
+                    "temporaryDirectory" to temporaryRoot.absolutePath,
+                ))
+            } catch (ex: Exception) {
+                temporaryRoot.deleteRecursively()
+                reply.error(ex.message ?: "无法导入所选压缩包")
+            }
+        }.start()
     }
 
     private fun importLocalSchemeDirectory(reply: Reply, resultCode: Int, data: Intent?) {
@@ -632,12 +725,14 @@ class KeytaoAndroidChannel(
                 val childId = cursor.getString(0) ?: throw IllegalStateException("无法读取目录项")
                 val name = cursor.getString(1) ?: throw IllegalStateException("无法读取目录项名称")
                 validateDirectoryEntryName(name)
-                if ((topLevel && name in setOf("build", "sync", "installation.yaml", "user.yaml")) ||
-                    name in setOf(".git", ".DS_Store", "default-custom.yaml", "user_dict.txt", ".keytao-active-scheme.json") ||
-                    name.endsWith(".userdb") || name.endsWith(".custom.yaml") ||
+                val lower = name.lowercase(Locale.ROOT)
+                if ((topLevel && name in setOf("build", "sync", "log", "logs", "installation.yaml", "user.yaml", "__MACOSX")) ||
+                    (name.startsWith(".") && name != ".nomedia") ||
+                    name in setOf("__MACOSX", "default-custom.yaml", "user_dict.txt") ||
+                    lower in setOf("system volume information", "\$recycle.bin", "app-state.json") ||
+                    name.endsWith(".userdb") || name.endsWith(".leveldb") || name.endsWith(".custom.yaml") ||
                     name.endsWith(".user.dict.yaml") || name.endsWith(".user.yaml") ||
-                    name.endsWith("_user.txt") ||
-                    (name.startsWith(".keytao-sync-base-") && name.endsWith(".json"))) continue
+                    name.endsWith("_user.txt")) continue
                 val output = safePrivateFile(destination, name)
                 if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
                     check(output.mkdir()) { "无法创建目录：$name" }
@@ -653,7 +748,9 @@ class KeytaoAndroidChannel(
                             while (true) {
                                 val count = source.read(buffer)
                                 if (count < 0) break
-                                check(count.toLong() <= 512L * 1024 * 1024 - copiedBytes) { "方案包解压后过大" }
+                                check(count.toLong() <= 512L * 1024 * 1024 - copiedBytes) {
+                                    "方案体积超过 512 MB 限制（在 $name 处超出）。请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包（系统会自动过滤 build 目录）"
+                                }
                                 copiedBytes += count
                                 target.write(buffer, 0, count)
                             }
@@ -741,6 +838,7 @@ class KeytaoAndroidChannel(
     companion object {
         private const val storagePermissionRequestCode = 0x4B54
         private const val directoryPickRequestCode = 0x4B55
+        private const val archivePickRequestCode = 0x4B56
     }
 
     private fun safePrivateFile(root: File, relativePath: String): File {
