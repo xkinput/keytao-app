@@ -122,13 +122,29 @@ class AndroidKeyMapperTest {
     }
 
     @Test
-    fun `consumed Alt-produced characters clear only the editor Alt bits`() {
-        val alt = AndroidKeyMapper.RIME_MOD_ALT
-        val shift = AndroidKeyMapper.RIME_MOD_SHIFT
-        val stripped = AndroidKeyMapper.modifiersForUnicode(alt or shift, '!'.code, 'Q'.code)
-        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.consumedAltMetaStates(true, stripped))
-        assertEquals(0, AndroidKeyMapper.consumedAltMetaStates(true, alt or shift))
-        assertEquals(0, AndroidKeyMapper.consumedAltMetaStates(false, shift))
+    fun `consumed chords clear latchable editor modifiers`() {
+        assertEquals(0, AndroidKeyMapper.consumedChordMetaStates(0))
+        assertEquals(0, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_CTRL_ON or KeyEvent.META_CAPS_LOCK_ON))
+        assertEquals(KeyEvent.META_SHIFT_MASK, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON))
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_ALT_ON or KeyEvent.META_ALT_RIGHT_ON))
+        assertEquals(KeyEvent.META_SYM_ON, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_SYM_ON))
+        assertEquals(
+            KeyEvent.META_SHIFT_MASK or KeyEvent.META_ALT_MASK or KeyEvent.META_SYM_ON,
+            AndroidKeyMapper.consumedChordMetaStates(
+                KeyEvent.META_SHIFT_LEFT_ON or KeyEvent.META_ALT_LEFT_ON or KeyEvent.META_SYM_ON or KeyEvent.META_CTRL_ON,
+            ),
+        )
+    }
+
+    @Test
+    fun `modifier taps clear only Shift and Alt editor latches`() {
+        assertEquals(KeyEvent.META_SHIFT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_SHIFT_LEFT))
+        assertEquals(KeyEvent.META_SHIFT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_SHIFT_RIGHT))
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_ALT_LEFT))
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_ALT_RIGHT))
+        assertEquals(0, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_CTRL_LEFT))
+        assertEquals(0, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_CTRL_RIGHT))
+        assertEquals(0, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_A))
     }
 
     @Test

@@ -1128,10 +1128,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 pendingKeystrokeStartNs = 0L
                 return passKeyDownToHost(keyCode, event)
             }
-            val altMetaStates = AndroidKeyMapper.consumedAltMetaStates(event.isAltPressed, key.modifiers)
-            if (altMetaStates != 0) {
-                // The editor never sees this chord and would latch Alt on release.
-                currentInputConnection?.clearMetaKeyStates(altMetaStates)
+            val chordMetaStates = AndroidKeyMapper.consumedChordMetaStates(event.metaState)
+            if (chordMetaStates != 0) {
+                // The editor never sees this chord and would latch Shift/Alt/Sym on release.
+                currentInputConnection?.clearMetaKeyStates(chordMetaStates)
             }
             applyState(result)
             consumedKeyUps.recordDown(event.deviceId, keyCode)
@@ -1170,18 +1170,23 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             deferDeploymentKey { onKeyUp(keyCode, deferredEvent) }
         ) return true
         pendingModifierTap = null
-        if (!shouldToggle) return super.onKeyUp(keyCode, event)
-        if (bypassesComposition()) return super.onKeyUp(keyCode, event)
+        if (!shouldToggle) return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
+        if (bypassesComposition()) return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
 
         val beforeAsciiMode = currentState.asciiMode
         val result = KeytaoRimeInput.processModifierTap(keysym, engine::processKey, ::applyState)
         if (result.accepted || result.asciiMode != beforeAsciiMode) {
             applyState(result)
-            // Keep Control/Alt releases paired with their downs in the editor.
-            return if (shift) true else super.onKeyUp(keyCode, event)
+            val clearMetaStates = AndroidKeyMapper.modifierTapClearMetaStates(keyCode)
+            if (clearMetaStates != 0) {
+                // Clear editor Shift/Alt press and toggle latches before pairing the release.
+                currentInputConnection?.clearMetaKeyStates(clearMetaStates)
+            }
+            // Keep modifier releases paired with their downs unless emoji search ate the down.
+            return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
         }
         KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
-        return super.onKeyUp(keyCode, event)
+        return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
     }
 
     private fun logHardwareDevice(event: KeyEvent) {
