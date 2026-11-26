@@ -60,8 +60,19 @@ object AndroidKeyMapper {
     internal fun modifiersForUnicode(modifiers: Int, codePoint: Int, codePointWithoutAlt: Int): Int =
         if (codePoint != 0 && codePoint != codePointWithoutAlt) modifiers and RIME_MOD_ALT.inv() else modifiers
 
-    internal fun consumedAltMetaStates(altPressed: Boolean, rimeModifiers: Int): Int =
-        if (altPressed && rimeModifiers and RIME_MOD_ALT == 0) KeyEvent.META_ALT_MASK else 0
+    internal fun consumedChordMetaStates(metaState: Int): Int {
+        var mask = 0
+        if (metaState and KeyEvent.META_SHIFT_MASK != 0) mask = mask or KeyEvent.META_SHIFT_MASK
+        if (metaState and KeyEvent.META_ALT_MASK != 0) mask = mask or KeyEvent.META_ALT_MASK
+        if (metaState and KeyEvent.META_SYM_ON != 0) mask = mask or KeyEvent.META_SYM_ON
+        return mask
+    }
+
+    internal fun modifierTapClearMetaStates(keyCode: Int): Int = when (keyCode) {
+        KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT -> KeyEvent.META_SHIFT_MASK
+        KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> KeyEvent.META_ALT_MASK
+        else -> 0
+    }
 
     internal fun specialHardwareKeysym(keyCode: Int): Int? = when (keyCode) {
         KeyEvent.KEYCODE_DEL -> XK_BACK_SPACE
