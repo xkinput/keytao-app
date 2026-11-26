@@ -105,6 +105,49 @@ class AndroidKeyMapperTest {
     }
 
     @Test
+    fun `Alt-produced digits and punctuation drop Alt while preserving other modifiers`() {
+        val alt = AndroidKeyMapper.RIME_MOD_ALT
+        val shift = AndroidKeyMapper.RIME_MOD_SHIFT
+        assertEquals(0, AndroidKeyMapper.modifiersForUnicode(alt, '1'.code, 'w'.code))
+        assertEquals(shift, AndroidKeyMapper.modifiersForUnicode(alt or shift, '！'.code, 'Q'.code))
+        assertEquals(0, AndroidKeyMapper.modifiersForUnicode(alt, '!'.code, 0))
+    }
+
+    @Test
+    fun `Alt remains when it produces the same character or no character`() {
+        val alt = AndroidKeyMapper.RIME_MOD_ALT
+        assertEquals(alt, AndroidKeyMapper.modifiersForUnicode(alt, 'w'.code, 'w'.code))
+        assertEquals(alt, AndroidKeyMapper.modifiersForUnicode(alt, 0, 'w'.code))
+        assertEquals(alt, AndroidKeyMapper.modifiersForUnicode(alt, 0, 0))
+    }
+
+    @Test
+    fun `consumed chords clear latchable editor modifiers`() {
+        assertEquals(0, AndroidKeyMapper.consumedChordMetaStates(0))
+        assertEquals(0, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_CTRL_ON or KeyEvent.META_CAPS_LOCK_ON))
+        assertEquals(KeyEvent.META_SHIFT_MASK, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON))
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_ALT_ON or KeyEvent.META_ALT_RIGHT_ON))
+        assertEquals(KeyEvent.META_SYM_ON, AndroidKeyMapper.consumedChordMetaStates(KeyEvent.META_SYM_ON))
+        assertEquals(
+            KeyEvent.META_SHIFT_MASK or KeyEvent.META_ALT_MASK or KeyEvent.META_SYM_ON,
+            AndroidKeyMapper.consumedChordMetaStates(
+                KeyEvent.META_SHIFT_LEFT_ON or KeyEvent.META_ALT_LEFT_ON or KeyEvent.META_SYM_ON or KeyEvent.META_CTRL_ON,
+            ),
+        )
+    }
+
+    @Test
+    fun `modifier taps clear only Shift and Alt editor latches`() {
+        assertEquals(KeyEvent.META_SHIFT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_SHIFT_LEFT))
+        assertEquals(KeyEvent.META_SHIFT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_SHIFT_RIGHT))
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_ALT_LEFT))
+        assertEquals(KeyEvent.META_ALT_MASK, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_ALT_RIGHT))
+        assertEquals(0, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_CTRL_LEFT))
+        assertEquals(0, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_CTRL_RIGHT))
+        assertEquals(0, AndroidKeyMapper.modifierTapClearMetaStates(KeyEvent.KEYCODE_A))
+    }
+
+    @Test
     fun `hardware modifiers retain CapsLock and Meta independently of Shift`() {
         for (shift in listOf(false, true)) {
             for (capsLock in listOf(false, true)) {

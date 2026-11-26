@@ -177,7 +177,9 @@ pub fn read_ui_settings(root: &Path) -> Result<RimeSyncSettings, String> {
             return Ok(settings);
         }
     };
-    let default_dir = if runtime.active_package_key.is_some() {
+    let default_dir = if settings.sync_dir.is_empty() && !sync_dir.as_os_str().is_empty() {
+        sync_dir.clone()
+    } else if runtime.active_package_key.is_some() {
         runtime.user_data_dir.join("sync")
     } else {
         root.join("sync")
@@ -801,6 +803,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ui_settings_display_the_resolved_default_sync_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        select_test_package(root, "one");
+        save_settings(root, "device", "").unwrap();
+
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(
+            Path::new(&ui.default_sync_dir),
+            root.join("runtime/one/sync")
+        );
+        assert_eq!(ui.default_sync_dir, ui.package_sync_dir);
+
+        let shared = root.join("shared");
+        fs::create_dir_all(shared.join("keytao-packages")).unwrap();
+        std::os::unix::fs::symlink(&shared, root.join("sync")).unwrap();
+
+        let ui = read_ui_settings(root).unwrap();
+        assert_eq!(
+            Path::new(&ui.default_sync_dir),
+            root.join("sync/keytao-packages/one")
+        );
+        assert_eq!(ui.default_sync_dir, ui.package_sync_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn sync_pins_a_dangling_legacy_sync_root() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
@@ -815,7 +844,7 @@ mod tests {
         let ui = read_ui_settings(root).unwrap();
         assert!(ui.sync_dir.is_empty());
         assert_eq!(Path::new(&ui.package_sync_dir), legacy);
-        assert_eq!(Path::new(&ui.default_sync_dir), default_dir);
+        assert_eq!(ui.default_sync_dir, ui.package_sync_dir);
         assert!(!default_dir.exists());
 
         let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
@@ -941,6 +970,7 @@ mod tests {
 
             let ui = read_ui_settings(root).unwrap();
             assert_eq!(Path::new(&ui.package_sync_dir), legacy);
+            assert_eq!(ui.default_sync_dir, ui.package_sync_dir);
             let runtime = prepare_sync_root(root, &settings, rename_sync_dir).unwrap();
             assert_eq!(
                 Path::new(&read_settings(&runtime).unwrap().sync_dir),
@@ -964,10 +994,7 @@ mod tests {
         save_settings(root, "device", "").unwrap();
         let ui = read_ui_settings(root).unwrap();
         assert!(ui.sync_dir.is_empty());
-        assert_eq!(
-            Path::new(&ui.default_sync_dir),
-            root.join("runtime/two/sync")
-        );
+        assert_eq!(ui.default_sync_dir, ui.package_sync_dir);
         assert_eq!(
             Path::new(&ui.package_sync_dir),
             root.join("sync/keytao-packages/two")

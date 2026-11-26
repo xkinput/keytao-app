@@ -31,14 +31,15 @@ class _SyncCore implements RustLibApi {
   BigInt lastSyncAt = BigInt.zero;
   String _installationId = _initial.installationId;
   String _syncDir = '';
+  String _defaultSyncDir = _initial.defaultSyncDir;
 
   RimeSyncSettingsDto get _settings => RimeSyncSettingsDto(
     installationId: _installationId,
     syncDir: _syncDir,
     effectiveSyncDir: _syncDir.isEmpty ? _initial.effectiveSyncDir : _syncDir,
-    defaultSyncDir: _initial.defaultSyncDir,
+    defaultSyncDir: _defaultSyncDir,
     packageSyncDir: _syncDir.isEmpty
-        ? _initial.packageSyncDir
+        ? _defaultSyncDir
         : '$_syncDir/keytao-packages/keytao',
     lastSyncAt: lastSyncAt,
     lastSyncError: lastSyncError,
@@ -85,7 +86,7 @@ class _SyncController extends AppController {
   int opens = 0;
 
   @override
-  Future<bool> openRimeSyncDirectory() async {
+  Future<bool> openRimeSyncDirectory({Locale? locale}) async {
     opens++;
     return true;
   }
@@ -228,10 +229,33 @@ void main() {
     );
   }
 
+  testWidgets('pinned legacy path displays and saves as the default', (
+    tester,
+  ) async {
+    const pinnedPath = '/isolated/rime-sync/sync/keytao-packages/keytao';
+    core._defaultSyncDir = pinnedPath;
+    await _show(tester, controller);
+    await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text(pinnedPath), findsOneWidget);
+    expect(find.text('默认'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('rime-sync-installation-id')),
+      'updated-desktop',
+    );
+    await tester.pump();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(core.saves.single.syncDir, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   for (final (label, custom, legacy) in [
     ('custom', true, false),
     ('default', false, false),
-    ('legacy fallback', false, true),
+    ('pinned legacy', false, true),
   ]) {
     test('open $label sync directory', () async {
       final root = await Directory.systemTemp.createTemp('keytao-rime-sync-');
@@ -260,27 +284,29 @@ void main() {
         installationId: _initial.installationId,
         syncDir: custom ? customPath : '',
         effectiveSyncDir: custom ? customPath : '${root.path}/sync',
-        defaultSyncDir: defaultPath,
+        defaultSyncDir: custom ? defaultPath : packagePath,
         packageSyncDir: packagePath,
         lastSyncAt: BigInt.zero,
       );
 
-      expect(await openController.openRimeSyncDirectory(), isFalse);
-      expect(
-        openController.rimeSyncError,
-        contains('Sync directory parent does not exist'),
-      );
-      expect(await parent.exists(), isFalse);
-      expect(opened, isEmpty);
+      for (final (locale, message) in [
+        (const Locale('zh'), '同步文件夹不可用：${parent.path}'),
+        (const Locale('en'), 'Sync folder unavailable: ${parent.path}'),
+      ]) {
+        expect(
+          await openController.openRimeSyncDirectory(locale: locale),
+          isFalse,
+        );
+        expect(openController.rimeSyncError, message);
+        expect(await parent.exists(), isFalse);
+        expect(await directory.exists(), isFalse);
+        expect(opened, isEmpty);
+      }
 
       await parent.create(recursive: true);
-      if (legacy) {
-        expect(await openController.openRimeSyncDirectory(), isFalse);
-        expect(await directory.exists(), isFalse);
-        await directory.create();
-      }
       expect(await openController.openRimeSyncDirectory(), isTrue);
       expect(await directory.exists(), isTrue);
+      expect(openController.rimeSyncError, isNull);
       expect(opened, [packagePath]);
     });
   }

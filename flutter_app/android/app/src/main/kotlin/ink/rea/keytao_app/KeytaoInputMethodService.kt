@@ -22,6 +22,7 @@ import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -64,6 +65,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var pendingKeystrokeStartNs = 0L
     private var releasingPreviousInput = false
     private val hardwareChordKeys = KeytaoHardwareChordKeys()
+    private val consumedKeyUps = KeytaoConsumedKeyUps()
+    private var loggedHardwareDevice = false
     private lateinit var engine: KeytaoImeEngine
     private val mainHandler = Handler(Looper.getMainLooper())
     private val voiceInput = KeytaoVoiceInput()
@@ -216,6 +219,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var lastReadiness: Readiness? = null
     private var presentationLoadedWithoutRoot = false
     private var inputViewShown = false
+    private var candidateStripOnly = false
+    private var configuredKeyboard = Configuration.KEYBOARD_UNDEFINED
+    private var configuredHardKeyboardHidden = Configuration.HARDKEYBOARDHIDDEN_UNDEFINED
     private var navigationResetOnShow = true
     private var configurationChanging = false
     private var panelBackDownConsumed = false
@@ -227,7 +233,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var readinessRetryCount = 0
     private var readinessRetryDelayMs = 500L
     private var lastReloadStampSignature: String? = null
-    private var lastHardwareStampCheckMs = 0L
+    private var lastHardwareStampCheckMs = -1_000L
     private var reloadStampObserver: FileObserver? = null
     private var reloadStampObservedDir: String? = null
     private var reloadStampRefreshPending = false
@@ -246,6 +252,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onCreate() {
         createdAtMs = SystemClock.elapsedRealtime()
         super.onCreate()
+        configuredKeyboard = resources.configuration.keyboard
+        configuredHardKeyboardHidden = resources.configuration.hardKeyboardHidden
         KeytaoRuntimeLog.event("lifecycle", "ime_create")
         engine = KeytaoImeEngine(applicationContext)
         engine.onReloadStarted = {
@@ -290,6 +298,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onCreateInputView(): View {
         val started = System.nanoTime()
+        onEvaluateInputViewShown()
         window?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         val host = KeytaoKeyboardHost(this)
         host.listener = object : KeytaoKeyboardHost.Listener {
@@ -303,6 +312,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         markPresentationLoad()
         val view = KeytaoKeyboardView(this)
+        view.candidateStripOnly = candidateStripOnly
         view.listener = this
         engine.onSchemaLogoChanged = {
             mainHandler.post { keyboardView?.updateSchemaLogo(engine.schemaLogo) }
@@ -330,7 +340,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onComputeInsets(outInsets: Insets) {
-        val mode = keyboardLayoutState.mode
+        val mode = presentedKeyboardLayoutMode()
         if (mode == KeyboardLayoutMode.FULL) {
             super.onComputeInsets(outInsets)
             return
@@ -372,6 +382,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
+        onEvaluateInputViewShown()
         pendingModifierTap = null
         if (restarting && configurationChanging) {
             applyEditorInfo(attribute, reloadIfNeeded = true)
@@ -416,6 +427,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         val started = System.nanoTime()
         super.onStartInputView(info, restarting)
+        onEvaluateInputViewShown()
         inputViewShown = true
         stopReloadStampObserver()
         readinessRetryCount = 0
@@ -476,7 +488,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onWindowShown() {
         val started = System.nanoTime()
         super.onWindowShown()
-        val mode = keyboardLayoutState.mode.name.lowercase(Locale.ROOT)
+        val mode = presentedKeyboardLayoutMode().name.lowercase(Locale.ROOT)
         val hostHeight = keyboardHost?.height ?: 0
         val childHeight = keyboardView?.height ?: 0
         val diagnostics = keyboardView?.renderDiagnostics() ?: mapOf(
@@ -497,6 +509,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onWindowHidden() {
+        consumedKeyUps.clear()
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
         cancelVoiceInput()
@@ -525,11 +538,26 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun logStartInput(phase: String, info: EditorInfo?, restarting: Boolean, started: Long) {
         val pkg = info?.packageName
         val secure = !privacyMode.allowsComposing
+        val config = resources.configuration
+        val keyboard = config.keyboard
+        val hardKeyboardHidden = config.hardKeyboardHidden
+        val showImeWithHardwareKeyboard = runCatching {
+            Settings.Secure.getInt(contentResolver, "show_ime_with_hard_keyboard", 0)
+        }.getOrDefault(-1)
+        val stripOnly = candidateStripOnly
+        val readiness = lastReadiness?.name ?: "unknown"
+        val available = inputAvailable
         KeytaoRuntimeLog.event("lifecycle", "ime_start_input", KeytaoRuntimeLog.elapsedMs(started)) {
             put("phase", phase)
             pkg?.let { put("pkg", it) }
             put("restarting", restarting)
             put("secure", secure)
+            put("kb", keyboard)
+            put("hkh", hardKeyboardHidden)
+            put("show_ime_hw", showImeWithHardwareKeyboard)
+            put("strip_only", stripOnly)
+            put("readiness", readiness)
+            put("input_available", available)
         }
     }
 
@@ -677,9 +705,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val runtimeReady = engine.nativeReady
             mainHandler.post {
                 if (generation != editorUpdateGeneration) return@post
-                if (!runtimeReady && lastReadiness == Readiness.READY) {
-                    lastReadiness = Readiness.NATIVE_UNAVAILABLE
-                }
+                val readiness = if (!runtimeReady && lastReadiness == Readiness.READY) {
+                    Readiness.NATIVE_UNAVAILABLE
+                } else lastReadiness
                 if (state?.hasComposition == true && !currentState.hasComposition) {
                     // The editor may move its caret while show work is pending.
                     // Clear the stale engine composition before releasing the gate.
@@ -695,7 +723,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     composing = it.hasComposition
                     keyboardView?.updateState(it)
                 }
-                lastReadiness?.let(::applyReadiness)
+                readiness?.let(::applyReadiness)
             }
             if (result.isFailure) KeytaoRuntimeLog.event("error", "editor_update_failed")
         }
@@ -761,6 +789,20 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
+        val keyboard = newConfig.keyboard
+        val hardKeyboardHidden = newConfig.hardKeyboardHidden
+        if (keyboard != configuredKeyboard || hardKeyboardHidden != configuredHardKeyboardHidden) {
+            val previousKeyboard = configuredKeyboard
+            val previousHardKeyboardHidden = configuredHardKeyboardHidden
+            configuredKeyboard = keyboard
+            configuredHardKeyboardHidden = hardKeyboardHidden
+            KeytaoRuntimeLog.event("lifecycle", "ime_keyboard_config") {
+                put("from_kb", previousKeyboard)
+                put("from_hkh", previousHardKeyboardHidden)
+                put("kb", keyboard)
+                put("hkh", hardKeyboardHidden)
+            }
+        }
         val previousView = keyboardView
         val resetOnShow = navigationResetOnShow
         configurationChanging = true
@@ -773,6 +815,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             configurationChanging = false
             navigationResetOnShow = resetOnShow
         }
+        onEvaluateInputViewShown()
         keyboardView?.updateTheme(resolvePresentationTheme())
         applyKeyboardPresentation(loadPresentationConfig())
         if (!inputViewShown) scheduleReadinessRetry()
@@ -805,6 +848,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         applyKeyboardPresentation(config, keyboardLayoutState)
     }
 
+    private fun presentedKeyboardLayoutMode(): KeyboardLayoutMode =
+        if (candidateStripOnly) KeyboardLayoutMode.FULL else keyboardLayoutState.mode
+
     private fun applyKeyboardPresentation(
         config: KeytaoAndroidImeConfig,
         state: KeyboardLayoutState,
@@ -814,7 +860,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             isLandscape = presentationIsLandscape,
         )
         keyboardLayoutState = normalized
-        val presentedConfig = when (normalized.mode) {
+        val layoutMode = presentedKeyboardLayoutMode()
+        val presentedConfig = when (layoutMode) {
             KeyboardLayoutMode.FULL -> config
             KeyboardLayoutMode.ONE_HANDED -> config.scaledForOneHanded(normalized.oneHandedScale)
             KeyboardLayoutMode.FLOATING -> config.scaledForFloating(
@@ -823,27 +870,28 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             )
         }
         val theme = resolvePresentationTheme()
-        val flushBottom = normalized.mode != KeyboardLayoutMode.FLOATING && keyboardLayoutStateStore.flushBottom
+        val flushBottom = layoutMode != KeyboardLayoutMode.FLOATING && keyboardLayoutStateStore.flushBottom
         val safeBottomInset = resolveKeyboardBottomInsetDp(
             systemBottomInsetDp, navigationBottomInsetDp, config.keyboardBottomInsetDp, flushBottom,
         )
         keyboardHost?.updatePresentation(
-            normalized,
+            normalized.copy(mode = layoutMode),
             config.floating.marginDp,
             normalKeyboardHeightDp(config) + safeBottomInset,
             safeBottomInset.toFloat(),
             presentationIsLandscape,
             theme,
         )
+        keyboardView?.candidateStripOnly = candidateStripOnly
         keyboardView?.updateLayoutPresentation(
-            mode = normalized.mode,
+            mode = layoutMode,
             oneHandedSide = normalized.oneHandedSide,
-            oneHandedAvailable = !presentationIsLandscape,
+            oneHandedAvailable = !candidateStripOnly && !presentationIsLandscape,
         )
         keyboardView?.updateSettingsConfig(config)
         keyboardView?.updateConfig(presentedConfig)
         keyboardView?.updateBottomInsetDp(
-            if (normalized.mode == KeyboardLayoutMode.FLOATING) 0 else resolveKeyboardBottomInsetDp(
+            if (layoutMode == KeyboardLayoutMode.FLOATING) 0 else resolveKeyboardBottomInsetDp(
                 systemBottomInsetDp, navigationBottomInsetDp, presentedConfig.keyboardBottomInsetDp, flushBottom,
             ),
         )
@@ -862,6 +910,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleKeyboardLayoutStateChanged(next: KeyboardLayoutState, finished: Boolean) {
+        if (candidateStripOnly) return
         val normalized = next.normalized(
             allowOneHanded = !presentationIsLandscape,
             isLandscape = presentationIsLandscape,
@@ -884,6 +933,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun toggleFloatingKeyboard() {
+        if (candidateStripOnly) return
         val config = baseKeyboardConfig ?: loadPresentationConfig()
         val nextMode = if (keyboardLayoutState.mode == KeyboardLayoutMode.FLOATING) {
             KeyboardLayoutMode.FULL
@@ -900,7 +950,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun toggleOneHandedKeyboard() {
-        if (presentationIsLandscape) return
+        if (candidateStripOnly || presentationIsLandscape) return
         val config = baseKeyboardConfig ?: loadPresentationConfig()
         val nextMode = if (keyboardLayoutState.mode == KeyboardLayoutMode.ONE_HANDED) {
             KeyboardLayoutMode.FULL
@@ -919,6 +969,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
+        consumedKeyUps.clear()
+        loggedHardwareDevice = false
         mainHandler.removeCallbacks(readinessRetry)
         releaseHardwareChordKeys()
         keyboardView?.clearActiveKeyTouches()
@@ -953,8 +1005,23 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onEvaluateFullscreenMode(): Boolean = false
 
+    override fun onEvaluateInputViewShown(): Boolean {
+        val softKeys = super.onEvaluateInputViewShown()
+        val config = resources.configuration
+        val decision = decideInputView(softKeys, config.keyboard, config.hardKeyboardHidden)
+        candidateStripOnly = decision.stripOnly
+        return decision.show
+    }
+
+    override fun onShowInputRequested(flags: Int, configChange: Boolean): Boolean =
+        super.onShowInputRequested(flags, configChange) || candidateStripOnly
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (!runningDeferredDeploymentKey) inputCounts.record("key_down")
+        if (!runningDeferredDeploymentKey) {
+            inputCounts.record("key_down")
+            if (!loggedHardwareDevice) logHardwareDevice(event)
+            if (!inputAvailable && shouldRetryReadiness()) refreshAvailabilityFromHardware()
+        }
         val deferredEvent = KeyEvent(event)
         if (deferDeploymentKey(markPressed = false) {
                 if (!onKeyDown(keyCode, deferredEvent)) currentInputConnection?.sendKeyEvent(deferredEvent)
@@ -990,6 +1057,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                         if (key != null && !bypassesComposition() && !engine.shouldBypassKey(key.keyCode, key.modifiers)) {
                             if (deferDeploymentKey { onKeyDown(keyCode, deferredEvent) }) return true
                             val result = engine.processKey(key.keyCode, key.modifiers)
+                            inputCounts.record(if (result.accepted) "hw_accepted" else "hw_rejected")
                             hardwareChordKeys.recordPress(keyCode, key, result.accepted, currentState.chordComposer, currentState.asciiMode)
                             applyState(result)
                             if (!result.accepted && !result.hasComposition && event.unicodeChar > 0 &&
@@ -1001,31 +1069,33 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                         }
                     }
                 }
+                consumedKeyUps.recordDown(event.deviceId, keyCode)
             }
             return true
         }
         if (modifierKeysym != null) return super.onKeyDown(keyCode, event)
         if (!inputAvailable || event.isMetaPressed) {
-            if (lastReadiness == Readiness.DEPLOYING) showUnavailableMessage()
+            inputCounts.record(if (!inputAvailable) "hw_unavailable" else "hw_bypass")
+            if (lastReadiness == Readiness.DEPLOYING) showUnavailableMessage(refresh = false)
             return passKeyDownToHost(keyCode, event)
         }
-        val key = AndroidKeyMapper.fromAndroidKeyEvent(event) ?: return passKeyDownToHost(keyCode, event)
+        val key = AndroidKeyMapper.fromAndroidKeyEvent(event)
+        if (key == null) {
+            inputCounts.record("hw_unmapped")
+            return passKeyDownToHost(keyCode, event)
+        }
         if (!privacyMode.allowsComposing || directInputEditor) {
+            inputCounts.record("hw_bypass")
             return passKeyDownToHost(keyCode, event)
         }
         if (deferDeploymentKey {
                 if (!onKeyDown(keyCode, deferredEvent)) currentInputConnection?.sendKeyEvent(deferredEvent)
             }) return true
-        if (!inputViewShown) {
-            val nowMs = SystemClock.uptimeMillis()
-            if (nowMs - lastHardwareStampCheckMs >= 1_000L) {
-                lastHardwareStampCheckMs = nowMs
-                scheduleAvailabilityRefresh()
-            }
-        }
+        if (!inputViewShown) refreshAvailabilityFromHardware()
         // ascii_mode deliberately plays no part here: English mode still needs
         // librime's ascii_composer to see the key. keytao-core owns the rule.
         if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
+            inputCounts.record("hw_bypass")
             return passKeyDownToHost(keyCode, event)
         }
         pendingKeystrokeStartNs = System.nanoTime()
@@ -1044,6 +1114,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 )
                 engine.processKey(routedKeyCode, key.modifiers)
             }
+            inputCounts.record(if (result.accepted) "hw_accepted" else "hw_rejected")
             if (key.keyCode == AndroidKeyMapper.XK_CAPS_LOCK) {
                 // Android toggles the lock on release, so Rime receives the pre-toggle mask.
                 applyState(result)
@@ -1057,7 +1128,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 pendingKeystrokeStartNs = 0L
                 return passKeyDownToHost(keyCode, event)
             }
+            val chordMetaStates = AndroidKeyMapper.consumedChordMetaStates(event.metaState)
+            if (chordMetaStates != 0) {
+                // The editor never sees this chord and would latch Shift/Alt/Sym on release.
+                currentInputConnection?.clearMetaKeyStates(chordMetaStates)
+            }
             applyState(result)
+            consumedKeyUps.recordDown(event.deviceId, keyCode)
             return true
         } finally {
             pendingKeystrokeStartNs = 0L
@@ -1074,10 +1151,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             panelBackDownConsumed = false
             return true
         }
+        val consumedDown = consumedKeyUps.removeDown(event.deviceId, keyCode)
         hardwareChordKeys.release(keyCode)?.let { release ->
             release.key?.let { key -> applyState(engine.processKey(key.keyCode, key.modifiers)) }
-            return if (release.passToHost) super.onKeyUp(keyCode, event) else true
+            return consumedDown || !release.passToHost || super.onKeyUp(keyCode, event)
         }
+        if (consumedDown) return true
         val shift = isShiftKey(keyCode)
         if (!shift && emojiSearchQuery != null && !isSystemLanguageKey(keyCode)) return true
         val keysym = AndroidKeyMapper.modifierTapKeysym(keyCode) ?: return super.onKeyUp(keyCode, event)
@@ -1091,23 +1170,42 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             deferDeploymentKey { onKeyUp(keyCode, deferredEvent) }
         ) return true
         pendingModifierTap = null
-        if (!shouldToggle) return super.onKeyUp(keyCode, event)
-        if (bypassesComposition()) return super.onKeyUp(keyCode, event)
+        if (!shouldToggle) return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
+        if (bypassesComposition()) return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
 
         val beforeAsciiMode = currentState.asciiMode
         val result = KeytaoRimeInput.processModifierTap(keysym, engine::processKey, ::applyState)
         if (result.accepted || result.asciiMode != beforeAsciiMode) {
             applyState(result)
-            // Keep Control/Alt releases paired with their downs in the editor.
-            return if (shift) true else super.onKeyUp(keyCode, event)
+            val clearMetaStates = AndroidKeyMapper.modifierTapClearMetaStates(keyCode)
+            if (clearMetaStates != 0) {
+                // Clear editor Shift/Alt press and toggle latches before pairing the release.
+                currentInputConnection?.clearMetaKeyStates(clearMetaStates)
+            }
+            // Keep modifier releases paired with their downs unless emoji search ate the down.
+            return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
         }
         KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
-        return super.onKeyUp(keyCode, event)
+        return if (emojiSearchQuery != null) true else super.onKeyUp(keyCode, event)
+    }
+
+    private fun logHardwareDevice(event: KeyEvent) {
+        val device = event.device ?: return
+        loggedHardwareDevice = true
+        KeytaoRuntimeLog.event("input", "ime_hardware_device") {
+            put("sources", device.sources)
+            put("keyboard_type", device.keyboardType)
+            put("is_virtual", device.isVirtual)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put("is_external", device.isExternal)
+            put("vendor_id", device.vendorId)
+            put("product_id", device.productId)
+        }
     }
 
     override fun allowsChordInput(): Boolean = !bypassesComposition()
 
     private fun passKeyDownToHost(keyCode: Int, event: KeyEvent): Boolean {
+        consumedKeyUps.removeDown(event.deviceId, keyCode)
         hardwareChordKeys.passToHost(keyCode)
         return super.onKeyDown(keyCode, event)
     }
@@ -2942,17 +3040,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         return inputAvailable
     }
 
+    private fun shouldRetryReadiness(): Boolean = when (lastReadiness) {
+        Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
+        else -> false
+    }
+
+    private fun refreshAvailabilityFromHardware() {
+        val nowMs = SystemClock.uptimeMillis()
+        if (nowMs - lastHardwareStampCheckMs < 1_000L) return
+        lastHardwareStampCheckMs = nowMs
+        scheduleAvailabilityRefresh()
+    }
+
     private fun scheduleAvailabilityRefresh(pollReloadStamp: Boolean = false) {
         if (serviceDestroyed || !::engine.isInitialized || availabilityRefreshPending) return
-        val retryableReadiness = when (lastReadiness) {
-            Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
-            else -> false
-        }
         if (pollReloadStamp && !shouldPollReloadStamp()) return
         availabilityRefreshPending = true
         val reloadPresentation = presentationLoadedWithoutRoot
         val resumingAlgorithm = lastReadiness == Readiness.ENGINE_DISABLED
-        val retryReadiness = retryableReadiness &&
+        val retryReadiness = shouldRetryReadiness() &&
             (lastReadiness == Readiness.DEPLOYING || readinessRetryCount < 30)
         if (pollReloadStamp && retryReadiness) readinessRetryCount++
         val optionsView = keyboardView?.takeIf { inputViewShown && it.rimePanelOpen }
@@ -3024,7 +3130,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val readiness = if (snapshot == Readiness.READY && !engine.nativeReady) {
             Readiness.NATIVE_UNAVAILABLE
         } else snapshot
-        if (readiness == Readiness.ENGINE_DISABLED && lastReadiness != readiness) {
+        val previous = lastReadiness
+        if (previous != readiness) {
+            KeytaoRuntimeLog.event("lifecycle", "ime_readiness_changed") {
+                put("from", previous?.name ?: "unknown")
+                put("to", readiness.name)
+            }
+        }
+        if (readiness == Readiness.ENGINE_DISABLED && previous != readiness) {
             resetDeploymentInput()
             if (composing) currentInputConnection?.finishComposingText()
             composing = false
@@ -3145,9 +3258,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         return if (usesEnglishSchema()) currentRimeSchemaId == englishSchemaId else currentState.asciiMode
     }
 
-    private fun showUnavailableMessage() {
+    private fun showUnavailableMessage(refresh: Boolean = true) {
         engine.deploymentKeyPressed()
-        scheduleAvailabilityRefresh()
+        if (refresh) scheduleAvailabilityRefresh()
         keyboardView?.updateDeploymentHint(engine.deploymentHint)
         keyboardView?.showMessage(unavailableMessage)
     }
@@ -3396,6 +3509,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun applyState(state: KeytaoImeState) {
+        if (!inputViewShown && state.candidates.isNotEmpty()) inputCounts.record("candidates_hidden")
         if (state.hasComposition || state.committed.isNotEmpty()) discardPendingHostBackspace()
         val started = applyStateDurations.start()
         try {

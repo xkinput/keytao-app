@@ -298,6 +298,10 @@ abstract final class AppStrings {
       locale.languageCode.startsWith('zh') ? '默认' : 'Default';
   static String syncOpen(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '打开' : 'Open';
+  static String syncFolderUnavailable(Locale locale, String path) =>
+      locale.languageCode.startsWith('zh')
+      ? '同步文件夹不可用：$path'
+      : 'Sync folder unavailable: $path';
   static String syncNow(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '立即同步' : 'Sync now';
   static String syncing(Locale locale) =>

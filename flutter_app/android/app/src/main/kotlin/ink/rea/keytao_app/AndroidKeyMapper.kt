@@ -44,11 +44,34 @@ object AndroidKeyMapper {
         if (keyCode == KeyEvent.KEYCODE_LANGUAGE_SWITCH ||
             (keyCode == KeyEvent.KEYCODE_CAPS_LOCK && event.repeatCount != 0)
         ) return null
-        val modifiers = modifiers(event)
+        val metaState = event.metaState
+        val codePoint = event.getUnicodeChar(metaState)
+        var modifiers = modifiers(event)
+        if (modifiers and RIME_MOD_ALT != 0) {
+            val codePointWithoutAlt = event.getUnicodeChar(metaState and KeyEvent.META_ALT_MASK.inv())
+            modifiers = modifiersForUnicode(modifiers, codePoint, codePointWithoutAlt)
+        }
         specialHardwareKeysym(keyCode)?.let { return RimeKey(it, modifiers) }
-        return fromHardwareUnicode(keyCode, event.getUnicodeChar(event.metaState), modifiers) {
+        return fromHardwareUnicode(keyCode, codePoint, modifiers) {
             KeytaoNativeBridge.textToKeysym(it)
         }
+    }
+
+    internal fun modifiersForUnicode(modifiers: Int, codePoint: Int, codePointWithoutAlt: Int): Int =
+        if (codePoint != 0 && codePoint != codePointWithoutAlt) modifiers and RIME_MOD_ALT.inv() else modifiers
+
+    internal fun consumedChordMetaStates(metaState: Int): Int {
+        var mask = 0
+        if (metaState and KeyEvent.META_SHIFT_MASK != 0) mask = mask or KeyEvent.META_SHIFT_MASK
+        if (metaState and KeyEvent.META_ALT_MASK != 0) mask = mask or KeyEvent.META_ALT_MASK
+        if (metaState and KeyEvent.META_SYM_ON != 0) mask = mask or KeyEvent.META_SYM_ON
+        return mask
+    }
+
+    internal fun modifierTapClearMetaStates(keyCode: Int): Int = when (keyCode) {
+        KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT -> KeyEvent.META_SHIFT_MASK
+        KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> KeyEvent.META_ALT_MASK
+        else -> 0
     }
 
     internal fun specialHardwareKeysym(keyCode: Int): Int? = when (keyCode) {

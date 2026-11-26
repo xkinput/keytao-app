@@ -103,8 +103,10 @@ class _RimeSyncDialogState extends State<_RimeSyncDialog> {
     if (_hasChanges) _save();
   }
 
-  Future<void> _open() async {
-    if (await _saveChanges()) await widget.controller.openRimeSyncDirectory();
+  Future<void> _open(Locale locale) async {
+    if (await _saveChanges()) {
+      await widget.controller.openRimeSyncDirectory(locale: locale);
+    }
   }
 
   Future<void> _sync() async {
@@ -219,7 +221,7 @@ class _RimeSyncDialogState extends State<_RimeSyncDialog> {
                   ActionButton(
                     AppStrings.syncOpen(locale),
                     onPress: enabled && settings.packageSyncDir.isNotEmpty
-                        ? _open
+                        ? () => _open(locale)
                         : null,
                   ),
                 ],
