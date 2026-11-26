@@ -350,6 +350,19 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var pressedCandidateMenuAction: CandidateMenuActionRect? = null
     private var candidateLongPressConsumed = false
     private val candidatePanelExpanded: Boolean get() = navigation.panel != null
+    internal var candidateStripOnly = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (value) clearActiveKeyTouches()
+            invalidateKeyboardLayoutCache()
+            requestLayout()
+            invalidate()
+        }
+    private val showCandidateStrip: Boolean
+        get() = candidateStripOnly && !candidatePanelExpanded && emojiSearchQuery == null &&
+            keyboardLayer != "editor" && !keyboardLayer.isSymbolLayer() &&
+            (keyboardLayer != "numbers" || editorRequestedLayer == "numbers")
     private val functionPanelActive: Boolean
         get() = navigation.panel != null && navigation.panel != KeyboardPanel.EXPANDED_CANDIDATES
     private val functionPanelMode: FunctionPanelMode
@@ -897,8 +910,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             visibleRecentEmojis = recentEmojis
         }
         val wasOnSymbols = keyboardLayer == "symbols"
+        val wasShowingCandidateStrip = showCandidateStrip
         navigation.navigate(nextLayer, nextPanel, reset)
         if (restore != null) navigation.restoreFrom(restore)
+        if (wasShowingCandidateStrip != showCandidateStrip) requestLayout()
         interactiveRectsDirty = true
         if (shiftState != KeyboardShiftState.ONCE) lastShiftTapTimeMs = 0L
         if (reset || wasOnSymbols != (keyboardLayer == "symbols")) toolbarScrollX = 0f
@@ -968,10 +983,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun restoreNavigationFrom(previous: KeytaoKeyboardView) {
+        val wasShowingCandidateStrip = showCandidateStrip
         navigation.restoreFrom(previous.navigation)
         visibleRecentEmojis = previous.visibleRecentEmojis
         recentEmojis = previous.recentEmojis
         emojiSearchQuery = previous.emojiSearchQuery
+        if (wasShowingCandidateStrip != showCandidateStrip) requestLayout()
         emojiSearchResults = previous.emojiSearchResults
         emojiSearchOrigin = previous.emojiSearchOrigin
         selectionModeActive = previous.selectionModeActive
@@ -1013,7 +1030,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
-        val contentHeight = if (emojiSearchQuery != null) config.emojiSearchHeightDp() else config.effectiveKeyboardHeightDp
+        val contentHeight = when {
+            showCandidateStrip -> 0f
+            emojiSearchQuery != null -> config.emojiSearchHeightDp()
+            else -> config.effectiveKeyboardHeightDp
+        }
         val desiredHeight = dp(contentHeight + config.candidateBarHeightDp + bottomInsetDp).toInt()
         val resolvedHeight = resolveSize(desiredHeight, heightMeasureSpec)
         setMeasuredDimension(width, resolvedHeight)
@@ -1048,7 +1069,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawCandidateBar(canvas)
             if (candidatePanelExpanded) {
                 drawExpandedCandidatePanel(canvas)
-            } else {
+            } else if (!showCandidateStrip) {
                 drawKeyboard(canvas)
                 textPaint.typeface = theme.typeface
                 drawKeyFeedbackOverlays(canvas)
@@ -1060,7 +1081,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             refreshAccessibilityNodes()
             if (
                 !emptyFrameRecoveryAttempted && width > 0 && height > 0 &&
-                !candidatePanelExpanded && keyRects.isEmpty() && toolbarRects.isEmpty()
+                !candidatePanelExpanded && !showCandidateStrip && keyRects.isEmpty() && toolbarRects.isEmpty()
             ) {
                 emptyFrameRecoveryAttempted = true
                 val emptyLayer = keyboardLayer
@@ -1102,7 +1123,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 }
             }
         }
-        keyRects = if (!candidatePanelExpanded) keyboardLayout() else emptyList()
+        keyRects = if (!candidatePanelExpanded && !showCandidateStrip) keyboardLayout() else emptyList()
         candidateRects = emptyList()
         expandedCandidateRects = emptyList()
         expandedCandidateDrawingRects = emptyMap()
@@ -5090,8 +5111,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             id = "layout",
         )
         val layoutActions = buildList {
-            if (oneHandedAvailable) add(oneHanded)
-            add(floating)
+            if (!candidateStripOnly) {
+                if (oneHandedAvailable) add(oneHanded)
+                add(floating)
+            }
         }
         return if (keyboardLayer == "symbols") {
             buildList {
@@ -5251,7 +5274,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun bottomReservedInset(): Float {
         val requested = min(dp(bottomInsetDp), dp(64f))
-        val minKeyboardContentHeight = dp(180f)
+        val minKeyboardContentHeight = if (showCandidateStrip) 0f else dp(180f)
         val available = (height.toFloat() - keyboardTop() - minKeyboardContentHeight).coerceAtLeast(0f)
         return min(requested, available)
     }
