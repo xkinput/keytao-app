@@ -4711,25 +4711,35 @@ class AppController extends ChangeNotifier {
   Future<bool> resetRimeSyncDirectory(String installationId) =>
       saveRimeSyncSettings(installationId, '');
 
-  Future<bool> openRimeSyncDirectory() => _rimeSyncAction(() async {
-    if (rimeSyncSettings case final settings?
-        when settings.packageSyncDir.isNotEmpty) {
-      final directory = Directory(settings.packageSyncDir);
-      if (!await directory.exists()) {
-        final custom = settings.syncDir.isNotEmpty;
-        final parent = custom ? Directory(settings.syncDir) : directory.parent;
-        if ((!custom && directory.path != settings.defaultSyncDir) ||
-            !await parent.exists()) {
-          throw FileSystemException(
-            'Sync directory parent does not exist',
-            parent.path,
+  Future<bool> openRimeSyncDirectory({Locale? locale}) => _rimeSyncAction(
+    () async {
+      if (rimeSyncSettings case final settings?
+          when settings.packageSyncDir.isNotEmpty) {
+        final directory = Directory(settings.packageSyncDir);
+        if (!await directory.exists()) {
+          final custom = settings.syncDir.isNotEmpty;
+          final base = custom ? Directory(settings.syncDir) : directory.parent;
+          final unavailable = StateError(
+            AppStrings.syncFolderUnavailable(
+              locale ?? PlatformDispatcher.instance.locale,
+              base.path,
+            ),
           );
+          try {
+            if (!await base.exists()) throw unavailable;
+            if (directory.path != base.path) {
+              // Create each level separately so the base is never recreated.
+              if (custom) await directory.parent.create();
+              await directory.create();
+            }
+          } on FileSystemException {
+            throw unavailable;
+          }
         }
-        await directory.create(recursive: custom);
+        await _open(directory.path);
       }
-      await _open(directory.path);
-    }
-  });
+    },
+  );
 
   Future<bool> syncRimeUserData() => _rimeSyncAction(() async {
     rimeSyncing = true;
