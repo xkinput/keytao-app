@@ -131,20 +131,16 @@ async fn latest_package_release(
         .flatten()
         .filter(|source| source.version.strip_prefix('v').unwrap_or(&source.version) == version)
         .find_map(|source| {
-            source
-                .download_url
-                .clone()
+            let platform_url = match core.env().platform {
+                crate::Platform::Windows => source.download_urls.windows.clone(),
+                crate::Platform::MacOs => source.download_urls.macos.clone(),
+                crate::Platform::Linux => source.download_urls.linux.clone(),
+                crate::Platform::Android => source.download_urls.android.clone(),
+                crate::Platform::Ios => source.download_urls.ios.clone(),
+            };
+            platform_url
                 .filter(|url| !url.is_empty())
-                .or_else(|| {
-                    let url = match core.env().platform {
-                        crate::Platform::Windows => source.download_urls.windows.clone(),
-                        crate::Platform::MacOs => source.download_urls.macos.clone(),
-                        crate::Platform::Linux => source.download_urls.linux.clone(),
-                        crate::Platform::Android => source.download_urls.android.clone(),
-                        crate::Platform::Ios => source.download_urls.ios.clone(),
-                    };
-                    url.filter(|url| !url.is_empty())
-                })
+                .or_else(|| source.download_url.clone().filter(|url| !url.is_empty()))
         })
         .ok_or_else(|| {
             CoreError::Other("The latest scheme has no package for this platform".into())
@@ -1546,6 +1542,43 @@ mod tests {
             (
                 "v1.3.35".into(),
                 "https://github.com/xkinput/KeyTao/releases/download/v1.3.35/keytao-v1.3.35.zip"
+                    .into()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_package_release_keeps_legacy_platform_asset_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        fs::create_dir_all(&core.env().cache_dir).unwrap();
+        let cache = serde_json::json!({
+            "cached_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            "release": {
+                "version": "v1.3.34", "name": "KeyTao v1.3.34", "published_at": "", "body": "",
+                "github": {
+                    "version": "v1.3.34",
+                    "download_url": "https://github.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-linux-v1.3.34.zip",
+                    "download_urls": {
+                        "linux": "https://github.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-linux-v1.3.34.zip",
+                        "android": "https://github.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-android-v1.3.34.zip"
+                    }
+                },
+                "gitee": null
+            }
+        });
+        fs::write(
+            core.env().cache_dir.join("release_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest_package_release(&core, "keytao", "github").await.unwrap(),
+            (
+                "v1.3.34".into(),
+                "https://github.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-android-v1.3.34.zip"
                     .into()
             )
         );

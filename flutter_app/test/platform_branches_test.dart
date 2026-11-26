@@ -479,6 +479,30 @@ void main() {
     );
     expect(c.downloadUrl, universal);
     expect(c.selectedSchemeAsset, 'keytao-v1.3.35.zip');
+
+    // Legacy multi-platform packages still resolve to the current platform's asset
+    // even if a fallback downloadUrl was populated alongside downloadUrls.
+    c.latestRelease = const ReleaseInfoDto(
+      version: 'v1.3.34',
+      name: 'KeyTao v1.3.34',
+      publishedAt: '',
+      body: '',
+      gitee: PlatformReleaseDto(
+        version: 'v1.3.34',
+        downloadUrl:
+            'https://gitee.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-linux-v1.3.34.zip',
+        downloadUrls: DownloadUrlsDto(
+          linux:
+              'https://gitee.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-linux-v1.3.34.zip',
+          ios:
+              'https://gitee.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-ios-v1.3.34.zip',
+        ),
+      ),
+    );
+    expect(
+      c.downloadUrl,
+      'https://gitee.com/xkinput/KeyTao/releases/download/v1.3.34/keytao-ios-v1.3.34.zip',
+    );
   });
 
   for (final platform in [BridgePlatform.ios, BridgePlatform.android]) {
