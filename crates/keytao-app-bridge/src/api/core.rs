@@ -243,10 +243,25 @@ pub async fn trash_package_orphans(
     .map_err(|error| error.to_string())
 }
 
+pub async fn inspect_local_scheme(
+    directory_path: String,
+) -> Result<LocalImportInspectionDto, String> {
+    let state = runtime::state()?;
+    let core = state.core.clone();
+    let inspection = tokio::task::spawn_blocking(move || {
+        keytao_app_core::packages::inspect_local_scheme(&core, std::path::Path::new(&directory_path))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("扫描方案失败：{error}"))??;
+    runtime::dto(inspection)
+}
+
 pub async fn import_local_scheme(
     directory_path: String,
     display_name: String,
     scheme_key: Option<String>,
+    selected_schemas: Option<Vec<String>>,
 ) -> Result<String, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -256,11 +271,12 @@ pub async fn import_local_scheme(
         .map_err(|error| error.to_string())?;
     let core = state.core.clone();
     tokio::task::spawn_blocking(move || {
-        keytao_app_core::packages::import_local_scheme(
+        keytao_app_core::packages::import_local_scheme_selected(
             &core,
             std::path::Path::new(&directory_path),
             &display_name,
             scheme_key.as_deref(),
+            selected_schemas.as_deref(),
         )
         .map_err(|error| error.to_string())
     })
@@ -1301,9 +1317,14 @@ pub fn get_schemas() -> Result<SchemaListDto, String> {
 
 pub fn get_rime_sync_settings() -> Result<RimeSyncSettingsDto, String> {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    return runtime::dto(keytao_app_core::rime_sync::read_ui_settings(
-        &runtime::state()?.host.user_root()?,
-    )?);
+    {
+        let state = runtime::state()?;
+        let root = state.host.user_root()?;
+        return runtime::dto(keytao_app_core::rime_sync::ensure_and_read_ui_settings(
+            &state.core,
+            &root,
+        )?);
+    }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     Err("Rime user data sync is only available on desktop".into())
 }
@@ -1344,6 +1365,9 @@ pub async fn sync_rime_user_data() -> Result<(), String> {
     {
         let state = runtime::state()?;
         let _guard = state.install_lock.lock().await;
+        let root = state.host.user_root()?;
+        keytao_app_core::rime_sync::ensure_installation(&state.core, &root)
+            .map_err(|error| error.to_string())?;
         keytao_app_core::rime_sync::sync_user_data(state.host.clone()).await
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

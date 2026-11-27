@@ -1150,6 +1150,52 @@ class LinuxImeStatusDto {
           message == other.message;
 }
 
+class LocalImportGroupDto {
+  final String primarySchemaId;
+  final String displayName;
+  final List<PackageSchemaDto> schemas;
+
+  const LocalImportGroupDto({
+    required this.primarySchemaId,
+    required this.displayName,
+    required this.schemas,
+  });
+
+  @override
+  int get hashCode =>
+      primarySchemaId.hashCode ^ displayName.hashCode ^ schemas.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LocalImportGroupDto &&
+          runtimeType == other.runtimeType &&
+          primarySchemaId == other.primarySchemaId &&
+          displayName == other.displayName &&
+          schemas == other.schemas;
+}
+
+class LocalImportInspectionDto {
+  final List<LocalImportGroupDto> groups;
+  final int totalSchemas;
+
+  const LocalImportInspectionDto({
+    required this.groups,
+    required this.totalSchemas,
+  });
+
+  @override
+  int get hashCode => groups.hashCode ^ totalSchemas.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LocalImportInspectionDto &&
+          runtimeType == other.runtimeType &&
+          groups == other.groups &&
+          totalSchemas == other.totalSchemas;
+}
+
 class LocalSchemaDto {
   final bool installed;
   final bool deployed;

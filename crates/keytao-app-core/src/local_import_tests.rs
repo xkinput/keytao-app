@@ -343,20 +343,101 @@ fn local_import_preserves_package_schema_order() {
         let expected: &[&str] = if config_name.is_some() {
             &["keytao", "keytao-dz", "keytao-bj"]
         } else {
-            &["keytao-aa", "keytao-bj", "keytao-cx", "keytao-dz", "keytao"]
+            &["keytao", "keytao-aa", "keytao-bj", "keytao-cx", "keytao-dz"]
         };
-        assert_eq!(key, format!("local-{}", expected[0]));
+        // All `keytao*` variants belong to the same scheme family and stay grouped in ONE package.
+        assert_eq!(key, "local-keytao-backslash-test");
         let installed: Vec<String> = core.state().installed_packages.keys().cloned().collect();
-        let expected_keys: Vec<String> = expected.iter().map(|s| format!("local-{s}")).collect();
-        let mut sorted_expected = expected_keys.clone();
-        sorted_expected.sort();
-        assert_eq!(installed, sorted_expected);
-        for schema in expected {
-            let files = stored_files(&core, &format!("local-{schema}"));
-            let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
-            assert_eq!(crate::scheme_files::parse_schema_list(config), [*schema]);
-        }
+        assert_eq!(installed, vec![key.clone()]);
+        let files = stored_files(&core, &key);
+        let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
+        assert_eq!(crate::scheme_files::parse_schema_list(config), expected);
     }
+}
+
+#[test]
+fn local_import_groups_same_family_and_splits_distinct_families_with_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = open_core(directory.path());
+    let path = directory.path().join("mixed-rime");
+    fs::create_dir_all(path.join("lua")).unwrap();
+    fs::write(
+        path.join("keytao.schema.yaml"),
+        "schema:\n  schema_id: keytao\n  name: 键道6\ntranslator:\n  dictionary: xkjd6\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("keytao-bj.schema.yaml"),
+        "schema:\n  schema_id: keytao-bj\n  name: 键道6并击\ntranslator:\n  dictionary: xkjd6\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("keytao-dz.schema.yaml"),
+        "schema:\n  schema_id: keytao-dz\n  name: 键道6单字\ntranslator:\n  dictionary: xkjd6dz\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("rime_ice.schema.yaml"),
+        "schema:\n  schema_id: rime_ice\n  name: 雾凇拼音\ntranslator:\n  dictionary: rime_ice\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("double_pinyin_flypy.schema.yaml"),
+        "schema:\n  schema_id: double_pinyin_flypy\n  name: 小鹤双拼\ntranslator:\n  dictionary: rime_ice\n",
+    )
+    .unwrap();
+    fs::write(path.join("xkjd6.dict.yaml"), "---\nname: xkjd6\n...\n键\tj\n").unwrap();
+    fs::write(path.join("xkjd6dz.dict.yaml"), "---\nname: xkjd6dz\n...\n单\td\n").unwrap();
+    fs::write(path.join("rime_ice.dict.yaml"), "---\nname: rime_ice\n...\n雾\twu\n").unwrap();
+    fs::write(path.join("lua/common.lua"), "return {}\n").unwrap();
+
+    // Inspection groups keytao* into 1 family and rime_ice + double_pinyin_flypy into 1 family.
+    let inspection = inspect_local_scheme(&core, &path).unwrap();
+    assert_eq!(inspection.total_schemas, 5);
+    assert_eq!(inspection.groups.len(), 2);
+    let keytao_group = inspection
+        .groups
+        .iter()
+        .find(|g| g.primary_schema_id == "keytao")
+        .unwrap();
+    assert_eq!(keytao_group.display_name, "键道6");
+    assert_eq!(
+        keytao_group
+            .schemas
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["keytao", "keytao-bj", "keytao-dz"]
+    );
+    let ice_group = inspection
+        .groups
+        .iter()
+        .find(|g| g.primary_schema_id != "keytao")
+        .unwrap();
+    assert_eq!(ice_group.schemas.len(), 2);
+
+    // Selecting only keytao + keytao-bj imports ONLY the keytao family package (skipping rime_ice).
+    let selected = vec!["keytao".to_owned(), "keytao-bj".to_owned()];
+    let imported = import_local_scheme_selected(&core, &path, "Mixed", None, Some(&selected)).unwrap();
+    assert_eq!(imported, "local-keytao");
+    assert_eq!(
+        core.state().installed_packages.keys().cloned().collect::<Vec<_>>(),
+        vec!["local-keytao"]
+    );
+    let files = stored_files(&core, "local-keytao");
+    assert!(files.contains_key("keytao.schema.yaml"));
+    assert!(files.contains_key("keytao-bj.schema.yaml"));
+    assert!(files.contains_key("keytao-dz.schema.yaml"));
+    assert!(files.contains_key("xkjd6.dict.yaml"));
+    assert!(files.contains_key("xkjd6dz.dict.yaml"));
+    assert!(files.contains_key("lua/common.lua"));
+    assert!(!files.contains_key("rime_ice.schema.yaml"));
+    assert!(!files.contains_key("rime_ice.dict.yaml"));
+    let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
+    assert_eq!(
+        crate::scheme_files::parse_schema_list(config),
+        vec!["keytao", "keytao-bj"]
+    );
 }
 
 #[test]

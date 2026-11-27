@@ -83,14 +83,22 @@ Future<List<String>> trashPackageOrphans({
   keptBackups: keptBackups,
 );
 
+Future<LocalImportInspectionDto> inspectLocalScheme({
+  required String directoryPath,
+}) => RustLib.instance.api.crateApiCoreInspectLocalScheme(
+  directoryPath: directoryPath,
+);
+
 Future<String> importLocalScheme({
   required String directoryPath,
   required String displayName,
   String? schemeKey,
+  List<String>? selectedSchemas,
 }) => RustLib.instance.api.crateApiCoreImportLocalScheme(
   directoryPath: directoryPath,
   displayName: displayName,
   schemeKey: schemeKey,
+  selectedSchemas: selectedSchemas,
 );
 
 Future<String> importGitScheme({

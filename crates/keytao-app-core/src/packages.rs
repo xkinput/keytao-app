@@ -12,7 +12,10 @@ use std::{
 
 #[path = "local_import.rs"]
 mod local_import;
-pub use local_import::import_local_scheme;
+pub use local_import::{
+    LocalImportGroup, LocalImportInspection, import_local_scheme, import_local_scheme_selected,
+    inspect_local_scheme,
+};
 #[path = "git_import.rs"]
 mod git_import;
 pub use git_import::{GitSchemeConfig, GitSchemeMode, import_git_scheme, sync_git_scheme};

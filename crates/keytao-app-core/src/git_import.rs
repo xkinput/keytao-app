@@ -919,6 +919,7 @@ pub async fn import_git_scheme(
                 version_override: resolved.version_hint.as_deref(),
                 origin: Some(&origin),
                 git: Some(normalized),
+                selected_schemas: None,
             },
         )
     };

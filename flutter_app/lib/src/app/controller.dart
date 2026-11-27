@@ -185,6 +185,7 @@ String formatWindowTitle(String pageTitle, Locale locale) =>
 typedef PendingSchemaSelectionPrompt = ({
   String packageKey,
   bool activateOnConfirm,
+  bool convert,
 });
 
 class AppController extends ChangeNotifier {
@@ -284,10 +285,12 @@ class AppController extends ChangeNotifier {
   void requestSchemaSelectionPrompt(
     String packageKey, {
     bool activateOnConfirm = false,
+    bool convert = false,
   }) {
     _pendingSchemaSelectionPrompt = (
       packageKey: packageKey,
       activateOnConfirm: activateOnConfirm,
+      convert: convert,
     );
     _changed();
   }
@@ -295,12 +298,14 @@ class AppController extends ChangeNotifier {
   Future<bool> _deferDeployForSchemaSelection(
     String key, {
     required bool activateOnConfirm,
+    bool convert = false,
   }) async {
     final schemas = await packageSchemas(key);
-    if (schemas.length <= 3) return false;
+    if (schemas.length <= 2) return false;
     _pendingSchemaSelectionPrompt = (
       packageKey: key,
       activateOnConfirm: activateOnConfirm,
+      convert: convert,
     );
     return true;
   }
@@ -311,7 +316,13 @@ class AppController extends ChangeNotifier {
   ) async {
     if (!status.installed) return;
     if (prefersLibjd) {
-      await _convertSchemePackage(key);
+      if (!await _deferDeployForSchemaSelection(
+        key,
+        activateOnConfirm: false,
+        convert: true,
+      )) {
+        await _convertSchemePackage(key);
+      }
     } else if (!status.deployed) {
       await _deferDeployForSchemaSelection(key, activateOnConfirm: false);
     }
@@ -2707,7 +2718,17 @@ class AppController extends ChangeNotifier {
         if (isAndroid) await _requireStorage(redirect: true);
         await core.downloadSchemePackage(schemeKey: key, source: source);
         if (prefersLibjd) {
-          await _convertSchemePackage(key);
+          await _readInstalledPackages();
+          final defer = await _deferDeployForSchemaSelection(
+            key,
+            activateOnConfirm: true,
+            convert: true,
+          );
+          if (!defer) {
+            await _convertSchemePackage(key);
+          } else {
+            await _readLocal();
+          }
         } else {
           final defer = await _deferDeployForSchemaSelection(
             key,
@@ -2740,6 +2761,8 @@ class AppController extends ChangeNotifier {
   Future<bool> importLocalScheme({
     String? schemeKey,
     bool fromArchive = false,
+    Future<List<String>?> Function(LocalImportInspectionDto inspection)?
+    selectSchemas,
   }) async {
     final wasActive = installedPackageFor(schemeKey ?? '')?.active == true;
     String? importedKey;
@@ -2785,16 +2808,42 @@ class AppController extends ChangeNotifier {
               .where((segment) => segment.isNotEmpty);
           displayName = segments.isEmpty ? 'local-scheme' : segments.last;
         }
+        List<String>? selectedSchemas;
+        var userSelectedBeforeImport = false;
+        if (schemeKey == null && selectSchemas != null) {
+          final inspection = await core.inspectLocalScheme(
+            directoryPath: sourcePath,
+          );
+          if (inspection.totalSchemas > 2) {
+            final chosen = await selectSchemas(inspection);
+            if (chosen == null || chosen.isEmpty) return;
+            selectedSchemas = chosen;
+            userSelectedBeforeImport = true;
+          }
+        }
         final key = await core.importLocalScheme(
           directoryPath: sourcePath,
           displayName: displayName,
           schemeKey: schemeKey,
+          selectedSchemas: selectedSchemas,
         );
         importedKey = key;
         _pendingCloudPackageUploads.remove(key);
         _invalidateSchemeUpdates();
         if (prefersLibjd) {
-          await _convertSchemePackage(key);
+          await _readInstalledPackages();
+          if (!userSelectedBeforeImport) {
+            deferred = await _deferDeployForSchemaSelection(
+              key,
+              activateOnConfirm: true,
+              convert: true,
+            );
+          }
+          if (!deferred) {
+            await _convertSchemePackage(key);
+          } else {
+            await _readLocal();
+          }
           scheduleSchemeProfileSync();
           return;
         }
@@ -2804,10 +2853,12 @@ class AppController extends ChangeNotifier {
         scheme = key;
         await refreshRelease();
         await _persistSchemeSettings(schedule: false);
-        deferred = await _deferDeployForSchemaSelection(
-          key,
-          activateOnConfirm: true,
-        );
+        if (!userSelectedBeforeImport) {
+          deferred = await _deferDeployForSchemaSelection(
+            key,
+            activateOnConfirm: true,
+          );
+        }
         if (!deferred && wasActive) {
           await _switchSchemePackage(key);
         } else {
@@ -2866,7 +2917,17 @@ class AppController extends ChangeNotifier {
         _pendingCloudPackageUploads.remove(key);
         _invalidateSchemeUpdates();
         if (prefersLibjd) {
-          await _convertSchemePackage(key);
+          await _readInstalledPackages();
+          deferred = await _deferDeployForSchemaSelection(
+            key,
+            activateOnConfirm: true,
+            convert: true,
+          );
+          if (!deferred) {
+            await _convertSchemePackage(key);
+          } else {
+            await _readLocal();
+          }
         } else {
           await _readInstalledPackages();
           await _readLocal();
@@ -3983,7 +4044,13 @@ class AppController extends ChangeNotifier {
             ?.schemeKey ??
         package['schemeKey'] as String;
     if (prefersLibjd) {
-      await _convertSchemePackage(key);
+      if (!await _deferDeployForSchemaSelection(
+        key,
+        activateOnConfirm: true,
+        convert: true,
+      )) {
+        await _convertSchemePackage(key);
+      }
     } else if (!await _deferDeployForSchemaSelection(
       key,
       activateOnConfirm: true,

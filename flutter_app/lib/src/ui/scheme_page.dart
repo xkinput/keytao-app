@@ -39,7 +39,13 @@ void _showLocalSchemeImportDialog(
           onPress: () {
             Navigator.pop(dialogContext);
             unawaited(
-              c.importLocalScheme(schemeKey: schemeKey, fromArchive: true),
+              c.importLocalScheme(
+                schemeKey: schemeKey,
+                fromArchive: true,
+                selectSchemas: (inspection) async => context.mounted
+                    ? showLocalImportSchemaSelection(context, inspection)
+                    : null,
+              ),
             );
           },
         ),
@@ -51,7 +57,13 @@ void _showLocalSchemeImportDialog(
           onPress: () {
             Navigator.pop(dialogContext);
             unawaited(
-              c.importLocalScheme(schemeKey: schemeKey, fromArchive: false),
+              c.importLocalScheme(
+                schemeKey: schemeKey,
+                fromArchive: false,
+                selectSchemas: (inspection) async => context.mounted
+                    ? showLocalImportSchemaSelection(context, inspection)
+                    : null,
+              ),
             );
           },
         ),
@@ -202,6 +214,7 @@ class _SchemePageState extends State<SchemePage> {
           widget.controller,
           prompt.packageKey,
           activateOnConfirm: prompt.activateOnConfirm,
+          convert: prompt.convert,
         ),
       );
     });

@@ -195,6 +195,7 @@ class _MigrationNoticePresenterState extends State<_MigrationNoticePresenter> {
           c,
           prompt.packageKey,
           activateOnConfirm: prompt.activateOnConfirm,
+          convert: prompt.convert,
         );
         if (!mounted) return;
       }

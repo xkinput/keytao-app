@@ -17,6 +17,8 @@ import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/login.dart' show showAccountDialog;
 import 'package:keytao/src/ui/onboarding.dart';
+import 'package:keytao/src/ui/package_schema_selection.dart'
+    show showLocalImportSchemaSelection;
 import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/settings.dart' show showCloudPackageTransfer;
 import 'package:keytao/src/ui/theme.dart';
@@ -170,6 +172,8 @@ class _PackageController extends ViewController {
   Future<bool> importLocalScheme({
     String? schemeKey,
     bool fromArchive = false,
+    Future<List<String>?> Function(LocalImportInspectionDto inspection)?
+    selectSchemas,
   }) async {
     actions.add('import:$schemeKey:${fromArchive ? 'zip' : 'folder'}');
     return true;
@@ -2946,6 +2950,74 @@ void main() {
 
       expect(c.activeSchemeDir, '${c.defaultDir}/runtime/rime_ice');
       expect(find.text('${c.defaultDir}/runtime/rime_ice'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
+  testWidgets(
+    'local import selection dialog groups same-family schemas and returns selected IDs',
+    (tester) async {
+      _size(tester, const Size(1000, 760));
+      List<String>? picked;
+      const inspection = LocalImportInspectionDto(
+        groups: [
+          LocalImportGroupDto(
+            primarySchemaId: 'keytao',
+            displayName: '键道6',
+            schemas: [
+              PackageSchemaDto(id: 'keytao', name: '键道6', selected: true),
+              PackageSchemaDto(id: 'keytao-bj', name: '键道6并击', selected: true),
+              PackageSchemaDto(id: 'keytao-dz', name: '键道6单字', selected: true),
+            ],
+          ),
+          LocalImportGroupDto(
+            primarySchemaId: 'rime_ice',
+            displayName: '雾凇拼音',
+            schemas: [
+              PackageSchemaDto(id: 'rime_ice', name: '雾凇拼音', selected: true),
+            ],
+          ),
+        ],
+        totalSchemas: 4,
+      );
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.macOs,
+          home: FScaffold(
+            child: Builder(
+              builder: (context) => Center(
+                child: ActionButton(
+                  '打开导入选择',
+                  onPress: () async {
+                    picked = await showLocalImportSchemaSelection(
+                      context,
+                      inspection,
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开导入选择'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('选择要导入的方案'), findsOneWidget);
+      expect(find.text('3 个子方案'), findsOneWidget);
+      expect(find.text('键道6并击'), findsOneWidget);
+      expect(find.text('键道6单字'), findsOneWidget);
+      expect(find.text('导入 (4)'), findsOneWidget);
+
+      await tester.tap(find.text('键道6单字'));
+      await tester.pumpAndSettle();
+      expect(find.text('导入 (3)'), findsOneWidget);
+
+      await tester.tap(find.text('导入 (3)'));
+      await tester.pumpAndSettle();
+
+      expect(picked, ['keytao', 'keytao-bj', 'rime_ice']);
       await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),

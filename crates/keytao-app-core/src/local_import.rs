@@ -412,23 +412,9 @@ fn import_local_zip_scheme(
     archive_path: &Path,
     display_name: &str,
     scheme_key: Option<&str>,
+    selected_schemas: Option<&[String]>,
 ) -> Result<String, CoreError> {
-    let mut file = import_io(fs::File::open(archive_path), "读取方案压缩包", archive_path)?;
-    let mut magic = [0u8; 4];
-    let read = import_io(file.read(&mut magic), "读取方案压缩包", archive_path)?;
-    if read < 4 || &magic[..2] != b"PK" || !matches!(magic[2..4], [3, 4] | [5, 6]) {
-        return Err(CoreError::Other(
-            "仅支持导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包".into(),
-        ));
-    }
-    import_io(file.seek(SeekFrom::Start(0)), "读取方案压缩包", archive_path)?;
-
-    let cache_dir = &core.env().cache_dir;
-    fs::create_dir_all(cache_dir)?;
-    let stage = tempfile::Builder::new()
-        .prefix(".local-zip-")
-        .tempdir_in(cache_dir)?;
-    extract_filtered_zip(file, stage.path(), true)?;
+    let stage = extract_local_zip_to_temp(core, archive_path)?;
 
     let stem = archive_path
         .file_name()
@@ -447,8 +433,32 @@ fn import_local_zip_scheme(
             version_override: None,
             origin: Some(&origin),
             git: None,
+            selected_schemas,
         },
     )
+}
+
+fn extract_local_zip_to_temp(
+    core: &Core,
+    archive_path: &Path,
+) -> Result<tempfile::TempDir, CoreError> {
+    let mut file = import_io(fs::File::open(archive_path), "读取方案压缩包", archive_path)?;
+    let mut magic = [0u8; 4];
+    let read = import_io(file.read(&mut magic), "读取方案压缩包", archive_path)?;
+    if read < 4 || &magic[..2] != b"PK" || !matches!(magic[2..4], [3, 4] | [5, 6]) {
+        return Err(CoreError::Other(
+            "仅支持导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包".into(),
+        ));
+    }
+    import_io(file.seek(SeekFrom::Start(0)), "读取方案压缩包", archive_path)?;
+
+    let cache_dir = &core.env().cache_dir;
+    fs::create_dir_all(cache_dir)?;
+    let stage = tempfile::Builder::new()
+        .prefix(".local-zip-")
+        .tempdir_in(cache_dir)?;
+    extract_filtered_zip(file, stage.path(), true)?;
+    Ok(stage)
 }
 
 fn build_default_custom(
@@ -691,9 +701,40 @@ fn dict_stem(relative: &str) -> Option<&str> {
     file_name.strip_suffix(".dict.yaml")
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct LocalImportGroup {
+    pub primary_schema_id: String,
+    pub display_name: String,
+    pub schemas: Vec<crate::package_schemas::PackageSchema>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct LocalImportInspection {
+    pub groups: Vec<LocalImportGroup>,
+    pub total_schemas: usize,
+}
+
 struct SchemaPartition {
     owned_schemas: BTreeSet<String>,
     owned_dict_paths: BTreeSet<String>,
+    main_dictionary: Option<String>,
+    main_dict_imports: BTreeSet<String>,
+}
+
+fn main_translator_dictionary(value: &serde_yaml::Value) -> Option<String> {
+    value
+        .get("translator")
+        .and_then(|t| t.get("dictionary"))
+        .and_then(serde_yaml::Value::as_str)
+        .or_else(|| {
+            value
+                .get("patch")
+                .and_then(|p| p.get("translator/dictionary"))
+                .and_then(serde_yaml::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 fn compute_schema_partitions(
@@ -736,6 +777,7 @@ fn compute_schema_partitions(
         let mut schema_queue = vec![primary.clone()];
         let mut dict_queue: Vec<String> = Vec::new();
         let mut seen_dict_names = BTreeSet::new();
+        let mut main_dictionary: Option<String> = None;
 
         while let Some(schema_id) = schema_queue.pop() {
             if !owned_schemas.insert(schema_id.clone()) {
@@ -748,6 +790,11 @@ fn compute_schema_partitions(
                 if let Some(ImportFile::Bytes(bytes)) = files.get(&candidate)
                     && let Ok(value) = serde_yaml::from_slice::<serde_yaml::Value>(bytes)
                 {
+                    if schema_id == *primary
+                        && let Some(dict) = main_translator_dictionary(&value)
+                    {
+                        main_dictionary = Some(dict);
+                    }
                     let mut deps = BTreeSet::new();
                     let mut dicts = BTreeSet::new();
                     collect_yaml_schema_refs(&value, &mut deps, &mut dicts);
@@ -766,6 +813,17 @@ fn compute_schema_partitions(
             // Implicitly associate `<schema_id>.dict.yaml` if present.
             if seen_dict_names.insert(schema_id.clone()) {
                 dict_queue.push(schema_id);
+            }
+        }
+
+        let mut main_dict_imports = BTreeSet::new();
+        if let Some(ref main_dict) = main_dictionary
+            && let Some(paths) = dict_name_to_paths.get(main_dict)
+        {
+            for path in paths {
+                if let Some(imports) = dict_path_imports.get(path) {
+                    main_dict_imports.extend(imports.iter().cloned());
+                }
             }
         }
 
@@ -793,36 +851,197 @@ fn compute_schema_partitions(
             SchemaPartition {
                 owned_schemas,
                 owned_dict_paths,
+                main_dictionary,
+                main_dict_imports,
             },
         );
     }
     partitions
 }
 
-fn filter_files_for_schema(
+fn id_variant_prefix_match(base: &str, derived: &str) -> bool {
+    let Some(rest) = derived.strip_prefix(base) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    if rest.starts_with('-') || rest.starts_with('_') || rest.starts_with('.') {
+        return true;
+    }
+    base.len() >= 4
+        && matches!(
+            rest.to_ascii_lowercase().as_str(),
+            "dz" | "bj"
+                | "cx"
+                | "cy"
+                | "py"
+                | "sp"
+                | "sc"
+                | "pro"
+                | "lite"
+                | "plus"
+                | "full"
+                | "fast"
+                | "single"
+                | "word"
+                | "min"
+                | "max"
+                | "en"
+                | "jp"
+        )
+}
+
+fn same_schema_id_family(a: &str, b: &str) -> bool {
+    if a == b || id_variant_prefix_match(a, b) || id_variant_prefix_match(b, a) {
+        return true;
+    }
+    if let (Some((stem_a, _)), Some((stem_b, _))) = (a.split_once('-'), b.split_once('-'))
+        && stem_a == stem_b
+        && stem_a.len() >= 3
+    {
+        return true;
+    }
+    false
+}
+
+fn name_prefix_match(shorter: &str, longer: &str) -> bool {
+    let shorter = shorter.trim();
+    let longer = longer.trim();
+    if shorter.chars().count() < 2
+        || matches!(
+            shorter,
+            "方案" | "拼音" | "双拼" | "五笔" | "输入法" | "Rime" | "rime"
+        )
+    {
+        return false;
+    }
+    longer != shorter && longer.starts_with(shorter)
+}
+
+fn same_display_name_family(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => name_prefix_match(a, b) || name_prefix_match(b, a),
+        _ => false,
+    }
+}
+
+/// Groups primary schemas that belong to the same scheme family together so variants
+/// (e.g., `keytao`, `keytao-bj`, `keytao-dz`, or `rime_ice` + `double_pinyin_flypy`)
+/// stay inside one package and can be switched between, while unrelated schemes remain
+/// separated into distinct packages.
+fn group_schemas_into_families(
+    files: &BTreeMap<String, ImportFile>,
+    primary_schemas: &[String],
+    partitions: &BTreeMap<String, SchemaPartition>,
+) -> Vec<Vec<String>> {
+    let n = primary_schemas.len();
+    if n <= 1 {
+        return if n == 0 {
+            Vec::new()
+        } else {
+            vec![primary_schemas.to_vec()]
+        };
+    }
+
+    let names: Vec<Option<String>> = primary_schemas
+        .iter()
+        .map(|id| infer_schema_display_name(files, std::slice::from_ref(id)))
+        .collect();
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let union = |parent: &mut [usize], a: usize, b: usize| {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+            parent[hi] = lo;
+        }
+    };
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let id_a = &primary_schemas[i];
+            let id_b = &primary_schemas[j];
+            let pa = partitions.get(id_a);
+            let pb = partitions.get(id_b);
+
+            let dep_connected = pa.is_some_and(|p| p.owned_schemas.contains(id_b))
+                || pb.is_some_and(|p| p.owned_schemas.contains(id_a));
+            let dict_connected = match (
+                pa.and_then(|p| p.main_dictionary.as_deref()),
+                pb.and_then(|p| p.main_dictionary.as_deref()),
+            ) {
+                (Some(da), Some(db)) => {
+                    da == db
+                        || pa.is_some_and(|p| p.main_dict_imports.contains(db))
+                        || pb.is_some_and(|p| p.main_dict_imports.contains(da))
+                }
+                _ => false,
+            };
+            let id_connected = same_schema_id_family(id_a, id_b);
+            let name_connected =
+                same_display_name_family(names[i].as_deref(), names[j].as_deref());
+
+            if dep_connected || dict_connected || id_connected || name_connected {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+
+    let mut by_root: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for (idx, id) in primary_schemas.iter().enumerate() {
+        let root = find(&mut parent, idx);
+        by_root.entry(root).or_default().push(id.clone());
+    }
+    by_root.into_values().collect()
+}
+
+fn filter_files_for_schema_group(
     all_files: &BTreeMap<String, ImportFile>,
-    target_schema: &str,
+    group_schemas: &[String],
     partitions: &BTreeMap<String, SchemaPartition>,
 ) -> BTreeMap<String, ImportFile> {
-    let Some(target) = partitions.get(target_schema) else {
+    let mut group_owned_schemas = BTreeSet::new();
+    let mut group_owned_dicts = BTreeSet::new();
+    for id in group_schemas {
+        group_owned_schemas.insert(id.as_str());
+        if let Some(partition) = partitions.get(id) {
+            for owned in &partition.owned_schemas {
+                group_owned_schemas.insert(owned.as_str());
+            }
+            for dict in &partition.owned_dict_paths {
+                group_owned_dicts.insert(dict.as_str());
+            }
+        }
+    }
+    if group_owned_schemas.is_empty() {
         return all_files.clone();
-    };
+    }
+
     let all_claimed_dicts: BTreeSet<&str> = partitions
         .values()
         .flat_map(|p| p.owned_dict_paths.iter().map(String::as_str))
         .collect();
     let other_primary_schemas: Vec<&str> = partitions
         .keys()
-        .filter(|id| id.as_str() != target_schema && !target.owned_schemas.contains(id.as_str()))
+        .filter(|id| !group_owned_schemas.contains(id.as_str()))
         .map(String::as_str)
         .collect();
 
     let mut selected = BTreeMap::new();
     for (relative, file) in all_files {
-        // 1. Root `.schema.yaml` / `.custom.yaml`: keep only schemas owned by target.
+        // 1. Root `.schema.yaml` / `.custom.yaml`: keep only schemas owned by this family group.
         if !relative.contains('/') {
             if let Some(id) = relative.strip_suffix(".schema.yaml") {
-                if target.owned_schemas.contains(id) {
+                if group_owned_schemas.contains(id) {
                     selected.insert(relative.clone(), file.clone());
                 }
                 continue;
@@ -830,22 +1049,24 @@ fn filter_files_for_schema(
             if let Some(id) = relative.strip_suffix(".custom.yaml")
                 && !matches!(id, "default" | "squirrel" | "weasel")
             {
-                if target.owned_schemas.contains(id) {
+                if group_owned_schemas.contains(id) {
                     selected.insert(relative.clone(), file.clone());
                 }
                 continue;
             }
         }
-        // 2. Dictionary files (`*.dict.yaml`): separate per schema; keep unowned shared dicts.
+        // 2. Dictionary files (`*.dict.yaml`): separate per family; keep unowned shared dicts.
         if let Some(stem) = dict_stem(relative) {
-            if target.owned_dict_paths.contains(relative) {
+            if group_owned_dicts.contains(relative.as_str()) {
                 selected.insert(relative.clone(), file.clone());
             } else if !all_claimed_dicts.contains(relative.as_str()) {
                 let belongs_to_other = other_primary_schemas.iter().any(|other| {
                     stem == *other
                         || stem
                             .strip_prefix(other)
-                            .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('_') || rest.starts_with('-'))
+                            .is_some_and(|rest| {
+                                rest.starts_with('.') || rest.starts_with('_') || rest.starts_with('-')
+                            })
                 });
                 if !belongs_to_other {
                     selected.insert(relative.clone(), file.clone());
@@ -921,6 +1142,7 @@ pub(super) struct LocalImportOptions<'a> {
     pub version_override: Option<&'a str>,
     pub origin: Option<&'a str>,
     pub git: Option<super::GitSchemeConfig>,
+    pub selected_schemas: Option<&'a [String]>,
 }
 
 pub fn import_local_scheme(
@@ -928,6 +1150,16 @@ pub fn import_local_scheme(
     path: &Path,
     display_name: &str,
     scheme_key: Option<&str>,
+) -> Result<String, CoreError> {
+    import_local_scheme_selected(core, path, display_name, scheme_key, None)
+}
+
+pub fn import_local_scheme_selected(
+    core: &Core,
+    path: &Path,
+    display_name: &str,
+    scheme_key: Option<&str>,
+    selected_schemas: Option<&[String]>,
 ) -> Result<String, CoreError> {
     let canonical = path
         .canonicalize()
@@ -938,10 +1170,13 @@ pub fn import_local_scheme(
             &canonical,
             display_name,
             scheme_key,
-            LocalImportOptions::default(),
+            LocalImportOptions {
+                selected_schemas,
+                ..Default::default()
+            },
         )
     } else if canonical.is_file() {
-        import_local_zip_scheme(core, &canonical, display_name, scheme_key)
+        import_local_zip_scheme(core, &canonical, display_name, scheme_key, selected_schemas)
     } else {
         Err(CoreError::Other(
             "请选择纯 Rime 文件夹或 Rime 方案 .zip 压缩包".into(),
@@ -949,23 +1184,23 @@ pub fn import_local_scheme(
     }
 }
 
-pub(super) fn import_local_scheme_with(
-    core: &Core,
+fn scan_directory_schemas(
     directory: &Path,
-    display_name: &str,
-    scheme_key: Option<&str>,
-    options: LocalImportOptions<'_>,
-) -> Result<String, CoreError> {
-    let _operation = AppOperation::start("import_local_scheme");
-    let directory = directory
-        .canonicalize()
-        .map_err(|error| context("读取方案目录", directory, error))?;
+    skip_trime_assets: bool,
+) -> Result<
+    (
+        BTreeMap<String, ImportFile>,
+        Vec<(String, Vec<u8>)>,
+        Vec<String>,
+    ),
+    CoreError,
+> {
     if !directory.is_dir() {
         return Err(CoreError::Other(
             "请选择纯 Rime 文件夹或 Rime 方案 .zip 压缩包".into(),
         ));
     }
-    if !has_root_schema(&directory)? {
+    if !has_root_schema(directory)? {
         return Err(CoreError::Other(
             "目录根部未找到 .schema.yaml 方案文件，请导入纯 Rime 文件夹或 Rime 方案 .zip 压缩包"
                 .into(),
@@ -973,8 +1208,7 @@ pub(super) fn import_local_scheme_with(
     }
     let mut files = BTreeMap::new();
     let mut total_size = 0;
-    let skip_trime_assets = core.env().platform == crate::Platform::Android && options.git.is_some();
-    collect(&directory, "", &mut files, &mut total_size, skip_trime_assets)?;
+    collect(directory, "", &mut files, &mut total_size, skip_trime_assets)?;
     let mut schemas: Vec<_> = files
         .keys()
         .filter(|name| !name.contains('/'))
@@ -993,18 +1227,26 @@ pub(super) fn import_local_scheme_with(
                 && schemas.iter().any(|id| id == schema)
         })
     });
-    let defaults = ["default.yaml", "default-custom.yaml", "default.custom.yaml"].into_iter()
+    let defaults = ["default.yaml", "default-custom.yaml", "default.custom.yaml"]
+        .into_iter()
         .filter_map(|name| match fs::read(directory.join(name)) {
             Ok(bytes) => Some(Ok((name.to_owned(), bytes))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => Some(Err(context("读取方案配置", &directory.join(name), error))),
-        }).collect::<Result<Vec<_>, _>>()?;
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let schema_order: Vec<_> = crate::package_schemas::default_schemas(&defaults)?
         .into_iter()
         .filter(|id| schemas.contains(id))
         .collect();
     if !schema_order.is_empty() {
         schemas.retain(|schema| schema_order.contains(schema));
+        schemas.sort_by_key(|schema| {
+            schema_order
+                .iter()
+                .position(|id| id == schema)
+                .unwrap_or(usize::MAX)
+        });
     } else {
         let schema_files = schemas
             .iter()
@@ -1018,29 +1260,103 @@ pub(super) fn import_local_scheme_with(
             .collect::<Vec<_>>();
         let candidates = crate::package_schemas::enumerate("local-import", &schema_files, None)?;
         schemas.retain(|id| candidates.iter().any(|schema| schema.selected && &schema.id == id));
+        // Sort by schema ID (not filename) so base IDs like `keytao` come before `keytao-aa`.
+        schemas.sort();
     }
-    schemas.sort_by_key(|schema| {
-        schema_order
-            .iter()
-            .position(|id| id == schema)
-            .unwrap_or(usize::MAX)
-    });
+    Ok((files, defaults, schemas))
+}
 
-    // If re-syncing a previously split Git scheme, narrow to its specific schema partition.
+pub fn inspect_local_scheme(core: &Core, path: &Path) -> Result<LocalImportInspection, CoreError> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| context("读取方案路径", path, error))?;
+    let _zip_stage;
+    let directory = if canonical.is_dir() {
+        canonical
+    } else if canonical.is_file() {
+        _zip_stage = extract_local_zip_to_temp(core, &canonical)?;
+        _zip_stage.path().canonicalize()?
+    } else {
+        return Err(CoreError::Other(
+            "请选择纯 Rime 文件夹或 Rime 方案 .zip 压缩包".into(),
+        ));
+    };
+    let (files, _defaults, schemas) = scan_directory_schemas(&directory, false)?;
+    let partitions = compute_schema_partitions(&directory, &files, &schemas);
+    let grouped = group_schemas_into_families(&files, &schemas, &partitions);
+    let mut total_schemas = 0usize;
+    let groups = grouped
+        .into_iter()
+        .map(|group_ids| {
+            let primary_schema_id = group_ids[0].clone();
+            let display_name = infer_schema_display_name(&files, &group_ids)
+                .unwrap_or_else(|| primary_schema_id.clone());
+            let group_schemas: Vec<_> = group_ids
+                .into_iter()
+                .map(|id| {
+                    let name = infer_schema_display_name(&files, std::slice::from_ref(&id))
+                        .unwrap_or_else(|| id.clone());
+                    crate::package_schemas::PackageSchema {
+                        id,
+                        name,
+                        selected: true,
+                    }
+                })
+                .collect();
+            total_schemas += group_schemas.len();
+            LocalImportGroup {
+                primary_schema_id,
+                display_name,
+                schemas: group_schemas,
+            }
+        })
+        .collect();
+    Ok(LocalImportInspection {
+        groups,
+        total_schemas,
+    })
+}
+
+pub(super) fn import_local_scheme_with(
+    core: &Core,
+    directory: &Path,
+    display_name: &str,
+    scheme_key: Option<&str>,
+    options: LocalImportOptions<'_>,
+) -> Result<String, CoreError> {
+    let _operation = AppOperation::start("import_local_scheme");
+    let directory = directory
+        .canonicalize()
+        .map_err(|error| context("读取方案目录", directory, error))?;
+    let skip_trime_assets = core.env().platform == crate::Platform::Android && options.git.is_some();
+    let (files, defaults, schemas) = scan_directory_schemas(&directory, skip_trime_assets)?;
+    let partitions = compute_schema_partitions(&directory, &files, &schemas);
+    let groups = group_schemas_into_families(&files, &schemas, &partitions);
+
+    // If re-syncing a previously split Git scheme, narrow to its family group.
     if let Some(target_schema) = options
         .git
         .as_ref()
         .and_then(|g| g.schema_id.as_deref())
         .filter(|id| schemas.iter().any(|s| s == id))
     {
-        let partitions = compute_schema_partitions(&directory, &files, &schemas);
-        let filtered = filter_files_for_schema(&files, target_schema, &partitions);
+        let target_group = groups
+            .iter()
+            .find(|group| group.iter().any(|id| id == target_schema))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let effective_schemas: Vec<String> = if target_group.is_empty() {
+            vec![target_schema.to_owned()]
+        } else {
+            target_group.to_vec()
+        };
+        let filtered = filter_files_for_schema_group(&files, &effective_schemas, &partitions);
         return write_single_imported_package(
             core,
             &directory,
             filtered,
             &defaults,
-            &[target_schema.to_owned()],
+            &effective_schemas,
             display_name,
             scheme_key,
             &options,
@@ -1048,54 +1364,98 @@ pub(super) fn import_local_scheme_with(
         );
     }
 
-    // Multi-schema split import: when adding a new local/Git package with multiple
-    // primary schemas, split schemas & dictionaries per scheme while sharing lua/common files,
-    // and validate size independently for each split scheme.
-    if scheme_key.is_none() && schemas.len() > 1 {
-        let partitions = compute_schema_partitions(&directory, &files, &schemas);
-        let mut first_key: Option<String> = None;
-        for schema_id in &schemas {
-            let split_files = filter_files_for_schema(&files, schema_id, &partitions);
-            let split_name = infer_schema_display_name(&split_files, std::slice::from_ref(schema_id))
-                .unwrap_or_else(|| schema_id.clone());
-            let mut split_options = LocalImportOptions {
-                slug_hint: Some(schema_id.as_str()),
-                version_override: options.version_override,
-                origin: options.origin,
-                git: options.git.clone().map(|mut git| {
-                    git.schema_id = Some(schema_id.clone());
-                    git
-                }),
-            };
-            // Preserve custom display name prefix only if user explicitly named a single scheme;
-            // for split multi-schema imports, each package takes its schema's own display name.
-            let _ = &mut split_options;
-            let imported_key = write_single_imported_package(
-                core,
-                &directory,
-                split_files,
-                &defaults,
-                std::slice::from_ref(schema_id),
-                &split_name,
-                None,
-                &split_options,
-                Some(schema_id.as_str()),
-            )?;
-            if first_key.is_none() {
-                first_key = Some(imported_key);
-            }
+    // New import: group same-family schemas into one package (so variants like
+    // keytao / keytao-bj / keytao-dz stay together and switchable), while splitting
+    // distinct scheme families into separate local packages.
+    if scheme_key.is_none() {
+        let selected_groups: Vec<(&[String], Vec<String>)> = groups
+            .iter()
+            .filter_map(|group| {
+                let chosen: Vec<String> = match options.selected_schemas {
+                    Some(selected) => group
+                        .iter()
+                        .filter(|id| selected.iter().any(|picked| picked == *id))
+                        .cloned()
+                        .collect(),
+                    None => group.clone(),
+                };
+                (!chosen.is_empty()).then_some((group.as_slice(), chosen))
+            })
+            .collect();
+        if selected_groups.is_empty() {
+            return Err(CoreError::Other("至少选择一个方案".into()));
         }
-        return first_key.ok_or_else(|| {
-            CoreError::Other("目录根部未找到可导入的 .schema.yaml 方案文件".into())
-        });
+        if groups.len() > 1 {
+            let mut first_key: Option<String> = None;
+            for (group_all, chosen_schemas) in selected_groups {
+                let group_files = filter_files_for_schema_group(&files, group_all, &partitions);
+                let primary_id = &group_all[0];
+                let group_name = infer_schema_display_name(&group_files, &chosen_schemas)
+                    .or_else(|| infer_schema_display_name(&group_files, group_all))
+                    .unwrap_or_else(|| primary_id.clone());
+                let group_options = LocalImportOptions {
+                    slug_hint: Some(primary_id.as_str()),
+                    version_override: options.version_override,
+                    origin: options.origin,
+                    git: options.git.clone().map(|mut git| {
+                        git.schema_id = Some(primary_id.clone());
+                        git
+                    }),
+                    selected_schemas: None,
+                };
+                let imported_key = write_single_imported_package(
+                    core,
+                    &directory,
+                    group_files,
+                    &defaults,
+                    &chosen_schemas,
+                    &group_name,
+                    None,
+                    &group_options,
+                    Some(primary_id.as_str()),
+                )?;
+                if first_key.is_none() {
+                    first_key = Some(imported_key);
+                }
+            }
+            return first_key.ok_or_else(|| {
+                CoreError::Other("目录根部未找到可导入的 .schema.yaml 方案文件".into())
+            });
+        }
+        let (_, chosen_schemas) = selected_groups.into_iter().next().unwrap();
+        return write_single_imported_package(
+            core,
+            &directory,
+            files,
+            &defaults,
+            &chosen_schemas,
+            display_name,
+            None,
+            &options,
+            options.slug_hint,
+        );
     }
 
+    let chosen_schemas = match options.selected_schemas {
+        Some(selected) => {
+            let filtered: Vec<String> = schemas
+                .iter()
+                .filter(|id| selected.iter().any(|picked| picked == *id))
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                return Err(CoreError::Other("至少选择一个方案".into()));
+            }
+            filtered
+        }
+        None => schemas,
+    };
     write_single_imported_package(
         core,
         &directory,
         files,
         &defaults,
-        &schemas,
+        &chosen_schemas,
         display_name,
         scheme_key,
         &options,

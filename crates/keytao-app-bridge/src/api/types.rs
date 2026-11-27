@@ -120,6 +120,19 @@ pub struct PackageSchemaDto {
 }
 
 #[derive(serde::Deserialize)]
+pub struct LocalImportGroupDto {
+    pub primary_schema_id: String,
+    pub display_name: String,
+    pub schemas: Vec<PackageSchemaDto>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LocalImportInspectionDto {
+    pub groups: Vec<LocalImportGroupDto>,
+    pub total_schemas: u32,
+}
+
+#[derive(serde::Deserialize)]
 pub struct PackageOrphanFileDto {
     pub path: String,
     pub sha256: String,

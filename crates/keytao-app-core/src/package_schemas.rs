@@ -17,7 +17,7 @@ fn yaml_error(error: serde_yaml::Error) -> CoreError {
     CoreError::Other(error.to_string())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PackageSchema {
     pub id: String,
     pub name: String,

@@ -4,9 +4,171 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/strings.dart' show AppStrings;
 import '../rust/api/types.dart';
+import 'theme.dart';
 import 'widgets.dart';
 
 const selectConversionSchemaLabel = '选择转换方案';
+
+Future<List<String>?> showLocalImportSchemaSelection(
+  BuildContext context,
+  LocalImportInspectionDto inspection,
+) => showFDialog<List<String>>(
+  context: context,
+  barrierDismissible: false,
+  builder: (_, _, animation) => _LocalImportSelectionDialog(
+    inspection: inspection,
+    animation: animation,
+  ),
+);
+
+class _LocalImportSelectionDialog extends StatefulWidget {
+  const _LocalImportSelectionDialog({
+    required this.inspection,
+    required this.animation,
+  });
+
+  final LocalImportInspectionDto inspection;
+  final Animation<double> animation;
+
+  @override
+  State<_LocalImportSelectionDialog> createState() =>
+      _LocalImportSelectionDialogState();
+}
+
+class _LocalImportSelectionDialogState
+    extends State<_LocalImportSelectionDialog> {
+  final Set<String> _selected = {};
+
+  @override
+  void initState() {
+    super.initState();
+    for (final group in widget.inspection.groups) {
+      for (final schema in group.schemas) {
+        if (schema.selected) _selected.add(schema.id);
+      }
+    }
+    if (_selected.isEmpty) {
+      for (final group in widget.inspection.groups) {
+        for (final schema in group.schemas) {
+          _selected.add(schema.id);
+        }
+      }
+    }
+  }
+
+  void _confirm() {
+    Navigator.pop(context, [
+      for (final group in widget.inspection.groups)
+        for (final schema in group.schemas)
+          if (_selected.contains(schema.id)) schema.id,
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final groups = widget.inspection.groups;
+    final multiGroup = groups.length > 1;
+    final palette = AppPalette.of(context);
+    final subtitle = multiGroup
+        ? '检测到 ${groups.length} 个独立方案（共 ${widget.inspection.totalSchemas} 个子方案）。同一方案下的子方案将归集为一个方案包并支持切换，不同方案将分别创建独立方案包。'
+        : '检测到同一方案下的 ${widget.inspection.totalSchemas} 个子方案，将归集为一个方案包并支持切换使用，请选择要导入的方案。';
+    return AppDialog(
+      title: '选择要导入的方案',
+      animation: widget.animation,
+      actions: [
+        ActionButton(AppStrings.cancel, onPress: () => Navigator.pop(context)),
+        ActionButton(
+          '导入 (${_selected.length})',
+          primary: true,
+          onPress: _selected.isEmpty ? null : _confirm,
+        ),
+      ],
+      child: SizedBox(
+        width: 500,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              subtitle,
+              style: context.theme.typography.body.sm.copyWith(
+                color: palette.muted,
+              ),
+            ),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 380),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final group in groups) ...[
+                      if (multiGroup) ...[
+                        Padding(
+                          padding: const EdgeInsets.only(top: 10, bottom: 4),
+                          child: Row(
+                            spacing: 8,
+                            children: [
+                              Expanded(
+                                child: FCheckbox(
+                                  value: group.schemas.every(
+                                    (s) => _selected.contains(s.id),
+                                  ),
+                                  label: Text(
+                                    group.displayName,
+                                    style: context.theme.typography.body.sm
+                                        .copyWith(fontWeight: FontWeight.w700),
+                                  ),
+                                  onChange: (checked) => setState(() {
+                                    for (final s in group.schemas) {
+                                      if (checked) {
+                                        _selected.add(s.id);
+                                      } else {
+                                        _selected.remove(s.id);
+                                      }
+                                    }
+                                  }),
+                                ),
+                              ),
+                              if (group.schemas.length > 1)
+                                AppBadge('${group.schemas.length} 个子方案'),
+                            ],
+                          ),
+                        ),
+                      ],
+                      for (final schema in group.schemas)
+                        Padding(
+                          padding: EdgeInsets.fromLTRB(
+                            multiGroup ? 24 : 0,
+                            6,
+                            0,
+                            6,
+                          ),
+                          child: FCheckbox(
+                            value: _selected.contains(schema.id),
+                            label: Text(schema.name),
+                            description: Text(schema.id),
+                            onChange: (value) => setState(() {
+                              if (value) {
+                                _selected.add(schema.id);
+                              } else {
+                                _selected.remove(schema.id);
+                              }
+                            }),
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 Future<void> showPackageSchemaSelection(
   BuildContext context,
@@ -171,24 +333,36 @@ class _SchemaSelectionDialogState extends State<_SchemaSelectionDialog> {
           if (widget.convert && !_loading && _error == null && _schemas.isEmpty)
             const Text('此方案包没有可转换的子方案'),
           if (!widget.convert)
-            for (final schema in _schemas)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: FCheckbox(
-                  value: _selected.contains(schema.id),
-                  enabled:
-                      !(_selected.length == 1 && _selected.contains(schema.id)),
-                  label: Text(schema.name),
-                  description: Text(schema.id),
-                  onChange: (value) => setState(() {
-                    if (value) {
-                      _selected.add(schema.id);
-                    } else if (_selected.length > 1) {
-                      _selected.remove(schema.id);
-                    }
-                  }),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 380),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final schema in _schemas)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: FCheckbox(
+                          value: _selected.contains(schema.id),
+                          enabled:
+                              !(_selected.length == 1 &&
+                                  _selected.contains(schema.id)),
+                          label: Text(schema.name),
+                          description: Text(schema.id),
+                          onChange: (value) => setState(() {
+                            if (value) {
+                              _selected.add(schema.id);
+                            } else if (_selected.length > 1) {
+                              _selected.remove(schema.id);
+                            }
+                          }),
+                        ),
+                      ),
+                  ],
                 ),
               ),
+            ),
         ],
       ),
     ),

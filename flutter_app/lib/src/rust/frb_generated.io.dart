@@ -269,6 +269,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<KeyboardSummaryDto> dco_decode_list_keyboard_summary_dto(dynamic raw);
 
   @protected
+  List<LocalImportGroupDto> dco_decode_list_local_import_group_dto(dynamic raw);
+
+  @protected
   List<PackageKeptBackupDto> dco_decode_list_package_kept_backup_dto(
     dynamic raw,
   );
@@ -322,6 +325,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw);
+
+  @protected
+  LocalImportGroupDto dco_decode_local_import_group_dto(dynamic raw);
+
+  @protected
+  LocalImportInspectionDto dco_decode_local_import_inspection_dto(dynamic raw);
 
   @protected
   LocalSchemaDto dco_decode_local_schema_dto(dynamic raw);
@@ -404,6 +413,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   );
+
+  @protected
+  List<String>? dco_decode_opt_list_String(dynamic raw);
 
   @protected
   List<PackageKeptBackupDto>? dco_decode_opt_list_package_kept_backup_dto(
@@ -823,6 +835,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<LocalImportGroupDto> sse_decode_list_local_import_group_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<PackageKeptBackupDto> sse_decode_list_package_kept_backup_dto(
     SseDeserializer deserializer,
   );
@@ -888,6 +905,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  LocalImportGroupDto sse_decode_local_import_group_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  LocalImportInspectionDto sse_decode_local_import_inspection_dto(
     SseDeserializer deserializer,
   );
 
@@ -982,6 +1009,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
 
   @protected
   List<PackageKeptBackupDto>? sse_decode_opt_list_package_kept_backup_dto(
@@ -1533,6 +1563,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_local_import_group_dto(
+    List<LocalImportGroupDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_package_kept_backup_dto(
     List<PackageKeptBackupDto> self,
     SseSerializer serializer,
@@ -1619,6 +1655,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_verify_entry_dto(
     List<VerifyEntryDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_local_import_group_dto(
+    LocalImportGroupDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_local_import_inspection_dto(
+    LocalImportInspectionDto self,
     SseSerializer serializer,
   );
 
@@ -1727,6 +1775,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     WindowsImeStatusDto? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_package_kept_backup_dto(

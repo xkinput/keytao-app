@@ -22,7 +22,7 @@ pub struct RimeSyncSettings {
     pub last_sync_error: Option<String>,
 }
 
-pub(crate) fn ensure_installation(core: &Core, root: &Path) -> Result<(), CoreError> {
+pub fn ensure_installation(core: &Core, root: &Path) -> Result<(), CoreError> {
     let has_id = |mapping: &Mapping| match mapping.get(Value::String("installation_id".into())) {
         None | Some(Value::Null) => false,
         Some(Value::String(id)) => !id.trim().is_empty(),
@@ -143,7 +143,7 @@ fn read_document(root: &Path) -> Result<(PathBuf, Option<String>, Mapping), Stri
 fn settings(root: &Path, mapping: &Mapping) -> Result<RimeSyncSettings, String> {
     let string = |key: &str| match mapping.get(Value::String(key.into())) {
         Some(Value::String(value)) => Ok(value.clone()),
-        None => Ok(String::new()),
+        None | Some(Value::Null) => Ok(String::new()),
         _ => Err(format!("installation.yaml {key} must be a string")),
     };
     let installation_id = string("installation_id")?;
@@ -166,6 +166,24 @@ fn settings(root: &Path, mapping: &Mapping) -> Result<RimeSyncSettings, String> 
 
 pub fn read_settings(root: &Path) -> Result<RimeSyncSettings, String> {
     settings(root, &read_document(root)?.2)
+}
+
+pub fn ensure_and_read_ui_settings(core: &Core, root: &Path) -> Result<RimeSyncSettings, String> {
+    let ensure_error = match ensure_installation(core, root) {
+        Ok(()) => None,
+        Err(error) => {
+            tracing::warn!(%error, "Could not ensure Rime installation metadata");
+            Some(error.to_string())
+        }
+    };
+    let mut settings = read_ui_settings(root)?;
+    if settings.installation_id.trim().is_empty()
+        && settings.last_sync_error.is_none()
+        && let Some(error) = ensure_error
+    {
+        settings.last_sync_error = Some(error);
+    }
+    Ok(settings)
 }
 
 pub fn read_ui_settings(root: &Path) -> Result<RimeSyncSettings, String> {
@@ -1085,6 +1103,23 @@ mod tests {
             ensure_installation(&core, &root).unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
         }
+
+        // Opening sync settings when installation.yaml is missing or empty
+        // automatically backfills a UUIDv4 installation_id alongside default_sync_dir.
+        fs::remove_file(&path).unwrap();
+        let ui = ensure_and_read_ui_settings(&core, &root).unwrap();
+        let bytes = ui.installation_id.as_bytes();
+        assert_eq!(bytes.len(), 36);
+        assert_eq!(bytes[14], b'4');
+        assert!(b"89ab".contains(&bytes[19]));
+        assert_eq!(Path::new(&ui.default_sync_dir), root.join("sync"));
+        assert!(ui.last_sync_error.is_none());
+
+        fs::write(&path, "installation_id:\nsync_dir:\n").unwrap();
+        let ui2 = ensure_and_read_ui_settings(&core, &root).unwrap();
+        assert_eq!(ui2.installation_id.len(), 36);
+        assert!(ui2.sync_dir.is_empty());
+        assert!(ui2.last_sync_error.is_none());
     }
 
     #[test]
