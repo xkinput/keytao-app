@@ -408,10 +408,15 @@ impl PanelRenderer {
                 fit_candidate_widths(&natural_widths, &minimum_widths, selected, budget)
             }
         } else {
-            natural_widths
+            let mut widths: Vec<_> = natural_widths
                 .into_iter()
                 .map(|width| width.min(inner_width))
-                .collect()
+                .collect();
+            if theme.candidate.vertical_full_width {
+                let max_option_width = widths.iter().copied().fold(0.0, f32::max);
+                widths.fill(max_option_width);
+            }
+            widths
         };
         let preedit_width = model
             .preedit

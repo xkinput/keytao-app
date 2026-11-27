@@ -192,6 +192,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeployStepDto dco_decode_deploy_step_dto(dynamic raw);
 
   @protected
+  DesktopEnglishSwitchKeyDto dco_decode_desktop_english_switch_key_dto(
+    dynamic raw,
+  );
+
+  @protected
   DownloadUrlsDto dco_decode_download_urls_dto(dynamic raw);
 
   @protected
@@ -229,6 +234,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IsolatedPackageDto dco_decode_isolated_package_dto(dynamic raw);
+
+  @protected
+  KeyboardDocumentDto dco_decode_keyboard_document_dto(dynamic raw);
 
   @protected
   KeyboardExportDto dco_decode_keyboard_export_dto(dynamic raw);
@@ -710,6 +718,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeployStepDto sse_decode_deploy_step_dto(SseDeserializer deserializer);
 
   @protected
+  DesktopEnglishSwitchKeyDto sse_decode_desktop_english_switch_key_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DownloadUrlsDto sse_decode_download_urls_dto(SseDeserializer deserializer);
 
   @protected
@@ -755,6 +768,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IsolatedPackageDto sse_decode_isolated_package_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  KeyboardDocumentDto sse_decode_keyboard_document_dto(
     SseDeserializer deserializer,
   );
 
@@ -1380,6 +1398,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_deploy_step_dto(DeployStepDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_desktop_english_switch_key_dto(
+    DesktopEnglishSwitchKeyDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_download_urls_dto(
     DownloadUrlsDto self,
     SseSerializer serializer,
@@ -1442,6 +1466,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_isolated_package_dto(
     IsolatedPackageDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_keyboard_document_dto(
+    KeyboardDocumentDto self,
     SseSerializer serializer,
   );
 

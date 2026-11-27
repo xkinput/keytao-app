@@ -962,6 +962,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             baseKeyboardConfig = reloaded
             applyKeyboardPresentation(config: reloaded)
             showMessage("已切换：\(reloaded.name)")
+            refreshRimeOptions()
             return
         }
         if key == "reset" {
@@ -1642,7 +1643,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             englishSchemaID: usesEnglishSchema ? englishSchemaID : nil,
             switches: switches,
             options: optionStates,
-            packages: optionsOpen ? engine.listSwitcherPackages() : []
+            packages: optionsOpen ? engine.listSwitcherPackages() : [],
+            keyboards: optionsOpen ? engine.listKeyboards(recommendedFor: currentSchema?.id) : []
         ))
         if optionsOpen {
             keyboardView?.updateSchemeOperationProgress(progress)

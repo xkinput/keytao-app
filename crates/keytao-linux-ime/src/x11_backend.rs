@@ -64,6 +64,21 @@ fn keysym_at_level(
     keycode: u8,
     shift: bool,
 ) -> u32 {
+    keysym_at_level_with_numlock(keysyms, min_keycode, keysyms_per_keycode, keycode, shift, false)
+}
+
+fn is_keypad_numeric_keysym(sym: u32) -> bool {
+    sym == key_policy::XK_KP_DECIMAL || (0xffb0..=0xffb9).contains(&sym)
+}
+
+fn keysym_at_level_with_numlock(
+    keysyms: &[u32],
+    min_keycode: u8,
+    keysyms_per_keycode: u8,
+    keycode: u8,
+    shift: bool,
+    numlock: bool,
+) -> u32 {
     let kc = keycode as usize;
     let min = min_keycode as usize;
     let per = keysyms_per_keycode as usize;
@@ -72,10 +87,17 @@ fn keysym_at_level(
     }
     let base = (kc - min) * per;
     let unshifted = keysyms.get(base).copied().unwrap_or(0);
-    if !shift || per < 2 {
+    if per < 2 {
         return unshifted;
     }
-    match keysyms.get(base + 1).copied().unwrap_or(0) {
+    let level1 = keysyms.get(base + 1).copied().unwrap_or(0);
+    if numlock && is_keypad_numeric_keysym(level1) {
+        return if shift { unshifted } else { level1 };
+    }
+    if !shift {
+        return unshifted;
+    }
+    match level1 {
         0 => unshifted,
         shifted => shifted,
     }
@@ -821,11 +843,21 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         // fetched at init time.  xev.detail is the raw X11 keycode and the Shift
         // bit (bit 0) of xev.state picks the keysym level.
         let shift = u32::from(xev.state) & 0x0001 != 0;
+        let numlock = u32::from(xev.state) & 0x0010 != 0;
         let base_sym = self.keysym_for(xev.detail, false);
         let keysym = if is_shift_key(base_sym) {
             base_sym
+        } else if self.keycode_map.is_empty() {
+            xev.detail as u32
         } else {
-            self.keysym_for(xev.detail, shift)
+            keysym_at_level_with_numlock(
+                &self.keycode_map,
+                self.min_keycode,
+                self.keysyms_per_keycode,
+                xev.detail,
+                shift,
+                numlock,
+            )
         };
 
         if keysym == 0 {
@@ -1109,5 +1141,15 @@ mod tests {
         // sees a solo Shift if the release is filtered to the input method.
         assert_eq!(XIM_FILTER_KEY_EVENTS & 1, 1);
         assert_eq!(XIM_FILTER_KEY_EVENTS & 2, 2);
+    }
+
+    #[test]
+    fn numlock_selects_keypad_decimal_and_digits_on_x11() {
+        use super::keysym_at_level_with_numlock;
+        // keycode 91 -> [XK_KP_Delete (0xff9f), XK_KP_Decimal (0xffae)]
+        const KP_MAP: &[u32] = &[0xff9f, 0xffae];
+        assert_eq!(keysym_at_level_with_numlock(KP_MAP, 91, 2, 91, false, false), 0xff9f);
+        assert_eq!(keysym_at_level_with_numlock(KP_MAP, 91, 2, 91, false, true), 0xffae);
+        assert_eq!(keysym_at_level_with_numlock(KP_MAP, 91, 2, 91, true, true), 0xff9f);
     }
 }

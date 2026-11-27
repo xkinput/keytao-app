@@ -79,6 +79,12 @@ fn sanitize_settings(input: &Value) -> Value {
             output[key] = input[key].clone();
         }
     }
+    if let Some(switch_key) = input["desktop_english_switch_key"]
+        .as_str()
+        .and_then(|value| keytao_core::english_mode::EnglishSwitchKey::parse(value).ok())
+    {
+        output["desktop_english_switch_key"] = serde_json::json!(switch_key.as_setting());
+    }
     for (group, booleans, numbers, choices) in [
         (
             "android",

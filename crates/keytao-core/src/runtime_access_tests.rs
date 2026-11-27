@@ -1403,3 +1403,126 @@ fn a_sensitive_transition_while_busy_still_discards_the_previous_composition() {
         (InputContextPolicy::private(), false)
     );
 }
+
+#[test]
+fn custom_english_switch_key_overrides_schema_modifier_and_supports_shortcuts() {
+    let Some((runtime, dir)) = native_fixture("custom_english_switch_key_overrides_schema") else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    assert!(!session.is_ascii_mode());
+
+    // Override switch key to Left Shift only: Left Shift toggles, Right Shift does nothing.
+    english_mode::write_english_switch_key(
+        &dir,
+        &english_mode::EnglishSwitchKey::parse("Shift_L").unwrap(),
+    )
+    .unwrap();
+    runtime.reload_without_deploy().unwrap();
+
+    let after_right = session
+        .process_keys_result(&[(0xffe2, 0), (0xffe2, RIME_RELEASE_MASK)])
+        .unwrap();
+    assert!(!after_right.accepted);
+    assert!(!after_right.state.ascii_mode);
+
+    let after_left = session
+        .process_keys_result(&[(0xffe1, 0), (0xffe1, RIME_RELEASE_MASK)])
+        .unwrap();
+    assert!(after_left.accepted);
+    assert!(after_left.state.ascii_mode);
+
+    // Override switch key to Left Control: exposes 0xffe3 in modifier_taps and toggles back.
+    english_mode::write_english_switch_key(
+        &dir,
+        &english_mode::EnglishSwitchKey::parse("Control_L").unwrap(),
+    )
+    .unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert_eq!(session.state().modifier_taps, vec![0xffe3]);
+    let after_ctrl = session
+        .process_keys_result(&[(0xffe3, 0), (0xffe3, RIME_RELEASE_MASK)])
+        .unwrap();
+    assert!(after_ctrl.accepted);
+    assert!(!after_ctrl.state.ascii_mode);
+
+    // Override switch key to Control+space: shortcut is exposed to frontends and toggles with hint.
+    english_mode::write_english_switch_key(
+        &dir,
+        &english_mode::EnglishSwitchKey::parse("Control+space").unwrap(),
+    )
+    .unwrap();
+    runtime.reload_without_deploy().unwrap();
+    let state = session.state();
+    assert!(state.modifier_taps.is_empty());
+    assert!(!key_policy::should_bypass_empty_composition(
+        0x20,
+        RIME_MOD_CONTROL,
+        &state
+    ));
+    let toggled = session
+        .process_key_result(0x20, RIME_MOD_CONTROL)
+        .unwrap();
+    assert!(toggled.accepted);
+    assert!(toggled.state.ascii_mode);
+    assert_eq!(toggled.state.switch_hint.as_deref(), Some("英"));
+
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn numpad_decimal_keeps_ascii_period_instead_of_chinese_full_stop() {
+    let Some((runtime, dir)) =
+        native_fixture("numpad_decimal_keeps_ascii_period_instead_of_chinese_full_stop")
+    else {
+        return;
+    };
+    let session = runtime.create_session().unwrap();
+    let empty = session.state();
+    assert!(!empty.ascii_mode);
+    assert_eq!(key_policy::char_for_keysym(key_policy::XK_KP_DECIMAL), Some('.'));
+    assert!(key_policy::should_bypass_empty_composition(
+        key_policy::XK_KP_DECIMAL,
+        0,
+        &empty
+    ));
+    assert!(!key_policy::should_bypass_empty_composition(b'.'.into(), 0, &empty));
+
+    // When not composing, KP_Decimal is declined so the host app inserts literal '.'.
+    let declined = session
+        .process_key_result(key_policy::XK_KP_DECIMAL, 0)
+        .unwrap();
+    assert!(!declined.accepted);
+    assert_eq!(declined.state.committed, None);
+
+    // While composing, KP_Decimal commits the candidate followed by literal '.' (not '。').
+    let typed = session
+        .process_keys_result(&[(b'a'.into(), 0), (b'a'.into(), 0)])
+        .unwrap();
+    assert!(typed.accepted);
+    assert!(!typed.state.candidates.is_empty());
+    assert!(!key_policy::should_bypass_empty_composition(
+        key_policy::XK_KP_DECIMAL,
+        0,
+        &typed.state
+    ));
+    let first_candidate = typed.state.candidates[0].text.clone();
+    let committed = session
+        .process_key_result(key_policy::XK_KP_DECIMAL, 0)
+        .unwrap();
+    assert!(committed.accepted);
+    assert_eq!(
+        committed.state.committed.as_deref(),
+        Some(format!("{first_candidate}.").as_str())
+    );
+    assert!(committed.state.preedit.is_empty());
+    assert!(committed.state.candidates.is_empty());
+
+    drop(session);
+    runtime.shutdown().unwrap();
+    runtime_log::flush_blocking(Duration::from_secs(1));
+    let _ = std::fs::remove_dir_all(dir);
+}

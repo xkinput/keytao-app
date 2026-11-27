@@ -1546,6 +1546,45 @@ pub fn get_recommended_keyboard_for_schema(
     )
 }
 
+pub fn get_keyboard_document(id: String) -> Result<KeyboardDocumentDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::get_keyboard_document(
+        theme_library_host()?,
+        &id,
+    )?)
+}
+
+pub fn save_keyboard_document(
+    id: String,
+    layout_json: String,
+    apply: bool,
+) -> Result<KeyboardSummaryDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::save_keyboard_document(
+        theme_library_host()?,
+        &id,
+        &layout_json,
+        apply,
+    )?)
+}
+
+pub fn duplicate_keyboard(
+    id: String,
+    new_name: Option<String>,
+) -> Result<KeyboardSummaryDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::duplicate_keyboard(
+        theme_library_host()?,
+        &id,
+        new_name.as_deref(),
+    )?)
+}
+
+pub fn rename_keyboard(id: String, new_name: String) -> Result<KeyboardSummaryDto, String> {
+    runtime::dto(keytao_app_core::keyboard_library::rename_keyboard(
+        theme_library_host()?,
+        &id,
+        &new_name,
+    )?)
+}
+
 pub fn get_ime_ui_settings() -> Result<ImeUiSettingsDto, String> {
     let state = runtime::state()?;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1678,6 +1717,35 @@ pub fn get_desktop_english_mode() -> Result<EnglishModeDto, String> {
     runtime::dto(
         keytao_app_core::ime_settings::get_desktop_english_mode(runtime::state()?.host.clone())
             .map_err(|error| error.to_string())?,
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopEnglishSwitchKeyDto {
+    pub key: String,
+    pub schema_keys: Vec<String>,
+}
+
+pub fn get_desktop_english_switch_key() -> Result<DesktopEnglishSwitchKeyDto, String> {
+    runtime::dto(
+        keytao_app_core::ime_settings::get_desktop_english_switch_key(
+            runtime::state()?.host.clone(),
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn set_desktop_english_switch_key(
+    key: String,
+) -> Result<DesktopEnglishSwitchKeyDto, String> {
+    runtime::dto(
+        keytao_app_core::ime_settings::set_desktop_english_switch_key(
+            runtime::state()?.host.clone(),
+            key,
+        )
+        .await
+        .map_err(|error| error.to_string())?,
     )
 }
 

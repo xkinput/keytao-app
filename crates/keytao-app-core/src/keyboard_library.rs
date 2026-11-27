@@ -2,7 +2,8 @@
 
 use crate::ime_host::ImeHost;
 use keytao_theme::keyboard_store::{
-    self, KeyboardExport, KeyboardImportPreview, KeyboardImportResult, KeyboardSummary,
+    self, KeyboardDocument, KeyboardExport, KeyboardImportPreview, KeyboardImportResult,
+    KeyboardSummary,
 };
 use std::path::{Path, PathBuf};
 
@@ -75,4 +76,43 @@ pub fn recommended_keyboard_for_schema(
     schema_id: &str,
 ) -> Result<Option<KeyboardSummary>, String> {
     keyboard_store::recommended_keyboard_for_schema(&keyboard_path(&host)?, schema_id)
+}
+
+pub fn get_keyboard_document(host: impl ImeHost, id: &str) -> Result<KeyboardDocument, String> {
+    keyboard_store::get_keyboard_document(&keyboard_path(&host)?, id)
+}
+
+pub fn save_keyboard_document(
+    host: impl ImeHost,
+    id: &str,
+    layout_json: &str,
+    apply: bool,
+) -> Result<KeyboardSummary, String> {
+    let path = keyboard_path(&host)?;
+    let summary = keyboard_store::save_keyboard_document(&path, id, layout_json, apply)?;
+    if summary.current {
+        notify_mobile(&host, &path)?;
+    }
+    Ok(summary)
+}
+
+pub fn duplicate_keyboard(
+    host: impl ImeHost,
+    id: &str,
+    new_name: Option<&str>,
+) -> Result<KeyboardSummary, String> {
+    keyboard_store::duplicate_keyboard(&keyboard_path(&host)?, id, new_name)
+}
+
+pub fn rename_keyboard(
+    host: impl ImeHost,
+    id: &str,
+    new_name: &str,
+) -> Result<KeyboardSummary, String> {
+    let path = keyboard_path(&host)?;
+    let summary = keyboard_store::rename_keyboard(&path, id, new_name)?;
+    if summary.current {
+        notify_mobile(&host, &path)?;
+    }
+    Ok(summary)
 }

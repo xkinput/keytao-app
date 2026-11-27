@@ -742,6 +742,8 @@ class AppController extends ChangeNotifier {
     }
   }
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
+  String desktopEnglishSwitchKey = 'schema';
+  List<String> desktopSchemaEnglishSwitchKeys = const [];
   ComponentVersionsDto? versions;
   RuntimeLogSettingsDto? logSettings;
   DebugLogFileDto? runtimeLog;
@@ -1873,6 +1875,15 @@ class AppController extends ChangeNotifier {
     if (_disposed || request != _schemaSwitchesRequest) return;
     schemaSwitches = switches;
     schemaSwitchError = loadError;
+    if (!isMobile) {
+      try {
+        final switchKey = await core.getDesktopEnglishSwitchKey();
+        if (!_disposed && request == _schemaSwitchesRequest) {
+          desktopEnglishSwitchKey = switchKey.key;
+          desktopSchemaEnglishSwitchKeys = switchKey.schemaKeys;
+        }
+      } catch (_) {}
+    }
   }
 
   Future<void> refreshIosKeyboardStatus() async {
@@ -1994,6 +2005,11 @@ class AppController extends ChangeNotifier {
       if (!isMobile) ...[
         read(() async {
           desktopEnglishMode = await core.getDesktopEnglishMode();
+        }),
+        read(() async {
+          final switchKey = await core.getDesktopEnglishSwitchKey();
+          desktopEnglishSwitchKey = switchKey.key;
+          desktopSchemaEnglishSwitchKeys = switchKey.schemaKeys;
         }),
       ],
     ]);
@@ -3513,6 +3529,7 @@ class AppController extends ChangeNotifier {
           if (isWindows) 'show_tray_mode_indicator': ui.showTrayModeIndicator,
         },
       'desktop_english_mode': desktopEnglishMode.name,
+      if (!isMobile) 'desktop_english_switch_key': desktopEnglishSwitchKey,
     };
   }
 
@@ -3591,6 +3608,54 @@ class AppController extends ChangeNotifier {
     return jsonEncode(sorted(value));
   }
 
+  bool _cloudProfileDiffers(Map cloud, Map local) {
+    Map<String, dynamic> normalize(Map raw, Map other) {
+      final copy = jsonDecode(jsonEncode(raw)) as Map<String, dynamic>;
+      final settings = copy['settings'];
+      final otherSettings = other['settings'];
+      if (settings is Map<String, dynamic> && otherSettings is Map) {
+        if (!isMobile && !otherSettings.containsKey('android')) {
+          settings.remove('android');
+        }
+        if (isMobile) {
+          for (final key in const [
+            'desktop_english_mode',
+            'desktop_english_switch_key',
+          ]) {
+            if (!otherSettings.containsKey(key)) settings.remove(key);
+          }
+        } else if (settings['desktop_english_switch_key'] == 'schema' &&
+            !otherSettings.containsKey('desktop_english_switch_key')) {
+          settings.remove('desktop_english_switch_key');
+        }
+        final ui = settings['ime_ui'];
+        final otherUi = otherSettings['ime_ui'];
+        if (ui is Map<String, dynamic> && otherUi is Map) {
+          if (isMobile) {
+            for (final key in const [
+              'orientation',
+              'font_size',
+              'embedded_composition',
+              'hide_candidate_panel',
+              'show_tray_mode_indicator',
+            ]) {
+              if (!otherUi.containsKey(key)) ui.remove(key);
+            }
+          } else if (!isWindows &&
+              !otherUi.containsKey('show_tray_mode_indicator')) {
+            ui.remove('show_tray_mode_indicator');
+          }
+        }
+      }
+      return copy;
+    }
+
+    final normalizedCloud = normalize(cloud, local);
+    final normalizedLocal = normalize(local, cloud);
+    return _comparableProfile(normalizedCloud) !=
+        _comparableProfile(normalizedLocal);
+  }
+
   Future<void> checkCloudProfileAfterLogin() async {
     final account = accountUser?.id;
     if (_disposed ||
@@ -3602,17 +3667,22 @@ class AppController extends ChangeNotifier {
     _checkingSchemeSyncAccount = account;
     _schemeSyncDebounce?.cancel();
     try {
-      final envelope = jsonDecode(await core.fetchSchemeProfile()) as Map;
-      final profile = envelope['profile'];
-      await _persistSchemeSettings(schedule: false);
-      final local = jsonDecode(await core.exportSchemeProfile());
-      if (accountUser?.id != account || _disposed) return;
-      _readySchemeSyncAccount = account;
-      _checkedSchemeSyncAccounts.add(account);
-      if (envelope['updateAt'] case final String time) lastSchemeSyncAt = time;
-      if (profile is Map &&
-          _comparableProfile(profile) != _comparableProfile(local)) {
-        pendingCloudProfile = Map<String, dynamic>.from(profile);
+      if (followAccountSync) {
+        final envelope = jsonDecode(await core.fetchSchemeProfile()) as Map;
+        final profile = envelope['profile'];
+        await _persistSchemeSettings(schedule: false);
+        final local = jsonDecode(await core.exportSchemeProfile());
+        if (accountUser?.id != account || _disposed) return;
+        _readySchemeSyncAccount = account;
+        _checkedSchemeSyncAccounts.add(account);
+        if (envelope['updateAt'] case final String time) {
+          lastSchemeSyncAt = time;
+        }
+        if (profile is Map &&
+            local is Map &&
+            _cloudProfileDiffers(profile, local)) {
+          pendingCloudProfile = Map<String, dynamic>.from(profile);
+        }
       }
       schemeSyncError = null;
       try {
@@ -3824,6 +3894,12 @@ class AppController extends ChangeNotifier {
           orElse: () => desktopEnglishMode,
         ),
       );
+    }
+    if (settings['desktop_english_switch_key'] case final String key
+        when !isMobile) {
+      final saved = await core.setDesktopEnglishSwitchKey(key: key);
+      desktopEnglishSwitchKey = saved.key;
+      desktopSchemaEnglishSwitchKeys = saved.schemaKeys;
     }
     _changed();
   }
@@ -4457,6 +4533,53 @@ class AppController extends ChangeNotifier {
     return result;
   }
 
+  Future<KeyboardDocumentDto> getKeyboardDocument(String id) =>
+      core.getKeyboardDocument(id: id);
+
+  Future<KeyboardSummaryDto> saveKeyboardDocument(
+    String id,
+    String layoutJson, {
+    bool apply = true,
+  }) async {
+    if (isAndroid) await _requireStorage();
+    final saved = await core.saveKeyboardDocument(
+      id: id,
+      layoutJson: layoutJson,
+      apply: apply,
+    );
+    if (saved.current && (isIos || (isAndroid && storageReady))) {
+      androidSettings = await core.getAndroidImeInputSettings();
+    }
+    await _refreshKeyboardLibrary();
+    _changed();
+    return saved;
+  }
+
+  Future<KeyboardSummaryDto> duplicateKeyboardProfile(
+    String id, {
+    String? newName,
+  }) async {
+    if (isAndroid) await _requireStorage();
+    final dup = await core.duplicateKeyboard(id: id, newName: newName);
+    await _refreshKeyboardLibrary();
+    _changed();
+    return dup;
+  }
+
+  Future<KeyboardSummaryDto> renameKeyboardProfile(
+    String id,
+    String newName,
+  ) async {
+    if (isAndroid) await _requireStorage();
+    final renamed = await core.renameKeyboard(id: id, newName: newName);
+    if (renamed.current && (isIos || (isAndroid && storageReady))) {
+      androidSettings = await core.getAndroidImeInputSettings();
+    }
+    await _refreshKeyboardLibrary();
+    _changed();
+    return renamed;
+  }
+
   Future<void> shareKeyboardFile(KeyboardExportDto keyboard) =>
       themeLibraryAction(() async {
         if (isAndroid) {
@@ -4760,6 +4883,12 @@ class AppController extends ChangeNotifier {
       throw StateError(AppStrings.englishNotReady);
     }
     desktopEnglishMode = await core.setDesktopEnglishMode(mode: value);
+    await _persistSchemeSettings();
+  });
+  Future<bool> saveDesktopEnglishSwitchKey(String value) => run(() async {
+    final saved = await core.setDesktopEnglishSwitchKey(key: value);
+    desktopEnglishSwitchKey = saved.key;
+    desktopSchemaEnglishSwitchKeys = saved.schemaKeys;
     await _persistSchemeSettings();
   });
 

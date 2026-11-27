@@ -1011,10 +1011,15 @@ impl PanelRenderer {
                 fit_candidate_widths(&natural_widths, &minimum_widths, selected, available)
             }
         } else {
-            natural_widths
+            let mut widths: Vec<_> = natural_widths
                 .iter()
                 .map(|width| width.min(row_width))
-                .collect()
+                .collect();
+            if theme.candidate.vertical_full_width {
+                let max_option_width = widths.iter().copied().fold(0.0, f32::max);
+                widths.fill(max_option_width);
+            }
+            widths
         };
         let visible_count = option_widths.iter().filter(|&&width| width > 0.0).count();
         let last_visible = option_widths.iter().rposition(|&width| width > 0.0);

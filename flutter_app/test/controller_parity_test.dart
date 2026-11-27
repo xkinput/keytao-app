@@ -9,7 +9,7 @@ import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/platform/android_host.dart';
 import 'package:keytao/src/platform/ios_host.dart';
 import 'package:keytao/src/rust/api/core.dart'
-    show AddonStatusDto, WanxiangGrammarStatusDto;
+    show AddonStatusDto, DesktopEnglishSwitchKeyDto, WanxiangGrammarStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
@@ -275,6 +275,27 @@ class FakeCore implements RustLibApi {
   Future<EnglishModeDto> crateApiCoreGetDesktopEnglishMode() async {
     calls.add('englishMode');
     return english;
+  }
+
+  String desktopSwitchKey = 'schema';
+  List<String> desktopSchemaSwitchKeys = const ['Shift_L'];
+
+  @override
+  Future<DesktopEnglishSwitchKeyDto>
+  crateApiCoreGetDesktopEnglishSwitchKey() async => DesktopEnglishSwitchKeyDto(
+    key: desktopSwitchKey,
+    schemaKeys: desktopSchemaSwitchKeys,
+  );
+
+  @override
+  Future<DesktopEnglishSwitchKeyDto> crateApiCoreSetDesktopEnglishSwitchKey({
+    required String key,
+  }) async {
+    desktopSwitchKey = key;
+    return DesktopEnglishSwitchKeyDto(
+      key: desktopSwitchKey,
+      schemaKeys: desktopSchemaSwitchKeys,
+    );
   }
 
   @override

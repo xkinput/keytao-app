@@ -399,6 +399,7 @@ pub struct CandidateTheme {
     pub separator_visible: bool,
     pub separator_color: RgbaColor,
     pub label_suffix: String,
+    pub vertical_full_width: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1152,6 +1153,7 @@ impl ResolvedImeTheme {
                 separator_visible: false,
                 separator_color: rgba(0xDC, 0xE7, 0xF7, 0xFF),
                 label_suffix: ".".to_string(),
+                vertical_full_width: false,
             },
             navigation: NavigationTheme {
                 foreground: rgba(0x68, 0x76, 0x84, 0xFF),
@@ -1507,6 +1509,7 @@ struct PartialCandidateTheme {
     #[serde(default, deserialize_with = "optional_color")]
     separator_color: Option<RgbaColor>,
     label_suffix: Option<String>,
+    vertical_full_width: Option<bool>,
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -1657,6 +1660,7 @@ impl CandidateTheme {
         if let Some(label_suffix) = partial.label_suffix {
             self.label_suffix = label_suffix;
         }
+        assign(&mut self.vertical_full_width, partial.vertical_full_width);
     }
 }
 

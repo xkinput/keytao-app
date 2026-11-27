@@ -1520,6 +1520,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             baseKeyboardConfig = reloaded
             applyKeyboardPresentation(reloaded, keyboardLayoutState)
             keyboardView?.showMessage("已切换：${reloaded.keyboardName}")
+            refreshRimeOptions(inBackground = true)
             return
         }
         if (key == "reset") {
@@ -2404,6 +2405,73 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
+    private fun loadKeyboardOptions(schemaId: String?): List<KeytaoKeyboardOption> {
+        val keyboardFile = KeytaoAndroidPaths.keyboardFileOrNull(this) ?: return emptyList()
+        val listJson = KeytaoNativeBridge.listKeyboardsJson(keyboardFile.absolutePath) ?: return emptyList()
+        data class RawKb(
+            val id: String,
+            val name: String,
+            val builtIn: Boolean,
+            val current: Boolean,
+            val recommendedSchemas: List<String>,
+        )
+        val items = runCatching {
+            val arr = org.json.JSONArray(listJson)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val id = obj.optString("id")
+                    val name = obj.optString("name")
+                    if (id.isBlank() || name.isBlank()) continue
+                    val recsArr = obj.optJSONArray("recommendedSchemas")
+                    val recs = buildList {
+                        if (recsArr != null) {
+                            for (j in 0 until recsArr.length()) {
+                                recsArr.optString(j).takeIf(String::isNotBlank)?.let(::add)
+                            }
+                        }
+                    }
+                    add(
+                        RawKb(
+                            id = id,
+                            name = name,
+                            builtIn = obj.optBoolean("builtIn", false),
+                            current = obj.optBoolean("current", false),
+                            recommendedSchemas = recs,
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+        val normalized = schemaId?.trim()?.lowercase().orEmpty()
+        var recommendedId: String? = null
+        if (normalized.isNotEmpty()) {
+            val ordered = items.filterNot { it.builtIn } + items.filter { it.builtIn }
+            recommendedId = ordered.firstOrNull { item ->
+                item.recommendedSchemas.any { it.equals(normalized, ignoreCase = true) }
+            }?.id
+            if (recommendedId == null && (
+                    normalized.contains("pinyin") ||
+                        normalized.contains("shuangpin") ||
+                        normalized.contains("wanxiang") ||
+                        normalized.contains("rime_ice") ||
+                        normalized.contains("rime_mint") ||
+                        normalized.contains("rime_frost")
+                    )
+            ) {
+                recommendedId = items.firstOrNull { it.id == "keytao.qwerty26" }?.id
+            }
+        }
+        return items.map {
+            KeytaoKeyboardOption(
+                id = it.id,
+                name = it.name,
+                current = it.current,
+                recommended = it.id == recommendedId,
+            )
+        }
+    }
+
     private fun refreshRimeOptions(inBackground: Boolean = false) {
         val generation = ++rimeOptionsGeneration
         val refreshPackages = inBackground && keyboardView?.rimePanelOpen == true
@@ -2425,6 +2493,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     )
                 }
             }
+            val keyboards = if (keyboardView?.rimePanelOpen == true) {
+                loadKeyboardOptions(currentSchema?.id)
+            } else {
+                emptyList()
+            }
             val options = KeytaoRimeOptionsState(
                 schemas = schemas,
                 currentSchema = currentSchema,
@@ -2435,6 +2508,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     .distinct()
                     .associateWith(engine::getOption),
                 packages = if (refreshPackages) engine.listSwitcherPackages() else visiblePackages,
+                keyboards = keyboards,
             )
             val publish = publish@{
                 if (generation != rimeOptionsGeneration) return@publish

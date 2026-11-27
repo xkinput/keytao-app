@@ -514,4 +514,100 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets(
+    'verticalFullWidth stretches vertical highlight box to widest candidate and toggles in ThemeEditor',
+    (tester) async {
+      final controller = _DragThemeEditorController();
+      addTearDown(controller.dispose);
+      final baseTheme = controller.resolveCandidatePanelPreview(
+        colorScheme: UiColorSchemeDto.light,
+        accentColor: '#3B73D9',
+        cornerRadius: null,
+        backgroundColor: '',
+        fontSize: 20,
+        systemDark: false,
+      );
+      const sampleCandidates = [
+        (text: '这', comment: ''),
+        (text: '之', comment: ''),
+        (text: '只能服从中国', comment: '~a'),
+      ];
+
+      // Default verticalFullWidth: false -> first candidate is narrower than longest candidate.
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.macOs,
+          home: FScaffold(
+            child: CandidatePanelPreview(
+              theme: baseTheme,
+              orientation: PanelOrientationDto.vertical,
+              showPreedit: false,
+              candidates: sampleCandidates,
+              candidateCount: 3,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final shortWidthOff = tester
+          .getSize(find.byKey(const ValueKey('candidate-preview-item-0')))
+          .width;
+      final longWidthOff = tester
+          .getSize(find.byKey(const ValueKey('candidate-preview-item-2')))
+          .width;
+      expect(shortWidthOff, lessThan(longWidthOff));
+
+      // Enabled verticalFullWidth: true -> highlight box matches widest candidate.
+      final fullWidthTheme = Map<String, dynamic>.from(baseTheme);
+      fullWidthTheme['candidate'] = {
+        ...(baseTheme['candidate'] as Map<String, dynamic>),
+        'verticalFullWidth': true,
+      };
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.macOs,
+          home: FScaffold(
+            child: CandidatePanelPreview(
+              theme: fullWidthTheme,
+              orientation: PanelOrientationDto.vertical,
+              showPreedit: false,
+              candidates: sampleCandidates,
+              candidateCount: 3,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final shortWidthOn = tester
+          .getSize(find.byKey(const ValueKey('candidate-preview-item-0')))
+          .width;
+      final longWidthOn = tester
+          .getSize(find.byKey(const ValueKey('candidate-preview-item-2')))
+          .width;
+      expect(shortWidthOn, closeTo(longWidthOn, 0.5));
+
+      // ThemeEditorSection exposes the toggle and writes pc.candidate.verticalFullWidth.
+      await tester.binding.setSurfaceSize(const Size(900, 1200));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.macOs,
+          home: FScaffold(child: ThemeEditorSection(controller: controller)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('候选'));
+      await tester.pumpAndSettle();
+      final toggleSwitch = find.byWidgetPredicate(
+        (w) => w is FSwitch && w.semanticsLabel == '竖排高亮等宽',
+      );
+      await tester.ensureVisible(toggleSwitch);
+      await tester.pumpAndSettle();
+      await tester.tap(toggleSwitch);
+      await tester.pumpAndSettle();
+      expect(controller.writes, contains(('pc.candidate.verticalFullWidth', true)));
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

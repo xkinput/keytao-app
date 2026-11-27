@@ -56,26 +56,32 @@ pub(crate) struct GlobalInput {
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl GlobalInput {
-    pub fn get<'a>(slot: &'a mut Option<Self>, engine: &dyn ImeBackend, root: &Path) -> &'a mut Self {
-        if slot.as_ref().is_some_and(|global| global.root != root) {
+    pub fn get<'a>(
+        slot: &'a mut Option<Self>,
+        engine: &dyn ImeBackend,
+        control_root: &Path,
+        schema_root: &Path,
+    ) -> &'a mut Self {
+        if slot.as_ref().is_some_and(|global| global.root != schema_root) {
             *slot = None;
         }
-        slot.get_or_insert_with(|| Self::new(engine, root))
+        slot.get_or_insert_with(|| Self::new(engine, control_root, schema_root))
     }
 
-    pub fn new(engine: &dyn ImeBackend, root: &Path) -> Self {
+    pub fn new(engine: &dyn ImeBackend, control_root: &Path, schema_root: &Path) -> Self {
         let mut english_mode = EnglishModeController::default();
-        english_mode.configure(
-            crate::english_mode::read_english_mode(root),
+        english_mode.configure_with_switch_key(
+            crate::english_mode::read_english_mode(control_root),
+            crate::english_mode::read_english_switch_key(control_root),
             engine.list_schemas(),
         );
         let state = InputState::read(engine);
         if !state.is_switcher() {
-            crate::publish_current_schema(root, &state.schema_id);
+            crate::publish_current_schema(schema_root, &state.schema_id);
         }
         Self {
             version: 1,
-            root: root.to_path_buf(),
+            root: schema_root.to_path_buf(),
             state,
             english_mode,
         }

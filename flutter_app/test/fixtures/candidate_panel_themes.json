@@ -99,7 +99,8 @@
         "green": 60,
         "red": 52
       },
-      "separatorVisible": false
+      "separatorVisible": false,
+      "verticalFullWidth": false
     },
     "font": {
       "commentSize": 16.0,
@@ -773,6 +774,7 @@
         "pc.candidate.borderWidth",
         "pc.candidate.cornerRadius",
         "pc.candidate.labelSuffix",
+        "pc.candidate.verticalFullWidth",
         "pc.modeHint.background",
         "pc.modeHint.foreground",
         "pc.modeHint.borderColor",
@@ -828,6 +830,7 @@
         "pc.candidate.borderWidth",
         "pc.candidate.cornerRadius",
         "pc.candidate.labelSuffix",
+        "pc.candidate.verticalFullWidth",
         "pc.modeHint.background",
         "pc.modeHint.foreground",
         "pc.modeHint.borderColor",
@@ -882,6 +885,7 @@
         "pc.candidate.borderWidth",
         "pc.candidate.cornerRadius",
         "pc.candidate.labelSuffix",
+        "pc.candidate.verticalFullWidth",
         "pc.modeHint.background",
         "pc.modeHint.foreground",
         "pc.modeHint.borderColor",
@@ -994,7 +998,8 @@
         "green": 231,
         "red": 220
       },
-      "separatorVisible": false
+      "separatorVisible": false,
+      "verticalFullWidth": false
     },
     "font": {
       "commentSize": 16.0,

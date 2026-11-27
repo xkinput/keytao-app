@@ -151,6 +151,9 @@ class CandidatePanel: NSPanel {
             }
         } else {
             widths = widths.map { min($0, innerWidth) }
+            if theme.candidate.verticalFullWidth == true, let maxOptionWidth = widths.max() {
+                widths = Array(repeating: maxOptionWidth, count: widths.count)
+            }
         }
 
         let visibleOptions = zip(active, widths).filter { option, width in

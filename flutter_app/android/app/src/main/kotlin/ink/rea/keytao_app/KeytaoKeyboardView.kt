@@ -1283,6 +1283,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val signature = buildString {
             append(keyboardLayer).append('|')
             append(shiftState).append('|')
+            append(isTemporaryEnglishActive()).append('|')
             append(isEnglishMode).append('|')
             append(selectionModeActive).append('|')
             append(navigation.panel).append('|')
@@ -1372,10 +1373,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             val label = when (command.type) {
                 KeyCommandTypes.BACKSPACE -> "退格"
                 KeyCommandTypes.ENTER -> enterLabelOverride ?: "回车"
-                KeyCommandTypes.SHIFT -> when (shiftState) {
-                    KeyboardShiftState.OFF -> "切换大小写"
-                    KeyboardShiftState.ONCE -> "大写，输入一次后关闭"
-                    KeyboardShiftState.LOCKED -> "大写锁定"
+                KeyCommandTypes.SHIFT -> when {
+                    shiftState == KeyboardShiftState.LOCKED -> "大写锁定"
+                    shiftState == KeyboardShiftState.ONCE -> "大写，输入一次后关闭"
+                    isTemporaryEnglishActive() -> "临时英文输入中"
+                    else -> "切换大小写"
                 }
                 KeyCommandTypes.SPACE -> if (isVoiceInputOffered(key.spec)) "空格，长按语音输入" else "空格"
                 else -> displayLabel(key.spec).ifBlank { key.spec.label }.ifBlank { "按键" }
@@ -2427,6 +2429,29 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     items.add(rimeSwitchItem(index, schemaSwitch))
                 }
             }
+            if (rimeOptionsState.keyboards.isNotEmpty()) {
+                items.add(
+                    CandidateDrawItem(
+                        index = -4000,
+                        label = "键盘切换",
+                        text = "",
+                        style = PanelItemStyle.SECTION,
+                    )
+                )
+                rimeOptionsState.keyboards.forEachIndexed { index, kb ->
+                    items.add(
+                        CandidateDrawItem(
+                            index = -4100 - index,
+                            label = kb.name,
+                            text = "",
+                            selected = kb.current,
+                            command = KeyCommand(KeyCommandTypes.SETTING, "keyboardProfile", kb.id),
+                            style = PanelItemStyle.SCHEMA,
+                            statusLabel = if (kb.recommended) "推荐" else null,
+                        )
+                    )
+                }
+            }
             return items
         }
         val all = expandedCandidates
@@ -3378,7 +3403,28 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
 
         val textLeft = rect.left + dp(36f)
-        val maxWidth = (rect.right - dp(10f) - textLeft).coerceAtLeast(0f)
+        val badgeText = item.statusLabel?.takeIf(String::isNotBlank)
+        var textRight = rect.right - dp(10f)
+        if (badgeText != null) {
+            val badgeWidth = dp(34f)
+            val badgeHeight = dp(18f)
+            val badgeRect = RectF(
+                rect.right - dp(10f) - badgeWidth,
+                rect.centerY() - badgeHeight / 2f,
+                rect.right - dp(10f),
+                rect.centerY() + badgeHeight / 2f,
+            )
+            textRight = badgeRect.left - dp(6f)
+            paint.style = Paint.Style.FILL
+            val accent = theme.candidateSelectedForeground.toArgb()
+            paint.color = (accent and 0x00FFFFFF) or (0x24 shl 24)
+            canvas.drawRoundRect(badgeRect, dp(5f), dp(5f), paint)
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = sp(10f)
+            textPaint.color = accent
+            canvas.drawText(badgeText, badgeRect.centerX(), badgeRect.centerY() + textBaselineOffset(textPaint), textPaint)
+        }
+        val maxWidth = (textRight - textLeft).coerceAtLeast(0f)
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = sp(candidateTextSizeSp())
         textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateForeground.toArgb()
@@ -4402,20 +4448,23 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawShiftStateDecoration(canvas: Canvas, rect: RectF, style: KeytaoKeyStyle) {
-        if (shiftState == KeyboardShiftState.OFF) return
+        val temporaryEnglish = isTemporaryEnglishActive()
+        if (shiftState == KeyboardShiftState.OFF && !temporaryEnglish) return
         paint.color = style.borderColor.toArgb()
-        if (shiftState == KeyboardShiftState.ONCE) {
-            if (style.borderWidth <= 0f) return
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(style.borderWidth)
-            val inset = dp(1.5f)
-            canvas.drawRoundRect(
-                RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset),
-                dp(style.cornerRadius),
-                dp(style.cornerRadius),
-                paint,
-            )
-        } else {
+        if (shiftState == KeyboardShiftState.ONCE || (shiftState == KeyboardShiftState.OFF && temporaryEnglish)) {
+            if (style.borderWidth > 0f) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dp(style.borderWidth)
+                val inset = dp(1.5f)
+                canvas.drawRoundRect(
+                    RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset),
+                    dp(style.cornerRadius),
+                    dp(style.cornerRadius),
+                    paint,
+                )
+            }
+        }
+        if (shiftState == KeyboardShiftState.LOCKED || temporaryEnglish) {
             paint.style = Paint.Style.FILL
             val barWidth = rect.width() * 0.36f
             val barHeight = dp(2.5f)
@@ -4769,13 +4818,26 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    private fun isTemporaryEnglishActive(): Boolean {
+        if (state.asciiMode || isEnglishMode || state.isPackageSwitcher) return false
+        val preedit = state.candidatePanel.preedit?.takeIf { it.isNotEmpty() } ?: state.preedit
+        if (preedit.isEmpty()) return false
+        val first = preedit[0]
+        if (first !in 'A'..'Z') return false
+        return preedit.all { ch -> ch.code in 0x20..0x7E }
+    }
+
     private fun isShiftActive(): Boolean {
         return shiftState != KeyboardShiftState.OFF
     }
 
+    private fun isShiftKeyHighlighted(): Boolean {
+        return isShiftActive() || isTemporaryEnglishActive()
+    }
+
     private fun isActiveKey(command: KeyCommand): Boolean {
         return when (command.type) {
-            KeyCommandTypes.SHIFT -> isShiftActive()
+            KeyCommandTypes.SHIFT -> isShiftKeyHighlighted()
             KeyCommandTypes.KEYBOARD_MODE -> command.value != "back" &&
                 config.normalizedLayer(navigation.resolveLayer(command.value)) == keyboardLayer
             KeyCommandTypes.EDIT -> command.value == "toggleSelection" && selectionModeActive
@@ -7027,7 +7089,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         key.style == "accent",
         isSoftAccentPunctuationKey(key),
         isActiveKey(command),
-        isShiftActive(),
+        isShiftKeyHighlighted(),
     )
 
     private fun drawKeyShadow(canvas: Canvas, rect: RectF, style: KeytaoKeyStyle) {

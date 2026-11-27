@@ -74,6 +74,7 @@ String _sampleLayoutJson({
           [
             {
               'label': 'q',
+              'value': 'q',
               'hint': '1',
               if (hasMnemonics)
                 'mnemonic': {
@@ -82,7 +83,7 @@ String _sampleLayoutJson({
                   'tone': 'outer',
                 },
             },
-            {'label': 'w', 'hint': '2'},
+            {'label': 'w', 'value': 'w', 'hint': '2'},
           ],
           [
             {
@@ -97,12 +98,30 @@ String _sampleLayoutJson({
             },
           ],
         ],
+  'numberRows': [
+    [
+      {'label': '1', 'value': '1'},
+      {'label': '2', 'value': '2'},
+      {
+        'label': '返回',
+        'action': {'type': 'keyboardMode', 'value': 'back'},
+      },
+    ],
+  ],
+  'symbolRows': [
+    [
+      {'label': '，', 'value': '，'},
+      {'label': '。', 'value': '。'},
+    ],
+  ],
 });
 
 class _KeyboardTestController extends ViewController {
   _KeyboardTestController() : super(BridgePlatform.android);
 
   final List<String> appliedIds = [];
+  final List<(String id, String layoutJson)> savedDocuments = [];
+  final Map<String, String> documents = {};
 
   @override
   Future<bool> applyKeyboardProfile(String id) async {
@@ -136,6 +155,63 @@ class _KeyboardTestController extends ViewController {
     pendingRecommendedKeyboard = null;
     notifyListeners();
     return true;
+  }
+
+  @override
+  Future<KeyboardDocumentDto> getKeyboardDocument(String id) async {
+    final kb = keyboards.firstWhere((k) => k.id == id);
+    return KeyboardDocumentDto(
+      id: kb.id,
+      name: kb.name,
+      description: kb.description,
+      builtIn: kb.builtIn,
+      current: kb.current,
+      hasMnemonics: kb.hasMnemonics,
+      recommendedSchemas: kb.recommendedSchemas,
+      layoutJson: documents[id] ?? kb.previewLayoutJson,
+    );
+  }
+
+  @override
+  Future<KeyboardSummaryDto> saveKeyboardDocument(
+    String id,
+    String layoutJson, {
+    bool apply = true,
+  }) async {
+    savedDocuments.add((id, layoutJson));
+    final decoded = jsonDecode(layoutJson) as Map<String, dynamic>;
+    final nextId = id.startsWith('keytao.') ? 'my.${id.substring(7)}' : id;
+    final nextName = id.startsWith('keytao.')
+        ? '${decoded['name']}（自定义）'
+        : '${decoded['name']}';
+    documents[nextId] = layoutJson;
+    final summary = KeyboardSummaryDto(
+      id: nextId,
+      name: nextName,
+      description: decoded['description'] as String?,
+      builtIn: false,
+      current: apply,
+      hasMnemonics: decoded['hasMnemonics'] == true,
+      recommendedSchemas: const [],
+      previewLayoutJson: layoutJson,
+    );
+    keyboards = [
+      for (final kb in keyboards)
+        if (kb.id != nextId)
+          KeyboardSummaryDto(
+            id: kb.id,
+            name: kb.name,
+            description: kb.description,
+            builtIn: kb.builtIn,
+            current: apply ? false : kb.current,
+            hasMnemonics: kb.hasMnemonics,
+            recommendedSchemas: kb.recommendedSchemas,
+            previewLayoutJson: kb.previewLayoutJson,
+          ),
+      summary,
+    ];
+    notifyListeners();
+    return summary;
   }
 }
 
@@ -228,9 +304,9 @@ List<KeyboardSummaryDto> _sixKeyboards({String currentId = 'keytao.qwerty26'}) =
 
 void main() {
   testWidgets(
-    'keyboard library shows 2-column preview cards, recommendation banner, and gates mnemonic switch',
+    'keyboard library sits below 候选与键盘 with compact name cards, recommendation tag, and gates mnemonic switch',
     (tester) async {
-      await tester.binding.setSurfaceSize(const Size(420, 900));
+      await tester.binding.setSurfaceSize(const Size(420, 1400));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       final c = _KeyboardTestController();
@@ -240,7 +316,7 @@ void main() {
       await tester.pumpWidget(
         _testApp(
           SizedBox(
-            height: 850,
+            height: 1350,
             child: SingleChildScrollView(
               child: ListenableBuilder(
                 listenable: c,
@@ -252,14 +328,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Recommendation banner visible.
+      // 键盘方案 section sits BELOW 候选与键盘.
+      final candidateSectionRect = tester.getRect(find.text('候选与键盘'));
+      final keyboardLibraryRect = tester.getRect(
+        find.byKey(const ValueKey('mobile-keyboard-library')),
+      );
+      expect(keyboardLibraryRect.top, greaterThan(candidateSectionRect.top));
+
+      // Compact cards show names, recommendation tag on recommended card, and 更多键盘 button.
       expect(
-        find.byKey(const ValueKey('recommended-keyboard-banner')),
+        find.byKey(const ValueKey('keyboard-library-more-button')),
         findsOneWidget,
       );
-      expect(find.text('推荐当前方案使用「键道6 键盘」'), findsOneWidget);
-
-      // 2-column grid with all 6 keyboards and previews.
       expect(
         find.byKey(const ValueKey('keyboard-profile-grid')),
         findsOneWidget,
@@ -268,34 +348,122 @@ void main() {
         expect(find.byKey(ValueKey('keyboard-card-${kb.id}')), findsOneWidget);
         expect(find.text(kb.name), findsAtLeastNWidgets(1));
       }
-      final leftCard = tester.getRect(
-        find.byKey(const ValueKey('keyboard-card-keytao.qwerty26')),
-      );
-      final rightCard = tester.getRect(
-        find.byKey(const ValueKey('keyboard-card-keytao.keytao30')),
-      );
       expect(
-        (leftCard.top - rightCard.top).abs(),
-        lessThan(1.0),
-        reason: 'First two keyboard cards should sit side by side in 2 columns',
+        find.descendant(
+          of: find.byKey(const ValueKey('keyboard-card-keytao.keytao30')),
+          matching: find.text('推荐'),
+        ),
+        findsOneWidget,
       );
-      expect(rightCard.left, greaterThan(leftCard.right));
 
-      // Active keyboard is qwerty26 (no mnemonics) -> mnemonic switch hidden!
+      // Active keyboard is qwerty26 (no mnemonics) -> mnemonic switch hidden.
       expect(find.text('开启键盘助记'), findsNothing);
 
-      // Switch to recommended keyboard (keytao30, hasMnemonics: true).
-      await tester.tap(
-        find.descendant(
-          of: find.byKey(const ValueKey('recommended-keyboard-banner')),
-          matching: find.text('切换'),
-        ),
+      // Tap recommended compact card directly to switch.
+      final targetCard = find.byKey(
+        const ValueKey('keyboard-card-keytao.keytao30'),
       );
+      await tester.ensureVisible(targetCard);
+      await tester.pumpAndSettle();
+      await tester.tap(targetCard);
       await tester.pumpAndSettle();
       expect(c.appliedIds, ['keytao.keytao30']);
 
       // Now mnemonic switch MUST appear!
       expect(find.text('开启键盘助记'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    '更多键盘 opens detail page with key tap editing, instant live preview, effect test, and save',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(430, 960));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final c = _KeyboardTestController();
+      c.keyboards = _sixKeyboards(currentId: 'keytao.qwerty26');
+      c.recommendedKeyboard = c.keyboards[1];
+
+      await tester.pumpWidget(
+        _testApp(
+          SizedBox(
+            height: 920,
+            child: SingleChildScrollView(
+              child: ListenableBuilder(
+                listenable: c,
+                builder: (_, _) => InputPage(controller: c),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Open keyboard detail page via 更多键盘.
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('keyboard-library-more-button')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('keyboard-library-more-button')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('keyboard-detail-page')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('keyboard-detail-live-preview')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('keyboard-key-inspector')),
+        findsOneWidget,
+      );
+
+      // Tap second key on row 0 ("w") to select it for editing.
+      await tester.tap(find.byKey(const ValueKey('keyboard-editable-key-0-1')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('第 1 行 · 第 2 键'), findsOneWidget);
+
+      // Edit key label -> live preview updates immediately!
+      await tester.enterText(find.byKey(const ValueKey('key-label-input')), 'W!');
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('keyboard-detail-live-preview')),
+          matching: find.text('W!'),
+        ),
+        findsOneWidget,
+      );
+
+      // Switch to 效果测试 mode and tap the first key ("q") + layer key ("数").
+      await tester.tap(find.byKey(const ValueKey('mode-test-keyboard')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('keyboard-test-area')), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const ValueKey('keyboard-interactive-key-0-0')),
+      );
+      await tester.pumpAndSettle();
+      final inputField = tester.widget<TextField>(
+        find.byKey(const ValueKey('keyboard-test-input')),
+      );
+      expect(inputField.controller?.text, 'q');
+
+      // Tap "数" key -> switches live preview to numbers layer!
+      await tester.tap(
+        find.byKey(const ValueKey('keyboard-interactive-key-1-0')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('数字层'), findsAtLeastNWidgets(1));
+
+      // Save edited built-in keyboard -> forks and persists via controller.
+      await tester.tap(find.text('保存为自定义'));
+      await tester.pumpAndSettle();
+      expect(c.savedDocuments.length, 1);
+      expect(c.savedDocuments.first.$1, 'keytao.qwerty26');
       expect(tester.takeException(), isNull);
     },
   );

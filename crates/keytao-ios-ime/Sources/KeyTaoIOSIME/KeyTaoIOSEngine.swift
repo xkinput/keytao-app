@@ -197,6 +197,13 @@ struct KeyTaoRimeSchemaSwitch: Codable, Equatable {
     }
 }
 
+struct KeyTaoKeyboardOption: Equatable {
+    var id: String
+    var name: String
+    var current: Bool
+    var recommended: Bool
+}
+
 struct KeyTaoRimeOptionsState: Equatable {
     var schemas: [KeyTaoRimeSchema]
     var currentSchema: KeyTaoRimeSchema?
@@ -204,6 +211,7 @@ struct KeyTaoRimeOptionsState: Equatable {
     var switches: [KeyTaoRimeSchemaSwitch]
     var options: [String: Bool]
     var packages: [KeyTaoRimePackage]
+    var keyboards: [KeyTaoKeyboardOption] = []
 
     static let empty = KeyTaoRimeOptionsState(
         schemas: [],
@@ -211,7 +219,8 @@ struct KeyTaoRimeOptionsState: Equatable {
         englishSchemaID: nil,
         switches: [],
         options: [:],
-        packages: []
+        packages: [],
+        keyboards: []
     )
 }
 
@@ -723,7 +732,7 @@ final class KeyTaoIOSEngine {
         }
     }
 
-    func listKeyboardIds() -> [String] {
+    func listKeyboards(recommendedFor schemaID: String?) -> [KeyTaoKeyboardOption] {
         let path = KeyTaoIOSPaths.keyboardFile(userRoot: userRoot).path
         guard let ptr = path.withCString({ keytao_list_keyboards_json($0) }) else {
             return []
@@ -733,7 +742,53 @@ final class KeyTaoIOSEngine {
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             return []
         }
-        return arr.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+        let normalized = schemaID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        struct RawItem {
+            let id: String
+            let name: String
+            let builtIn: Bool
+            let current: Bool
+            let recommendedSchemas: [String]
+        }
+        let items: [RawItem] = arr.compactMap { entry in
+            guard let id = entry["id"] as? String, !id.isEmpty,
+                  let name = entry["name"] as? String, !name.isEmpty else { return nil }
+            return RawItem(
+                id: id,
+                name: name,
+                builtIn: entry["builtIn"] as? Bool ?? false,
+                current: entry["current"] as? Bool ?? false,
+                recommendedSchemas: entry["recommendedSchemas"] as? [String] ?? []
+            )
+        }
+        var recommendedID: String?
+        if !normalized.isEmpty {
+            let ordered = items.filter { !$0.builtIn } + items.filter { $0.builtIn }
+            recommendedID = ordered.first { item in
+                item.recommendedSchemas.contains { $0.lowercased() == normalized }
+            }?.id
+            if recommendedID == nil,
+               normalized.contains("pinyin")
+                || normalized.contains("shuangpin")
+                || normalized.contains("wanxiang")
+                || normalized.contains("rime_ice")
+                || normalized.contains("rime_mint")
+                || normalized.contains("rime_frost") {
+                recommendedID = items.first { $0.id == "keytao.qwerty26" }?.id
+            }
+        }
+        return items.map {
+            KeyTaoKeyboardOption(
+                id: $0.id,
+                name: $0.name,
+                current: $0.current,
+                recommended: $0.id == recommendedID
+            )
+        }
+    }
+
+    func listKeyboardIds() -> [String] {
+        listKeyboards(recommendedFor: nil).map(\.id)
     }
 
     func applyKeyboard(id: String) -> Bool {

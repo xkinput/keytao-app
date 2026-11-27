@@ -57,6 +57,15 @@ class _CandidateIndicatorPainter extends CustomPainter {
       color != oldDelegate.color || paddingX != oldDelegate.paddingX;
 }
 
+enum KeyboardPreviewGesture {
+  tap,
+  longPress,
+  swipeUp,
+  swipeDown,
+  swipeLeft,
+  swipeRight,
+}
+
 class MobileKeyboardPreview extends StatelessWidget {
   const MobileKeyboardPreview({
     super.key,
@@ -68,7 +77,15 @@ class MobileKeyboardPreview extends StatelessWidget {
     this.editorPreview = false,
     this.showToolbar = true,
     this.fullHeight = false,
+    this.layoutOverride,
     this.layoutJsonOverride,
+    this.layerName = 'letters',
+    this.asciiMode = false,
+    this.shifted = false,
+    this.selectedKey,
+    this.selectedKeyColor,
+    this.onKeyTap,
+    this.onKeyGesture,
     this.mnemonicHintsOverride,
     this.fontFamily,
     this.highlightPath,
@@ -84,7 +101,16 @@ class MobileKeyboardPreview extends StatelessWidget {
   final bool editorPreview;
   final bool showToolbar;
   final bool fullHeight;
+  final Map<String, dynamic>? layoutOverride;
   final String? layoutJsonOverride;
+  final String layerName;
+  final bool asciiMode;
+  final bool shifted;
+  final (int, int)? selectedKey;
+  final Color? selectedKeyColor;
+  final void Function(int row, int col)? onKeyTap;
+  final void Function(int row, int col, KeyboardPreviewGesture gesture)?
+  onKeyGesture;
   final bool? mnemonicHintsOverride;
   final String? fontFamily;
   final String? highlightPath;
@@ -126,8 +152,12 @@ class MobileKeyboardPreview extends StatelessWidget {
   ];
 
   Map<String, dynamic>? _layout() {
+    if (layoutOverride != null) return layoutOverride;
     final override = layoutJsonOverride;
     if (override != null && override.isNotEmpty) {
+      if (_overrideLayoutCache.length > 32) {
+        _overrideLayoutCache.clear();
+      }
       return _overrideLayoutCache[override] ??=
           jsonDecode(override) as Map<String, dynamic>;
     }
@@ -135,6 +165,18 @@ class MobileKeyboardPreview extends StatelessWidget {
     final json = settings?.keyboardLayoutJson;
     if (json == null || json.isEmpty) return null;
     return _layoutCache[settings!] ??= jsonDecode(json) as Map<String, dynamic>;
+  }
+
+  List<dynamic>? _rawLayerRows(Map<String, dynamic>? layout) {
+    if (layout == null) return null;
+    return switch (layerName) {
+      'letters' => layout['rows'] as List<dynamic>?,
+      'numbers' => layout['numberRows'] as List<dynamic>?,
+      'symbols' => layout['symbolRows'] as List<dynamic>?,
+      _ =>
+        (layout['layers'] as Map<String, dynamic>?)?[layerName]
+            as List<dynamic>?,
+    };
   }
 
   Color? _parseHexColor(String? value) {
@@ -193,14 +235,30 @@ class MobileKeyboardPreview extends StatelessWidget {
         'dark';
     final rawKeyGroups =
         (layout?['keyGroups'] as Map<String, dynamic>?) ?? const {};
-    final layoutHasMnemonics = layout?['hasMnemonics'] == true;
+    final layoutHasMnemonics =
+        layout?['hasMnemonics'] == true ||
+        (layout?['rows'] as List<dynamic>?)?.any(
+              (r) =>
+                  r is List &&
+                  r.any(
+                    (k) =>
+                        k is Map &&
+                        k['mnemonic'] is Map &&
+                        ((k['mnemonic']['top'] as String?)?.isNotEmpty ==
+                                true ||
+                            (k['mnemonic']['bottomLines'] as List?)
+                                    ?.isNotEmpty ==
+                                true),
+                  ),
+            ) ==
+            true;
     final showMnemonics =
         layoutHasMnemonics &&
         (mnemonicHintsOverride ??
             keyboardSettings?.mnemonicHintsEnabled ??
             false);
     final numberRowMode = (layout?['numberRow'] as String?) ?? 'auto';
-    final nativeRows = layout?['rows'] as List<dynamic>?;
+    final nativeRows = _rawLayerRows(layout);
     final letterRows = nativeRows == null || nativeRows.isEmpty
         ? _bundledRows
         : [
@@ -212,8 +270,10 @@ class MobileKeyboardPreview extends StatelessWidget {
           ];
     final includeNumberRow =
         showToolbar &&
+        layerName == 'letters' &&
         numberRowMode == 'auto' &&
         keyboardSettings?.numberRowEnabled == true;
+    final rowOffset = includeNumberRow ? 1 : 0;
     final rows = [
       if (includeNumberRow)
         [
@@ -318,18 +378,69 @@ class MobileKeyboardPreview extends StatelessWidget {
       return fallback is Map<String, dynamic> ? fallback : null;
     }
 
+    Widget wrapInteractiveKey(Widget child, int? layerRow, int? layerCol) {
+      if (layerRow == null || layerCol == null) return child;
+      final isSelected =
+          selectedKey != null &&
+          selectedKey!.$1 == layerRow &&
+          selectedKey!.$2 == layerCol;
+      var result = child;
+      if (isSelected) {
+        final highlight = selectedKeyColor ?? const Color(0xFF0A84FF);
+        result = DecoratedBox(
+          position: DecorationPosition.foreground,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(
+              _metric(baseKey, 'cornerRadius'),
+            ),
+            border: Border.all(color: highlight, width: 2.2),
+            color: highlight.withValues(alpha: 0.14),
+          ),
+          child: result,
+        );
+      }
+      if (onKeyGesture != null) {
+        result = _InteractivePreviewKey(
+          key: ValueKey('keyboard-interactive-key-$layerRow-$layerCol'),
+          onGesture: (g) => onKeyGesture!(layerRow, layerCol, g),
+          child: result,
+        );
+      } else if (onKeyTap != null) {
+        result = GestureDetector(
+          key: ValueKey('keyboard-editable-key-$layerRow-$layerCol'),
+          behavior: HitTestBehavior.opaque,
+          onTap: () => onKeyTap!(layerRow, layerCol),
+          child: result,
+        );
+      }
+      return result;
+    }
+
     Widget key(
       _PreviewKey spec, {
       required double width,
       double? heightOverride,
       bool accentSample = false,
+      int? layerRow,
+      int? layerCol,
     }) {
       final effectiveHeight = heightOverride ?? keyHeight;
-      final action = spec.action;
+      final action = asciiMode ? (spec.asciiAction ?? spec.action) : spec.action;
+      final baseLabel = asciiMode && spec.asciiLabel != null
+          ? spec.asciiLabel!
+          : spec.label;
+      final shiftedLabel =
+          shifted &&
+              baseLabel.length == 1 &&
+              RegExp(r'^[a-z]$').hasMatch(baseLabel)
+          ? baseLabel.toUpperCase()
+          : baseLabel;
       final label = switch (action) {
         'space' when schemeName.isNotEmpty => schemeName,
-        'mode' => theme['modeHint']['chineseText'] as String? ?? spec.label,
-        _ => spec.label,
+        'mode' => asciiMode
+            ? (theme['modeHint']['englishText'] as String? ?? 'En')
+            : (theme['modeHint']['chineseText'] as String? ?? shiftedLabel),
+        _ => shiftedLabel,
       };
       final activeMnemonic = showMnemonics ? spec.mnemonic : null;
       final groupStyle = resolveGroup(activeMnemonic?.group ?? spec.group);
@@ -355,7 +466,7 @@ class MobileKeyboardPreview extends StatelessWidget {
         ...types[function ? 'function' : 'character'] as Map<String, dynamic>,
         if (const {'space', 'enter', 'backspace', 'shift'}.contains(action))
           ...types[action] as Map<String, dynamic>,
-        if (spec.accent || accentSample)
+        if (spec.accent || accentSample || (action == 'shift' && shifted))
           ...classes['accent'] as Map<String, dynamic>,
         if (punctuation && !accentSample)
           ...classes['accentPunctuation'] as Map<String, dynamic>,
@@ -377,43 +488,49 @@ class MobileKeyboardPreview extends StatelessWidget {
           ? math.max(1.0, _metric(style, 'borderWidth'))
           : _metric(style, 'borderWidth');
       if (spec.stack.isNotEmpty) {
-        return Container(
-          key: ValueKey('keyboard-preview-key-${spec.label}'),
-          width: width,
-          height: effectiveHeight,
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(_metric(style, 'cornerRadius')),
-            border: Border.all(
-              color: borderColor,
-              width: borderWidth,
-              style: borderWidth > 0 ? BorderStyle.solid : BorderStyle.none,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: _color(style, 'shadowColor'),
-                offset: Offset(0, _metric(style, 'shadowOffsetY')),
+        return wrapInteractiveKey(
+          Container(
+            key: ValueKey('keyboard-preview-key-${spec.label}'),
+            width: width,
+            height: effectiveHeight,
+            decoration: BoxDecoration(
+              color: bgColor,
+              borderRadius: BorderRadius.circular(
+                _metric(style, 'cornerRadius'),
               ),
-            ],
-          ),
-          child: Column(
-            children: [
-              for (final item in spec.stack)
-                Expanded(
-                  child: Center(
-                    child: Text(
-                      item,
-                      textScaler: TextScaler.noScaling,
-                      style: textStyle(
-                        15 * fontScale,
-                        foreground,
-                        _weight(style['fontWeight']),
+              border: Border.all(
+                color: borderColor,
+                width: borderWidth,
+                style: borderWidth > 0 ? BorderStyle.solid : BorderStyle.none,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: _color(style, 'shadowColor'),
+                  offset: Offset(0, _metric(style, 'shadowOffsetY')),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                for (final item in spec.stack)
+                  Expanded(
+                    child: Center(
+                      child: Text(
+                        item,
+                        textScaler: TextScaler.noScaling,
+                        style: textStyle(
+                          15 * fontScale,
+                          foreground,
+                          _weight(style['fontWeight']),
+                        ),
                       ),
                     ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
+          layerRow,
+          layerCol,
         );
       }
       final target = switch ((
@@ -660,36 +777,42 @@ class MobileKeyboardPreview extends StatelessWidget {
           ],
         );
       }
-      return edit(
-        Container(
-          key: ValueKey('keyboard-preview-key-${spec.label}'),
-          width: width,
-          height: effectiveHeight,
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(_metric(style, 'cornerRadius')),
-            border: Border.all(
-              color: borderColor,
-              width: borderWidth,
-              style: borderWidth > 0 ? BorderStyle.solid : BorderStyle.none,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: _color(style, 'shadowColor'),
-                offset: Offset(0, _metric(style, 'shadowOffsetY')),
+      return wrapInteractiveKey(
+        edit(
+          Container(
+            key: ValueKey('keyboard-preview-key-${spec.label}'),
+            width: width,
+            height: effectiveHeight,
+            decoration: BoxDecoration(
+              color: bgColor,
+              borderRadius: BorderRadius.circular(
+                _metric(style, 'cornerRadius'),
               ),
-            ],
-          ),
-          foregroundDecoration: BoxDecoration(
-            border: themePreviewBorder(
-              field != null && !legend && !hintHighlighted ||
-                  spec.label == 'q' && path == 'common.cornerRadius',
+              border: Border.all(
+                color: borderColor,
+                width: borderWidth,
+                style: borderWidth > 0 ? BorderStyle.solid : BorderStyle.none,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: _color(style, 'shadowColor'),
+                  offset: Offset(0, _metric(style, 'shadowOffsetY')),
+                ),
+              ],
             ),
+            foregroundDecoration: BoxDecoration(
+              border: themePreviewBorder(
+                field != null && !legend && !hintHighlighted ||
+                    spec.label == 'q' && path == 'common.cornerRadius',
+              ),
+            ),
+            child: body,
           ),
-          child: body,
+          '${target}background',
+          '$label 底色',
         ),
-        '${target}background',
-        '$label 底色',
+        layerRow,
+        layerCol,
       );
     }
 
@@ -709,15 +832,18 @@ class MobileKeyboardPreview extends StatelessWidget {
           ? maximumRowWidth
           : math.min(maximumRowWidth, referenceUnitWidth * weight + gapWidth);
       final unitWidth = (rowWidth - gapWidth) / weight;
+      final layerRow = index >= rowOffset ? index - rowOffset : null;
       return Row(
         mainAxisAlignment: MainAxisAlignment.center,
         spacing: horizontalGap,
         children: [
-          for (final spec in row)
+          for (final (colIndex, spec) in row.indexed)
             key(
               spec,
               width: unitWidth * spec.weight,
               accentSample: sampleAccent && spec.label == '，',
+              layerRow: layerRow,
+              layerCol: layerRow == null ? null : colIndex,
             ),
         ],
       );
@@ -742,6 +868,7 @@ class MobileKeyboardPreview extends StatelessWidget {
       var activeSpans = <({double weight, int remaining})>[];
       for (var rowIndex = 0; rowIndex < rows.length; rowIndex++) {
         final row = rows[rowIndex];
+        final layerRow = rowIndex >= rowOffset ? rowIndex - rowOffset : null;
         final spanCount = activeSpans.length;
         final spanWeight = activeSpans.fold(0.0, (sum, s) => sum + s.weight);
         final totalCount = spanCount + row.length;
@@ -757,7 +884,7 @@ class MobileKeyboardPreview extends StatelessWidget {
           for (final s in activeSpans)
             if (s.remaining > 1) (weight: s.weight, remaining: s.remaining - 1),
         ];
-        for (final spec in row) {
+        for (final (colIndex, spec) in row.indexed) {
           final w = unitWidth * spec.weight;
           final spanRows = math.min(spec.rowSpan, rows.length - rowIndex);
           final h = keyHeight * spanRows + verticalGap * (spanRows - 1);
@@ -770,6 +897,8 @@ class MobileKeyboardPreview extends StatelessWidget {
                 width: w,
                 heightOverride: h,
                 accentSample: sampleAccent && spec.label == '，',
+                layerRow: layerRow,
+                layerCol: layerRow == null ? null : colIndex,
               ),
             ),
           );
@@ -1294,14 +1423,91 @@ class MobileKeyboardPreview extends StatelessWidget {
         child: content,
       );
     }
+    final interactive =
+        onEditField != null || onKeyTap != null || onKeyGesture != null;
     return Semantics(
       container: true,
-      label: 'KeyTao 键盘预览，$schemeName${onEditField == null ? '，静态展示' : ''}',
-      child: onEditField == null
-          ? ExcludeSemantics(child: IgnorePointer(child: content))
-          : content,
+      label: 'KeyTao 键盘预览，$schemeName${interactive ? '' : '，静态展示'}',
+      child: interactive
+          ? content
+          : ExcludeSemantics(child: IgnorePointer(child: content)),
     );
   }
+}
+
+class _InteractivePreviewKey extends StatefulWidget {
+  const _InteractivePreviewKey({
+    super.key,
+    required this.onGesture,
+    required this.child,
+  });
+
+  final ValueChanged<KeyboardPreviewGesture> onGesture;
+  final Widget child;
+
+  @override
+  State<_InteractivePreviewKey> createState() => _InteractivePreviewKeyState();
+}
+
+class _InteractivePreviewKeyState extends State<_InteractivePreviewKey> {
+  bool _pressed = false;
+  Offset _dragDelta = Offset.zero;
+  bool _swiped = false;
+
+  void _finishDrag() {
+    final dx = _dragDelta.dx;
+    final dy = _dragDelta.dy;
+    const threshold = 18.0;
+    if (!_swiped && (dx.abs() >= threshold || dy.abs() >= threshold)) {
+      _swiped = true;
+      if (dy.abs() >= dx.abs()) {
+        widget.onGesture(
+          dy < 0
+              ? KeyboardPreviewGesture.swipeUp
+              : KeyboardPreviewGesture.swipeDown,
+        );
+      } else {
+        widget.onGesture(
+          dx < 0
+              ? KeyboardPreviewGesture.swipeLeft
+              : KeyboardPreviewGesture.swipeRight,
+        );
+      }
+    }
+    if (_pressed) {
+      setState(() => _pressed = false);
+    }
+    _dragDelta = Offset.zero;
+  }
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTapDown: (_) => setState(() => _pressed = true),
+    onTapCancel: () => setState(() => _pressed = false),
+    onTapUp: (_) => setState(() => _pressed = false),
+    onTap: () => widget.onGesture(KeyboardPreviewGesture.tap),
+    onLongPress: () {
+      setState(() => _pressed = false);
+      widget.onGesture(KeyboardPreviewGesture.longPress);
+    },
+    onPanStart: (_) {
+      _dragDelta = Offset.zero;
+      _swiped = false;
+      setState(() => _pressed = true);
+    },
+    onPanUpdate: (details) => _dragDelta += details.delta,
+    onPanEnd: (_) => _finishDrag(),
+    onPanCancel: () {
+      _dragDelta = Offset.zero;
+      if (_pressed) setState(() => _pressed = false);
+    },
+    child: AnimatedOpacity(
+      duration: const Duration(milliseconds: 60),
+      opacity: _pressed ? 0.65 : 1.0,
+      child: widget.child,
+    ),
+  );
 }
 
 class _PreviewSlots {
@@ -1392,8 +1598,10 @@ class _PreviewMnemonic {
 class _PreviewKey {
   const _PreviewKey(
     this.label, {
+    this.asciiLabel,
     this.hint,
     this.action,
+    this.asciiAction,
     this.weight = 1,
     this.accent = false,
     this.group,
@@ -1404,9 +1612,16 @@ class _PreviewKey {
   });
 
   factory _PreviewKey.fromJson(Map<String, dynamic> key) => _PreviewKey(
-    key['label'] as String,
-    hint: key['hint'] as String?,
+    (key['label'] as String?) ?? '',
+    asciiLabel: (key['asciiLabel'] as String?)?.isNotEmpty == true
+        ? key['asciiLabel'] as String
+        : null,
+    hint: (key['hint'] as String?)?.isNotEmpty == true
+        ? key['hint'] as String
+        : null,
     action: (key['action'] as Map<String, dynamic>?)?['type'] as String?,
+    asciiAction:
+        (key['asciiAction'] as Map<String, dynamic>?)?['type'] as String?,
     weight: math.max(0.25, (key['weight'] as num?)?.toDouble() ?? 1),
     accent: key['style'] == 'accent',
     group: key['group'] as String?,
@@ -1426,8 +1641,10 @@ class _PreviewKey {
   );
 
   final String label;
+  final String? asciiLabel;
   final String? hint;
   final String? action;
+  final String? asciiAction;
   final double weight;
   final bool accent;
   final String? group;

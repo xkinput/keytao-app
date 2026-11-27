@@ -6,8 +6,8 @@
 
 use crate::{
     mobile_layout::{
-        mobile_layout_preview_json, resolve_mobile_layout_from_yaml, MobileLayout,
-        DEFAULT_KEYBOARD_ID, KEYBOARD_SOURCE_VERSION,
+        mobile_layout_json, mobile_layout_preview_json, resolve_mobile_layout_from_yaml,
+        MobileLayout, DEFAULT_KEYBOARD_ID, KEYBOARD_SOURCE_VERSION,
     },
     share::THEME_SHARE_FILE_THRESHOLD,
 };
@@ -59,6 +59,19 @@ pub struct KeyboardSummary {
     pub has_mnemonics: bool,
     pub recommended_schemas: Vec<String>,
     pub preview_layout_json: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardDocument {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub built_in: bool,
+    pub current: bool,
+    pub has_mnemonics: bool,
+    pub recommended_schemas: Vec<String>,
+    pub layout_json: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -668,6 +681,254 @@ pub fn import_keyboard(
     })
 }
 
+fn layout_to_source_yaml(layout: &MobileLayout) -> Result<String, String> {
+    let mut value = serde_json::to_value(layout).map_err(|e| format!("序列化键盘配置失败: {e}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or("键盘配置根节点必须是 JSON 对象")?;
+    object.remove("id");
+    object.remove("name");
+    object.remove("author");
+    object.remove("description");
+    object.remove("recommendedSchemas");
+    object.remove("hasMnemonics");
+    object.remove("clipboardRowHeight");
+    object.remove("clipboardDeleteHitWidth");
+    object.insert(
+        "version".into(),
+        Value::Number(KEYBOARD_SOURCE_VERSION.into()),
+    );
+    object.insert("inheritsDefaultLayers".into(), Value::Bool(false));
+
+    let mut meta = serde_json::Map::new();
+    meta.insert("id".into(), Value::String(layout.id.clone()));
+    meta.insert("name".into(), Value::String(layout.name.clone()));
+    if let Some(author) = layout
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        meta.insert("author".into(), Value::String(author.to_string()));
+    }
+    if let Some(description) = layout
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        meta.insert("description".into(), Value::String(description.to_string()));
+    }
+    if !layout.recommended_schemas.is_empty() {
+        meta.insert(
+            "recommendedSchemas".into(),
+            Value::Array(
+                layout
+                    .recommended_schemas
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    object.insert("meta".into(), Value::Object(meta));
+
+    let canonical = canonical_keyboard_json(&value)?;
+    if canonical.len() > MAX_KEYBOARD_SOURCE_BYTES {
+        return Err("键盘配置超过 256 KiB 上限".into());
+    }
+    serde_yaml::to_string(&value).map_err(|e| format!("序列化键盘 YAML 失败: {e}"))
+}
+
+pub fn get_keyboard_document(
+    keyboard_path: &Path,
+    id: &str,
+) -> Result<KeyboardDocument, String> {
+    let _guard = lock_store();
+    let current_id = active_keyboard_id(keyboard_path);
+    let items = load_all_keyboards(keyboard_path);
+    let target = items
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| format!("未找到键盘方案：{id}"))?;
+    let layout_json =
+        mobile_layout_json(&target.layout).map_err(|e| format!("序列化键盘文档失败: {e}"))?;
+    Ok(KeyboardDocument {
+        id: target.id.clone(),
+        name: target.layout.name.clone(),
+        description: target.layout.description.clone(),
+        built_in: target.built_in,
+        current: target.id == current_id,
+        has_mnemonics: target.layout.has_mnemonics,
+        recommended_schemas: target.layout.recommended_schemas.clone(),
+        layout_json,
+    })
+}
+
+pub fn save_keyboard_document(
+    keyboard_path: &Path,
+    id: &str,
+    layout_json: &str,
+    apply: bool,
+) -> Result<KeyboardSummary, String> {
+    let _guard = lock_store();
+    if layout_json.len() > MAX_KEYBOARD_SHARE_TEXT_BYTES {
+        return Err("键盘配置超过大小上限".into());
+    }
+    let mut layout: MobileLayout =
+        serde_json::from_str(layout_json).map_err(|e| format!("解析键盘配置失败: {e}"))?;
+    if layout.rows.is_empty() || layout.rows.iter().all(Vec::is_empty) {
+        return Err("键盘至少需要包含一行有效按键".into());
+    }
+    let trimmed_name = layout.name.trim().to_string();
+    if trimmed_name.is_empty() {
+        return Err("键盘名称不能为空".into());
+    }
+    layout.name = trimmed_name;
+
+    let items = load_all_keyboards(keyboard_path);
+    let existing: BTreeSet<String> = items.iter().map(|k| k.id.clone()).collect();
+    let source = items.iter().find(|k| k.id == id);
+
+    let (final_id, forked) = if is_built_in_id(id) || validate_keyboard_id(id).is_err() {
+        (suggest_non_conflicting_id(id, &existing), true)
+    } else {
+        (validate_keyboard_id(id)?, false)
+    };
+    if forked {
+        if let Some(built_in_source) = source {
+            if layout.name == built_in_source.layout.name {
+                layout.name = format!("{}（自定义）", layout.name);
+            }
+        }
+    }
+    layout.id = final_id.clone();
+
+    let yaml = layout_to_source_yaml(&layout)?;
+    let mut resolved = resolve_mobile_layout_from_yaml(&yaml);
+    resolved.id = final_id.clone();
+    if resolved.rows.is_empty() {
+        return Err("键盘配置缺少有效的按键行（rows）".into());
+    }
+
+    let target_file = keyboards_dir(keyboard_path).join(format!("{final_id}.yaml"));
+    write_atomic(&target_file, yaml.as_bytes())?;
+
+    let active_id = active_keyboard_id(keyboard_path);
+    let should_apply = apply || active_id == final_id;
+    if should_apply {
+        let compiled = compile_keyboard_yaml(&final_id, &yaml)?;
+        write_atomic(keyboard_path, compiled.as_bytes())?;
+    }
+
+    let stored = StoredKeyboard {
+        id: final_id.clone(),
+        built_in: false,
+        raw_yaml: yaml,
+        layout: resolved,
+    };
+    let current_id = if should_apply { final_id } else { active_id };
+    to_summary(&stored, &current_id)
+}
+
+pub fn duplicate_keyboard(
+    keyboard_path: &Path,
+    id: &str,
+    new_name: Option<&str>,
+) -> Result<KeyboardSummary, String> {
+    let _guard = lock_store();
+    let current_id = active_keyboard_id(keyboard_path);
+    let items = load_all_keyboards(keyboard_path);
+    let source = items
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| format!("未找到键盘方案：{id}"))?;
+    let existing: BTreeSet<String> = items.iter().map(|k| k.id.clone()).collect();
+    let final_id = suggest_non_conflicting_id(&source.id, &existing);
+    let final_name = new_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}（副本）", source.layout.name));
+
+    let mut value = portable_keyboard_value(&source.raw_yaml)?;
+    let object = value
+        .as_object_mut()
+        .ok_or("键盘配置根节点必须是对象")?;
+    let meta = object
+        .entry("meta")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(meta_obj) = meta.as_object_mut() {
+        meta_obj.insert("id".into(), Value::String(final_id.clone()));
+        meta_obj.insert("name".into(), Value::String(final_name));
+    }
+    let yaml = serde_yaml::to_string(&value).map_err(|e| format!("序列化键盘源失败: {e}"))?;
+    let target_file = keyboards_dir(keyboard_path).join(format!("{final_id}.yaml"));
+    write_atomic(&target_file, yaml.as_bytes())?;
+
+    let mut resolved = resolve_mobile_layout_from_yaml(&yaml);
+    resolved.id = final_id.clone();
+    let stored = StoredKeyboard {
+        id: final_id,
+        built_in: false,
+        raw_yaml: yaml,
+        layout: resolved,
+    };
+    to_summary(&stored, &current_id)
+}
+
+pub fn rename_keyboard(
+    keyboard_path: &Path,
+    id: &str,
+    new_name: &str,
+) -> Result<KeyboardSummary, String> {
+    let _guard = lock_store();
+    if is_built_in_id(id) {
+        return Err("内置键盘方案不可重命名".into());
+    }
+    let id = validate_keyboard_id(id)?;
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err("键盘名称不能为空".into());
+    }
+    let items = load_all_keyboards(keyboard_path);
+    let source = items
+        .iter()
+        .find(|item| item.id == id && !item.built_in)
+        .ok_or_else(|| format!("未找到自定义键盘：{id}"))?;
+
+    let mut value = portable_keyboard_value(&source.raw_yaml)?;
+    let object = value
+        .as_object_mut()
+        .ok_or("键盘配置根节点必须是对象")?;
+    let meta = object
+        .entry("meta")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(meta_obj) = meta.as_object_mut() {
+        meta_obj.insert("id".into(), Value::String(id.clone()));
+        meta_obj.insert("name".into(), Value::String(trimmed.to_string()));
+    }
+    let yaml = serde_yaml::to_string(&value).map_err(|e| format!("序列化键盘源失败: {e}"))?;
+    let target_file = keyboards_dir(keyboard_path).join(format!("{id}.yaml"));
+    write_atomic(&target_file, yaml.as_bytes())?;
+
+    let current_id = active_keyboard_id(keyboard_path);
+    if current_id == id {
+        let compiled = compile_keyboard_yaml(&id, &yaml)?;
+        write_atomic(keyboard_path, compiled.as_bytes())?;
+    }
+
+    let mut resolved = resolve_mobile_layout_from_yaml(&yaml);
+    resolved.id = id.clone();
+    let stored = StoredKeyboard {
+        id,
+        built_in: false,
+        raw_yaml: yaml,
+        layout: resolved,
+    };
+    to_summary(&stored, &current_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +1018,22 @@ mod tests {
         assert_eq!(k30.rows.len(), 4);
         assert_eq!(k30.rows[3][0].label, "数");
         assert!(k30.rows[3].iter().all(|k| k.label != "键"));
+        let reverse_lookup = k30.rows[1].iter().find(|k| k.label == "g").unwrap();
+        assert_eq!(reverse_lookup.hint.as_deref(), Some("反"));
+        assert_eq!(
+            reverse_lookup
+                .swipe_up
+                .as_ref()
+                .and_then(|c| c.value.as_deref()),
+            Some("`")
+        );
+        assert_eq!(
+            reverse_lookup
+                .long_press
+                .as_ref()
+                .and_then(|c| c.value.as_deref()),
+            Some("`")
+        );
 
         // Verify lssp_3x5 has embedded numberRow and rowSpan=3 stacked left symbol column.
         let l35 = resolve_mobile_layout_from_yaml(
@@ -810,6 +1087,64 @@ mod tests {
             .find(|k| k.id == DEFAULT_KEYBOARD_ID)
             .unwrap()
             .current);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn document_edit_auto_forks_builtin_updates_custom_and_supports_duplicate_rename() {
+        let (dir, path) = temp_keyboard_path("doc-edit");
+
+        // Load built-in document and edit first key label + swipeUp.
+        let doc = get_keyboard_document(&path, "keytao.qwerty26").unwrap();
+        assert!(doc.built_in);
+        let mut layout: MobileLayout = serde_json::from_str(&doc.layout_json).unwrap();
+        layout.rows[0][0].label = "Q!".into();
+        layout.rows[0][0].swipe_up = Some(crate::mobile_layout::MobileCommand {
+            command_type: "directInput".into(),
+            value: Some("1".into()),
+            fallback_value: None,
+        });
+        let edited_json = serde_json::to_string(&layout).unwrap();
+
+        // Saving a built-in keyboard auto-forks to a custom keyboard and activates it.
+        let saved = save_keyboard_document(&path, "keytao.qwerty26", &edited_json, true).unwrap();
+        assert!(!saved.built_in);
+        assert!(saved.current);
+        assert_eq!(saved.id, "my.qwerty26");
+        assert_eq!(saved.name, "标准 26 键（自定义）");
+
+        let reloaded = get_keyboard_document(&path, &saved.id).unwrap();
+        let reloaded_layout: MobileLayout = serde_json::from_str(&reloaded.layout_json).unwrap();
+        assert_eq!(reloaded_layout.rows[0][0].label, "Q!");
+        assert_eq!(
+            reloaded_layout.rows[0][0]
+                .swipe_up
+                .as_ref()
+                .and_then(|c| c.value.as_deref()),
+            Some("1")
+        );
+
+        // Saving the custom keyboard again updates it in place.
+        let mut updated = reloaded_layout;
+        updated.name = "我的专属键盘".into();
+        let saved2 = save_keyboard_document(
+            &path,
+            &saved.id,
+            &serde_json::to_string(&updated).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(saved2.id, saved.id);
+        assert_eq!(saved2.name, "我的专属键盘");
+
+        // Duplicate and rename.
+        let dup = duplicate_keyboard(&path, &saved.id, Some("副本一")).unwrap();
+        assert_ne!(dup.id, saved.id);
+        assert_eq!(dup.name, "副本一");
+        let renamed = rename_keyboard(&path, &dup.id, "已重命名键盘").unwrap();
+        assert_eq!(renamed.name, "已重命名键盘");
+        assert!(rename_keyboard(&path, "keytao.qwerty26", "nope").is_err());
 
         let _ = fs::remove_dir_all(dir);
     }

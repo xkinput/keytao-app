@@ -91,7 +91,7 @@ pub fn vk_to_keysym(vk: u16, lparam: isize, mods: u32) -> Option<u32> {
         VK_MULTIPLY => 0x002A,
         VK_ADD => 0x002B,
         VK_SUBTRACT => 0x002D,
-        VK_DECIMAL => 0x002E,
+        VK_DECIMAL => key_policy::XK_KP_DECIMAL,
         VK_DIVIDE => 0x002F,
 
         // --- Control keys ---
@@ -714,6 +714,7 @@ fn is_nonstarter_vk(vk: u16) -> bool {
             | VK_END
             | VK_PRIOR
             | VK_NEXT
+            | VK_DECIMAL
     )
 }
 
@@ -992,5 +993,18 @@ mod tests {
         assert!(should_eat_key(VK_F4.0, false, 0));
         assert!(!should_eat_key(VK_SHIFT.0, true, 0));
         assert!(key_policy::is_system_reserved_modifier(RIME_MOD_SUPER));
+    }
+
+    #[test]
+    fn numpad_decimal_bypasses_empty_composition_and_uses_kp_decimal_keysym() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_DECIMAL;
+
+        let empty = ImeState::empty();
+        let composing = composing_state();
+        assert_eq!(vk_to_keysym(VK_DECIMAL.0, 0, 0), Some(key_policy::XK_KP_DECIMAL));
+        assert!(!should_eat_key(VK_DECIMAL.0, false, 0));
+        assert!(should_bypass_empty_composition(VK_DECIMAL.0, 0, &empty));
+        assert!(should_eat_key(VK_DECIMAL.0, true, 0));
+        assert!(!should_bypass_empty_composition(VK_DECIMAL.0, 0, &composing));
     }
 }

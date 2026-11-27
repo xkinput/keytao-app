@@ -888,6 +888,57 @@ pub fn get_desktop_english_mode(
     result.map_err(CoreError::Other)
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopEnglishSwitchKey {
+    pub key: String,
+    pub schema_keys: Vec<String>,
+}
+
+pub fn get_desktop_english_switch_key(
+    host: impl ImeHost,
+) -> Result<DesktopEnglishSwitchKey, CoreError> {
+    let result: Result<_, String> = (|| {
+        let root = host.user_root()?;
+        Ok(DesktopEnglishSwitchKey {
+            key: keytao_core::english_mode::read_english_switch_key(&root)
+                .as_setting()
+                .into_owned(),
+            schema_keys: keytao_core::english_mode::read_schema_english_switch_keys(&root),
+        })
+    })();
+    result.map_err(CoreError::Other)
+}
+
+pub async fn set_desktop_english_switch_key(
+    host: impl ImeHost,
+    key: String,
+) -> Result<DesktopEnglishSwitchKey, CoreError> {
+    let result: Result<_, String> = async {
+        tokio::task::spawn_blocking(move || {
+            use keytao_core::english_mode::{
+                EnglishSwitchKey, read_schema_english_switch_keys, write_english_switch_key,
+            };
+            #[cfg(target_os = "windows")]
+            use keytao_core::english_mode::{EnglishMode, read_english_mode};
+            let root = host.user_root()?;
+            let parsed = EnglishSwitchKey::parse(&key)?;
+            let saved = write_english_switch_key(&root, &parsed)?;
+            #[cfg(target_os = "windows")]
+            host.publish_english_settings(read_english_mode(&root) == EnglishMode::Schema)?;
+            host.write_reload_stamp(&root)?;
+            Ok(DesktopEnglishSwitchKey {
+                key: saved,
+                schema_keys: read_schema_english_switch_keys(&root),
+            })
+        })
+        .await
+        .map_err(|e| format!("保存切换中英键失败：{e}"))?
+    }
+    .await;
+    result.map_err(CoreError::Other)
+}
+
 #[derive(Serialize)]
 pub struct SchemaList {
     pub current: Option<String>,

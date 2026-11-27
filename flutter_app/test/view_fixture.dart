@@ -358,6 +358,8 @@ class ViewController extends AppController {
     );
     theme['panel']['orientation'] =
         pcField('panel', 'orientation') ?? 'horizontal';
+    theme['candidate']['verticalFullWidth'] =
+        pcField('candidate', 'verticalFullWidth') == true;
     return theme;
   }
 

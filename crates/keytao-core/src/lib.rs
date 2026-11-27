@@ -5149,6 +5149,7 @@ pub mod key_policy {
     pub const XK_BEGIN: u32 = 0xff58;
     pub const XK_DELETE: u32 = 0xffff;
     pub const XK_KP_ENTER: u32 = 0xff8d;
+    pub const XK_KP_DECIMAL: u32 = 0xffae;
     pub const XK_F4: u32 = 0xffc1;
 
     /// X11 encodes a keysym for an arbitrary Unicode scalar as
@@ -5251,7 +5252,7 @@ pub mod key_policy {
         matches!(
             sym,
             XK_SPACE | XK_BACK_SPACE | XK_DELETE | XK_TAB | XK_RETURN | XK_ESCAPE | XK_HOME
-                ..=XK_BEGIN | XK_KP_ENTER
+                ..=XK_BEGIN | XK_KP_ENTER | XK_KP_DECIMAL
         )
     }
 
@@ -5374,6 +5375,9 @@ pub mod key_policy {
 
     /// The character a keysym stands for, inverse of [`keysym_for_char`].
     pub fn char_for_keysym(sym: u32) -> Option<char> {
+        if sym == XK_KP_DECIMAL {
+            return Some('.');
+        }
         let codepoint = if sym & 0xff00_0000 == XK_UNICODE_BASE {
             sym & 0x00ff_ffff
         } else if sym <= 0x00ff {
@@ -5978,6 +5982,7 @@ pub struct ImeRuntimeSession {
 struct PendingRuntimeInput {
     state_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     package_menu: Option<switcher_model::Menu>,
+    armed_modifier_tap: Option<(u32, Instant)>,
 }
 
 #[cfg(any(
@@ -6137,7 +6142,9 @@ impl ProcessRimeState {
         let mut sessions = lock_ignore_poison(&self.sessions);
         sessions.retain(|session| {
             if let Some(pending) = session.pending.upgrade() {
-                lock_ignore_poison(&pending).package_menu = None;
+                let mut pending = lock_ignore_poison(&pending);
+                pending.package_menu = None;
+                pending.armed_modifier_tap = None;
             }
             let Some(session) = session.inner.upgrade() else {
                 return false;
@@ -6186,7 +6193,8 @@ impl ProcessRimeState {
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 {
                     let mut global = lock_ignore_poison(&self.global_input);
-                    let global = global_input::GlobalInput::get(&mut global, engine, schema_root);
+                    let global =
+                        global_input::GlobalInput::get(&mut global, engine, root, schema_root);
                     if let Some(id) = request.schema_id.as_deref() {
                         global.request_schema(id);
                     }
@@ -6226,6 +6234,7 @@ impl ProcessRimeState {
                     } else {
                         engine.select_schema(id)?;
                         engine.apply_reset_switch_request(schema_root)?;
+                        engine.apply_ascii_mode(false);
                         publish_current_schema(schema_root, id);
                     }
                 }
@@ -7137,19 +7146,34 @@ impl ImeRuntime {
                 };
                 let engine = PROCESS_RIME.create_backend(&dirs.user)?;
                 let mode = english_mode::read_english_mode(&dirs.user);
+                let switch_key = english_mode::read_english_switch_key(&dirs.user);
                 let schemas = engine.list_schemas();
                 if self.0.ime_host {
                     engine.apply_reset_switch_request(&schema_root)?;
                 }
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                {
+                    // Mobile keyboards own Chinese/English state via their dedicated 中/英 key;
+                    // ignore upstream desktop defaults like `ascii_mode: reset: 1`.
+                    engine.apply_ascii_mode(false);
+                }
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 if self.0.ime_host {
                     let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
-                    let global =
-                        global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
-                    global.english_mode.configure(mode, schemas.clone());
+                    let global = global_input::GlobalInput::get(
+                        &mut global,
+                        engine.as_ref(),
+                        &dirs.user,
+                        &schema_root,
+                    );
+                    global.english_mode.configure_with_switch_key(
+                        mode,
+                        switch_key.clone(),
+                        schemas.clone(),
+                    );
                     global.apply(engine.as_ref(), &schema_root)?;
                 }
-                english_mode.configure(mode, schemas);
+                english_mode.configure_with_switch_key(mode, switch_key, schemas);
                 if request.is_some() {
                     PROCESS_RIME.apply_switch_request(
                         &dirs.user,
@@ -7228,7 +7252,13 @@ impl Default for ImeRuntime {
 impl ImeRuntimeSession {
     pub fn state(&self) -> ImeState {
         self.with_package_menu(|menu| menu.state())
-            .or_else(|| self.with_engine(|engine| engine.state()))
+            .or_else(|| {
+                self.with_engine_access(false, false, |engine, _, mode, _, _| {
+                    let mut state = engine.state();
+                    mode.switch_key.apply_to_state(&mut state);
+                    state
+                })
+            })
             .unwrap_or_else(ImeState::empty)
     }
 
@@ -7302,8 +7332,11 @@ impl ImeRuntimeSession {
         if let Some(state) = self.with_package_menu(|menu| menu.state()) {
             return state;
         }
-        let state =
-            self.with_engine_access_mode(false, false, false, |engine, _, _, _, _| engine.state());
+        let state = self.with_engine_access_mode(false, false, false, |engine, _, mode, _, _| {
+            let mut state = engine.state();
+            mode.switch_key.apply_to_state(&mut state);
+            state
+        });
         if state.is_none() && self.runtime_can_resume() {
             self.schedule_prewarm();
         }
@@ -7591,6 +7624,21 @@ impl ImeRuntimeSession {
                     engine.discard_composition();
                 }
                 if policy.composing {
+                    if cfg!(not(any(target_os = "android", target_os = "ios")))
+                        && !mode.switch_key.is_schema()
+                    {
+                        if let Some(mut intercepted) = self.intercept_custom_english_switch_key(
+                            engine,
+                            mode,
+                            keycode,
+                            mask,
+                            ime_host,
+                            input,
+                        ) {
+                            mode.switch_key.apply_to_state(&mut intercepted.state);
+                            return intercepted;
+                        }
+                    }
                     let desktop_dictionary =
                         cfg!(not(any(target_os = "android", target_os = "ios")))
                             && mode.mode == english_mode::EnglishMode::Schema
@@ -7606,6 +7654,31 @@ impl ImeRuntimeSession {
                         return KeyProcessResult {
                             state: engine.state(),
                             accepted: false,
+                        };
+                    }
+                    if keycode == key_policy::XK_KP_DECIMAL
+                        && mask & !(RIME_MOD_LOCK | RIME_MOD_SHIFT) == 0
+                    {
+                        let current = engine.state();
+                        if current.preedit.is_empty() && current.candidates.is_empty() {
+                            return KeyProcessResult {
+                                state: current,
+                                accepted: false,
+                            };
+                        }
+                        let raw = engine.raw_input().filter(|raw| !raw.is_empty());
+                        let mut committed_state = engine.commit_composition();
+                        let mut text = committed_state
+                            .committed
+                            .take()
+                            .or(raw)
+                            .unwrap_or_default();
+                        text.push('.');
+                        committed_state.committed = Some(text);
+                        mode.switch_key.apply_to_state(&mut committed_state);
+                        return KeyProcessResult {
+                            state: committed_state,
+                            accepted: true,
                         };
                     }
                     let before = engine.is_ascii_mode();
@@ -7685,18 +7758,148 @@ impl ImeRuntimeSession {
                     {
                         crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
                     }
+                    mode.switch_key.apply_to_state(&mut result.state);
                     result
                 } else {
                     // A sensitive context never reaches librime: no composition, no
                     // candidates and nothing for the user dictionary to learn.
+                    let mut state = engine.state();
+                    mode.switch_key.apply_to_state(&mut state);
                     KeyProcessResult {
-                        state: engine.state(),
+                        state,
                         accepted: false,
                     }
                 }
             })
         })
         .flatten()
+    }
+
+    fn trigger_custom_english_toggle(
+        &self,
+        engine: &dyn ImeBackend,
+        mode: &mut english_mode::EnglishModeController,
+        target_english: bool,
+        accepted: bool,
+        show_hint: bool,
+        ime_host: bool,
+        input: Option<&global_input::InputState>,
+    ) -> KeyProcessResult {
+        self.context_ascii_mode.store(0, Ordering::Release);
+        let committed = if engine.is_composing() {
+            engine.commit_composition().committed
+        } else {
+            None
+        };
+        let mut state = match mode.switch(engine, target_english) {
+            Ok(state) => state,
+            Err(error) => {
+                crate::rt_log!(Level::Info, "error", "english_mode_switch", msg = error);
+                engine.set_ascii_mode(target_english)
+            }
+        };
+        if let Some(prefix) = committed {
+            state.committed = Some(format!("{prefix}{}", state.committed.unwrap_or_default()));
+        }
+        if let Err(error) = self.apply_reset_switch_request(engine, ime_host, input, &mut state) {
+            crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
+        }
+        if show_hint {
+            state.switch_hint = Some(if state.is_english_mode() {
+                "英".into()
+            } else {
+                "中".into()
+            });
+        }
+        KeyProcessResult { state, accepted }
+    }
+
+    fn intercept_custom_english_switch_key(
+        &self,
+        engine: &dyn ImeBackend,
+        mode: &mut english_mode::EnglishModeController,
+        keycode: u32,
+        mask: u32,
+        ime_host: bool,
+        input: Option<&global_input::InputState>,
+    ) -> Option<KeyProcessResult> {
+        let own_modifier = match keycode {
+            0xffe1 | 0xffe2 => Some(RIME_MOD_SHIFT),
+            0xffe3 | 0xffe4 => Some(RIME_MOD_CONTROL),
+            0xffe9 | 0xffea => Some(RIME_MOD_ALT),
+            _ => None,
+        };
+        if let Some(own_modifier) = own_modifier {
+            let other = rime_modifier_mask(mask) & !(own_modifier | RIME_RELEASE_MASK);
+            let mut pending = lock_ignore_poison(&self.pending);
+            if mask & RIME_RELEASE_MASK == 0 {
+                pending.armed_modifier_tap = (other == 0).then_some((keycode, Instant::now()));
+                return Some(KeyProcessResult {
+                    state: engine.state(),
+                    accepted: false,
+                });
+            }
+            let armed = pending.armed_modifier_tap.take();
+            drop(pending);
+            if other == 0
+                && armed.is_some_and(|(key, started)| {
+                    key == keycode && started.elapsed() < Duration::from_millis(500)
+                })
+                && mode.switch_key.matches_modifier_tap(keycode)
+            {
+                let target_english = !mode.is_english(engine);
+                return Some(self.trigger_custom_english_toggle(
+                    engine,
+                    mode,
+                    target_english,
+                    true,
+                    false,
+                    ime_host,
+                    input,
+                ));
+            }
+            return Some(KeyProcessResult {
+                state: engine.state(),
+                accepted: false,
+            });
+        }
+
+        if keycode == 0xffe5 {
+            lock_ignore_poison(&self.pending).armed_modifier_tap = None;
+            if mask & RIME_RELEASE_MASK == 0 && mode.switch_key.matches_caps_lock() {
+                let target_english = mask & RIME_MOD_LOCK == 0;
+                return Some(self.trigger_custom_english_toggle(
+                    engine,
+                    mode,
+                    target_english,
+                    false,
+                    false,
+                    ime_host,
+                    input,
+                ));
+            }
+            return Some(KeyProcessResult {
+                state: engine.state(),
+                accepted: false,
+            });
+        }
+
+        if mask & RIME_RELEASE_MASK == 0 {
+            lock_ignore_poison(&self.pending).armed_modifier_tap = None;
+        }
+        if mode.switch_key.matches_shortcut(keycode, mask) {
+            let target_english = !mode.is_english(engine);
+            return Some(self.trigger_custom_english_toggle(
+                engine,
+                mode,
+                target_english,
+                true,
+                true,
+                ime_host,
+                input,
+            ));
+        }
+        None
     }
 
     /// `Return` handling shared by every frontend, see [`RimeBackend::process_enter`].
@@ -7714,8 +7917,8 @@ impl ImeRuntimeSession {
         if let Some(result) = self.process_package_key(key_policy::XK_RETURN, 0) {
             return Some(result);
         }
-        self.with_engine_access_mode(true, false, true, |engine, policy, _, ime_host, before| {
-            if policy.composing {
+        self.with_engine_access_mode(true, false, true, |engine, policy, mode, ime_host, before| {
+            let mut result = if policy.composing {
                 let mut result = engine.process_enter();
                 if let Err(error) =
                     self.apply_reset_switch_request(engine, ime_host, before, &mut result.state)
@@ -7728,7 +7931,9 @@ impl ImeRuntimeSession {
                     state: engine.state(),
                     accepted: false,
                 }
-            }
+            };
+            mode.switch_key.apply_to_state(&mut result.state);
+            result
         })
     }
 
@@ -7754,12 +7959,14 @@ impl ImeRuntimeSession {
         } else if let Some(state) = self.with_package_menu(|menu| menu.state()) {
             return Some(state);
         }
-        self.with_engine_access_mode(false, false, false, |engine, policy, _, _, _| {
-            if !policy.composing {
+        self.with_engine_access_mode(false, false, false, |engine, policy, mode, _, _| {
+            let mut state = if !policy.composing {
                 engine.clear_composition()
             } else {
                 engine.state()
-            }
+            };
+            mode.switch_key.apply_to_state(&mut state);
+            state
         })
     }
 
@@ -7890,7 +8097,7 @@ impl ImeRuntimeSession {
     pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
         self.close_package_menu();
         self.context_ascii_mode.store(0, Ordering::Release);
-        self.with_engine_and_mode(|engine, _, _, ime_host, before| {
+        self.with_engine_and_mode(|engine, _, mode, ime_host, before| {
             let mut state = match engine.select_schema(schema_id) {
                 Ok(state) => state,
                 Err(error) => {
@@ -7906,6 +8113,12 @@ impl ImeRuntimeSession {
                 write_current_schema(&schema_root, schema_id)?;
             }
             self.apply_reset_switch_request(engine, ime_host, before, &mut state)?;
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                engine.apply_ascii_mode(false);
+                state.ascii_mode = false;
+            }
+            mode.switch_key.apply_to_state(&mut state);
             Ok(state)
         })
         .ok_or_else(|| "Rime session is unavailable".to_string())?
@@ -7922,6 +8135,7 @@ impl ImeRuntimeSession {
     }
 
     pub fn reset(&self) -> Option<ImeState> {
+        lock_ignore_poison(&self.pending).armed_modifier_tap = None;
         self.with_input_change(|engine| engine.reset())
     }
 
@@ -7961,6 +8175,7 @@ impl ImeRuntimeSession {
         self.with_engine_and_mode(|engine, _, mode, ime_host, before| {
             let mut state = mode.switch(engine, enabled)?;
             self.apply_reset_switch_request(engine, ime_host, before, &mut state)?;
+            mode.switch_key.apply_to_state(&mut state);
             Ok(state)
         })
         .ok_or_else(|| "Rime session is unavailable".to_string())?
@@ -8020,9 +8235,13 @@ impl ImeRuntimeSession {
         self.with_engine_and_policy(|engine, _| action(engine))
     }
 
-    fn with_input_change<T>(&self, action: impl FnOnce(&dyn ImeBackend) -> T) -> Option<T> {
+    fn with_input_change(&self, action: impl FnOnce(&dyn ImeBackend) -> ImeState) -> Option<ImeState> {
         self.close_package_menu();
-        self.with_engine_and_mode(|engine, _, _, _, _| action(engine))
+        self.with_engine_and_mode(|engine, _, mode, _, _| {
+            let mut state = action(engine);
+            mode.switch_key.apply_to_state(&mut state);
+            state
+        })
     }
 
     /// Same as [`ImeRuntimeSession::with_engine`], but the action also sees the
@@ -8364,7 +8583,8 @@ impl ImeRuntimeSession {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if ime_host {
             let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
-            let global = global_input::GlobalInput::get(&mut global, engine, &schema_root);
+            let global =
+                global_input::GlobalInput::get(&mut global, engine, &self.dirs.user, &schema_root);
             if policy.composing && context_ascii_mode == 0 {
                 if *applied_input_version != global.version && !engine.is_composing() {
                     global.apply(engine, &schema_root).ok()?;
@@ -8468,22 +8688,27 @@ impl ImeRuntimeSession {
             }
             let engine = PROCESS_RIME.create_backend(root)?;
             let schema_root = PROCESS_RIME.schema_root(root);
+            let mode = english_mode::read_english_mode(root);
+            let switch_key = english_mode::read_english_switch_key(root);
+            let schemas = engine.list_schemas();
             inner
                 .english_mode
-                .configure(english_mode::read_english_mode(root), engine.list_schemas());
+                .configure_with_switch_key(mode, switch_key.clone(), schemas.clone());
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             if inner.ime_host {
                 let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
-                let global = global_input::GlobalInput::get(&mut global, engine.as_ref(), &schema_root);
+                let global =
+                    global_input::GlobalInput::get(&mut global, engine.as_ref(), root, &schema_root);
                 global
                     .english_mode
-                    .configure(english_mode::read_english_mode(root), engine.list_schemas());
+                    .configure_with_switch_key(mode, switch_key, schemas);
                 global.apply(engine.as_ref(), &schema_root)?;
                 inner.carried_ascii_mode = None;
                 inner.carried_english_mode = None;
             }
             // Restore live language state before applying any new app request.
-            if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
+            let carried_ascii = inner.carried_ascii_mode.take();
+            if let Some(ascii_mode) = carried_ascii {
                 engine.apply_ascii_mode(ascii_mode);
             }
             if cfg!(not(any(target_os = "android", target_os = "ios"))) {
@@ -8498,6 +8723,10 @@ impl ImeRuntimeSession {
             }
             if inner.ime_host {
                 engine.apply_reset_switch_request(&schema_root)?;
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if carried_ascii.is_none() {
+                engine.apply_ascii_mode(false);
             }
             inner.engine = Some(engine);
             inner.generation = current;

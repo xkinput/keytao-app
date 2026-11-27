@@ -171,24 +171,39 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       _cloudDialogOpen = true;
       final confirmed = await showFDialog<bool>(
         context: context,
-        builder: (context, _, animation) => AppDialog(
-          title: profile != null
-              ? '从云端下载'
-              : '启用${c.packageDisplayName(active!)}？',
-          animation: animation,
-          actions: [
-            ActionButton(
-              AppStrings.cancel,
-              onPress: () => Navigator.pop(context, false),
-            ),
-            ActionButton(
-              profile != null ? '应用' : '启用',
-              primary: true,
-              onPress: () => Navigator.pop(context, true),
-            ),
-          ],
-          child: const SizedBox.shrink(),
-        ),
+        builder: (context, _, animation) {
+          final cloudScheme = profile?['active_scheme'] as String?;
+          return AppDialog(
+            title: profile != null
+                ? '同步云端账号配置'
+                : '启用${c.packageDisplayName(active!)}？',
+            animation: animation,
+            actions: [
+              ActionButton(
+                profile != null ? '暂不应用' : AppStrings.cancel,
+                onPress: () => Navigator.pop(context, false),
+              ),
+              ActionButton(
+                profile != null ? '下载并应用' : '启用',
+                primary: true,
+                onPress: () => Navigator.pop(context, true),
+              ),
+            ],
+            child: profile != null
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    spacing: 6,
+                    children: [
+                      const Text('检测到账号云端保存的输入方案、外观与输入设置与当前设备不同。'),
+                      if (cloudScheme != null && cloudScheme.isNotEmpty)
+                        Text('云端当前方案：${c.packageDisplayName(cloudScheme)}'),
+                      const Text('点击「下载并应用」将用云端配置更新本机设置；点击「暂不应用」将保留当前设备设置。'),
+                    ],
+                  )
+                : const SizedBox.shrink(),
+          );
+        },
       );
       if (profile != null) {
         if (confirmed == true) await c.applyCloudProfile();

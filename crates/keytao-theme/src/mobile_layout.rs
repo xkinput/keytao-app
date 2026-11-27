@@ -118,8 +118,8 @@ pub struct MobileKeyboardMeta {
     pub recommended_schemas: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct MobileLayout {
     pub id: String,
     pub name: String,
@@ -154,16 +154,16 @@ pub struct MobileLayout {
     pub layers: BTreeMap<String, Vec<Vec<MobileKey>>>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct MobileFloatingLayout {
     pub margin: f32,
     pub portrait: MobileFloatingProfile,
     pub landscape: MobileFloatingProfile,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct MobileFloatingProfile {
     pub enabled: bool,
     pub scale: f32,

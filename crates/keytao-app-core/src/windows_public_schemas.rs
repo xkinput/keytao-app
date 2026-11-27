@@ -1309,11 +1309,16 @@ fn remove_schema_at(
 
 /// Publish input preferences without exposing private metadata or dictionaries.
 pub fn publish_english_settings(root: &Path, enabled: bool) -> Result<(), String> {
-    let bytes = serde_json::to_vec(&serde_json::json!({
+    let switch_key = keytao_core::english_mode::read_english_switch_key(root);
+    let mut payload = serde_json::json!({
         "englishMode": if enabled { "schema" } else { "ascii" },
         "candidatePageSize": crate::ime_settings::read_candidate_page_size(root),
-    }))
-    .map_err(|error| error.to_string())?;
+    });
+    if !switch_key.is_schema() {
+        payload[keytao_core::english_mode::SWITCH_KEY_SETTING] =
+            serde_json::json!(switch_key.as_setting());
+    }
+    let bytes = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
     publish_files(&[
         (PathBuf::from("keytao-ime.json"), bytes),
         crate::ime_settings::schema_switch_settings_file(root)?,

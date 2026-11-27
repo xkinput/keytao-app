@@ -292,12 +292,24 @@ class CandidatePanelPreview extends StatelessWidget {
       return (text: candidate.text, comment: comment);
     });
     final commentsBelow = option['commentPosition'] == 'below';
+    final verticalFullWidth = vertical && option['verticalFullWidth'] == true;
     final alignStackedRow =
         !vertical &&
         commentsBelow &&
         previewCandidates.any((candidate) => candidate.comment.isNotEmpty);
-    final widths = <double>[];
-    final candidates = <Widget>[];
+    final measured = <({
+      bool selected,
+      String label,
+      ({String text, String comment}) candidate,
+      String comment,
+      TextStyle labelStyle,
+      TextStyle textStyle,
+      TextStyle commentStyle,
+      bool stacked,
+      Size labelSize,
+      Size wordSize,
+      double width,
+    })>[];
     for (var index = 0; index < previewCandidates.length; index++) {
       final selected = index == 0;
       final label = '${index + 1}${option['labelSuffix']}';
@@ -332,6 +344,38 @@ class CandidatePanelPreview extends StatelessWidget {
               : wordSize.width +
                     (comment.isEmpty ? 0 : commentWidth + inlineGap)) +
           _metric(option, 'paddingX') * 2;
+      measured.add((
+        selected: selected,
+        label: label,
+        candidate: candidate,
+        comment: comment,
+        labelStyle: labelStyle,
+        textStyle: textStyle,
+        commentStyle: commentStyle,
+        stacked: stacked,
+        labelSize: labelSize,
+        wordSize: wordSize,
+        width: width,
+      ));
+    }
+    final maxOptionWidth = measured.isEmpty
+        ? 0.0
+        : measured.map((item) => item.width).reduce(math.max);
+    final widths = <double>[];
+    final candidates = <Widget>[];
+    for (var index = 0; index < measured.length; index++) {
+      final item = measured[index];
+      final selected = item.selected;
+      final label = item.label;
+      final candidate = item.candidate;
+      final comment = item.comment;
+      final labelStyle = item.labelStyle;
+      final textStyle = item.textStyle;
+      final commentStyle = item.commentStyle;
+      final stacked = item.stacked;
+      final labelSize = item.labelSize;
+      final wordSize = item.wordSize;
+      final width = verticalFullWidth ? maxOptionWidth : item.width;
       final word = themePreviewOutline(
         edit(
           'pc.font.size',
@@ -387,7 +431,8 @@ class CandidatePanelPreview extends StatelessWidget {
         'pc.candidate.selectedBorderColor' ||
         'pc.candidate.borderWidth' ||
         'pc.candidate.cornerRadius' ||
-        'pc.candidate.commentPosition' => selected,
+        'pc.candidate.commentPosition' ||
+        'pc.candidate.verticalFullWidth' => selected,
         _ => false,
       };
       widths.add(width);
@@ -410,6 +455,7 @@ class CandidatePanelPreview extends StatelessWidget {
                       )
                     : null,
                 child: Container(
+                  key: ValueKey('candidate-preview-item-$index'),
                   width: width,
                   constraints: BoxConstraints(
                     minHeight: _metric(option, 'minHeight'),

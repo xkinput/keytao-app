@@ -139,6 +139,7 @@ abstract final class AppStrings {
   static const on = '开启';
   static const off = '关闭';
   static const englishMode = '英文模式';
+  static const englishSwitchKey = '切换中英键';
   static const englishSchema = 'English 方案';
   static const englishAscii = 'ASCII 模式';
   static const englishHint = '请先在方案页安装附加方案 English';

@@ -977,6 +977,7 @@ final class KeyTaoInputController: IMKInputController {
         switch Int(event.keyCode) {
         case kVK_Return:           return rimeKeyReturn
         case kVK_ANSI_KeypadEnter: return rimeKeyKeypadEnter
+        case kVK_ANSI_KeypadDecimal: return 0xffae
         case kVK_Delete:           return 0xff08
         case kVK_ForwardDelete:    return 0xffff
         case kVK_Escape:           return 0xff1b

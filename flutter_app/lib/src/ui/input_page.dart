@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
+import 'english_switch_key_picker.dart';
 import 'settings.dart';
 import 'progress.dart';
 import 'theme.dart';
@@ -97,6 +98,7 @@ class InputPage extends StatelessWidget {
                 ),
                 if (controller.englishModeHint case final hint?)
                   Text(hint, style: context.theme.typography.body.xs),
+                _DesktopEnglishSwitchKeyRow(controller: controller),
               ],
             ),
           SwitchSetting(
@@ -175,6 +177,107 @@ class InputPage extends StatelessWidget {
         controller.userWordsReportError != null)
       UserWordsNotice(controller: controller),
   ];
+}
+
+class _DesktopEnglishSwitchKeyRow extends StatelessWidget {
+  const _DesktopEnglishSwitchKeyRow({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final isMacOs = controller.info.platform == BridgePlatform.macOs;
+    final current = controller.desktopEnglishSwitchKey;
+    final schemaKeys = controller.desktopSchemaEnglishSwitchKeys;
+    final schemaSummary = formatSchemaEnglishSwitchKeys(
+      schemaKeys,
+      isMacOs: isMacOs,
+    );
+    final presets = englishSwitchKeyPresets(
+      isMacOs: isMacOs,
+      schemaKeys: schemaKeys,
+    );
+    final items = <String, String>{
+      for (final entry in presets.entries) entry.value: entry.key,
+      if (!presets.containsKey(current))
+        englishSwitchKeyLabel(current, isMacOs: isMacOs): current,
+    };
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: 4,
+        children: [
+          SettingRow(
+            AppStrings.englishSwitchKey,
+            keepInline: true,
+            controlMaxWidth: 268,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 8,
+              children: [
+                Semantics(
+                  label: AppStrings.englishSwitchKey,
+                  enabled: !controller.busy,
+                  child: SizedBox(
+                    width: 204,
+                    child: FSelect<String>(
+                      size: FTextFieldSizeVariant.md,
+                      enabled: !controller.busy,
+                      control: FSelectControl.lifted(
+                        value: current,
+                        onChange: (value) {
+                          if (value != null && value != current) {
+                            controller.saveDesktopEnglishSwitchKey(value);
+                          }
+                        },
+                      ),
+                      items: items,
+                    ),
+                  ),
+                ),
+                FTooltip(
+                  tipBuilder: (_, _) => const Text('自定义按键'),
+                  child: FButton.icon(
+                    key: const ValueKey('english-switch-key-record-button'),
+                    variant: FButtonVariant.outline,
+                    onPress: controller.busy
+                        ? null
+                        : () async {
+                            final selected = await showEnglishSwitchKeyDialog(
+                              context,
+                              currentKey: current,
+                              isMacOs: isMacOs,
+                              schemaKeys: schemaKeys,
+                            );
+                            if (selected != null && selected != current) {
+                              await controller.saveDesktopEnglishSwitchKey(
+                                selected,
+                              );
+                            }
+                          },
+                    child: const Icon(
+                      FLucideIcons.keyboard,
+                      size: 16,
+                      semanticLabel: '自定义切换中英键',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (schemaSummary != null)
+            Text(
+              current == 'schema'
+                  ? '当前方案切换键：$schemaSummary'
+                  : '已自定义覆盖（方案默认：$schemaSummary）',
+              style: context.theme.typography.body.xs.copyWith(
+                color: AppPalette.of(context).muted,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }
 
 class _RecentOperation extends StatelessWidget {

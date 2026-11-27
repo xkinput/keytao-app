@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 class AccountStatsDto {
   final int batchesCount;
@@ -875,6 +875,53 @@ class IsolatedPackageDto {
           ready == other.ready &&
           engine == other.engine &&
           schemas == other.schemas;
+}
+
+class KeyboardDocumentDto {
+  final String id;
+  final String name;
+  final String? description;
+  final bool builtIn;
+  final bool current;
+  final bool hasMnemonics;
+  final List<String> recommendedSchemas;
+  final String layoutJson;
+
+  const KeyboardDocumentDto({
+    required this.id,
+    required this.name,
+    this.description,
+    required this.builtIn,
+    required this.current,
+    required this.hasMnemonics,
+    required this.recommendedSchemas,
+    required this.layoutJson,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      description.hashCode ^
+      builtIn.hashCode ^
+      current.hashCode ^
+      hasMnemonics.hashCode ^
+      recommendedSchemas.hashCode ^
+      layoutJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeyboardDocumentDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          description == other.description &&
+          builtIn == other.builtIn &&
+          current == other.current &&
+          hasMnemonics == other.hasMnemonics &&
+          recommendedSchemas == other.recommendedSchemas &&
+          layoutJson == other.layoutJson;
 }
 
 class KeyboardExportDto {

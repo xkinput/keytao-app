@@ -22,6 +22,13 @@ enum class Readiness {
     READY,
 }
 
+data class KeytaoKeyboardOption(
+    val id: String,
+    val name: String,
+    val current: Boolean,
+    val recommended: Boolean,
+)
+
 data class KeytaoRimeOptionsState(
     val schemas: List<KeytaoRimeSchema>,
     val currentSchema: KeytaoRimeSchema?,
@@ -29,6 +36,7 @@ data class KeytaoRimeOptionsState(
     val switches: List<KeytaoRimeSchemaSwitch>,
     val options: Map<String, Boolean>,
     val packages: List<KeytaoRimeSwitcherPackage> = emptyList(),
+    val keyboards: List<KeytaoKeyboardOption> = emptyList(),
 ) {
     companion object {
         val EMPTY = KeytaoRimeOptionsState(emptyList(), null, null, emptyList(), emptyMap())

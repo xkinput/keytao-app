@@ -2,11 +2,430 @@
 //! `ascii_mode` remains librime's pass-through flag; English dictionary input
 //! deliberately keeps that flag off so the engine can produce candidates.
 
-use crate::{ImeState, KeyProcessResult, SchemaInfo, SchemaSwitch};
+use crate::{
+    ImeState, KeyProcessResult, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+    SchemaInfo, SchemaShortcut, SchemaSwitch,
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path};
+use std::{borrow::Cow, collections::BTreeMap, path::Path};
 
 pub const SETTINGS_FILE: &str = "keytao-ime.json";
+pub const SWITCH_KEY_SETTING: &str = "englishSwitchKey";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifierSwitchKey {
+    Shift,
+    ShiftL,
+    ShiftR,
+    Control,
+    ControlL,
+    ControlR,
+    Alt,
+    AltL,
+    AltR,
+}
+
+impl ModifierSwitchKey {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shift => "Shift",
+            Self::ShiftL => "Shift_L",
+            Self::ShiftR => "Shift_R",
+            Self::Control => "Control",
+            Self::ControlL => "Control_L",
+            Self::ControlR => "Control_R",
+            Self::Alt => "Alt",
+            Self::AltL => "Alt_L",
+            Self::AltR => "Alt_R",
+        }
+    }
+
+    pub fn matches(self, keycode: u32) -> bool {
+        match self {
+            Self::Shift => matches!(keycode, 0xffe1 | 0xffe2),
+            Self::ShiftL => keycode == 0xffe1,
+            Self::ShiftR => keycode == 0xffe2,
+            Self::Control => matches!(keycode, 0xffe3 | 0xffe4),
+            Self::ControlL => keycode == 0xffe3,
+            Self::ControlR => keycode == 0xffe4,
+            Self::Alt => matches!(keycode, 0xffe9 | 0xffea),
+            Self::AltL => keycode == 0xffe9,
+            Self::AltR => keycode == 0xffea,
+        }
+    }
+
+    /// Control/Alt keysyms that platform frontends must forward on solo taps.
+    pub fn modifier_taps(self) -> Vec<u32> {
+        match self {
+            Self::Control => vec![0xffe3, 0xffe4],
+            Self::ControlL => vec![0xffe3],
+            Self::ControlR => vec![0xffe4],
+            Self::Alt => vec![0xffe9, 0xffea],
+            Self::AltL => vec![0xffe9],
+            Self::AltR => vec![0xffea],
+            Self::Shift | Self::ShiftL | Self::ShiftR => Vec::new(),
+        }
+    }
+}
+
+/// Desktop Chinese/English switch key preference.
+///
+/// `Schema` preserves the active Rime schema's own `ascii_composer` /
+/// `key_binder` configuration (and libjd's built-in Shift/CapsLock defaults).
+/// Any other variant overrides modifier taps and/or adds a global toggle shortcut
+/// across both librime and libjd sessions without requiring redeployment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EnglishSwitchKey {
+    #[default]
+    Schema,
+    ModifierTap(ModifierSwitchKey),
+    CapsLock,
+    Shortcut {
+        spec: String,
+        shortcut: SchemaShortcut,
+    },
+}
+
+impl EnglishSwitchKey {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("schema") {
+            return Ok(Self::Schema);
+        }
+        let preset = match trimmed.to_ascii_lowercase().as_str() {
+            "shift" => Some(Self::ModifierTap(ModifierSwitchKey::Shift)),
+            "shift_l" => Some(Self::ModifierTap(ModifierSwitchKey::ShiftL)),
+            "shift_r" => Some(Self::ModifierTap(ModifierSwitchKey::ShiftR)),
+            "control" | "ctrl" => Some(Self::ModifierTap(ModifierSwitchKey::Control)),
+            "control_l" | "ctrl_l" => Some(Self::ModifierTap(ModifierSwitchKey::ControlL)),
+            "control_r" | "ctrl_r" => Some(Self::ModifierTap(ModifierSwitchKey::ControlR)),
+            "alt" | "option" => Some(Self::ModifierTap(ModifierSwitchKey::Alt)),
+            "alt_l" | "option_l" => Some(Self::ModifierTap(ModifierSwitchKey::AltL)),
+            "alt_r" | "option_r" => Some(Self::ModifierTap(ModifierSwitchKey::AltR)),
+            "caps_lock" | "capslock" => Some(Self::CapsLock),
+            _ => None,
+        };
+        if let Some(key) = preset {
+            return Ok(key);
+        }
+        let parts: Vec<&str> = trimmed.split('+').map(str::trim).collect();
+        if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+            return Err(format!("无效的切换中英键设置：{value}"));
+        }
+        let key_token = *parts.last().unwrap();
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        for &modifier in &parts[..parts.len() - 1] {
+            match modifier.to_ascii_lowercase().as_str() {
+                "control" | "ctrl" => ctrl = true,
+                "alt" | "mod1" | "option" => alt = true,
+                "shift" => shift = true,
+                _ => return Err(format!("不支持的修饰键：{modifier}")),
+            }
+        }
+        let mut canonical = String::new();
+        if ctrl {
+            canonical.push_str("Control+");
+        }
+        if alt {
+            canonical.push_str("Alt+");
+        }
+        if shift {
+            canonical.push_str("Shift+");
+        }
+        canonical.push_str(key_token);
+        let shortcut = SchemaShortcut::parse(&canonical, "always")
+            .ok_or_else(|| format!("无效的切换中英键设置：{value}"))?;
+        let is_function_key = (0xffbe..=0xffe0).contains(&shortcut.key);
+        let has_ctrl_or_alt = shortcut.modifiers & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0;
+        let is_shift_safe = shortcut.modifiers == RIME_MOD_SHIFT
+            && (shortcut.key == 0x20 || is_function_key);
+        if !has_ctrl_or_alt && !is_shift_safe && !is_function_key {
+            return Err("自定义快捷键需包含 Ctrl / Alt、Shift+空格 或功能键 F1-F12".into());
+        }
+        Ok(Self::Shortcut {
+            spec: canonical,
+            shortcut,
+        })
+    }
+
+    pub fn from_setting(value: &str) -> Self {
+        Self::parse(value).unwrap_or_default()
+    }
+
+    pub fn as_setting(&self) -> Cow<'_, str> {
+        match self {
+            Self::Schema => Cow::Borrowed("schema"),
+            Self::ModifierTap(key) => Cow::Borrowed(key.as_str()),
+            Self::CapsLock => Cow::Borrowed("Caps_Lock"),
+            Self::Shortcut { spec, .. } => Cow::Borrowed(spec.as_str()),
+        }
+    }
+
+    pub fn is_schema(&self) -> bool {
+        matches!(self, Self::Schema)
+    }
+
+    pub fn modifier_taps(&self) -> Vec<u32> {
+        match self {
+            Self::ModifierTap(key) => key.modifier_taps(),
+            Self::Schema | Self::CapsLock | Self::Shortcut { .. } => Vec::new(),
+        }
+    }
+
+    pub fn shortcut(&self) -> Option<SchemaShortcut> {
+        match self {
+            Self::Shortcut { shortcut, .. } => Some(*shortcut),
+            _ => None,
+        }
+    }
+
+    pub fn matches_modifier_tap(&self, keycode: u32) -> bool {
+        matches!(self, Self::ModifierTap(key) if key.matches(keycode))
+    }
+
+    pub fn matches_caps_lock(&self) -> bool {
+        matches!(self, Self::CapsLock)
+    }
+
+    pub fn matches_shortcut(&self, keycode: u32, mask: u32) -> bool {
+        mask & RIME_RELEASE_MASK == 0
+            && matches!(self, Self::Shortcut { shortcut, .. } if shortcut.matches_key(keycode, mask))
+    }
+
+    pub fn apply_to_state(&self, state: &mut ImeState) {
+        if self.is_schema() {
+            return;
+        }
+        state.modifier_taps = self.modifier_taps();
+        if let Some(shortcut) = self.shortcut() {
+            if !state.schema_shortcuts.contains(&shortcut) {
+                state.schema_shortcuts.push(shortcut);
+            }
+        }
+    }
+}
+
+pub fn read_english_switch_key(root: &Path) -> EnglishSwitchKey {
+    std::fs::read(root.join(SETTINGS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get(SWITCH_KEY_SETTING)
+                .and_then(|v| v.as_str())
+                .map(EnglishSwitchKey::from_setting)
+        })
+        .unwrap_or_default()
+}
+
+/// Preserve unrelated settings, and reject malformed files instead of erasing
+/// them. Removes the field when set back to `Schema`.
+pub fn write_english_switch_key(root: &Path, key: &EnglishSwitchKey) -> Result<String, String> {
+    let path = root.join(SETTINGS_FILE);
+    let mut config = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|e| format!("read English switch key settings: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("read English switch key settings: {e}")),
+    };
+    let object = config
+        .as_object_mut()
+        .ok_or("English input settings must be an object")?;
+    let setting = key.as_setting().into_owned();
+    if key.is_schema() {
+        object.remove(SWITCH_KEY_SETTING);
+    } else {
+        object.insert(SWITCH_KEY_SETTING.into(), serde_json::json!(setting));
+    }
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("save English switch key settings: {e}"))?;
+    Ok(setting)
+}
+
+fn is_active_ascii_switch_style(style: &str) -> bool {
+    matches!(
+        style,
+        "inline_ascii"
+            | "commit_code"
+            | "commit_text"
+            | "clear"
+            | "set_ascii_mode"
+            | "unset_ascii_mode"
+    )
+}
+
+fn extract_switch_keys_from_mapping(
+    switch_key: &serde_yaml::Mapping,
+    include_caps_lock: bool,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    let ordered: &[&str] = if include_caps_lock {
+        &[
+            "Shift_L",
+            "Shift_R",
+            "Control_L",
+            "Control_R",
+            "Alt_L",
+            "Alt_R",
+            "Caps_Lock",
+        ]
+    } else {
+        &[
+            "Shift_L",
+            "Shift_R",
+            "Control_L",
+            "Control_R",
+            "Alt_L",
+            "Alt_R",
+        ]
+    };
+    for &name in ordered {
+        let enabled = switch_key
+            .get(serde_yaml::Value::String(name.into()))
+            .and_then(serde_yaml::Value::as_str)
+            .is_some_and(is_active_ascii_switch_style);
+        if enabled {
+            keys.push(name.to_owned());
+        }
+    }
+    keys
+}
+
+fn read_yaml_file(path: &Path) -> Option<serde_yaml::Value> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_yaml::from_slice(&bytes).ok()
+}
+
+fn yaml_switch_key_map<'a>(doc: &'a serde_yaml::Value) -> Option<&'a serde_yaml::Mapping> {
+    if let Some(map) = doc
+        .get("ascii_composer")
+        .and_then(|v| v.get("switch_key"))
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        return Some(map);
+    }
+    if let Some(patch) = doc.get("patch").and_then(serde_yaml::Value::as_mapping) {
+        if let Some(map) = patch
+            .get(serde_yaml::Value::String("ascii_composer/switch_key".into()))
+            .and_then(serde_yaml::Value::as_mapping)
+        {
+            return Some(map);
+        }
+        if let Some(map) = patch
+            .get(serde_yaml::Value::String("ascii_composer".into()))
+            .and_then(|v| v.get("switch_key"))
+            .and_then(serde_yaml::Value::as_mapping)
+        {
+            return Some(map);
+        }
+    }
+    None
+}
+
+fn yaml_key_binder_ascii_toggles(doc: &serde_yaml::Value) -> Vec<String> {
+    let mut keys = Vec::new();
+    let Some(bindings) = doc
+        .get("key_binder")
+        .and_then(|v| v.get("bindings"))
+        .and_then(serde_yaml::Value::as_sequence)
+    else {
+        return keys;
+    };
+    for binding in bindings {
+        if binding.get("toggle").and_then(serde_yaml::Value::as_str) == Some("ascii_mode") {
+            if let Some(accept) = binding.get("accept").and_then(serde_yaml::Value::as_str) {
+                if let Ok(parsed) = EnglishSwitchKey::parse(accept) {
+                    let setting = parsed.as_setting().into_owned();
+                    if !keys.contains(&setting) {
+                        keys.push(setting);
+                    }
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Read the active schema's configured Chinese/English switch keys on desktop,
+/// reflecting `libjd_engine` defaults or the deployed Rime schema/default YAML.
+pub fn read_schema_english_switch_keys(root: &Path) -> Vec<String> {
+    read_schema_english_switch_keys_with_caps(root, !cfg!(target_os = "macos"))
+}
+
+pub fn read_schema_english_switch_keys_with_caps(
+    root: &Path,
+    include_caps_lock: bool,
+) -> Vec<String> {
+    if !crate::engine_choice::preferred(root).is_rime() {
+        let mut keys = vec!["Shift_L".into(), "Shift_R".into()];
+        if include_caps_lock {
+            keys.push("Caps_Lock".into());
+        }
+        return keys;
+    }
+
+    let dirs = match crate::RuntimeDirs::resolve(root, root) {
+        Ok(dirs) => dirs,
+        Err(_) => crate::RuntimeDirs::flat(root, root),
+    };
+    let schema_id = crate::current_schema_id_from_dir(root)
+        .or_else(|| crate::current_schema_id_from_dir(&dirs.user_data_dir))
+        .or_else(|| {
+            std::fs::read_to_string(dirs.user_data_dir.join(".keytao-current-schema"))
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        });
+
+    let schema_doc = schema_id.as_deref().and_then(|id| {
+        read_yaml_file(&dirs.staging_dir.join(format!("{id}.schema.yaml")))
+            .or_else(|| read_yaml_file(&dirs.user_data_dir.join(format!("{id}.schema.yaml"))))
+    });
+    let default_doc = read_yaml_file(&dirs.staging_dir.join("default.yaml"))
+        .or_else(|| read_yaml_file(&dirs.user_data_dir.join("default.custom.yaml")))
+        .or_else(|| read_yaml_file(&dirs.user_data_dir.join("default.yaml")));
+
+    let uses_ascii_composer = schema_doc.as_ref().map_or(true, |doc| {
+        doc.get("engine")
+            .and_then(|v| v.get("processors"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_none_or(|list| {
+                list.iter().any(|item| {
+                    item.as_str()
+                        .and_then(|s| s.split('@').next())
+                        == Some("ascii_composer")
+                })
+            })
+    });
+
+    if uses_ascii_composer {
+        if let Some(map) = schema_doc.as_ref().and_then(yaml_switch_key_map) {
+            let keys = extract_switch_keys_from_mapping(map, include_caps_lock);
+            if !keys.is_empty() {
+                return keys;
+            }
+        } else if let Some(map) = default_doc.as_ref().and_then(yaml_switch_key_map) {
+            let keys = extract_switch_keys_from_mapping(map, include_caps_lock);
+            if !keys.is_empty() {
+                return keys;
+            }
+        }
+    }
+
+    for doc in [schema_doc.as_ref(), default_doc.as_ref()].into_iter().flatten() {
+        let keys = yaml_key_binder_ascii_toggles(doc);
+        if !keys.is_empty() {
+            return keys;
+        }
+    }
+    Vec::new()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,14 +533,26 @@ pub(crate) fn schema_options(engine: &dyn EnglishBackend) -> BTreeMap<String, bo
 #[derive(Default)]
 pub(crate) struct EnglishModeController {
     pub mode: EnglishMode,
+    pub switch_key: EnglishSwitchKey,
     schemas: Vec<SchemaInfo>,
     chinese_schema: Option<String>,
     chinese_options: BTreeMap<String, bool>,
 }
 
 impl EnglishModeController {
+    #[cfg(test)]
     pub fn configure(&mut self, mode: EnglishMode, schemas: Vec<SchemaInfo>) {
+        self.configure_with_switch_key(mode, EnglishSwitchKey::Schema, schemas);
+    }
+
+    pub fn configure_with_switch_key(
+        &mut self,
+        mode: EnglishMode,
+        switch_key: EnglishSwitchKey,
+        schemas: Vec<SchemaInfo>,
+    ) {
         self.mode = mode;
+        self.switch_key = switch_key;
         self.schemas = schemas;
     }
 
@@ -590,5 +1021,163 @@ mod tests {
         assert_eq!(std::fs::read(root.join(SETTINGS_FILE)).unwrap(), b"invalid");
         std::fs::remove_file(root.join(SETTINGS_FILE)).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn english_switch_key_parses_canonicalizes_and_rejects_unsafe_bindings() {
+        assert_eq!(EnglishSwitchKey::parse("").unwrap(), EnglishSwitchKey::Schema);
+        assert_eq!(
+            EnglishSwitchKey::parse("schema").unwrap(),
+            EnglishSwitchKey::Schema
+        );
+        for (input, expected) in [
+            ("shift", "Shift"),
+            ("Shift_L", "Shift_L"),
+            ("shift_r", "Shift_R"),
+            ("ctrl", "Control"),
+            ("control_l", "Control_L"),
+            ("Control_R", "Control_R"),
+            ("option", "Alt"),
+            ("alt_l", "Alt_L"),
+            ("Option_R", "Alt_R"),
+            ("Caps_Lock", "Caps_Lock"),
+            ("ctrl+space", "Control+space"),
+            ("Shift+Ctrl+space", "Control+Shift+space"),
+            ("Option+grave", "Alt+grave"),
+            ("Shift+space", "Shift+space"),
+            ("F2", "F2"),
+        ] {
+            let parsed = EnglishSwitchKey::parse(input).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(parsed.as_setting(), expected, "{input}");
+        }
+        for rejected in [
+            "a",
+            "space",
+            "Shift+a",
+            "Shift+1",
+            "Return",
+            "BackSpace",
+            "Super+space",
+            "Control+",
+            "+space",
+        ] {
+            assert!(
+                EnglishSwitchKey::parse(rejected).is_err(),
+                "expected {rejected:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn english_switch_key_roundtrips_and_applies_state_overrides() {
+        let root = std::env::temp_dir().join(format!(
+            "keytao-switch-key-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(read_english_switch_key(&root), EnglishSwitchKey::Schema);
+        std::fs::write(root.join(SETTINGS_FILE), br#"{"englishMode":"schema","other":7}"#).unwrap();
+
+        let ctrl_l = EnglishSwitchKey::parse("Control_L").unwrap();
+        assert_eq!(write_english_switch_key(&root, &ctrl_l).unwrap(), "Control_L");
+        assert_eq!(read_english_switch_key(&root), ctrl_l);
+        let mut state = ImeState::empty();
+        state.modifier_taps = vec![0xffe4];
+        ctrl_l.apply_to_state(&mut state);
+        assert_eq!(state.modifier_taps, vec![0xffe3]);
+
+        let combo = EnglishSwitchKey::parse("Control+space").unwrap();
+        assert_eq!(
+            write_english_switch_key(&root, &combo).unwrap(),
+            "Control+space"
+        );
+        assert_eq!(read_english_switch_key(&root), combo);
+        let mut state = ImeState::empty();
+        state.modifier_taps = vec![0xffe3];
+        combo.apply_to_state(&mut state);
+        assert!(state.modifier_taps.is_empty());
+        assert_eq!(state.schema_shortcuts.len(), 1);
+        assert!(combo.matches_shortcut(0x20, RIME_MOD_CONTROL));
+        assert!(!combo.matches_shortcut(0x20, RIME_MOD_CONTROL | RIME_RELEASE_MASK));
+
+        assert_eq!(
+            write_english_switch_key(&root, &EnglishSwitchKey::Schema).unwrap(),
+            "schema"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert_eq!(saved["englishMode"], "schema");
+        assert_eq!(saved["other"], 7);
+        assert!(saved.get(SWITCH_KEY_SETTING).is_none());
+
+        std::fs::remove_file(root.join(SETTINGS_FILE)).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn read_schema_english_switch_keys_reads_compiled_default_schema_override_and_libjd() {
+        let root = std::env::temp_dir().join(format!(
+            "keytao-schema-switch-keys-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let build = root.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+
+        // keydo-like default.yaml: Shift_L disabled, Shift_R + Control_L/R + Caps_Lock enabled.
+        std::fs::write(root.join(".keytao-current-schema"), "keydo").unwrap();
+        std::fs::write(
+            build.join("keydo.schema.yaml"),
+            "engine:\n  processors:\n    - ascii_composer\n    - speller\n",
+        )
+        .unwrap();
+        std::fs::write(
+            build.join("default.yaml"),
+            "ascii_composer:\n  switch_key:\n    Shift_L: noop\n    Shift_R: commit_text\n    Control_L: commit_code\n    Control_R: commit_code\n    Caps_Lock: inline_ascii\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_schema_english_switch_keys_with_caps(&root, false),
+            vec!["Shift_R", "Control_L", "Control_R"]
+        );
+        assert_eq!(
+            read_schema_english_switch_keys_with_caps(&root, true),
+            vec!["Shift_R", "Control_L", "Control_R", "Caps_Lock"]
+        );
+
+        // Schema-level ascii_composer/switch_key overrides default.yaml.
+        std::fs::write(
+            build.join("keydo.schema.yaml"),
+            "engine:\n  processors:\n    - ascii_composer\nascii_composer:\n  switch_key:\n    Shift_L: commit_text\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_schema_english_switch_keys_with_caps(&root, true),
+            vec!["Shift_L"]
+        );
+
+        // libjd_engine reports its built-in Shift (+ Caps_Lock on Windows/Linux).
+        std::fs::write(
+            root.join(SETTINGS_FILE),
+            br#"{"engine":"libjd_engine"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_schema_english_switch_keys_with_caps(&root, false),
+            vec!["Shift_L", "Shift_R"]
+        );
+        assert_eq!(
+            read_schema_english_switch_keys_with_caps(&root, true),
+            vec!["Shift_L", "Shift_R", "Caps_Lock"]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

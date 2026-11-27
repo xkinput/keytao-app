@@ -789,7 +789,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
       alignment: Alignment.centerRight,
       child: FSwitch(
         semanticsLabel: label,
-        value: _value(path) as bool,
+        value: _value(path) == true,
         enabled: _enabled && _supported(path),
         onChange: (value) => _save(path, value),
       ),
@@ -1279,6 +1279,7 @@ class _ThemeEditorSectionState extends State<ThemeEditorSection> {
           _compactRows([
             _slider('边框宽度', 'pc.candidate.borderWidth', 0, 3, 6),
             _slider('高亮圆角', 'pc.candidate.cornerRadius', 0, 24, 24),
+            _toggle('竖排高亮等宽', 'pc.candidate.verticalFullWidth'),
           ]),
           _text('序号后缀', 'pc.candidate.labelSuffix'),
         ]),

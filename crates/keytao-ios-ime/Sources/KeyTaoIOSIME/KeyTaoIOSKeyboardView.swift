@@ -3354,7 +3354,30 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
 
         let textLeft = rect.minX + 36
-        let textWidth = max(0, rect.maxX - 10 - textLeft)
+        let badgeText = item.comment?.isEmpty == false ? item.comment : nil
+        var textRight = rect.maxX - 10
+        if let badgeText {
+            let badgeWidth: CGFloat = 34
+            let badgeHeight: CGFloat = 18
+            let badgeRect = CGRect(
+                x: rect.maxX - 10 - badgeWidth,
+                y: rect.midY - badgeHeight / 2,
+                width: badgeWidth,
+                height: badgeHeight
+            )
+            textRight = badgeRect.minX - 6
+            theme.mobile.candidateBar.selectedForeground.uiColor.withAlphaComponent(0.14).setFill()
+            UIBezierPath(roundedRect: badgeRect, cornerRadius: 5).fill()
+            drawText(
+                badgeText,
+                in: badgeRect,
+                color: theme.mobile.candidateBar.selectedForeground.uiColor,
+                size: 10,
+                weight: theme.font.weight,
+                alignment: .center
+            )
+        }
+        let textWidth = max(0, textRight - textLeft)
         drawTruncatedText(
             item.text,
             in: CGRect(x: textLeft, y: rect.minY, width: textWidth, height: rect.height),
@@ -4068,12 +4091,31 @@ final class KeyTaoIOSKeyboardView: UIView {
         return (pressProgress > 0 ? style.pressedBackground : style.background).uiColor
     }
 
+    private var isTemporaryEnglishActive: Bool {
+        guard !state.asciiMode, !isEnglishMode, !state.isPackageSwitcher else {
+            return false
+        }
+        let panelPreedit = state.candidatePanel.preedit ?? ""
+        let preedit = panelPreedit.isEmpty ? state.preedit : panelPreedit
+        guard let first = preedit.unicodeScalars.first,
+              first.value >= 0x41 && first.value <= 0x5A else {
+            return false
+        }
+        return preedit.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value <= 0x7E }
+    }
+
+    private var isShiftKeyHighlighted: Bool {
+        shiftState != .off || isTemporaryEnglishActive
+    }
+
     private func drawShiftStateDecoration(_ key: KeyTaoKeySpec, rect: CGRect, style: KeyTaoImeTheme.KeyStyle) {
-        guard actionForMode(key).type == KeyTaoCommandType.shift, shiftState != .off else {
+        let temporaryEnglish = isTemporaryEnglishActive
+        guard actionForMode(key).type == KeyTaoCommandType.shift,
+              shiftState != .off || temporaryEnglish else {
             return
         }
         let color = style.borderColor.uiColor
-        if shiftState == .once {
+        if shiftState == .once || (shiftState == .off && temporaryEnglish) {
             color.setStroke()
             let outline = UIBezierPath(
                 roundedRect: rect.insetBy(dx: 1.5, dy: 1.5),
@@ -4081,7 +4123,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             )
             outline.lineWidth = style.borderWidth
             outline.stroke()
-        } else {
+        }
+        if shiftState == .locked || temporaryEnglish {
             color.setFill()
             let barWidth = rect.width * 0.36
             let barHeight: CGFloat = 2.5
@@ -5253,6 +5296,38 @@ final class KeyTaoIOSKeyboardView: UIView {
             } else {
                 items.append(contentsOf: visibleSwitches.enumerated().map { index, schemaSwitch in
                     rimeSwitchItem(index: index, schemaSwitch: schemaSwitch)
+                })
+            }
+            if !rimeOptionsState.keyboards.isEmpty {
+                items.append(
+                    CandidateDrawItem(
+                        identifierIndex: -4000,
+                        selectIndex: -4000,
+                        label: "键盘切换",
+                        text: "",
+                        comment: nil,
+                        selected: false,
+                        global: false,
+                        command: nil,
+                        style: .section
+                    )
+                )
+                items.append(contentsOf: rimeOptionsState.keyboards.enumerated().map { index, keyboard in
+                    CandidateDrawItem(
+                        identifierIndex: -4100 - index,
+                        selectIndex: -4100 - index,
+                        label: "",
+                        text: keyboard.name,
+                        comment: keyboard.recommended ? "推荐" : nil,
+                        selected: keyboard.current,
+                        global: false,
+                        command: KeyTaoKeyCommand(
+                            type: KeyTaoCommandType.setting,
+                            value: "keyboardProfile",
+                            fallbackValue: keyboard.id
+                        ),
+                        style: .schema
+                    )
                 })
             }
             return items
@@ -6939,7 +7014,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         switch actionForMode(key).type {
         case KeyTaoCommandType.backspace: return "删除"
         case KeyTaoCommandType.enter: return hostTraits.returnKeyLabel ?? "换行"
-        case KeyTaoCommandType.shift: return shiftState == .locked ? "大写锁定" : "上档"
+        case KeyTaoCommandType.shift:
+            if shiftState == .locked { return "大写锁定" }
+            if shiftState == .off && isTemporaryEnglishActive { return "临时英文输入中" }
+            return "上档"
         case KeyTaoCommandType.space: return "空格"
         default: return displayLabel(key)
         }
@@ -6969,7 +7047,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func isActiveKey(_ key: KeyTaoKeySpec) -> Bool {
         let command = actionForMode(key)
-        if command.type == KeyTaoCommandType.shift { return shiftState != .off }
+        if command.type == KeyTaoCommandType.shift { return isShiftKeyHighlighted }
         guard command.type == KeyTaoCommandType.keyboardMode,
               let value = command.value, value != "back" else { return false }
         return config.normalizedLayer(navigation.resolve(value).id) == layerMode
@@ -7279,7 +7357,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
             style = style.applying(state)
         }
-        if command == KeyTaoCommandType.shift, shiftState != .off {
+        if command == KeyTaoCommandType.shift, isShiftKeyHighlighted {
             style = style.applying(keyboard.keyStates["shiftOn"])
         }
         return style

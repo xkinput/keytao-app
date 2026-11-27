@@ -633,6 +633,19 @@ pub struct KeyboardSummaryDto {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct KeyboardDocumentDto {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub built_in: bool,
+    pub current: bool,
+    pub has_mnemonics: bool,
+    pub recommended_schemas: Vec<String>,
+    pub layout_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeyboardExportDto {
     pub id: String,
     pub file_name: String,

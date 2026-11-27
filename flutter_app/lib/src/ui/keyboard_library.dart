@@ -7,6 +7,7 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'candidate_panel_preview.dart';
+import 'keyboard_editor_page.dart';
 import 'mobile_keyboard_preview.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -17,11 +18,13 @@ class KeyboardLibrarySection extends StatefulWidget {
     required this.controller,
     required this.previewTheme,
     required this.schemeName,
+    this.onMore,
   });
 
   final AppController controller;
   final Map<String, dynamic> previewTheme;
   final String schemeName;
+  final VoidCallback? onMore;
 
   @override
   State<KeyboardLibrarySection> createState() => _KeyboardLibrarySectionState();
@@ -65,29 +68,6 @@ class _KeyboardLibrarySectionState extends State<KeyboardLibrarySection> {
   Future<void> _apply(KeyboardSummaryDto keyboard) => _perform(() async {
     if (await _controller.applyKeyboardProfile(keyboard.id) && mounted) {
       _notice('已切换为 ${keyboard.name}');
-    }
-  });
-
-  Future<void> _delete(KeyboardSummaryDto keyboard) => _perform(() async {
-    final confirmed = await showFDialog<bool>(
-      context: context,
-      builder: (context, _, animation) => AppDialog(
-        title: '删除自定义键盘',
-        animation: animation,
-        actions: [
-          ActionButton('取消', onPress: () => Navigator.pop(context, false)),
-          ActionButton(
-            '删除',
-            primary: true,
-            onPress: () => Navigator.pop(context, true),
-          ),
-        ],
-        child: Text('确定删除「${keyboard.name}」吗？'),
-      ),
-    );
-    if (confirmed != true) return;
-    if (await _controller.deleteKeyboardProfile(keyboard.id) && mounted) {
-      _notice('已删除 ${keyboard.name}');
     }
   });
 
@@ -189,135 +169,131 @@ class _KeyboardLibrarySectionState extends State<KeyboardLibrarySection> {
       'overwritten' => '已覆盖',
       _ => '已导入',
     };
-    _notice([
-      '$status ${result.name}',
-      ...result.warnings,
-    ].join('\n'));
+    _notice(['$status ${result.name}', ...result.warnings].join('\n'));
   }
 
-  Widget _toolbarAction(String label, IconData icon, VoidCallback? onPress) =>
-      Tooltip(
-        message: label,
+  void _openMore() {
+    if (widget.onMore case final callback?) {
+      callback();
+      return;
+    }
+    showKeyboardDetailPage(
+      context,
+      controller: _controller,
+      previewTheme: widget.previewTheme,
+      schemeName: widget.schemeName,
+    );
+  }
+
+  Widget _action(String label, IconData icon, VoidCallback? onPress) =>
+      FTooltip(
+        tipBuilder: (_, _) => Text(label),
         child: FButton.icon(
           variant: FButtonVariant.ghost,
-          size: FButtonSizeVariant.sm,
           onPress: onPress,
-          child: Icon(icon, size: 16),
+          style: const FButtonStyleDelta.delta(
+            contentStyle: FButtonContentStyleDelta.delta(
+              constraints: BoxConstraints.tightFor(width: 40, height: 40),
+              padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
+            ),
+          ),
+          child: Icon(icon, size: 16, semanticLabel: label),
         ),
       );
 
   @override
   Widget build(BuildContext context) {
-    final palette = AppPalette.of(context);
-    final accent = ChromeAccent.of(context);
     final keyboards = _controller.keyboards;
     final recommended = _controller.recommendedKeyboard;
     final current = _current;
-    final showMnemonicInCard = (KeyboardSummaryDto kb) {
-      if (!kb.hasMnemonics) return false;
-      if (kb.current) {
-        return _controller.androidSettings?.mnemonicHintsEnabled ?? false;
-      }
-      return kb.id == 'keytao.keytao26' || kb.id == 'keytao.keydo30';
-    };
 
-    return Section(
+    return Column(
       key: const ValueKey('mobile-keyboard-library'),
-      title: '键盘方案',
-      trailing: Wrap(
-        spacing: 2,
-        children: [
-          _toolbarAction(
-            '粘贴导入',
-            FLucideIcons.clipboardPaste,
-            _enabled ? _paste : null,
-          ),
-          _toolbarAction(
-            '复制分享串',
-            FLucideIcons.copy,
-            _enabled && current != null
-                ? () => _export(current.id, copy: true)
-                : null,
-          ),
-          _toolbarAction(
-            '导出文件',
-            FLucideIcons.download,
-            _enabled && current != null ? () => _export(current.id) : null,
-          ),
-          _toolbarAction(
-            '导入文件',
-            FLucideIcons.upload,
-            _enabled ? _openFile : null,
-          ),
-        ],
-      ),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: 8,
       children: [
-        if (recommended != null)
-          Container(
-            key: const ValueKey('recommended-keyboard-banner'),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: accent.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: accent.withValues(alpha: 0.35)),
-            ),
-            child: Row(
-              spacing: 10,
-              children: [
-                Icon(FLucideIcons.sparkles, size: 16, color: accent),
-                Expanded(
-                  child: Text(
-                    '推荐当前方案使用「${recommended.name}」',
-                    style: context.theme.typography.body.sm.copyWith(
-                      color: palette.ink,
-                      fontWeight: FontWeight.w500,
-                    ),
+        Row(
+          children: [
+            const EyebrowLabel('键盘方案'),
+            Expanded(
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _action(
+                    '粘贴导入',
+                    FLucideIcons.clipboardPaste,
+                    _enabled ? _paste : null,
                   ),
-                ),
-                if (!recommended.current)
-                  ActionButton(
-                    '切换',
-                    primary: true,
-                    onPress: _enabled ? () => _apply(recommended) : null,
-                  )
-                else
-                  Text(
-                    '已启用',
-                    style: context.theme.typography.body.xs.copyWith(
-                      color: accent,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  _action(
+                    '复制分享串',
+                    FLucideIcons.copy,
+                    _enabled && current != null
+                        ? () => _export(current.id, copy: true)
+                        : null,
                   ),
-              ],
+                  _action(
+                    '导出文件',
+                    FLucideIcons.download,
+                    _enabled && current != null
+                        ? () => _export(current.id)
+                        : null,
+                  ),
+                  _action(
+                    '导入文件',
+                    FLucideIcons.upload,
+                    _enabled ? _openFile : null,
+                  ),
+                  FButton(
+                    key: const ValueKey('keyboard-library-more-button'),
+                    variant: FButtonVariant.ghost,
+                    size: context.platformVariant.touch
+                        ? FButtonSizeVariant.md
+                        : FButtonSizeVariant.xs,
+                    mainAxisSize: MainAxisSize.min,
+                    onPress: _enabled ? _openMore : null,
+                    child: const Text('更多键盘'),
+                  ),
+                ],
+              ),
             ),
-          ),
+          ],
+        ),
+        if (_busy) const FProgress(),
         if (keyboards.isEmpty)
           StatusMessage('正在加载键盘方案…', icon: FLucideIcons.keyboard)
         else
-          GridView.builder(
+          LayoutBuilder(
             key: const ValueKey('keyboard-profile-grid'),
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
-              childAspectRatio: 1.08,
-            ),
-            itemCount: keyboards.length,
-            itemBuilder: (context, index) {
-              final kb = keyboards[index];
-              final isRecommended = recommended?.id == kb.id;
-              return _KeyboardProfileCard(
-                key: ValueKey('keyboard-card-${kb.id}'),
-                keyboard: kb,
-                isRecommended: isRecommended,
-                previewTheme: widget.previewTheme,
-                schemeName: widget.schemeName,
-                showMnemonicPreview: showMnemonicInCard(kb),
-                enabled: _enabled,
-                onTap: () => _apply(kb),
-                onDelete: kb.builtIn ? null : () => _delete(kb),
+            builder: (context, constraints) {
+              const gap = 6.0;
+              const minChipWidth = 112.0;
+              const maxChipWidth = 160.0;
+              final availableWidth = constraints.hasBoundedWidth
+                  ? constraints.maxWidth
+                  : maxChipWidth;
+              final columns = ((availableWidth + gap) / (minChipWidth + gap))
+                  .floor()
+                  .clamp(1, keyboards.length);
+              final width = ((availableWidth + gap) / columns - gap)
+                  .floorToDouble()
+                  .clamp(0.0, maxChipWidth);
+              return Wrap(
+                spacing: gap,
+                runSpacing: gap,
+                children: [
+                  for (final kb in keyboards)
+                    SizedBox(
+                      width: width,
+                      child: _CompactKeyboardCard(
+                        key: ValueKey('keyboard-card-${kb.id}'),
+                        keyboard: kb,
+                        isRecommended: recommended?.id == kb.id,
+                        enabled: _enabled,
+                        onTap: () => _apply(kb),
+                      ),
+                    ),
+                ],
               );
             },
           ),
@@ -329,106 +305,64 @@ class _KeyboardLibrarySectionState extends State<KeyboardLibrarySection> {
   }
 }
 
-class _KeyboardProfileCard extends StatelessWidget {
-  const _KeyboardProfileCard({
+class _CompactKeyboardCard extends StatelessWidget {
+  const _CompactKeyboardCard({
     super.key,
     required this.keyboard,
     required this.isRecommended,
-    required this.previewTheme,
-    required this.schemeName,
-    required this.showMnemonicPreview,
     required this.enabled,
     required this.onTap,
-    this.onDelete,
   });
 
   final KeyboardSummaryDto keyboard;
   final bool isRecommended;
-  final Map<String, dynamic> previewTheme;
-  final String schemeName;
-  final bool showMnemonicPreview;
   final bool enabled;
   final VoidCallback onTap;
-  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
     final accent = ChromeAccent.of(context);
     final active = keyboard.current;
-    return Material(
-      color: active ? accent.withValues(alpha: 0.08) : palette.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: enabled && !active ? onTap : null,
+    return Semantics(
+      selected: active,
+      child: FTappable(
+        semanticsLabel: '切换键盘 ${keyboard.name}',
+        onPress: enabled && !active ? onTap : null,
         child: Container(
-          padding: const EdgeInsets.all(8),
+          constraints: const BoxConstraints(minHeight: 44),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
+            color: active ? accent.withValues(alpha: 0.08) : palette.surface,
             border: Border.all(
               color: active ? accent : palette.hairline,
               width: active ? 1.5 : 1,
             ),
+            borderRadius: BorderRadius.circular(8),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Row(
+            spacing: 4,
             children: [
               Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Center(
-                    child: MobileKeyboardPreview(
-                      theme: previewTheme,
-                      schemeName: schemeName,
-                      layoutJsonOverride: keyboard.previewLayoutJson,
-                      mnemonicHintsOverride: showMnemonicPreview,
-                      showToolbar: false,
-                      fullHeight: true,
-                    ),
+                child: Text(
+                  keyboard.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                    color: active ? accent : palette.ink,
                   ),
                 ),
               ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      keyboard.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.theme.typography.body.sm.copyWith(
-                        fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                        color: active ? accent : palette.ink,
-                      ),
-                    ),
-                  ),
-                  if (onDelete != null)
-                    GestureDetector(
-                      onTap: enabled ? onDelete : null,
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 4),
-                        child: Icon(
-                          FLucideIcons.trash2,
-                          size: 14,
-                          color: palette.muted,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              if (active || isRecommended || keyboard.hasMnemonics) ...[
-                const SizedBox(height: 3),
-                Wrap(
-                  spacing: 4,
-                  runSpacing: 2,
-                  children: [
-                    if (active) _Badge('使用中', accent),
-                    if (isRecommended) _Badge('推荐', accent),
-                    if (keyboard.hasMnemonics) _Badge('助记', palette.muted),
-                  ],
+              if (isRecommended) _Badge('推荐', accent),
+              if (active)
+                Icon(
+                  FLucideIcons.check,
+                  size: 13,
+                  color: accent,
+                  semanticLabel: '当前键盘',
                 ),
-              ],
             ],
           ),
         ),

@@ -786,13 +786,6 @@ class _SettingsCardState extends State<SettingsCard> {
         schemeDisplayName(c.activeSchemeKey);
     return [
       HairlineGridCell(
-        child: KeyboardLibrarySection(
-          controller: c,
-          previewTheme: keyboardPreviewTheme,
-          schemeName: keyboardSchemeName,
-        ),
-      ),
-      HairlineGridCell(
         child: Semantics(
           label: AppStrings.mobileKeyboard,
           child: Section(
@@ -887,6 +880,13 @@ class _SettingsCardState extends State<SettingsCard> {
               ),
             ],
           ),
+        ),
+      ),
+      HairlineGridCell(
+        child: KeyboardLibrarySection(
+          controller: c,
+          previewTheme: keyboardPreviewTheme,
+          schemeName: keyboardSchemeName,
         ),
       ),
       HairlineGridCell(

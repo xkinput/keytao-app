@@ -41,7 +41,7 @@ rows:
       { label: "s", hint: "|←", value: "s", swipeUp: { type: edit, value: lineStart }, longPress: { type: edit, value: lineStart }, mnemonic: { bottomLines: ["a ia"], tone: outer } },
       { label: "d", hint: "→|", value: "d", swipeUp: { type: edit, value: lineEnd }, longPress: { type: edit, value: lineEnd }, mnemonic: { bottomLines: ["ie ou"], tone: outer } },
       { label: "f", hint: "?", value: "f", swipeUp: { type: input, value: "?" }, longPress: { type: input, value: "?" }, mnemonic: { top: "zh", bottomLines: ["an"], tone: outer } },
-      { label: "g", hint: "反", value: "g", swipeUp: { type: rimeInput, value: "i" }, longPress: { type: rimeInput, value: "i" }, mnemonic: { bottomLines: ["ing uai"], tone: outer } },
+      { label: "g", hint: "反", value: "g", swipeUp: { type: input, value: "`" }, longPress: { type: input, value: "`" }, mnemonic: { bottomLines: ["ing uai"], tone: outer } },
       { label: "h", hint: "⇥", value: "h", swipeUp: { type: edit, value: cursorRight }, longPress: { type: edit, value: cursorRight }, mnemonic: { bottomLines: ["ai üe"], tone: outer } },
       { label: "j", hint: "✓", value: "j", swipeUp: { type: edit, value: toggleSelection }, longPress: { type: edit, value: toggleSelection }, mnemonic: { top: "ch", bottomLines: ["er u"], tone: outer } },
       { label: "k", hint: "[", value: "k", swipeUp: { type: input, value: "[" }, longPress: { type: input, value: "[" }, mnemonic: { bottomLines: ["i"], tone: outer } },

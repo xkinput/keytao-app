@@ -605,6 +605,32 @@ Future<KeyboardSummaryDto?> getRecommendedKeyboardForSchema({
   schemaId: schemaId,
 );
 
+Future<KeyboardDocumentDto> getKeyboardDocument({required String id}) =>
+    RustLib.instance.api.crateApiCoreGetKeyboardDocument(id: id);
+
+Future<KeyboardSummaryDto> saveKeyboardDocument({
+  required String id,
+  required String layoutJson,
+  required bool apply,
+}) => RustLib.instance.api.crateApiCoreSaveKeyboardDocument(
+  id: id,
+  layoutJson: layoutJson,
+  apply: apply,
+);
+
+Future<KeyboardSummaryDto> duplicateKeyboard({
+  required String id,
+  String? newName,
+}) => RustLib.instance.api.crateApiCoreDuplicateKeyboard(
+  id: id,
+  newName: newName,
+);
+
+Future<KeyboardSummaryDto> renameKeyboard({
+  required String id,
+  required String newName,
+}) => RustLib.instance.api.crateApiCoreRenameKeyboard(id: id, newName: newName);
+
 Future<ImeUiSettingsDto> getImeUiSettings() =>
     RustLib.instance.api.crateApiCoreGetImeUiSettings();
 
@@ -656,6 +682,13 @@ Future<ImeUiSettingsDto> setImeShowTrayModeIndicator({required bool show_}) =>
 
 Future<EnglishModeDto> getDesktopEnglishMode() =>
     RustLib.instance.api.crateApiCoreGetDesktopEnglishMode();
+
+Future<DesktopEnglishSwitchKeyDto> getDesktopEnglishSwitchKey() =>
+    RustLib.instance.api.crateApiCoreGetDesktopEnglishSwitchKey();
+
+Future<DesktopEnglishSwitchKeyDto> setDesktopEnglishSwitchKey({
+  required String key,
+}) => RustLib.instance.api.crateApiCoreSetDesktopEnglishSwitchKey(key: key);
 
 Future<int?> getCandidatePageSize() =>
     RustLib.instance.api.crateApiCoreGetCandidatePageSize();
@@ -871,6 +904,27 @@ class AddonStatusDto {
           variant == other.variant &&
           englishAvailable == other.englishAvailable &&
           latestVersion == other.latestVersion;
+}
+
+class DesktopEnglishSwitchKeyDto {
+  final String key;
+  final List<String> schemaKeys;
+
+  const DesktopEnglishSwitchKeyDto({
+    required this.key,
+    required this.schemaKeys,
+  });
+
+  @override
+  int get hashCode => key.hashCode ^ schemaKeys.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DesktopEnglishSwitchKeyDto &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          schemaKeys == other.schemaKeys;
 }
 
 class WanxiangGrammarStatusDto {

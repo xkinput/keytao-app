@@ -50,6 +50,7 @@ const FIELDS: &[(&str, u8)] = &[
     ("pc.candidate.borderWidth", DESKTOP),
     ("pc.candidate.cornerRadius", DESKTOP),
     ("pc.candidate.labelSuffix", DESKTOP),
+    ("pc.candidate.verticalFullWidth", DESKTOP),
     ("pc.modeHint.background", DESKTOP),
     ("pc.modeHint.foreground", DESKTOP),
     ("pc.modeHint.borderColor", DESKTOP),
@@ -339,6 +340,7 @@ mod tests {
             "orientation" => json!("horizontal"),
             "commentPosition" => json!("below"),
             "shadow" | "showComment" => json!(false),
+            "verticalFullWidth" => json!(true),
             "labelSuffix" => json!(":"),
             "fontScale" | "hintFontScale" => json!(1.1),
             "size" | "labelSize" | "commentSize" | "commentFontSize" | "preeditSize" | "fontSize" => {

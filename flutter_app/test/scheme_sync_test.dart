@@ -192,12 +192,35 @@ void main() {
   });
 
   testWidgets('account sync stays off until enabled', (tester) async {
+    api.cloudProfile = {...api.profile, 'active_scheme': 'xmjd'};
     await controller.loadSchemeSyncState();
     await controller.reloadAccountSession();
+    expect(controller.pendingCloudProfile, isNull);
     controller.scheduleSchemeProfileSync(packageKey: 'keytao');
     await tester.pump(const Duration(seconds: 2));
     expect(api.calls.where((call) => call.contains('Upload')), isEmpty);
   });
+
+  testWidgets(
+    'cross-platform only fields and default switch key do not trigger cloud download popup',
+    (tester) async {
+      api.enabled = true;
+      api.profile['settings'] = {
+        'ime_ui': {'font_size': 20.0},
+        'desktop_english_switch_key': 'schema',
+      };
+      api.cloudProfile = {
+        ...api.profile,
+        'settings': {
+          'android': {'haptics_enabled': true},
+          'ime_ui': {'font_size': 20, 'show_tray_mode_indicator': true},
+        },
+      };
+      await controller.loadSchemeSyncState();
+      await controller.reloadAccountSession();
+      expect(controller.pendingCloudProfile, isNull);
+    },
+  );
 
   testWidgets('integer JSON settings match doubles and allow automatic sync', (
     tester,
