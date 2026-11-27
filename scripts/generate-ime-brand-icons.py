@@ -275,27 +275,91 @@ def generate_macos():
     render_svg(svg, directory / "keytao-menu-icon.png", 56, 40, 28)
 
 
+def _render_mask_svg(path_d, size, stroke_width=0.0, fill=True):
+    from PIL import Image
+
+    fill_attr = "#FFFFFF" if fill else "none"
+    stroke_attr = (
+        f'stroke="#FFFFFF" stroke-width="{stroke_width}" stroke-linejoin="round"'
+        if stroke_width > 0
+        else ""
+    )
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
+        f'<path d="{path_d}" fill="{fill_attr}" {stroke_attr}/>'
+        f"</svg>"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        source = Path(td) / "mask.svg"
+        destination = Path(td) / "mask.png"
+        source.write_text(svg, encoding="utf-8")
+        render_svg(source, destination, size, size, 64)
+        return Image.open(destination).convert("RGBA").getchannel("A")
+
+
+def _diagonal_gradient(size, stops):
+    from PIL import Image
+
+    image = Image.new("RGBA", (size, size))
+    pixels = image.load()
+    denom = max(1, (size - 1) * 2)
+    for y in range(size):
+        for x in range(size):
+            t = (x + (size - 1 - y)) / denom
+            for index in range(len(stops) - 1):
+                p0, c0 = stops[index]
+                p1, c1 = stops[index + 1]
+                if t <= p1 or index == len(stops) - 2:
+                    u = max(0.0, min(1.0, (t - p0) / max(1e-6, p1 - p0)))
+                    pixels[x, y] = (
+                        int(round(c0[0] + (c1[0] - c0[0]) * u)),
+                        int(round(c0[1] + (c1[1] - c0[1]) * u)),
+                        int(round(c0[2] + (c1[2] - c0[2]) * u)),
+                        255,
+                    )
+                    break
+    return image
+
+
 def generate_windows():
-    # The Windows brand icon is cropped from keytao-next's app/icon.png (kept as
-    # ime-brand-source.png). Needs Pillow: uv run --with pillow python scripts/...
-    from PIL import Image, ImageFilter
+    # High-contrast Windows tray brand icon: vivid purple-blue-cyan KeyTao star
+    # with subtle dark outer rim and crisp white Tao script so it stays clear on
+    # both light/beige and dark Windows taskbars. Needs Pillow + ImageMagick.
+    from PIL import Image
 
     directory = ROOT / "crates/keytao-windows-ime"
-    image = Image.open(directory / "ime-brand-source.png").convert("RGBA")
-    # Erode the alpha so the faint scatter dots do not widen the crop.
-    solid = image.getchannel("A").point(lambda v: 255 if v > 160 else 0)
-    left, top, right, bottom = solid.filter(ImageFilter.MinFilter(9)).getbbox()
-    half = max(right - left, bottom - top) * 51 // 100
-    cx, cy = (left + right) // 2, (top + bottom) // 2
-    square = Image.new("RGBA", (2 * half, 2 * half))
-    square.paste(image.crop((cx - half, cy - half, cx + half, cy + half)))
+    star_d = svg_path(fit_star((4.0, 3.0, 60.0, 59.0)))
+    tao_d = svg_path(place_tao(15.2, 18.2, 32.5))
+    stops = [
+        (0.0, (148, 52, 238)),
+        (0.48, (48, 114, 240)),
+        (1.0, (10, 194, 214)),
+    ]
+
     frames = []
     for size in ICO_SIZES:
-        frame = square.resize((size, size), Image.LANCZOS)
-        if size <= 24:
-            # Thin strokes wash out at taskbar sizes.
-            frame.putalpha(frame.getchannel("A").point(lambda v: min(255, int(v * 1.8))))
-        frames.append(frame)
+        hi = max(128, size * 4)
+        rim_mask = _render_mask_svg(star_d, hi, stroke_width=3.6, fill=True)
+        star_mask = _render_mask_svg(star_d, hi, stroke_width=0.0, fill=True)
+        tao_shadow_mask = _render_mask_svg(tao_d, hi, stroke_width=2.6, fill=True)
+        tao_mask = _render_mask_svg(tao_d, hi, stroke_width=0.9, fill=True)
+
+        rim = Image.new("RGBA", (hi, hi), (24, 30, 52, 0))
+        rim.putalpha(rim_mask.point(lambda v: int(v * 0.90)))
+
+        star_layer = _diagonal_gradient(hi, stops)
+        star_layer.putalpha(star_mask)
+
+        tao_shadow = Image.new("RGBA", (hi, hi), (18, 24, 48, 0))
+        tao_shadow.putalpha(tao_shadow_mask.point(lambda v: int(v * 0.55)))
+
+        tao_layer = Image.new("RGBA", (hi, hi), (255, 255, 255, 0))
+        tao_layer.putalpha(tao_mask)
+
+        comp = Image.alpha_composite(rim, star_layer)
+        comp = Image.alpha_composite(comp, tao_shadow)
+        comp = Image.alpha_composite(comp, tao_layer)
+        frames.append(comp.resize((size, size), Image.LANCZOS))
     frames[-1].save(directory / "ime-brand.ico", format="ICO",
                     sizes=[(s, s) for s in ICO_SIZES], append_images=frames[:-1])
 

@@ -401,8 +401,12 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var backspacePreviewText: String?
     private var backspacePreviewRect: CGRect?
     private var backspacePreviewPressed = false
+    private var backspacePreviewDismissRect: CGRect?
+    private var backspacePreviewDismissPressed = false
     private var backspacePreviewPendingSelection = false
     private var backspacePreviewHideWorkItem: DispatchWorkItem?
+    private var statusMessageDismissRect: CGRect?
+    private var statusMessageDismissPressed = false
     private let emojiPreferences = UserDefaults(suiteName: KeyTaoIOSPaths.appGroupIdentifier) ?? .standard
     private lazy var recentEmojis: [String] = loadRecentEmojis()
     private var visibleRecentEmojis: [String] = []
@@ -542,16 +546,28 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
-    func showSwitchHint(_ message: String) {
+    func showSwitchHint(_ message: String, duration: TimeInterval = 1.2) {
         switchHintHideWorkItem?.cancel()
         switchHintMessage = message
+        statusMessageDismissPressed = false
         let workItem = DispatchWorkItem { [weak self] in
             self?.switchHintMessage = nil
             self?.switchHintHideWorkItem = nil
+            self?.statusMessageDismissRect = nil
+            self?.statusMessageDismissPressed = false
             self?.invalidateLayoutAndDisplay()
         }
         switchHintHideWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
+        invalidateLayoutAndDisplay()
+    }
+
+    private func dismissSwitchHint() {
+        switchHintHideWorkItem?.cancel()
+        switchHintHideWorkItem = nil
+        switchHintMessage = nil
+        statusMessageDismissRect = nil
+        statusMessageDismissPressed = false
         invalidateLayoutAndDisplay()
     }
 
@@ -1018,6 +1034,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         candidateLongPressConsumed = false
         pressedCandidateMenuAction = nil
         backspacePreviewPressed = false
+        backspacePreviewDismissPressed = false
+        statusMessageDismissPressed = false
         toolbarTouchActive = false
         toolbarDragging = false
         toolbarLongPressConsumed = false
@@ -1085,8 +1103,16 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func beginAuxiliaryTouch(at point: CGPoint) -> Bool {
         gestureTouchStart = point
+        if !backspacePreviewPendingSelection, backspacePreviewDismissRect?.contains(point) == true {
+            backspacePreviewDismissPressed = true
+            return true
+        }
         if !backspacePreviewPendingSelection, backspacePreviewRect?.contains(point) == true {
             backspacePreviewPressed = true
+            return true
+        }
+        if statusMessageDismissRect?.contains(point) == true {
+            statusMessageDismissPressed = true
             return true
         }
         if candidateMenu != nil {
@@ -1159,8 +1185,18 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func updateCandidateOrPanelTouchMove(at point: CGPoint) {
+        if backspacePreviewDismissPressed {
+            backspacePreviewDismissPressed = backspacePreviewDismissRect?.contains(point) == true
+            setNeedsDisplay()
+            return
+        }
         if backspacePreviewPressed {
             backspacePreviewPressed = backspacePreviewRect?.contains(point) == true
+            setNeedsDisplay()
+            return
+        }
+        if statusMessageDismissPressed {
+            statusMessageDismissPressed = statusMessageDismissRect?.contains(point) == true
             setNeedsDisplay()
             return
         }
@@ -1264,6 +1300,17 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func finishCandidateOrPanelTouch(at point: CGPoint) {
+        if backspacePreviewDismissPressed || backspacePreviewDismissRect?.contains(gestureTouchStart) == true {
+            let activate = backspacePreviewDismissPressed && backspacePreviewDismissRect?.contains(point) == true
+            clearCandidateOrPanelTouchState()
+            if activate {
+                performSelectionFeedback(playSound: false)
+                hideBackspaceDeletionPreview()
+            } else {
+                setNeedsDisplay()
+            }
+            return
+        }
         if backspacePreviewPressed || backspacePreviewRect?.contains(gestureTouchStart) == true {
             let activate = backspacePreviewPressed && backspacePreviewRect?.contains(point) == true
             clearCandidateOrPanelTouchState()
@@ -1277,6 +1324,17 @@ final class KeyTaoIOSKeyboardView: UIView {
                     )
                 )
                 hideBackspaceDeletionPreview()
+            }
+            return
+        }
+        if statusMessageDismissPressed || statusMessageDismissRect?.contains(gestureTouchStart) == true {
+            let activate = statusMessageDismissPressed && statusMessageDismissRect?.contains(point) == true
+            clearCandidateOrPanelTouchState()
+            if activate {
+                performSelectionFeedback(playSound: false)
+                dismissSwitchHint()
+            } else {
+                setNeedsDisplay()
             }
             return
         }
@@ -1854,6 +1912,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         backspacePreviewText = nil
         backspacePreviewRect = nil
         backspacePreviewPressed = false
+        backspacePreviewDismissRect = nil
+        backspacePreviewDismissPressed = false
         backspacePreviewPendingSelection = false
         // The hint owns the whole bar while visible, so the toolbar/candidate
         // rects must be rebuilt when it goes away or the bar stays empty.
@@ -2131,7 +2191,14 @@ final class KeyTaoIOSKeyboardView: UIView {
         toolbarRects = barContent == .functionPanel || barContent == .toolbar ? toolbarLayout() : []
         candidateExpandRect = barContent == .candidates ? expandButtonRect() : nil
         candidateMenuActionRects = barContent == .candidateMenu ? candidateMenuLayout() : []
-        backspacePreviewRect = barContent == .backspaceHint ? backspacePreviewLayout() : nil
+        if barContent == .backspaceHint, let layout = backspacePreviewLayout() {
+            backspacePreviewRect = layout.preview
+            backspacePreviewDismissRect = layout.dismiss
+        } else {
+            backspacePreviewRect = nil
+            backspacePreviewDismissRect = nil
+        }
+        statusMessageDismissRect = barContent == .statusMessage ? statusMessageDismissLayout() : nil
     }
 
     private var candidateBarMessage: String? {
@@ -2182,16 +2249,37 @@ final class KeyTaoIOSKeyboardView: UIView {
         return actions
     }
 
-    private func backspacePreviewLayout() -> CGRect? {
+    private func backspacePreviewLayout() -> (preview: CGRect, dismiss: CGRect?)? {
         guard backspacePreviewText?.isEmpty == false else { return nil }
         let gap = max(KeyTaoIMEInteractionTuning.backspacePreviewMinimumHorizontalInset, panelGap)
         let verticalInset = KeyTaoIMEInteractionTuning.backspacePreviewVerticalInset
-        return CGRect(
-            x: gap,
-            y: verticalInset,
-            width: max(0, bounds.width - gap * 2),
-            height: max(0, config.candidateBarHeightDp - verticalInset * 2)
+        let height = max(0, config.candidateBarHeightDp - verticalInset * 2)
+        if !backspacePreviewPendingSelection {
+            let dismissWidth: CGFloat = 40
+            let dismissX = max(gap, bounds.width - gap - dismissWidth)
+            let previewWidth = max(0, dismissX - panelGap - gap)
+            return (
+                preview: CGRect(x: gap, y: verticalInset, width: previewWidth, height: height),
+                dismiss: CGRect(x: dismissX, y: verticalInset, width: max(0, bounds.width - gap - dismissX), height: height)
+            )
+        }
+        return (
+            preview: CGRect(x: gap, y: verticalInset, width: max(0, bounds.width - gap * 2), height: height),
+            dismiss: nil
         )
+    }
+
+    private func statusMessageDismissLayout() -> CGRect? {
+        guard availabilityMessage?.isEmpty != false, switchHintMessage?.isEmpty == false else {
+            return nil
+        }
+        let barHeight = config.candidateBarHeightDp
+        let leftPadding = panelGap * 1.5
+        let dismissHeight = min(34, max(0, barHeight - 10))
+        let dismissWidth = min(40, max(0, bounds.width - leftPadding * 2))
+        let dismissX = max(leftPadding, bounds.width - leftPadding - dismissWidth)
+        let dismissY = (barHeight - dismissHeight) / 2
+        return CGRect(x: dismissX, y: dismissY, width: dismissWidth, height: dismissHeight)
     }
 
     private func makeAccessibilityElements() -> [UIAccessibilityElement] {
@@ -2351,14 +2439,17 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
             return
         case .statusMessage:
-            drawText(
+            let textRight = max(leftPadding, (statusMessageDismissRect?.minX ?? (bounds.width - leftPadding)) - (statusMessageDismissRect != nil ? panelGap : 0))
+            drawTruncatedText(
                 message ?? "请先在 KeyTao App 安装键道方案",
-                in: CGRect(x: leftPadding, y: 0, width: bounds.width - leftPadding * 2, height: barHeight),
+                in: CGRect(x: leftPadding, y: 0, width: max(0, textRight - leftPadding), height: barHeight),
                 color: statusMessageColor(),
                 size: preeditSize,
-                weight: theme.font.weight,
                 alignment: .left
             )
+            if let dismissRect = statusMessageDismissRect {
+                drawBannerBackButton(dismissRect, pressed: statusMessageDismissPressed)
+            }
             return
         case .functionPanel:
             drawFunctionPanelBar()
@@ -2489,6 +2580,15 @@ final class KeyTaoIOSKeyboardView: UIView {
             weight: theme.font.weight,
             alignment: .center
         )
+        if let dismissRect = backspacePreviewDismissRect {
+            drawBannerBackButton(dismissRect, pressed: backspacePreviewDismissPressed)
+        }
+    }
+
+    private func drawBannerBackButton(_ rect: CGRect, pressed: Bool) {
+        drawToolbarSurface(rect, pressed: pressed, active: false, selected: false)
+        let color = (pressed ? theme.mobile.keyboard.toolbar.selectedForeground : theme.mobile.keyboard.toolbar.foreground).uiColor
+        drawToolbarIcon(.back, in: rect, color: color)
     }
 
     private func fittedBackspacePreviewText(_ deleted: String, availableWidth: CGFloat) -> String {
@@ -4460,7 +4560,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                     horizontalGap: rowGap,
                     maximumRowWidth: maximumRowWidth,
                     effectiveKeyCount: effectiveKeyCount,
-                    effectiveWeight: totalWeight
+                    effectiveWeight: totalWeight,
+                    hasActiveLeadingSpans: !activeLeadingSpans.isEmpty
                 )
                 let unitWidth = max(1, (rowWidth - gapWidth) / totalWeight)
                 var x = isEmojiBody ? (bounds.width - maximumRowWidth) / 2 : (bounds.width - rowWidth) / 2
@@ -7306,20 +7407,29 @@ final class KeyTaoIOSKeyboardView: UIView {
         horizontalGap: CGFloat,
         maximumRowWidth: CGFloat,
         effectiveKeyCount: Int,
-        effectiveWeight: CGFloat
+        effectiveWeight: CGFloat,
+        hasActiveLeadingSpans: Bool = false
     ) -> CGFloat {
-        if keyboardRowShouldFillWidth(row, rowIndex: rowIndex, rows: rows) {
+        if keyboardRowShouldFillWidth(row, rowIndex: rowIndex, rows: rows, hasActiveLeadingSpans: hasActiveLeadingSpans) {
             return maximumRowWidth
         }
         let gapWidth = horizontalGap * CGFloat(max(0, effectiveKeyCount - 1))
         return min(maximumRowWidth, referenceUnitWidth * effectiveWeight + gapWidth)
     }
 
-    private func keyboardRowShouldFillWidth(_ row: [KeyTaoKeySpec], rowIndex: Int, rows: [[KeyTaoKeySpec]]) -> Bool {
+    private func keyboardRowShouldFillWidth(
+        _ row: [KeyTaoKeySpec],
+        rowIndex: Int,
+        rows: [[KeyTaoKeySpec]],
+        hasActiveLeadingSpans: Bool = false
+    ) -> Bool {
         if layerMode != .letters {
             return true
         }
         if rowIndex == 0 || rowIndex == rows.count - 1 {
+            return true
+        }
+        if hasActiveLeadingSpans || row.contains(where: { keyRowSpan($0) > 1 }) {
             return true
         }
         if row.count <= 5 {

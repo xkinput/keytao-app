@@ -314,8 +314,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var selectionModeActive = false
     private var schemaReady = true
     private var statusMessage: String? = null
+    private var statusMessageDismissRect: RectF? = null
+    private var statusMessageDismissPressed = false
     private val hideStatusMessage = Runnable {
         statusMessage = null
+        statusMessageDismissRect = null
+        statusMessageDismissPressed = false
         rebuildInteractiveRects()
         invalidate()
     }
@@ -479,6 +483,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var backspacePreviewText: String? = null
     private var backspacePreviewRect: RectF? = null
     private var backspacePreviewPressed = false
+    private var backspacePreviewDismissRect: RectF? = null
+    private var backspacePreviewDismissPressed = false
     private var backspacePreviewSettled = false
     private var backspacePreviewPendingSelection = false
     private var textRecallAllowed = true
@@ -511,6 +517,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         backspacePreviewText = null
         backspacePreviewRect = null
         backspacePreviewPressed = false
+        backspacePreviewDismissRect = null
+        backspacePreviewDismissPressed = false
         backspacePreviewSettled = false
         backspacePreviewPendingSelection = false
         // The hint owns the whole bar while visible, so the toolbar/candidate
@@ -805,7 +813,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     fun showMessage(message: String, durationMs: Long? = null) {
         removeCallbacks(hideStatusMessage)
         statusMessage = message
+        statusMessageDismissPressed = false
         durationMs?.let { postDelayed(hideStatusMessage, it) }
+        rebuildInteractiveRects()
+        invalidate()
+    }
+
+    private fun dismissStatusMessage() {
+        removeCallbacks(hideStatusMessage)
+        statusMessage = null
+        statusMessageDismissRect = null
+        statusMessageDismissPressed = false
         rebuildInteractiveRects()
         invalidate()
     }
@@ -1133,6 +1151,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         visibleCandidateGlobalIndexes = emptySet()
         toolbarLogoSize = 0f
         backspacePreviewRect = null
+        backspacePreviewDismissRect = null
+        statusMessageDismissRect = null
         val barHeight = dp(config.candidateBarHeightDp)
         val gap = dp(panelGapDp)
         val leftPadding = gap * 1.5f
@@ -1143,6 +1163,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
             CandidateBarContent.STATUS_MESSAGE -> {
                 resetCandidateScroll()
+                if (visibleDeploymentHint == null && schemaReady && !statusMessage.isNullOrBlank()) {
+                    val dismissHeight = minOf(dp(34f), barHeight - dp(10f))
+                    val dismissWidth = dp(40f).coerceAtMost((width - leftPadding * 2f).coerceAtLeast(0f))
+                    val dismissTop = (barHeight - dismissHeight) / 2f
+                    val dismissLeft = (width - leftPadding - dismissWidth).coerceAtLeast(leftPadding)
+                    statusMessageDismissRect = RectF(
+                        dismissLeft,
+                        dismissTop,
+                        dismissLeft + dismissWidth,
+                        dismissTop + dismissHeight,
+                    )
+                }
             }
             CandidateBarContent.FUNCTION_PANEL -> {
                 resetCandidateScroll()
@@ -1162,7 +1194,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_MINIMUM_HORIZONTAL_INSET_DP),
                 )
                 val verticalInset = dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_VERTICAL_INSET_DP)
-                backspacePreviewRect = RectF(previewGap, verticalInset, width - previewGap, barHeight - verticalInset)
+                if (!backspacePreviewPendingSelection) {
+                    val dismissWidth = dp(40f)
+                    val dismissLeft = (width - previewGap - dismissWidth).coerceAtLeast(previewGap)
+                    val previewRight = (dismissLeft - gap).coerceAtLeast(previewGap)
+                    backspacePreviewRect = RectF(previewGap, verticalInset, previewRight, barHeight - verticalInset)
+                    backspacePreviewDismissRect = RectF(
+                        dismissLeft,
+                        verticalInset,
+                        width - previewGap,
+                        barHeight - verticalInset,
+                    )
+                } else {
+                    backspacePreviewRect = RectF(previewGap, verticalInset, width - previewGap, barHeight - verticalInset)
+                }
             }
             CandidateBarContent.CLIPBOARD_SUGGESTION -> {
                 resetCandidateScroll()
@@ -1523,9 +1568,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     invalidate()
                     return true
                 }
-                backspacePreviewPressed = !backspacePreviewPendingSelection &&
+                backspacePreviewDismissPressed = !backspacePreviewPendingSelection &&
+                    backspacePreviewDismissRect?.contains(event.x, event.y) == true
+                backspacePreviewPressed = !backspacePreviewDismissPressed &&
+                    !backspacePreviewPendingSelection &&
                     backspacePreviewRect?.contains(event.x, event.y) == true
-                if (backspacePreviewPressed) {
+                statusMessageDismissPressed = statusMessageDismissRect?.contains(event.x, event.y) == true
+                if (backspacePreviewPressed || backspacePreviewDismissPressed || statusMessageDismissPressed) {
                     panelGesturePointerId = pointerId
                     downX = event.x
                     downY = event.y
@@ -1727,6 +1776,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 keyboardDismissTouchActive = false
                 keyboardDismissConsumed = false
                 backspacePreviewPressed = false
+                backspacePreviewDismissPressed = false
+                statusMessageDismissPressed = false
                 resetExpandedCandidateTouch()
                 keyboardScrollTouchActive = false
                 keyboardDragging = false
@@ -1803,15 +1854,23 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 return
             }
             CandidateBarContent.STATUS_MESSAGE -> {
+                val dismissRect = statusMessageDismissRect
+                val textRight = (dismissRect?.left?.minus(gap) ?: (width - leftPadding)).coerceAtLeast(leftPadding)
                 textPaint.textSize = sp(preeditSizeSp)
                 textPaint.color = statusMessageColor()
                 textPaint.textAlign = Paint.Align.LEFT
+                canvas.save()
+                canvas.clipRect(leftPadding, 0f, textRight, barHeight)
                 canvas.drawText(
                     message ?: "请先在 KeyTao App 安装键道方案",
                     leftPadding,
                     centerY + textBaselineOffset(textPaint),
                     textPaint,
                 )
+                canvas.restore()
+                if (dismissRect != null) {
+                    drawBannerBackButton(canvas, dismissRect, statusMessageDismissPressed)
+                }
                 return
             }
             CandidateBarContent.FUNCTION_PANEL -> {
@@ -1939,6 +1998,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             rect.centerY() + textBaselineOffset(textPaint),
             textPaint,
         )
+        backspacePreviewDismissRect?.let { dismissRect ->
+            drawBannerBackButton(canvas, dismissRect, backspacePreviewDismissPressed)
+        }
+    }
+
+    private fun drawBannerBackButton(canvas: Canvas, rect: RectF, pressed: Boolean) {
+        drawToolbarSurface(canvas, rect, pressed)
+        val color = theme.toolbar.themeColor(if (pressed) "selectedForeground" else "foreground").toArgb()
+        drawToolbarIcon(canvas, ToolbarIcon.BACK, rect, color)
     }
 
     private fun fittedBackspacePreviewText(deleted: String, availableWidth: Float): String {
@@ -4972,6 +5040,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     maximumRowWidth = maximumRowWidth,
                     effectiveKeyCount = effectiveKeyCount,
                     effectiveWeight = totalWeight,
+                    hasActiveLeadingSpans = activeLeadingSpans.isNotEmpty(),
                 )
                 val unitWidth = ((rowWidth - gapWidth) / totalWeight).coerceAtLeast(1f)
                 var x = (width - rowWidth) / 2f
@@ -6287,8 +6356,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val x = event.getX(pointerIndex)
         val y = event.getY(pointerIndex)
         when {
+            backspacePreviewDismissPressed -> {
+                backspacePreviewDismissPressed = backspacePreviewDismissRect?.contains(x, y) == true
+                invalidate()
+            }
             backspacePreviewPressed -> {
                 backspacePreviewPressed = backspacePreviewRect?.contains(x, y) == true
+                invalidate()
+            }
+            statusMessageDismissPressed -> {
+                statusMessageDismissPressed = statusMessageDismissRect?.contains(x, y) == true
                 invalidate()
             }
             candidateMenu != null -> {
@@ -6420,12 +6497,34 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun finishPanelGesture(x: Float, y: Float): Boolean {
+        if (backspacePreviewDismissPressed || backspacePreviewDismissRect?.contains(downX, downY) == true) {
+            val activate = backspacePreviewDismissPressed && backspacePreviewDismissRect?.contains(x, y) == true
+            backspacePreviewDismissPressed = false
+            if (activate) {
+                performConfiguredSelectionFeedback(playSound = false)
+                hideBackspacePreviewRunnable.run()
+            } else {
+                invalidate()
+            }
+            return true
+        }
         if (backspacePreviewPressed || backspacePreviewRect?.contains(downX, downY) == true) {
             val activate = backspacePreviewPressed && backspacePreviewRect?.contains(x, y) == true
             backspacePreviewPressed = false
             if (activate) {
                 listener?.onKeyCommand(backspaceGestureCommand("restoreGesture"))
                 hideBackspacePreviewRunnable.run()
+            }
+            return true
+        }
+        if (statusMessageDismissPressed || statusMessageDismissRect?.contains(downX, downY) == true) {
+            val activate = statusMessageDismissPressed && statusMessageDismissRect?.contains(x, y) == true
+            statusMessageDismissPressed = false
+            if (activate) {
+                performConfiguredSelectionFeedback(playSound = false)
+                dismissStatusMessage()
+            } else {
+                invalidate()
             }
             return true
         }
@@ -7205,17 +7304,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         maximumRowWidth: Float,
         effectiveKeyCount: Int,
         effectiveWeight: Float,
+        hasActiveLeadingSpans: Boolean = false,
     ): Float {
-        if (keyboardRowShouldFillWidth(row, rowIndex, rows)) {
+        if (keyboardRowShouldFillWidth(row, rowIndex, rows, hasActiveLeadingSpans)) {
             return maximumRowWidth
         }
         val gapWidth = horizontalGap * (effectiveKeyCount - 1).coerceAtLeast(0)
         return (referenceUnitWidth * effectiveWeight + gapWidth).coerceAtMost(maximumRowWidth)
     }
 
-    private fun keyboardRowShouldFillWidth(row: List<KeySpec>, rowIndex: Int, rows: List<List<KeySpec>>): Boolean {
+    private fun keyboardRowShouldFillWidth(
+        row: List<KeySpec>,
+        rowIndex: Int,
+        rows: List<List<KeySpec>>,
+        hasActiveLeadingSpans: Boolean = false,
+    ): Boolean {
         if (keyboardLayer != "letters") return true
         if (rowIndex == 0 || rowIndex == rows.lastIndex) return true
+        if (hasActiveLeadingSpans || row.any { keyRowSpan(it) > 1 }) return true
         if (row.size <= 5) return true
         return row.any { key ->
             val type = actionForMode(key).type

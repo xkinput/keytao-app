@@ -1512,14 +1512,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 value
             }
             if (!KeytaoNativeBridge.applyKeyboard(keyboardFile.absolutePath, targetId)) {
-                keyboardView?.showMessage("切换键盘方案失败")
+                keyboardView?.showMessage("切换键盘方案失败", durationMs = 2500L)
                 return
             }
             KeytaoAndroidImeConfig.invalidateCache()
             val reloaded = loadPresentationConfig()
             baseKeyboardConfig = reloaded
             applyKeyboardPresentation(reloaded, keyboardLayoutState)
-            keyboardView?.showMessage("已切换：${reloaded.keyboardName}")
+            keyboardView?.showMessage("已切换：${reloaded.keyboardName}", durationMs = 2000L)
             refreshRimeOptions(inBackground = true)
             return
         }
@@ -1545,12 +1545,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             )
             KeytaoThemeResolver.invalidate()
             keyboardView?.updateTheme(resolvePresentationTheme())
-            if (!configWritten || !themeWritten) keyboardView?.showMessage("键盘内设置恢复失败")
+            if (!configWritten || !themeWritten) {
+                keyboardView?.showMessage("键盘内设置恢复失败", durationMs = 2500L)
+            }
             return
         }
         val patch = settingPatch(key, value) ?: return
         if (!KeytaoAndroidImeConfig.persistSettings(this, mapOf(key to patch))) {
-            keyboardView?.showMessage("设置保存失败")
+            keyboardView?.showMessage("设置保存失败", durationMs = 2500L)
         }
     }
 

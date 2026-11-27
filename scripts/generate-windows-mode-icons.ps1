@@ -11,8 +11,8 @@ $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 Add-Type -AssemblyName System.Drawing
 
-# Render font outlines, not a ClearType screenshot: alpha must remain transparent
-# and every visible pixel must stay white at all Windows tray/DPI sizes.
+# Render font outlines, not a ClearType screenshot: white glyph with a subtle
+# dark outer outline so it stays legible on both light and dark Windows taskbars.
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -35,7 +35,8 @@ public static class KeyTaoModeIcons
         {
             path.AddString(glyph, family, (int)FontStyle.Regular, 100, PointF.Empty, format);
             RectangleF bounds = path.GetBounds();
-            float extent = size * 0.875f; // 14px at 100% DPI; no colored tile/padding.
+            float strokeWidth = Math.Max(2.0f, size * 0.14f);
+            float extent = size * 0.78f;
             float scale = extent / Math.Max(bounds.Width, bounds.Height);
             float x = (size - bounds.Width * scale) / 2 - bounds.X * scale;
             float y = (size - bounds.Height * scale) / 2 - bounds.Y * scale;
@@ -43,7 +44,12 @@ public static class KeyTaoModeIcons
                 path.Transform(transform);
             graphics.Clear(Color.Transparent);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.CompositingMode = CompositingMode.SourceCopy;
+            graphics.CompositingMode = CompositingMode.SourceOver;
+            using (var outlinePen = new Pen(Color.FromArgb(235, 20, 20, 20), strokeWidth))
+            {
+                outlinePen.LineJoin = LineJoin.Round;
+                graphics.DrawPath(outlinePen, path);
+            }
             graphics.FillPath(Brushes.White, path);
         }
         return bitmap;
@@ -68,9 +74,9 @@ public static class KeyTaoModeIcons
             for (int y = size - 1; y >= 0; y--)
                 for (int x = 0; x < size; x++)
                 {
-                    byte alpha = bitmap.GetPixel(x, y).A;
-                    writer.Write((byte)255); writer.Write((byte)255);
-                    writer.Write((byte)255); writer.Write(alpha);
+                    Color c = bitmap.GetPixel(x, y);
+                    writer.Write(c.B); writer.Write(c.G);
+                    writer.Write(c.R); writer.Write(c.A);
                 }
             for (int y = size - 1; y >= 0; y--)
             {

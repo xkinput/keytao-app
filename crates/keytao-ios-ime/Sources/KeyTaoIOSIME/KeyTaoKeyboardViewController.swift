@@ -954,14 +954,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                 targetId = value
             }
             guard engine.applyKeyboard(id: targetId) else {
-                showMessage("切换键盘方案失败")
+                keyboardView?.showSwitchHint("切换键盘方案失败", duration: 2.5)
                 return
             }
             engine.releaseCaches()
             let reloaded = engine.loadConfig()
             baseKeyboardConfig = reloaded
             applyKeyboardPresentation(config: reloaded)
-            showMessage("已切换：\(reloaded.name)")
+            keyboardView?.showSwitchHint("已切换：\(reloaded.name)", duration: 2.0)
             refreshRimeOptions()
             return
         }
@@ -977,7 +977,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             let themeWritten = engine.persistThemeUi(colorScheme: "auto", accentHex: "", resetAppearance: true)
             engine.releaseCaches()
             updateThemeForCurrentAppearance()
-            if !configWritten || !themeWritten { showMessage("键盘内设置恢复失败") }
+            if !configWritten || !themeWritten {
+                keyboardView?.showSwitchHint("键盘内设置恢复失败", duration: 2.5)
+            }
             return
         }
         guard let patchValue = settingPatch(key: key, value: value) else { return }
@@ -985,7 +987,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             applyKeyboardPresentation(config: current)
         }
         if !engine.persistSettings(patch: [key: patchValue]) {
-            showMessage("设置保存失败")
+            keyboardView?.showSwitchHint("设置保存失败", duration: 2.5)
         }
     }
 
