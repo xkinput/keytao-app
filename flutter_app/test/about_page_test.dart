@@ -125,6 +125,26 @@ void main() {
     expect(find.widgetWithText(SettingRow, '检查更新'), findsNothing);
     expect(find.text('GitHub'), findsNothing);
     expect(find.text('键道目录'), findsNothing);
+    final uninstallButton = find.byKey(const ValueKey('uninstall-keytao'));
+    await tester.ensureVisible(uninstallButton);
+    expect(uninstallButton, findsOneWidget);
+    await tester.tap(uninstallButton);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('uninstall-clear-user-data')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('uninstall-clear-user-data')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('继续'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('uninstall-confirm-clear-data')),
+      findsOneWidget,
+    );
+    expect(find.text('永久删除并卸载'), findsOneWidget);
+    await tester.tap(find.text('返回'));
+    await tester.pumpAndSettle();
 
     for (final name in ['KeyTao', 'librime', 'libjd-engine']) {
       final link = find.byWidgetPredicate(
@@ -218,6 +238,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('uninstall-keytao')), findsNothing);
     final deploy = Completer<void>();
     final deployment = controller.run(() => deploy.future);
     await tester.pump();

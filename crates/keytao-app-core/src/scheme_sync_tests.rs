@@ -31,6 +31,42 @@ fn fixture() -> (tempfile::TempDir, Arc<Core>) {
 }
 
 #[test]
+fn hidden_schemes_round_trip_filters_invalid_keys_and_groups_variants() {
+    let (_dir, core) = fixture();
+    let settings = json!({"hidden_schemes": [
+        "xmjd-feiding", "xmjd", "builtin/xmjd", "rime_ice", "easy_en", "wanxiang",
+        "rime_mint", "rime_frost", "triple_pinyin_lssp", "txjx", "keytao", "builtin/keytao",
+        "local-custom", "../bad", "unknown", 7, null,
+    ]});
+    let expected = json!({"hidden_schemes": [
+        "easy_en", "local-custom", "rime_frost", "rime_ice", "rime_mint", "triple_pinyin_lssp", "txjx",
+        "wanxiang", "xmjd",
+    ]});
+    assert_eq!(sanitize_settings(&settings), expected);
+    assert_eq!(sanitize_settings(&expected), expected);
+    assert_eq!(
+        sanitize_settings(&json!({"hidden_schemes": "txjx"})),
+        json!({})
+    );
+    let saved = set_preferences(&core, None, None, None, Some(settings)).unwrap();
+    assert_eq!(saved["settings"], expected);
+    let env = core.env().clone();
+    drop(core);
+    let restarted = Core::new(env, Arc::new(Sink)).unwrap();
+    assert_eq!(sync_state(&restarted)["settings"], expected);
+    assert_eq!(export_profile(&restarted).unwrap()["settings"], expected);
+    let shown = set_preferences(
+        &restarted,
+        None,
+        None,
+        None,
+        Some(json!({"hidden_schemes": []})),
+    )
+    .unwrap();
+    assert_eq!(shown["settings"], json!({"hidden_schemes": []}));
+}
+
+#[test]
 fn appearance_sync_round_trip_preserves_overrides_and_explicit_defaults() {
     let (_dir, core) = fixture();
     for appearance in [
@@ -117,6 +153,46 @@ fn profile_serialization_excludes_secrets_paths_logs_and_banner_state() {
                 "ime_ui":{"accent_color":"#112233"},"android":{"haptics_enabled":true}}
         })
     );
+}
+
+#[tokio::test]
+async fn custom_git_sources_survive_restart_and_stay_local_to_the_device() {
+    let (dir, core) = fixture();
+    let settings = json!({"custom_git_schemes":[
+        {"scheme_key":"local-demo","repo_url":"https://github.com/acme/demo","mode":"release","asset_name":"full.zip","display_name":"Demo"},
+        {"scheme_key":"local-dev","repo_url":"https://github.com/acme/dev/tree/dev","mode":"branch","branch":"dev"},
+        {"scheme_key":"../bad","repo_url":"https://github.com/acme/bad","mode":"release"},
+        {"scheme_key":"local-ftp","repo_url":"ftp://example.com/repo","mode":"release"}
+    ]});
+    let expected = json!({"custom_git_schemes":[
+        {"scheme_key":"local-demo","repo_url":"https://github.com/acme/demo","mode":"release","branch":null,"asset_name":"full.zip","display_name":"Demo"},
+        {"scheme_key":"local-dev","repo_url":"https://github.com/acme/dev/tree/dev","mode":"branch","branch":"dev","asset_name":null,"display_name":null}
+    ]});
+    assert_eq!(
+        set_preferences(&core, None, None, None, Some(settings)).unwrap()["settings"],
+        expected
+    );
+    let profile = export_profile(&core).unwrap();
+    assert!(profile["settings"].get("custom_git_schemes").is_none());
+    let env = core.env().clone();
+    drop(core);
+
+    let restarted = Core::new(env, Arc::new(Sink)).unwrap();
+    assert_eq!(sync_state(&restarted)["settings"], expected);
+    let remote_profile = json!({
+        "version":1,
+        "active_scheme":null,
+        "packages":[],
+        "settings":{"download_source":"github","custom_git_schemes":[]}
+    });
+    let result = apply_profile_at(&restarted, remote_profile, dir.path(), "http://127.0.0.1:1")
+        .await
+        .unwrap();
+    assert_eq!(
+        sync_state(&restarted)["settings"]["custom_git_schemes"],
+        expected["custom_git_schemes"]
+    );
+    assert!(result["settings"].get("custom_git_schemes").is_none());
 }
 
 #[test]

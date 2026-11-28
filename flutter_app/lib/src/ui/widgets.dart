@@ -688,6 +688,7 @@ class SettingRow extends StatelessWidget {
     this.description,
     this.stacked = false,
     this.keepInline = false,
+    this.compact = false,
     this.value,
     this.controlMaxWidth,
     this.minimumControlWidth = 0,
@@ -698,6 +699,7 @@ class SettingRow extends StatelessWidget {
   final String? description;
   final bool stacked;
   final bool keepInline;
+  final bool compact;
   final Widget? value;
   final double? controlMaxWidth;
   final double minimumControlWidth;
@@ -711,6 +713,9 @@ class SettingRow extends StatelessWidget {
         children: [
           Text(
             label,
+            maxLines: compact ? 1 : null,
+            softWrap: compact ? false : null,
+            overflow: compact ? TextOverflow.ellipsis : null,
             style: context.theme.typography.body.sm.copyWith(
               color: context.theme.colors.foreground,
               fontWeight: FontWeight.w400,
@@ -734,7 +739,7 @@ class SettingRow extends StatelessWidget {
           constraints.maxWidth - 200 >= minimumControlWidth;
       return ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 20),
-        child: keepInline && !inline
+        child: compact || (keepInline && !inline)
             ? Row(
                 children: [
                   Expanded(child: title),
@@ -915,11 +920,13 @@ class SwitchSetting extends StatelessWidget {
     required this.value,
     this.onChanged,
     this.hint,
+    this.compact = false,
   });
   final String label;
   final bool value;
   final ValueChanged<bool>? onChanged;
   final String? hint;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -929,6 +936,7 @@ class SwitchSetting extends StatelessWidget {
       label,
       description: hint,
       keepInline: true,
+      compact: compact,
       child: FSwitch(
         semanticsLabel: AppStrings.toggle(label),
         value: value,

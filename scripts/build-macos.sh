@@ -6,9 +6,19 @@ export COPYFILE_DISABLE=1
 PACKAGE_ARCHS=(universal)
 case "${1:-}" in
     --all-archs) PACKAGE_ARCHS+=(arm64 x86_64); shift ;;
+    --arch)
+        if (( $# < 2 )); then
+            echo "Usage: $0 [--all-archs | --arch universal|arm64|x86_64]" >&2
+            exit 2
+        fi
+        case "$2" in
+            universal|arm64|x86_64) PACKAGE_ARCHS=("$2"); shift 2 ;;
+            *) echo "Unsupported macOS package architecture: $2" >&2; exit 2 ;;
+        esac
+        ;;
 esac
 if (( $# != 0 )); then
-    echo "Usage: $0 [--all-archs]" >&2
+    echo "Usage: $0 [--all-archs | --arch universal|arm64|x86_64]" >&2
     exit 2
 fi
 
@@ -17,7 +27,8 @@ LIBRIME_VERSION="${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versi
 IME_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-ime"
 FLUTTER_DIR="$PROJECT_DIR/flutter_app"
 MAIN_APP="$FLUTTER_DIR/build/macos/Build/Products/Release/KeyTao.app"
-PKG_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-pkg"
+PKG_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-pkg-build"
+PKG_OUTPUT_DIR="$PROJECT_DIR/target/keytao-macos-pkg"
 VENDOR_DIR="$PROJECT_DIR/vendor/librime/macos-universal"
 VENDOR_ENV="$VENDOR_DIR/env.sh"
 PACKAGE_VERSION="$(awk '
@@ -281,6 +292,7 @@ PKG_REPACK_DIR="$PKG_BUILD_DIR/repack"
 PKG_EXPANDED_DIR="$PKG_REPACK_DIR/expanded"
 PKG_FLAT_DIR="$PKG_REPACK_DIR/flat"
 PKG_CLEAN_OUTPUT="$PKG_REPACK_DIR/KeyTao.clean.pkg"
+mkdir -p "$PKG_OUTPUT_DIR"
 
 for arch in "${PACKAGE_ARCHS[@]}"; do
     echo "==> Building KeyTao installer pkg ($arch)..."
@@ -297,6 +309,7 @@ for arch in "${PACKAGE_ARCHS[@]}"; do
         ditto --noextattr --norsrc --arch "$arch" "$MAIN_APP" "$payload_main_app"
         ditto --noextattr --norsrc --arch "$arch" "$IME_APP" "$payload_ime_app"
     fi
+    final_output="$PKG_OUTPUT_DIR/$(basename "$output")"
     find "$PKG_PAYLOAD" \( -name '._*' -o -name '.DS_Store' \) -delete
     xattr -cr "$PKG_PAYLOAD" 2>/dev/null || true
     xattr -cr "$PKG_SCRIPTS" 2>/dev/null || true
@@ -360,7 +373,9 @@ SCRIPTEOF
         -) ;;
         *) codesign --force --sign "$SIGN_ID" "$output.dmg" ;;
     esac
-    echo "==> pkg complete: $output.pkg"
+    mv -f "$output.pkg" "$final_output.pkg"
+    mv -f "$output.dmg" "$final_output.dmg"
+    echo "==> pkg complete: $final_output.pkg"
 done
 echo "    /Applications/KeyTao.app"
 echo "    /Library/Input Methods/KeyTao.app"

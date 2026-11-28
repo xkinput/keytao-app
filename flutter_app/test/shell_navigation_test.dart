@@ -12,12 +12,15 @@ import 'view_fixture.dart';
 
 Future<ViewController> mountShell(
   WidgetTester tester,
-  BridgePlatform platform,
-) async {
+  BridgePlatform platform, {
+  Size? size,
+}) async {
   tester.view.devicePixelRatio = 1;
-  tester.view.physicalSize = platform == BridgePlatform.android
-      ? const Size(390, 800)
-      : const Size(1000, 800);
+  tester.view.physicalSize =
+      size ??
+      (platform == BridgePlatform.android
+          ? const Size(390, 800)
+          : const Size(1000, 800));
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   final controller = ViewController(platform);
@@ -78,15 +81,18 @@ void main() {
   });
 
   for (final platform in [BridgePlatform.macOs, BridgePlatform.android]) {
+    final nextPage = platform == BridgePlatform.macOs
+        ? AppPage.skin
+        : AppPage.scheme;
     testWidgets('tabs are visible in order on ${platform.name}', (
       tester,
     ) async {
       await mountShell(tester, platform);
 
       var previousCenter = 0.0;
-      for (final (id, label) in const [
+      for (final (id, label) in [
         ('ime', '输入'),
-        ('scheme', '方案'),
+        if (platform != BridgePlatform.macOs) ('scheme', '方案'),
         ('skin', '皮肤'),
         ('library', '词库与设置'),
         ('about', '关于'),
@@ -102,6 +108,14 @@ void main() {
         expect(center, greaterThan(previousCenter));
         previousCenter = center;
       }
+      expect(
+        find.byKey(const ValueKey('nav-scheme'), skipOffstage: false),
+        platform == BridgePlatform.macOs ? findsNothing : findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('page-slide-scheme'), skipOffstage: false),
+        platform == BridgePlatform.macOs ? findsNothing : findsOneWidget,
+      );
       expect(find.byKey(const ValueKey('nav-debug')), findsNothing);
       expect(tester.takeException(), isNull);
     });
@@ -111,11 +125,11 @@ void main() {
     ) async {
       await mountShell(tester, platform);
 
-      await tester.tap(find.byKey(const ValueKey('nav-scheme')));
+      await tester.tap(find.byKey(ValueKey('nav-${nextPage.id}')));
       await tester.pump();
-      expect(offsetOf(tester, 'scheme'), greaterThan(0));
+      expect(offsetOf(tester, nextPage.id), greaterThan(0));
       await tester.pumpAndSettle();
-      expect(offsetOf(tester, 'scheme'), 0);
+      expect(offsetOf(tester, nextPage.id), 0);
 
       await tester.tap(find.byKey(const ValueKey('nav-ime')));
       await tester.pump();
@@ -135,7 +149,7 @@ void main() {
       await tester.pump();
       final firstOffset = offsetOf(tester, 'ime');
       expect(firstOffset, inExclusiveRange(-.35, 0));
-      expect(offsetOf(tester, 'scheme'), closeTo(1 + firstOffset, .001));
+      expect(offsetOf(tester, nextPage.id), closeTo(1 + firstOffset, .001));
       await swipe.moveBy(Offset(-width * .23, 0));
       await tester.pump();
       final lastOffset = offsetOf(tester, 'ime');
@@ -143,19 +157,19 @@ void main() {
       expect(controller.activePage, AppPage.input);
       await swipe.up();
       await tester.pump();
-      expect(offsetOf(tester, 'scheme'), closeTo(1 + lastOffset, .001));
+      expect(offsetOf(tester, nextPage.id), closeTo(1 + lastOffset, .001));
       await tester.pumpAndSettle();
-      expect(controller.activePage, AppPage.scheme);
-      expect(offsetOf(tester, 'scheme'), 0);
+      expect(controller.activePage, nextPage);
+      expect(offsetOf(tester, nextPage.id), 0);
 
       final shortDrag = await tester.startGesture(Offset(width * .25, 170));
       await shortDrag.moveBy(Offset(width * .16, 0));
       await tester.pump();
-      expect(offsetOf(tester, 'scheme'), greaterThan(0));
+      expect(offsetOf(tester, nextPage.id), greaterThan(0));
       await shortDrag.up();
       await tester.pumpAndSettle();
-      expect(controller.activePage, AppPage.scheme);
-      expect(offsetOf(tester, 'scheme'), 0);
+      expect(controller.activePage, nextPage);
+      expect(offsetOf(tester, nextPage.id), 0);
 
       final swipeBack = await tester.startGesture(Offset(width * .25, 170));
       await swipeBack.moveBy(Offset(width * .42, 0));
@@ -164,7 +178,74 @@ void main() {
       await swipeBack.up();
       await tester.pumpAndSettle();
       expect(controller.activePage, AppPage.input);
+      expect(
+        find.byKey(const ValueKey('page-slide-scheme'), skipOffstage: false),
+        platform == BridgePlatform.macOs ? findsNothing : findsOneWidget,
+      );
     });
+  }
+
+  for (final width in [400.0, 1000.0]) {
+    testWidgets('macOS tabs open matching pages at width $width', (
+      tester,
+    ) async {
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        (_) async => null,
+      );
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          null,
+        ),
+      );
+      final controller = await mountShell(
+        tester,
+        BridgePlatform.macOs,
+        size: Size(width, 800),
+      );
+      expect(controller.visiblePages, const [
+        AppPage.input,
+        AppPage.skin,
+        AppPage.library,
+        AppPage.about,
+        AppPage.website,
+      ]);
+      expect(find.byKey(const ValueKey('nav-scheme')), findsNothing);
+
+      for (final page in const [
+        AppPage.skin,
+        AppPage.library,
+        AppPage.about,
+        AppPage.input,
+      ]) {
+        final tab = find.byKey(ValueKey('nav-${page.id}'));
+        expect(tab.hitTestable(), findsOneWidget);
+        await tester.tap(tab);
+        await tester.pumpAndSettle();
+        expect(controller.activePage, page);
+        expect(find.byKey(PageStorageKey(page.id)), findsOneWidget);
+        expect(offsetOf(tester, page.id), 0);
+      }
+
+      await openWebsite(tester);
+      expect(controller.activePage, AppPage.website);
+      expect(offsetOf(tester, 'website'), 0);
+
+      expect(AppPage.fromId('scheme'), AppPage.scheme);
+      controller.selectPage(AppPage.fromId('scheme')!);
+      await tester.pumpAndSettle();
+      expect(controller.activePage, AppPage.input);
+      expect(find.byKey(const PageStorageKey('ime')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('page-slide-scheme'), skipOffstage: false),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   }
 
   testWidgets(
@@ -225,6 +306,8 @@ void main() {
 
   testWidgets('desktop slow mouse drag selects page text', (tester) async {
     final controller = await mountShell(tester, _desktopPlatform);
+    await tester.tap(find.byKey(const ValueKey('nav-skin')));
+    await tester.pumpAndSettle();
     final editable = find.byWidgetPredicate(
       (widget) =>
           widget is EditableText &&
@@ -243,14 +326,14 @@ void main() {
       await drag.moveBy(const Offset(-7.5, 0));
     }
     await tester.pump();
-    expect(offsetOf(tester, 'ime'), 0);
+    expect(offsetOf(tester, 'skin'), 0);
     await drag.up();
     await tester.pumpAndSettle();
     expect(
       tester.widget<EditableText>(editable).controller.selection.isCollapsed,
       isFalse,
     );
-    expect(controller.activePage, AppPage.input);
+    expect(controller.activePage, AppPage.skin);
   }, variant: _desktopPlatforms);
 
   testWidgets('desktop button fires after five pixels of mouse jitter', (
@@ -299,7 +382,12 @@ void main() {
 
     for (final (kind, page) in [
       (PointerDeviceKind.trackpad, AppPage.input),
-      (PointerDeviceKind.mouse, AppPage.scheme),
+      (
+        PointerDeviceKind.mouse,
+        _desktopPlatform == BridgePlatform.macOs
+            ? AppPage.skin
+            : AppPage.scheme,
+      ),
     ]) {
       await tester.dragFrom(
         const Offset(700, 170),
@@ -337,8 +425,11 @@ void main() {
         await drag.up();
         await tester.pumpAndSettle();
 
-        expect(controller.activePage, AppPage.scheme);
-        expect(offsetOf(tester, 'scheme'), 0);
+        final nextPage = _desktopPlatform == BridgePlatform.macOs
+            ? AppPage.skin
+            : AppPage.scheme;
+        expect(controller.activePage, nextPage);
+        expect(offsetOf(tester, nextPage.id), 0);
       },
       variant: _desktopPlatforms,
     );

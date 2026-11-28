@@ -174,6 +174,7 @@ async fn git_release_auto_picks_targz_unwraps_folder_and_detects_updates() {
     assert_eq!(key, "local-rime-demo");
     let installed = crate::packages::list_installed_packages(&core).unwrap();
     let pkg = installed.iter().find(|p| p.scheme_key == key).unwrap();
+    assert_eq!(pkg.source, "git");
     assert_eq!(pkg.display_name.as_deref(), Some("示例方案"));
     assert_eq!(pkg.version.as_deref(), Some("v1.2.0"));
     assert_eq!(

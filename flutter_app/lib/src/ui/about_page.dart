@@ -1,3 +1,5 @@
+import 'dart:io' show exit;
+
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -5,6 +7,8 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import '../app/uninstaller.dart';
+import '../rust/api/types.dart';
 import 'debug_page.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -90,6 +94,126 @@ class AboutPage extends StatelessWidget {
     );
     if (redownload != null) {
       await controller.openAppUpdate(redownload: redownload);
+    }
+  }
+
+  Future<void> _uninstall(BuildContext context) async {
+    var clearUserData = false;
+    final shouldContinue = await showFDialog<bool>(
+      context: context,
+      builder: (context, _, animation) => StatefulBuilder(
+        builder: (context, setState) => AppDialog(
+          title: '卸载 KeyTao',
+          animation: animation,
+          actions: [
+            ActionButton('取消', onPress: () => Navigator.pop(context)),
+            ActionButton(
+              '继续',
+              icon: FLucideIcons.trash2,
+              primary: true,
+              onPress: () => Navigator.pop(context, true),
+            ),
+          ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('将从 Mac 移除 KeyTao 主应用和系统输入法组件。'),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  FCheckbox(
+                    key: const ValueKey('uninstall-clear-user-data'),
+                    value: clearUserData,
+                    semanticsLabel: '同时清除本机 KeyTao 个人资料',
+                    onChange: (value) => setState(() {
+                      clearUserData = value;
+                    }),
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        '同时清除本机方案、词库、学习记录、应用设置和缓存。'
+                        '自定义 Rime 数据目录不会删除。',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (shouldContinue != true || !context.mounted) return;
+
+    if (clearUserData) {
+      var confirmed = false;
+      final clearConfirmed = await showFDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context, _, animation) => StatefulBuilder(
+          builder: (context, setState) => AppDialog(
+            title: '永久删除 KeyTao 个人资料？',
+            animation: animation,
+            actions: [
+              ActionButton('返回', onPress: () => Navigator.pop(context)),
+              ActionButton(
+                '永久删除并卸载',
+                icon: FLucideIcons.trash2,
+                primary: true,
+                onPress: confirmed ? () => Navigator.pop(context, true) : null,
+              ),
+            ],
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '将删除 ~/Library/keytao、KeyTao 应用状态、缓存和偏好设置。'
+                  '此操作无法撤销。',
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FCheckbox(
+                      key: const ValueKey('uninstall-confirm-clear-data'),
+                      value: confirmed,
+                      semanticsLabel: '确认永久删除 KeyTao 个人资料',
+                      onChange: (value) => setState(() {
+                        confirmed = value;
+                      }),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text('我了解这些本机数据将被永久删除'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      if (clearConfirmed != true || !context.mounted) return;
+    }
+
+    try {
+      await KeyTaoUninstaller.uninstall(clearUserData: clearUserData);
+      exit(0);
+    } on KeyTaoUninstallCancelled {
+      if (context.mounted) controller.showToast('已取消卸载，KeyTao 未移除');
+    } catch (error) {
+      if (context.mounted) {
+        controller.showToast(
+          '卸载未完成：${error.toString().replaceFirst('Bad state: ', '')}',
+        );
+      }
     }
   }
 
@@ -317,6 +441,26 @@ class AboutPage extends StatelessWidget {
                 ],
               ),
             ),
+            if (c.info.platform == BridgePlatform.macOs)
+              HairlineGridCell(
+                child: Section(
+                  title: '应用卸载',
+                  icon: FLucideIcons.trash2,
+                  children: [
+                    SettingRow(
+                      '卸载 KeyTao',
+                      description: '从 Mac 移除主应用和系统输入法组件。',
+                      child: ActionButton(
+                        '卸载应用',
+                        key: const ValueKey('uninstall-keytao'),
+                        icon: FLucideIcons.trash2,
+                        onPress: () => _uninstall(context),
+                        tooltip: '卸载 KeyTao',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ...debugLogCells(c),
           ],
         ),

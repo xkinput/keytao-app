@@ -13,7 +13,7 @@ import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/package_orphans.dart';
-import 'package:keytao/src/ui/scheme_page.dart';
+import 'package:keytao/src/ui/scheme_page.dart' show SchemePackageRow;
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -34,6 +34,7 @@ class _FollowupsCore extends FakeCore {
     installedVersion: 'v0.14.0',
   );
   String inputEngine = 'rime';
+  final persistedSchemeSettings = <String, dynamic>{};
   Completer<void>? engineSwitchGate;
   Completer<int>? libjdImportGate;
   Completer<String>? previewGate;
@@ -59,6 +60,26 @@ class _FollowupsCore extends FakeCore {
   Future<void> crateApiCoreDismissMigrationBackupNotice() async {
     dismissedBackupNotice = true;
     calls.add('dismissBackupNotice');
+  }
+
+  @override
+  Future<String> crateApiCoreGetSchemeSyncState() async => jsonEncode({
+    'settings': persistedSchemeSettings,
+  });
+
+  @override
+  Future<String> crateApiCoreSetSchemeSyncPreferences({
+    bool? followAccountSync,
+    String? schemeKey,
+    bool? sync_,
+    String? settingsJson,
+  }) async {
+    if (settingsJson != null) {
+      persistedSchemeSettings
+        ..clear()
+        ..addAll(jsonDecode(settingsJson) as Map<String, dynamic>);
+    }
+    return jsonEncode({'settings': persistedSchemeSettings});
   }
 
   List<InstalledPackageDto>? customInstalledPackages;
@@ -364,9 +385,7 @@ class _OrphanController extends ViewController {
     trashedFiles = files.map((f) => f.path).toList();
     trashedBackups = keptBackups.map((b) => b.backup).toList();
     report = PackageOrphanReportDto(
-      files: report.files
-          .where((f) => !trashedFiles.contains(f.path))
-          .toList(),
+      files: report.files.where((f) => !trashedFiles.contains(f.path)).toList(),
       keptBackups: report.keptBackups
           .where((b) => !trashedBackups.contains(b.backup))
           .toList(),
@@ -770,11 +789,14 @@ void main() {
       final schemeSelector = find.byKey(
         const ValueKey('current-schema-selector'),
       );
-      expect(find.text('macOS 系统输入法 ·'), findsOneWidget);
-      expect(find.descendant(of: engineSelector, matching: find.text('Rime')),
-          findsOneWidget);
+      expect(find.text('当前方案 ·'), findsOneWidget);
+      expect(
+        find.descendant(of: engineSelector, matching: find.text('Rime')),
+        findsOneWidget,
+      );
       expect(find.text('已部署'), findsNothing);
-      expect(find.widgetWithText(ActionButton, '重新部署'), findsOneWidget);
+      expect(find.byKey(const ValueKey('input-deploy-button')), findsOneWidget);
+      expect(find.widgetWithText(ActionButton, '重新部署'), findsNothing);
       expect(find.widgetWithText(SwitchSetting, '算法引擎'), findsOneWidget);
       expect(find.text('切换引擎'), findsNothing);
       expect(find.text('切换方案'), findsNothing);
@@ -806,8 +828,10 @@ void main() {
       // instead of leaving the user on a manual "未转换 / 前往方案页" prompt.
       expect(api.calls, contains('importLibjd:keytao'));
       expect(c.isUsingLibjd, isTrue);
-      expect(find.descendant(of: engineSelector, matching: find.text('ime-jd')),
-          findsOneWidget);
+      expect(
+        find.descendant(of: engineSelector, matching: find.text('ime-jd')),
+        findsOneWidget,
+      );
       expect(c.candidatePreviewCandidates.single.text, 'ime-jd预览');
       expect(find.text('未转换'), findsNothing);
       expect(find.text('已部署'), findsNothing);
@@ -824,15 +848,25 @@ void main() {
       await tester.tap(find.widgetWithText(FItem, '星猫键道'));
       await tester.pumpAndSettle();
       expect(api.calls, contains('convertSchema:xmjd:xmjd6'));
-      expect(find.descendant(of: engineSelector, matching: find.text('ime-jd')),
-          findsOneWidget);
+      expect(
+        find.descendant(of: engineSelector, matching: find.text('ime-jd')),
+        findsOneWidget,
+      );
       api.previewWord = '星猫预览';
       stalePreview.complete(
         '{"page_size":5,"candidates":[{"text":"过期待选","comment":""}]}',
       );
       await firstPreview;
       expect(c.candidatePreviewCandidates.single.text, '星猫预览');
-      expect(find.text('已转换'), findsNothing);
+      final converted = find.text('已转换');
+      expect(converted, findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('scheme-package-keytao')),
+          matching: converted,
+        ),
+        findsOneWidget,
+      );
       expect(macosReady, findsOneWidget);
       expect(find.textContaining('请前往方案页下载并转换你的方案'), findsNothing);
 
@@ -882,7 +916,6 @@ void main() {
       expect(await c.switchPackage('xmjd'), isTrue);
       expect(api.calls, contains('switchPackage:xmjd:'));
       expect(api.calls, isNot(contains('importLibjd:xmjd')));
-      c.selectPage(AppPage.scheme);
       await tester.pumpAndSettle();
       final xmjdMenu = find.descendant(
         of: find.byWidgetPredicate(
@@ -922,8 +955,10 @@ void main() {
       expect(await c.setInputEngine('rime'), isTrue);
       await tester.pumpAndSettle();
       expect(api.calls, contains('deployDefault'));
-      expect(find.descendant(of: engineSelector, matching: find.text('Rime')),
-          findsOneWidget);
+      expect(
+        find.descendant(of: engineSelector, matching: find.text('Rime')),
+        findsOneWidget,
+      );
       expect(find.text('未部署'), findsNothing);
       expect(find.text('请先安装输入方案。'), findsNothing);
       expect(c.canDeploy, isTrue);
@@ -959,22 +994,23 @@ void main() {
     (tester) async {
       final api = _FollowupsCore();
       RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: '1.2.15-alpha.7',
-          userRoot: '/rime',
-        ),
-      )
-        ..local = deployedLocal
-        ..installedPackages = const [
-          InstalledPackageDto(
-            schemeKey: 'keytao',
-            version: '1.0.0',
-            active: true,
-            hasPackageZip: true,
-          ),
-        ];
+      final c =
+          AppController(
+              info: const BridgeInfo(
+                platform: BridgePlatform.macOs,
+                appVersion: '1.2.15-alpha.7',
+                userRoot: '/rime',
+              ),
+            )
+            ..local = deployedLocal
+            ..installedPackages = const [
+              InstalledPackageDto(
+                schemeKey: 'keytao',
+                version: '1.0.0',
+                active: true,
+                hasPackageZip: true,
+              ),
+            ];
       addTearDown(() async {
         c.dispose();
         await api.events.close();
@@ -990,16 +1026,18 @@ void main() {
           home: FScaffold(
             child: ListenableBuilder(
               listenable: c,
-              builder: (_, _) => SchemePage(controller: c),
+              builder: (_, _) => InputPage(controller: c),
             ),
           ),
         ),
       );
       await tester.pumpAndSettle();
 
-      final addGit = find.byKey(const ValueKey('add-git-scheme-button'));
-      await tester.ensureVisible(addGit);
-      await tester.tap(addGit);
+      final addScheme = find.byKey(const ValueKey('add-scheme-button'));
+      await tester.ensureVisible(addScheme);
+      await tester.tap(addScheme);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('add-custom-scheme')));
       await tester.pumpAndSettle();
       expect(find.text('从 Git 添加方案'), findsOneWidget);
 
@@ -1043,6 +1081,65 @@ void main() {
       });
       expect(find.text('从 Git 添加方案'), findsNothing);
       expect(find.text('自定义 Git 方案'), findsOneWidget);
+      expect(c.isLocalScheme('local-git-demo'), isFalse);
+
+      await tester.tap(addScheme);
+      await tester.pumpAndSettle();
+      final remembered = find.byKey(
+        const ValueKey('add-remembered-git-scheme-local-git-demo'),
+      );
+      expect(remembered, findsOneWidget);
+      await tester.tap(remembered);
+      await tester.pumpAndSettle();
+      expect(find.text('配置 Git 方案'), findsOneWidget);
+
+      final urlField = tester.widget<TextField>(
+        find.descendant(
+          of: find.byKey(const ValueKey('git-scheme-url')),
+          matching: find.byType(TextField),
+        ),
+      );
+      expect(
+        urlField.controller?.text,
+        'https://github.com/acme/rime-custom',
+      );
+      expect(
+        tester.widget<TextField>(
+          find.descendant(
+            of: find.byKey(const ValueKey('git-scheme-asset')),
+            matching: find.byType(TextField),
+          ),
+        ).controller?.text,
+        'full.zip',
+      );
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('git-scheme-url'))),
+      ).pop();
+      await tester.pumpAndSettle();
+
+      c.installedPackages = const [];
+      api.customInstalledPackages = const [];
+      await c.loadSchemeSyncState();
+      await tester.pumpAndSettle();
+      await tester.tap(addScheme);
+      await tester.pumpAndSettle();
+      expect(remembered, findsOneWidget);
+      expect(find.text('自定义 Git 方案'), findsOneWidget);
+      await tester.tap(remembered);
+      await tester.pumpAndSettle();
+      expect(find.text('配置 Git 方案'), findsOneWidget);
+      expect(
+        tester.widget<TextField>(
+          find.descendant(
+            of: find.byKey(const ValueKey('git-scheme-url')),
+            matching: find.byType(TextField),
+          ),
+        ).controller?.text,
+        'https://github.com/acme/rime-custom',
+      );
+      await tester.tap(find.byKey(const ValueKey('git-scheme-submit')));
+      await tester.pumpAndSettle();
+      expect(api.gitImports.last['schemeKey'], 'local-git-demo');
     },
   );
 
@@ -1051,22 +1148,23 @@ void main() {
     (tester) async {
       final api = _FollowupsCore();
       RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: '1.2.15-alpha.7',
-          userRoot: '/rime',
-        ),
-      )
-        ..local = deployedLocal
-        ..installedPackages = const [
-          InstalledPackageDto(
-            schemeKey: 'keytao',
-            version: '1.0.0',
-            active: true,
-            hasPackageZip: true,
-          ),
-        ];
+      final c =
+          AppController(
+              info: const BridgeInfo(
+                platform: BridgePlatform.macOs,
+                appVersion: '1.2.15-alpha.7',
+                userRoot: '/rime',
+              ),
+            )
+            ..local = deployedLocal
+            ..installedPackages = const [
+              InstalledPackageDto(
+                schemeKey: 'keytao',
+                version: '1.0.0',
+                active: true,
+                hasPackageZip: true,
+              ),
+            ];
       addTearDown(() async {
         c.dispose();
         await api.events.close();
@@ -1147,22 +1245,23 @@ void main() {
       final api = _FollowupsCore()
         ..remoteLogos['txjx'] = '/cache/remote-scheme-logos-v1/txjx/logo.png';
       RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: '1.2.15-alpha.7',
-          userRoot: '/rime',
-        ),
-      )
-        ..local = deployedLocal
-        ..installedPackages = const [
-          InstalledPackageDto(
-            schemeKey: 'keytao',
-            version: '1.0.0',
-            active: true,
-            hasPackageZip: true,
-          ),
-        ];
+      final c =
+          AppController(
+              info: const BridgeInfo(
+                platform: BridgePlatform.macOs,
+                appVersion: '1.2.15-alpha.7',
+                userRoot: '/rime',
+              ),
+            )
+            ..local = deployedLocal
+            ..installedPackages = const [
+              InstalledPackageDto(
+                schemeKey: 'keytao',
+                version: '1.0.0',
+                active: true,
+                hasPackageZip: true,
+              ),
+            ];
       addTearDown(() async {
         c.dispose();
         await api.events.close();
@@ -1180,10 +1279,8 @@ void main() {
           home: FScaffold(
             child: ListenableBuilder(
               listenable: c,
-              builder: (_, _) => SchemePackageRow(
-                controller: c,
-                schemeKey: 'txjx',
-              ),
+              builder: (_, _) =>
+                  SchemePackageRow(controller: c, schemeKey: 'txjx'),
             ),
           ),
         ),
@@ -1202,7 +1299,9 @@ void main() {
       expect(find.byType(SchemaLogo), findsOneWidget);
 
       // Subsequent rebuilds within 2 days reuse cache without calling bridge again.
-      final callsBefore = api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length;
+      final callsBefore = api.calls
+          .where((x) => x.startsWith('remoteLogo:txjx'))
+          .length;
       await c.ensureRemoteSchemeLogo('txjx');
       expect(
         api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length,
@@ -1226,58 +1325,49 @@ void main() {
     },
   );
 
-  test(
-    'failed remote logo lookup cools down instead of retrying every build and installed package logos preload versions',
-    () async {
-      final directory = Directory.systemTemp.createTempSync(
-        'keytao-test-logo-stability-',
-      );
-      addTearDown(() => directory.deleteSync(recursive: true));
-      final pkgLogo = File('${directory.path}/keytao.png')
-        ..writeAsBytesSync([0x89, 0x50, 0x4E, 0x47]);
-      final api = _FollowupsCore()
-        ..failingRemoteLogos.add('txjx')
-        ..customInstalledPackages = [
-          InstalledPackageDto(
-            schemeKey: 'keytao',
-            version: '1.0.0',
-            active: true,
-            hasPackageZip: true,
-            logoPath: pkgLogo.path,
-          ),
-        ];
-      RustLib.initMock(api: api);
-      final c = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.windows,
-          appVersion: '1.2.22',
-          userRoot: '/rime',
+  test('failed remote logo lookup cools down instead of retrying every build and installed package logos preload versions', () async {
+    final directory = Directory.systemTemp.createTempSync(
+      'keytao-test-logo-stability-',
+    );
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final pkgLogo = File('${directory.path}/keytao.png')
+      ..writeAsBytesSync([0x89, 0x50, 0x4E, 0x47]);
+    final api = _FollowupsCore()
+      ..failingRemoteLogos.add('txjx')
+      ..customInstalledPackages = [
+        InstalledPackageDto(
+          schemeKey: 'keytao',
+          version: '1.0.0',
+          active: true,
+          hasPackageZip: true,
+          logoPath: pkgLogo.path,
         ),
-      );
-      addTearDown(() async {
-        c.dispose();
-        await api.events.close();
-        RustLib.dispose();
-      });
+      ];
+    RustLib.initMock(api: api);
+    final c = AppController(
+      info: const BridgeInfo(
+        platform: BridgePlatform.windows,
+        appVersion: '1.2.22',
+        userRoot: '/rime',
+      ),
+    );
+    addTearDown(() async {
+      c.dispose();
+      await api.events.close();
+      RustLib.dispose();
+    });
 
-      expect(c.shouldFetchRemoteSchemeLogo('txjx'), isTrue);
-      await c.ensureRemoteSchemeLogo('txjx');
-      expect(
-        api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length,
-        1,
-      );
-      // Immediately after a network failure, cooldown prevents tight retry storms.
-      expect(c.shouldFetchRemoteSchemeLogo('txjx'), isFalse);
-      await c.ensureRemoteSchemeLogo('txjx');
-      expect(
-        api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length,
-        1,
-      );
+    expect(c.shouldFetchRemoteSchemeLogo('txjx'), isTrue);
+    await c.ensureRemoteSchemeLogo('txjx');
+    expect(api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length, 1);
+    // Immediately after a network failure, cooldown prevents tight retry storms.
+    expect(c.shouldFetchRemoteSchemeLogo('txjx'), isFalse);
+    await c.ensureRemoteSchemeLogo('txjx');
+    expect(api.calls.where((x) => x.startsWith('remoteLogo:txjx')).length, 1);
 
-      // Refreshing installed packages preloads schemaLogoVersion so SchemaLogo
-      // does not toggle ImageProvider types on subsequent builds.
-      await c.refreshSchemeUpdates();
-      expect(c.schemaLogoVersion(pkgLogo.path), isNotNull);
-    },
-  );
+    // Refreshing installed packages preloads schemaLogoVersion so SchemaLogo
+    // does not toggle ImageProvider types on subsequent builds.
+    await c.refreshSchemeUpdates();
+    expect(c.schemaLogoVersion(pkgLogo.path), isNotNull);
+  });
 }

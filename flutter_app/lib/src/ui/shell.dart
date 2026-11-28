@@ -37,8 +37,15 @@ extension PageIcon on AppPage {
   };
 }
 
+bool _showSchemeUpdateIndicator(AppPage page, AppController controller) =>
+    page ==
+        (controller.info.platform == BridgePlatform.macOs
+            ? AppPage.input
+            : AppPage.scheme) &&
+    controller.hasSchemeUpdates;
+
 Widget _navigationIcon(AppPage page, AppController controller, double size) =>
-    page == AppPage.scheme && controller.hasSchemeUpdates
+    _showSchemeUpdateIndicator(page, controller)
     ? Semantics(
         label: AppStrings.checkUpdate,
         child: Stack(
@@ -240,10 +247,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      void select(int index) {
-        if (index == c.activePage.index) return;
+      void select(AppPage page) {
+        if (page == c.activePage) return;
         FocusScope.of(context).unfocus();
-        c.selectPage(AppPage.values[index]);
+        c.selectPage(page);
       }
 
       final shell = LayoutBuilder(
@@ -406,8 +413,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             ),
                           ),
                         ),
-                        index: c.activePage.index,
-                        onChange: select,
+                        index: c.visiblePages.indexOf(c.activePage),
+                        onChange: (index) => select(c.visiblePages[index]),
                         children: [
                           for (final page in c.visiblePages)
                             FBottomNavigationBarItem(
@@ -427,10 +434,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               animate: !reduceMotion,
               touchOnly: c.isMobile,
               nativeWebsiteOverlay: c.isLinux,
-              onSelect: (page) => select(page.index),
+              onSelect: select,
               children: {
                 AppPage.input: InputPage(controller: c),
-                AppPage.scheme: SchemePage(controller: c),
+                if (c.visiblePages.contains(AppPage.scheme))
+                  AppPage.scheme: SchemePage(controller: c),
                 AppPage.skin: SkinPage(controller: c),
                 AppPage.library: LibraryPage(controller: c),
                 AppPage.about: AboutPage(controller: c),
@@ -765,7 +773,7 @@ class _PageDeckPreciseDragRecognizer extends HorizontalDragGestureRecognizer {
 class _DesktopNavigation extends StatelessWidget {
   const _DesktopNavigation({required this.controller, required this.onSelect});
   final AppController controller;
-  final ValueChanged<int> onSelect;
+  final ValueChanged<AppPage> onSelect;
 
   @override
   Widget build(BuildContext context) {
@@ -793,7 +801,7 @@ class _DesktopNavigation extends StatelessWidget {
                   semanticsButton: false,
                   semanticsRole: SemanticsRole.tab,
                   selected: controller.activePage == page,
-                  onPress: () => onSelect(page.index),
+                  onPress: () => onSelect(page),
                   builder: (context, variants, _) => Container(
                     constraints: const BoxConstraints(minHeight: 44),
                     padding: const EdgeInsets.symmetric(
@@ -826,8 +834,7 @@ class _DesktopNavigation extends StatelessWidget {
                                 : palette.ink,
                           ),
                         ),
-                        if (page == AppPage.scheme &&
-                            controller.hasSchemeUpdates) ...[
+                        if (_showSchemeUpdateIndicator(page, controller)) ...[
                           const SizedBox(width: 8),
                           Semantics(
                             label: AppStrings.checkUpdate,

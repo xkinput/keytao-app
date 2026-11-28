@@ -60,7 +60,8 @@ class RimeAddonSlot {
   final Future<core.AddonStatusDto> Function({
     required bool installed,
     required FutureOr<String> Function() androidDeploy,
-  }) _manage;
+  })
+  _manage;
   core.AddonStatusDto? status;
   String? error;
   InstallProgressDto? progress;
@@ -215,6 +216,7 @@ class AppController extends ChangeNotifier {
     );
     return file?.path;
   }
+
   bool get isAndroid => info.platform == BridgePlatform.android;
   bool get isWindows => info.platform == BridgePlatform.windows;
   bool get isLinux => info.platform == BridgePlatform.linux;
@@ -383,14 +385,18 @@ class AppController extends ChangeNotifier {
       selectPage(AppPage.website);
     }
   }
+
   late final _reduceMotion = ValueNotifier(info.reduceMotion);
   ValueListenable<bool> get reduceMotionChanges => _reduceMotion;
   bool get reduceMotion => _reduceMotion.value;
   bool _savingReduceMotion = false;
   bool get canSaveReduceMotion => !_savingReduceMotion;
-  List<AppPage> get visiblePages => websiteHidden
-      ? AppPage.values.take(AppPage.website.index).toList()
-      : AppPage.values;
+  List<AppPage> get visiblePages => [
+    for (final page in AppPage.values)
+      if (!(info.platform == BridgePlatform.macOs && page == AppPage.scheme) &&
+          !(websiteHidden && page == AppPage.website))
+        page,
+  ];
   OperationKind? operation;
   bool checkingStorage = false;
   bool releaseLoading = false;
@@ -619,7 +625,9 @@ class AppController extends ChangeNotifier {
   String? packageDeployError(String key) {
     final package =
         deploySteps.where((step) => step.packageKey == key).firstOrNull ??
-        deploySteps.where((step) => step.packageKey == 'builtin/$key').firstOrNull;
+        deploySteps
+            .where((step) => step.packageKey == 'builtin/$key')
+            .firstOrNull;
     return package?.error;
   }
 
@@ -752,6 +760,7 @@ class AppController extends ChangeNotifier {
       _remoteSchemeLogoInFlight.remove(key);
     }
   }
+
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
   String desktopEnglishSwitchKey = 'schema';
   List<String> desktopSchemaEnglishSwitchKeys = const [];
@@ -830,7 +839,191 @@ class AppController extends ChangeNotifier {
     return schemeDisplayName(normalized);
   }
 
-  bool isLocalScheme(String key) => installedPackageFor(key)?.source == 'local';
+  bool isLocalScheme(String key) {
+    final package = installedPackageFor(key);
+    return package?.source == 'local' && package?.git == null;
+  }
+
+  List<InstalledPackageDto> get rememberedGitSchemes {
+    final configs = <String, GitSchemeConfigDto>{};
+    final names = <String, String?>{};
+    final stored = _schemeSettings['custom_git_schemes'];
+    if (stored is List) {
+      for (final value in stored.whereType<Map>()) {
+        final key = value['scheme_key'];
+        final repoUrl = value['repo_url'];
+        final mode = value['mode'];
+        if (key is! String ||
+            !key.startsWith('local-') ||
+            repoUrl is! String ||
+            mode is! String) {
+          continue;
+        }
+        configs[key] = GitSchemeConfigDto(
+          repoUrl: repoUrl,
+          mode: mode,
+          branch: value['branch'] as String?,
+          assetName: value['asset_name'] as String?,
+        );
+        names[key] = value['display_name'] as String?;
+      }
+    }
+    for (final package in installedPackages) {
+      if (package.git case final git?) {
+        configs[package.schemeKey] = git;
+        names[package.schemeKey] =
+            package.displayName ?? names[package.schemeKey];
+      }
+    }
+    return [
+      for (final key in configs.keys)
+        _rememberedGitPackage(
+          key,
+          configs[key]!,
+          names[key],
+          installedPackageFor(key),
+        ),
+    ];
+  }
+
+  InstalledPackageDto _rememberedGitPackage(
+    String key,
+    GitSchemeConfigDto git,
+    String? displayName,
+    InstalledPackageDto? installed,
+  ) => InstalledPackageDto(
+    schemeKey: key,
+    version: installed?.version,
+    active: installed?.active ?? false,
+    inUse: installed?.inUse ?? false,
+    hasPackageZip: installed?.hasPackageZip ?? false,
+    supportsUserWords: installed?.supportsUserWords ?? true,
+    source: installed?.source ?? 'git',
+    displayName: installed?.displayName ?? displayName,
+    logoPath: installed?.logoPath,
+    engine: installed?.engine ?? 'rime',
+    git: installed?.git ?? git,
+    buildCacheBytes: installed?.buildCacheBytes,
+    imeJdCacheBytes: installed?.imeJdCacheBytes,
+  );
+
+  bool _rememberGitScheme({
+    required String schemeKey,
+    required String repoUrl,
+    required String mode,
+    required String? branch,
+    required String? assetName,
+    required String displayName,
+  }) {
+    final package = installedPackageFor(schemeKey);
+    final git = package?.git;
+    final url = git?.repoUrl ?? repoUrl;
+    final savedMode = git?.mode ?? mode;
+    final savedBranch = git?.branch ?? branch;
+    final savedAsset = git?.assetName ?? assetName;
+    final savedName = package?.displayName ?? displayName;
+    final current = _schemeSettings['custom_git_schemes'];
+    final entries = current is List
+        ? current
+              .whereType<Map>()
+              .map((entry) => Map<String, dynamic>.from(entry))
+              .toList()
+        : <Map<String, dynamic>>[];
+    final old = entries
+        .where((entry) => entry['scheme_key'] == schemeKey)
+        .firstOrNull;
+    if (old != null &&
+        old['repo_url'] == url &&
+        old['mode'] == savedMode &&
+        old['branch'] == savedBranch &&
+        old['asset_name'] == savedAsset &&
+        old['display_name'] == savedName) {
+      return false;
+    }
+    entries.removeWhere((entry) => entry['scheme_key'] == schemeKey);
+    entries.add({
+      'scheme_key': schemeKey,
+      'repo_url': url,
+      'mode': savedMode,
+      'branch': savedBranch,
+      'asset_name': savedAsset,
+      'display_name': savedName,
+    });
+    _schemeSettings['custom_git_schemes'] = entries;
+    return true;
+  }
+
+  bool _rememberInstalledGitSchemes() {
+    var changed = false;
+    for (final package in installedPackages) {
+      final git = package.git;
+      if (git == null) continue;
+      changed =
+          _rememberGitScheme(
+            schemeKey: package.schemeKey,
+            repoUrl: git.repoUrl,
+            mode: git.mode,
+            branch: git.branch,
+            assetName: git.assetName,
+            displayName: package.displayName ?? '',
+          ) ||
+          changed;
+    }
+    return changed;
+  }
+
+  static String _schemeVisibilityKey(String key) {
+    final normalized = key.startsWith('builtin/')
+        ? key.substring('builtin/'.length)
+        : key;
+    return normalized == 'xmjd-feiding' ? 'xmjd' : normalized;
+  }
+
+  Set<String> get hiddenSchemes => {
+    for (final key in _schemeSettings['hidden_schemes'] as List? ?? const [])
+      if (key is String && _schemeVisibilityKey(key) != 'keytao')
+        _schemeVisibilityKey(key),
+  };
+
+  bool isSchemeDeployed(String key) {
+    final family = _schemeVisibilityKey(key);
+    bool matches(String candidate) => _schemeVisibilityKey(candidate) == family;
+    if (isolatedPackages.any(
+      (package) => matches(package.packageKey) && package.ready,
+    )) {
+      return true;
+    }
+    if (local?.deployed == true && matches(activeSchemeKey)) return true;
+    if (family == 'easy_en') return addon?.deployed == true;
+    if (family == 'wanxiang') return wanxiang?.deployed == true;
+    return rimeAddons.entries.any(
+      (entry) => matches(entry.key) && entry.value.status?.deployed == true,
+    );
+  }
+
+  bool canHideScheme(String key) =>
+      !busy &&
+      _schemeVisibilityKey(key) != 'keytao' &&
+      !isLocalScheme(key) &&
+      !isSchemeDeployed(key);
+
+  bool isSchemeHidden(String key) =>
+      hiddenSchemes.contains(_schemeVisibilityKey(key)) &&
+      !isSchemeDeployed(key);
+
+  Future<void> setSchemeHidden(String key, bool hidden) async {
+    if ((hidden && !canHideScheme(key)) ||
+        _schemeVisibilityKey(key) == 'keytao' ||
+        isLocalScheme(key)) {
+      return;
+    }
+    final keys = hiddenSchemes;
+    final family = _schemeVisibilityKey(key);
+    if (!(hidden ? keys.add(family) : keys.remove(family))) return;
+    _schemeSettings['hidden_schemes'] = keys.toList()..sort();
+    _changed();
+    await _persistSchemeSettings();
+  }
 
   String get activeSchemeKey {
     final installed = local?.installedScheme;
@@ -1187,7 +1380,9 @@ class AppController extends ChangeNotifier {
   String get defaultDir => info.userRoot;
 
   String? get activeIsolatedPackageKey {
-    final activeIsolated = isolatedPackages.where((pkg) => pkg.active).firstOrNull;
+    final activeIsolated = isolatedPackages
+        .where((pkg) => pkg.active)
+        .firstOrNull;
     if (activeIsolated != null && activeIsolated.packageKey.isNotEmpty) {
       return activeIsolated.packageKey;
     }
@@ -1227,7 +1422,11 @@ class AppController extends ChangeNotifier {
   ).toString();
   bool get canOpenDictionaryManager =>
       !isMobile && !busy && defaultDir.isNotEmpty;
-  String? get englishModeHint => englishReady ? null : AppStrings.englishHint;
+  String? get englishModeHint => englishReady
+      ? null
+      : info.platform == BridgePlatform.macOs
+      ? '请在上方方案列表安装附加方案 English'
+      : AppStrings.englishHint;
   bool get canOpenStorageSettings =>
       !busy && storage?['canOpenSettings'] != false;
   String get permissionDescription =>
@@ -1491,7 +1690,9 @@ class AppController extends ChangeNotifier {
               (publicWarning || compileWarning))) {
         progress = message;
         _deployStep(message, DeployStepState.neutral);
-        if (!isDeploying && !publicWarning) addOperationLogs(['[WARN] $message']);
+        if (!isDeploying && !publicWarning) {
+          addOperationLogs(['[WARN] $message']);
+        }
       }
       return;
     }
@@ -1560,6 +1761,9 @@ class AppController extends ChangeNotifier {
   }
 
   void selectPage(AppPage page) {
+    if (info.platform == BridgePlatform.macOs && page == AppPage.scheme) {
+      page = AppPage.input;
+    }
     if (activePage == page || (page == AppPage.website && websiteHidden)) {
       return;
     }
@@ -1569,7 +1773,8 @@ class AppController extends ChangeNotifier {
       sharedLogPath = null;
       unawaited(refreshLogs());
     }
-    if (page == AppPage.scheme) {
+    if (page == AppPage.scheme ||
+        (page == AppPage.input && info.platform == BridgePlatform.macOs)) {
       unawaited(refreshSchemeUpdates());
       unawaited(_refreshLiveSchemaSwitches());
     }
@@ -1714,7 +1919,8 @@ class AppController extends ChangeNotifier {
   Future<void> _readRimeAddon(RimeAddonSlot slot) async {
     try {
       slot.status = await slot._readStatus();
-      if (slot.operation != OperationKind.rimeIce || operation != slot.operation) {
+      if (slot.operation != OperationKind.rimeIce ||
+          operation != slot.operation) {
         slot.error = null;
       }
     } catch (failure) {
@@ -1780,7 +1986,11 @@ class AppController extends ChangeNotifier {
     final marker = File('${info.userRoot}$_liveSwitchesPath');
     DateTime? lastModified;
     _schemaSwitchPoll = Timer.periodic(const Duration(seconds: 1), (_) async {
-      if (!_foreground || activePage != AppPage.scheme) return;
+      final watchSwitches =
+          activePage == AppPage.scheme ||
+          (activePage == AppPage.input &&
+              info.platform == BridgePlatform.macOs);
+      if (!_foreground || !watchSwitches) return;
       final stat = await marker.stat();
       if (_disposed || !_foreground || stat.type != FileSystemEntityType.file) {
         return;
@@ -2537,10 +2747,11 @@ class AppController extends ChangeNotifier {
     }
   }, switchingInput: true);
 
-  Future<bool> convertSchemePackage(String key, String schemaId) => run(() async {
-    packageError = null;
-    await _convertSchemePackage(key, schemaId: schemaId);
-  });
+  Future<bool> convertSchemePackage(String key, String schemaId) =>
+      run(() async {
+        packageError = null;
+        await _convertSchemePackage(key, schemaId: schemaId);
+      });
 
   Future<void> _convertSchemePackage(String key, {String? schemaId}) async {
     final previousOperation = operation;
@@ -2916,8 +3127,18 @@ class AppController extends ChangeNotifier {
         importedKey = key;
         _pendingCloudPackageUploads.remove(key);
         _invalidateSchemeUpdates();
+        await _readInstalledPackages();
+        if (_rememberGitScheme(
+          schemeKey: key,
+          repoUrl: repoUrl,
+          mode: mode,
+          branch: branch,
+          assetName: assetName,
+          displayName: displayName,
+        )) {
+          await _persistSchemeSettings(schedule: false);
+        }
         if (prefersLibjd) {
-          await _readInstalledPackages();
           deferred = await _deferDeployForSchemaSelection(
             key,
             activateOnConfirm: true,
@@ -2929,7 +3150,6 @@ class AppController extends ChangeNotifier {
             await _readLocal();
           }
         } else {
-          await _readInstalledPackages();
           await _readLocal();
           _manuallySelectedScheme = true;
           scheme = key;
@@ -3093,9 +3313,7 @@ class AppController extends ChangeNotifier {
     await _readInstalledPackages();
     await _readLocal();
     if (isMobile) {
-      await _checkRecommendedKeyboardAfterSchemaSwitch(
-        currentSchemaId ?? key,
-      );
+      await _checkRecommendedKeyboardAfterSchemaSwitch(currentSchemaId ?? key);
     }
     if (key == 'wanxiang') {
       wanxiang = await core.wanxiangStatus();
@@ -3207,7 +3425,7 @@ class AppController extends ChangeNotifier {
         } else {
           await _readInstalledPackages();
         }
-        if (package.active || (package.source == 'local' && scheme == key)) {
+        if (package.active || scheme == key) {
           _manuallySelectedScheme = true;
           scheme =
               installedPackages
@@ -3370,11 +3588,14 @@ class AppController extends ChangeNotifier {
         warning = result.warning;
       }
       await _readState();
-      if (!prefersLibjd && !hasPackageDeployProgress && local?.deployed != true) {
+      if (!prefersLibjd &&
+          !hasPackageDeployProgress &&
+          local?.deployed != true) {
         throw StateError(AppStrings.deployCheckFailed);
       }
-      final effectiveWarning =
-          warning?.isNotEmpty == true ? warning : local?.deployWarning;
+      final effectiveWarning = warning?.isNotEmpty == true
+          ? warning
+          : local?.deployWarning;
       deployWarning = effectiveWarning;
       _deployStep(message, DeployStepState.ok);
       if (effectiveWarning != null && effectiveWarning.isNotEmpty) {
@@ -3524,6 +3745,9 @@ class AppController extends ChangeNotifier {
   Future<void> loadSchemeSyncState() async {
     try {
       _readSchemeSyncState(await core.getSchemeSyncState());
+      if (_rememberInstalledGitSchemes()) {
+        await _persistSchemeSettings(schedule: false);
+      }
       _changed();
     } catch (failure) {
       schemeSyncError = errorText(failure);
@@ -4225,6 +4449,7 @@ class AppController extends ChangeNotifier {
     if (!requireRimeEngine()) return Future.value(false);
     return _manageAddon(true);
   }
+
   Future<bool> uninstallAddon() => _manageAddon(false);
 
   Future<bool> setPackageEasyEnglish(String key, bool enabled) {
@@ -4326,9 +4551,9 @@ class AppController extends ChangeNotifier {
       await _readLocal();
       addOperationLogs([
         installed
-          ? prefersLibjd
-              ? '[ADDON] ${AppStrings.wanxiang}已转换'
-              : wanxiang?.deployed == true
+            ? prefersLibjd
+                  ? '[ADDON] ${AppStrings.wanxiang}已转换'
+                  : wanxiang?.deployed == true
                   ? AppStrings.wanxiangInstalled
                   : '[ADDON] ${AppStrings.wanxiang}已下载'
             : AppStrings.wanxiangRemoved,
@@ -4362,36 +4587,36 @@ class AppController extends ChangeNotifier {
     return run(() async {
       _startOperation(
         OperationKind.wanxiangGrammar,
-      installed ? AppStrings.installing : AppStrings.uninstall,
-    );
-    wanxiangGrammarError = null;
-    wanxiangGrammarProgress = null;
-    try {
-      if (!showWanxiangGrammar) {
-        throw StateError(AppStrings.wanxiangGrammarUnavailable);
-      }
-      if (isAndroid) await _requireStorage();
-      wanxiangGrammar = await core.manageWanxiangGrammar(
-        installed: installed,
-        androidDeploy: _androidDeploy,
+        installed ? AppStrings.installing : AppStrings.uninstall,
       );
-      await _readLocal();
-      addOperationLogs([
-        installed
-            ? AppStrings.wanxiangGrammarInstalled
-            : AppStrings.wanxiangGrammarRemoved,
-      ]);
-    } catch (failure) {
-      wanxiangGrammarError = errorText(failure);
+      wanxiangGrammarError = null;
+      wanxiangGrammarProgress = null;
       try {
-        await _readWanxiangGrammar();
+        if (!showWanxiangGrammar) {
+          throw StateError(AppStrings.wanxiangGrammarUnavailable);
+        }
+        if (isAndroid) await _requireStorage();
+        wanxiangGrammar = await core.manageWanxiangGrammar(
+          installed: installed,
+          androidDeploy: _androidDeploy,
+        );
         await _readLocal();
-      } catch (_) {}
-      rethrow;
-    } finally {
-      operation = null;
-    }
-  });
+        addOperationLogs([
+          installed
+              ? AppStrings.wanxiangGrammarInstalled
+              : AppStrings.wanxiangGrammarRemoved,
+        ]);
+      } catch (failure) {
+        wanxiangGrammarError = errorText(failure);
+        try {
+          await _readWanxiangGrammar();
+          await _readLocal();
+        } catch (_) {}
+        rethrow;
+      } finally {
+        operation = null;
+      }
+    });
   }
 
   Future<bool> manageRimeAddon(String id, bool installed) => run(() async {
@@ -4647,32 +4872,28 @@ class AppController extends ChangeNotifier {
     return renamed;
   }
 
-  Future<void> shareKeyboardFile(KeyboardExportDto keyboard) =>
-      themeLibraryAction(() async {
-        if (isAndroid) {
-          await android.shareThemeFile(keyboard.fileName, keyboard.json);
-        } else if (isIos) {
-          await const IosHost().shareThemeFile(
-            keyboard.fileName,
-            keyboard.json,
-          );
-        } else if (info.platform == BridgePlatform.macOs) {
-          await const MethodChannel('ink.rea.keytao/window').invokeMethod<void>(
-            'shareThemeFile',
-            {'fileName': keyboard.fileName, 'json': keyboard.json},
-          );
-        } else {
-          final location = await getSaveLocation(
-            suggestedName: keyboard.fileName,
-          );
-          if (location == null) return;
-          await XFile.fromData(
-            Uint8List.fromList(utf8.encode(keyboard.json)),
-            mimeType: 'application/json',
-            name: keyboard.fileName,
-          ).saveTo(location.path);
-        }
-      });
+  Future<void> shareKeyboardFile(
+    KeyboardExportDto keyboard,
+  ) => themeLibraryAction(() async {
+    if (isAndroid) {
+      await android.shareThemeFile(keyboard.fileName, keyboard.json);
+    } else if (isIos) {
+      await const IosHost().shareThemeFile(keyboard.fileName, keyboard.json);
+    } else if (info.platform == BridgePlatform.macOs) {
+      await const MethodChannel('ink.rea.keytao/window').invokeMethod<void>(
+        'shareThemeFile',
+        {'fileName': keyboard.fileName, 'json': keyboard.json},
+      );
+    } else {
+      final location = await getSaveLocation(suggestedName: keyboard.fileName);
+      if (location == null) return;
+      await XFile.fromData(
+        Uint8List.fromList(utf8.encode(keyboard.json)),
+        mimeType: 'application/json',
+        name: keyboard.fileName,
+      ).saveTo(location.path);
+    }
+  });
 
   Future<bool> saveCandidatePageSize(int? size) => run(() async {
     if (isAndroid) await _requireStorage();
@@ -4941,9 +5162,10 @@ class AppController extends ChangeNotifier {
   Future<bool> saveHideCandidatePanel(bool value) => _saveAppearance(() async {
     uiSettings = await core.setImeHideCandidatePanel(hide_: value);
   });
-  Future<bool> saveShowTrayModeIndicator(bool value) => _saveAppearance(() async {
-    uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
-  });
+  Future<bool> saveShowTrayModeIndicator(bool value) =>
+      _saveAppearance(() async {
+        uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
+      });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {
     await _readLocal();
     if (value == EnglishModeDto.schema && !englishReady) {

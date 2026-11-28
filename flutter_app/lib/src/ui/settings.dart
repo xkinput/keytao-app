@@ -227,16 +227,19 @@ class SettingsCard extends StatefulWidget {
     super.key,
     required this.controller,
     this.hero,
+    this.inputSections = const [],
     this.inputCells = const [],
   }) : appearance = false;
 
   const SettingsCard.skin({super.key, required this.controller})
     : appearance = true,
       hero = null,
+      inputSections = const [],
       inputCells = const [];
 
   final AppController controller;
   final Widget? hero;
+  final List<Widget> inputSections;
   final List<Widget> inputCells;
   final bool appearance;
 
@@ -337,110 +340,126 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget _candidatePageSize() {
     final c = controller;
     final enabled = !c.busy && (!c.isAndroid || c.storageReady);
-    return SettingRow(
-      '候选个数',
-      keepInline: true,
-      controlMaxWidth: 160,
-      child: Semantics(
-        label: '候选个数',
-        enabled: enabled,
-        child: SizedBox(
-          width: 160,
-          child: FSelect<int>(
-            size: context.platformVariant.touch
-                ? FTextFieldSizeVariant.sm
-                : FTextFieldSizeVariant.md,
-            enabled: enabled,
-            control: FSelectControl.lifted(
-              value: c.candidatePageSize ?? 0,
-              onChange: (value) =>
-                  c.saveCandidatePageSize(value == 0 ? null : value),
+    return LayoutBuilder(
+      builder: (context, constraints) => SettingRow(
+        '候选个数',
+        keepInline: constraints.maxWidth >= 240,
+        controlMaxWidth: 160,
+        child: Semantics(
+          label: '候选个数',
+          enabled: enabled,
+          child: SizedBox(
+            width: constraints.maxWidth.clamp(0.0, 160.0),
+            child: FSelect<int>(
+              size: context.platformVariant.touch
+                  ? FTextFieldSizeVariant.sm
+                  : FTextFieldSizeVariant.md,
+              enabled: enabled,
+              control: FSelectControl.lifted(
+                value: c.candidatePageSize ?? 0,
+                onChange: (value) =>
+                    c.saveCandidatePageSize(value == 0 ? null : value),
+              ),
+              items: {
+                '跟随方案': 0,
+                for (var size = 1; size <= 10; size++) '$size': size,
+              },
             ),
-            items: {
-              '跟随方案': 0,
-              for (var size = 1; size <= 10; size++) '$size': size,
-            },
           ),
         ),
       ),
     );
   }
 
+  Widget _candidateSettings() {
+    final c = controller;
+    final s = c.uiSettings;
+    if (s == null) {
+      return HairlineGridCell(
+        child: SettingRow(
+          AppStrings.checking,
+          child: ActionButton(
+            AppStrings.recheck,
+            onPress: c.busy ? null : c.refreshState,
+          ),
+        ),
+      );
+    }
+    return _settingsCell('候选', [
+      BigTextRadioGroup<PanelOrientationDto?>(
+        label: '候选模式',
+        value: s.hideCandidatePanel ? null : s.orientation,
+        options: const {...orientations, null: '隐藏'},
+        onChanged: c.canSaveTheme
+            ? (value) => value == null
+                  ? c.saveHideCandidatePanel(true)
+                  : _savePreview(orientation: value, hideCandidatePanel: false)
+            : null,
+      ),
+      _candidatePageSize(),
+      if (c.showsEmbeddedComposition)
+        _separated(
+          SwitchSetting(
+            AppStrings.embedded,
+            value: s.effectiveEmbeddedComposition,
+            onChanged: c.canSaveTheme && !s.hideCandidatePanel
+                ? c.saveEmbedded
+                : null,
+          ),
+        ),
+      if (c.isWindows)
+        _separated(
+          SwitchSetting(
+            '托盘显示中英状态',
+            value: s.showTrayModeIndicator,
+            onChanged: c.canSaveTheme ? c.saveShowTrayModeIndicator : null,
+          ),
+        ),
+    ]);
+  }
+
   Widget _input(BuildContext context) {
     final c = controller;
     final s = c.uiSettings;
-    final preview = c.isMobile
-        ? _preview(context, keyboard: true)
-        : s != null && !s.hideCandidatePanel
-        ? _preview(context)
-        : null;
+    final Widget? headerPanel;
+    if (c.info.platform == BridgePlatform.macOs) {
+      final showSwitches =
+          c.hasUsableBuild &&
+          !c.usesLibjd(c.activeSchemeKey) &&
+          (c.schemaSwitches.isNotEmpty || c.schemaSwitchError != null);
+      headerPanel = showSwitches
+          ? HairlineGridCell(child: SchemaSwitchesSection(controller: c))
+          : null;
+    } else {
+      headerPanel = c.isMobile
+          ? _preview(context, keyboard: true)
+          : s != null && !s.hideCandidatePanel
+          ? _preview(context)
+          : null;
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (MediaQuery.sizeOf(context).width >= 880 &&
+        if ((c.info.platform == BridgePlatform.macOs ||
+                MediaQuery.sizeOf(context).width >= 880) &&
             widget.hero != null &&
-            preview != null)
+            headerPanel != null)
           Row(
             children: [
               Expanded(child: widget.hero!),
-              Expanded(child: preview),
+              Expanded(child: headerPanel),
             ],
           )
         else ...[
           ?widget.hero,
           if (c.isMobile) const SizedBox(height: 12),
-          ?preview,
+          ?headerPanel,
         ],
+        ...widget.inputSections,
         HairlineGridSection(
           children: [
-            if (!c.isMobile)
-              if (s == null)
-                HairlineGridCell(
-                  child: SettingRow(
-                    AppStrings.checking,
-                    child: ActionButton(
-                      AppStrings.recheck,
-                      onPress: c.busy ? null : c.refreshState,
-                    ),
-                  ),
-                )
-              else
-                _settingsCell('候选', [
-                  BigTextRadioGroup<PanelOrientationDto?>(
-                    label: '候选模式',
-                    value: s.hideCandidatePanel ? null : s.orientation,
-                    options: const {...orientations, null: '隐藏'},
-                    onChanged: c.canSaveTheme
-                        ? (value) => value == null
-                              ? c.saveHideCandidatePanel(true)
-                              : _savePreview(
-                                  orientation: value,
-                                  hideCandidatePanel: false,
-                                )
-                        : null,
-                  ),
-                  _candidatePageSize(),
-                  if (c.showsEmbeddedComposition)
-                    _separated(
-                      SwitchSetting(
-                        AppStrings.embedded,
-                        value: s.effectiveEmbeddedComposition,
-                        onChanged: c.canSaveTheme && !s.hideCandidatePanel
-                            ? c.saveEmbedded
-                            : null,
-                      ),
-                    ),
-                  if (c.isWindows)
-                    _separated(
-                      SwitchSetting(
-                        '托盘显示中英状态',
-                        value: s.showTrayModeIndicator,
-                        onChanged: c.canSaveTheme
-                            ? c.saveShowTrayModeIndicator
-                            : null,
-                      ),
-                    ),
-                ]),
+            if (!c.isMobile && c.info.platform != BridgePlatform.macOs)
+              _candidateSettings(),
             if (c.isMobile) ..._mobile(context),
             ...widget.inputCells,
             if (c.imeUiError case final error?)
@@ -454,11 +473,22 @@ class _SettingsCardState extends State<SettingsCard> {
   Widget _skin(BuildContext context) {
     final c = controller;
     final settings = c.uiSettings;
+    final isMacOs = c.info.platform == BridgePlatform.macOs;
     final showPanel = c.isMobile || settings?.hideCandidatePanel == false;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (showPanel)
+        if (isMacOs)
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(child: _candidateSettings()),
+              Expanded(
+                child: showPanel ? _preview(context) : const SizedBox.shrink(),
+              ),
+            ],
+          )
+        else if (showPanel)
           LayoutBuilder(
             builder: (context, constraints) {
               if (!c.isMobile && constraints.maxWidth >= 800) {
@@ -480,17 +510,9 @@ class _SettingsCardState extends State<SettingsCard> {
           minCellWidth: 420,
           columnCount: MediaQuery.sizeOf(context).width >= 880 ? 2 : 1,
           children: [
-            if (settings == null)
-              HairlineGridCell(
-                child: SettingRow(
-                  AppStrings.checking,
-                  child: ActionButton(
-                    AppStrings.recheck,
-                    onPress: c.busy ? null : c.refreshState,
-                  ),
-                ),
-              )
-            else ...[
+            if (settings == null) ...[
+              if (!isMacOs) _candidateSettings(),
+            ] else ...[
               _settingsCell('配色', [
                 BigTextRadioGroup<UiColorSchemeDto>(
                   label: '配色方案',
@@ -663,48 +685,48 @@ class _SettingsCardState extends State<SettingsCard> {
         willChange: false,
         painter: _PreviewDots(AppPalette.of(context).hairline),
         child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: widget.appearance ? 240 : 128),
-        child: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: MediaQuery.sizeOf(context).width >= 720 ? 24 : 0,
-            vertical: 14,
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: widget.appearance
-                ? CrossAxisAlignment.center
-                : CrossAxisAlignment.end,
-            children: [
-              if (appearance != null) ...[
-                EyebrowLabel(colorSchemes[appearance]!),
-                const SizedBox(height: 8),
-              ],
-              AnimatedSwitcher(
-                duration: MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                layoutBuilder: (current, _) =>
-                    current ?? const SizedBox.shrink(),
-                child: preview,
-              ),
-              if (!widget.appearance) ...[
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Text(
-                    '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
-                    textAlign: TextAlign.right,
-                    style: context.theme.typography.body.xs.copyWith(
-                      color: AppPalette.of(context).muted,
+          constraints: BoxConstraints(minHeight: widget.appearance ? 240 : 128),
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: MediaQuery.sizeOf(context).width >= 720 ? 24 : 0,
+              vertical: 14,
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: widget.appearance
+                  ? CrossAxisAlignment.center
+                  : CrossAxisAlignment.end,
+              children: [
+                if (appearance != null) ...[
+                  EyebrowLabel(colorSchemes[appearance]!),
+                  const SizedBox(height: 8),
+                ],
+                AnimatedSwitcher(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 160),
+                  layoutBuilder: (current, _) =>
+                      current ?? const SizedBox.shrink(),
+                  child: preview,
+                ),
+                if (!widget.appearance) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      '${orientations[orientation]} · ${c.candidatePageSize == null ? '跟随方案' : '${c.candidatePageSize} 个'} · ${fontSize.round()} 号',
+                      textAlign: TextAlign.right,
+                      style: context.theme.typography.body.xs.copyWith(
+                        color: AppPalette.of(context).muted,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
-    ),
     );
   }
 
@@ -775,7 +797,9 @@ class _SettingsCardState extends State<SettingsCard> {
       colorScheme:
           _previewScheme ?? previewUi?.colorScheme ?? UiColorSchemeDto.auto,
       accentColor: previewAccent,
-      cornerRadius: _resetRadius ? null : _previewRadius ?? previewUi?.cornerRadius,
+      cornerRadius: _resetRadius
+          ? null
+          : _previewRadius ?? previewUi?.cornerRadius,
       backgroundColor: _previewBackground ?? previewUi?.backgroundColor ?? '',
       fontSize: _previewFontSize ?? previewUi?.fontSize ?? 18,
       systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
@@ -1052,7 +1076,7 @@ class AccountCard extends StatelessWidget {
           onPress: () => showAccountDialog(context, c),
         ),
         children: [
-          if (!c.isMobile)
+          if (!c.isMobile && c.info.platform != BridgePlatform.macOs)
             ActionRow(
               children: [
                 ActionButton(
@@ -1145,7 +1169,7 @@ class AccountCard extends StatelessWidget {
   }
 }
 
-/// The deployed scheme's own switches, shown on the scheme page.
+/// The deployed scheme's own switches.
 class SchemaSwitchesSection extends StatelessWidget {
   const SchemaSwitchesSection({super.key, required this.controller});
   final AppController controller;
@@ -1173,6 +1197,7 @@ class SchemaSwitchesSection extends StatelessWidget {
         if (entry.options.isEmpty)
           SwitchSetting(
             entry.states[1],
+            compact: true,
             value: entry.value == 1,
             onChanged: c.busy
                 ? null
@@ -1192,49 +1217,45 @@ class SchemaSwitchesSection extends StatelessWidget {
           ),
     ];
     return LayoutBuilder(
-      builder: (context, constraints) => Section(
-        title: '方案开关',
-        icon: FLucideIcons.slidersHorizontal,
-        children:
-            constraints.hasBoundedWidth &&
-                (c.isMobile ||
-                    (MediaQuery.sizeOf(context).width >= 720 &&
-                        constraints.maxWidth >= 640))
-            ? [
-                for (var index = 0; index < switches.length; index += 2)
-                  Table(
-                    border: index + 1 < switches.length
-                        ? TableBorder(
-                            verticalInside: BorderSide(
-                              color: AppPalette.of(context).hairline,
-                            ),
-                          )
-                        : null,
+      builder: (context, constraints) {
+        final columnInset = ((constraints.maxWidth - 240) / 16).clamp(
+          0.0,
+          c.isMobile ? 8.0 : 16.0,
+        );
+        return Section(
+          title: '方案开关',
+          icon: FLucideIcons.slidersHorizontal,
+          children: [
+            for (var index = 0; index < switches.length; index += 2)
+              Table(
+                border: index + 1 < switches.length
+                    ? TableBorder(
+                        verticalInside: BorderSide(
+                          color: AppPalette.of(context).hairline,
+                        ),
+                      )
+                    : null,
+                children: [
+                  TableRow(
                     children: [
-                      TableRow(
-                        children: [
-                          HairlineGridCell(
-                            padding: EdgeInsets.only(
-                              right: c.isMobile ? 8 : 16,
-                            ),
-                            child: switches[index],
-                          ),
-                          if (index + 1 < switches.length)
-                            HairlineGridCell(
-                              padding: EdgeInsets.only(
-                                left: c.isMobile ? 8 : 16,
-                              ),
-                              child: switches[index + 1],
-                            )
-                          else
-                            const SizedBox.shrink(),
-                        ],
+                      HairlineGridCell(
+                        padding: EdgeInsets.only(right: columnInset),
+                        child: switches[index],
                       ),
+                      if (index + 1 < switches.length)
+                        HairlineGridCell(
+                          padding: EdgeInsets.only(left: columnInset),
+                          child: switches[index + 1],
+                        )
+                      else
+                        const SizedBox.shrink(),
                     ],
                   ),
-              ]
-            : switches,
-      ),
+                ],
+              ),
+          ],
+        );
+      },
     );
   }
 }

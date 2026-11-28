@@ -6,8 +6,7 @@ import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
-import 'controller_parity_test.dart'
-    show FakeAndroid, FakeCore, settle;
+import 'controller_parity_test.dart' show FakeAndroid, FakeCore, settle;
 
 const successfulInstall = InstallResultDto(
   mergedSchemas: [],
@@ -218,7 +217,9 @@ class PackageCore extends FakeCore {
     String? schemaId,
     required FutureOr<String> Function() androidDeploy,
   }) async {
-    calls.add(schemaId == null ? 'switch:$packageKey' : 'switch:$packageKey:$schemaId');
+    calls.add(
+      schemaId == null ? 'switch:$packageKey' : 'switch:$packageKey:$schemaId',
+    );
     await activationGate?.future;
     await deployGate?.future;
     if (packages.any((package) => package.schemeKey == packageKey)) {
@@ -424,10 +425,11 @@ void main() {
     ];
 
     expect(await controller.manageRimeAddon('rime_ice', true), isTrue);
-    expect(
-      controller.takePendingSchemaSelectionPrompt(),
-      (packageKey: 'rime_ice', activateOnConfirm: false),
-    );
+    expect(controller.takePendingSchemaSelectionPrompt(), (
+      packageKey: 'rime_ice',
+      activateOnConfirm: false,
+      convert: false,
+    ));
     expect(core.calls, isNot(contains('deployImeData')));
   });
 
@@ -491,7 +493,7 @@ void main() {
     controller = create();
     controller.selectSource('github');
     await controller.refreshSchemeUpdates();
-      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
+    expect(await controller.downloadSchemePackage('xmjd'), isTrue);
 
     expect(
       core.calls,
@@ -856,112 +858,107 @@ void main() {
     },
   );
 
-  test(
-    'persisted skipped-schema warning loads on startup and packageDisplayName resolves names',
-    () async {
-      const warningText = '方案 broken 编译失败，已跳过：missing dict\n已从切换列表移除';
-      core
-        ..packages = [
-          const InstalledPackageDto(
-            schemeKey: 'local-custom',
-            version: '1.0',
-            active: true,
-            source: 'local',
-            displayName: '我的本地双拼',
-            hasPackageZip: true,
-          ),
-        ]
-        ..local = const LocalSchemaDto(
-          installed: true,
-          deployed: true,
-          schemas: ['keytao'],
-          installedScheme: 'local-custom',
-          deployWarning: warningText,
-        );
-      controller.dispose();
-      controller = create();
-      await controller.refreshState();
-
-      expect(controller.deployWarning, warningText);
-      expect(controller.packageDisplayName('local-custom'), '我的本地双拼');
-      expect(controller.packageDisplayName('rime_ice'), '雾凇拼音');
-
-      core.local = const LocalSchemaDto(
+  test('persisted skipped-schema warning loads on startup and packageDisplayName resolves names', () async {
+    const warningText = '方案 broken 编译失败，已跳过：missing dict\n已从切换列表移除';
+    core
+      ..packages = [
+        const InstalledPackageDto(
+          schemeKey: 'local-custom',
+          version: '1.0',
+          active: true,
+          source: 'local',
+          displayName: '我的本地双拼',
+          hasPackageZip: true,
+        ),
+      ]
+      ..local = const LocalSchemaDto(
         installed: true,
         deployed: true,
         schemas: ['keytao'],
         installedScheme: 'local-custom',
+        deployWarning: warningText,
       );
-      await controller.refreshSchemas();
-      expect(controller.deployWarning, isNull);
-    },
-  );
+    controller.dispose();
+    controller = create();
+    await controller.refreshState();
 
-  test(
-    'packages with up to 3 schemas auto-deploy while >3 schemas prompt before deploying',
-    () async {
-      core.packages[1] = const InstalledPackageDto(
+    expect(controller.deployWarning, warningText);
+    expect(controller.packageDisplayName('local-custom'), '我的本地双拼');
+    expect(controller.packageDisplayName('rime_ice'), '雾凇拼音');
+
+    core.local = const LocalSchemaDto(
+      installed: true,
+      deployed: true,
+      schemas: ['keytao'],
+      installedScheme: 'local-custom',
+    );
+    await controller.refreshSchemas();
+    expect(controller.deployWarning, isNull);
+  });
+
+  test('packages with up to 2 schemas auto-deploy while >2 schemas prompt before deploying', () async {
+    core.packages[1] = const InstalledPackageDto(
+      schemeKey: 'xmjd',
+      version: '20261101',
+      active: false,
+      hasPackageZip: false,
+    );
+    core.schemasByPackage['xmjd'] = const [
+      PackageSchemaDto(id: 's1', name: 'S1', selected: true),
+      PackageSchemaDto(id: 's2', name: 'S2', selected: true),
+    ];
+    await controller.refreshSchemeUpdates();
+    core.calls.clear();
+
+    // Exactly 2 schemas (not > 2) deploys immediately without prompting.
+    expect(await controller.downloadSchemePackage('xmjd'), isTrue);
+    expect(controller.hasPendingSchemaSelectionPrompt, isFalse);
+    expect(
+      core.calls,
+      containsAllInOrder(['packageDownload:xmjd', 'switch:xmjd']),
+    );
+
+    // Reset xmjd to active: false and configure 3 schemas (> 2).
+    core.packages = [
+      keytaoPackage,
+      const InstalledPackageDto(
         schemeKey: 'xmjd',
         version: '20261101',
         active: false,
         hasPackageZip: false,
-      );
-      core.schemasByPackage['xmjd'] = const [
-        PackageSchemaDto(id: 's1', name: 'S1', selected: true),
-        PackageSchemaDto(id: 's2', name: 'S2', selected: true),
-        PackageSchemaDto(id: 's3', name: 'S3', selected: false),
-      ];
-      await controller.refreshSchemeUpdates();
-      core.calls.clear();
+      ),
+    ];
+    core.schemasByPackage['xmjd'] = const [
+      PackageSchemaDto(id: 's1', name: 'S1', selected: true),
+      PackageSchemaDto(id: 's2', name: 'S2', selected: true),
+      PackageSchemaDto(id: 's3', name: 'S3', selected: false),
+    ];
+    await controller.refreshSchemeUpdates();
+    core.calls.clear();
 
-      // Exactly 3 schemas (not > 3) deploys immediately without prompting.
-      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
-      expect(controller.hasPendingSchemaSelectionPrompt, isFalse);
-      expect(
-        core.calls,
-        containsAllInOrder(['packageDownload:xmjd', 'switch:xmjd']),
-      );
+    expect(await controller.downloadSchemePackage('xmjd'), isTrue);
+    expect(core.calls, ['packageDownload:xmjd']);
+    expect(core.calls.any((call) => call.startsWith('switch:')), isFalse);
+    final prompt = controller.takePendingSchemaSelectionPrompt();
+    expect(prompt, (
+      packageKey: 'xmjd',
+      activateOnConfirm: true,
+      convert: false,
+    ));
 
-      // Reset xmjd to active: false and configure 4 schemas (> 3).
-      core.packages = [
-        keytaoPackage,
-        const InstalledPackageDto(
-          schemeKey: 'xmjd',
-          version: '20261101',
-          active: false,
-          hasPackageZip: false,
-        ),
-      ];
-      core.schemasByPackage['xmjd'] = const [
-        PackageSchemaDto(id: 's1', name: 'S1', selected: true),
-        PackageSchemaDto(id: 's2', name: 'S2', selected: true),
-        PackageSchemaDto(id: 's3', name: 'S3', selected: false),
-        PackageSchemaDto(id: 's4', name: 'S4', selected: false),
-      ];
-      await controller.refreshSchemeUpdates();
-      core.calls.clear();
-
-      expect(await controller.downloadSchemePackage('xmjd'), isTrue);
-      expect(core.calls, ['packageDownload:xmjd']);
-      expect(core.calls.any((call) => call.startsWith('switch:')), isFalse);
-      final prompt = controller.takePendingSchemaSelectionPrompt();
-      expect(prompt, (packageKey: 'xmjd', activateOnConfirm: true));
-
-      // Confirming schema selection deploys and switches to xmjd.
-      core.calls.clear();
-      expect(
-        await controller.setPackageSchemas(
-          'xmjd',
-          ['s1', 's3'],
-          activate: prompt!.activateOnConfirm,
-        ),
-        isTrue,
-      );
-      expect(
-        core.calls,
-        containsAllInOrder(['schemas:xmjd:s1,s3', 'switch:xmjd']),
-      );
-      expect(controller.activeSchemeKey, 'xmjd');
-    },
-  );
+    // Confirming schema selection deploys and switches to xmjd.
+    core.calls.clear();
+    expect(
+      await controller.setPackageSchemas('xmjd', [
+        's1',
+        's3',
+      ], activate: prompt!.activateOnConfirm),
+      isTrue,
+    );
+    expect(
+      core.calls,
+      containsAllInOrder(['schemas:xmjd:s1,s3', 'switch:xmjd']),
+    );
+    expect(controller.activeSchemeKey, 'xmjd');
+  });
 }

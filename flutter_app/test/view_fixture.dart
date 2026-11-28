@@ -42,16 +42,19 @@ final _candidatePanelThemes = jsonDecode(
 
 // View-only fixture: local theme data, no bootstrap, events, network, or FFI.
 class ViewController extends AppController {
-  ViewController(BridgePlatform platform, {String? keyboardLayoutJson})
-    : super(
-        info: BridgeInfo(
-          platform: platform,
-          appVersion: '1.2.1-alpha.42',
-          userRoot: platform == BridgePlatform.android
-              ? '/storage/emulated/0/rime'
-              : '/Users/rea/Library/Rime',
-        ),
-      ) {
+  ViewController(
+    BridgePlatform platform, {
+    String? keyboardLayoutJson,
+    String appVersion = '1.2.1-alpha.42',
+  }) : super(
+         info: BridgeInfo(
+           platform: platform,
+           appVersion: appVersion,
+           userRoot: platform == BridgePlatform.android
+               ? '/storage/emulated/0/rime'
+               : '/Users/rea/Library/Rime',
+         ),
+       ) {
     local = const LocalSchemaDto(
       installed: true,
       deployed: true,

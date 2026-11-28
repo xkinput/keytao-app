@@ -10,6 +10,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
+import 'package:keytao/src/ui/candidate_panel_preview.dart';
 import 'package:keytao/src/ui/shell.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
@@ -19,6 +20,7 @@ import '../view_fixture.dart';
 final _directory =
     Platform.environment['SCREENSHOTS_DIR'] ?? '../target/ui-shots';
 const _cjkFamily = 'SettingsScreenshotCjk';
+late Uint8List _cjkFontBytes;
 const _captureKey = ValueKey('settings-screenshot');
 final _schemaLogoPath = '$_directory/schema-logo.png';
 final _catLogoPath = '$_directory/cat-logo.png';
@@ -50,6 +52,14 @@ const _themes = [
 
 class _ScreenshotCore implements RustLibApi {
   @override
+  Future<String> crateApiCoreSetSchemeSyncPreferences({
+    bool? followAccountSync,
+    String? schemeKey,
+    bool? sync_,
+    String? settingsJson,
+  }) async => jsonEncode({'settings': jsonDecode(settingsJson ?? '{}')});
+
+  @override
   dynamic noSuchMethod(Invocation invocation) =>
       switch (invocation.memberName) {
         #crateApiCoreGetThemeLibrary => Future.value(_themes),
@@ -62,7 +72,7 @@ class _ScreenshotCore implements RustLibApi {
 }
 
 class _ScreenshotController extends ViewController {
-  _ScreenshotController(super.platform) {
+  _ScreenshotController(super.platform) : super(appVersion: '1.2.24') {
     activeSchemaLogoPath = _schemaLogoPath;
     candidatePageSize = 6;
     appUpdate = null;
@@ -85,6 +95,13 @@ class _ScreenshotController extends ViewController {
         active: false,
         hasPackageZip: true,
         logoPath: _tianLogoPath,
+      ),
+      const InstalledPackageDto(
+        schemeKey: 'local-custom',
+        source: 'local',
+        displayName: '小鹤双拼',
+        active: false,
+        hasPackageZip: true,
       ),
     ];
     schemaSwitches = [
@@ -120,9 +137,15 @@ class _ScreenshotController extends ViewController {
       fontSize: fontSize,
       systemDark: systemDark,
     );
-    (theme['font'] as Map<String, dynamic>)['family'] = _cjkFamily;
+    (theme['font'] as Map<String, dynamic>)
+      ..['family'] = _cjkFamily
+      ..['effectiveFamily'] = _cjkFamily;
     return theme;
   }
+
+  @override
+  Future<Uint8List> loadSystemFontBytes({required String family}) async =>
+      _cjkFontBytes;
 }
 
 Future<void> _loadFonts() async {
@@ -149,9 +172,10 @@ Future<void> _loadFonts() async {
     final file = File(path);
     if (!file.existsSync()) continue;
     try {
+      _cjkFontBytes = await file.readAsBytes();
       await (FontLoader(
         _cjkFamily,
-      )..addFont(file.readAsBytes().then(ByteData.sublistView))).load();
+      )..addFont(Future.value(ByteData.sublistView(_cjkFontBytes)))).load();
       return;
     } on Object catch (_) {
       // Try the next system font when this font collection cannot be loaded.
@@ -238,6 +262,16 @@ void main() {
 
   for (final device in [
     (
+      name: 'desktop-390',
+      size: const Size(390, 844),
+      platform: BridgePlatform.macOs,
+    ),
+    (
+      name: 'desktop-840',
+      size: const Size(840, 900),
+      platform: BridgePlatform.macOs,
+    ),
+    (
       name: 'desktop-960',
       size: const Size(960, 860),
       platform: BridgePlatform.macOs,
@@ -254,13 +288,43 @@ void main() {
     ),
   ]) {
     for (final page in AppPage.values) {
+      if (device.platform == BridgePlatform.macOs && page == AppPage.scheme) {
+        continue;
+      }
       for (final brightness in Brightness.values) {
         final name = '${device.name}-${page.id}-${brightness.name}';
+        final libraryPage = device.platform == BridgePlatform.macOs
+            ? AppPage.input
+            : AppPage.scheme;
         testWidgets(
           'capture settings $name',
           (tester) async {
             final controller = _ScreenshotController(device.platform)
               ..activePage = page;
+            if (page == AppPage.skin) {
+              final settings = controller.uiSettings!;
+              controller.uiSettings = ImeUiSettingsDto(
+                colorScheme: brightness == Brightness.dark
+                    ? UiColorSchemeDto.dark
+                    : UiColorSchemeDto.light,
+                effectiveColorScheme: brightness == Brightness.dark
+                    ? EffectiveColorSchemeDto.dark
+                    : EffectiveColorSchemeDto.light,
+                orientation: settings.orientation,
+                embeddedComposition: settings.embeddedComposition,
+                hideCandidatePanel: settings.hideCandidatePanel,
+                showTrayModeIndicator: settings.showTrayModeIndicator,
+                effectiveEmbeddedComposition:
+                    settings.effectiveEmbeddedComposition,
+                accentColor: settings.accentColor,
+                cornerRadius: settings.cornerRadius,
+                backgroundColor: settings.backgroundColor,
+                fontSize: settings.fontSize,
+                themeExists: settings.themeExists,
+                themePath: settings.themePath,
+                message: settings.message,
+              );
+            }
             if (page == AppPage.scheme) {
               controller.userWordsReportScheme = 'keytao';
               controller.userWordsReport = const UserWordsReportDto(
@@ -281,6 +345,18 @@ void main() {
             );
             const webViewChannel = MethodChannel('com.infradise.webview_core');
             final messenger = tester.binding.defaultBinaryMessenger;
+            if (device.platform == BridgePlatform.macOs) {
+              const windowChannel = MethodChannel('ink.rea.keytao/window');
+              messenger.setMockMethodCallHandler(windowChannel, (call) async {
+                if (call.method == 'resolveSystemFontFamily') {
+                  return (call.arguments as Map)['family'];
+                }
+                return null;
+              });
+              addTearDown(
+                () => messenger.setMockMethodCallHandler(windowChannel, null),
+              );
+            }
             int? webViewId;
             if (page == AppPage.website) {
               messenger.setMockMethodCallHandler(webViewChannel, (call) async {
@@ -358,7 +434,7 @@ void main() {
               );
             }
             await tester.pumpAndSettle();
-            if (page == AppPage.input || page == AppPage.scheme) {
+            if (page == AppPage.input || page == libraryPage) {
               final logos = find.byType(SchemaLogo);
               expect(logos, findsWidgets);
               final logo = logos.first;
@@ -373,7 +449,7 @@ void main() {
               expect(renderedLogo.image?.height, 192);
             }
             expect(tester.getSize(find.byKey(_captureKey)), device.size);
-            if (page == AppPage.scheme) {
+            if (page == libraryPage) {
               for (final (key, path) in [
                 ('keytao', _schemaLogoPath),
                 ('xmjd', _catLogoPath),
@@ -385,18 +461,191 @@ void main() {
                 );
                 expect((image.image as FileImage).file.path, path);
               }
+            }
+            if (page == AppPage.scheme) {
               final notice = find.text('键道6 · 自造词');
               expect(
                 tester.getTopLeft(notice).dx,
                 greaterThanOrEqualTo(controller.isMobile ? 16 : 24),
               );
+            }
+            final switchesPage = device.platform == BridgePlatform.macOs
+                ? AppPage.input
+                : AppPage.scheme;
+            if (page == switchesPage) {
               expect(find.text('方案开关'), findsOneWidget);
               for (final label in ['西文', '全角', '繁體']) {
+                final title = tester.getRect(find.text(label));
+                final paragraph = tester.renderObject<RenderParagraph>(
+                  find.text(label),
+                );
+                expect(paragraph.didExceedMaxLines, isFalse, reason: label);
+                final textBoxes = paragraph.getBoxesForSelection(
+                  TextSelection(baseOffset: 0, extentOffset: label.length),
+                );
                 expect(
-                  tester.getTopLeft(find.text(label)).dx,
+                  textBoxes.map((box) => box.top).toSet(),
+                  hasLength(1),
+                  reason: '$label should stay on one line',
+                );
+                expect(
+                  title.left,
                   greaterThanOrEqualTo(controller.isMobile ? 16 : 24),
                 );
+                final setting = find.ancestor(
+                  of: find.text(label),
+                  matching: find.byType(SwitchSetting),
+                );
+                final toggle = tester.getRect(
+                  find.descendant(of: setting, matching: find.byType(FSwitch)),
+                );
+                expect(toggle.left, greaterThanOrEqualTo(title.right));
+                expect(toggle.center.dy, closeTo(title.center.dy, 0.5));
               }
+              final first = tester.getRect(find.text('西文'));
+              final second = tester.getRect(find.text('全角'));
+              final third = tester.getRect(find.text('繁體'));
+              expect(second.top, closeTo(first.top, 0.5));
+              expect(second.left, greaterThan(first.right));
+              expect(third.left, closeTo(first.left, 0.5));
+              expect(third.top, greaterThan(first.bottom));
+            }
+            if (page == AppPage.input &&
+                device.platform == BridgePlatform.macOs) {
+              expect(find.byKey(const ValueKey('nav-scheme')), findsNothing);
+              final actions = [
+                for (final key in [
+                  'input-deploy-button',
+                  'rime-sync-button',
+                  'input-open-directory-button',
+                ])
+                  tester.getRect(find.byKey(ValueKey(key))),
+              ];
+              final syncSettings = tester.getRect(
+                find.byKey(const ValueKey('rime-sync-settings-button')),
+              );
+              expect(syncSettings.left, greaterThan(actions[1].right));
+              expect(syncSettings.center.dy, closeTo(actions[1].center.dy, .1));
+              expect(actions[1].top, greaterThanOrEqualTo(actions[0].top));
+              expect(actions[2].top, greaterThanOrEqualTo(actions[1].top));
+              if (device.size.width >= 720) {
+                expect(actions[0].top, closeTo(actions[1].top, .1));
+                expect(actions[1].top, closeTo(actions[2].top, .1));
+                expect(actions[1].left, greaterThan(actions[0].right));
+                expect(actions[2].left, greaterThan(actions[1].right));
+              }
+              final cleanup = tester.getRect(
+                find.widgetWithText(ActionButton, '清理残留文件'),
+              );
+              final checkLocal = tester.getRect(
+                find.byKey(const ValueKey('input-check-local-button')),
+              );
+              expect(checkLocal.top, closeTo(cleanup.top, .1));
+              expect(checkLocal.left, greaterThan(cleanup.right));
+              final schemeLogo = tester.getRect(find.byType(SchemaLogo).first);
+              final switchesHeading = tester.getRect(find.text('方案开关'));
+              expect(switchesHeading.left, greaterThan(schemeLogo.right));
+              expect(switchesHeading.top, lessThan(schemeLogo.bottom));
+              final library = tester.getRect(
+                find.byKey(const ValueKey('cloud-schemes')),
+              );
+              final local = tester.getRect(
+                find
+                    .ancestor(
+                      of: find.byKey(const ValueKey('local-schemes')),
+                      matching: find.byType(HairlineGridCell),
+                    )
+                    .first,
+              );
+              final pageInset = device.size.width >= 720 ? 0.0 : 16.0;
+              expect(library.left, closeTo(pageInset, .1));
+              expect(
+                library.width,
+                closeTo(device.size.width - pageInset * 2, .1),
+              );
+              expect(local.left, closeTo(library.left, .1));
+              expect(local.width, closeTo(library.width, .1));
+              expect(library.top, greaterThan(schemeLogo.bottom));
+              expect(library.top, greaterThan(switchesHeading.bottom));
+              final addScheme = tester.getRect(
+                find.byKey(const ValueKey('add-scheme-button')),
+              );
+              final toolbar = tester.getRect(
+                find.byKey(const ValueKey('scheme-toolbar')),
+              );
+              final remoteTitle = tester.getRect(find.text('远程方案'));
+              final source = tester.getRect(
+                find.byKey(const ValueKey('scheme-source')),
+              );
+              final update = tester.getRect(
+                find.byKey(const ValueKey('scheme-update-button')),
+              );
+              expect(source.left, greaterThan(remoteTitle.right));
+              expect(update.left, greaterThanOrEqualTo(source.right));
+              expect(addScheme.left, greaterThan(update.right));
+              expect(addScheme.right, closeTo(toolbar.right, .1));
+              expect(addScheme.center.dy, closeTo(remoteTitle.center.dy, .1));
+              expect(library.top, greaterThanOrEqualTo(toolbar.bottom));
+              expect(local.top, greaterThanOrEqualTo(library.bottom));
+              expect(find.text('小鹤双拼'), findsOneWidget);
+              expect(
+                find.byType(BigTextRadioGroup<PanelOrientationDto?>),
+                findsNothing,
+              );
+              expect(find.text('候选个数'), findsNothing);
+              expect(find.text(AppStrings.embedded), findsNothing);
+              expect(find.byType(CandidatePanelPreview), findsNothing);
+            }
+            if (page == AppPage.skin &&
+                device.platform == BridgePlatform.macOs) {
+              final mode = tester.getRect(
+                find.byType(BigTextRadioGroup<PanelOrientationDto?>),
+              );
+              final pageSize = tester.getRect(
+                find.byWidgetPredicate((widget) => widget is FSelect<int>),
+              );
+              final embedded = tester.getRect(
+                find.widgetWithText(SwitchSetting, AppStrings.embedded),
+              );
+              final previewFinder = find.byType(CandidatePanelPreview);
+              expect(
+                tester
+                    .widget<CandidatePanelPreview>(previewFinder)
+                    .theme['ui']['effectiveColorScheme'],
+                brightness.name,
+              );
+              expect(
+                tester
+                    .widget<CandidatePanelPreview>(previewFinder)
+                    .theme['font']['effectiveFamily'],
+                _cjkFamily,
+              );
+              for (final text in tester.widgetList<Text>(
+                find.descendant(of: previewFinder, matching: find.byType(Text)),
+              )) {
+                expect(text.style?.fontFamily, _cjkFamily, reason: text.data);
+              }
+              final preview = tester.getRect(previewFinder);
+              final colors = tester.getRect(find.text('配色'));
+              expect(mode.left, lessThan(preview.left));
+              expect(mode.top, lessThan(preview.bottom));
+              expect(pageSize.right, lessThanOrEqualTo(preview.left));
+              expect(embedded.right, lessThanOrEqualTo(preview.left));
+              expect(colors.top, greaterThanOrEqualTo(embedded.bottom));
+              expect(colors.top, greaterThanOrEqualTo(preview.bottom));
+              final themePath = tester.getRect(
+                find.byKey(const ValueKey('skin-theme-path')),
+              );
+              expect(themePath.top, greaterThanOrEqualTo(colors.bottom));
+              expect(
+                find.text(controller.uiSettings!.themePath!),
+                findsOneWidget,
+              );
+            }
+            if (page == AppPage.library &&
+                device.platform == BridgePlatform.macOs) {
+              expect(find.text('账号与同步'), findsNothing);
+              expect(find.byIcon(FLucideIcons.user), findsOneWidget);
             }
 
             expect(tester.takeException(), isNull);
@@ -425,9 +674,11 @@ void main() {
                 await _capture(tester, '$name-full');
                 tester.view.physicalSize = device.size;
                 await tester.pumpAndSettle();
+              } else {
+                await _capture(tester, '$name-full');
               }
             }
-            if (page == AppPage.scheme) {
+            if (page == libraryPage) {
               for (final (key, title) in [
                 ('rime-ice', AppStrings.rimeIce),
                 ('easy-en', schemeDisplayName('easy_en')),
@@ -440,17 +691,54 @@ void main() {
                 );
                 expect(paragraph.didExceedMaxLines, isFalse, reason: title);
               }
-              final addons = find.byKey(const ValueKey('addon-schemes-button'));
-              await tester.ensureVisible(addons);
-              await tester.tap(addons);
+              final hide = find.byKey(const ValueKey('hide-scheme-keydo'));
+              await tester.ensureVisible(hide);
+              await tester.tap(hide);
               await tester.pumpAndSettle();
-              expect(find.byType(AppDialog), findsOneWidget);
+              expect(controller.isSchemeHidden('keydo'), isTrue);
+              final libraryScroll = tester.state<ScrollableState>(
+                find
+                    .descendant(
+                      of: find.byKey(PageStorageKey(page.id)),
+                      matching: find.byType(Scrollable),
+                    )
+                    .first,
+              );
+              final remainingExtent = libraryScroll.position.maxScrollExtent;
+              tester.view.physicalSize = Size(
+                device.size.width,
+                device.size.height + remainingExtent.ceil(),
+              );
+              await tester.pumpAndSettle();
+              libraryScroll.position.jumpTo(0);
+              await tester.pumpAndSettle();
+              final addScheme = find.byKey(const ValueKey('add-scheme-button'));
+              await tester.ensureVisible(addScheme);
+              await tester.tap(addScheme);
+              await tester.pumpAndSettle();
+              expect(
+                find.byKey(const ValueKey('add-hidden-scheme-keydo')),
+                findsOneWidget,
+              );
+              expect(
+                find.byKey(const ValueKey('add-custom-scheme')),
+                findsOneWidget,
+              );
+              expect(find.text('从 Git 添加'), findsNothing);
+              expect(tester.takeException(), isNull);
               await _capture(
                 tester,
-                '${device.name}-addons-${brightness.name}',
+                '${device.name}-add-scheme-${brightness.name}',
               );
-              Navigator.of(tester.element(find.byType(AppDialog))).pop();
+              await tester.tap(
+                find.byKey(const ValueKey('add-hidden-scheme-keydo')),
+              );
               await tester.pumpAndSettle();
+              expect(controller.isSchemeHidden('keydo'), isFalse);
+              tester.view.physicalSize = device.size;
+              await tester.pumpAndSettle();
+            }
+            if (page == AppPage.scheme) {
               final conflicts = find.text('查看冲突');
               await tester.ensureVisible(conflicts);
               await tester.tap(conflicts);

@@ -7,6 +7,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
+import 'package:keytao/src/ui/input_page.dart';
 import 'package:keytao/src/ui/library_page.dart';
 import 'package:keytao/src/ui/settings.dart' show AccountCard;
 import 'package:keytao/src/ui/theme.dart';
@@ -26,6 +27,7 @@ const _newId = 'f906573a-85d0-4691-b08e-75b76ea4cd09';
 class _SyncCore implements RustLibApi {
   final saves = <({String installationId, String syncDir})>[];
   Completer<void>? sync;
+  int syncCalls = 0;
   String? saveFailure;
   String? lastSyncError;
   BigInt lastSyncAt = BigInt.zero;
@@ -62,7 +64,10 @@ class _SyncCore implements RustLibApi {
   }
 
   @override
-  Future<void> crateApiCoreSyncRimeUserData() => sync!.future;
+  Future<void> crateApiCoreSyncRimeUserData() {
+    syncCalls++;
+    return sync!.future;
+  }
 
   @override
   Future<String> crateApiCoreNewRimeInstallationId() async => _newId;
@@ -81,9 +86,33 @@ class _SyncController extends AppController {
           userRoot: '/isolated/rime-sync',
         ),
         pickDesktopDirectory: () async => '/isolated/picked-sync',
-      );
+      ) {
+    local = const LocalSchemaDto(
+      installed: true,
+      deployed: true,
+      installedScheme: 'keytao',
+      schemas: ['keytao'],
+    );
+    schemas = const [SchemaDto(id: 'keytao', name: '键道6')];
+    currentSchemaId = 'keytao';
+    macosIme = const MacosImeStatusDto(
+      installed: true,
+      appPath: '/isolated/rime-sync/KeyTao.app',
+      message: '',
+    );
+  }
 
   int opens = 0;
+
+  @override
+  Future<void> refreshSchemas() async {}
+
+  @override
+  bool shouldFetchRemoteSchemeLogo(
+    String key, {
+    String? repoUrl,
+    bool? addonInstalled,
+  }) => false;
 
   @override
   Future<bool> openRimeSyncDirectory({Locale? locale}) async {
@@ -92,14 +121,21 @@ class _SyncController extends AppController {
   }
 }
 
-Future<void> _show(WidgetTester tester, AppController controller) async {
+Future<void> _show(
+  WidgetTester tester,
+  AppController controller, {
+  bool library = false,
+}) async {
   await tester.pumpWidget(
     KeyTaoTheme(
       platform: controller.info.platform,
       home: FScaffold(
         child: ListenableBuilder(
           listenable: controller,
-          builder: (_, _) => LibraryPage(controller: controller),
+          builder: (_, _) =>
+              controller.info.platform == BridgePlatform.macOs && !library
+              ? InputPage(controller: controller)
+              : LibraryPage(controller: controller),
         ),
       ),
     ),
@@ -140,12 +176,30 @@ void main() {
       expect(find.text('同步文件夹名称'), findsNothing);
       expect(find.text('同步路径'), findsNothing);
       if (!mobile) {
-        expect(
-          find.descendant(of: find.byType(AccountCard), matching: button),
-          findsOneWidget,
-        );
-        await tester.tap(button);
+        if (platform == BridgePlatform.macOs) {
+          expect(
+            find.descendant(of: find.byType(InputPage), matching: button),
+            findsOneWidget,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('current-scheme-actions')),
+              matching: button,
+            ),
+            findsOneWidget,
+          );
+        } else {
+          expect(
+            find.descendant(of: find.byType(AccountCard), matching: button),
+            findsOneWidget,
+          );
+        }
+        final settingsButton = platform == BridgePlatform.macOs
+            ? find.byKey(const ValueKey('rime-sync-settings-button'))
+            : button;
+        await tester.tap(settingsButton);
         await tester.pumpAndSettle();
+        expect(core.syncCalls, 0);
         expect(find.byType(AppDialog), findsOneWidget);
         expect(find.text('同步文件夹名称'), findsOneWidget);
         expect(find.text('同步路径'), findsOneWidget);
@@ -158,6 +212,64 @@ void main() {
     });
   }
 
+  testWidgets('macOS sync runs immediately without opening settings', (
+    tester,
+  ) async {
+    core.sync = Completer<void>();
+    await _show(tester, controller);
+    final sync = find.byKey(const ValueKey('rime-sync-button'));
+    final settings = find.byKey(const ValueKey('rime-sync-settings-button'));
+    expect(controller.rimeSyncSettings, isNull);
+    expect(
+      tester.getRect(settings).left,
+      greaterThan(tester.getRect(sync).right),
+    );
+    expect(tester.getRect(settings).center.dy, tester.getRect(sync).center.dy);
+    await tester.tap(sync);
+    await tester.pump();
+    expect(core.syncCalls, 1);
+    expect(core.saves, isEmpty);
+    expect(controller.rimeSyncing, isTrue);
+    expect(find.byType(AppDialog), findsNothing);
+    expect(tester.widget<ActionButton>(sync).onPress, isNull);
+    expect(tester.widget<FButton>(settings).onPress, isNull);
+    core.sync!.complete();
+    await tester.pumpAndSettle();
+    expect(controller.rimeSyncing, isFalse);
+    expect(controller.rimeSyncSettings, _initial);
+    expect(tester.widget<ActionButton>(sync).onPress, isNotNull);
+    expect(tester.widget<FButton>(settings).onPress, isNotNull);
+    core.sync = Completer<void>();
+    await tester.tap(sync);
+    await tester.pump();
+    core.sync!.completeError(StateError('IME is not running'));
+    await tester.pumpAndSettle();
+    expect(core.syncCalls, 2);
+    expect(
+      find.widgetWithText(ErrorMessage, 'IME is not running'),
+      findsOneWidget,
+    );
+    expect(find.byType(AppDialog), findsNothing);
+    await tester.tap(settings);
+    await tester.pumpAndSettle();
+    expect(find.byType(AppDialog), findsOneWidget);
+    expect(core.syncCalls, 2);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('macOS library no longer shows the sync entry', (tester) async {
+    await _show(tester, controller, library: true);
+
+    expect(find.byType(LibraryPage), findsOneWidget);
+    expect(find.byType(AccountCard), findsNothing);
+    expect(find.text('账号与同步'), findsNothing);
+    expect(find.byKey(const ValueKey('rime-sync-button')), findsNothing);
+    expect(find.byType(AppDialog), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   for (final savedPath in [
     '',
     '/isolated/saved-sync',
@@ -168,7 +280,7 @@ void main() {
     ) async {
       core._syncDir = savedPath;
       await _show(tester, controller);
-      await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+      await tester.tap(find.byKey(const ValueKey('rime-sync-settings-button')));
       await tester.pumpAndSettle();
 
       final path = find.byKey(const ValueKey('rime-sync-directory'));
@@ -198,7 +310,9 @@ void main() {
       (tester) async {
         core._syncDir = '/isolated/saved-sync';
         await _show(tester, controller);
-        await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+        await tester.tap(
+          find.byKey(const ValueKey('rime-sync-settings-button')),
+        );
         await tester.pumpAndSettle();
 
         const draft = 'unsaved-desktop';
@@ -235,7 +349,7 @@ void main() {
     const pinnedPath = '/isolated/rime-sync/sync/keytao-packages/keytao';
     core._defaultSyncDir = pinnedPath;
     await _show(tester, controller);
-    await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+    await tester.tap(find.byKey(const ValueKey('rime-sync-settings-button')));
     await tester.pumpAndSettle();
 
     expect(find.text(pinnedPath), findsOneWidget);
@@ -315,10 +429,16 @@ void main() {
     const error = 'Could not read sync result';
     core.lastSyncError = error;
     await _show(tester, controller);
-    await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+    await tester.tap(find.byKey(const ValueKey('rime-sync-settings-button')));
     await tester.pumpAndSettle();
 
-    expect(find.widgetWithText(ErrorMessage, error), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(AppDialog),
+        matching: find.widgetWithText(ErrorMessage, error),
+      ),
+      findsOneWidget,
+    );
     final path = find.byKey(const ValueKey('rime-sync-directory'));
     await tester.enterText(path, '/isolated/replacement-sync');
     await tester.pump();
@@ -332,7 +452,7 @@ void main() {
     'sync controls save, choose, reset, open and sync through controller',
     (tester) async {
       await _show(tester, controller);
-      await tester.tap(find.byKey(const ValueKey('rime-sync-button')));
+      await tester.tap(find.byKey(const ValueKey('rime-sync-settings-button')));
       await tester.pumpAndSettle();
       final id = find.byKey(const ValueKey('rime-sync-installation-id'));
       final path = find.byKey(const ValueKey('rime-sync-directory'));
@@ -381,7 +501,10 @@ void main() {
       await tester.tap(find.text('立即同步'));
       await tester.pump();
       expect(core.saves.last.syncDir, '/isolated/run-sync');
-      expect(find.text('同步中'), findsOneWidget);
+      expect(
+        find.descendant(of: find.byType(AppDialog), matching: find.text('同步中')),
+        findsOneWidget,
+      );
       expect(find.byType(FProgress), findsWidgets);
       expect(controller.busy, isTrue);
       core.lastSyncAt = BigInt.from(
@@ -389,7 +512,13 @@ void main() {
       );
       core.sync!.complete();
       await tester.pumpAndSettle();
-      expect(find.text('上次同步 2026-11-25 10:20'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AppDialog),
+          matching: find.text('上次同步 2026-11-25 10:20'),
+        ),
+        findsOneWidget,
+      );
 
       core.sync = Completer<void>();
       await tester.tap(find.text('立即同步'));
@@ -398,7 +527,10 @@ void main() {
       core.sync!.completeError(StateError('IME is not running'));
       await tester.pumpAndSettle();
       expect(
-        find.widgetWithText(ErrorMessage, 'IME is not running'),
+        find.descendant(
+          of: find.byType(AppDialog),
+          matching: find.widgetWithText(ErrorMessage, 'IME is not running'),
+        ),
         findsOneWidget,
       );
       expect(controller.unhandledError, isNull);
@@ -409,7 +541,13 @@ void main() {
       await tester.tap(find.text('保存'));
       await tester.pumpAndSettle();
       expect(
-        find.widgetWithText(ErrorMessage, 'Invalid installation_id'),
+        find.descendant(
+          of: find.byType(AppDialog),
+          matching: find.widgetWithText(
+            ErrorMessage,
+            'Invalid installation_id',
+          ),
+        ),
         findsOneWidget,
       );
       expect(controller.rimeSyncSettings!.installationId, 'new-desktop');
