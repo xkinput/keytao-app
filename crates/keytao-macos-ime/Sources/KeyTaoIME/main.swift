@@ -3,7 +3,7 @@ import InputMethodKit
 import CKeytaoCore
 
 if let subcommand = CommandLine.arguments.dropFirst().first,
-  subcommand == "--deploy" || subcommand == "--preview-candidates"
+  subcommand == "--deploy" || subcommand == "--reload" || subcommand == "--preview-candidates"
 {
   if let sharedDir = bundledSharedDataDir() ?? resolveSharedDataDir() {
     setenv("KEYTAO_RIME_SHARED_DATA_DIR", sharedDir, 1)

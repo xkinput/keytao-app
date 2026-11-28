@@ -27,8 +27,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   const bool command = std::any_of(
       command_line_arguments.begin(), command_line_arguments.end(),
       [](const std::string& arg) {
-        return arg == "--deploy" || arg == "--disable-engine" ||
-               arg == "--enable-engine";
+        return arg == "--deploy" || arg == "--reload" ||
+               arg == "--disable-engine" || arg == "--enable-engine";
       });
   SingleInstance single_instance;
   if (!command) {

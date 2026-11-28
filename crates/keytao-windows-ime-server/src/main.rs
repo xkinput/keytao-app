@@ -100,6 +100,7 @@ fn main() {
     }
     if let Some(subcommand) = std::env::args_os().skip(1).find(|arg| {
         arg == "--deploy"
+            || arg == keytao_core::deploy_child::RELOAD_SUBCOMMAND
             || arg == "--deploy-public"
             || arg == keytao_core::deploy_child::PREVIEW_SUBCOMMAND
     }) {

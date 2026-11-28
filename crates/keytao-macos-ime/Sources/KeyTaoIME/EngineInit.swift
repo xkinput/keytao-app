@@ -103,6 +103,7 @@ final class KeyTaoRuntime {
 
     private var lastInitializationAttempt: Date?
     private var shutdownScheduled = false
+    private var redeployRequestInProgress = false
     private var watchSource: DispatchSourceFileSystemObject?
     private var migrationWatchSource: DispatchSourceFileSystemObject?
     private var deploymentWatchSource: DispatchSourceFileSystemObject?
@@ -129,7 +130,10 @@ final class KeyTaoRuntime {
             self.startWatchingDeployment()
             let timer = DispatchSource.makeTimerSource(queue: self.deploymentQueue)
             timer.schedule(deadline: .now(), repeating: .milliseconds(250))
-            timer.setEventHandler { [weak self] in self?.refreshDeploymentHint() }
+            timer.setEventHandler { [weak self] in
+                self?.pollRedeployRequest()
+                self?.refreshDeploymentHint()
+            }
             self.deploymentTimer = timer
             timer.resume()
         }
@@ -342,6 +346,20 @@ final class KeyTaoRuntime {
             self.shutdownScheduled = false
             self.consumeReloadRequest()
             self.fillSessionPool()
+        }
+    }
+
+    private func pollRedeployRequest() {
+        guard !redeployRequestInProgress else { return }
+        guard keytao_claim_redeploy_request() else { return }
+        redeployRequestInProgress = true
+        reloadNow { [weak self] succeeded in
+            if !succeeded {
+                NSLog("KeyTao: Lua-triggered runtime redeployment failed")
+            }
+            self?.deploymentQueue.async {
+                self?.redeployRequestInProgress = false
+            }
         }
     }
 

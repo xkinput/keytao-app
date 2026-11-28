@@ -1019,22 +1019,21 @@ fn prepare_runtime(
         }
     }
 
-    let is_local = crate::scheme::is_local_scheme_key(key);
     let mut user = Files::new();
     let mut runtime_overrides = previous.runtime_overrides.clone();
     let mut disk_hashes = BTreeMap::new();
     walk_files(&runtime, "", private_path, &mut |path, relative| {
         let tracked = previous.fingerprint(relative);
         let preserve = preserves_runtime_data(Path::new(relative));
+        let is_account_user_file = relative == crate::account::USER_DICTIONARY
+            || relative == crate::account::USER_WORD_REMOVALS;
         let seeds_file = owned.contains_key(relative)
             || bundled_files.contains_key(relative)
-            || generated.contains_key(relative);
-        if relative == crate::account::USER_WORD_REMOVALS
-            || relative == keytao_core::english_mode::SETTINGS_FILE
-            || (relative == crate::account::USER_DICTIONARY
-                && previous.generated.contains_key(relative))
-            || (is_local && !preserve)
-            || (tracked.is_none() && !user_path(relative) && !(preserve && seeds_file))
+            || generated.contains_key(relative)
+            || is_account_user_file
+            || relative == crate::remove_filter::SCRIPT_PATH;
+        if relative == keytao_core::english_mode::SETTINGS_FILE
+            || (tracked.is_none() && !user_path(relative) && !seeds_file)
         {
             return Ok(());
         }
@@ -1061,7 +1060,7 @@ fn prepare_runtime(
                 user.insert(relative.to_owned(), bytes);
             } else {
                 let bytes = strip_generated(relative, bytes)?;
-                if !bytes.is_empty() {
+                if !bytes.is_empty() || runtime_overrides.contains(relative) {
                     user.insert(relative.to_owned(), bytes);
                 }
             }
@@ -1072,7 +1071,11 @@ fn prepare_runtime(
     let incoming = take_default_custom(&mut owned);
     let incoming = incoming.as_ref().map(RuntimeFile::read).transpose()?;
     let existing = take_default_custom(&mut user);
-    let default = default_custom(incoming.as_deref(), existing.as_deref(), &selected)?;
+    let default = default_custom(
+        incoming.as_deref(),
+        existing.as_deref().filter(|bytes| !bytes.is_empty()),
+        &selected,
+    )?;
     if let Some(existing) = existing {
         if runtime_overrides.remove(DEFAULT_CUSTOM[1]) {
             runtime_overrides.insert(DEFAULT_CUSTOM[0].into());
@@ -1082,9 +1085,9 @@ fn prepare_runtime(
     generated.insert(DEFAULT_CUSTOM[0].into(), default);
     for (path, bytes) in &user {
         owned.remove(path);
-        if preserves_runtime_data(Path::new(path)) {
+        bundled_files.remove(path);
+        if path != DEFAULT_CUSTOM[0] {
             generated.remove(path);
-            bundled_files.remove(path);
         }
         if path.ends_with(".schema.yaml") && !path.contains('/') {
             schema_sources.insert(path.clone(), bytes.clone());
@@ -1129,6 +1132,7 @@ fn prepare_runtime(
             owned.get(name).map(RuntimeFile::read).transpose()
         },
         &used,
+        &user,
         &mut generated,
     )?;
     if windows_lua
@@ -1583,7 +1587,9 @@ fn regenerate_custom(
         fs::create_dir_all(destination.parent().unwrap())?;
         source.copy_to(&mut fs::File::create(destination)?)?;
     }
-    for (path, bytes) in user.iter().filter(|(path, _)| path.ends_with(".custom.yaml")) {
+    for (path, bytes) in user.iter().filter(|(path, _)| {
+        path.ends_with(".custom.yaml") || *path == crate::remove_filter::SCRIPT_PATH
+    }) {
         let destination = safe(stage, path)?;
         fs::create_dir_all(destination.parent().unwrap())?;
         fs::write(destination, bytes)?;
@@ -1598,6 +1604,9 @@ fn regenerate_custom(
     managed_custom::regenerate(stage, &schemas.iter().cloned().collect())
         .map_err(CoreError::Other)?;
     for path in managed_custom::generated_paths(stage).map_err(CoreError::Other)? {
+        if path == crate::remove_filter::SCRIPT_PATH && user.contains_key(&path) {
+            continue;
+        }
         let bytes = fs::read(safe(stage, &path)?)?;
         if owned.get(&path).map(RuntimeFile::sha256).transpose()?.as_deref()
             != Some(sha256_reader(bytes.as_slice())?.as_str())
@@ -1629,6 +1638,7 @@ fn write_runtime(
     stage: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
     let user_default = user.get(DEFAULT_CUSTOM[0])
+        .filter(|bytes| !bytes.is_empty())
         .map(|bytes| utf8(bytes).map(str::to_owned))
         .transpose()?;
     let user: RuntimeFiles = user.into_iter()
@@ -1705,7 +1715,6 @@ fn write_runtime(
         writes.push((path, source, previous_sha256));
     }
     let mut removals = Vec::new();
-    let mut scheduled_removals = BTreeSet::new();
     for (relative, hash) in previous.owned.iter().chain(&previous.generated).chain(
         previous.user_owned.get_key_value(crate::account::USER_DICTIONARY),
     ) {
@@ -1716,27 +1725,11 @@ fn write_runtime(
         {
             let path = safe(runtime, relative)?;
             if let Some(actual) = optional_sha256(&path)? {
-                if actual == *hash || (is_local && !preserves_runtime_data(Path::new(relative))) {
-                    scheduled_removals.insert(relative.clone());
+                if actual == *hash {
                     removals.push((path, actual));
                 }
             }
         }
-    }
-    if is_local {
-        walk_files(runtime, "", private_path, &mut |path, relative| {
-            if user_path(relative)
-                && !preserves_runtime_data(Path::new(relative))
-                && relative != crate::account::USER_WORD_REMOVALS
-                && manifest.fingerprint(relative).is_none()
-                && !scheduled_removals.contains(relative)
-            {
-                let digest = sha256_reader(fs::File::open(path)?)?;
-                scheduled_removals.insert(relative.to_owned());
-                removals.push((safe(runtime, relative)?, digest));
-            }
-            Ok(())
-        })?;
     }
     let pending_path = safe(runtime, PENDING)?;
     let patch = Pending {
@@ -2470,6 +2463,218 @@ mod tests {
         assert!(content.contains("ascii_composer: from_user"));
         assert!(content.contains("recognizer/patterns: from_b"));
         assert!(!content.contains("from_a"));
+    }
+
+    #[test]
+    fn edited_user_dictionary_and_other_runtime_files_survive_redeploy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        put(&bundled, "default.yaml", "schema_list: []\npunctuator: {}\n");
+        put(&bundled, "symbols.yaml", "bundled symbols\n");
+        put(&bundled, "key_bindings.yaml", "bundled bindings\n");
+        put(&bundled, "punctuation.yaml", "bundled punctuation\n");
+        put(
+            root,
+            crate::account::USER_DICTIONARY,
+            "---\nname: keytao.user\nversion: \"1\"\n...\n原词\tab\n",
+        );
+        put(root, crate::account::USER_WORD_REMOVALS, "旧删词\tcd\n");
+
+        let mut sources = fixture(root, "keytao");
+        sources.remove("symbols.yaml");
+        sources.insert(
+            "keytao.schema.yaml".into(),
+            b"schema: {schema_id: keytao, name: KeyTao}\ntranslator: {dictionary: keytao.extended}\n"
+                .to_vec(),
+        );
+        sources.insert(
+            "keytao.extended.dict.yaml".into(),
+            b"---\nname: keytao.extended\nimport_tables:\n  - keytao.phrase\n...\n".to_vec(),
+        );
+
+        materialize(root, &bundled, "keytao", sources.clone(), None, None).unwrap();
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "keytao").unwrap();
+        assert_eq!(
+            fs::read_to_string(runtime.join(crate::account::USER_DICTIONARY)).unwrap(),
+            "---\nname: keytao.user\nversion: \"1\"\n...\n原词\tab\n"
+        );
+        assert!(
+            fs::read_to_string(runtime.join("keytao.extended.dict.yaml"))
+                .unwrap()
+                .contains("- keytao.user")
+        );
+
+        // Untouched runtime copy still follows control_root updates (e.g. dictionary manager / cloud sync).
+        put(
+            root,
+            crate::account::USER_DICTIONARY,
+            "---\nname: keytao.user\nversion: \"1\"\n...\n同步词\tef\n",
+        );
+        materialize(root, &bundled, "keytao", sources.clone(), None, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(runtime.join(crate::account::USER_DICTIONARY)).unwrap(),
+            "---\nname: keytao.user\nversion: \"1\"\n...\n同步词\tef\n"
+        );
+
+        // User edits keytao.user.dict.yaml, keytao.user.remove.txt, bundled YAMLs, schema, dict, lua and custom files.
+        let edited_user_dict = "---\nname: keytao.user\nversion: \"1\"\n...\n手改词\tgh\n";
+        let edited_removals = "手改删词\tij\n";
+        let edited_symbols = "user edited symbols\n";
+        let edited_bindings = "user edited bindings\n";
+        let edited_schema =
+            "schema: {schema_id: keytao, name: KeyTao Custom}\ntranslator: {dictionary: keytao.extended}\n";
+        let edited_extended =
+            "---\nname: keytao.extended\nimport_tables:\n  - keytao.user\n  - keytao.phrase\n  - extra_user\n...\n";
+        let edited_rime_lua = "require('keytao')\n-- user lua\n";
+        let edited_filter_lua = "-- custom remove filter\n";
+        put(&runtime, crate::account::USER_DICTIONARY, edited_user_dict);
+        put(&runtime, crate::account::USER_WORD_REMOVALS, edited_removals);
+        put(&runtime, "symbols.yaml", edited_symbols);
+        put(&runtime, "key_bindings.yaml", edited_bindings);
+        put(&runtime, "keytao.schema.yaml", edited_schema);
+        put(&runtime, "keytao.extended.dict.yaml", edited_extended);
+        put(&runtime, "rime.lua", edited_rime_lua);
+        put(&runtime, crate::remove_filter::SCRIPT_PATH, edited_filter_lua);
+        put(&runtime, "extra_user.dict.yaml", "---\nname: extra_user\n...\n扩展\tkl\n");
+        put(&runtime, "keytao.custom.yaml", "");
+        put(&runtime, "default.custom.yaml", "");
+
+        // Staged deploy preparation and direct materialization both succeed and keep all user edits.
+        let stage = prepare_runtime(
+            root,
+            &bundled,
+            "keytao",
+            runtime_files(sources.clone()),
+            None,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        drop(stage);
+
+        for _ in 0..2 {
+            materialize(root, &bundled, "keytao", sources.clone(), None, None).unwrap();
+            assert_eq!(
+                fs::read_to_string(runtime.join(crate::account::USER_DICTIONARY)).unwrap(),
+                edited_user_dict
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join(crate::account::USER_WORD_REMOVALS)).unwrap(),
+                edited_removals
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join("symbols.yaml")).unwrap(),
+                edited_symbols
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join("key_bindings.yaml")).unwrap(),
+                edited_bindings
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join("keytao.schema.yaml")).unwrap(),
+                edited_schema
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join("keytao.extended.dict.yaml")).unwrap(),
+                edited_extended
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join("rime.lua")).unwrap(),
+                edited_rime_lua
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join(crate::remove_filter::SCRIPT_PATH)).unwrap(),
+                edited_filter_lua
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.join("extra_user.dict.yaml")).unwrap(),
+                "---\nname: extra_user\n...\n扩展\tkl\n"
+            );
+            assert!(
+                keytao_core::parse_schema_list(
+                    &fs::read_to_string(runtime.join("default.custom.yaml")).unwrap()
+                ) == ["keytao"]
+            );
+        }
+
+        // Deleting the runtime override falls back to control_root cleanly.
+        fs::remove_file(runtime.join(crate::account::USER_DICTIONARY)).unwrap();
+        materialize(root, &bundled, "keytao", sources, None, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(runtime.join(crate::account::USER_DICTIONARY)).unwrap(),
+            "---\nname: keytao.user\nversion: \"1\"\n...\n同步词\tef\n"
+        );
+    }
+
+    #[test]
+    fn runtime_created_user_dictionary_without_control_root_patches_extended_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        let mut sources = fixture(root, "keytao");
+        sources.insert(
+            "keytao.schema.yaml".into(),
+            b"schema: {schema_id: keytao, name: KeyTao}\ntranslator: {dictionary: keytao.extended}\n"
+                .to_vec(),
+        );
+        sources.insert(
+            "keytao.extended.dict.yaml".into(),
+            b"---\nname: keytao.extended\nimport_tables:\n  - keytao.phrase\n...\n".to_vec(),
+        );
+
+        materialize(root, &bundled, "keytao", sources.clone(), None, None).unwrap();
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "keytao").unwrap();
+        assert!(!runtime.join(crate::account::USER_DICTIONARY).exists());
+
+        let created = "---\nname: keytao.user\nversion: \"1\"\n...\n新建词\tmn\n";
+        put(&runtime, crate::account::USER_DICTIONARY, created);
+        materialize(root, &bundled, "keytao", sources, None, None).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(runtime.join(crate::account::USER_DICTIONARY)).unwrap(),
+            created
+        );
+        assert!(
+            fs::read_to_string(runtime.join("keytao.extended.dict.yaml"))
+                .unwrap()
+                .contains("- keytao.user")
+        );
+    }
+
+    #[test]
+    fn local_scheme_preserves_edited_yaml_and_user_added_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        let key = "local-editable";
+        let sources = fixture(root, key);
+
+        materialize(root, &bundled, key, sources.clone(), None, None).unwrap();
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, key).unwrap();
+
+        let edited_schema = format!("schema: {{schema_id: {key}, name: Local Edited}}\n");
+        let added_dict = "---\nname: my_custom\n...\n自定\tab\n";
+        let added_custom = "patch:\n  menu/page_size: 9\n";
+        put(&runtime, &format!("{key}.schema.yaml"), &edited_schema);
+        put(&runtime, "my_custom.dict.yaml", added_dict);
+        put(&runtime, &format!("{key}.custom.yaml"), added_custom);
+
+        materialize(root, &bundled, key, sources, None, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(runtime.join(format!("{key}.schema.yaml"))).unwrap(),
+            edited_schema
+        );
+        assert_eq!(
+            fs::read_to_string(runtime.join("my_custom.dict.yaml")).unwrap(),
+            added_dict
+        );
+        assert!(
+            fs::read_to_string(runtime.join(format!("{key}.custom.yaml")))
+                .unwrap()
+                .contains("menu/page_size: 9")
+        );
     }
 
     #[cfg(unix)]

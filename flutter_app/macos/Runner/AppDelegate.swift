@@ -4,7 +4,7 @@ import FlutterMacOS
 @main
 class AppDelegate: FlutterAppDelegate {
   static func main() {
-    let commands = ["--deploy", "--disable-engine", "--enable-engine"]
+    let commands = ["--deploy", "--reload", "--disable-engine", "--enable-engine"]
     guard CommandLine.arguments.dropFirst().contains(where: commands.contains) else {
       _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
       return

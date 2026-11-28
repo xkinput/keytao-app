@@ -9,7 +9,12 @@ import '../rust/frb_generated.dart';
 import 'controller.dart';
 import 'operation_timing.dart';
 
-const _desktopCommands = {'--deploy', '--disable-engine', '--enable-engine'};
+const _desktopCommands = {
+  '--deploy',
+  '--reload',
+  '--disable-engine',
+  '--enable-engine',
+};
 
 Future<int?> runDesktopCommand(List<String> args) async {
   if (Platform.isAndroid ||
@@ -19,14 +24,14 @@ Future<int?> runDesktopCommand(List<String> args) async {
   }
   if (args.length != 1) {
     stderr.writeln(
-      'Usage: keytao-app --deploy | --disable-engine | --enable-engine',
+      'Usage: keytao-app --deploy | --reload | --disable-engine | --enable-engine',
     );
     return 64;
   }
   try {
     await RustLib.init();
     await core.initCore(config: await bridgeConfig(hostPlatform()));
-    if (args.single == '--deploy') {
+    if (args.single == '--deploy' || args.single == '--reload') {
       final result = await core.deployDefault();
       if (!result.success) throw StateError(result.message);
       stdout.writeln(result.message);

@@ -205,6 +205,20 @@ fn remove_legacy_kde_env_file() {
 }
 
 #[cfg(target_os = "linux")]
+fn run_redeploy_child(root: &std::path::Path) -> Result<(), String> {
+    let lock = keytao_core::linux_deploy_lock(root, std::time::Duration::from_secs(600))?
+        .ok_or("another deployment is in progress")?;
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new(exe);
+    keytao_core::deploy_child::inherit_linux_deploy_lock(&mut command, &lock);
+    keytao_core::deploy_child::run_deploy_child_command_with_progress(
+        &mut command,
+        std::time::Duration::from_secs(600),
+        |_| {},
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn install_reload_watcher(
     engine: engine::CoreEngine,
     gate: Option<keytao_core::ReloadStampGate>,
@@ -218,7 +232,16 @@ fn install_reload_watcher(
         .name("reload-watcher".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Some(root) = gate.path().parent() {
+                    if keytao_core::deploy_child::claim_redeploy_request(root) {
+                        tracing::info!("redeploy requested from runtime directory");
+                        let _activity = hot_update::activity();
+                        if let Err(error) = run_redeploy_child(root) {
+                            tracing::error!("runtime redeploy failed: {error}");
+                        }
+                    }
+                }
                 let Some(requested) = gate.pending() else {
                     continue;
                 };
@@ -273,10 +296,10 @@ fn main() {
     }
 
     #[cfg(target_os = "linux")]
-    if std::env::args_os()
-        .skip(1)
-        .any(|arg| arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND)
-    {
+    if std::env::args_os().skip(1).any(|arg| {
+        arg == keytao_core::deploy_child::DEPLOY_SUBCOMMAND
+            || arg == keytao_core::deploy_child::RELOAD_SUBCOMMAND
+    }) {
         keytao_core::deploy_child::exit_deploy_child(
             keytao_core::deploy_child::run_deploy_child_main_with_prepare(|root| {
                 keytao_app_core::package_migration::migrate_default_if_needed(

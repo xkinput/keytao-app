@@ -899,6 +899,7 @@ pub(crate) fn add_runtime_user_dictionary<'a>(
     control_root: &Path,
     dictionary: impl Fn(&str) -> Result<Option<std::borrow::Cow<'a, [u8]>>, CoreError>,
     used: &BTreeSet<String>,
+    user: &BTreeMap<String, Vec<u8>>,
     generated: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), CoreError> {
     if !used.iter().any(|dictionary| dictionary.starts_with("keytao")) {
@@ -906,6 +907,9 @@ pub(crate) fn add_runtime_user_dictionary<'a>(
     }
 
     for name in [USER_DICTIONARY, USER_WORD_REMOVALS] {
+        if user.contains_key(name) {
+            continue;
+        }
         let path = crate::packages::safe_path(control_root, name).map_err(CoreError::Other)?;
         match std::fs::read(path) {
             Ok(bytes) => { generated.insert(name.into(), bytes); }
@@ -913,7 +917,7 @@ pub(crate) fn add_runtime_user_dictionary<'a>(
             Err(error) => return Err(error.into()),
         }
     }
-    if generated.contains_key(USER_DICTIONARY) {
+    if generated.contains_key(USER_DICTIONARY) || user.contains_key(USER_DICTIONARY) {
         for id in used.iter().filter(|name| {
             name.starts_with("keytao") && name.ends_with(".extended")
         }) {
@@ -1305,8 +1309,9 @@ mod tests {
             Ok(dictionaries.get(name).map(|bytes| std::borrow::Cow::Borrowed(bytes.as_slice())))
         };
         let used = runtime_dictionary_usage(std::iter::once(schema), dictionary).unwrap();
+        let user = BTreeMap::new();
         let mut generated = BTreeMap::new();
-        add_runtime_user_dictionary(root.path(), dictionary, &used, &mut generated).unwrap();
+        add_runtime_user_dictionary(root.path(), dictionary, &used, &user, &mut generated).unwrap();
         assert_eq!(generated[USER_DICTIONARY], source);
         assert_eq!(generated[USER_WORD_REMOVALS], removals);
         assert_eq!(generated["keytao.extended.dict.yaml"], b"import_tables:\n  - keytao.user\n  - keytao.phrase\n");
@@ -1315,7 +1320,7 @@ mod tests {
         generated.clear();
         let schema: &[u8] = b"translator: {dictionary: other}";
         let unrelated = runtime_dictionary_usage(std::iter::once(schema), dictionary).unwrap();
-        add_runtime_user_dictionary(root.path(), dictionary, &unrelated, &mut generated).unwrap();
+        add_runtime_user_dictionary(root.path(), dictionary, &unrelated, &user, &mut generated).unwrap();
         assert!(generated.is_empty());
     }
 

@@ -481,7 +481,7 @@ impl ReloadNotification {
     }
 
     fn wait(&self) -> bool {
-        match unsafe { WaitForSingleObject(self.0, 5_000) } {
+        match unsafe { WaitForSingleObject(self.0, 500) } {
             // Rearm before refreshing so a stamp written during reload is still observed.
             WAIT_OBJECT_0 => unsafe { FindNextChangeNotification(self.0) }.is_ok(),
             WAIT_TIMEOUT => true,
@@ -534,6 +534,24 @@ pub fn run() -> Result<(), String> {
                                 Err(error) => {
                                     keytao_core::rt_log!(Level::Info, "ipc", "shutdown_failed", msg = error);
                                 }
+                            }
+                        }
+                        continue;
+                    }
+                    if keytao_core::deploy_child::claim_redeploy_request(&watched_dir) {
+                        match deploy(&watched_runtime, None, |_| {}) {
+                            Ok(()) => {
+                                if let Some(signature) = stamp.pending() {
+                                    stamp.commit(signature);
+                                }
+                            }
+                            Err(error) => {
+                                keytao_core::rt_log!(
+                                    Level::Info,
+                                    "ipc",
+                                    "lua_redeploy_failed",
+                                    msg = error
+                                );
                             }
                         }
                         continue;

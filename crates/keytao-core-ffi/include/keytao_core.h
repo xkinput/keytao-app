@@ -95,6 +95,11 @@ void keytao_run_deploy_child_main(void);
 void keytao_run_preview_child_main(void);
 
 /**
+ * Atomically consume a Lua/script `.keytao-redeploy` trigger file if present.
+ */
+bool keytao_claim_redeploy_request(void);
+
+/**
  * Redeploy through the macOS executable itself, with a 600-second timeout.
  * Returns true only for a successful exit and a valid success protocol result.
  */

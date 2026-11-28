@@ -15,7 +15,9 @@ use std::{
 };
 
 pub const DEPLOY_SUBCOMMAND: &str = "--deploy";
+pub const RELOAD_SUBCOMMAND: &str = "--reload";
 pub const PREVIEW_SUBCOMMAND: &str = "--preview-candidates";
+pub const REDEPLOY_REQUEST_FILE: &str = ".keytao-redeploy";
 const PACKAGE_DEPLOY_ARG: &str = "--packages";
 const PROGRESS_VERSION_ENV: &str = "KEYTAO_DEPLOY_PROGRESS_VERSION";
 const STRUCTURED_PROGRESS_VERSION: &str = "2";
@@ -107,7 +109,43 @@ fn write_message(output: &mut impl Write, message: &Message) -> Result<(), Strin
         .map_err(|error| format!("cannot flush deployment protocol: {error}"))
 }
 
-/// Handle `--deploy` or `--deploy --packages`; pass the code to [`exit_deploy_child`].
+/// Atomically claim a Lua- or script-created `.keytao-redeploy` trigger file
+/// from either the active runtime directory (`rime_api.get_user_data_dir()`) or
+/// `control_root`. Rejects symlinks and returns `false` while disabled,
+/// migrating, or already deploying.
+pub fn claim_redeploy_request(control_root: &Path) -> bool {
+    if !crate::engine_choice::is_enabled(control_root)
+        || crate::deployment_in_progress(control_root)
+        || RuntimeDirs::needs_migration(control_root)
+    {
+        return false;
+    }
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(dir) = RuntimeDirs::active_package_key(control_root)
+        .and_then(|key| RuntimeDirs::isolated_user_data_dir(control_root, &key))
+    {
+        candidates.push(dir.join(REDEPLOY_REQUEST_FILE));
+    }
+    let root_request = control_root.join(REDEPLOY_REQUEST_FILE);
+    if !candidates.contains(&root_request) {
+        candidates.push(root_request);
+    }
+    let mut claimed = false;
+    for path in candidates {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            claimed = true;
+        }
+    }
+    claimed
+}
+
+/// Handle `--deploy`, `--reload`, or `--deploy --packages`; pass the code to [`exit_deploy_child`].
 /// No engine session or caller-supplied data paths are accepted.
 pub fn run_deploy_child_main() -> i32 {
     run_deploy_child_main_with_prepare(|_| Ok(()))
@@ -117,6 +155,9 @@ pub fn run_deploy_child_main_with_prepare(
     prepare: impl FnOnce(&Path) -> Result<(), String>,
 ) -> i32 {
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == RELOAD_SUBCOMMAND {
+        args[0] = OsString::from(DEPLOY_SUBCOMMAND);
+    }
     let package_plan =
         args.len() == 2 && args[0] == DEPLOY_SUBCOMMAND && args[1] == PACKAGE_DEPLOY_ARG;
     if package_plan {
@@ -127,10 +168,17 @@ pub fn run_deploy_child_main_with_prepare(
         &mut io::stdout().lock(),
         DEPLOY_SUBCOMMAND,
         |emit| {
-            #[cfg(target_os = "linux")]
-            let _lock = inherited_linux_deploy_lock()?;
             let user_dir = crate::default_user_data_dir()
                 .ok_or("cannot determine the librime user data directory")?;
+            #[cfg(target_os = "linux")]
+            let _lock = if std::env::var_os(LOCK_FD_ENV).is_some() {
+                inherited_linux_deploy_lock()?
+            } else if !package_plan {
+                crate::linux_deploy_lock(&user_dir, Duration::from_secs(600))?
+                    .ok_or("another deployment is in progress")?
+            } else {
+                return Err("librime deploy child requires an inherited deployment lock".into());
+            };
             prepare(&user_dir)?;
             if RuntimeDirs::needs_migration(&user_dir) {
                 return Err("scheme directory migration is required before deployment".into());
@@ -156,7 +204,11 @@ pub fn run_deploy_child_main_with_prepare(
                 None,
                 &targets,
                 emit,
-            )
+            )?;
+            if !package_plan {
+                crate::ReloadStamp::write(&user_dir)?;
+            }
+            Ok(())
         },
     )
 }
@@ -1610,6 +1662,66 @@ printf '%s\n' '{"preview":{"candidates":[],"page_size":1}}' '{"ok":true}'
             std::fs::remove_file(&spawned).unwrap();
         }
         std::fs::remove_dir_all(exe.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn claim_redeploy_request_consumes_runtime_and_control_triggers_once() {
+        let root = std::env::temp_dir().join(format!(
+            "keytao-redeploy-claim-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime/keytao");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            root.join(RuntimeDirs::MIGRATION_MARKER),
+            serde_json::json!({"version": 1, "runtime_package": "keytao"}).to_string(),
+        )
+        .unwrap();
+        let active_dir = root.join("scheme-packages");
+        std::fs::create_dir_all(&active_dir).unwrap();
+        std::fs::write(
+            active_dir.join("active.json"),
+            serde_json::json!({"active_package": "keytao"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!claim_redeploy_request(&root));
+
+        // Lua writes `.keytao-redeploy` inside rime_api.get_user_data_dir() (runtime/keytao).
+        let runtime_trigger = runtime.join(REDEPLOY_REQUEST_FILE);
+        std::fs::write(&runtime_trigger, "1\n").unwrap();
+        assert!(claim_redeploy_request(&root));
+        assert!(!runtime_trigger.exists());
+        assert!(!claim_redeploy_request(&root));
+
+        // Fallback trigger in control_root is also supported.
+        let root_trigger = root.join(REDEPLOY_REQUEST_FILE);
+        std::fs::write(&root_trigger, "1\n").unwrap();
+        assert!(claim_redeploy_request(&root));
+        assert!(!root_trigger.exists());
+
+        // Disabled engine does not consume pending requests.
+        crate::engine_choice::set_enabled(&root, false).unwrap();
+        std::fs::write(&runtime_trigger, "1\n").unwrap();
+        assert!(!claim_redeploy_request(&root));
+        assert!(runtime_trigger.is_file());
+        crate::engine_choice::set_enabled(&root, true).unwrap();
+        assert!(claim_redeploy_request(&root));
+        assert!(!runtime_trigger.exists());
+
+        #[cfg(unix)]
+        {
+            let target = root.join("outside.txt");
+            std::fs::write(&target, "keep").unwrap();
+            std::os::unix::fs::symlink(&target, &runtime_trigger).unwrap();
+            assert!(!claim_redeploy_request(&root));
+            assert!(target.is_file());
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
