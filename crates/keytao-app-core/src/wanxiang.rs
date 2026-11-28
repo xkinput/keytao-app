@@ -29,11 +29,12 @@ const GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
 const ISOLATED_GRAMMAR_FILE: &str = "runtime/wanxiang/wanxiang-lts-zh-hans.gram";
 const SHARED_GRAMMAR_MANIFEST: &str = ".keytao-wanxiang-grammar.json";
 const GRAMMAR_LANGUAGE: &str = "wanxiang-lts-zh-hans";
-const GRAMMAR_RELEASE: &str = "https://api.github.com/repos/amzxyz/RIME-LMDG/releases/tags/LTS";
+const GRAMMAR_RELEASE: &str =
+    "https://api.github.com/repos/amzxyz/rime-wanxiang-data/releases/tags/LTS";
 const GRAMMAR_DOWNLOAD: &str =
-    "https://github.com/amzxyz/RIME-LMDG/releases/download/LTS/wanxiang-lts-zh-hans.gram";
+    "https://github.com/amzxyz/rime-wanxiang-data/releases/download/LTS/wanxiang-lts-zh-hans.gram";
 const GRAMMAR_SIZE: u64 = 407_160_876;
-const MAX_GRAMMAR_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAX_GRAMMAR_BYTES: u64 = 1024 * 1024 * 1024;
 const RELEASE_LATEST: &str = "https://github.com/amzxyz/rime-wanxiang/releases/latest";
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const MANIFEST: &str = ".keytao-wanxiang.json";
@@ -153,10 +154,10 @@ pub struct GrammarStatus {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct GrammarModel {
-    version: String,
-    size: u64,
-    sha256: String,
+pub(crate) struct GrammarModel {
+    pub(crate) version: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -281,11 +282,11 @@ fn stored_manifest(core: &Core, root: &Path) -> Result<Option<Manifest>, String>
         .transpose()
 }
 
-fn valid_hash(hash: &str) -> bool {
+pub(crate) fn valid_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn grammar_supported() -> bool {
+pub(crate) fn grammar_supported() -> bool {
     !cfg!(target_os = "ios") && keytao_core::octagram_available()
 }
 
@@ -357,7 +358,7 @@ fn link_or_copy_grammar(source: &Path, destination: &Path) -> Result<(), String>
     }
 }
 
-fn same_file_identity(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file_identity(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -510,7 +511,7 @@ fn grammar_package(json: &str) -> Result<RemotePackage, String> {
     })
 }
 
-fn available_disk_space(root: &Path) -> Result<u64, String> {
+pub(crate) fn available_disk_space(root: &Path) -> Result<u64, String> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -544,7 +545,7 @@ fn available_disk_space(root: &Path) -> Result<u64, String> {
     }
 }
 
-fn verify_disk_space(available: u64, size: u64) -> Result<(), String> {
+pub(crate) fn verify_disk_space(available: u64, size: u64) -> Result<(), String> {
     let required = size.saturating_add(64 * 1024 * 1024);
     if available < required {
         return Err(format!(
@@ -556,7 +557,7 @@ fn verify_disk_space(available: u64, size: u64) -> Result<(), String> {
     Ok(())
 }
 
-async fn save_grammar_stream<S, B, E>(
+pub(crate) async fn save_grammar_stream<S, B, E>(
     root: &Path,
     stream: S,
     expected: u64,
@@ -1610,7 +1611,7 @@ fn verify_download(downloaded: u64, expected: Option<u64>) -> Result<(), String>
     verify_download_with_limit(downloaded, expected, MAX_DOWNLOAD_BYTES)
 }
 
-fn verify_download_with_limit(
+pub(crate) fn verify_download_with_limit(
     downloaded: u64,
     expected: Option<u64>,
     max_bytes: u64,

@@ -768,6 +768,29 @@ Future<WanxiangGrammarStatusDto> setPackageWanxiangGrammar({
   androidDeploy: androidDeploy,
 );
 
+Future<GrammarModelsOverviewDto> grammarModelsStatus() =>
+    RustLib.instance.api.crateApiCoreGrammarModelsStatus();
+
+Future<GrammarModelsOverviewDto> manageGrammarModel({
+  required String modelId,
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageGrammarModel(
+  modelId: modelId,
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+Future<GrammarModelsOverviewDto> setPackageGrammarModel({
+  required String packageKey,
+  String? modelId,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreSetPackageGrammarModel(
+  packageKey: packageKey,
+  modelId: modelId,
+  androidDeploy: androidDeploy,
+);
+
 Future<AddonStatusDto> rimeIceStatus() =>
     RustLib.instance.api.crateApiCoreRimeIceStatus();
 
@@ -948,6 +971,78 @@ class DesktopEnglishSwitchKeyDto {
           runtimeType == other.runtimeType &&
           key == other.key &&
           schemaKeys == other.schemaKeys;
+}
+
+class GrammarModelItemDto {
+  final String id;
+  final String name;
+  final String shortName;
+  final String description;
+  final String repoUrl;
+  final bool installed;
+  final String version;
+  final BigInt size;
+
+  const GrammarModelItemDto({
+    required this.id,
+    required this.name,
+    required this.shortName,
+    required this.description,
+    required this.repoUrl,
+    required this.installed,
+    required this.version,
+    required this.size,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      shortName.hashCode ^
+      description.hashCode ^
+      repoUrl.hashCode ^
+      installed.hashCode ^
+      version.hashCode ^
+      size.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GrammarModelItemDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          shortName == other.shortName &&
+          description == other.description &&
+          repoUrl == other.repoUrl &&
+          installed == other.installed &&
+          version == other.version &&
+          size == other.size;
+}
+
+class GrammarModelsOverviewDto {
+  final bool available;
+  final List<GrammarModelItemDto> models;
+  final Map<String, String> packageModels;
+
+  const GrammarModelsOverviewDto({
+    required this.available,
+    required this.models,
+    required this.packageModels,
+  });
+
+  @override
+  int get hashCode =>
+      available.hashCode ^ models.hashCode ^ packageModels.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GrammarModelsOverviewDto &&
+          runtimeType == other.runtimeType &&
+          available == other.available &&
+          models == other.models &&
+          packageModels == other.packageModels;
 }
 
 class WanxiangGrammarStatusDto {

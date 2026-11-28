@@ -9,7 +9,6 @@ use serde_yaml::Value;
 const FILTER: &str = "lua_filter@*keytao_grammar_hint";
 pub(crate) const SCRIPT: &str = include_str!("keytao_grammar_hint.lua");
 pub(crate) const SCRIPT_PATH: &str = "lua/keytao_grammar_hint.lua";
-const WANXIANG_GRAMMAR_PATCH: &str = "{grammar/language: wanxiang-lts-zh-hans, grammar/collocation_max_length: 6, grammar/collocation_min_length: 2, grammar/collocation_penalty: -14, grammar/non_collocation_penalty: -6, grammar/weak_collocation_penalty: -100, grammar/rear_penalty: -18, translator/contextual_suggestions: true, translator/max_homophones: 8, translator/max_homographs: 7}";
 const MAX_INCLUDE_DEPTH: usize = 4;
 
 fn valid_language(language: &str) -> bool {
@@ -197,12 +196,17 @@ pub(crate) fn configured_grammar_languages(
     result
 }
 
-pub(crate) fn ensure_wanxiang_grammar_for_schemas(
+pub(crate) fn ensure_grammar_model_for_schemas(
     root: &Path,
     schemas: &BTreeSet<String>,
-    enabled: bool,
+    model_id: Option<&str>,
 ) -> Result<bool, String> {
     let mut changed = false;
+    let managed_patch = if cfg!(target_os = "ios") {
+        None
+    } else {
+        model_id.and_then(crate::grammar_models::managed_patch_for)
+    };
     for id in schemas {
         if id == crate::wanxiang::SCHEMA_ID || id == crate::addon::EASY_EN_ADDON_ID {
             continue;
@@ -226,15 +230,18 @@ pub(crate) fn ensure_wanxiang_grammar_for_schemas(
             let custom: Value =
                 serde_yaml::from_str(&without_managed).map_err(|error| error.to_string())?;
             let user_defined = resolve_schema_grammar_language(root, &schema, &custom).is_some();
-            let patch = (enabled && !cfg!(target_os = "ios") && !user_defined)
-                .then_some(WANXIANG_GRAMMAR_PATCH);
+            let patch = if user_defined {
+                None
+            } else {
+                managed_patch.as_deref()
+            };
             let updated =
                 crate::managed_custom::set_patch(&without_wanxiang, "wanxiang-grammar", patch)?;
             changed |= crate::managed_custom::write_custom(root, &relative, &content, &updated)?;
             Ok(())
         })();
         if let Err(error) = result {
-            tracing::warn!(schema = id, %error, "Skipped Wanxiang grammar patch");
+            tracing::warn!(schema = id, %error, "Skipped managed grammar model patch");
         }
     }
     Ok(changed)

@@ -36,14 +36,28 @@ class _GrammarController extends ViewController {
   }
 
   @override
-  Future<bool> setPackageWanxiangGrammar(String key, bool enabled) async {
-    actions.add('pkg-grammar:$key:$enabled');
+  Future<bool> setPackageGrammarModel(String key, String? modelId) async {
+    actions.add('pkg-model:$key:${modelId ?? 'off'}');
+    return true;
+  }
+
+  @override
+  Future<bool> manageGrammarModel(String modelId, bool installed) async {
+    if (modelId == AppController.wanxiangHansModelId) {
+      return manageWanxiangGrammar(installed);
+    }
+    actions.add('model:$modelId:$installed');
     return true;
   }
 
   @override
   Future<void> cancelWanxiangGrammarDownload() async {
     actions.add('cancel');
+  }
+
+  @override
+  Future<void> cancelDownload() async {
+    actions.add('cancel-scheme-download');
   }
 }
 
@@ -147,17 +161,33 @@ void main() {
         await _pump(tester, c);
         expect(find.byKey(rowKey), findsNothing);
       }
-      // Still visible when Wanxiang Pinyin itself is not installed.
+      // Still visible when Wanxiang Pinyin itself is not installed, listing all 4 models.
       final c = _GrammarController(BridgePlatform.macOs)..wanxiang = null;
       addTearDown(c.dispose);
       await _pump(tester, c);
       expect(find.byKey(rowKey), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('grammar-model-wanxiang-lts-zh-hant')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('grammar-model-zh-hans-t-essay-bgw')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('grammar-model-zh-hant-t-essay-bgw')),
+        findsOneWidget,
+      );
     },
   );
 
   testWidgets('grammar row downloads, deletes and only cancels the download', (
     tester,
   ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(900, 1200);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
     final c = _GrammarController(BridgePlatform.macOs);
     addTearDown(c.dispose);
     final row = find.byKey(rowKey);
@@ -180,6 +210,7 @@ void main() {
     await tester.tap(action('卸载'));
     expect(c.actions.last, 'grammar:false');
 
+    final idleHeight = tester.getSize(row).height;
     c.busy = true;
     c.operation = OperationKind.wanxiangGrammar;
     for (final stage in [
@@ -195,13 +226,14 @@ void main() {
       final button = tester.widget<ActionButton>(
         find.descendant(of: row, matching: find.byType(ActionButton)),
       );
-      expect(button.label, '取消');
-      expect(button.onPress != null, stage == 'wanxiang-grammar-download');
       expect(
-        find.descendant(of: row, matching: find.byType(FDeterminateProgress)),
-        findsOneWidget,
+        button.label,
+        stage == 'wanxiang-grammar-download' ? '取消 40%' : '部署中… 40%',
       );
-      if (button.onPress != null) await tester.tap(action('取消'));
+      expect(button.onPress != null, stage == 'wanxiang-grammar-download');
+      // Inline button progress never increases card height.
+      expect(tester.getSize(row).height, idleHeight);
+      if (button.onPress != null) await tester.tap(find.byWidget(button));
     }
     expect(c.actions.last, 'cancel');
     await tester.pumpAndSettle();
@@ -269,7 +301,7 @@ void main() {
       final moreButtons = find.byIcon(FLucideIcons.ellipsis);
       expect(moreButtons, findsNWidgets(2));
 
-      // Cloud scheme (keytao): already enabled -> tapping disables.
+      // Cloud scheme (keytao): open nested grammar model submenu and turn off.
       await tester.tap(moreButtons.first);
       await tester.pumpAndSettle();
       final cloudItem = find.byKey(
@@ -278,9 +310,13 @@ void main() {
       expect(cloudItem, findsOneWidget);
       await tester.tap(cloudItem);
       await tester.pumpAndSettle();
-      expect(c.actions.last, 'pkg-grammar:keytao:false');
+      await tester.tap(
+        find.byKey(const ValueKey('grammar-model-option-keytao-off')),
+      );
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'pkg-model:keytao:off');
 
-      // Local scheme (local-demo): not enabled -> tapping enables.
+      // Local scheme (local-demo): open nested grammar model submenu and select Wanxiang Hans.
       await tester.tap(moreButtons.last);
       await tester.pumpAndSettle();
       final localItem = find.byKey(
@@ -289,7 +325,15 @@ void main() {
       expect(localItem, findsOneWidget);
       await tester.tap(localItem);
       await tester.pumpAndSettle();
-      expect(c.actions.last, 'pkg-grammar:local-demo:true');
+      await tester.tap(
+        find.byKey(
+          const ValueKey(
+            'grammar-model-option-local-demo-wanxiang-lts-zh-hans',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'pkg-model:local-demo:wanxiang-lts-zh-hans');
 
       // In Libjd mode, the switch is hidden.
       c.inputEngine = 'libjd_engine';
@@ -300,6 +344,113 @@ void main() {
         find.byKey(const ValueKey('enable-wanxiang-grammar-keytao')),
         findsNothing,
       );
+    },
+  );
+
+  testWidgets('collapse/expand toggle cell matches adjacent card height', (
+    tester,
+  ) async {
+    final c = _GrammarController(BridgePlatform.macOs);
+    addTearDown(c.dispose);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(900, 1200);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: FScaffold(
+          child: SingleChildScrollView(child: SchemePage(controller: c)),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final toggleCollapsed = find.bySemanticsLabel('展开全部方案');
+    expect(toggleCollapsed, findsOneWidget);
+    final siblingCard = find.ancestor(
+      of: find.byKey(const ValueKey('scheme-package-keydo')),
+      matching: find.byType(HairlineGridCell),
+    );
+    expect(
+      tester.getSize(toggleCollapsed).height,
+      closeTo(tester.getSize(siblingCard).height, 1.0),
+    );
+
+    await tester.tap(toggleCollapsed);
+    await tester.pumpAndSettle();
+    final toggleExpanded = find.bySemanticsLabel('收起');
+    expect(toggleExpanded, findsOneWidget);
+    final easyEnCell = find.byKey(const ValueKey('addon-easy-en'));
+    expect(
+      tester.getSize(toggleExpanded).height,
+      closeTo(tester.getSize(easyEnCell).height, 1.0),
+    );
+  });
+
+  testWidgets(
+    'downloading a cloud scheme keeps card height unchanged and puts cancel on button',
+    (tester) async {
+      final c = _GrammarController(BridgePlatform.macOs);
+      addTearDown(c.dispose);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(900, 1200);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+
+      Future<void> pumpCard() async {
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: c.info.platform,
+            home: FScaffold(
+              child: HairlineGridSection(
+                columnCount: 2,
+                children: [
+                  HairlineGridCell(
+                    child: SchemePackageRow(
+                      controller: c,
+                      schemeKey: 'keydo',
+                    ),
+                  ),
+                  HairlineGridCell(
+                    child: SchemePackageRow(
+                      controller: c,
+                      schemeKey: 'snow_jiandao',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      await pumpCard();
+      final card = find.byKey(const ValueKey('scheme-package-keydo'));
+      final idleHeight = tester.getSize(card).height;
+
+      c
+        ..busy = true
+        ..operation = OperationKind.install
+        ..installingSchemeKey = 'keydo'
+        ..installProgress = const InstallProgressDto(
+          stage: 'downloading',
+          percent: 35,
+          message: '正在下载…',
+        );
+      await pumpCard();
+
+      expect(tester.getSize(card).height, closeTo(idleHeight, 1.0));
+      final cancelBtn = find.descendant(
+        of: card,
+        matching: find.widgetWithText(ActionButton, '取消 35%'),
+      );
+      expect(cancelBtn, findsOneWidget);
+      await tester.tap(cancelBtn);
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'cancel-scheme-download');
     },
   );
 }

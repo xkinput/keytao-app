@@ -9,7 +9,12 @@ import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/platform/android_host.dart';
 import 'package:keytao/src/platform/ios_host.dart';
 import 'package:keytao/src/rust/api/core.dart'
-    show AddonStatusDto, DesktopEnglishSwitchKeyDto, WanxiangGrammarStatusDto;
+    show
+        AddonStatusDto,
+        DesktopEnglishSwitchKeyDto,
+        GrammarModelItemDto,
+        GrammarModelsOverviewDto,
+        WanxiangGrammarStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
@@ -247,6 +252,45 @@ class FakeCore implements RustLibApi {
       size: wanxiangGrammarStatus.size,
       enabledPackages: updated.toList()..sort(),
     );
+  }
+  @override
+  Future<GrammarModelsOverviewDto> crateApiCoreGrammarModelsStatus() async =>
+      GrammarModelsOverviewDto(
+        available: wanxiangGrammarStatus.available,
+        models: [
+          GrammarModelItemDto(
+            id: 'wanxiang-lts-zh-hans',
+            name: '万象语法模型（简体）',
+            shortName: '万象·简体',
+            description: '简体大语料模型',
+            repoUrl: 'https://github.com/amzxyz/rime-wanxiang-data',
+            installed: wanxiangGrammarStatus.installed,
+            version: wanxiangGrammarStatus.version,
+            size: wanxiangGrammarStatus.size,
+          ),
+        ],
+        packageModels: {
+          for (final pkg in wanxiangGrammarStatus.enabledPackages)
+            pkg: 'wanxiang-lts-zh-hans',
+        },
+      );
+  @override
+  Future<GrammarModelsOverviewDto> crateApiCoreManageGrammarModel({
+    required String modelId,
+    required bool installed,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('grammarModel:$modelId:$installed');
+    return crateApiCoreGrammarModelsStatus();
+  }
+  @override
+  Future<GrammarModelsOverviewDto> crateApiCoreSetPackageGrammarModel({
+    required String packageKey,
+    String? modelId,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('pkgGrammarModel:$packageKey:${modelId ?? 'off'}');
+    return crateApiCoreGrammarModelsStatus();
   }
   @override
   Future<void> crateApiCoreCancelWanxiangGrammarDownload() async {

@@ -605,10 +605,18 @@ void main() {
             ),
           ),
         );
+        // Wanxiang variant switcher is nested inside its overflow menu and disabled while busy.
+        await tester.tap(
+          find.descendant(
+            of: find.byKey(const ValueKey('addon-wanxiang')),
+            matching: find.byIcon(FLucideIcons.ellipsis),
+          ),
+        );
+        await tester.pumpAndSettle();
         expect(
           tester
-              .widget<FSelect<String>>(
-                find.byWidgetPredicate((widget) => widget is FSelect<String>),
+              .widget<FSubmenuItem>(
+                find.byKey(const ValueKey('wanxiang-variant-submenu')),
               )
               .enabled,
           isFalse,
@@ -1253,10 +1261,8 @@ void main() {
         expect(button.onPress, isNull);
         expect(button.success, operation != OperationKind.deploy);
         expect(find.byType(AppBadge), findsNothing);
-        expect(
-          find.text(AppStrings.deployingLibrime),
-          operation == OperationKind.deploy ? findsOneWidget : findsNothing,
-        );
+        // Deployment state stays inline on the button without expanding the card.
+        expect(find.text(AppStrings.deployingLibrime), findsNothing);
         c.deployingSchemeKey = 'keytao';
         await tester.pumpWidget(
           KeyTaoTheme(
@@ -1711,7 +1717,7 @@ void main() {
           (widget) =>
               widget is Icon && widget.semanticLabel == AppStrings.checkUpdate,
         );
-        expect(tester.widget<ActionButton>(button).label, '附加方案');
+        expect(tester.widget<ActionButton>(button).label, '附加功能');
         expect(
           tester.getRect(source).right,
           lessThanOrEqualTo(tester.getRect(button).left),
@@ -2016,7 +2022,7 @@ void main() {
       c.rebuild();
       await tester.pumpAndSettle();
       expect(
-        find.descendant(of: card, matching: find.byType(FDeterminateProgress)),
+        find.descendant(of: card, matching: find.text('下载中 40%')),
         findsOneWidget,
       );
       expect(
@@ -2108,13 +2114,19 @@ void main() {
     _size(tester, const Size(1200, 1000));
     await _pumpSchemePage(tester, c);
     await _openAddons(tester);
-    final variant = find.byWidgetPredicate(
-      (widget) => widget is FSelect<String>,
+    // Wanxiang variant selector lives inside its overflow menu as a nested submenu.
+    expect(find.byWidgetPredicate((widget) => widget is FSelect<String>), findsNothing);
+    final wanxiangCard = find.byKey(const ValueKey('addon-wanxiang'));
+    await tester.tap(
+      find.descendant(of: wanxiangCard, matching: find.byIcon(FLucideIcons.ellipsis)),
     );
-    expect(find.text('基础版'), findsOneWidget);
-    await tester.tap(variant);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('纯净').last);
+    final variantMenu = find.byKey(const ValueKey('wanxiang-variant-submenu'));
+    expect(variantMenu, findsOneWidget);
+    expect(find.text('版本切换'), findsOneWidget);
+    await tester.tap(variantMenu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('wanxiang-variant-pure')));
     await tester.pumpAndSettle();
     expect(c.selectedWanxiangVariant, 'pure');
     final grammar = find.byKey(const ValueKey('wanxiang-grammar'));
@@ -2146,7 +2158,7 @@ void main() {
       await tester.pumpAndSettle();
       final card = find.byKey(ValueKey('addon-$key'));
       expect(
-        find.descendant(of: card, matching: find.byType(FDeterminateProgress)),
+        find.descendant(of: card, matching: find.text('下载中 40%')),
         findsOneWidget,
       );
       expect(

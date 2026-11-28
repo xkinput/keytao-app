@@ -285,7 +285,7 @@ class HairlineGridSection extends StatelessWidget {
           for (final child in children)
             // The catalogue toggle still supplies a TableCell.
             if (child is TableCell)
-              KeyedSubtree(key: child.key, child: child.child)
+              _MasonryFillCell(key: child.key, child: child.child)
             else
               child,
         ],
@@ -317,8 +317,25 @@ class _HairlineMasonry extends MultiChildRenderObjectWidget {
   ) => renderObject.update(columns, columnSizing, border);
 }
 
+class _MasonryFillCell extends ParentDataWidget<_MasonryParentData> {
+  const _MasonryFillCell({super.key, required super.child});
+
+  @override
+  void applyParentData(RenderObject renderObject) {
+    final data = renderObject.parentData! as _MasonryParentData;
+    if (!data.fillRow) {
+      data.fillRow = true;
+      renderObject.parent?.markNeedsLayout();
+    }
+  }
+
+  @override
+  Type get debugTypicalAncestorWidgetClass => _HairlineMasonry;
+}
+
 class _MasonryParentData extends ContainerBoxParentData<RenderBox> {
   late int column;
+  bool fillRow = false;
 }
 
 class _RenderHairlineMasonry extends RenderBox
@@ -396,17 +413,56 @@ class _RenderHairlineMasonry extends RenderBox
     return bottoms;
   }
 
+  double _fillTargetHeight(
+    List<({RenderBox child, int column, double top, double height})> placed,
+    double top,
+    double currentHeight,
+  ) {
+    var sameRow = 0.0;
+    var anyRow = 0.0;
+    for (final entry in placed) {
+      if ((entry.child.parentData! as _MasonryParentData).fillRow) continue;
+      if (entry.height > anyRow) anyRow = entry.height;
+      if ((entry.top - top).abs() <= _slotTolerance && entry.height > sameRow) {
+        sameRow = entry.height;
+      }
+    }
+    return math.max(currentHeight, sameRow > 0 ? sameRow : anyRow);
+  }
+
   @override
   void performLayout() {
     _columnWidth = _widthFor(constraints);
     final childConstraints = BoxConstraints.tightFor(width: _columnWidth);
+    final placed =
+        <({RenderBox child, int column, double top, double height})>[];
     _bottoms = _stack((child, column, top) {
       child.layout(childConstraints, parentUsesSize: true);
       (child.parentData! as _MasonryParentData)
         ..column = column
         ..offset = Offset(column * _columnWidth, top);
+      placed.add((
+        child: child,
+        column: column,
+        top: top,
+        height: child.size.height,
+      ));
       return child.size.height;
     });
+    for (final entry in placed) {
+      if (!(entry.child.parentData! as _MasonryParentData).fillRow) continue;
+      final targetHeight = _fillTargetHeight(placed, entry.top, entry.height);
+      if (targetHeight > entry.height) {
+        entry.child.layout(
+          BoxConstraints.tightFor(width: _columnWidth, height: targetHeight),
+          parentUsesSize: true,
+        );
+        _bottoms[entry.column] = math.max(
+          _bottoms[entry.column],
+          entry.top + targetHeight,
+        );
+      }
+    }
     size = constraints.constrain(
       Size(_columnWidth * _columns, _bottoms.reduce(math.max)),
     );
@@ -416,9 +472,23 @@ class _RenderHairlineMasonry extends RenderBox
   Size computeDryLayout(BoxConstraints constraints) {
     final width = _widthFor(constraints);
     final childConstraints = BoxConstraints.tightFor(width: width);
-    final bottoms = _stack(
-      (child, _, _) => child.getDryLayout(childConstraints).height,
-    );
+    final placed =
+        <({RenderBox child, int column, double top, double height})>[];
+    final bottoms = _stack((child, column, top) {
+      final height = child.getDryLayout(childConstraints).height;
+      placed.add((child: child, column: column, top: top, height: height));
+      return height;
+    });
+    for (final entry in placed) {
+      if (!(entry.child.parentData! as _MasonryParentData).fillRow) continue;
+      final targetHeight = _fillTargetHeight(placed, entry.top, entry.height);
+      if (targetHeight > entry.height) {
+        bottoms[entry.column] = math.max(
+          bottoms[entry.column],
+          entry.top + targetHeight,
+        );
+      }
+    }
     return constraints.constrain(
       Size(width * _columns, bottoms.reduce(math.max)),
     );

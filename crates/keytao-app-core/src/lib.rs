@@ -47,6 +47,7 @@ pub mod update;
 pub mod user_words;
 mod remove_filter;
 mod grammar_hint;
+pub mod grammar_models;
 mod candidate_page_size;
 mod managed_custom;
 pub mod runtime_materialize;

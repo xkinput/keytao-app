@@ -301,6 +301,8 @@ struct Settings {
     easy_english_packages: BTreeSet<String>,
     #[serde(default)]
     wanxiang_grammar_packages: BTreeSet<String>,
+    #[serde(default)]
+    package_grammar_models: BTreeMap<String, String>,
 }
 
 fn read_settings(root: &Path) -> Result<Settings, CoreError> {
@@ -314,12 +316,35 @@ pub fn easy_english_enabled(root: &Path, key: &str) -> Result<bool, CoreError> {
     Ok(read_settings(root)?.easy_english_packages.contains(key))
 }
 
+pub fn all_package_grammar_models(root: &Path) -> Result<BTreeMap<String, String>, CoreError> {
+    let settings = read_settings(root)?;
+    let mut models = BTreeMap::new();
+    for key in settings.wanxiang_grammar_packages {
+        models.insert(key, crate::grammar_models::WANXIANG_HANS_ID.into());
+    }
+    for (key, model) in settings.package_grammar_models {
+        if crate::grammar_models::find_spec(&model).is_some() {
+            models.insert(key, model);
+        }
+    }
+    Ok(models)
+}
+
+pub fn package_grammar_model(root: &Path, key: &str) -> Result<Option<String>, CoreError> {
+    Ok(all_package_grammar_models(root)?.remove(key))
+}
+
 pub fn wanxiang_grammar_enabled(root: &Path, key: &str) -> Result<bool, CoreError> {
-    Ok(read_settings(root)?.wanxiang_grammar_packages.contains(key))
+    Ok(package_grammar_model(root, key)?.as_deref() == Some(crate::grammar_models::WANXIANG_HANS_ID))
 }
 
 pub fn wanxiang_grammar_packages(root: &Path) -> Result<BTreeSet<String>, CoreError> {
-    Ok(read_settings(root)?.wanxiang_grammar_packages)
+    Ok(all_package_grammar_models(root)?
+        .into_iter()
+        .filter_map(|(key, model)| {
+            (model == crate::grammar_models::WANXIANG_HANS_ID).then_some(key)
+        })
+        .collect())
 }
 
 pub(crate) fn package_installed(core: &Core, root: &Path, key: &str) -> Result<bool, CoreError> {
@@ -332,20 +357,22 @@ pub(crate) fn package_installed(core: &Core, root: &Path, key: &str) -> Result<b
                 .is_some_and(|path| path.is_dir())))
 }
 
-pub(crate) fn installed_wanxiang_grammar_packages(
+pub(crate) fn installed_packages_using_grammar_model(
     core: &Core,
     root: &Path,
+    model_id: &str,
 ) -> Result<Vec<String>, CoreError> {
-    let enabled = read_settings(root)?.wanxiang_grammar_packages;
-    if enabled.is_empty() {
+    let models = all_package_grammar_models(root)?;
+    if models.is_empty() {
         return Ok(Vec::new());
     }
     let shared = crate::deploy::deploy_shared_data_dir(core, root);
     let installed = isolated_package_keys(core, root, &shared)?;
-    Ok(enabled
+    Ok(models
         .into_iter()
-        .filter(|key| {
-            key != crate::wanxiang::SCHEMA_ID
+        .filter(|(key, id)| {
+            id == model_id
+                && key != crate::wanxiang::SCHEMA_ID
                 && key != EASY_EN_ADDON_ID
                 && (installed.contains(key)
                     || (key == "builtin/keytao"
@@ -353,13 +380,21 @@ pub(crate) fn installed_wanxiang_grammar_packages(
                         && RuntimeDirs::isolated_user_data_dir(root, key)
                             .is_some_and(|path| path.is_dir())))
         })
+        .map(|(key, _)| key)
         .collect())
 }
 
-pub(crate) fn update_wanxiang_grammar(
+pub(crate) fn installed_wanxiang_grammar_packages(
+    core: &Core,
+    root: &Path,
+) -> Result<Vec<String>, CoreError> {
+    installed_packages_using_grammar_model(core, root, crate::grammar_models::WANXIANG_HANS_ID)
+}
+
+pub(crate) fn update_package_grammar_model(
     root: &Path,
     key: &str,
-    enabled: bool,
+    model_id: Option<&str>,
 ) -> Result<bool, CoreError> {
     let path = safe(root, RuntimeDirs::SETTINGS_FILE)?;
     let mut settings: serde_json::Map<String, serde_json::Value> = read_optional(&path)?
@@ -373,19 +408,54 @@ pub(crate) fn update_wanxiang_grammar(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let changed = if enabled {
-        packages.insert(key.into())
-    } else {
-        packages.remove(key)
-    };
+    let mut models: BTreeMap<String, String> = settings
+        .get("package_grammar_models")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let mut changed = false;
+    match model_id {
+        Some(id) => {
+            if models.get(key).map(String::as_str) != Some(id) {
+                models.insert(key.into(), id.into());
+                changed = true;
+            }
+            if id == crate::grammar_models::WANXIANG_HANS_ID {
+                changed |= packages.insert(key.into());
+            } else {
+                changed |= packages.remove(key);
+            }
+        }
+        None => {
+            changed |= models.remove(key).is_some();
+            changed |= packages.remove(key);
+        }
+    }
     if changed {
         settings.insert(
             "wanxiang_grammar_packages".into(),
             serde_json::to_value(packages)?,
         );
+        settings.insert(
+            "package_grammar_models".into(),
+            serde_json::to_value(models)?,
+        );
         write_file(&path, &serde_json::to_vec(&settings)?)?;
     }
     Ok(changed)
+}
+
+pub(crate) fn update_wanxiang_grammar(
+    root: &Path,
+    key: &str,
+    enabled: bool,
+) -> Result<bool, CoreError> {
+    update_package_grammar_model(
+        root,
+        key,
+        enabled.then_some(crate::grammar_models::WANXIANG_HANS_ID),
+    )
 }
 
 pub(crate) fn installed_easy_english_packages(
@@ -676,10 +746,21 @@ fn prepare_targets(
                         publish_package_sources(control_root, namespace, &key, &name, &files)?;
                     }
                 }
-                let wanxiang_grammar = key != crate::wanxiang::SCHEMA_ID
-                    && key != EASY_EN_ADDON_ID
-                    && settings.wanxiang_grammar_packages.contains(&key)
-                    && crate::wanxiang::shared_grammar_model_path(control_root).is_some();
+                let grammar_model = if key != crate::wanxiang::SCHEMA_ID && key != EASY_EN_ADDON_ID {
+                    settings
+                        .package_grammar_models
+                        .get(&key)
+                        .cloned()
+                        .or_else(|| {
+                            settings
+                                .wanxiang_grammar_packages
+                                .contains(&key)
+                                .then(|| crate::grammar_models::WANXIANG_HANS_ID.into())
+                        })
+                        .filter(|id| crate::grammar_models::model_path(control_root, id).is_some())
+                } else {
+                    None
+                };
                 let prepared = prepare_runtime(
                     control_root,
                     bundled,
@@ -687,7 +768,7 @@ fn prepare_targets(
                     files,
                     selection.as_deref(),
                     overlay_for(&key)?,
-                    wanxiang_grammar,
+                    grammar_model.as_deref(),
                     stage,
                     core.env().platform == crate::Platform::Windows,
                 )?;
@@ -1034,7 +1115,7 @@ fn prepare_runtime(
     sources: RuntimeFiles,
     selection: Option<&[String]>,
     overlay: Option<&RuntimeFiles>,
-    wanxiang_grammar: bool,
+    grammar_model: Option<&str>,
     stage: bool,
     windows_lua: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
@@ -1182,7 +1263,7 @@ fn prepare_runtime(
         &schema_sources,
         &selected,
         crate::ime_settings::read_candidate_page_size(control_root),
-        wanxiang_grammar,
+        grammar_model,
         &mut owned,
         &mut generated,
         &user,
@@ -1724,7 +1805,7 @@ fn regenerate_custom(
     sources: &Files,
     schemas: &[String],
     page_size: Option<u8>,
-    wanxiang_grammar: bool,
+    grammar_model: Option<&str>,
     owned: &mut RuntimeFiles,
     generated: &mut Files,
     user: &Files,
@@ -1764,7 +1845,7 @@ fn regenerate_custom(
     }
     let active: BTreeSet<String> = schemas.iter().cloned().collect();
     // Use the package's selected schemas for managed filters, grammar, and candidate page size.
-    managed_custom::regenerate_with_options(stage, &active, wanxiang_grammar)
+    managed_custom::regenerate_with_options(stage, &active, grammar_model)
         .map_err(CoreError::Other)?;
     let grammar_languages: BTreeSet<String> =
         crate::grammar_hint::configured_grammar_languages(stage, &active)
@@ -2085,10 +2166,12 @@ mod tests {
         overlay: Option<&Files>,
     ) -> Result<(), CoreError> {
         let overlay = overlay.cloned().map(runtime_files);
-        let wanxiang_grammar = key != crate::wanxiang::SCHEMA_ID
-            && key != EASY_EN_ADDON_ID
-            && wanxiang_grammar_enabled(control_root, key)?
-            && crate::wanxiang::shared_grammar_model_path(control_root).is_some();
+        let grammar_model = if key != crate::wanxiang::SCHEMA_ID && key != EASY_EN_ADDON_ID {
+            package_grammar_model(control_root, key)?
+                .filter(|id| crate::grammar_models::model_path(control_root, id).is_some())
+        } else {
+            None
+        };
         prepare_runtime(
             control_root,
             bundled,
@@ -2096,7 +2179,7 @@ mod tests {
             runtime_files(sources),
             selection,
             overlay.as_ref(),
-            wanxiang_grammar,
+            grammar_model.as_deref(),
             false,
             cfg!(windows),
         )
@@ -2288,7 +2371,7 @@ mod tests {
         sources.remove("lua/TJ/stats.txt");
 
         let stage = prepare_runtime(
-            root, &bundled, key, runtime_files(sources.clone()), None, None, false, true, false,
+            root, &bundled, key, runtime_files(sources.clone()), None, None, None, true, false,
         )
         .unwrap()
         .unwrap();
@@ -2720,7 +2803,7 @@ mod tests {
             runtime_files(sources.clone()),
             None,
             None,
-            false,
+            None,
             true,
             false,
         )

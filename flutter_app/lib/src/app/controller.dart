@@ -451,6 +451,7 @@ class AppController extends ChangeNotifier {
   String? addonError;
   String? wanxiangError;
   String? wanxiangGrammarError;
+  String? managingGrammarModelId;
   String? macosImeError;
   String? windowsImeError;
   String? linuxImeError;
@@ -474,6 +475,7 @@ class AppController extends ChangeNotifier {
   bool? inputEngineTransition;
   core.AddonStatusDto? wanxiang;
   core.WanxiangGrammarStatusDto? wanxiangGrammar;
+  core.GrammarModelsOverviewDto? grammarModels;
   String? _selectedWanxiangVariant;
   String? wanxiangLatestVersion;
   final rimeAddons = Map<String, RimeAddonSlot>.unmodifiable({
@@ -990,19 +992,101 @@ class AppController extends ChangeNotifier {
   bool get isDeploying => operation == OperationKind.deploy;
   bool get isManagingAddon => operation == OperationKind.addon;
   bool get isManagingWanxiang => operation == OperationKind.wanxiang;
+  static const wanxiangHansModelId = 'wanxiang-lts-zh-hans';
+
+  List<core.GrammarModelItemDto> get effectiveGrammarModels {
+    final live = grammarModels?.models;
+    if (live != null && live.isNotEmpty) return live;
+    final wx = wanxiangGrammar;
+    return [
+      core.GrammarModelItemDto(
+        id: wanxiangHansModelId,
+        name: '万象语法模型（简体）',
+        shortName: '万象·简体',
+        description: '简体大语料模型，整句与长句准确率高，适合万象、雾凇、白霜及各类双拼主力使用。',
+        repoUrl: 'https://github.com/amzxyz/rime-wanxiang-data',
+        installed: wx?.installed == true,
+        version: wx?.version ?? '',
+        size: wx != null && wx.size > BigInt.zero
+            ? wx.size
+            : BigInt.from(407160876),
+      ),
+      core.GrammarModelItemDto(
+        id: 'wanxiang-lts-zh-hant',
+        name: '万象语法模型（繁体）',
+        shortName: '万象·繁体',
+        description: '万象同源繁体大语料模型，适合繁体拼音、注音、仓颉等繁体整句输入场景。',
+        repoUrl: 'https://github.com/amzxyz/rime-wanxiang-data',
+        installed: false,
+        version: '',
+        size: BigInt.from(409859116),
+      ),
+      core.GrammarModelItemDto(
+        id: 'zh-hans-t-essay-bgw',
+        name: '八股文·简体词级（Rime 官方）',
+        shortName: '八股文·简体',
+        description: 'Rime 官方轻量简体词级模型，体积小、内存与流量占用低，适合移动端或轻量整句纠错。',
+        repoUrl: 'https://github.com/lotem/rime-octagram-data',
+        installed: false,
+        version: '',
+        size: BigInt.from(40925228),
+      ),
+      core.GrammarModelItemDto(
+        id: 'zh-hant-t-essay-bgw',
+        name: '八股文·繁体词级（Rime 官方）',
+        shortName: '八股文·繁体',
+        description: 'Rime 官方轻量繁体词级模型，搭配朙月、地球拼音等繁体方案开箱即用。',
+        repoUrl: 'https://github.com/lotem/rime-octagram-data',
+        installed: false,
+        version: '',
+        size: BigInt.from(41415724),
+      ),
+    ];
+  }
+
+  Map<String, String> get effectivePackageGrammarModels {
+    final live = grammarModels?.packageModels;
+    if (live != null) return live;
+    final enabled = wanxiangGrammar?.enabledPackages ?? const <String>[];
+    return {for (final pkg in enabled) pkg: wanxiangHansModelId};
+  }
+
   bool get isManagingWanxiangGrammar =>
       operation == OperationKind.wanxiangGrammar;
+  bool isManagingGrammarModel(String modelId) =>
+      isManagingWanxiangGrammar &&
+      (managingGrammarModelId == null || managingGrammarModelId == modelId);
   bool get showWanxiangGrammar =>
-      !isIos && wanxiangGrammar?.available == true;
+      !isIos && (grammarModels?.available ?? wanxiangGrammar?.available ?? false);
   bool get canManageWanxiangGrammar =>
       !busy &&
       showWanxiangGrammar &&
       (!prefersLibjd || wanxiangGrammar?.installed == true);
+  bool canManageGrammarModel(core.GrammarModelItemDto model) =>
+      !busy && showWanxiangGrammar && (!prefersLibjd || model.installed);
   bool get canToggleWanxiangGrammarOnPackages =>
-      !isIos && !prefersLibjd && wanxiangGrammar?.available == true;
+      !isIos &&
+      !prefersLibjd &&
+      (grammarModels?.available ?? wanxiangGrammar?.available ?? false);
+  String? grammarModelForPackage(String packageKey) {
+    final id = effectivePackageGrammarModels[packageKey];
+    if (id == null) return null;
+    final installed = effectiveGrammarModels
+        .where((m) => m.id == id && m.installed)
+        .isNotEmpty;
+    return installed ? id : null;
+  }
+
+  String? grammarModelShortName(String? modelId) {
+    if (modelId == null) return null;
+    for (final model in effectiveGrammarModels) {
+      if (model.id == modelId) return model.shortName;
+    }
+    return modelId;
+  }
+
   bool isWanxiangGrammarEnabledFor(String packageKey) =>
-      wanxiangGrammar?.installed == true &&
-      (wanxiangGrammar?.enabledPackages.contains(packageKey) ?? false);
+      grammarModelForPackage(packageKey) == wanxiangHansModelId;
   bool get canCancelWanxiangGrammarDownload =>
       isManagingWanxiangGrammar &&
       wanxiangGrammarProgress?.stage.startsWith('wanxiang-grammar-download') ==
@@ -4372,11 +4456,19 @@ class AppController extends ChangeNotifier {
       wanxiangGrammar = null;
       wanxiangGrammarError ??= errorText(failure);
     }
+    if (!isIos) {
+      try {
+        grammarModels = await core.grammarModelsStatus();
+      } catch (_) {}
+    } else {
+      grammarModels = null;
+    }
   }
 
   Future<bool> manageWanxiangGrammar(bool installed) {
     if (installed && !requireRimeEngine()) return Future.value(false);
     return run(() async {
+      managingGrammarModelId = wanxiangHansModelId;
       _startOperation(
         OperationKind.wanxiangGrammar,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -4392,6 +4484,9 @@ class AppController extends ChangeNotifier {
         installed: installed,
         androidDeploy: _androidDeploy,
       );
+      try {
+        grammarModels = await core.grammarModelsStatus();
+      } catch (_) {}
       await _readLocal();
       addOperationLogs([
         installed
@@ -4406,12 +4501,58 @@ class AppController extends ChangeNotifier {
       } catch (_) {}
       rethrow;
     } finally {
+      managingGrammarModelId = null;
       operation = null;
     }
   });
   }
 
-  Future<bool> setPackageWanxiangGrammar(String key, bool enabled) {
+  Future<bool> manageGrammarModel(String modelId, bool installed) {
+    if (modelId == wanxiangHansModelId) {
+      return manageWanxiangGrammar(installed);
+    }
+    if (installed && !requireRimeEngine()) return Future.value(false);
+    return run(() async {
+      managingGrammarModelId = modelId;
+      _startOperation(
+        OperationKind.wanxiangGrammar,
+        installed ? AppStrings.installing : AppStrings.uninstall,
+      );
+      wanxiangGrammarError = null;
+      wanxiangGrammarProgress = null;
+      try {
+        if (!showWanxiangGrammar) {
+          throw StateError(AppStrings.wanxiangGrammarUnavailable);
+        }
+        if (isAndroid) await _requireStorage();
+        grammarModels = await core.manageGrammarModel(
+          modelId: modelId,
+          installed: installed,
+          androidDeploy: _androidDeploy,
+        );
+        await _readLocal();
+        final label = grammarModelShortName(modelId) ?? modelId;
+        addOperationLogs([
+          installed ? '[MODEL] $label 已安装' : '[MODEL] $label 已删除',
+        ]);
+      } catch (failure) {
+        wanxiangGrammarError = errorText(failure);
+        try {
+          await _readWanxiangGrammar();
+          await _readLocal();
+        } catch (_) {}
+        rethrow;
+      } finally {
+        managingGrammarModelId = null;
+        operation = null;
+      }
+    });
+  }
+
+  Future<bool> setPackageWanxiangGrammar(String key, bool enabled) =>
+      setPackageGrammarModel(key, enabled ? wanxiangHansModelId : null);
+
+  Future<bool> setPackageGrammarModel(String key, String? modelId) {
     if (!requireRimeEngine()) return Future.value(false);
     return run(() async {
       deployingSchemeKey = key;
@@ -4423,11 +4564,14 @@ class AppController extends ChangeNotifier {
       );
       try {
         if (isAndroid) await _requireStorage();
-        wanxiangGrammar = await core.setPackageWanxiangGrammar(
+        grammarModels = await core.setPackageGrammarModel(
           packageKey: key,
-          enabled: enabled,
+          modelId: modelId,
           androidDeploy: _androidDeploy,
         );
+        try {
+          wanxiangGrammar = isIos ? null : await core.wanxiangGrammarStatus();
+        } catch (_) {}
         await _readLocal();
       } catch (failure) {
         try {

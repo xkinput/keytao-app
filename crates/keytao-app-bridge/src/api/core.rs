@@ -1955,6 +1955,70 @@ pub async fn set_package_wanxiang_grammar(
     )
 }
 
+#[derive(serde::Deserialize)]
+#[flutter_rust_bridge::frb]
+pub struct GrammarModelItemDto {
+    pub id: String,
+    pub name: String,
+    pub short_name: String,
+    pub description: String,
+    pub repo_url: String,
+    pub installed: bool,
+    pub version: String,
+    pub size: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[flutter_rust_bridge::frb]
+pub struct GrammarModelsOverviewDto {
+    pub available: bool,
+    pub models: Vec<GrammarModelItemDto>,
+    pub package_models: std::collections::HashMap<String, String>,
+}
+
+pub fn grammar_models_status() -> Result<GrammarModelsOverviewDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::grammar_models::status(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn manage_grammar_model(
+    model_id: String,
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<GrammarModelsOverviewDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::grammar_models::manage_model(&state.core, &model_id, installed, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn set_package_grammar_model(
+    package_key: String,
+    model_id: Option<String>,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<GrammarModelsOverviewDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::grammar_models::set_package_model(
+            &state.core,
+            &package_key,
+            model_id.as_deref(),
+            &host,
+        )
+        .await
+        .map_err(|error| error.to_string())?,
+    )
+}
+
 pub fn rime_ice_status() -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     runtime::dto(

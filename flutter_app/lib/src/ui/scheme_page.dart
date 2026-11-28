@@ -113,6 +113,10 @@ void _showAddonSchemes(BuildContext context, AppController c) {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: EyebrowLabel(AppStrings.schemesSectionTitle),
+                ),
                 HairlineGridSection(
                   key: const ValueKey('addon-schemes'),
                   minCellWidth: 180,
@@ -244,32 +248,34 @@ class _SchemePageState extends State<SchemePage> {
   );
 
   Widget _schemeGridToggle(int hiddenCount) => TableCell(
-    verticalAlignment: TableCellVerticalAlignment.intrinsicHeight,
+    verticalAlignment: TableCellVerticalAlignment.fill,
     child: FTappable(
       semanticsLabel: _schemesExpanded ? '收起' : '展开全部方案',
       semanticsExpanded: _schemesExpanded,
       excludeSemantics: true,
       onPress: () => setState(() => _schemesExpanded = !_schemesExpanded),
       child: HairlineGridCell(
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          spacing: 12,
-          children: [
-            if (!_schemesExpanded) const Icon(FLucideIcons.layers3, size: 24),
-            Text(
-              _schemesExpanded ? '收起' : '+$hiddenCount',
-              style: context.theme.typography.body.sm.copyWith(
-                fontSize: 26,
-                fontWeight: FontWeight.w700,
+        child: Center(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            spacing: 12,
+            children: [
+              if (!_schemesExpanded) const Icon(FLucideIcons.layers3, size: 24),
+              Text(
+                _schemesExpanded ? '收起' : '+$hiddenCount',
+                style: context.theme.typography.body.sm.copyWith(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
-            ),
-            Icon(
-              _schemesExpanded
-                  ? FLucideIcons.chevronUp
-                  : FLucideIcons.chevronDown,
-              size: 20,
-            ),
-          ],
+              Icon(
+                _schemesExpanded
+                    ? FLucideIcons.chevronUp
+                    : FLucideIcons.chevronDown,
+                size: 20,
+              ),
+            ],
+          ),
         ),
       ),
     ),
@@ -766,11 +772,13 @@ class SchemePackageRow extends StatelessWidget {
         !c.prefersLibjd &&
         !c.isDeploying &&
         (deployFailed || (checksCurrentPackage && local?.deployed == false));
+    final installingDownload = installing && !c.isImportingLibjd;
+    final installPercent = c.installProgress?.percent;
     final actions = ActionRow(
       keepPairTogether: mobile && !compact,
       children: [
         if (schemeKey == 'keytao' && showSource) _SchemeSource(controller: c),
-        if (update != null)
+        if (update != null && !installingDownload)
           ActionButton(
             '更新',
             compact: mobile && !compact,
@@ -778,7 +786,20 @@ class SchemePackageRow extends StatelessWidget {
             icon: FLucideIcons.arrowUpCircle,
             onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
           ),
-        if (deployLabel != null)
+        if (installingDownload)
+          ActionButton(
+            c.canCancelDownload
+                ? (installPercent != null && installPercent > 0
+                    ? '${AppStrings.cancel} $installPercent%'
+                    : AppStrings.cancel)
+                : (installPercent != null && installPercent > 0
+                    ? '${AppStrings.installing} $installPercent%'
+                    : AppStrings.installing),
+            compact: mobile && !compact,
+            icon: c.canCancelDownload ? FLucideIcons.x : null,
+            onPress: c.canCancelDownload ? c.cancelDownload : null,
+          )
+        else if (deployLabel != null)
           ActionButton(deployLabel, primary: true, compact: mobile && !compact)
         else if (!isLocal && package == null)
           ActionButton(
@@ -1284,13 +1305,11 @@ class SchemePackageRow extends StatelessWidget {
             const SizedBox(height: 8),
             ErrorMessage(step.message),
           ],
-        if (installing || deploying) ...[
+        if (installing && c.isImportingLibjd) ...[
           const SizedBox(height: 8),
           InstallProgressView(
             active: true,
-            progress: deploying && c.hasPackageDeployProgress
-                ? null
-                : c.installProgress,
+            progress: c.installProgress,
             fraction: c.installFraction,
             message: c.progress,
           ),
@@ -1539,6 +1558,10 @@ class AddonCard extends StatelessWidget {
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
+      const Padding(
+        padding: EdgeInsets.only(bottom: 8),
+        child: EyebrowLabel(AppStrings.schemesSectionTitle),
+      ),
       HairlineGridSection(
         minCellWidth: 320,
         columnCount: controller.isMobile ? 2 : null,
@@ -1552,44 +1575,92 @@ class AddonCard extends StatelessWidget {
   );
 }
 
-FItem _wanxiangGrammarMenuItem(
+FItemMixin _wanxiangGrammarMenuItem(
   BuildContext context,
   AppController c,
   String packageKey,
   FPopoverController popover, {
   required bool inAddonsDialog,
 }) {
-  final enabled = c.isWanxiangGrammarEnabledFor(packageKey);
-  final modelInstalled = c.wanxiangGrammar?.installed == true;
-  return FItem(
+  final activeId = c.grammarModelForPackage(packageKey);
+  final activeLabel =
+      c.grammarModelShortName(activeId) ?? AppStrings.grammarModelOff;
+  final models = c.effectiveGrammarModels;
+  return FSubmenuItem(
     key: ValueKey('enable-wanxiang-grammar-$packageKey'),
-    title: const Text(AppStrings.enableWanxiangGrammar),
+    title: const Text(AppStrings.grammarModelMenu),
     prefix: const Icon(FLucideIcons.cpu),
-    semanticsChecked: enabled,
-    suffix: enabled
-        ? const Icon(FLucideIcons.check)
-        : !modelInstalled
-        ? Text(
-            AppStrings.notInstalled,
-            style: context.theme.typography.body.xs.copyWith(
-              color: context.theme.colors.mutedForeground,
+    suffix: Row(
+      mainAxisSize: MainAxisSize.min,
+      spacing: 4,
+      children: [
+        Text(
+          activeLabel,
+          style: context.theme.typography.body.xs.copyWith(
+            color: activeId != null
+                ? ChromeAccent.of(context)
+                : context.theme.colors.mutedForeground,
+          ),
+        ),
+        const Icon(FLucideIcons.chevronRight, size: 14),
+      ],
+    ),
+    enabled: !c.busy,
+    submenuMaxHeight: 340,
+    submenu: [
+      FItemGroup(
+        enabled: !c.busy,
+        children: [
+          FItem(
+            key: ValueKey('grammar-model-option-$packageKey-off'),
+            title: const Text(AppStrings.grammarModelOff),
+            semanticsChecked: activeId == null,
+            suffix: activeId == null ? const Icon(FLucideIcons.check) : null,
+            onPress: c.busy
+                ? null
+                : () {
+                    popover.hide();
+                    unawaited(c.setPackageGrammarModel(packageKey, null));
+                  },
+          ),
+          for (final model in models)
+            FItem(
+              key: ValueKey('grammar-model-option-$packageKey-${model.id}'),
+              title: Text(model.name),
+              subtitle: Text(
+                model.description,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              semanticsChecked: activeId == model.id,
+              suffix: activeId == model.id
+                  ? const Icon(FLucideIcons.check)
+                  : !model.installed
+                  ? Text(
+                      AppStrings.notInstalled,
+                      style: context.theme.typography.body.xs.copyWith(
+                        color: context.theme.colors.mutedForeground,
+                      ),
+                    )
+                  : null,
+              onPress: c.busy
+                  ? null
+                  : () {
+                      popover.hide();
+                      if (!model.installed) {
+                        if (!inAddonsDialog) {
+                          _showAddonSchemes(context, c);
+                        } else {
+                          c.showToast(AppStrings.wanxiangGrammarNeedDownload);
+                        }
+                        return;
+                      }
+                      unawaited(c.setPackageGrammarModel(packageKey, model.id));
+                    },
             ),
-          )
-        : null,
-    onPress: c.busy
-        ? null
-        : () {
-            popover.hide();
-            if (!modelInstalled) {
-              if (!inAddonsDialog) {
-                _showAddonSchemes(context, c);
-              } else {
-                c.showToast(AppStrings.wanxiangGrammarNeedDownload);
-              }
-              return;
-            }
-            unawaited(c.setPackageWanxiangGrammar(packageKey, !enabled));
-          },
+        ],
+      ),
+    ],
   );
 }
 
@@ -1600,8 +1671,8 @@ class _ModelsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final installed = c.wanxiangGrammar?.installed == true;
     final mobile = c.isMobile;
+    final models = c.effectiveGrammarModels;
     return Column(
       key: const ValueKey('addon-models'),
       mainAxisSize: MainAxisSize.min,
@@ -1612,84 +1683,125 @@ class _ModelsSection extends StatelessWidget {
           child: EyebrowLabel(AppStrings.modelsTitle),
         ),
         HairlineGridSection(
-          minCellWidth: 200,
-          columnCount: 1,
+          minCellWidth: 260,
+          columnCount: mobile ? 1 : null,
           children: [
-            HairlineGridCell(
-              key: const ValueKey('wanxiang-grammar'),
-              padding: EdgeInsets.all(mobile ? 10 : 14),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 12,
-                    runSpacing: 8,
-                    children: [
-                      Wrap(
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 8,
-                        runSpacing: 4,
-                        children: [
-                          Text(
-                            AppStrings.wanxiangModelTitle,
-                            style: context.theme.typography.body.sm.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          Text(
-                            c.wanxiangGrammarSize,
-                            style: context.theme.typography.body.xs.copyWith(
-                              color: context.theme.colors.mutedForeground,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (c.isManagingWanxiangGrammar)
-                        ActionButton(
-                          AppStrings.cancel,
-                          onPress: c.canCancelWanxiangGrammarDownload
-                              ? c.cancelWanxiangGrammarDownload
-                              : null,
-                        )
-                      else
-                        ActionButton(
-                          installed ? AppStrings.uninstall : AppStrings.download,
-                          icon: installed
-                              ? FLucideIcons.trash2
-                              : FLucideIcons.download,
-                          onPress: c.canManageWanxiangGrammar
-                              ? () => c.manageWanxiangGrammar(!installed)
-                              : null,
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '仅 Rime 模式支持。下载后自动用于万象拼音，也可在云端方案或本地方案的「…」菜单中开启。',
-                    style: context.theme.typography.body.xs.copyWith(
-                      color: context.theme.colors.mutedForeground,
-                    ),
-                  ),
-                  if (c.isManagingWanxiangGrammar) ...[
-                    const SizedBox(height: 8),
-                    InstallProgressView(
-                      active: true,
-                      progress: c.wanxiangGrammarProgress,
-                    ),
-                  ],
-                  if (c.wanxiangGrammarError case final error?) ...[
-                    const SizedBox(height: 8),
-                    ErrorMessage(error),
-                  ],
-                ],
-              ),
-            ),
+            for (final model in models) _modelCard(context, c, model, mobile),
           ],
         ),
+        if (c.wanxiangGrammarError case final error?) ...[
+          const SizedBox(height: 8),
+          ErrorMessage(error),
+        ],
       ],
+    );
+  }
+
+  Widget _modelCard(
+    BuildContext context,
+    AppController c,
+    dynamic model,
+    bool mobile,
+  ) {
+    final id = model.id as String;
+    final name = model.name as String;
+    final description = model.description as String;
+    final repoUrl = model.repoUrl as String;
+    final installed = model.installed as bool;
+    final size = model.size as BigInt;
+    final isWanxiangHans = id == AppController.wanxiangHansModelId;
+    final managing = c.isManagingGrammarModel(id);
+    final sizeText = isWanxiangHans
+        ? c.wanxiangGrammarSize
+        : formatLogBytes(size);
+    final pct = c.wanxiangGrammarProgress?.percent ?? 0;
+    final canCancel = c.canCancelWanxiangGrammarDownload;
+    return HairlineGridCell(
+      key: isWanxiangHans
+          ? const ValueKey('wanxiang-grammar')
+          : ValueKey('grammar-model-$id'),
+      padding: EdgeInsets.all(mobile ? 10 : 14),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              Text(
+                name,
+                style: context.theme.typography.body.sm.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              Text(
+                sizeText,
+                style: context.theme.typography.body.xs.copyWith(
+                  color: context.theme.colors.mutedForeground,
+                ),
+              ),
+              if (installed)
+                StatusPill('已安装', color: AppPalette.of(context).success),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            description,
+            style: context.theme.typography.body.xs.copyWith(
+              color: context.theme.colors.mutedForeground,
+            ),
+          ),
+          const SizedBox(height: 10),
+          ActionRow(
+            children: [
+              if (managing)
+                ActionButton(
+                  canCancel
+                      ? (pct > 0
+                          ? '${AppStrings.cancel} $pct%'
+                          : AppStrings.cancel)
+                      : (pct > 0
+                          ? '${AppStrings.deploying} $pct%'
+                          : AppStrings.deploying),
+                  icon: canCancel ? FLucideIcons.x : null,
+                  onPress: canCancel ? c.cancelWanxiangGrammarDownload : null,
+                )
+              else
+                ActionButton(
+                  installed ? AppStrings.uninstall : AppStrings.download,
+                  icon: installed
+                      ? FLucideIcons.trash2
+                      : FLucideIcons.download,
+                  onPress: c.canManageGrammarModel(model)
+                      ? () => c.manageGrammarModel(id, !installed)
+                      : null,
+                ),
+              FPopoverMenu(
+                menuAnchor: Alignment.topRight,
+                childAnchor: Alignment.bottomRight,
+                menuBuilder: (_, popover, _) => [
+                  FItemGroup(
+                    children: [
+                      FItem(
+                        title: const Text('仓库地址'),
+                        prefix: const Icon(FLucideIcons.externalLink),
+                        onPress: () {
+                          popover.hide();
+                          c.open(repoUrl);
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+                builder: (_, popover, _) =>
+                    _SchemeMoreButton(onPress: popover.toggle),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1714,7 +1826,7 @@ Map<String, Widget> _addonCells(
     required bool installed,
     required VoidCallback? uninstall,
     required bool active,
-    required Widget progress,
+    required int? progressPercent,
     required String? error,
     Widget? variant,
     Widget? extra,
@@ -1744,9 +1856,6 @@ Map<String, Widget> _addonCells(
         : c.deployingSchemeKey == deployKey && (c.isDeploying || active)
         ? AppStrings.deploying
         : null;
-    final deploying =
-        deployLabel == AppStrings.packageDeploying ||
-        deployLabel == AppStrings.deploying;
     final cardError = c.packageDeployError(packageKey) ?? error;
     final palette = AppPalette.of(context);
     final mobile = c.isMobile;
@@ -1907,7 +2016,15 @@ Map<String, Widget> _addonCells(
                             !englishEnabled,
                           ),
                   ),
-                if (showInstall &&
+                if (active)
+                  ActionButton(
+                    (progressPercent ?? 0) > 0
+                        ? '下载中 $progressPercent%'
+                        : AppStrings.installing,
+                    compact: mobile && cloudCard,
+                    onPress: null,
+                  )
+                else if (showInstall &&
                     (overlay
                         ? !installed || hasUpdate
                         : label != AppStrings.deploy))
@@ -1919,9 +2036,9 @@ Map<String, Widget> _addonCells(
                     tooltip: overlay ? null : tooltip,
                     onPress: install,
                   ),
-                if (!overlay && inUse && mobile && deployLabel == null)
+                if (!active && !overlay && inUse && mobile && deployLabel == null)
                   const _InUseLabel()
-                else if (!overlay && (installed || deployLabel != null))
+                else if (!active && !overlay && (installed || deployLabel != null))
                   ActionButton(
                     deployLabel ?? (inUse ? '使用中' : '使用'),
                     compact: mobile && cloudCard,
@@ -1939,6 +2056,67 @@ Map<String, Widget> _addonCells(
                   menuBuilder: (_, popover, _) => [
                     FItemGroup(
                       children: [
+                        if (packageKey == 'wanxiang')
+                          FSubmenuItem(
+                            key: const ValueKey('wanxiang-variant-submenu'),
+                            title: const Text('版本切换'),
+                            prefix: const Icon(FLucideIcons.layers),
+                            suffix: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              spacing: 4,
+                              children: [
+                                Text(
+                                  AppStrings
+                                          .wanxiangVariants[c
+                                              .selectedWanxiangVariant] ??
+                                      c.selectedWanxiangVariant,
+                                  style: context.theme.typography.body.xs
+                                      .copyWith(
+                                        color: context
+                                            .theme
+                                            .colors
+                                            .mutedForeground,
+                                      ),
+                                ),
+                                const Icon(
+                                  FLucideIcons.chevronRight,
+                                  size: 14,
+                                ),
+                              ],
+                            ),
+                            enabled: !c.busy,
+                            submenuMaxHeight: 320,
+                            submenu: [
+                              FItemGroup(
+                                enabled: !c.busy,
+                                children: [
+                                  for (final entry
+                                      in AppStrings.wanxiangVariants.entries)
+                                    FItem(
+                                      key: ValueKey(
+                                        'wanxiang-variant-${entry.key}',
+                                      ),
+                                      title: Text(entry.value),
+                                      semanticsChecked:
+                                          c.selectedWanxiangVariant ==
+                                          entry.key,
+                                      suffix:
+                                          c.selectedWanxiangVariant == entry.key
+                                          ? const Icon(FLucideIcons.check)
+                                          : null,
+                                      onPress: c.busy
+                                          ? null
+                                          : () {
+                                              popover.hide();
+                                              c.selectWanxiangVariant(
+                                                entry.key,
+                                              );
+                                            },
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
                         if (!overlay &&
                             cloudCard &&
                             installed &&
@@ -2030,23 +2208,13 @@ Map<String, Widget> _addonCells(
               const SizedBox(height: 6),
               Align(alignment: Alignment.centerLeft, child: cardState),
             ],
-            if (active || deploying || importing) ...[
+            if (importing) ...[
               const SizedBox(height: 12),
-              if (importing)
-                InstallProgressView(
-                  active: true,
-                  progress: c.installProgress,
-                  message: c.progress,
-                )
-              else if ((deploying && c.isDeploying) ||
-                  ((deploying || overlay) && c.hasPackageDeployProgress))
-                InstallProgressView(
-                  active: true,
-                  fraction: overlay ? null : c.installFraction,
-                  message: c.progress,
-                )
-              else
-                progress,
+              InstallProgressView(
+                active: true,
+                progress: c.installProgress,
+                message: c.progress,
+              ),
             ],
             if (cardError != null) ...[
               const SizedBox(height: 8),
@@ -2077,7 +2245,7 @@ Map<String, Widget> _addonCells(
           ? () => c.manageRimeAddon(id, false)
           : null,
       active: active,
-      progress: InstallProgressView(active: active, progress: slot.progress),
+      progressPercent: slot.progress?.percent,
       error: slot.error,
     );
   }
@@ -2097,10 +2265,7 @@ Map<String, Widget> _addonCells(
       installed: c.addon?.installed == true,
       uninstall: c.canUninstallAddon ? c.uninstallAddon : null,
       active: c.isManagingAddon,
-      progress: InstallProgressView(
-        active: c.isManagingAddon,
-        progress: c.addonProgress,
-      ),
+      progressPercent: c.addonProgress?.percent,
       error: c.addonError,
     ),
     if (allowedKeys == null || allowedKeys.contains('wanxiang'))
@@ -2109,28 +2274,9 @@ Map<String, Widget> _addonCells(
       packageKey: 'wanxiang',
       title: AppStrings.wanxiang,
       repositoryUrl: schemeRepositoryUrls['wanxiang']!,
-      variant: Align(
-        alignment: Alignment.centerLeft,
-        child: SizedBox(
-          width: 160,
-          child: Semantics(
-            label: AppStrings.wanxiangVariant,
-            enabled: !c.busy,
-            child: FSelect<String>(
-              enabled: !c.busy,
-              control: FSelectControl.lifted(
-                value: c.selectedWanxiangVariant,
-                onChange: c.selectWanxiangVariant,
-              ),
-              items: {
-                for (final entry in AppStrings.wanxiangVariants.entries)
-                  entry.value: entry.key,
-              },
-            ),
-          ),
-        ),
-      ),
-      status: c.wanxiangStatusText,
+      status: c.wanxiang?.installed == true
+          ? c.wanxiangStatusText
+          : '${c.wanxiangStatusText} · ${AppStrings.wanxiangVariants[c.selectedWanxiangVariant] ?? c.selectedWanxiangVariant}',
       label: c.wanxiangButtonLabel,
       tooltip: c.wanxiangTooltip,
       showInstall: c.showWanxiangInstall,
@@ -2138,10 +2284,7 @@ Map<String, Widget> _addonCells(
       installed: c.wanxiang?.installed == true,
       uninstall: c.canUninstallWanxiang ? () => c.manageWanxiang(false) : null,
       active: c.isManagingWanxiang,
-      progress: InstallProgressView(
-        active: c.isManagingWanxiang,
-        progress: c.wanxiangProgress,
-      ),
+      progressPercent: c.wanxiangProgress?.percent,
       error: c.wanxiangError,
     ),
     for (final entry in c.rimeAddons.entries)

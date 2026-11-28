@@ -214,6 +214,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GitSchemeConfigDto dco_decode_git_scheme_config_dto(dynamic raw);
 
   @protected
+  GrammarModelItemDto dco_decode_grammar_model_item_dto(dynamic raw);
+
+  @protected
+  GrammarModelsOverviewDto dco_decode_grammar_models_overview_dto(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -260,6 +266,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<GrammarModelItemDto> dco_decode_list_grammar_model_item_dto(dynamic raw);
 
   @protected
   List<InstalledPackageDto> dco_decode_list_installed_package_dto(dynamic raw);
@@ -756,6 +765,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GrammarModelItemDto sse_decode_grammar_model_item_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  GrammarModelsOverviewDto sse_decode_grammar_models_overview_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -820,6 +839,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<GrammarModelItemDto> sse_decode_list_grammar_model_item_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<InstalledPackageDto> sse_decode_list_installed_package_dto(
@@ -1463,6 +1487,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_grammar_model_item_dto(
+    GrammarModelItemDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_grammar_models_overview_dto(
+    GrammarModelsOverviewDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -1545,6 +1581,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_grammar_model_item_dto(
+    List<GrammarModelItemDto> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_installed_package_dto(

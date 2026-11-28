@@ -220,15 +220,15 @@ pub(crate) fn strip_file(root: &Path, relative: &str) -> Result<bool, String> {
     write_custom(root, relative, content, &strip(content)?)
 }
 
-#[cfg(test)]
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn regenerate(root: &Path, schemas: &BTreeSet<String>) -> Result<bool, String> {
-    regenerate_with_options(root, schemas, false)
+    regenerate_with_options(root, schemas, None)
 }
 
 pub(crate) fn regenerate_with_options(
     root: &Path,
     schemas: &BTreeSet<String>,
-    wanxiang_grammar: bool,
+    grammar_model: Option<&str>,
 ) -> Result<bool, String> {
     let mut changed = false;
     for path in generated_paths(root)? {
@@ -240,10 +240,10 @@ pub(crate) fn regenerate_with_options(
         }
     }
     changed |= crate::remove_filter::ensure_for_schemas(root, schemas)?;
-    changed |= crate::grammar_hint::ensure_wanxiang_grammar_for_schemas(
+    changed |= crate::grammar_hint::ensure_grammar_model_for_schemas(
         root,
         schemas,
-        wanxiang_grammar,
+        grammar_model,
     )?;
     changed |= crate::grammar_hint::ensure_for_schemas(root, schemas)?;
     changed |= crate::candidate_page_size::apply_for_schemas(

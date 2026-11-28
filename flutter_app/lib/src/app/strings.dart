@@ -17,7 +17,8 @@ abstract final class AppStrings {
   static const about = '关于';
   static const website = '网站';
   static const localSchemeTitle = '本地方案';
-  static const addonTitle = '附加方案';
+  static const addonTitle = '附加功能';
+  static const schemesSectionTitle = '方案';
   static const modelsTitle = '模型';
   static const imeSettings = '输入法设置';
   static const username = '用户名';
@@ -60,9 +61,11 @@ abstract final class AppStrings {
   static const openDirectory = '打开目录';
   static const wanxiang = '万象拼音';
   static const wanxiangGrammar = '语法模型';
-  static const wanxiangModelTitle = '万象语法模型';
+  static const grammarModelMenu = '语法模型';
+  static const grammarModelOff = '关闭';
+  static const wanxiangModelTitle = '万象语法模型（简体）';
   static const enableWanxiangGrammar = '启用万象模型';
-  static const wanxiangGrammarNeedDownload = '请先在「附加方案 → 模型」中下载万象语法模型';
+  static const wanxiangGrammarNeedDownload = '请先在「附加功能 → 模型」中下载万象语法模型';
   static const wanxiangGrammarUnavailable = '语法模型不可用';
   static const rimeIce = '雾凇拼音';
   static const rimeMint = '薄荷拼音';
