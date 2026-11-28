@@ -25,6 +25,14 @@ void unifiedGateCases(BridgePlatform platform) {
       platform == BridgePlatform.windows || platform == BridgePlatform.linux;
   final mobile =
       platform == BridgePlatform.android || platform == BridgePlatform.ios;
+  final expectedPages = [
+    AppPage.input,
+    if (platform != BridgePlatform.macOs) AppPage.scheme,
+    AppPage.skin,
+    AppPage.library,
+    AppPage.about,
+    AppPage.website,
+  ];
   testWidgets(
     '${platform.name} onboarding opens on the first incomplete step',
     (tester) async {
@@ -147,6 +155,18 @@ void unifiedGateCases(BridgePlatform platform) {
             ]);
             expect(AppPage.about.shortcutDigit, 5);
             expect(AppPage.library.shortcutDigit, 4);
+            expect(c.visiblePages, expectedPages);
+            expect(
+              find.byKey(const ValueKey('nav-scheme'), skipOffstage: false),
+              platform == BridgePlatform.macOs ? findsNothing : findsOneWidget,
+            );
+            expect(
+              find.byKey(
+                const ValueKey('page-slide-scheme'),
+                skipOffstage: false,
+              ),
+              platform == BridgePlatform.macOs ? findsNothing : findsOneWidget,
+            );
             expect(find.byKey(const ValueKey('nav-extension')), findsNothing);
             expect(find.byKey(const ValueKey('nav-website')), findsOneWidget);
             if (platform == BridgePlatform.windows) {
@@ -180,14 +200,14 @@ void unifiedGateCases(BridgePlatform platform) {
             if (platform == BridgePlatform.android) {
               expect(scroll.position.pixels, greaterThan(0));
             }
-            final schemeTab = find.byKey(const ValueKey('nav-scheme'));
-            if (c.isMobile && schemeTab.hitTestable().evaluate().isEmpty) {
+            final nextTab = find.byKey(ValueKey('nav-${expectedPages[1].id}'));
+            if (c.isMobile && nextTab.hitTestable().evaluate().isEmpty) {
               await tester.drag(input, const Offset(0, 80));
               await tester.pumpAndSettle();
             }
             final offset = scroll.position.pixels;
             for (final page in [
-              AppPage.scheme,
+              if (platform != BridgePlatform.macOs) AppPage.scheme,
               AppPage.skin,
               AppPage.library,
               AppPage.about,
@@ -196,6 +216,7 @@ void unifiedGateCases(BridgePlatform platform) {
               await tester.tap(find.byKey(ValueKey('nav-${page.id}')));
               await tester.pumpAndSettle();
               expect(c.activePage, page);
+              expect(find.byKey(PageStorageKey(page.id)), findsOneWidget);
               if (!c.isMobile) {
                 expect(
                   titleCalls.last,
@@ -216,12 +237,16 @@ void unifiedGateCases(BridgePlatform platform) {
                   .menus
                   .whereType<PlatformMenu>()
                   .singleWhere((menu) => menu.label == '显示');
-              expect(viewMenu.menus.length, AppPage.values.length);
-              for (final page in AppPage.values) {
-                final item = viewMenu.menus[page.index];
+              expect(viewMenu.menus.length, expectedPages.length);
+              expect(
+                viewMenu.menus.map((item) => item.label),
+                expectedPages.map((page) => page.title),
+              );
+              for (final (index, page) in expectedPages.indexed) {
+                final item = viewMenu.menus[index];
                 expect(
                   (item.shortcut as CharacterActivator).character,
-                  '${page.shortcutDigit}',
+                  '${index + 1}',
                 );
                 expect((item.shortcut as CharacterActivator).meta, isTrue);
                 if (page == AppPage.website) continue;
@@ -246,6 +271,7 @@ void unifiedGateCases(BridgePlatform platform) {
               await tester.sendKeyDownEvent(modifier);
               try {
                 for (final (key, character, page) in const [
+                  (LogicalKeyboardKey.digit2, '2', AppPage.scheme),
                   (LogicalKeyboardKey.digit3, '3', AppPage.skin),
                   (LogicalKeyboardKey.digit4, '4', AppPage.library),
                   (LogicalKeyboardKey.digit5, '5', AppPage.about),
@@ -261,6 +287,24 @@ void unifiedGateCases(BridgePlatform platform) {
                 await tester.sendKeyUpEvent(modifier);
               }
             }
+            final legacyScheme = AppPage.fromId('scheme');
+            expect(legacyScheme, AppPage.scheme);
+            c.selectPage(AppPage.skin);
+            await tester.pumpAndSettle();
+            c.selectPage(legacyScheme!);
+            await tester.pumpAndSettle();
+            final legacyTarget = platform == BridgePlatform.macOs
+                ? AppPage.input
+                : AppPage.scheme;
+            expect(c.activePage, legacyTarget);
+            expect(find.byKey(PageStorageKey(legacyTarget.id)), findsOneWidget);
+            expect(
+              find.byKey(
+                const ValueKey('page-slide-scheme'),
+                skipOffstage: false,
+              ),
+              platform == BridgePlatform.macOs ? findsNothing : findsOneWidget,
+            );
           }
           tester.platformDispatcher.platformBrightnessTestValue =
               Brightness.dark;

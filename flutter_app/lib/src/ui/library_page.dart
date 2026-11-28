@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import '../rust/api/types.dart';
 import 'settings.dart';
 import 'user_words.dart';
 import 'widgets.dart';
@@ -63,7 +64,8 @@ class LibraryPage extends StatelessWidget {
                   ],
                 ),
               ),
-            HairlineGridCell(child: AccountCard(controller: c)),
+            if (c.info.platform != BridgePlatform.macOs)
+              HairlineGridCell(child: AccountCard(controller: c)),
             HairlineGridCell(
               child: Section(
                 title: '应用设置',

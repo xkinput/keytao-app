@@ -24,7 +24,9 @@ const _captureKey = ValueKey('scheme-page-screenshot');
 
 class _SchemeScreenshotController extends ViewController {
   _SchemeScreenshotController(super.platform) {
-    activePage = AppPage.scheme;
+    activePage = info.platform == BridgePlatform.macOs
+        ? AppPage.input
+        : AppPage.scheme;
     appUpdate = null;
     activeSchemaLogoPath = File('assets/logo.png').absolute.path;
     installedPackages = [
@@ -238,12 +240,10 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(tester.getSize(find.byKey(_captureKey)), device.size);
-      expect(find.text('方案列表'), findsOneWidget);
+      expect(find.text('远程方案'), findsOneWidget);
       expect(find.text('键道方案'), findsNothing);
-      expect(
-        find.byKey(const ValueKey('addon-schemes-button')),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('addon-schemes-button')), findsNothing);
+      expect(find.byKey(const ValueKey('add-scheme-button')), findsOneWidget);
       expect(find.bySemanticsLabel('展开全部方案'), findsNothing);
       final cards = [
         for (final key in ['keytao', 'xmjd', 'txjx', 'keydo', 'snow_jiandao'])
@@ -255,10 +255,12 @@ void main() {
               .first,
         find.byKey(const ValueKey('addon-rime-ice')),
         find.byKey(const ValueKey('addon-easy-en')),
+        for (final key in ['wanxiang', 'rime-mint', 'rime-frost', 'rime-lssp'])
+          find.byKey(ValueKey('addon-$key')),
       ];
       expect(
         tester.getTopLeft(cards.first).dy -
-            tester.getBottomLeft(find.text('方案列表')).dy,
+            tester.getBottomLeft(find.text('远程方案')).dy,
         inInclusiveRange(0, 40),
       );
       for (final card in cards) {
@@ -302,44 +304,26 @@ void main() {
       if (screenshots) await _capture(tester, device.name);
       final scrollable = find
           .descendant(
-            of: find.byKey(const PageStorageKey('scheme')),
+            of: find.byKey(PageStorageKey(controller.activePage.id)),
             matching: find.byType(Scrollable),
           )
           .first;
       final position = tester.state<ScrollableState>(scrollable).position;
       position.jumpTo(position.maxScrollExtent);
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('wanxiang-grammar')), findsNothing);
+      expect(find.byKey(const ValueKey('wanxiang-grammar')), findsOneWidget);
       expect(tester.takeException(), isNull);
       if (screenshots && device.platform == BridgePlatform.macOs) {
         await _capture(tester, '${device.name}-scrolled');
       }
-      final addons = find.byKey(const ValueKey('addon-schemes-button'));
-      await tester.ensureVisible(addons);
-      await tester.tap(addons);
+      final addScheme = find.byKey(const ValueKey('add-scheme-button'));
+      await tester.ensureVisible(addScheme);
+      await tester.tap(addScheme);
       await tester.pumpAndSettle();
-      expect(find.byType(AppDialog), findsOneWidget);
-      for (final key in ['wanxiang', 'rime-mint', 'rime-frost', 'rime-lssp']) {
-        expect(
-          find.descendant(
-            of: find.byType(AppDialog),
-            matching: find.byKey(ValueKey('addon-$key')),
-          ),
-          findsOneWidget,
-        );
-      }
-      for (final key in ['rime-ice', 'easy-en']) {
-        expect(
-          find.descendant(
-            of: find.byType(AppDialog),
-            matching: find.byKey(ValueKey('addon-$key')),
-          ),
-          findsNothing,
-        );
-      }
-      expect(find.byKey(const ValueKey('wanxiang-grammar')), findsOneWidget);
+      expect(find.byType(AppDialog), findsNothing);
+      expect(find.byKey(const ValueKey('add-custom-scheme')), findsOneWidget);
       expect(tester.takeException(), isNull);
-      if (screenshots) await _capture(tester, '${device.name}-addons');
+      if (screenshots) await _capture(tester, '${device.name}-add-scheme');
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }

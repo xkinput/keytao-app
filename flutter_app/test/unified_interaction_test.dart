@@ -203,7 +203,7 @@ void main() {
   for (final size in [const Size(400, 860), const Size(1000, 760)]) {
     testWidgets('changelog and operation log dialogs at $size', (tester) async {
       final c = ViewController(BridgePlatform.macOs)
-        ..activePage = AppPage.scheme;
+        ..activePage = AppPage.input;
       await _pump(tester, c, size);
       final more = find.descendant(
         of: find.byKey(const ValueKey('scheme-package-keytao')),

@@ -1,7 +1,10 @@
 use crate::{Core, CoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 const PROFILE_LIMIT: usize = 256 * 1024;
 
@@ -54,12 +57,89 @@ pub fn export_profile(core: &Core) -> Result<Value, CoreError> {
         version: 1,
         active_scheme: state.active_scheme,
         packages,
-        settings: sanitize_settings(&state.scheme_sync_settings),
+        settings: sanitize_profile_settings(&state.scheme_sync_settings),
     })?)
 }
 
 fn sanitize_settings(input: &Value) -> Value {
     let mut output = json!({});
+    if let Some(entries) = input["custom_git_schemes"].as_array() {
+        let mut remembered = BTreeMap::new();
+        for entry in entries.iter().take(256) {
+            let Some(key) = entry["scheme_key"].as_str().map(str::trim) else {
+                continue;
+            };
+            if !crate::scheme::is_local_scheme_key(key)
+                || crate::scheme::validate_scheme_key(key).is_err()
+            {
+                continue;
+            }
+            let Some(repo_url) = entry["repo_url"]
+                .as_str()
+                .map(str::trim)
+                .filter(|url| !url.is_empty() && url.len() <= 2048)
+            else {
+                continue;
+            };
+            let Ok(url) = reqwest::Url::parse(repo_url) else {
+                continue;
+            };
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                continue;
+            }
+            let Some(mode) = entry["mode"]
+                .as_str()
+                .filter(|mode| matches!(*mode, "branch" | "release"))
+            else {
+                continue;
+            };
+            let branch = entry["branch"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256);
+            if mode == "branch" && branch.is_none() {
+                continue;
+            }
+            let asset_name = entry["asset_name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256);
+            let display_name = entry["display_name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256);
+            remembered.insert(
+                key.to_owned(),
+                json!({
+                    "scheme_key": key,
+                    "repo_url": repo_url,
+                    "mode": mode,
+                    "branch": branch,
+                    "asset_name": asset_name,
+                    "display_name": display_name,
+                }),
+            );
+        }
+        output["custom_git_schemes"] = json!(remembered.into_values().collect::<Vec<_>>());
+    }
+    if let Some(keys) = input["hidden_schemes"].as_array() {
+        let hidden: BTreeSet<_> = keys
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|key| key.strip_prefix("builtin/").unwrap_or(key))
+            .map(|key| if key == "xmjd-feiding" { "xmjd" } else { key })
+            .filter(|key| {
+                *key != "keytao"
+                    && (crate::scheme::validate_scheme_key(key).is_ok()
+                        || crate::addon_store::IDS.contains(key))
+            })
+            .collect();
+        output["hidden_schemes"] = json!(hidden);
+    }
     for (key, choices) in [
         ("download_source", &["github", "gitee"][..]),
         (
@@ -215,6 +295,14 @@ fn sanitize_settings(input: &Value) -> Value {
     output
 }
 
+fn sanitize_profile_settings(input: &Value) -> Value {
+    let mut settings = sanitize_settings(input);
+    if let Some(settings) = settings.as_object_mut() {
+        settings.remove("custom_git_schemes");
+    }
+    settings
+}
+
 pub fn sync_state(core: &Core) -> Value {
     let state = core.state();
     json!({"settings":sanitize_settings(&state.scheme_sync_settings),
@@ -284,7 +372,7 @@ fn checked_profile(profile: Value) -> Result<SchemeProfile, CoreError> {
             return Err(CoreError::Other("云端启用方案不在配置中".into()));
         }
     }
-    profile.settings = sanitize_settings(&profile.settings);
+    profile.settings = sanitize_profile_settings(&profile.settings);
     Ok(profile)
 }
 
@@ -295,7 +383,13 @@ pub async fn apply_profile_at(
     api_base: &str,
 ) -> Result<Value, CoreError> {
     let profile = checked_profile(profile)?;
-    core.update_state(|state| state.scheme_sync_settings = profile.settings.clone())?;
+    core.update_state(|state| {
+        let mut settings = profile.settings.clone();
+        if let Some(custom_git_schemes) = state.scheme_sync_settings.get("custom_git_schemes") {
+            settings["custom_git_schemes"] = custom_git_schemes.clone();
+        }
+        state.scheme_sync_settings = settings;
+    })?;
     let mut skipped = Vec::new();
     let mut cloud_packages = None;
     for package in profile.packages {

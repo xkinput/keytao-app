@@ -5,8 +5,10 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'english_switch_key_picker.dart';
+import 'scheme_page.dart' show SchemeLibrarySections;
 import 'settings.dart';
 import 'progress.dart';
+import 'rime_sync_dialog.dart';
 import 'theme.dart';
 import 'user_words.dart';
 import 'widgets.dart';
@@ -60,6 +62,10 @@ class InputPage extends StatelessWidget {
       SettingsCard(
         controller: controller,
         hero: _CurrentSchemeHero(controller: controller),
+        inputSections: [
+          if (controller.info.platform == BridgePlatform.macOs)
+            SchemeLibrarySections(controller: controller),
+        ],
         inputCells: _homeCells(context),
       ),
     ],
@@ -116,37 +122,31 @@ class InputPage extends StatelessWidget {
                 ? null
                 : controller.setInputEngineEnabled,
           ),
-          Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: ActionButton(
-              controller.isDeploying
-                  ? AppStrings.deploying
-                  : AppStrings.redeploy,
-              onPress: controller.busy || !controller.activeSchemeDownloaded
-                  ? null
-                  : controller.deploy,
-            ),
-          ),
-          ValueRow('版本', controller.info.appVersion),
-          if (!controller.isMobile && controller.uiSettings?.themePath != null)
-            ValueRow(
-              AppStrings.theme,
-              controller.uiSettings!.themePath!,
-              trailing: FTooltip(
-                tipBuilder: (_, _) => const Text(AppStrings.openTheme),
-                child: FButton.icon(
-                  onPress: controller.canOpenTheme
-                      ? controller.openTheme
-                      : null,
-                  variant: FButtonVariant.ghost,
-                  child: const Icon(
-                    FLucideIcons.folderOpen,
-                    size: 16,
-                    semanticLabel: AppStrings.openTheme,
-                  ),
-                ),
+          if (controller.info.platform != BridgePlatform.macOs)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: ActionButton(
+                controller.isDeploying
+                    ? AppStrings.deploying
+                    : AppStrings.redeploy,
+                onPress: controller.busy || !controller.activeSchemeDownloaded
+                    ? null
+                    : controller.deploy,
               ),
             ),
+          if (controller.info.platform == BridgePlatform.macOs &&
+              !controller.prefersLibjd)
+            ActionRow(
+              children: [
+                ActionButton(
+                  AppStrings.dictManager,
+                  onPress: controller.canOpenDictionaryManager
+                      ? controller.openDictionaryManager
+                      : null,
+                ),
+              ],
+            ),
+          ValueRow('版本', controller.info.appVersion),
         ],
       ),
     ),
@@ -170,6 +170,8 @@ class InputPage extends StatelessWidget {
                     )
                     .take(4))
               _RecentOperation(line),
+            if (controller.info.platform == BridgePlatform.macOs)
+              ActionRow(children: [OperationLogButton(controller: controller)]),
           ],
         ),
       ),
@@ -600,11 +602,21 @@ class _CurrentSchemeHero extends StatelessWidget {
     final caption = schemeName == null ? null : status;
     final engine = c.prefersLibjd ? 'ime-jd' : 'Rime';
     final engineAvailable = c.libjd?.available == true;
-    final platform = '${c.aboutValues['平台']} 系统输入法';
+    final platform = c.info.platform == BridgePlatform.macOs
+        ? '当前方案'
+        : '${c.aboutValues['平台']} 系统输入法';
     final source = downloadSources[package?.source];
-    final showDeploy = installed && !c.prefersLibjd && !c.hasUsableBuild;
+    final syncError = c.rimeSyncError ?? c.rimeSyncSettings?.lastSyncError;
+    final lastSyncAt = c.rimeSyncSettings?.lastSyncAt.toInt() ?? 0;
+    final showDeploy =
+        c.info.platform != BridgePlatform.macOs &&
+        installed &&
+        !c.prefersLibjd &&
+        !c.hasUsableBuild;
     final showInstall =
-        choices.isEmpty && (!c.prefersLibjd || c.hasConvertedSchemes);
+        c.info.platform != BridgePlatform.macOs &&
+        choices.isEmpty &&
+        (!c.prefersLibjd || c.hasConvertedSchemes);
     return Container(
       margin: desktop ? EdgeInsets.zero : const EdgeInsets.only(top: 4),
       padding: desktop
@@ -705,15 +717,117 @@ class _CurrentSchemeHero extends StatelessWidget {
                 if (source != null) Text('来自 $source'),
               ],
             ),
-          if (_showActiveDeploySteps(c)) DeploySteps(controller: c),
-          if (c.prefersLibjd && !c.hasConvertedSchemes) ...[
-            const Text('请前往方案页下载并转换你的方案。ime-jd 目前仅支持键道方案。'),
+          if (c.info.platform == BridgePlatform.macOs)
             ActionRow(
+              key: const ValueKey('current-scheme-actions'),
               children: [
                 ActionButton(
-                  '前往方案页',
-                  onPress: () => c.selectPage(AppPage.scheme),
+                  c.isDeploying ? AppStrings.deploying : AppStrings.deploy,
+                  key: const ValueKey('input-deploy-button'),
+                  icon: desktop ? FLucideIcons.play : null,
+                  compact: !desktop,
+                  tooltip: c.deployTooltip,
+                  onPress: c.canDeploy ? c.deploy : null,
                 ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  spacing: 4,
+                  children: [
+                    ActionButton(
+                      c.rimeSyncing
+                          ? AppStrings.syncing(Localizations.localeOf(context))
+                          : AppStrings.rimeSync(
+                              Localizations.localeOf(context),
+                            ),
+                      key: const ValueKey('rime-sync-button'),
+                      icon: desktop ? FLucideIcons.refreshCw : null,
+                      compact: !desktop,
+                      onPress: c.busy || c.rimeSyncLoading
+                          ? null
+                          : c.syncRimeUserData,
+                    ),
+                    FTooltip(
+                      tipBuilder: (_, _) => Text(
+                        AppStrings.syncSettings(
+                          Localizations.localeOf(context),
+                        ),
+                      ),
+                      child: FButton.icon(
+                        key: const ValueKey('rime-sync-settings-button'),
+                        variant: FButtonVariant.outline,
+                        onPress: c.busy || c.rimeSyncLoading
+                            ? null
+                            : () => showRimeSyncDialog(context, c),
+                        style: FButtonStyleDelta.delta(
+                          decoration: FVariants.all(
+                            ShapeDecoration(
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(999),
+                                side: BorderSide(
+                                  color: AppPalette.of(context).hairline,
+                                  width: 1.5,
+                                ),
+                              ),
+                            ),
+                          ),
+                          contentStyle: const FButtonContentStyleDelta.delta(
+                            constraints: BoxConstraints(
+                              minWidth: 44,
+                              minHeight: 44,
+                            ),
+                          ),
+                        ),
+                        child: Icon(
+                          FLucideIcons.ellipsis,
+                          semanticLabel: AppStrings.syncSettings(
+                            Localizations.localeOf(context),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                ActionButton(
+                  AppStrings.openDirectory,
+                  key: const ValueKey('input-open-directory-button'),
+                  icon: desktop ? FLucideIcons.folderOpen : null,
+                  compact: !desktop,
+                  onPress: c.busy ? null : c.openActiveSchemeDirectory,
+                ),
+              ],
+            ),
+          if (c.info.platform == BridgePlatform.macOs) ...[
+            if (c.rimeSyncing) const FProgress(),
+            if (!c.rimeSyncing && syncError != null) ErrorMessage(syncError),
+            if (!c.rimeSyncing && syncError == null && lastSyncAt != 0)
+              Text(
+                AppStrings.syncLastAt(
+                  Localizations.localeOf(context),
+                  DateTime.fromMillisecondsSinceEpoch(lastSyncAt),
+                ),
+              ),
+          ],
+          if (c.info.platform == BridgePlatform.macOs &&
+              c.deployWarning != null)
+            StatusMessage(
+              c.deployWarning!,
+              icon: FLucideIcons.triangleAlert,
+              color: warningColor(context),
+            ),
+          if (_showActiveDeploySteps(c)) DeploySteps(controller: c),
+          if (c.prefersLibjd && !c.hasConvertedSchemes) ...[
+            Text(
+              c.info.platform == BridgePlatform.macOs
+                  ? '请在下方下载并转换你的方案。ime-jd 目前仅支持键道方案。'
+                  : '请前往方案页下载并转换你的方案。ime-jd 目前仅支持键道方案。',
+            ),
+            ActionRow(
+              children: [
+                if (c.info.platform != BridgePlatform.macOs)
+                  ActionButton(
+                    '前往方案页',
+                    onPress: () => c.selectPage(AppPage.scheme),
+                  ),
                 ActionButton(
                   '了解 ime-jd',
                   onPress: () => c.open(AppController.libjdRepositoryUrl),

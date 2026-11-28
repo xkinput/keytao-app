@@ -1557,7 +1557,7 @@ fn write_single_imported_package(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        source: "local".into(),
+        source: if options.git.is_some() { "git" } else { "local" }.into(),
         display_name: Some(resolved_name),
         selection_base_version: None,
         git: options

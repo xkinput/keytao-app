@@ -26,7 +26,13 @@ class AppMenus extends StatelessWidget {
         );
 
   Widget _buildMenus() {
-    final pages = controller?.visiblePages ?? AppPage.values;
+    final pages =
+        controller?.visiblePages ??
+        [
+          for (final page in AppPage.values)
+            if (!(platform == BridgePlatform.macOs && page == AppPage.scheme))
+              page,
+        ];
     if (platform != BridgePlatform.macOs) {
       final usesCommand = platform == BridgePlatform.ios;
       return CallbackShortcuts(
@@ -85,7 +91,7 @@ class AppMenus extends StatelessWidget {
               PlatformMenuItem(
                 label: page.title,
                 shortcut: CharacterActivator(
-                  '${page.shortcutDigit}',
+                  '${pages.indexOf(page) + 1}',
                   meta: true,
                 ),
                 onSelected: controller == null

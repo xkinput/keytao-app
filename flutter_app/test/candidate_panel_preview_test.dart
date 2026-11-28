@@ -533,7 +533,7 @@ void main() {
           (text: '第五词', comment: 'fifth'),
         ]
         ..updateSettings(orientation: orientation);
-      await _pumpSettings(tester, controller);
+      await _pumpSettings(tester, controller, appearance: true);
       expect(_pcText('方案首选'), findsOneWidget);
       expect(_pcText('~real'), findsOneWidget);
       expect(_pcText('词典注释'), findsOneWidget);
@@ -589,7 +589,7 @@ void main() {
     ) async {
       final controller = _PreviewController()
         ..updateSettings(orientation: orientation);
-      await _pumpSettings(tester, controller);
+      await _pumpSettings(tester, controller, appearance: true);
       final fullWidth = tester.getSize(_panel).width;
       for (final count in <int?>[
         null,
@@ -627,8 +627,75 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   }
 
+  for (final width in [400.0, 1440.0]) {
+    testWidgets(
+      'macOS skin preview follows color selection and Auto at width $width',
+      (tester) async {
+        tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+        addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+        final controller = _PreviewController();
+        await _pumpSettings(tester, controller, appearance: true);
+        tester.view.physicalSize = Size(width, 900);
+        await tester.pumpAndSettle();
+
+        String effectiveScheme() => tester
+            .widget<CandidatePanelPreview>(find.byType(CandidatePanelPreview))
+            .theme['ui']['effectiveColorScheme'] as String;
+        Future<void> select(UiColorSchemeDto scheme) async {
+          final option = find.descendant(
+            of: find.byType(BigTextRadioGroup<UiColorSchemeDto>),
+            matching: find.byKey(ValueKey(scheme)),
+          );
+          await tester.ensureVisible(option);
+          await tester.tap(option);
+          await tester.pumpAndSettle();
+        }
+
+        expect(find.byType(CandidatePanelPreview), findsOneWidget);
+        expect(effectiveScheme(), 'light');
+        final light = _panelColor(tester);
+        tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+        await tester.pumpAndSettle();
+        expect(effectiveScheme(), 'dark');
+        final dark = _panelColor(tester);
+        expect(dark, isNot(light));
+
+        // The selected appearance must reach the preview before saving finishes.
+        controller.saveGate = Completer<bool>();
+        await select(UiColorSchemeDto.light);
+        expect(controller.uiSettings!.colorScheme, UiColorSchemeDto.auto);
+        expect(effectiveScheme(), 'light');
+        expect(_panelColor(tester), light);
+        controller.saveGate!.complete(true);
+        await tester.pumpAndSettle();
+        controller.saveGate = null;
+        expect(controller.uiSettings!.colorScheme, UiColorSchemeDto.light);
+
+        tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+        await tester.pumpAndSettle();
+        expect(_panelColor(tester), light);
+        await select(UiColorSchemeDto.dark);
+        expect(controller.uiSettings!.colorScheme, UiColorSchemeDto.dark);
+        expect(effectiveScheme(), 'dark');
+        expect(_panelColor(tester), dark);
+
+        await select(UiColorSchemeDto.auto);
+        expect(controller.uiSettings!.colorScheme, UiColorSchemeDto.auto);
+        expect(effectiveScheme(), 'light');
+        expect(_panelColor(tester), light);
+        tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+        await tester.pumpAndSettle();
+        expect(effectiveScheme(), 'dark');
+        expect(_panelColor(tester), dark);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+  }
+
   testWidgets(
-    'settings preview follows a font drag before saving and changes direction',
+    'macOS skin preview follows a font drag before saving and changes direction',
     (tester) async {
       final controller = _PreviewController()
         ..updateSettings(
@@ -684,8 +751,6 @@ void main() {
         controller.savedFonts.single,
       );
 
-      await tester.pumpWidget(_settingsWidget(controller, appearance: false));
-      await tester.pumpAndSettle();
       controller.saveGate = Completer<bool>();
       final horizontal = find.text('横排');
       await tester.ensureVisible(horizontal);
@@ -695,7 +760,15 @@ void main() {
       expect(controller.uiSettings!.orientation, PanelOrientationDto.vertical);
       controller.saveGate!.complete(true);
       await tester.pumpAndSettle();
+      expect(
+        controller.uiSettings!.orientation,
+        PanelOrientationDto.horizontal,
+      );
       expect(tester.widget<Flex>(_candidates).direction, Axis.horizontal);
+      expect(
+        tester.widget<Text>(_firstText).style!.fontSize,
+        controller.savedFonts.single,
+      );
       expect(tester.getSize(_panel).width, lessThanOrEqualTo(368));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());

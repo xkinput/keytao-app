@@ -285,6 +285,8 @@ abstract final class AppStrings {
       locale.languageCode.startsWith('zh') ? '已是最新版本' : 'Already up to date';
   static String rimeSync(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '同步' : 'Sync';
+  static String syncSettings(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '同步设置' : 'Sync settings';
   static String syncInstallationId(Locale locale) =>
       locale.languageCode.startsWith('zh') ? '同步文件夹名称' : 'Sync folder name';
   static String syncDirectory(Locale locale) =>
