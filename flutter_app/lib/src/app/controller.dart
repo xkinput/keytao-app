@@ -194,13 +194,23 @@ class AppController extends ChangeNotifier {
     this.android = const AndroidHost(),
     this.pickDesktopDirectory = getDirectoryPath,
     this.pickDesktopArchive = _pickDesktopZip,
+    this.pickDesktopLocalSource = _pickMacosLocalSchemeSource,
     this.runDesktopOpen = Process.run,
   });
   final BridgeInfo info;
   final AndroidHost android;
   final Future<String?> Function() pickDesktopDirectory;
   final Future<String?> Function() pickDesktopArchive;
+  final Future<String?> Function() pickDesktopLocalSource;
   final Future<ProcessResult> Function(String, List<String>) runDesktopOpen;
+
+  bool get supportsUnifiedLocalSchemePicker =>
+      info.platform == BridgePlatform.macOs || isIos;
+
+  static Future<String?> _pickMacosLocalSchemeSource() =>
+      const MethodChannel(
+        'ink.rea.keytao/window',
+      ).invokeMethod<String>('pickLocalSchemeSource');
 
   static Future<String?> _pickDesktopZip() async {
     final file = await openFile(
@@ -2854,7 +2864,7 @@ class AppController extends ChangeNotifier {
 
   Future<bool> importLocalScheme({
     String? schemeKey,
-    bool fromArchive = false,
+    bool? fromArchive,
     Future<List<String>?> Function(LocalImportInspectionDto inspection)?
     selectSchemas,
   }) async {
@@ -2868,7 +2878,11 @@ class AppController extends ChangeNotifier {
         final String sourcePath;
         final String displayName;
         if (isMobile) {
-          final selected = fromArchive
+          final selected = fromArchive == null
+              ? (isIos
+                    ? await const IosHost().importLocalSchemeSource()
+                    : await android.importLocalSchemeDirectory())
+              : fromArchive
               ? (isAndroid
                     ? await android.importLocalSchemeArchive()
                     : await const IosHost().importLocalSchemeArchive())
@@ -2881,7 +2895,20 @@ class AppController extends ChangeNotifier {
               selected['path'] as String;
           sourcePath = selected['path'] as String;
           displayName = selected['name'] as String;
-        } else if (fromArchive) {
+        } else if (fromArchive == null &&
+            info.platform == BridgePlatform.macOs) {
+          final selected = await pickDesktopLocalSource();
+          if (selected == null) return;
+          sourcePath = selected;
+          final segments = selected
+              .split(RegExp(r'[/\\]'))
+              .where((segment) => segment.isNotEmpty);
+          final rawName = segments.isEmpty ? 'local-scheme' : segments.last;
+          displayName =
+              rawName.toLowerCase().endsWith('.zip') && rawName.length > 4
+              ? rawName.substring(0, rawName.length - 4)
+              : rawName;
+        } else if (fromArchive == true) {
           final selected = await pickDesktopArchive();
           if (selected == null) return;
           sourcePath = selected;

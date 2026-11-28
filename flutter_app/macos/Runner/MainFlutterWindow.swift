@@ -1,6 +1,7 @@
 import Cocoa
 import CoreText
 import FlutterMacOS
+import UniformTypeIdentifiers
 
 class MainFlutterWindow: NSWindow {
   private var themeSharePicker: NSSharingServicePicker?
@@ -30,6 +31,8 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "shareThemeFile":
         self?.shareThemeFile(call.arguments, result: result)
+      case "pickLocalSchemeSource":
+        self?.pickLocalSchemeSource(result: result)
       case "resolveSystemFontFamily":
         guard let self, let arguments = call.arguments as? [String: String],
           let family = arguments["family"], !family.isEmpty
@@ -150,6 +153,26 @@ class MainFlutterWindow: NSWindow {
     } catch {
       try? manager.removeItem(at: directory)
       result(FlutterError(code: "THEME_SHARE_FAILED", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  private func pickLocalSchemeSource(result: @escaping FlutterResult) {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.resolvesAliases = true
+    if #available(macOS 11.0, *) {
+      panel.allowedContentTypes = [.zip]
+    } else {
+      panel.allowedFileTypes = ["zip"]
+    }
+    panel.beginSheetModal(for: self) { response in
+      guard response == .OK, let url = panel.url else {
+        result(nil)
+        return
+      }
+      result(url.path)
     }
   }
 }

@@ -23,6 +23,42 @@ pub const WANXIANG_HANS_ID: &str = "wanxiang-lts-zh-hans";
 pub const WANXIANG_HANT_ID: &str = "wanxiang-lts-zh-hant";
 pub const OCTAGRAM_HANS_ID: &str = "zh-hans-t-essay-bgw";
 pub const OCTAGRAM_HANT_ID: &str = "zh-hant-t-essay-bgw";
+pub const MODELS_DIR: &str = "models";
+
+pub(crate) fn store_relative_path(file_name: &str) -> String {
+    format!("{MODELS_DIR}/{file_name}")
+}
+
+/// Migrates a legacy managed `.gram` placed directly under `root/` into `root/models/`
+/// so Rime never sees unrequested `.gram` files at the control root.
+pub(crate) fn migrate_legacy_root_model(root: &Path, file_name: &str, manifest_file: &str) {
+    let Ok(legacy) = wanxiang::safe_target(root, file_name) else {
+        return;
+    };
+    let Ok(manifest) = wanxiang::safe_target(root, manifest_file) else {
+        return;
+    };
+    let Ok(stored) = wanxiang::safe_target(root, &store_relative_path(file_name)) else {
+        return;
+    };
+    if !legacy.is_file() || !manifest.is_file() {
+        return;
+    }
+    if stored.is_file() {
+        // Legacy copy is redundant when models/<file> already has the same content.
+        if wanxiang::same_file_identity(&legacy, &stored)
+            || wanxiang::fingerprint(&legacy).ok() == wanxiang::fingerprint(&stored).ok()
+        {
+            let _ = fs::remove_file(&legacy);
+        }
+        return;
+    }
+    if let Some(parent) = stored.parent()
+        && fs::create_dir_all(parent).is_ok()
+    {
+        let _ = fs::rename(&legacy, &stored);
+    }
+}
 
 const WANXIANG_RELEASE_API: &str =
     "https://api.github.com/repos/amzxyz/rime-wanxiang-data/releases/tags/LTS";
@@ -143,12 +179,15 @@ pub struct GrammarModelsOverview {
 pub(crate) fn model_path(root: &Path, id: &str) -> Option<PathBuf> {
     let spec = find_spec(id)?;
     if spec.id == WANXIANG_HANS_ID {
+        migrate_legacy_root_model(root, spec.file_name, spec.manifest_file);
         return wanxiang::shared_grammar_model_path(root);
     }
-    let path = wanxiang::safe_target(root, spec.file_name).ok()?;
-    fs::metadata(&path)
-        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
-        .then_some(path)
+    migrate_legacy_root_model(root, spec.file_name, spec.manifest_file);
+    let stored = wanxiang::safe_target(root, &store_relative_path(spec.file_name)).ok()?;
+    if fs::metadata(&stored).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+        return Some(stored);
+    }
+    None
 }
 
 fn read_model_manifest(root: &Path, spec: &GrammarModelSpec) -> Result<Option<GrammarModel>, String> {
@@ -233,7 +272,8 @@ pub fn status(core: &Core, root: &Path) -> Result<GrammarModelsOverview, CoreErr
                 });
                 continue;
             }
-            let path = wanxiang::safe_target(root, spec.file_name)?;
+            migrate_legacy_root_model(root, spec.file_name, spec.manifest_file);
+            let path = wanxiang::safe_target(root, &store_relative_path(spec.file_name))?;
             let size = match fs::metadata(&path) {
                 Ok(meta) if meta.is_file() => meta.len(),
                 Ok(_) => return Err(format!("语法模型路径不是文件：{}", spec.file_name)),
@@ -397,7 +437,9 @@ pub async fn manage_model(
             },
         }));
 
-        let target_path = wanxiang::safe_target(&root, spec.file_name)?;
+        migrate_legacy_root_model(&root, spec.file_name, spec.manifest_file);
+        let relative_path = store_relative_path(spec.file_name);
+        let target_path = wanxiang::safe_target(&root, &relative_path)?;
         if installed {
             let mut receipt = InstallReceipt::new(&root)?;
             let model = if target_path.is_file() {
@@ -419,7 +461,7 @@ pub async fn manage_model(
                     package.download_bytes,
                     wanxiang::MAX_GRAMMAR_BYTES,
                 )?;
-                receipt.replace(spec.file_name, path.as_ref(), sha256.clone())?;
+                receipt.replace(&relative_path, path.as_ref(), sha256.clone())?;
                 GrammarModel {
                     version: package.version,
                     size,
@@ -597,7 +639,8 @@ mod tests {
 
         for id in [WANXIANG_HANS_ID, OCTAGRAM_HANS_ID] {
             let spec = find_spec(id).unwrap();
-            let path = root.join(spec.file_name);
+            let path = root.join(store_relative_path(spec.file_name));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, format!("fixture-{id}")).unwrap();
             let (sha256, size) = wanxiang::fingerprint(&path).unwrap();
             write_model_manifest(
@@ -611,6 +654,12 @@ mod tests {
             )
             .unwrap();
         }
+        // Downloaded models live under models/, never directly in the Rime root.
+        assert!(!root.join("wanxiang-lts-zh-hans.gram").exists());
+        assert!(!root.join("zh-hans-t-essay-bgw.gram").exists());
+        // Before enabling on builtin/keytao, neither model is linked into its runtime.
+        assert!(!runtime.join("wanxiang-lts-zh-hans.gram").exists());
+        assert!(!runtime.join("zh-hans-t-essay-bgw.gram").exists());
 
         let overview = set_package_model(&host.core, "builtin/keytao", Some(OCTAGRAM_HANS_ID), &host)
             .await
@@ -639,5 +688,43 @@ mod tests {
             .unwrap();
         assert!(!overview.package_models.contains_key("builtin/keytao"));
         assert!(!runtime.join("wanxiang-lts-zh-hans.gram").exists());
+        // Model remains stored under models/ and is never placed at root/.
+        assert!(root.join(store_relative_path("wanxiang-lts-zh-hans.gram")).is_file());
+        assert!(!root.join("wanxiang-lts-zh-hans.gram").exists());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "ios"))]
+    fn unselected_package_never_auto_links_models_from_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("bundled");
+        fs::create_dir_all(&bundled).unwrap();
+        let model = root.join(store_relative_path("zh-hans-t-essay-bgw.gram"));
+        fs::create_dir_all(model.parent().unwrap()).unwrap();
+        fs::write(&model, b"fixture-bgw").unwrap();
+
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "local-demo").unwrap();
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "demo.schema.yaml".to_owned(),
+            b"schema:\n  schema_id: demo\ngrammar:\n  language: zh-hans-t-essay-bgw\n".to_vec(),
+        );
+        sources.insert(
+            "default.custom.yaml".to_owned(),
+            b"patch:\n  schema_list:\n    - schema: demo\n".to_vec(),
+        );
+        crate::runtime_materialize::prepare_runtime_for_test(
+            root,
+            &bundled,
+            "local-demo",
+            sources,
+            None,
+            None,
+        )
+        .unwrap();
+        // Because package_grammar_models has no entry for local-demo, the model must not be linked.
+        assert!(!runtime.join("zh-hans-t-essay-bgw.gram").exists());
+        assert!(!root.join("zh-hans-t-essay-bgw.gram").exists());
     }
 }

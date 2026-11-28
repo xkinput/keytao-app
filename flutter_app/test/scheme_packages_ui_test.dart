@@ -177,11 +177,14 @@ class _PackageController extends ViewController {
   @override
   Future<bool> importLocalScheme({
     String? schemeKey,
-    bool fromArchive = false,
+    bool? fromArchive,
     Future<List<String>?> Function(LocalImportInspectionDto inspection)?
     selectSchemas,
   }) async {
-    actions.add('import:$schemeKey:${fromArchive ? 'zip' : 'folder'}');
+    final kind = fromArchive == null
+        ? 'either'
+        : (fromArchive ? 'zip' : 'folder');
+    actions.add('import:$schemeKey:$kind');
     return true;
   }
 
@@ -2660,16 +2663,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.textContaining('自动过滤 build'), findsAtLeastNWidgets(1));
     expect(find.textContaining('512 MB'), findsAtLeastNWidgets(1));
-    expect(find.byKey(const ValueKey('import-local-folder-button')), findsOneWidget);
-    expect(find.byKey(const ValueKey('import-local-zip-button')), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('import-local-folder-button')));
+    expect(find.byKey(const ValueKey('import-local-source-button')), findsOneWidget);
+    expect(find.byKey(const ValueKey('import-local-folder-button')), findsNothing);
+    expect(find.byKey(const ValueKey('import-local-zip-button')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('import-local-source-button')));
     await tester.pumpAndSettle();
-    expect(c.actions, ['import:null:folder']);
-    await tester.tap(add);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('import-local-zip-button')));
-    await tester.pumpAndSettle();
-    expect(c.actions, ['import:null:folder', 'import:null:zip']);
+    expect(c.actions, ['import:null:either']);
     c.installedPackages = [];
     c.rebuild();
     await tester.pumpAndSettle();
@@ -2732,9 +2731,9 @@ void main() {
       await tester.tap(find.widgetWithText(FItem, '重新导入'));
       await tester.pumpAndSettle();
       expect(find.text('重新导入本地方案'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('import-local-zip-button')));
+      await tester.tap(find.byKey(const ValueKey('import-local-source-button')));
       await tester.pumpAndSettle();
-      expect(c.actions.last, 'import:local-custom:zip');
+      expect(c.actions.last, 'import:local-custom:either');
       await tester.tap(more);
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FItem, '卸载'));
@@ -2743,6 +2742,45 @@ void main() {
       expect(tester.takeException(), isNull);
     }
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets(
+    'non-unified platform import dialog uses single button with folder and zip menu',
+    (tester) async {
+      final c = _PackageController(BridgePlatform.windows);
+      addTearDown(c.dispose);
+      _size(tester, const Size(900, 800));
+      await tester.pumpWidget(
+        KeyTaoTheme(
+          platform: BridgePlatform.windows,
+          home: FScaffold(child: SchemePage(controller: c)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final add = find.widgetWithText(ActionButton, '从目录导入');
+      await tester.ensureVisible(add);
+      await tester.tap(add);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('import-local-source-button')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('import-local-source-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('import-local-folder-item')));
+      await tester.pumpAndSettle();
+      expect(c.actions, ['import:null:folder']);
+
+      await tester.tap(add);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('import-local-source-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('import-local-zip-item')));
+      await tester.pumpAndSettle();
+      expect(c.actions, ['import:null:folder', 'import:null:zip']);
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   testWidgets('installed xmjd variants share a switchable home card', (
     tester,

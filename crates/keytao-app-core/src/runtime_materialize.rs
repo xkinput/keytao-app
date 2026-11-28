@@ -1258,7 +1258,7 @@ fn prepare_runtime(
         }
     }
 
-    let grammar_languages = regenerate_custom(
+    let _grammar_languages = regenerate_custom(
         &runtime,
         &schema_sources,
         &selected,
@@ -1271,7 +1271,7 @@ fn prepare_runtime(
     link_shared_grammar_models(
         control_root,
         &runtime,
-        &grammar_languages,
+        grammar_model,
         &owned,
         &user,
         &bundled_files,
@@ -1749,51 +1749,49 @@ fn is_stageable_config_yaml(path: &str) -> bool {
 fn link_shared_grammar_models(
     control_root: &Path,
     runtime: &Path,
-    languages: &BTreeSet<String>,
+    selected_model: Option<&str>,
     owned: &RuntimeFiles,
     user: &Files,
     bundled: &RuntimeFiles,
 ) -> Result<(), CoreError> {
-    if cfg!(target_os = "ios") || languages.is_empty() {
+    if cfg!(target_os = "ios") {
         return Ok(());
     }
-    for language in languages {
-        let file_name = format!("{language}.gram");
-        if owned.contains_key(&file_name)
-            || user.contains_key(&file_name)
-            || bundled.contains_key(&file_name)
-        {
-            continue;
-        }
-        let target = safe(runtime, &file_name)?;
-        if target.exists() {
-            continue;
-        }
-        let candidates = [
-            control_root.join(&file_name),
-            control_root
-                .join("runtime")
-                .join("wanxiang")
-                .join(&file_name),
-        ];
-        for source in candidates {
-            if !fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_file()) {
-                continue;
-            }
-            match fs::hard_link(&source, &target) {
-                Ok(()) => break,
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => break,
-                Err(_) => {
-                    let temp = tempfile::Builder::new()
-                        .prefix(".keytao-gram-")
-                        .tempfile_in(runtime)?;
-                    fs::copy(&source, temp.path())?;
-                    match temp.persist_noclobber(&target) {
-                        Ok(_) => break,
-                        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => break,
-                        Err(error) => return Err(error.error.into()),
-                    }
-                }
+    let Some(model_id) = selected_model else {
+        return Ok(());
+    };
+    let Some(spec) = crate::grammar_models::find_spec(model_id) else {
+        return Ok(());
+    };
+    let file_name = spec.file_name;
+    if owned.contains_key(file_name)
+        || user.contains_key(file_name)
+        || bundled.contains_key(file_name)
+    {
+        return Ok(());
+    }
+    let target = safe(runtime, file_name)?;
+    if target.exists() {
+        return Ok(());
+    }
+    let Some(source) = crate::grammar_models::model_path(control_root, model_id) else {
+        return Ok(());
+    };
+    if !fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_file()) {
+        return Ok(());
+    }
+    match fs::hard_link(&source, &target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            let temp = tempfile::Builder::new()
+                .prefix(".keytao-gram-")
+                .tempfile_in(runtime)?;
+            fs::copy(&source, temp.path())?;
+            match temp.persist_noclobber(&target) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.error.into()),
             }
         }
     }
@@ -2148,6 +2146,8 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
 
 #[cfg(test)]
 pub(crate) use tests::hashes as test_hashes;
+#[cfg(test)]
+pub(crate) use tests::materialize as prepare_runtime_for_test;
 
 #[cfg(test)]
 #[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
@@ -2157,7 +2157,7 @@ mod smoke_fixture;
 mod tests {
     use super::*;
 
-    fn materialize(
+    pub(crate) fn materialize(
         control_root: &Path,
         bundled: &Path,
         key: &str,
@@ -2963,10 +2963,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let bundled = root.join("rime-data");
-        // Simulate Wanxiang grammar model already downloaded in runtime/wanxiang/.
-        let wanxiang_runtime = RuntimeDirs::isolated_user_data_dir(root, "wanxiang").unwrap();
-        fs::create_dir_all(&wanxiang_runtime).unwrap();
-        let shared_gram = wanxiang_runtime.join("wanxiang-lts-zh-hans.gram");
+        // Model stored under models/ must not be auto-linked unless explicitly enabled for the package.
+        let shared_gram = root.join("models").join("wanxiang-lts-zh-hans.gram");
+        fs::create_dir_all(shared_gram.parent().unwrap()).unwrap();
         fs::write(&shared_gram, b"wanxiang-gram-fixture").unwrap();
 
         let mut sources = fixture(root, "rime_ice");
@@ -2979,10 +2978,14 @@ mod tests {
             b"patch:\n  grammar/language: wanxiang-lts-zh-hans\n".to_vec(),
         );
 
-        materialize(root, &bundled, "rime_ice", sources, None, None).unwrap();
-
+        materialize(root, &bundled, "rime_ice", sources.clone(), None, None).unwrap();
         let runtime = RuntimeDirs::isolated_user_data_dir(root, "rime_ice").unwrap();
         let linked_gram = runtime.join("wanxiang-lts-zh-hans.gram");
+        assert!(!linked_gram.exists());
+
+        assert!(update_wanxiang_grammar(root, "rime_ice", true).unwrap());
+        materialize(root, &bundled, "rime_ice", sources, None, None).unwrap();
+
         assert!(linked_gram.is_file());
         assert_eq!(fs::read(&linked_gram).unwrap(), b"wanxiang-gram-fixture");
         #[cfg(unix)]
@@ -3014,7 +3017,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let bundled = root.join("rime-data");
-        let shared_gram = root.join("wanxiang-lts-zh-hans.gram");
+        let shared_gram = root.join("models").join("wanxiang-lts-zh-hans.gram");
+        fs::create_dir_all(shared_gram.parent().unwrap()).unwrap();
         fs::write(&shared_gram, b"shared-wanxiang-gram").unwrap();
 
         let mut sources = fixture(root, "local-demo");

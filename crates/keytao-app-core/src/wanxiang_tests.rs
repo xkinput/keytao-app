@@ -1802,10 +1802,11 @@ async fn standalone_grammar_model_and_per_package_toggle_work_without_wanxiang_i
     let root = TestRoot::new();
     let host = AddonHost::new(&root.path);
     host.write_bundled_keytao();
-    // Simulate a downloaded shared Wanxiang grammar model without Wanxiang Pinyin installed.
-    let shared_model = root.path.join(GRAMMAR_FILE);
-    fs::write(&shared_model, b"standalone-wanxiang-gram").unwrap();
-    let (sha256, size) = fingerprint(&shared_model).unwrap();
+    // Simulate a legacy root Wanxiang grammar model without Wanxiang Pinyin installed;
+    // reading status migrates it out of the Rime root into models/ automatically.
+    let legacy_model = root.path.join(GRAMMAR_FILE);
+    fs::write(&legacy_model, b"standalone-wanxiang-gram").unwrap();
+    let (sha256, size) = fingerprint(&legacy_model).unwrap();
     write_shared_grammar_manifest(
         &root.path,
         Some(&GrammarModel {
@@ -1821,6 +1822,8 @@ async fn standalone_grammar_model_and_per_package_toggle_work_without_wanxiang_i
     assert!(status.installed);
     assert_eq!(status.version, "LTS@test");
     assert!(status.enabled_packages.is_empty());
+    assert!(!legacy_model.exists());
+    assert!(root.path.join(SHARED_GRAMMAR_FILE).is_file());
 
     // Materialize builtin/keytao runtime so it's registered as an installed package.
     let runtime = RuntimeDirs::isolated_user_data_dir(&root.path, "builtin/keytao").unwrap();

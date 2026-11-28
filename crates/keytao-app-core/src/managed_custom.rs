@@ -532,19 +532,22 @@ fn render(original: &str, contributions: &BTreeMap<String, String>) -> Result<St
     {
         return Err("Invalid custom patch mapping".into());
     }
-    let body = contributions
+    let entries: Vec<String> = contributions
         .values()
         .map(|patch| {
-            patch
+            let inner = patch
                 .trim()
                 .trim_start_matches('{')
                 .trim_end_matches('}')
-                .trim()
+                .trim();
+            format!("{{patch/+: {{{inner}}}}}")
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let literal = format!("{{patch/+: {{{body}}}}}");
-    let value: Value = serde_yaml::from_str(&literal).map_err(|error| error.to_string())?;
+        .collect();
+    let literal = entries.join(", ");
+    let parsed_entries: Vec<Value> = entries
+        .iter()
+        .map(|entry| serde_yaml::from_str::<Value>(entry).map_err(|error| error.to_string()))
+        .collect::<Result<_, _>>()?;
     let previous = expected.as_mapping_mut().unwrap().remove("__patch");
     let has_patch = previous.is_some();
     let mut patches = match previous.clone() {
@@ -552,12 +555,13 @@ fn render(original: &str, contributions: &BTreeMap<String, String>) -> Result<St
         Some(previous) => vec![previous],
         None => Vec::new(),
     };
-    patches.push(value);
+    let added = parsed_entries.len();
+    patches.extend(parsed_entries);
     expected.as_mapping_mut().unwrap().insert(
         Value::String("__patch".into()),
         Value::Sequence(patches.clone()),
     );
-    patches.pop();
+    patches.truncate(patches.len() - added);
     let existing = serde_json::to_string(&patches).map_err(|error| error.to_string())?;
     let existing = existing.strip_suffix(']').unwrap();
     let separator = if patches.is_empty() { "" } else { ", " };
@@ -633,7 +637,13 @@ fn render(original: &str, contributions: &BTreeMap<String, String>) -> Result<St
                 .find(|line| line.trim_start().starts_with('-'))
                 .map(|line| line.len() - line.trim_start_matches(' ').len())
                 .ok_or("Cannot locate custom patch list")?;
-            (end, end, format!("{}- {literal}", " ".repeat(indent)))
+            let newline = if original.contains("\r\n") { "\r\n" } else { "\n" };
+            let block = entries
+                .iter()
+                .map(|entry| format!("{}- {entry}", " ".repeat(indent)))
+                .collect::<Vec<_>>()
+                .join(newline);
+            (end, end, block)
         }
         (Some(_), Some((start, _, end, _))) => (
             start,
@@ -802,5 +812,33 @@ mod tests {
         assert!(regenerate(dir.path(), &BTreeSet::new()).unwrap());
         assert!(!dir.path().join("nested/example.custom.yaml").exists());
         assert!(generated_paths(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_filter_and_grammar_hint_coexist_without_duplicate_filter_key() {
+        let step1 = set_patch(
+            "",
+            "remove-filter",
+            Some("{engine/filters/@next: lua_filter@*keytao_remove_filter}"),
+        )
+        .unwrap();
+        let step2 = set_patch(
+            &step1,
+            "wanxiang-grammar",
+            crate::grammar_models::managed_patch_for(crate::grammar_models::WANXIANG_HANS_ID)
+                .as_deref(),
+        )
+        .unwrap();
+        let custom = set_patch(
+            &step2,
+            "grammar-hint",
+            Some("{engine/filters/@next: lua_filter@*keytao_grammar_hint}"),
+        )
+        .unwrap();
+        assert!(custom.contains("lua_filter@*keytao_remove_filter"));
+        assert!(custom.contains("lua_filter@*keytao_grammar_hint"));
+        assert!(custom.contains("grammar/language: wanxiang-lts-zh-hans"));
+        assert!(serde_yaml::from_str::<Value>(&custom).is_ok());
+        assert_eq!(strip(&custom).unwrap(), "");
     }
 }

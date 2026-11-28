@@ -26,6 +26,7 @@ use tokio::{
 
 pub const SCHEMA_ID: &str = "wanxiang";
 const GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
+const SHARED_GRAMMAR_FILE: &str = "models/wanxiang-lts-zh-hans.gram";
 const ISOLATED_GRAMMAR_FILE: &str = "runtime/wanxiang/wanxiang-lts-zh-hans.gram";
 const SHARED_GRAMMAR_MANIFEST: &str = ".keytao-wanxiang-grammar.json";
 const GRAMMAR_LANGUAGE: &str = "wanxiang-lts-zh-hans";
@@ -322,7 +323,8 @@ fn write_shared_grammar_manifest(root: &Path, model: Option<&GrammarModel>) -> R
 }
 
 pub(crate) fn shared_grammar_model_path(root: &Path) -> Option<PathBuf> {
-    for relative in [GRAMMAR_FILE, ISOLATED_GRAMMAR_FILE] {
+    crate::grammar_models::migrate_legacy_root_model(root, GRAMMAR_FILE, SHARED_GRAMMAR_MANIFEST);
+    for relative in [SHARED_GRAMMAR_FILE, ISOLATED_GRAMMAR_FILE] {
         if let Ok(path) = safe_target(root, relative)
             && fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
         {
@@ -421,7 +423,8 @@ pub fn grammar_status_for(core: &Core, root: &Path) -> Result<GrammarStatus, Cor
                 Err(error) => Err(format!("读取万象语法模型失败：{error}")),
             }
         };
-        let root_size = file_size(GRAMMAR_FILE)?;
+        crate::grammar_models::migrate_legacy_root_model(root, GRAMMAR_FILE, SHARED_GRAMMAR_MANIFEST);
+        let shared_size = file_size(SHARED_GRAMMAR_FILE)?;
         let isolated_size = if !RuntimeDirs::needs_migration(root) {
             file_size(ISOLATED_GRAMMAR_FILE)?
         } else {
@@ -430,9 +433,9 @@ pub fn grammar_status_for(core: &Core, root: &Path) -> Result<GrammarStatus, Cor
         let shared_model = read_shared_grammar_manifest(root)?;
         let wanxiang_model = stored_manifest(core, root)?.and_then(|manifest| manifest.grammar);
         let installed =
-            root_size > 0 || (isolated_size > 0 && (shared_model.is_some() || wanxiang_model.is_some()));
-        let size = if root_size > 0 {
-            root_size
+            shared_size > 0 || (isolated_size > 0 && (shared_model.is_some() || wanxiang_model.is_some()));
+        let size = if shared_size > 0 {
+            shared_size
         } else if installed {
             isolated_size
         } else {
@@ -1869,26 +1872,12 @@ fn commit_files(
     if receipt.is_isolated() {
         let grammar = receipt_manifest(receipt)?.and_then(|manifest| manifest.grammar);
         let isolated_path = safe_target(&receipt.root, ISOLATED_GRAMMAR_FILE)?;
-        let root_path = safe_target(&receipt.root, GRAMMAR_FILE)?;
         let grammar = match grammar {
             Some(model) if isolated_path.is_file() => {
                 if fingerprint(&isolated_path)? != (model.sha256.clone(), model.size) {
                     return Err("语法模型已修改，已保留原文件".into());
                 }
                 Some(model)
-            }
-            _ if root_path.is_file() => {
-                link_or_copy_grammar(&root_path, &isolated_path)?;
-                if let Some(model) = read_shared_grammar_manifest(&receipt.root)? {
-                    Some(model)
-                } else {
-                    let (sha256, size) = fingerprint(&isolated_path)?;
-                    Some(GrammarModel {
-                        version: "local".into(),
-                        size,
-                        sha256,
-                    })
-                }
             }
             _ => None,
         };
@@ -2138,8 +2127,9 @@ pub async fn manage_grammar(
             .into(),
         }));
 
+        crate::grammar_models::migrate_legacy_root_model(&root, GRAMMAR_FILE, SHARED_GRAMMAR_MANIFEST);
         if installed {
-            let root_model_path = safe_target(&root, GRAMMAR_FILE)?;
+            let shared_model_path = safe_target(&root, SHARED_GRAMMAR_FILE)?;
             if wanxiang_installed {
                 let mut receipt = InstallReceipt::new(&root)?;
                 receipt.attach_store(core, SCHEMA_ID)?;
@@ -2150,8 +2140,8 @@ pub async fn manage_grammar(
                     GRAMMAR_FILE
                 };
                 let target_path = safe_target(&root, grammar_file)?;
-                if !target_path.is_file() && root_model_path.is_file() {
-                    link_or_copy_grammar(&root_model_path, &target_path)?;
+                if !target_path.is_file() && shared_model_path.is_file() {
+                    link_or_copy_grammar(&shared_model_path, &target_path)?;
                 }
                 let download = if !target_path.is_file() {
                     Some(download_grammar(core, &receipt.work, &mut cancel).await?)
@@ -2175,8 +2165,8 @@ pub async fn manage_grammar(
                     grammar_supported(),
                 )?;
                 receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
-                if target_path.is_file() && !root_model_path.is_file() {
-                    link_or_copy_grammar(&target_path, &root_model_path)?;
+                if target_path.is_file() && !shared_model_path.is_file() {
+                    link_or_copy_grammar(&target_path, &shared_model_path)?;
                 }
                 if let Some(model) = stored_manifest(core, &root)?.and_then(|m| m.grammar) {
                     write_shared_grammar_manifest(&root, Some(&model))?;
@@ -2184,8 +2174,8 @@ pub async fn manage_grammar(
             } else {
                 let mut receipt = InstallReceipt::new(&root)?;
                 let isolated_path = safe_target(&root, ISOLATED_GRAMMAR_FILE)?;
-                let model = if root_model_path.is_file() {
-                    let (sha256, size) = fingerprint(&root_model_path)?;
+                let model = if shared_model_path.is_file() {
+                    let (sha256, size) = fingerprint(&shared_model_path)?;
                     verify_download_with_limit(size, Some(size), MAX_GRAMMAR_BYTES)?;
                     read_shared_grammar_manifest(&root)?.unwrap_or(GrammarModel {
                         version: "local".into(),
@@ -2193,8 +2183,8 @@ pub async fn manage_grammar(
                         sha256,
                     })
                 } else if isolated_path.is_file() {
-                    link_or_copy_grammar(&isolated_path, &root_model_path)?;
-                    let (sha256, size) = fingerprint(&root_model_path)?;
+                    link_or_copy_grammar(&isolated_path, &shared_model_path)?;
+                    let (sha256, size) = fingerprint(&shared_model_path)?;
                     verify_download_with_limit(size, Some(size), MAX_GRAMMAR_BYTES)?;
                     read_shared_grammar_manifest(&root)?.unwrap_or(GrammarModel {
                         version: "local".into(),
@@ -2208,7 +2198,7 @@ pub async fn manage_grammar(
                     }
                     let (sha256, size) = fingerprint(path.as_ref())?;
                     verify_download_with_limit(size, package.download_bytes, MAX_GRAMMAR_BYTES)?;
-                    receipt.replace(GRAMMAR_FILE, path.as_ref(), sha256.clone())?;
+                    receipt.replace(SHARED_GRAMMAR_FILE, path.as_ref(), sha256.clone())?;
                     GrammarModel {
                         version: package.version,
                         size,
@@ -2261,7 +2251,7 @@ pub async fn manage_grammar(
                     .map_err(|error| error.to_string())?;
             }
 
-            for relative in [GRAMMAR_FILE, ISOLATED_GRAMMAR_FILE] {
+            for relative in [SHARED_GRAMMAR_FILE, GRAMMAR_FILE, ISOLATED_GRAMMAR_FILE] {
                 let path = safe_target(&root, relative)?;
                 if !path.is_file() {
                     continue;

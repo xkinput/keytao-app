@@ -125,6 +125,7 @@ enum KeyTaoIOSBundledData {
   private enum PendingLocalImportKind {
     case directory
     case archive
+    case either
   }
 
   private static let appGroupIdentifier = "group.ink.rea.keytao-app"
@@ -191,6 +192,8 @@ enum KeyTaoIOSBundledData {
         presentLocalSchemePicker(result, kind: .directory)
       case "importLocalSchemeArchive":
         presentLocalSchemePicker(result, kind: .archive)
+      case "importLocalSchemeSource":
+        presentLocalSchemePicker(result, kind: .either)
       case "shareThemeFile":
         shareThemeFile(call.arguments, result: result)
       default:
@@ -288,7 +291,15 @@ enum KeyTaoIOSBundledData {
     while let presented = presenter.presentedViewController {
       presenter = presented
     }
-    let contentTypes: [UTType] = kind == .archive ? [.zip] : [.folder]
+    let contentTypes: [UTType]
+    switch kind {
+    case .directory:
+      contentTypes = [.folder]
+    case .archive:
+      contentTypes = [.zip]
+    case .either:
+      contentTypes = [.folder, .zip]
+    }
     let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes)
     picker.delegate = self
     picker.allowsMultipleSelection = false
@@ -316,9 +327,14 @@ enum KeyTaoIOSBundledData {
     pathsQueue.async {
       let response: Any
       do {
-        response = kind == .archive
-          ? try Self.copyLocalSchemeArchive(source)
-          : try Self.copyLocalSchemeDirectory(source)
+        switch kind {
+        case .archive:
+          response = try Self.copyLocalSchemeArchive(source)
+        case .directory:
+          response = try Self.copyLocalSchemeDirectory(source)
+        case .either:
+          response = try Self.copyLocalSchemeSource(source)
+        }
       } catch {
         response = FlutterError(
           code: "DIRECTORY_IMPORT_FAILED", message: error.localizedDescription, details: nil
@@ -396,6 +412,18 @@ enum KeyTaoIOSBundledData {
         try manager.copyItem(at: item, to: target)
       }
     }
+  }
+
+  private static func copyLocalSchemeSource(_ source: URL) throws -> [String: String] {
+    let scoped = source.startAccessingSecurityScopedResource()
+    defer {
+      if scoped { source.stopAccessingSecurityScopedResource() }
+    }
+    let isDirectory =
+      (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? source.hasDirectoryPath
+    return isDirectory
+      ? try copyLocalSchemeDirectory(source)
+      : try copyLocalSchemeArchive(source)
   }
 
   private static func copyLocalSchemeDirectory(_ source: URL) throws -> [String: String] {

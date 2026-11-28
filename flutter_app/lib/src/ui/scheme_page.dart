@@ -22,6 +22,18 @@ void _showLocalSchemeImportDialog(
   AppController c, {
   String? schemeKey,
 }) {
+  void startImport({bool? fromArchive}) {
+    unawaited(
+      c.importLocalScheme(
+        schemeKey: schemeKey,
+        fromArchive: fromArchive,
+        selectSchemas: (inspection) async => context.mounted
+            ? showLocalImportSchemaSelection(context, inspection)
+            : null,
+      ),
+    );
+  }
+
   showFDialog<void>(
     context: context,
     builder: (dialogContext, _, animation) => AppDialog(
@@ -32,41 +44,53 @@ void _showLocalSchemeImportDialog(
           AppStrings.cancel,
           onPress: () => Navigator.pop(dialogContext),
         ),
-        ActionButton(
-          '选择 .zip 压缩包',
-          key: const ValueKey('import-local-zip-button'),
-          icon: FLucideIcons.fileArchive,
-          onPress: () {
-            Navigator.pop(dialogContext);
-            unawaited(
-              c.importLocalScheme(
-                schemeKey: schemeKey,
-                fromArchive: true,
-                selectSchemas: (inspection) async => context.mounted
-                    ? showLocalImportSchemaSelection(context, inspection)
-                    : null,
+        if (c.supportsUnifiedLocalSchemePicker)
+          ActionButton(
+            '去选择',
+            key: const ValueKey('import-local-source-button'),
+            primary: true,
+            icon: FLucideIcons.folderOpen,
+            onPress: () {
+              Navigator.pop(dialogContext);
+              startImport();
+            },
+          )
+        else
+          FPopoverMenu(
+            menuAnchor: Alignment.bottomRight,
+            childAnchor: Alignment.topRight,
+            menu: [
+              FItemGroup(
+                children: [
+                  FItem(
+                    key: const ValueKey('import-local-folder-item'),
+                    prefix: const Icon(FLucideIcons.folderOpen, size: 15),
+                    title: const Text('选择 Rime 文件夹'),
+                    onPress: () {
+                      Navigator.pop(dialogContext);
+                      startImport(fromArchive: false);
+                    },
+                  ),
+                  FItem(
+                    key: const ValueKey('import-local-zip-item'),
+                    prefix: const Icon(FLucideIcons.fileArchive, size: 15),
+                    title: const Text('选择 .zip 压缩包'),
+                    onPress: () {
+                      Navigator.pop(dialogContext);
+                      startImport(fromArchive: true);
+                    },
+                  ),
+                ],
               ),
-            );
-          },
-        ),
-        ActionButton(
-          '选择 Rime 文件夹',
-          key: const ValueKey('import-local-folder-button'),
-          primary: true,
-          icon: FLucideIcons.folderOpen,
-          onPress: () {
-            Navigator.pop(dialogContext);
-            unawaited(
-              c.importLocalScheme(
-                schemeKey: schemeKey,
-                fromArchive: false,
-                selectSchemas: (inspection) async => context.mounted
-                    ? showLocalImportSchemaSelection(context, inspection)
-                    : null,
-              ),
-            );
-          },
-        ),
+            ],
+            builder: (context, controller, _) => ActionButton(
+              '去选择',
+              key: const ValueKey('import-local-source-button'),
+              primary: true,
+              icon: FLucideIcons.folderOpen,
+              onPress: controller.toggle,
+            ),
+          ),
       ],
       child: Column(
         mainAxisSize: MainAxisSize.min,
