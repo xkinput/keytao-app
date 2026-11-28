@@ -27,6 +27,7 @@ use tokio::{
 pub const SCHEMA_ID: &str = "wanxiang";
 const GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
 const ISOLATED_GRAMMAR_FILE: &str = "runtime/wanxiang/wanxiang-lts-zh-hans.gram";
+const SHARED_GRAMMAR_MANIFEST: &str = ".keytao-wanxiang-grammar.json";
 const GRAMMAR_LANGUAGE: &str = "wanxiang-lts-zh-hans";
 const GRAMMAR_RELEASE: &str = "https://api.github.com/repos/amzxyz/RIME-LMDG/releases/tags/LTS";
 const GRAMMAR_DOWNLOAD: &str =
@@ -148,6 +149,7 @@ pub struct GrammarStatus {
     pub installed: bool,
     pub version: String,
     pub size: u64,
+    pub enabled_packages: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -287,6 +289,114 @@ fn grammar_supported() -> bool {
     !cfg!(target_os = "ios") && keytao_core::octagram_available()
 }
 
+fn read_shared_grammar_manifest(root: &Path) -> Result<Option<GrammarModel>, String> {
+    let path = safe_target(root, SHARED_GRAMMAR_MANIFEST)?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取语法模型记录失败：{error}")),
+    };
+    let model: GrammarModel =
+        serde_json::from_slice(&bytes).map_err(|error| format!("语法模型记录损坏：{error}"))?;
+    if model.size == 0 || model.size > MAX_GRAMMAR_BYTES || !valid_hash(&model.sha256) {
+        return Err("万象语法模型安装记录无效".into());
+    }
+    Ok(Some(model))
+}
+
+fn write_shared_grammar_manifest(root: &Path, model: Option<&GrammarModel>) -> Result<(), String> {
+    let path = safe_target(root, SHARED_GRAMMAR_MANIFEST)?;
+    if let Some(model) = model {
+        let bytes = serde_json::to_vec_pretty(model).map_err(|error| error.to_string())?;
+        crate::scheme_files::write_file_atomic(&path, &bytes)
+            .map_err(|error| format!("保存语法模型记录失败：{error}"))?;
+    } else {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("删除语法模型记录失败：{error}")),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn shared_grammar_model_path(root: &Path) -> Option<PathBuf> {
+    for relative in [GRAMMAR_FILE, ISOLATED_GRAMMAR_FILE] {
+        if let Ok(path) = safe_target(root, relative)
+            && fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn link_or_copy_grammar(source: &Path, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    match fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => {
+            let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+            let temp = tempfile::Builder::new()
+                .prefix(".keytao-wanxiang-gram-")
+                .tempfile_in(parent)
+                .map_err(|error| error.to_string())?;
+            fs::copy(source, temp.path()).map_err(|error| error.to_string())?;
+            match temp.persist_noclobber(destination) {
+                Ok(_) => Ok(()),
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+                Err(error) => Err(error.error.to_string()),
+            }
+        }
+    }
+}
+
+fn same_file_identity(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
+}
+
+fn remove_package_linked_grammar(
+    root: &Path,
+    package_key: &str,
+    shared_path: Option<&Path>,
+    shared_model: Option<&GrammarModel>,
+) {
+    let Some(runtime) = RuntimeDirs::isolated_user_data_dir(root, package_key) else {
+        return;
+    };
+    let target = runtime.join(GRAMMAR_FILE);
+    if !fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_file()) {
+        return;
+    }
+    let matches_shared = shared_path.is_some_and(|shared| same_file_identity(shared, &target))
+        || shared_model.is_some_and(|model| {
+            fingerprint(&target)
+                .ok()
+                .is_some_and(|(sha, size)| sha == model.sha256 && size == model.size)
+        });
+    if matches_shared {
+        let _ = fs::remove_file(&target);
+    }
+}
+
 pub fn grammar_status(root: &Path) -> Result<GrammarStatus, CoreError> {
     grammar_status_from_manifest(
         root,
@@ -296,16 +406,49 @@ pub fn grammar_status(root: &Path) -> Result<GrammarStatus, CoreError> {
 }
 
 pub fn grammar_status_for(core: &Core, root: &Path) -> Result<GrammarStatus, CoreError> {
-    let relative = if !RuntimeDirs::needs_migration(root) {
-        ISOLATED_GRAMMAR_FILE
-    } else {
-        GRAMMAR_FILE
+    let result = || -> Result<_, String> {
+        let enabled_packages: Vec<String> = crate::runtime_materialize::wanxiang_grammar_packages(root)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
+        let file_size = |relative: &str| -> Result<u64, String> {
+            let path = safe_target(root, relative)?;
+            match fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+                Ok(_) => Err("万象语法模型路径不是文件".into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+                Err(error) => Err(format!("读取万象语法模型失败：{error}")),
+            }
+        };
+        let root_size = file_size(GRAMMAR_FILE)?;
+        let isolated_size = if !RuntimeDirs::needs_migration(root) {
+            file_size(ISOLATED_GRAMMAR_FILE)?
+        } else {
+            0
+        };
+        let shared_model = read_shared_grammar_manifest(root)?;
+        let wanxiang_model = stored_manifest(core, root)?.and_then(|manifest| manifest.grammar);
+        let installed =
+            root_size > 0 || (isolated_size > 0 && (shared_model.is_some() || wanxiang_model.is_some()));
+        let size = if root_size > 0 {
+            root_size
+        } else if installed {
+            isolated_size
+        } else {
+            GRAMMAR_SIZE
+        };
+        let version = shared_model
+            .or(wanxiang_model)
+            .map_or_else(String::new, |model| model.version);
+        Ok(GrammarStatus {
+            available: grammar_supported(),
+            installed,
+            version,
+            size,
+            enabled_packages,
+        })
     };
-    grammar_status_from_manifest(
-        root,
-        stored_manifest(core, root).map_err(CoreError::Other)?,
-        relative,
-    )
+    result().map_err(CoreError::Other)
 }
 
 fn grammar_status_from_manifest(
@@ -323,11 +466,16 @@ fn grammar_status_from_manifest(
         };
         let model = manifest.and_then(|manifest| manifest.grammar);
         let installed = size > 0 && (relative == GRAMMAR_FILE || model.is_some());
+        let enabled_packages: Vec<String> = crate::runtime_materialize::wanxiang_grammar_packages(root)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
         Ok(GrammarStatus {
             available: grammar_supported(),
             installed,
             version: model.map_or_else(String::new, |model| model.version),
             size: if installed { size } else { GRAMMAR_SIZE },
+            enabled_packages,
         })
     };
     result().map_err(CoreError::Other)
@@ -1719,14 +1867,27 @@ fn commit_files(
     variant_source(variant)?;
     if receipt.is_isolated() {
         let grammar = receipt_manifest(receipt)?.and_then(|manifest| manifest.grammar);
+        let isolated_path = safe_target(&receipt.root, ISOLATED_GRAMMAR_FILE)?;
+        let root_path = safe_target(&receipt.root, GRAMMAR_FILE)?;
         let grammar = match grammar {
-            Some(model) if safe_target(&receipt.root, ISOLATED_GRAMMAR_FILE)?.is_file() => {
-                if fingerprint(&safe_target(&receipt.root, ISOLATED_GRAMMAR_FILE)?)?
-                    != (model.sha256.clone(), model.size)
-                {
+            Some(model) if isolated_path.is_file() => {
+                if fingerprint(&isolated_path)? != (model.sha256.clone(), model.size) {
                     return Err("语法模型已修改，已保留原文件".into());
                 }
                 Some(model)
+            }
+            _ if root_path.is_file() => {
+                link_or_copy_grammar(&root_path, &isolated_path)?;
+                if let Some(model) = read_shared_grammar_manifest(&receipt.root)? {
+                    Some(model)
+                } else {
+                    let (sha256, size) = fingerprint(&isolated_path)?;
+                    Some(GrammarModel {
+                        version: "local".into(),
+                        size,
+                        sha256,
+                    })
+                }
             }
             _ => None,
         };
@@ -1957,16 +2118,12 @@ pub async fn manage_grammar(
             crate::deploy::ensure_not_using_libjd(core, &root)
                 .map_err(|error| error.to_string())?;
         }
-        crate::package_migration::ensure_before_write(core, &root).await.map_err(|error| error.to_string())?;
-        if !wanxiang_status(core, &root)
+        crate::package_migration::ensure_before_write(core, &root)
+            .await
+            .map_err(|error| error.to_string())?;
+        let wanxiang_installed = wanxiang_status(core, &root)
             .map_err(|e| e.to_string())?
-            .installed
-        {
-            return Err("请先安装万象拼音".into());
-        }
-        let mut receipt = InstallReceipt::new(&root)?;
-        receipt.attach_store(core, SCHEMA_ID)?;
-        receipt.seed_store_sources(core, SCHEMA_ID)?;
+            .installed;
         let mut cancel = core.download_cancel.subscribe();
         cancel.borrow_and_update();
         core.emit(CoreEvent::InstallProgress(InstallProgress {
@@ -1979,34 +2136,211 @@ pub async fn manage_grammar(
             }
             .into(),
         }));
-        let grammar_file = if receipt.is_isolated() {
-            ISOLATED_GRAMMAR_FILE
+
+        if installed {
+            let root_model_path = safe_target(&root, GRAMMAR_FILE)?;
+            if wanxiang_installed {
+                let mut receipt = InstallReceipt::new(&root)?;
+                receipt.attach_store(core, SCHEMA_ID)?;
+                receipt.seed_store_sources(core, SCHEMA_ID)?;
+                let grammar_file = if receipt.is_isolated() {
+                    ISOLATED_GRAMMAR_FILE
+                } else {
+                    GRAMMAR_FILE
+                };
+                let target_path = safe_target(&root, grammar_file)?;
+                if !target_path.is_file() && root_model_path.is_file() {
+                    link_or_copy_grammar(&root_model_path, &target_path)?;
+                }
+                let download = if !target_path.is_file() {
+                    Some(download_grammar(core, &receipt.work, &mut cancel).await?)
+                } else {
+                    None
+                };
+                if cancel.has_changed().unwrap_or(false) {
+                    return Err(crate::download::DOWNLOAD_CANCELLED.into());
+                }
+                core.emit(CoreEvent::InstallProgress(InstallProgress {
+                    stage: "wanxiang-grammar-deploy".into(),
+                    percent: 92,
+                    message: "正在部署万象拼音…".into(),
+                }));
+                commit_grammar(
+                    &mut receipt,
+                    download
+                        .as_ref()
+                        .map(|(path, package)| (path.as_ref(), package)),
+                    true,
+                    grammar_supported(),
+                )?;
+                receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
+                if target_path.is_file() && !root_model_path.is_file() {
+                    link_or_copy_grammar(&target_path, &root_model_path)?;
+                }
+                if let Some(model) = stored_manifest(core, &root)?.and_then(|m| m.grammar) {
+                    write_shared_grammar_manifest(&root, Some(&model))?;
+                }
+            } else {
+                let mut receipt = InstallReceipt::new(&root)?;
+                let isolated_path = safe_target(&root, ISOLATED_GRAMMAR_FILE)?;
+                let model = if root_model_path.is_file() {
+                    let (sha256, size) = fingerprint(&root_model_path)?;
+                    verify_download_with_limit(size, Some(size), MAX_GRAMMAR_BYTES)?;
+                    read_shared_grammar_manifest(&root)?.unwrap_or(GrammarModel {
+                        version: "local".into(),
+                        size,
+                        sha256,
+                    })
+                } else if isolated_path.is_file() {
+                    link_or_copy_grammar(&isolated_path, &root_model_path)?;
+                    let (sha256, size) = fingerprint(&root_model_path)?;
+                    verify_download_with_limit(size, Some(size), MAX_GRAMMAR_BYTES)?;
+                    read_shared_grammar_manifest(&root)?.unwrap_or(GrammarModel {
+                        version: "local".into(),
+                        size,
+                        sha256,
+                    })
+                } else {
+                    let (path, package) = download_grammar(core, &receipt.work, &mut cancel).await?;
+                    if cancel.has_changed().unwrap_or(false) {
+                        return Err(crate::download::DOWNLOAD_CANCELLED.into());
+                    }
+                    let (sha256, size) = fingerprint(path.as_ref())?;
+                    verify_download_with_limit(size, package.download_bytes, MAX_GRAMMAR_BYTES)?;
+                    receipt.replace(GRAMMAR_FILE, path.as_ref(), sha256.clone())?;
+                    GrammarModel {
+                        version: package.version,
+                        size,
+                        sha256,
+                    }
+                };
+                write_shared_grammar_manifest(&root, Some(&model))?;
+                receipt.finish()?;
+            }
+            for pkg in crate::runtime_materialize::installed_wanxiang_grammar_packages(core, &root)
+                .map_err(|error| error.to_string())?
+            {
+                core.emit(CoreEvent::InstallProgress(InstallProgress {
+                    stage: "wanxiang-grammar-deploy".into(),
+                    percent: 95,
+                    message: format!("正在部署 {pkg}…"),
+                }));
+                host.deploy_package(&pkg).await?;
+            }
         } else {
-            GRAMMAR_FILE
-        };
-        let download = if installed && !safe_target(&root, grammar_file)?.is_file() {
-            Some(download_grammar(core, &receipt.work, &mut cancel).await?)
-        } else {
-            None
-        };
-        if cancel.has_changed().unwrap_or(false) {
-            return Err(crate::download::DOWNLOAD_CANCELLED.into());
+            let shared_model = read_shared_grammar_manifest(&root)?;
+            let wanxiang_model = stored_manifest(core, &root)?.and_then(|m| m.grammar);
+            let known_model = shared_model.clone().or(wanxiang_model);
+            let shared_path_before = shared_grammar_model_path(&root);
+            let enabled_others =
+                crate::runtime_materialize::installed_wanxiang_grammar_packages(core, &root)
+                    .map_err(|error| error.to_string())?;
+
+            if wanxiang_installed {
+                let mut receipt = InstallReceipt::new(&root)?;
+                receipt.attach_store(core, SCHEMA_ID)?;
+                receipt.seed_store_sources(core, SCHEMA_ID)?;
+                core.emit(CoreEvent::InstallProgress(InstallProgress {
+                    stage: "wanxiang-grammar-deploy".into(),
+                    percent: 92,
+                    message: "正在部署万象拼音…".into(),
+                }));
+                commit_grammar(&mut receipt, None, false, grammar_supported())?;
+                receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
+            }
+
+            for pkg in &enabled_others {
+                remove_package_linked_grammar(
+                    &root,
+                    pkg,
+                    shared_path_before.as_deref(),
+                    known_model.as_ref(),
+                );
+                crate::runtime_materialize::update_wanxiang_grammar(&root, pkg, false)
+                    .map_err(|error| error.to_string())?;
+            }
+
+            for relative in [GRAMMAR_FILE, ISOLATED_GRAMMAR_FILE] {
+                let path = safe_target(&root, relative)?;
+                if !path.is_file() {
+                    continue;
+                }
+                let removable = known_model.as_ref().is_some_and(|model| {
+                    fingerprint(&path)
+                        .ok()
+                        .is_some_and(|(sha, size)| sha == model.sha256 && size == model.size)
+                });
+                if !removable {
+                    return Err("语法模型已修改或没有所有权记录，已保留原文件".into());
+                }
+                fs::remove_file(&path).map_err(|error| format!("删除语法模型失败：{error}"))?;
+            }
+            write_shared_grammar_manifest(&root, None)?;
+
+            for pkg in enabled_others {
+                core.emit(CoreEvent::InstallProgress(InstallProgress {
+                    stage: "wanxiang-grammar-deploy".into(),
+                    percent: 95,
+                    message: format!("正在重新部署 {pkg}…"),
+                }));
+                host.deploy_package(&pkg).await?;
+            }
         }
-        core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "wanxiang-grammar-deploy".into(),
-            percent: 92,
-            message: "正在部署万象拼音…".into(),
-        }));
-        commit_grammar(
-            &mut receipt,
-            download
-                .as_ref()
-                .map(|(path, package)| (path.as_ref(), package)),
-            installed,
-            grammar_supported(),
-        )?;
-        receipt.deploy_isolated(core, SCHEMA_ID, host).await?;
         finish_grammar(core, &root, installed)
+    }
+    .await;
+    result.map_err(CoreError::Other)
+}
+
+pub async fn set_package_wanxiang_grammar(
+    core: &Core,
+    key: &str,
+    enabled: bool,
+    host: &impl SchemeHost,
+) -> Result<GrammarStatus, CoreError> {
+    let result: Result<_, String> = async {
+        use crate::runtime_materialize::{
+            package_installed, update_wanxiang_grammar, wanxiang_grammar_enabled,
+        };
+        let root = host.user_root()?;
+        crate::deploy::ensure_not_using_libjd(core, &root)
+            .map_err(|error| error.to_string())?;
+        crate::package_migration::ensure_before_write(core, &root)
+            .await
+            .map_err(|error| error.to_string())?;
+        if key == SCHEMA_ID || key == crate::addon::EASY_EN_ADDON_ID {
+            return Err("该方案不支持单独切换万象模型".into());
+        }
+        if !package_installed(core, &root, key).map_err(|error| error.to_string())? {
+            return Err("方案未安装".into());
+        }
+        if enabled {
+            if !grammar_supported() {
+                return Err("当前平台未加载语法模型插件".into());
+            }
+            if shared_grammar_model_path(&root).is_none() {
+                return Err("请先在「附加方案 → 模型」中下载万象语法模型".into());
+            }
+        }
+        if wanxiang_grammar_enabled(&root, key).map_err(|error| error.to_string())? == enabled {
+            return grammar_status_for(core, &root).map_err(|error| error.to_string());
+        }
+        let shared_path = shared_grammar_model_path(&root);
+        let shared_model = read_shared_grammar_manifest(&root)?
+            .or_else(|| stored_manifest(core, &root).ok().flatten().and_then(|m| m.grammar));
+        update_wanxiang_grammar(&root, key, enabled).map_err(|error| error.to_string())?;
+        if !enabled {
+            remove_package_linked_grammar(&root, key, shared_path.as_deref(), shared_model.as_ref());
+        }
+        if let Err(error) = host.deploy_package(key).await {
+            update_wanxiang_grammar(&root, key, !enabled)
+                .map_err(|restore| format!("{error}；恢复万象模型设置失败：{restore}"))?;
+            host.deploy_package(key)
+                .await
+                .map_err(|restore| format!("{error}；恢复方案包部署失败：{restore}"))?;
+            return Err(error);
+        }
+        grammar_status_for(core, &root).map_err(|error| error.to_string())
     }
     .await;
     result.map_err(CoreError::Other)

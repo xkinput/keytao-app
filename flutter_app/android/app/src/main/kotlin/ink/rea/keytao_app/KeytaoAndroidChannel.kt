@@ -43,6 +43,8 @@ class KeytaoAndroidChannel(
     private val mainHandler = Handler(Looper.getMainLooper())
     // Both legacy permission flows share one dialog without losing pending replies.
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
+    private val pendingVoicePermissions = mutableListOf<Reply>()
+    private var voicePermissionRationaleBeforeRequest: Boolean? = null
     private var pendingDirectoryPick: Reply? = null
     private var pendingDirectoryImport = false
     private var pendingArchivePick: Reply? = null
@@ -53,6 +55,15 @@ class KeytaoAndroidChannel(
             when (call.method) {
                 "paths" -> paths(reply)
                 "imeStatus" -> imeStatus(reply)
+                "voiceInputStatus" -> voiceInputStatus(reply)
+                "setVoiceInputEnabled" -> {
+                    val enabled = requireNotNull(call.argument<Boolean>("enabled"))
+                    KeytaoVoiceSupport.setVoiceInputEnabled(activity, enabled)
+                    voiceInputStatus(reply)
+                }
+                "requestVoicePermission" -> requestVoicePermission(reply)
+                "openVoiceInputSettings" -> openVoiceInputSettings(reply)
+                "openVoiceModelSettings" -> openVoiceModelSettings(reply)
                 "storagePermissionStatus" -> storagePermissionStatus(reply)
                 "openStoragePermissionSettings" -> openStoragePermissionSettings(reply)
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
@@ -248,7 +259,38 @@ class KeytaoAndroidChannel(
         }
     }
 
-    fun onRequestPermissionsResult(requestCode: Int): Boolean {
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String> = emptyArray(),
+        grantResults: IntArray = IntArray(0),
+    ): Boolean {
+        if (requestCode == voicePermissionRequestCode) {
+            val pending = pendingVoicePermissions.toList()
+            pendingVoicePermissions.clear()
+            val granted = KeytaoVoiceSupport.hasRecordAudioPermission(activity)
+            val denied = !granted && grantResults.firstOrNull() == PackageManager.PERMISSION_DENIED
+            val rationaleAfter = activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
+            val preferences = activity.getSharedPreferences(voicePermissionPreferencesName, Context.MODE_PRIVATE)
+            if (granted) {
+                preferences.edit().remove(voicePermissionPermanentlyDeniedKey).apply()
+            } else if (KeytaoVoiceInput.shouldMarkPermissionPermanentlyDenied(
+                    denied = denied,
+                    rationaleBeforeRequest = voicePermissionRationaleBeforeRequest,
+                    rationaleAfterRequest = rationaleAfter,
+                )
+            ) {
+                preferences.edit().putBoolean(voicePermissionPermanentlyDeniedKey, true).apply()
+            }
+            voicePermissionRationaleBeforeRequest = null
+            for (reply in pending) {
+                try {
+                    reply.success(resolveVoiceInputStatus())
+                } catch (ex: Exception) {
+                    reply.error(ex.message ?: "Failed to read Android voice input status")
+                }
+            }
+            return true
+        }
         if (requestCode != storagePermissionRequestCode) return false
         val pending = pendingStoragePermissions.toList()
         pendingStoragePermissions.clear()
@@ -261,6 +303,86 @@ class KeytaoAndroidChannel(
             }
         }
         return true
+    }
+
+    private fun voiceInputStatus(reply: Reply) {
+        try {
+            reply.success(resolveVoiceInputStatus())
+        } catch (ex: Exception) {
+            reply.error(ex.message ?: "Failed to read Android voice input status")
+        }
+    }
+
+    private fun isVoicePermissionPermanentlyDenied(): Boolean {
+        if (KeytaoVoiceSupport.hasRecordAudioPermission(activity)) {
+            activity.getSharedPreferences(voicePermissionPreferencesName, Context.MODE_PRIVATE)
+                .edit()
+                .remove(voicePermissionPermanentlyDeniedKey)
+                .apply()
+            return false
+        }
+        val preferences = activity.getSharedPreferences(voicePermissionPreferencesName, Context.MODE_PRIVATE)
+        val requestedBefore = preferences.getBoolean(voicePermissionRequestedKey, false)
+        val markedDenied = preferences.getBoolean(voicePermissionPermanentlyDeniedKey, false)
+        return markedDenied || (requestedBefore && !activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO))
+    }
+
+    private fun resolveVoiceInputStatus(): Map<String, Any?> {
+        return KeytaoVoiceSupport.inspectStatus(
+            context = activity,
+            permissionPermanentlyDenied = isVoicePermissionPermanentlyDenied(),
+        ).toMap()
+    }
+
+    private fun requestVoicePermission(reply: Reply) {
+        try {
+            if (KeytaoVoiceSupport.hasRecordAudioPermission(activity)) {
+                reply.success(resolveVoiceInputStatus())
+                return
+            }
+            if (isVoicePermissionPermanentlyDenied()) {
+                openApplicationDetailsSettings()
+                reply.success(resolveVoiceInputStatus())
+                return
+            }
+            val preferences = activity.getSharedPreferences(voicePermissionPreferencesName, Context.MODE_PRIVATE)
+            preferences.edit().putBoolean(voicePermissionRequestedKey, true).apply()
+            pendingVoicePermissions.add(reply)
+            if (pendingVoicePermissions.size > 1) return
+            voicePermissionRationaleBeforeRequest =
+                activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
+            try {
+                ActivityCompat.requestPermissions(
+                    activity,
+                    arrayOf(Manifest.permission.RECORD_AUDIO),
+                    voicePermissionRequestCode,
+                )
+            } catch (ex: Exception) {
+                pendingVoicePermissions.remove(reply)
+                voicePermissionRationaleBeforeRequest = null
+                throw ex
+            }
+        } catch (ex: Exception) {
+            reply.error(ex.message ?: "无法请求录音权限")
+        }
+    }
+
+    private fun openVoiceInputSettings(reply: Reply) {
+        try {
+            KeytaoVoiceSupport.openVoiceInputSettings(activity)
+            reply.success()
+        } catch (ex: Exception) {
+            reply.error(ex.message ?: "无法打开系统语音输入设置")
+        }
+    }
+
+    private fun openVoiceModelSettings(reply: Reply) {
+        try {
+            KeytaoVoiceSupport.openVoiceModelSettings(activity)
+            reply.success()
+        } catch (ex: Exception) {
+            reply.error(ex.message ?: "无法打开语音模型设置")
+        }
     }
 
     private fun imeStatus(reply: Reply) {
@@ -839,6 +961,10 @@ class KeytaoAndroidChannel(
         private const val storagePermissionRequestCode = 0x4B54
         private const val directoryPickRequestCode = 0x4B55
         private const val archivePickRequestCode = 0x4B56
+        private const val voicePermissionRequestCode = 0x4B57
+        private const val voicePermissionPreferencesName = "keytao-voice-permission"
+        private const val voicePermissionRequestedKey = "requested"
+        private const val voicePermissionPermanentlyDeniedKey = "permanently_denied"
     }
 
     private fun safePrivateFile(root: File, relativePath: String): File {

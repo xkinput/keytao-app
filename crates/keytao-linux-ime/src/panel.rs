@@ -232,7 +232,7 @@ pub fn load_font() -> Option<FontSource> {
 fn load_symbol_fonts() -> Vec<FontSource> {
     let mut sources = Vec::new();
     let mut seen = HashSet::new();
-    let samples = ['🚫', '⚠', '✓', '✕', '〔', '〕'];
+    let samples = ['🚫', '⚠', '✓', '✕', '〔', '〕', '☯'];
 
     if let Ok(value) = std::env::var(SYMBOL_FONT_ENV) {
         for value in font_values(&value) {
@@ -971,11 +971,16 @@ impl PanelRenderer {
         } else {
             nav_count as f32 * nav_button + nav_count.saturating_sub(1) as f32 * panel_gap
         };
-        let max_width = (screen_width
+        let screen_max_width = (screen_width
             - self.s(theme.panel.screen_margin).ceil() * 2.0
             - self.shadow_inset(theme.panel.shadow) as f32 * 2.0)
             .floor()
             .max(1.0);
+        let max_width = theme
+            .ui
+            .candidate_panel_max_width
+            .map(|limit| screen_max_width.min(self.s(limit).floor().max(1.0)))
+            .unwrap_or(screen_max_width);
         let row_width = (max_width - panel_pad_left - panel_pad_right).max(0.0);
         let candidate_count = model.candidates.len();
         let option_widths = if model.orientation == PanelOrientation::Horizontal {

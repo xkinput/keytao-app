@@ -256,6 +256,8 @@ class _SettingsCardState extends State<SettingsCard> {
   double? _previewRadius;
   bool _resetRadius = false;
   double? _previewFontSize;
+  double? _previewMaxWidth;
+  bool _resetMaxWidth = false;
 
   @override
   void dispose() {
@@ -284,6 +286,8 @@ class _SettingsCardState extends State<SettingsCard> {
     _previewRadius = null;
     _resetRadius = false;
     _previewFontSize = null;
+    _previewMaxWidth = null;
+    _resetMaxWidth = false;
   }
 
   Future<void> _savePreview({
@@ -420,6 +424,7 @@ class _SettingsCardState extends State<SettingsCard> {
                         : null,
                   ),
                   _candidatePageSize(),
+                  _candidatePanelMaxWidth(),
                   if (c.showsEmbeddedComposition)
                     _separated(
                       SwitchSetting(
@@ -576,6 +581,58 @@ class _SettingsCardState extends State<SettingsCard> {
     onChanged: (value) => _savePreview(backgroundColor: value),
   );
 
+  Widget _candidatePanelMaxWidth() {
+    final c = controller;
+    final s = c.uiSettings!;
+    final configured = _resetMaxWidth
+        ? null
+        : _previewMaxWidth ?? s.candidatePanelMaxWidth;
+    final enabled = c.canSaveTheme && !s.hideCandidatePanel;
+    return SliderSetting(
+      key: const ValueKey('pc-candidate-panel-max-width'),
+      label: AppStrings.candidatePanelMaxWidth,
+      value: configured ?? candidatePanelMaxWidthDefaultPreview,
+      min: candidatePanelMaxWidthMin,
+      max: candidatePanelMaxWidthMax,
+      divisions: candidatePanelMaxWidthDivisions,
+      unit: 'px',
+      valueText: configured == null ? AppStrings.candidatePanelMaxWidthAuto : null,
+      onPreview: (value) => _schedulePreview(() {
+        _previewMaxWidth = value;
+        _resetMaxWidth = false;
+      }),
+      onChanged: enabled
+          ? (value) async {
+              final saved = await c.saveCandidatePanelMaxWidth(value);
+              if (!saved && mounted) setState(_resetPreview);
+            }
+          : null,
+      valueAction: configured == null
+          ? null
+          : FButton.icon(
+              variant: FButtonVariant.ghost,
+              size: context.platformVariant.touch
+                  ? FButtonSizeVariant.md
+                  : FButtonSizeVariant.xs,
+              onPress: enabled
+                  ? () async {
+                      setState(() {
+                        _previewMaxWidth = null;
+                        _resetMaxWidth = true;
+                      });
+                      final saved = await c.saveCandidatePanelMaxWidth(null);
+                      if (!saved && mounted) setState(_resetPreview);
+                    }
+                  : null,
+              child: const Icon(
+                FLucideIcons.rotateCcw,
+                size: 14,
+                semanticLabel: '候选条最大宽度：恢复自动',
+              ),
+            ),
+    );
+  }
+
   Widget _cornerRadius() {
     final radius = controller.uiSettings!.cornerRadius;
     return SliderSetting(
@@ -643,6 +700,11 @@ class _SettingsCardState extends State<SettingsCard> {
         systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
       ),
       orientation: orientation,
+      maxPanelWidth: keyboard
+          ? null
+          : _resetMaxWidth
+          ? null
+          : _previewMaxWidth ?? s?.candidatePanelMaxWidth,
       showPreedit: !keyboard && !s!.effectiveEmbeddedComposition,
       candidateCount: c.candidatePageSize ?? c.candidatePreviewPageSize ?? 6,
       candidates: c.candidatePreviewCandidates,
@@ -889,6 +951,7 @@ class _SettingsCardState extends State<SettingsCard> {
           schemeName: keyboardSchemeName,
         ),
       ),
+      HairlineGridCell(child: _voiceInputSection(context)),
       HairlineGridCell(
         child: Section(
           title: AppStrings.clipboard,
@@ -1008,6 +1071,137 @@ class _SettingsCardState extends State<SettingsCard> {
         ),
       ),
     ];
+  }
+
+  Widget _voiceInputSection(BuildContext context) {
+    final c = controller;
+    if (c.isIos) {
+      return Section(
+        title: AppStrings.voiceInput,
+        icon: FLucideIcons.mic,
+        children: [
+          Text(
+            AppStrings.voiceIosHint,
+            style: context.theme.typography.body.sm.copyWith(
+              color: AppPalette.of(context).muted,
+            ),
+          ),
+        ],
+      );
+    }
+    final status = c.voiceInput;
+    final enabled = status?['enabled'] != false;
+    final engineInstalled = status?['engineInstalled'] == true;
+    final engineSelected = status?['engineSelected'] == true;
+    final usesSystemDefault = status?['usesSystemDefault'] == true;
+    final selectionInvalid = status?['selectionInvalid'] == true;
+    final selectedEngineName = status?['selectedEngineName'] as String?;
+    final permissionGranted = status?['permissionGranted'] == true;
+    final permissionDenied = status?['permissionPermanentlyDenied'] == true;
+    final ready = status?['ready'] == true;
+
+    final engineValue = status == null
+        ? AppStrings.checking
+        : !engineInstalled
+        ? '未安装'
+        : selectionInvalid
+        ? '已失效（请重新选择）'
+        : !engineSelected
+        ? '未选择'
+        : selectedEngineName?.isNotEmpty == true
+        ? selectedEngineName!
+        : usesSystemDefault
+        ? AppStrings.voiceEngineSystemDefault
+        : '已选择';
+
+    final permissionValue = status == null
+        ? AppStrings.checking
+        : permissionGranted
+        ? AppStrings.voicePermissionGranted
+        : AppStrings.voicePermissionMissing;
+
+    String? guidance;
+    if (status != null && enabled) {
+      if (!engineInstalled) {
+        guidance = AppStrings.voiceEngineNotInstalled;
+      } else if (selectionInvalid) {
+        guidance = AppStrings.voiceEngineSelectionInvalid;
+      } else if (!engineSelected) {
+        guidance = AppStrings.voiceEngineNotSelected;
+      } else if (!permissionGranted) {
+        guidance = permissionDenied
+            ? AppStrings.voicePermissionDeniedHint
+            : '请先开启录音权限，长按空格键即可进行语音输入。';
+      }
+    }
+
+    return Section(
+      title: AppStrings.voiceInput,
+      icon: FLucideIcons.mic,
+      trailing: status == null
+          ? null
+          : StatusPill(
+              !enabled
+                  ? AppStrings.off
+                  : ready
+                  ? AppStrings.ready
+                  : AppStrings.needsSetup,
+              color: !enabled
+                  ? AppPalette.of(context).muted
+                  : ready
+                  ? successColor(context)
+                  : warningColor(context),
+            ),
+      children: [
+        SwitchSetting(
+          AppStrings.voiceInputEnabled,
+          key: const ValueKey('mobile-toggle-voiceInputEnabled'),
+          value: enabled,
+          hint: AppStrings.voiceInputEnabledHint,
+          onChanged: c.busy ? null : c.setVoiceInputEnabled,
+        ),
+        ValueRow(AppStrings.voiceEngine, engineValue),
+        ValueRow(AppStrings.voicePermission, permissionValue),
+        if (guidance != null)
+          StatusMessage(
+            guidance,
+            icon: FLucideIcons.triangleAlert,
+            color: warningColor(context),
+          )
+        else if (status != null && enabled && ready)
+          StatusMessage(
+            '长按键盘空格键即可开始语音输入。',
+            icon: FLucideIcons.circleCheck,
+            color: successColor(context),
+          ),
+        ActionRow(
+          children: [
+            if (!permissionGranted)
+              ActionButton(
+                permissionDenied
+                    ? AppStrings.voiceOpenPermissionSettings
+                    : AppStrings.voiceRequestPermission,
+                primary: engineInstalled && engineSelected,
+                onPress: c.busy ? null : c.requestVoicePermission,
+              ),
+            ActionButton(
+              AppStrings.voiceChooseEngine,
+              primary: !engineSelected,
+              onPress: c.busy ? null : c.openVoiceInputSettings,
+            ),
+            if (engineInstalled)
+              ActionButton(
+                AppStrings.voiceChooseModel,
+                onPress: c.busy ? null : c.openVoiceModelSettings,
+              ),
+            ActionButton(
+              AppStrings.recheck,
+              onPress: c.busy ? null : c.refreshVoiceInputStatus,
+            ),
+          ],
+        ),
+      ],
+    );
   }
 }
 

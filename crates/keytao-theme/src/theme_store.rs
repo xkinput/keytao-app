@@ -626,6 +626,7 @@ fn editor_snapshot_unlocked(
         theme.ui.embedded_composition = local.embedded_composition;
         theme.ui.hide_candidate_panel = local.hide_candidate_panel;
         theme.ui.show_tray_mode_indicator = local.show_tray_mode_indicator;
+        theme.ui.candidate_panel_max_width = local.candidate_panel_max_width;
         theme
     };
     let source: Value = serde_json::from_str(&canonical_source_json(&source)?)

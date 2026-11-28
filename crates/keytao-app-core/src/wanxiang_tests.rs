@@ -1794,3 +1794,48 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
     drop(runtime);
     receipt.finish().unwrap();
 }
+
+#[tokio::test]
+#[cfg(not(target_os = "ios"))]
+async fn standalone_grammar_model_and_per_package_toggle_work_without_wanxiang_installed() {
+    use crate::scheme_host::tests::AddonHost;
+    let root = TestRoot::new();
+    let host = AddonHost::new(&root.path);
+    host.write_bundled_keytao();
+    // Simulate a downloaded shared Wanxiang grammar model without Wanxiang Pinyin installed.
+    let shared_model = root.path.join(GRAMMAR_FILE);
+    fs::write(&shared_model, b"standalone-wanxiang-gram").unwrap();
+    let (sha256, size) = fingerprint(&shared_model).unwrap();
+    write_shared_grammar_manifest(
+        &root.path,
+        Some(&GrammarModel {
+            version: "LTS@test".into(),
+            size,
+            sha256,
+        }),
+    )
+    .unwrap();
+
+    assert!(!wanxiang_status(&host.core, &root.path).unwrap().installed);
+    let status = grammar_status_for(&host.core, &root.path).unwrap();
+    assert!(status.installed);
+    assert_eq!(status.version, "LTS@test");
+    assert!(status.enabled_packages.is_empty());
+
+    // Materialize builtin/keytao runtime so it's registered as an installed package.
+    let runtime = RuntimeDirs::isolated_user_data_dir(&root.path, "builtin/keytao").unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    let updated = set_package_wanxiang_grammar(&host.core, "builtin/keytao", true, &host)
+        .await
+        .unwrap();
+    assert_eq!(updated.enabled_packages, vec!["builtin/keytao".to_owned()]);
+    assert!(runtime.join(GRAMMAR_FILE).is_file());
+    assert!(runtime.join(crate::grammar_hint::SCRIPT_PATH).is_file());
+
+    // Disable cleans up enabled_packages and linked .gram.
+    let disabled = set_package_wanxiang_grammar(&host.core, "builtin/keytao", false, &host)
+        .await
+        .unwrap();
+    assert!(disabled.enabled_packages.is_empty());
+    assert!(!runtime.join(GRAMMAR_FILE).exists());
+}

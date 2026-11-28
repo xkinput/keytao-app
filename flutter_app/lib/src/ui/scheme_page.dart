@@ -109,30 +109,41 @@ void _showAddonSchemes(BuildContext context, AppController c) {
           ],
           child: SizedBox(
             width: 1056,
-            child: HairlineGridSection(
-              key: const ValueKey('addon-schemes'),
-              minCellWidth: 180,
-              columnCount: c.isMobile ? 2 : null,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                for (final entry in addons.entries)
-                  if (!_homeAddonKeys.contains(entry.key)) entry.value,
-                for (final key in {
-                  ...schemes.keys,
-                  for (final package in c.installedPackages) package.schemeKey,
-                })
-                  if (!_homeSchemeKeys.contains(key) &&
-                      key != 'xmjd-feiding' &&
-                      !addons.containsKey(key) &&
-                      !c.isLocalScheme(key))
-                    HairlineGridCell(
-                      padding: EdgeInsets.all(c.isMobile ? 8 : 12),
-                      child: SchemePackageRow(
-                        controller: c,
-                        schemeKey: key,
-                        compact: true,
-                        showSource: false,
-                      ),
-                    ),
+                HairlineGridSection(
+                  key: const ValueKey('addon-schemes'),
+                  minCellWidth: 180,
+                  columnCount: c.isMobile ? 2 : null,
+                  children: [
+                    for (final entry in addons.entries)
+                      if (!_homeAddonKeys.contains(entry.key)) entry.value,
+                    for (final key in {
+                      ...schemes.keys,
+                      for (final package in c.installedPackages)
+                        package.schemeKey,
+                    })
+                      if (!_homeSchemeKeys.contains(key) &&
+                          key != 'xmjd-feiding' &&
+                          !addons.containsKey(key) &&
+                          !c.isLocalScheme(key))
+                        HairlineGridCell(
+                          padding: EdgeInsets.all(c.isMobile ? 8 : 12),
+                          child: SchemePackageRow(
+                            controller: c,
+                            schemeKey: key,
+                            compact: true,
+                            showSource: false,
+                          ),
+                        ),
+                  ],
+                ),
+                if (c.showWanxiangGrammar) ...[
+                  const SizedBox(height: 16),
+                  _ModelsSection(controller: c),
+                ],
               ],
             ),
           ),
@@ -898,6 +909,14 @@ class SchemePackageRow extends StatelessWidget {
                           c.openSchemeDirectory(schemeKey);
                         },
                       ),
+                    if (c.canToggleWanxiangGrammarOnPackages)
+                      _wanxiangGrammarMenuItem(
+                        context,
+                        c,
+                        schemeKey,
+                        popover,
+                        inAddonsDialog: compact,
+                      ),
                     if (package.supportsUserWords)
                       FItem(
                         title: const Text('自造词'),
@@ -1516,11 +1535,163 @@ class AddonCard extends StatelessWidget {
   const AddonCard({super.key, required this.controller});
   final AppController controller;
   @override
-  Widget build(BuildContext context) => HairlineGridSection(
-    minCellWidth: 320,
-    columnCount: controller.isMobile ? 2 : null,
-    children: _addonCells(context, controller).values.toList(),
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      HairlineGridSection(
+        minCellWidth: 320,
+        columnCount: controller.isMobile ? 2 : null,
+        children: _addonCells(context, controller).values.toList(),
+      ),
+      if (controller.showWanxiangGrammar) ...[
+        const SizedBox(height: 16),
+        _ModelsSection(controller: controller),
+      ],
+    ],
   );
+}
+
+FItem _wanxiangGrammarMenuItem(
+  BuildContext context,
+  AppController c,
+  String packageKey,
+  FPopoverController popover, {
+  required bool inAddonsDialog,
+}) {
+  final enabled = c.isWanxiangGrammarEnabledFor(packageKey);
+  final modelInstalled = c.wanxiangGrammar?.installed == true;
+  return FItem(
+    key: ValueKey('enable-wanxiang-grammar-$packageKey'),
+    title: const Text(AppStrings.enableWanxiangGrammar),
+    prefix: const Icon(FLucideIcons.cpu),
+    semanticsChecked: enabled,
+    suffix: enabled
+        ? const Icon(FLucideIcons.check)
+        : !modelInstalled
+        ? Text(
+            AppStrings.notInstalled,
+            style: context.theme.typography.body.xs.copyWith(
+              color: context.theme.colors.mutedForeground,
+            ),
+          )
+        : null,
+    onPress: c.busy
+        ? null
+        : () {
+            popover.hide();
+            if (!modelInstalled) {
+              if (!inAddonsDialog) {
+                _showAddonSchemes(context, c);
+              } else {
+                c.showToast(AppStrings.wanxiangGrammarNeedDownload);
+              }
+              return;
+            }
+            unawaited(c.setPackageWanxiangGrammar(packageKey, !enabled));
+          },
+  );
+}
+
+class _ModelsSection extends StatelessWidget {
+  const _ModelsSection({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final installed = c.wanxiangGrammar?.installed == true;
+    final mobile = c.isMobile;
+    return Column(
+      key: const ValueKey('addon-models'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(bottom: 8),
+          child: EyebrowLabel(AppStrings.modelsTitle),
+        ),
+        HairlineGridSection(
+          minCellWidth: 200,
+          columnCount: 1,
+          children: [
+            HairlineGridCell(
+              key: const ValueKey('wanxiang-grammar'),
+              padding: EdgeInsets.all(mobile ? 10 : 14),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 12,
+                    runSpacing: 8,
+                    children: [
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          Text(
+                            AppStrings.wanxiangModelTitle,
+                            style: context.theme.typography.body.sm.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Text(
+                            c.wanxiangGrammarSize,
+                            style: context.theme.typography.body.xs.copyWith(
+                              color: context.theme.colors.mutedForeground,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (c.isManagingWanxiangGrammar)
+                        ActionButton(
+                          AppStrings.cancel,
+                          onPress: c.canCancelWanxiangGrammarDownload
+                              ? c.cancelWanxiangGrammarDownload
+                              : null,
+                        )
+                      else
+                        ActionButton(
+                          installed ? AppStrings.uninstall : AppStrings.download,
+                          icon: installed
+                              ? FLucideIcons.trash2
+                              : FLucideIcons.download,
+                          onPress: c.canManageWanxiangGrammar
+                              ? () => c.manageWanxiangGrammar(!installed)
+                              : null,
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '仅 Rime 模式支持。下载后自动用于万象拼音，也可在云端方案或本地方案的「…」菜单中开启。',
+                    style: context.theme.typography.body.xs.copyWith(
+                      color: context.theme.colors.mutedForeground,
+                    ),
+                  ),
+                  if (c.isManagingWanxiangGrammar) ...[
+                    const SizedBox(height: 8),
+                    InstallProgressView(
+                      active: true,
+                      progress: c.wanxiangGrammarProgress,
+                    ),
+                  ],
+                  if (c.wanxiangGrammarError case final error?) ...[
+                    const SizedBox(height: 8),
+                    ErrorMessage(error),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 }
 
 Map<String, Widget> _addonCells(
@@ -1815,6 +1986,17 @@ Map<String, Widget> _addonCells(
                                     c.openSchemeDirectory(packageKey);
                                   },
                           ),
+                        if (!overlay &&
+                            installed &&
+                            packageKey != 'wanxiang' &&
+                            c.canToggleWanxiangGrammarOnPackages)
+                          _wanxiangGrammarMenuItem(
+                            context,
+                            c,
+                            packageKey,
+                            popover,
+                            inAddonsDialog: compact,
+                          ),
                         FItem(
                           title: const Text('仓库地址'),
                           prefix: const Icon(FLucideIcons.externalLink),
@@ -1961,59 +2143,6 @@ Map<String, Widget> _addonCells(
         progress: c.wanxiangProgress,
       ),
       error: c.wanxiangError,
-      extra: c.showWanxiangGrammar
-          ? Column(
-              key: const ValueKey('wanxiang-grammar'),
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                SettingRow(
-                  AppStrings.wanxiangGrammar,
-                  child: ActionRow(
-                    children: [
-                      Text(
-                        c.wanxiangGrammarSize,
-                        style: context.theme.typography.body.xs.copyWith(
-                          color: context.theme.colors.mutedForeground,
-                        ),
-                      ),
-                      if (c.isManagingWanxiangGrammar)
-                        ActionButton(
-                          AppStrings.cancel,
-                          onPress: c.canCancelWanxiangGrammarDownload
-                              ? c.cancelWanxiangGrammarDownload
-                              : null,
-                        )
-                      else
-                        ActionButton(
-                          c.wanxiangGrammar?.installed == true
-                              ? AppStrings.uninstall
-                              : '下载',
-                          icon: c.wanxiangGrammar?.installed == true
-                              ? FLucideIcons.trash2
-                              : FLucideIcons.download,
-                          onPress: c.canManageWanxiangGrammar
-                              ? () => c.manageWanxiangGrammar(
-                                  c.wanxiangGrammar?.installed != true,
-                                )
-                              : null,
-                        ),
-                    ],
-                  ),
-                ),
-                if (c.isManagingWanxiangGrammar) ...[
-                  const SizedBox(height: 8),
-                  InstallProgressView(
-                    active: true,
-                    progress: c.wanxiangGrammarProgress,
-                  ),
-                ],
-                if (c.wanxiangGrammarError case final error?) ...[
-                  const SizedBox(height: 8),
-                  ErrorMessage(error),
-                ],
-              ],
-            )
-          : null,
     ),
     for (final entry in c.rimeAddons.entries)
       if (allowedKeys == null || allowedKeys.contains(entry.key))

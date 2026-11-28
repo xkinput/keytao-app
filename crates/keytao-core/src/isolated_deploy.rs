@@ -40,6 +40,13 @@ pub const LUA_RUNTIME_STATE: &[&str] = &[
     "white_replace/whitkey_pinned.txt",
 ];
 
+fn is_grammar_model_file(relative: &Path) -> bool {
+    relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".gram"))
+}
+
 /// User-writable runtime inputs that package materialization should preserve.
 /// Callers separately validate paths and filter reserved files.
 pub fn preserves_runtime_data(relative: &Path) -> bool {
@@ -534,7 +541,10 @@ fn deploy_package(
         let copy = stage.0.join(relative);
         fs::create_dir_all(copy.parent().unwrap())?;
         // A compiler or Lua script can write its copy while the live IME is typing.
-        if preserves_runtime_data(relative) || fs::hard_link(path, &copy).is_err() {
+        // Grammar models (.gram) are large read-only files mapped by librime-octagram.
+        if (!is_grammar_model_file(relative) && preserves_runtime_data(relative))
+            || fs::hard_link(path, &copy).is_err()
+        {
             fs::copy(path, copy)?;
         }
         Ok(())
@@ -629,7 +639,10 @@ impl InputEdit {
     fn apply_staged(&self, root: &Path, compiling: bool) -> Result<(), String> {
         let path = edit_path(root, &self.relative)?;
         let result = if let Some(source) = &self.staged_source {
-            if compiling && preserves_runtime_data(&self.relative) {
+            if compiling
+                && !is_grammar_model_file(&self.relative)
+                && preserves_runtime_data(&self.relative)
+            {
                 fs::create_dir_all(path.parent().unwrap())
                     .and_then(|()| fs::copy(source, &path))
                     .map(|_| ())

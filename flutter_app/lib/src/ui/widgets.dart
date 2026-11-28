@@ -959,6 +959,7 @@ class SliderSetting extends StatefulWidget {
     required this.max,
     required this.divisions,
     this.unit = '',
+    this.valueText,
     this.onChanged,
     this.onPreview,
     this.semanticLabel,
@@ -970,6 +971,7 @@ class SliderSetting extends StatefulWidget {
   final double max;
   final int divisions;
   final String unit;
+  final String? valueText;
   final ValueChanged<double>? onChanged;
   final ValueChanged<double>? onPreview;
   final String? semanticLabel;
@@ -998,8 +1000,11 @@ class _SliderSettingState extends State<SliderSetting> {
   Widget build(BuildContext context) {
     final value = (_draft ?? widget.value).clamp(widget.min, widget.max);
     final accent = ChromeAccent.of(context);
+    final displayedLabel = _draft == null && widget.valueText != null
+        ? widget.valueText!
+        : _label(value);
     final valueLabel = Text(
-      _label(value),
+      displayedLabel,
       textAlign: TextAlign.right,
       style: context.theme.typography.body.xs.copyWith(
         color: context.theme.colors.mutedForeground,

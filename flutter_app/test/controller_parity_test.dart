@@ -101,6 +101,7 @@ class FakeCore implements RustLibApi {
     installed: false,
     version: '',
     size: BigInt.zero,
+    enabledPackages: const [],
   );
   AddonStatusDto rimeIceStatus = missingAddon;
   AddonStatusDto rimeMintStatus = missingAddon;
@@ -220,6 +221,31 @@ class FakeCore implements RustLibApi {
       installed: installed,
       version: installed ? 'LTS' : '',
       size: BigInt.zero,
+      enabledPackages: installed ? wanxiangGrammarStatus.enabledPackages : const [],
+    );
+  }
+  @override
+  Future<WanxiangGrammarStatusDto> crateApiCoreSetPackageWanxiangGrammar({
+    required String packageKey,
+    required bool enabled,
+    required FutureOr<String> Function() androidDeploy,
+  }) async {
+    calls.add('pkgWanxiangGrammar:$packageKey:$enabled');
+    final failure = await androidDeploy();
+    calls.add('callback:$failure');
+    if (failure.isNotEmpty) throw StateError(failure);
+    final updated = {...wanxiangGrammarStatus.enabledPackages};
+    if (enabled) {
+      updated.add(packageKey);
+    } else {
+      updated.remove(packageKey);
+    }
+    return wanxiangGrammarStatus = WanxiangGrammarStatusDto(
+      available: wanxiangGrammarStatus.available,
+      installed: wanxiangGrammarStatus.installed,
+      version: wanxiangGrammarStatus.version,
+      size: wanxiangGrammarStatus.size,
+      enabledPackages: updated.toList()..sort(),
     );
   }
   @override
@@ -548,6 +574,22 @@ class FakeAndroid extends AndroidHost {
   Future<Map<String, dynamic>> imeStatus() async => {
     'enabled': true,
     'selected': true,
+  };
+
+  @override
+  Future<Map<String, dynamic>> voiceInputStatus() async => {
+    'enabled': true,
+    'ready': true,
+    'recognitionAvailable': true,
+    'engineInstalled': true,
+    'engineSelected': true,
+    'usesSystemDefault': false,
+    'selectionInvalid': false,
+    'selectedEngineName': 'Test Speech',
+    'hasModelSettings': true,
+    'permissionGranted': true,
+    'permissionPermanentlyDenied': false,
+    'engines': const <Map<String, dynamic>>[],
   };
   @override
   Future<void> openStoragePermissionSettings() async {

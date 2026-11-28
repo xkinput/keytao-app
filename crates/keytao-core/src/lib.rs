@@ -744,20 +744,64 @@ const WANXIANG_GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
 // librime 1.17.0 grammar.h: Grammar::Evaluate's no-grammar log(1e-6).
 const NEUTRAL_GRAMMAR_PENALTY: f64 = -13.815510557964274;
 
-fn wanxiang_grammar_enabled(user_dir: &Path) -> bool {
+fn valid_grammar_language(language: &str) -> bool {
+    !language.is_empty()
+        && !matches!(language, "." | "..")
+        && !language.contains(['/', '\\', '\0'])
+}
+
+fn deployed_grammar_model_files(user_dir: &Path) -> Vec<PathBuf> {
+    if cfg!(target_os = "ios") {
+        return Vec::new();
+    }
     let Ok(dirs) = RuntimeDirs::resolve(user_dir, user_dir) else {
-        return false;
+        return Vec::new();
     };
-    !cfg!(target_os = "ios")
-        && user_dir.join(WANXIANG_GRAMMAR_FILE).is_file()
-        && std::fs::read(dirs.staging_dir.join("wanxiang.schema.yaml"))
+    let Ok(entries) = std::fs::read_dir(&dirs.staging_dir) else {
+        return Vec::new();
+    };
+    let search_dirs = [
+        dirs.user_data_dir.as_path(),
+        user_dir,
+        dirs.shared_data_dir.as_path(),
+    ];
+    let mut models = std::collections::BTreeSet::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".schema.yaml") {
+            continue;
+        }
+        let Some(language) = std::fs::read(entry.path())
             .ok()
             .and_then(|bytes| serde_yaml::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|schema| {
-                schema["grammar"]["language"]
-                    .as_str()
-                    .is_some_and(|language| !language.is_empty())
-            })
+            .and_then(|schema| schema["grammar"]["language"].as_str().map(str::to_owned))
+            .filter(|language| valid_grammar_language(language))
+        else {
+            continue;
+        };
+        let file_name = format!("{language}.gram");
+        for dir in search_dirs {
+            let candidate = dir.join(&file_name);
+            if candidate.is_file() {
+                models.insert(candidate);
+                break;
+            }
+        }
+    }
+    models.into_iter().collect()
+}
+
+fn wanxiang_grammar_enabled(user_dir: &Path) -> bool {
+    !deployed_grammar_model_files(user_dir).is_empty()
 }
 
 /// Patch generated configs only; package sources and user overrides stay intact.
@@ -787,9 +831,6 @@ fn update_neutral_grammar(user_dir: &Path, enabled: bool) {
         Ok(_) => {}
     }
     for schema_id in configured_schema_list_from_dir(user_dir) {
-        if schema_id == "wanxiang" {
-            continue;
-        }
         let result = (|| -> Result<(), String> {
             if !valid_rime_build_id(&schema_id) {
                 return Err(format!("invalid schema id: {schema_id}"));
@@ -1371,10 +1412,19 @@ mod desktop {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(format!("inspect compiled preview data: {error}")),
             };
-            Ok::<_, String>([
-                identity(&dirs.prebuilt_data_dir)?,
-                identity(&runtime.user_data_dir.join(WANXIANG_GRAMMAR_FILE))?,
-            ])
+            let mut watched = vec![
+                dirs.prebuilt_data_dir.clone(),
+                runtime.user_data_dir.join(WANXIANG_GRAMMAR_FILE),
+            ];
+            for model in deployed_grammar_model_files(&runtime.user_data_dir) {
+                if !watched.contains(&model) {
+                    watched.push(model);
+                }
+            }
+            watched
+                .into_iter()
+                .map(|path| identity(&path))
+                .collect::<Result<Vec<_>, String>>()
         };
         #[cfg(target_os = "macos")]
         let live_data_before = snapshot_ready.is_some().then(live_data_stamp).transpose()?;

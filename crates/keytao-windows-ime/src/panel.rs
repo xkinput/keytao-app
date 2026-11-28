@@ -169,7 +169,7 @@ fn load_font_set() -> Option<FontSet> {
         return None;
     }
 
-    let fallback_samples = ['🚫', '😀', '⚠', '♥', '✓'];
+    let fallback_samples = ['🚫', '😀', '⚠', '♥', '✓', '☯'];
     for path in FALLBACK_PATHS {
         if let Some(font) = load_font_with_samples(path, &fallback_samples) {
             fonts.push(Arc::new(font));
@@ -359,11 +359,16 @@ impl PanelRenderer {
         } else {
             nav_count as f32 * nav_button + nav_count.saturating_sub(1) as f32 * panel_gap
         };
-        let max_width = (available_width
+        let screen_max_width = (available_width
             - resolved_panel_shadow(theme.panel.shadow)
                 .map_or(0.0, |shadow| (shadow.margin * scale).ceil() * 2.0))
         .floor()
         .max(1.0);
+        let max_width = theme
+            .ui
+            .candidate_panel_max_width
+            .map(|limit| screen_max_width.min((limit * scale).floor().max(1.0)))
+            .unwrap_or(screen_max_width);
         let inner_width = (max_width - panel_pad_left - panel_pad_right).max(0.0);
         let navigation_space = |candidate_count| {
             if nav_count == 0 {

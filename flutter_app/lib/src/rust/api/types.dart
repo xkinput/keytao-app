@@ -647,6 +647,7 @@ class ImeUiSettingsDto {
   final bool embeddedComposition;
   final bool hideCandidatePanel;
   final bool showTrayModeIndicator;
+  final double? candidatePanelMaxWidth;
   final bool effectiveEmbeddedComposition;
   final String accentColor;
   final String? accentColorOverride;
@@ -666,6 +667,7 @@ class ImeUiSettingsDto {
     required this.embeddedComposition,
     required this.hideCandidatePanel,
     required this.showTrayModeIndicator,
+    this.candidatePanelMaxWidth,
     required this.effectiveEmbeddedComposition,
     required this.accentColor,
     this.accentColorOverride,
@@ -687,6 +689,7 @@ class ImeUiSettingsDto {
       embeddedComposition.hashCode ^
       hideCandidatePanel.hashCode ^
       showTrayModeIndicator.hashCode ^
+      candidatePanelMaxWidth.hashCode ^
       effectiveEmbeddedComposition.hashCode ^
       accentColor.hashCode ^
       accentColorOverride.hashCode ^
@@ -710,6 +713,7 @@ class ImeUiSettingsDto {
           embeddedComposition == other.embeddedComposition &&
           hideCandidatePanel == other.hideCandidatePanel &&
           showTrayModeIndicator == other.showTrayModeIndicator &&
+          candidatePanelMaxWidth == other.candidatePanelMaxWidth &&
           effectiveEmbeddedComposition == other.effectiveEmbeddedComposition &&
           accentColor == other.accentColor &&
           accentColorOverride == other.accentColorOverride &&

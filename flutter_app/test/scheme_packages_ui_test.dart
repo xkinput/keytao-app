@@ -163,6 +163,12 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> setPackageWanxiangGrammar(String key, bool enabled) async {
+    actions.add('pkg-grammar:$key:$enabled');
+    return true;
+  }
+
+  @override
   Future<bool> manageRimeAddon(String id, bool installed) async {
     actions.add('$id:$installed');
     return true;
@@ -2096,6 +2102,7 @@ void main() {
         installed: false,
         version: '',
         size: BigInt.from(1024),
+        enabledPackages: const [],
       );
     addTearDown(c.dispose);
     _size(tester, const Size(1200, 1000));

@@ -688,6 +688,11 @@ Future<ImeUiSettingsDto> setImeHideCandidatePanel({required bool hide_}) =>
 Future<ImeUiSettingsDto> setImeShowTrayModeIndicator({required bool show_}) =>
     RustLib.instance.api.crateApiCoreSetImeShowTrayModeIndicator(show_: show_);
 
+Future<ImeUiSettingsDto> setImeCandidatePanelMaxWidth({double? maxWidth}) =>
+    RustLib.instance.api.crateApiCoreSetImeCandidatePanelMaxWidth(
+      maxWidth: maxWidth,
+    );
+
 Future<EnglishModeDto> getDesktopEnglishMode() =>
     RustLib.instance.api.crateApiCoreGetDesktopEnglishMode();
 
@@ -750,6 +755,16 @@ Future<WanxiangGrammarStatusDto> manageWanxiangGrammar({
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageWanxiangGrammar(
   installed: installed,
+  androidDeploy: androidDeploy,
+);
+
+Future<WanxiangGrammarStatusDto> setPackageWanxiangGrammar({
+  required String packageKey,
+  required bool enabled,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreSetPackageWanxiangGrammar(
+  packageKey: packageKey,
+  enabled: enabled,
   androidDeploy: androidDeploy,
 );
 
@@ -940,12 +955,14 @@ class WanxiangGrammarStatusDto {
   final bool installed;
   final String version;
   final BigInt size;
+  final List<String> enabledPackages;
 
   const WanxiangGrammarStatusDto({
     required this.available,
     required this.installed,
     required this.version,
     required this.size,
+    required this.enabledPackages,
   });
 
   @override
@@ -953,7 +970,8 @@ class WanxiangGrammarStatusDto {
       available.hashCode ^
       installed.hashCode ^
       version.hashCode ^
-      size.hashCode;
+      size.hashCode ^
+      enabledPackages.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -963,5 +981,6 @@ class WanxiangGrammarStatusDto {
           available == other.available &&
           installed == other.installed &&
           version == other.version &&
-          size == other.size;
+          size == other.size &&
+          enabledPackages == other.enabledPackages;
 }

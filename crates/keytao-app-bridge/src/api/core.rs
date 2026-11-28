@@ -1737,6 +1737,22 @@ pub fn set_ime_show_tray_mode_indicator(show: bool) -> Result<ImeUiSettingsDto, 
     }
 }
 
+pub fn set_ime_candidate_panel_max_width(max_width: Option<f32>) -> Result<ImeUiSettingsDto, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        runtime::state()?.host.require_default_theme_root()?;
+        runtime::dto(
+            keytao_app_core::ime_settings::set_ime_candidate_panel_max_width(max_width)
+                .map_err(|error| error.to_string())?,
+        )
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = max_width;
+        Err("Candidate panel max width settings are desktop only".into())
+    }
+}
+
 pub fn get_desktop_english_mode() -> Result<EnglishModeDto, String> {
     runtime::dto(
         keytao_app_core::ime_settings::get_desktop_english_mode(runtime::state()?.host.clone())
@@ -1882,11 +1898,14 @@ pub fn wanxiang_status() -> Result<AddonStatusDto, String> {
 }
 
 #[derive(serde::Deserialize)]
+#[flutter_rust_bridge::frb]
 pub struct WanxiangGrammarStatusDto {
     pub available: bool,
     pub installed: bool,
     pub version: String,
     pub size: u64,
+    #[serde(default)]
+    pub enabled_packages: Vec<String>,
 }
 
 pub fn wanxiang_grammar_status() -> Result<WanxiangGrammarStatusDto, String> {
@@ -1913,6 +1932,26 @@ pub async fn manage_wanxiang_grammar(
         keytao_app_core::wanxiang::manage_grammar(&state.core, installed, &host)
             .await
             .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn set_package_wanxiang_grammar(
+    package_key: String,
+    enabled: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<WanxiangGrammarStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::wanxiang::set_package_wanxiang_grammar(
+            &state.core,
+            &package_key,
+            enabled,
+            &host,
+        )
+        .await
+        .map_err(|error| error.to_string())?,
     )
 }
 

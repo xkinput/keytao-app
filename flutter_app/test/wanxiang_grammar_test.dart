@@ -23,6 +23,7 @@ class _GrammarController extends ViewController {
       installed: false,
       version: '',
       size: BigInt.zero,
+      enabledPackages: const [],
     );
   }
 
@@ -31,6 +32,12 @@ class _GrammarController extends ViewController {
   @override
   Future<bool> manageWanxiangGrammar(bool installed) async {
     actions.add('grammar:$installed');
+    return true;
+  }
+
+  @override
+  Future<bool> setPackageWanxiangGrammar(String key, bool enabled) async {
+    actions.add('pkg-grammar:$key:$enabled');
     return true;
   }
 
@@ -72,6 +79,7 @@ void main() {
         installed: installed,
         version: '',
         size: BigInt.from(426770496),
+        enabledPackages: const [],
       );
       await _pump(tester, c);
       final row = find.byKey(rowKey);
@@ -102,7 +110,7 @@ void main() {
   });
 
   testWidgets(
-    'grammar row requires Wanxiang and runtime capability, never iOS',
+    'models section shows standalone Wanxiang model outside Wanxiang card, never iOS',
     (tester) async {
       for (final platform in BridgePlatform.values) {
         final c = _GrammarController(platform);
@@ -112,19 +120,38 @@ void main() {
           find.byKey(rowKey),
           platform == BridgePlatform.ios ? findsNothing : findsOneWidget,
         );
+        if (platform != BridgePlatform.ios) {
+          // Lives in the dedicated Models section, not inside Wanxiang card.
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('addon-models')),
+              matching: find.byKey(rowKey),
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('addon-wanxiang')),
+              matching: find.byKey(rowKey),
+            ),
+            findsNothing,
+          );
+        }
         c.wanxiangGrammar = WanxiangGrammarStatusDto(
           available: false,
           installed: false,
           version: '',
           size: BigInt.zero,
+          enabledPackages: const [],
         );
         await _pump(tester, c);
         expect(find.byKey(rowKey), findsNothing);
       }
+      // Still visible when Wanxiang Pinyin itself is not installed.
       final c = _GrammarController(BridgePlatform.macOs)..wanxiang = null;
       addTearDown(c.dispose);
       await _pump(tester, c);
-      expect(find.byKey(rowKey), findsNothing);
+      expect(find.byKey(rowKey), findsOneWidget);
     },
   );
 
@@ -146,6 +173,7 @@ void main() {
       installed: true,
       version: 'LTS',
       size: BigInt.from(1024),
+      enabledPackages: const [],
     );
     await _pump(tester, c);
     expect(action('1.0 KB'), findsOneWidget);
@@ -179,4 +207,99 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'cloud and local scheme overflow menus toggle Wanxiang model in Rime mode only',
+    (tester) async {
+      final c = _GrammarController(BridgePlatform.macOs)
+        ..wanxiangGrammar = WanxiangGrammarStatusDto(
+          available: true,
+          installed: true,
+          version: 'LTS',
+          size: BigInt.from(1024),
+          enabledPackages: const ['keytao'],
+        )
+        ..installedPackages = [
+          const InstalledPackageDto(
+            schemeKey: 'keytao',
+            version: '1.0.0',
+            active: true,
+            inUse: true,
+            hasPackageZip: true,
+            supportsUserWords: true,
+            engine: 'rime',
+          ),
+          const InstalledPackageDto(
+            schemeKey: 'local-demo',
+            version: '1.0.0',
+            active: false,
+            inUse: false,
+            hasPackageZip: true,
+            supportsUserWords: true,
+            displayName: '本地演示',
+            engine: 'rime',
+          ),
+        ];
+      addTearDown(c.dispose);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1200, 1200);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+
+      Future<void> pumpSchemes() async {
+        await tester.pumpWidget(
+          KeyTaoTheme(
+            platform: c.info.platform,
+            home: FScaffold(
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    SchemePackageRow(controller: c, schemeKey: 'keytao'),
+                    SchemePackageRow(controller: c, schemeKey: 'local-demo'),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      await pumpSchemes();
+      final moreButtons = find.byIcon(FLucideIcons.ellipsis);
+      expect(moreButtons, findsNWidgets(2));
+
+      // Cloud scheme (keytao): already enabled -> tapping disables.
+      await tester.tap(moreButtons.first);
+      await tester.pumpAndSettle();
+      final cloudItem = find.byKey(
+        const ValueKey('enable-wanxiang-grammar-keytao'),
+      );
+      expect(cloudItem, findsOneWidget);
+      await tester.tap(cloudItem);
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'pkg-grammar:keytao:false');
+
+      // Local scheme (local-demo): not enabled -> tapping enables.
+      await tester.tap(moreButtons.last);
+      await tester.pumpAndSettle();
+      final localItem = find.byKey(
+        const ValueKey('enable-wanxiang-grammar-local-demo'),
+      );
+      expect(localItem, findsOneWidget);
+      await tester.tap(localItem);
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'pkg-grammar:local-demo:true');
+
+      // In Libjd mode, the switch is hidden.
+      c.inputEngine = 'libjd_engine';
+      await pumpSchemes();
+      await tester.tap(moreButtons.first);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('enable-wanxiang-grammar-keytao')),
+        findsNothing,
+      );
+    },
+  );
 }

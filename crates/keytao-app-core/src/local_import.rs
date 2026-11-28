@@ -235,8 +235,10 @@ fn collect(
                 ImportFile::Bytes(bytes)
             } else if !relative.contains('/') && relative.ends_with(".schema.yaml") {
                 ImportFile::Bytes(read_source(&path, metadata.len())?)
-            } else if relative == crate::remove_filter::SCRIPT_PATH
-                && metadata.len() == crate::remove_filter::SCRIPT.len() as u64
+            } else if (relative == crate::remove_filter::SCRIPT_PATH
+                && metadata.len() == crate::remove_filter::SCRIPT.len() as u64)
+                || (relative == crate::grammar_hint::SCRIPT_PATH
+                    && metadata.len() == crate::grammar_hint::SCRIPT.len() as u64)
             {
                 let bytes = read_source(&path, metadata.len())?;
                 if crate::managed_custom::is_generated(&relative, &bytes) {

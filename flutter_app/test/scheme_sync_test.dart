@@ -106,6 +106,22 @@ class SyncAndroidHost extends AndroidHost {
     'granted': true,
     'writable': true,
   };
+
+  @override
+  Future<Map<String, dynamic>> voiceInputStatus() async => {
+    'enabled': true,
+    'ready': true,
+    'recognitionAvailable': true,
+    'engineInstalled': true,
+    'engineSelected': true,
+    'usesSystemDefault': false,
+    'selectionInvalid': false,
+    'selectedEngineName': 'Test Speech',
+    'hasModelSettings': true,
+    'permissionGranted': true,
+    'permissionPermanentlyDenied': false,
+    'engines': const <Map<String, dynamic>>[],
+  };
 }
 
 void main() {

@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -483794220;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1976557181;
 
 // Section: executor
 
@@ -4795,6 +4795,40 @@ fn wire__crate__api__core__set_desktop_english_switch_key_impl(
         },
     )
 }
+fn wire__crate__api__core__set_ime_candidate_panel_max_width_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_ime_candidate_panel_max_width",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_max_width = <Option<f32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::core::set_ime_candidate_panel_max_width(api_max_width)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__set_ime_embedded_composition_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -5091,6 +5125,51 @@ fn wire__crate__api__core__set_package_schemas_impl(
                     (move || async move {
                         let output_ok =
                             crate::api::core::set_package_schemas(api_scheme_key, api_ids).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__set_package_wanxiang_grammar_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_package_wanxiang_grammar",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_package_key = <String>::sse_decode(&mut deserializer);
+            let api_enabled = <bool>::sse_decode(&mut deserializer);
+            let api_android_deploy = decode_DartFn_Inputs__Output_String_AnyhowException(
+                <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
+            );
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::core::set_package_wanxiang_grammar(
+                            api_package_key,
+                            api_enabled,
+                            api_android_deploy,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -6649,6 +6728,7 @@ impl SseDecode for crate::api::types::ImeUiSettingsDto {
         let mut var_embeddedComposition = <bool>::sse_decode(deserializer);
         let mut var_hideCandidatePanel = <bool>::sse_decode(deserializer);
         let mut var_showTrayModeIndicator = <bool>::sse_decode(deserializer);
+        let mut var_candidatePanelMaxWidth = <Option<f32>>::sse_decode(deserializer);
         let mut var_effectiveEmbeddedComposition = <bool>::sse_decode(deserializer);
         let mut var_accentColor = <String>::sse_decode(deserializer);
         let mut var_accentColorOverride = <Option<String>>::sse_decode(deserializer);
@@ -6667,6 +6747,7 @@ impl SseDecode for crate::api::types::ImeUiSettingsDto {
             embedded_composition: var_embeddedComposition,
             hide_candidate_panel: var_hideCandidatePanel,
             show_tray_mode_indicator: var_showTrayModeIndicator,
+            candidate_panel_max_width: var_candidatePanelMaxWidth,
             effective_embedded_composition: var_effectiveEmbeddedComposition,
             accent_color: var_accentColor,
             accent_color_override: var_accentColorOverride,
@@ -8055,11 +8136,13 @@ impl SseDecode for crate::api::core::WanxiangGrammarStatusDto {
         let mut var_installed = <bool>::sse_decode(deserializer);
         let mut var_version = <String>::sse_decode(deserializer);
         let mut var_size = <u64>::sse_decode(deserializer);
+        let mut var_enabledPackages = <Vec<String>>::sse_decode(deserializer);
         return crate::api::core::WanxiangGrammarStatusDto {
             available: var_available,
             installed: var_installed,
             version: var_version,
             size: var_size,
+            enabled_packages: var_enabledPackages,
         };
     }
 }
@@ -8369,99 +8452,111 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        134 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        134 => wire__crate__api__core__set_ime_candidate_panel_max_width_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        135 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
+        135 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        136 => wire__crate__api__core__set_ime_show_tray_mode_indicator_impl(
+        136 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        137 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        138 => wire__crate__api__core__set_input_engine_impl(port, ptr, rust_vec_len, data_len),
-        139 => {
+        137 => wire__crate__api__core__set_ime_show_tray_mode_indicator_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        138 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        139 => wire__crate__api__core__set_input_engine_impl(port, ptr, rust_vec_len, data_len),
+        140 => {
             wire__crate__api__core__set_input_engine_enabled_impl(port, ptr, rust_vec_len, data_len)
         }
-        140 => {
+        141 => {
             wire__crate__api__core__set_package_easy_english_impl(port, ptr, rust_vec_len, data_len)
         }
-        141 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
-        142 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
-        143 => {
+        142 => wire__crate__api__core__set_package_schemas_impl(port, ptr, rust_vec_len, data_len),
+        143 => wire__crate__api__core__set_package_wanxiang_grammar_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        144 => wire__crate__api__core__set_reduce_motion_impl(port, ptr, rust_vec_len, data_len),
+        145 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        144 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
-        145 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        146 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        147 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        146 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
+        148 => wire__crate__api__core__set_theme_editor_color_scheme_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        147 => {
+        149 => {
             wire__crate__api__core__set_user_word_removed_impl(port, ptr, rust_vec_len, data_len)
         }
-        148 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
-        150 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
-        151 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
-        152 => wire__crate__api__core__system_font_path_impl(port, ptr, rust_vec_len, data_len),
-        153 => {
+        150 => wire__crate__api__core__set_website_settings_impl(port, ptr, rust_vec_len, data_len),
+        152 => wire__crate__api__core__switch_package_impl(port, ptr, rust_vec_len, data_len),
+        153 => wire__crate__api__core__sync_rime_user_data_impl(port, ptr, rust_vec_len, data_len),
+        154 => wire__crate__api__core__system_font_path_impl(port, ptr, rust_vec_len, data_len),
+        155 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        154 => {
+        156 => {
             wire__crate__api__core__trash_package_orphans_impl(port, ptr, rust_vec_len, data_len)
         }
-        155 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
-        156 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        157 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        158 => {
+        157 => wire__crate__api__core__update_theme_editor_impl(port, ptr, rust_vec_len, data_len),
+        158 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        159 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        160 => {
             wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        159 => {
+        161 => {
             wire__crate__api__core__wanxiang_grammar_status_impl(port, ptr, rust_vec_len, data_len)
         }
-        160 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        161 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        162 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        163 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        162 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        164 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        163 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        164 => wire__crate__api__core__windows_pending_ime_action_impl(
+        165 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        166 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        165 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        167 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        166 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        168 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -8488,7 +8583,7 @@ fn pde_ffi_dispatcher_sync_impl(
         120 => {
             wire__crate__api__core__resolve_theme_editor_preview_impl(ptr, rust_vec_len, data_len)
         }
-        149 => wire__crate__api__timing__start_app_operation_impl(ptr, rust_vec_len, data_len),
+        151 => wire__crate__api__timing__start_app_operation_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -9103,6 +9198,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ImeUiSettingsDto {
             self.embedded_composition.into_into_dart().into_dart(),
             self.hide_candidate_panel.into_into_dart().into_dart(),
             self.show_tray_mode_indicator.into_into_dart().into_dart(),
+            self.candidate_panel_max_width.into_into_dart().into_dart(),
             self.effective_embedded_composition
                 .into_into_dart()
                 .into_dart(),
@@ -10227,6 +10323,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::core::WanxiangGrammarStatusDt
             self.installed.into_into_dart().into_dart(),
             self.version.into_into_dart().into_dart(),
             self.size.into_into_dart().into_dart(),
+            self.enabled_packages.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -10707,6 +10804,7 @@ impl SseEncode for crate::api::types::ImeUiSettingsDto {
         <bool>::sse_encode(self.embedded_composition, serializer);
         <bool>::sse_encode(self.hide_candidate_panel, serializer);
         <bool>::sse_encode(self.show_tray_mode_indicator, serializer);
+        <Option<f32>>::sse_encode(self.candidate_panel_max_width, serializer);
         <bool>::sse_encode(self.effective_embedded_composition, serializer);
         <String>::sse_encode(self.accent_color, serializer);
         <Option<String>>::sse_encode(self.accent_color_override, serializer);
@@ -11713,6 +11811,7 @@ impl SseEncode for crate::api::core::WanxiangGrammarStatusDto {
         <bool>::sse_encode(self.installed, serializer);
         <String>::sse_encode(self.version, serializer);
         <u64>::sse_encode(self.size, serializer);
+        <Vec<String>>::sse_encode(self.enabled_packages, serializer);
     }
 }
 

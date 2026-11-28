@@ -494,6 +494,7 @@ pub struct ImeUiSettingsDto {
     pub embedded_composition: bool,
     pub hide_candidate_panel: bool,
     pub show_tray_mode_indicator: bool,
+    pub candidate_panel_max_width: Option<f32>,
     pub effective_embedded_composition: bool,
     pub accent_color: String,
     pub accent_color_override: Option<String>,

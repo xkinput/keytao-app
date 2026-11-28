@@ -528,6 +528,7 @@ class AppController extends ChangeNotifier {
   core.AddonStatusDto? addon;
   Map<String, dynamic>? storage;
   Map<String, dynamic>? ime;
+  Map<String, dynamic>? voiceInput;
   bool iosKeyboardEnabled = false;
   bool? iosKeyboardFullAccess;
   MacosImeStatusDto? macosIme;
@@ -992,10 +993,16 @@ class AppController extends ChangeNotifier {
   bool get isManagingWanxiangGrammar =>
       operation == OperationKind.wanxiangGrammar;
   bool get showWanxiangGrammar =>
-      !isIos &&
-      wanxiang?.installed == true &&
-      wanxiangGrammar?.available == true;
-  bool get canManageWanxiangGrammar => !busy && showWanxiangGrammar;
+      !isIos && wanxiangGrammar?.available == true;
+  bool get canManageWanxiangGrammar =>
+      !busy &&
+      showWanxiangGrammar &&
+      (!prefersLibjd || wanxiangGrammar?.installed == true);
+  bool get canToggleWanxiangGrammarOnPackages =>
+      !isIos && !prefersLibjd && wanxiangGrammar?.available == true;
+  bool isWanxiangGrammarEnabledFor(String packageKey) =>
+      wanxiangGrammar?.installed == true &&
+      (wanxiangGrammar?.enabledPackages.contains(packageKey) ?? false);
   bool get canCancelWanxiangGrammarDownload =>
       isManagingWanxiangGrammar &&
       wanxiangGrammarProgress?.stage.startsWith('wanxiang-grammar-download') ==
@@ -1948,6 +1955,9 @@ class AppController extends ChangeNotifier {
         }),
         read(() async {
           ime = await android.imeStatus();
+        }),
+        read(() async {
+          voiceInput = await android.voiceInputStatus();
         }),
       ]);
     } else if (isIos) {
@@ -3586,6 +3596,8 @@ class AppController extends ChangeNotifier {
             'font_size': ui.fontSize,
             'embedded_composition': ui.embeddedComposition,
             'hide_candidate_panel': ui.hideCandidatePanel,
+            if (ui.candidatePanelMaxWidth != null)
+              'candidate_panel_max_width': ui.candidatePanelMaxWidth,
           },
           if (isWindows) 'show_tray_mode_indicator': ui.showTrayModeIndicator,
         },
@@ -3945,6 +3957,11 @@ class AppController extends ChangeNotifier {
       }
       if (ui['show_tray_mode_indicator'] case final bool value when isWindows) {
         uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
+      }
+      if (!isMobile && ui.containsKey('candidate_panel_max_width')) {
+        uiSettings = await core.setImeCandidatePanelMaxWidth(
+          maxWidth: (ui['candidate_panel_max_width'] as num?)?.toDouble(),
+        );
       }
     }
     if (settings['desktop_english_mode'] case final String mode
@@ -4394,6 +4411,38 @@ class AppController extends ChangeNotifier {
   });
   }
 
+  Future<bool> setPackageWanxiangGrammar(String key, bool enabled) {
+    if (!requireRimeEngine()) return Future.value(false);
+    return run(() async {
+      deployingSchemeKey = key;
+      wanxiangGrammarError = null;
+      wanxiangGrammarProgress = null;
+      _startOperation(
+        OperationKind.wanxiangGrammar,
+        AppStrings.deployingLibrime,
+      );
+      try {
+        if (isAndroid) await _requireStorage();
+        wanxiangGrammar = await core.setPackageWanxiangGrammar(
+          packageKey: key,
+          enabled: enabled,
+          androidDeploy: _androidDeploy,
+        );
+        await _readLocal();
+      } catch (failure) {
+        try {
+          await _readWanxiangGrammar();
+          await _readLocal();
+        } catch (_) {}
+        wanxiangGrammarError = errorText(failure);
+        rethrow;
+      } finally {
+        deployingSchemeKey = null;
+        operation = null;
+      }
+    });
+  }
+
   Future<bool> manageRimeAddon(String id, bool installed) => run(() async {
     final slot = rimeAddons[id]!;
     _addonUpdateChecks[id] = Object();
@@ -4451,6 +4500,31 @@ class AppController extends ChangeNotifier {
   Future<bool> setKeyboardFlushBottom(bool enabled) => run(() async {
     await android.setKeyboardFlushBottom(enabled);
     ime = {...?ime, 'keyboardFlushBottom': enabled};
+  });
+
+  Future<bool> refreshVoiceInputStatus() => run(() async {
+    if (!isAndroid) return;
+    voiceInput = await android.voiceInputStatus();
+  });
+
+  Future<bool> setVoiceInputEnabled(bool enabled) => run(() async {
+    if (!isAndroid) return;
+    voiceInput = await android.setVoiceInputEnabled(enabled);
+  });
+
+  Future<bool> requestVoicePermission() => run(() async {
+    if (!isAndroid) return;
+    voiceInput = await android.requestVoicePermission();
+  });
+
+  Future<bool> openVoiceInputSettings() => run(() async {
+    if (!isAndroid) return;
+    await android.openVoiceInputSettings();
+  });
+
+  Future<bool> openVoiceModelSettings() => run(() async {
+    if (!isAndroid) return;
+    await android.openVoiceModelSettings();
   });
 
   Future<bool> _saveAndroid(
@@ -4944,6 +5018,10 @@ class AppController extends ChangeNotifier {
   Future<bool> saveShowTrayModeIndicator(bool value) => _saveAppearance(() async {
     uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
   });
+  Future<bool> saveCandidatePanelMaxWidth(double? value) =>
+      _saveAppearance(() async {
+        uiSettings = await core.setImeCandidatePanelMaxWidth(maxWidth: value);
+      });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {
     await _readLocal();
     if (value == EnglishModeDto.schema && !englishReady) {

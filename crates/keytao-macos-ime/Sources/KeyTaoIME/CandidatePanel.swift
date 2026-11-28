@@ -78,7 +78,8 @@ class CandidatePanel: NSPanel {
         }
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let maxWidth = max(1, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2)
+        let screenMaxWidth = max(1, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2)
+        let maxWidth = theme.ui.candidatePanelMaxWidth.map { min(screenMaxWidth, max(1, $0)) } ?? screenMaxWidth
         let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2 - chromeInset * 2))
         let horizontal = model.orientation == .horizontal
         let gap = theme.panel.gap

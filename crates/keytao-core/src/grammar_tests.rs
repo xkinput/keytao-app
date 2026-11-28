@@ -628,3 +628,305 @@ fn real_librime_non_grammar_sentence_parity() {
     // This fixture has a unique best sentence; BeamSearch tie order is not covered.
     assert_eq!(sentences[0], sentences[1]);
 }
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn module_gate_accepts_any_deployed_grammar_schema_and_custom_model() {
+    let dir = scratch_dir();
+    fs::write(
+        dir.join("default.custom.yaml"),
+        "patch:\n  schema_list:\n    - schema: my_pinyin\n    - schema: wanxiang\n    - schema: plain\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("build/my_pinyin.schema.yaml"),
+        "schema:\n  schema_id: my_pinyin\ngrammar:\n  language: custom-zh-hans\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("build/wanxiang.schema.yaml"),
+        "schema:\n  schema_id: wanxiang\ntranslator:\n  dictionary: wanxiang\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("build/plain.schema.yaml"),
+        "schema:\n  schema_id: plain\ntranslator:\n  dictionary: plain\n",
+    )
+    .unwrap();
+
+    // No custom-zh-hans.gram yet -> disabled.
+    assert!(!wanxiang_grammar_enabled(&dir));
+
+    // Path traversal language is rejected even if a file exists.
+    fs::write(
+        dir.join("build/bad.schema.yaml"),
+        "schema:\n  schema_id: bad\ngrammar:\n  language: ../escape\n",
+    )
+    .unwrap();
+    assert!(!wanxiang_grammar_enabled(&dir));
+
+    // Once custom-zh-hans.gram exists, octagram gate enables without wanxiang.schema.yaml grammar.
+    fs::write(dir.join("custom-zh-hans.gram"), b"fixture").unwrap();
+    assert!(wanxiang_grammar_enabled(&dir));
+
+    patch_neutral_grammar(&dir);
+    let my_pinyin = fs::read_to_string(dir.join("build/my_pinyin.schema.yaml")).unwrap();
+    assert!(my_pinyin.contains("language: custom-zh-hans"));
+    assert!(!my_pinyin.contains("non_collocation_penalty"));
+
+    // Both sibling non-grammar schemas (including wanxiang when it has no grammar) get neutral penalty.
+    for id in ["wanxiang", "plain"] {
+        let compiled: Value = serde_yaml::from_slice(
+            &fs::read(dir.join(format!("build/{id}.schema.yaml"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(compiled["grammar"]["language"].as_str(), Some(""), "{id}");
+        assert_eq!(
+            compiled["grammar"]["non_collocation_penalty"].as_f64(),
+            Some(NEUTRAL_GRAMMAR_PENALTY),
+            "{id}"
+        );
+    }
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn real_librime_generic_grammar_loads_octagram_and_marks_taiji_comment() {
+    const CHILD_MODE: &str = "KEYTAO_GENERIC_GRAMMAR_TAIJI_CHILD";
+    const GRAMMAR_HINT_LUA: &str =
+        include_str!("../../keytao-app-core/src/keytao_grammar_hint.lua");
+
+    if std::env::var(CHILD_MODE).as_deref() == Ok("run") {
+        let dir = scratch_dir();
+        fs::create_dir_all(dir.join("lua")).unwrap();
+        fs::write(dir.join("lua/keytao_grammar_hint.lua"), GRAMMAR_HINT_LUA).unwrap();
+        fs::write(
+            dir.join("lua/test_comment.lua"),
+            r#"local M = {}
+function M.func(translation, env)
+  local preset = env.engine.schema.config:get_string("test_preset_comment") or ""
+  for cand in translation:iter() do
+    local genuine = (cand.get_genuine and cand:get_genuine()) or cand
+    if genuine.type == "sentence" and preset ~= "" then
+      cand.comment = preset
+    end
+    yield(cand)
+  end
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let schema_list = "\
+schema_list:
+  - schema: custom_gram
+  - schema: custom_gram_comment
+  - schema: custom_gram_dedup
+  - schema: custom_gram_off
+  - schema: plain_sibling
+";
+        fs::write(
+            dir.join("default.yaml"),
+            format!("config_version: '1'\n{schema_list}"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("default.custom.yaml"),
+            format!("patch:\n  {}", schema_list.replace('\n', "\n  ")),
+        )
+        .unwrap();
+
+        let script_schema = |id: &str, filters: &str, extra: &str| {
+            format!(
+                "schema:\n  schema_id: {id}\n  name: {id}\n  version: '1'\n\
+engine:\n  processors: [speller, selector, express_editor]\n  \
+segmentors: [abc_segmentor, fallback_segmentor]\n  \
+translators: [script_translator]\n  \
+filters: [{filters}]\n\
+speller:\n  alphabet: abcd\n  delimiter: \" '\"\n\
+translator:\n  dictionary: custom_gram\n  prism: custom_gram\n  enable_sentence: true\n  \
+enable_user_dict: false\n{extra}"
+            )
+        };
+        let table_schema = |id: &str| {
+            format!(
+                "schema:\n  schema_id: {id}\n  name: {id}\n  version: '1'\n\
+engine:\n  processors: [speller, selector, express_editor]\n  \
+segmentors: [abc_segmentor, fallback_segmentor]\n  \
+translators: [table_translator]\n  \
+filters: [uniquifier]\n\
+speller:\n  alphabet: abcd\n  max_code_length: 8\n\
+translator:\n  dictionary: custom_gram\n  enable_sentence: true\n  \
+enable_completion: false\n  enable_user_dict: false\n"
+            )
+        };
+
+        fs::write(
+            dir.join("custom_gram.schema.yaml"),
+            script_schema(
+                "custom_gram",
+                "uniquifier, lua_filter@*keytao_grammar_hint",
+                "grammar:\n  language: custom-model\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("custom_gram_comment.schema.yaml"),
+            script_schema(
+                "custom_gram_comment",
+                "uniquifier, lua_filter@*test_comment, lua_filter@*keytao_grammar_hint",
+                "grammar:\n  language: custom-model\ntest_preset_comment: '注释'\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("custom_gram_dedup.schema.yaml"),
+            script_schema(
+                "custom_gram_dedup",
+                "uniquifier, lua_filter@*test_comment, lua_filter@*keytao_grammar_hint",
+                "grammar:\n  language: custom-model\ntest_preset_comment: '已有☯'\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("custom_gram_off.schema.yaml"),
+            script_schema(
+                "custom_gram_off",
+                "uniquifier, lua_filter@*keytao_grammar_hint",
+                "grammar:\n  language: custom-model\nkeytao:\n  grammar_hint: false\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("plain_sibling.schema.yaml"),
+            table_schema("plain_sibling"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("custom_gram.dict.yaml"),
+            "---\nname: custom_gram\nversion: '1'\nsort: by_weight\n\
+use_preset_vocabulary: false\n...\n甲\ta\t1e9\n乙\tb\t1e9\n丙\tc\t1e9\n丁\td\t1e9\n替代\tabc\t1\n",
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join(super::ACTIVE_SCHEME_MANIFEST),
+            serde_json::to_vec(&serde_json::json!({
+                "root": dir.canonicalize().unwrap(),
+                "scheme_key": "local-custom-gram",
+                "manifest": {
+                    "custom_gram.schema.yaml": "fixture",
+                    "custom_gram_comment.schema.yaml": "fixture",
+                    "custom_gram_dedup.schema.yaml": "fixture",
+                    "custom_gram_off.schema.yaml": "fixture",
+                    "plain_sibling.schema.yaml": "fixture",
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Deploy first without .gram, then place custom-model.gram (non-wanxiang!) and reload.
+        let runtime = super::ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+        runtime.init().expect("deploy schemas");
+        fs::write(dir.join("custom-model.gram"), b"fixture").unwrap();
+        runtime
+            .reload_without_deploy()
+            .expect("reload with custom .gram model");
+
+        unsafe {
+            let api = librime_sys::rime_get_api();
+            let has_octagram = !((*api).find_module.unwrap())(c"octagram".as_ptr()).is_null();
+            let has_lua = !((*api).find_module.unwrap())(c"lua".as_ptr()).is_null();
+            assert!(has_octagram, "octagram module should load for non-wanxiang .gram");
+            assert!(has_lua, "lua module should load");
+        }
+
+        let sibling: Value = serde_yaml::from_slice(
+            &fs::read(dir.join("build/plain_sibling.schema.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sibling["grammar"]["language"].as_str(), Some(""));
+        assert_eq!(
+            sibling["grammar"]["non_collocation_penalty"].as_f64(),
+            Some(NEUTRAL_GRAMMAR_PENALTY)
+        );
+
+        let session = runtime.create_session().expect("create session");
+        let type_and_top = |schema_id: &str, keys: &[u8]| -> (String, String) {
+            session.select_schema(schema_id).unwrap();
+            for key in keys {
+                session.process_key_result(u32::from(*key), 0).unwrap();
+            }
+            let state = session.state();
+            let top = state
+                .candidates
+                .first()
+                .expect("expected at least one candidate");
+            let pair = (top.text.clone(), top.comment.clone().unwrap_or_default());
+            // Escape (0xff1b) clears composition before the next check.
+            session.process_key_result(0xff1b, 0).unwrap();
+            pair
+        };
+
+        // 1. Multi-segment script_translator sentence gets monochrome Taiji comment, text stays clean.
+        // With octagram active (default -12 penalty), 4-word sentence "甲乙丙丁" wins.
+        let (text, comment) = type_and_top("custom_gram", b"abcd");
+        assert_eq!(text, "甲乙丙丁");
+        assert_eq!(comment, "☯");
+
+        // 2. Single dictionary word (non-sentence) does NOT get Taiji comment.
+        let (text, comment) = type_and_top("custom_gram", b"a");
+        assert_eq!(text, "甲");
+        assert_eq!(comment, "");
+
+        // 3. Existing comment is preserved with space + Taiji.
+        let (text, comment) = type_and_top("custom_gram_comment", b"abcd");
+        assert_eq!(text, "甲乙丙丁");
+        assert_eq!(comment, "注释 ☯");
+
+        // 4. Existing Taiji is not duplicated.
+        let (text, comment) = type_and_top("custom_gram_dedup", b"abcd");
+        assert_eq!(text, "甲乙丙丁");
+        assert_eq!(comment, "已有☯");
+
+        // 5. Explicit opt-out keytao/grammar_hint: false suppresses Taiji on script_translator.
+        let (text, comment) = type_and_top("custom_gram_off", b"abcd");
+        assert_eq!(text, "甲乙丙丁");
+        assert_eq!(comment, "");
+
+        // 6. Sibling non-grammar table_translator schema keeps neutral penalty ("替代丁").
+        let (text, _comment) = type_and_top("plain_sibling", b"abcd");
+        assert_eq!(text, "替代丁");
+
+        return;
+    }
+
+    let plugins_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/librime/macos-universal/lib/rime-plugins");
+    if !plugins_dir.join("librime-octagram.dylib").is_file()
+        || !plugins_dir.join("librime-lua.dylib").is_file()
+    {
+        eprintln!("skipping real-librime generic grammar + taiji test: vendored plugins absent");
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "grammar_tests::real_librime_generic_grammar_loads_octagram_and_marks_taiji_comment",
+            "--nocapture",
+        ])
+        .env(CHILD_MODE, "run")
+        .output()
+        .expect("run isolated librime generic grammar + taiji test");
+    assert!(
+        output.status.success(),
+        "child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

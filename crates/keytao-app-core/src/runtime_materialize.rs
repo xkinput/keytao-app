@@ -299,6 +299,8 @@ impl Manifest {
 struct Settings {
     #[serde(default)]
     easy_english_packages: BTreeSet<String>,
+    #[serde(default)]
+    wanxiang_grammar_packages: BTreeSet<String>,
 }
 
 fn read_settings(root: &Path) -> Result<Settings, CoreError> {
@@ -310,6 +312,80 @@ fn read_settings(root: &Path) -> Result<Settings, CoreError> {
 
 pub fn easy_english_enabled(root: &Path, key: &str) -> Result<bool, CoreError> {
     Ok(read_settings(root)?.easy_english_packages.contains(key))
+}
+
+pub fn wanxiang_grammar_enabled(root: &Path, key: &str) -> Result<bool, CoreError> {
+    Ok(read_settings(root)?.wanxiang_grammar_packages.contains(key))
+}
+
+pub fn wanxiang_grammar_packages(root: &Path) -> Result<BTreeSet<String>, CoreError> {
+    Ok(read_settings(root)?.wanxiang_grammar_packages)
+}
+
+pub(crate) fn package_installed(core: &Core, root: &Path, key: &str) -> Result<bool, CoreError> {
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    let installed = isolated_package_keys(core, root, &shared)?;
+    Ok(installed.contains(key)
+        || (key == "builtin/keytao"
+            && shared.join("default.yaml").is_file()
+            && RuntimeDirs::isolated_user_data_dir(root, key)
+                .is_some_and(|path| path.is_dir())))
+}
+
+pub(crate) fn installed_wanxiang_grammar_packages(
+    core: &Core,
+    root: &Path,
+) -> Result<Vec<String>, CoreError> {
+    let enabled = read_settings(root)?.wanxiang_grammar_packages;
+    if enabled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shared = crate::deploy::deploy_shared_data_dir(core, root);
+    let installed = isolated_package_keys(core, root, &shared)?;
+    Ok(enabled
+        .into_iter()
+        .filter(|key| {
+            key != crate::wanxiang::SCHEMA_ID
+                && key != EASY_EN_ADDON_ID
+                && (installed.contains(key)
+                    || (key == "builtin/keytao"
+                        && shared.join("default.yaml").is_file()
+                        && RuntimeDirs::isolated_user_data_dir(root, key)
+                            .is_some_and(|path| path.is_dir())))
+        })
+        .collect())
+}
+
+pub(crate) fn update_wanxiang_grammar(
+    root: &Path,
+    key: &str,
+    enabled: bool,
+) -> Result<bool, CoreError> {
+    let path = safe(root, RuntimeDirs::SETTINGS_FILE)?;
+    let mut settings: serde_json::Map<String, serde_json::Value> = read_optional(&path)?
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?
+        .unwrap_or_default();
+    let mut packages: BTreeSet<String> = settings
+        .get("wanxiang_grammar_packages")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let changed = if enabled {
+        packages.insert(key.into())
+    } else {
+        packages.remove(key)
+    };
+    if changed {
+        settings.insert(
+            "wanxiang_grammar_packages".into(),
+            serde_json::to_value(packages)?,
+        );
+        write_file(&path, &serde_json::to_vec(&settings)?)?;
+    }
+    Ok(changed)
 }
 
 pub(crate) fn installed_easy_english_packages(
@@ -600,6 +676,10 @@ fn prepare_targets(
                         publish_package_sources(control_root, namespace, &key, &name, &files)?;
                     }
                 }
+                let wanxiang_grammar = key != crate::wanxiang::SCHEMA_ID
+                    && key != EASY_EN_ADDON_ID
+                    && settings.wanxiang_grammar_packages.contains(&key)
+                    && crate::wanxiang::shared_grammar_model_path(control_root).is_some();
                 let prepared = prepare_runtime(
                     control_root,
                     bundled,
@@ -607,6 +687,7 @@ fn prepare_targets(
                     files,
                     selection.as_deref(),
                     overlay_for(&key)?,
+                    wanxiang_grammar,
                     stage,
                     core.env().platform == crate::Platform::Windows,
                 )?;
@@ -953,6 +1034,7 @@ fn prepare_runtime(
     sources: RuntimeFiles,
     selection: Option<&[String]>,
     overlay: Option<&RuntimeFiles>,
+    wanxiang_grammar: bool,
     stage: bool,
     windows_lua: bool,
 ) -> Result<Option<tempfile::TempDir>, CoreError> {
@@ -1031,7 +1113,8 @@ fn prepare_runtime(
             || bundled_files.contains_key(relative)
             || generated.contains_key(relative)
             || is_account_user_file
-            || relative == crate::remove_filter::SCRIPT_PATH;
+            || relative == crate::remove_filter::SCRIPT_PATH
+            || relative == crate::grammar_hint::SCRIPT_PATH;
         if relative == keytao_core::english_mode::SETTINGS_FILE
             || (tracked.is_none() && !user_path(relative) && !seeds_file)
         {
@@ -1094,14 +1177,23 @@ fn prepare_runtime(
         }
     }
 
-    regenerate_custom(
+    let grammar_languages = regenerate_custom(
         &runtime,
         &schema_sources,
         &selected,
         crate::ime_settings::read_candidate_page_size(control_root),
+        wanxiang_grammar,
         &mut owned,
         &mut generated,
         &user,
+    )?;
+    link_shared_grammar_models(
+        control_root,
+        &runtime,
+        &grammar_languages,
+        &owned,
+        &user,
+        &bundled_files,
     )?;
     let schema_custom = |path: &str| {
         path.strip_suffix(".custom.yaml")
@@ -1560,15 +1652,83 @@ fn default_custom(
         .map_err(|error| CoreError::Other(error.to_string()))
 }
 
+fn is_managed_lua_script(path: &str) -> bool {
+    path == crate::remove_filter::SCRIPT_PATH || path == crate::grammar_hint::SCRIPT_PATH
+}
+
+fn is_stageable_config_yaml(path: &str) -> bool {
+    path.ends_with(".custom.yaml")
+        || is_managed_lua_script(path)
+        || (!path.contains('/')
+            && (path.ends_with(".yaml") || path.ends_with(".yml"))
+            && !path.ends_with(".dict.yaml")
+            && !path.ends_with(".dict.yml"))
+}
+
+fn link_shared_grammar_models(
+    control_root: &Path,
+    runtime: &Path,
+    languages: &BTreeSet<String>,
+    owned: &RuntimeFiles,
+    user: &Files,
+    bundled: &RuntimeFiles,
+) -> Result<(), CoreError> {
+    if cfg!(target_os = "ios") || languages.is_empty() {
+        return Ok(());
+    }
+    for language in languages {
+        let file_name = format!("{language}.gram");
+        if owned.contains_key(&file_name)
+            || user.contains_key(&file_name)
+            || bundled.contains_key(&file_name)
+        {
+            continue;
+        }
+        let target = safe(runtime, &file_name)?;
+        if target.exists() {
+            continue;
+        }
+        let candidates = [
+            control_root.join(&file_name),
+            control_root
+                .join("runtime")
+                .join("wanxiang")
+                .join(&file_name),
+        ];
+        for source in candidates {
+            if !fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_file()) {
+                continue;
+            }
+            match fs::hard_link(&source, &target) {
+                Ok(()) => break,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => break,
+                Err(_) => {
+                    let temp = tempfile::Builder::new()
+                        .prefix(".keytao-gram-")
+                        .tempfile_in(runtime)?;
+                    fs::copy(&source, temp.path())?;
+                    match temp.persist_noclobber(&target) {
+                        Ok(_) => break,
+                        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => break,
+                        Err(error) => return Err(error.error.into()),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn regenerate_custom(
     runtime: &Path,
     sources: &Files,
     schemas: &[String],
     page_size: Option<u8>,
+    wanxiang_grammar: bool,
     owned: &mut RuntimeFiles,
     generated: &mut Files,
     user: &Files,
-) -> Result<(), CoreError> {
+) -> Result<BTreeSet<String>, CoreError> {
     let staging = tempfile::Builder::new()
         .prefix(".keytao-materialize-")
         .tempdir_in(runtime)?;
@@ -1580,16 +1740,18 @@ fn regenerate_custom(
         fs::create_dir_all(destination.parent().unwrap())?;
         fs::write(destination, bytes)?;
     }
-    for (path, source) in owned.iter().filter(|(path, _)|
-        path.ends_with(".custom.yaml") || *path == crate::remove_filter::SCRIPT_PATH
-    ) {
+    for (path, source) in owned
+        .iter()
+        .filter(|(path, _)| is_stageable_config_yaml(path))
+    {
         let destination = safe(stage, path)?;
         fs::create_dir_all(destination.parent().unwrap())?;
         source.copy_to(&mut fs::File::create(destination)?)?;
     }
-    for (path, bytes) in user.iter().filter(|(path, _)| {
-        path.ends_with(".custom.yaml") || *path == crate::remove_filter::SCRIPT_PATH
-    }) {
+    for (path, bytes) in user
+        .iter()
+        .filter(|(path, _)| is_stageable_config_yaml(path))
+    {
         let destination = safe(stage, path)?;
         fs::create_dir_all(destination.parent().unwrap())?;
         fs::write(destination, bytes)?;
@@ -1600,11 +1762,16 @@ fn regenerate_custom(
             serde_json::to_vec(&serde_json::json!({ "candidatePageSize": page_size }))?,
         )?;
     }
-    // Use the package's selected schemas for both the remove filter and candidate page size.
-    managed_custom::regenerate(stage, &schemas.iter().cloned().collect())
+    let active: BTreeSet<String> = schemas.iter().cloned().collect();
+    // Use the package's selected schemas for managed filters, grammar, and candidate page size.
+    managed_custom::regenerate_with_options(stage, &active, wanxiang_grammar)
         .map_err(CoreError::Other)?;
+    let grammar_languages: BTreeSet<String> =
+        crate::grammar_hint::configured_grammar_languages(stage, &active)
+            .into_values()
+            .collect();
     for path in managed_custom::generated_paths(stage).map_err(CoreError::Other)? {
-        if path == crate::remove_filter::SCRIPT_PATH && user.contains_key(&path) {
+        if is_managed_lua_script(&path) && user.contains_key(&path) {
             continue;
         }
         let bytes = fs::read(safe(stage, &path)?)?;
@@ -1615,7 +1782,7 @@ fn regenerate_custom(
             generated.insert(path, bytes);
         }
     }
-    Ok(())
+    Ok(grammar_languages)
 }
 
 fn optional_sha256(path: &Path) -> Result<Option<String>, CoreError> {
@@ -1918,6 +2085,10 @@ mod tests {
         overlay: Option<&Files>,
     ) -> Result<(), CoreError> {
         let overlay = overlay.cloned().map(runtime_files);
+        let wanxiang_grammar = key != crate::wanxiang::SCHEMA_ID
+            && key != EASY_EN_ADDON_ID
+            && wanxiang_grammar_enabled(control_root, key)?
+            && crate::wanxiang::shared_grammar_model_path(control_root).is_some();
         prepare_runtime(
             control_root,
             bundled,
@@ -1925,6 +2096,7 @@ mod tests {
             runtime_files(sources),
             selection,
             overlay.as_ref(),
+            wanxiang_grammar,
             false,
             cfg!(windows),
         )
@@ -2116,7 +2288,7 @@ mod tests {
         sources.remove("lua/TJ/stats.txt");
 
         let stage = prepare_runtime(
-            root, &bundled, key, runtime_files(sources.clone()), None, None, true, false,
+            root, &bundled, key, runtime_files(sources.clone()), None, None, false, true, false,
         )
         .unwrap()
         .unwrap();
@@ -2548,6 +2720,7 @@ mod tests {
             runtime_files(sources.clone()),
             None,
             None,
+            false,
             true,
             false,
         )
@@ -2699,5 +2872,98 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read_dir(target).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "ios"))]
+    fn materialization_links_shared_grammar_model_and_registers_taiji_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        // Simulate Wanxiang grammar model already downloaded in runtime/wanxiang/.
+        let wanxiang_runtime = RuntimeDirs::isolated_user_data_dir(root, "wanxiang").unwrap();
+        fs::create_dir_all(&wanxiang_runtime).unwrap();
+        let shared_gram = wanxiang_runtime.join("wanxiang-lts-zh-hans.gram");
+        fs::write(&shared_gram, b"wanxiang-gram-fixture").unwrap();
+
+        let mut sources = fixture(root, "rime_ice");
+        sources.insert(
+            "rime_ice.schema.yaml".into(),
+            b"schema: {schema_id: rime_ice, name: Rime Ice}\n".to_vec(),
+        );
+        sources.insert(
+            "rime_ice.custom.yaml".into(),
+            b"patch:\n  grammar/language: wanxiang-lts-zh-hans\n".to_vec(),
+        );
+
+        materialize(root, &bundled, "rime_ice", sources, None, None).unwrap();
+
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "rime_ice").unwrap();
+        let linked_gram = runtime.join("wanxiang-lts-zh-hans.gram");
+        assert!(linked_gram.is_file());
+        assert_eq!(fs::read(&linked_gram).unwrap(), b"wanxiang-gram-fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&linked_gram).unwrap().ino(),
+                fs::metadata(&shared_gram).unwrap().ino()
+            );
+        }
+
+        let script = runtime.join(crate::grammar_hint::SCRIPT_PATH);
+        assert!(script.is_file());
+        assert_eq!(
+            fs::read_to_string(&script).unwrap(),
+            crate::grammar_hint::SCRIPT
+        );
+        let custom = fs::read_to_string(runtime.join("rime_ice.custom.yaml")).unwrap();
+        assert!(custom.contains("lua_filter@*keytao_grammar_hint"));
+        assert_eq!(
+            crate::managed_custom::strip(&custom).unwrap(),
+            "patch:\n  grammar/language: wanxiang-lts-zh-hans\n"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "ios"))]
+    fn package_wanxiang_grammar_toggle_injects_and_strips_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let bundled = root.join("rime-data");
+        let shared_gram = root.join("wanxiang-lts-zh-hans.gram");
+        fs::write(&shared_gram, b"shared-wanxiang-gram").unwrap();
+
+        let mut sources = fixture(root, "local-demo");
+        sources.insert(
+            "local-demo.schema.yaml".into(),
+            b"schema: {schema_id: local-demo, name: Local Demo}\n".to_vec(),
+        );
+        sources.insert(
+            "local-demo.custom.yaml".into(),
+            b"patch:\n  menu/page_size: 7\n".to_vec(),
+        );
+
+        assert!(update_wanxiang_grammar(root, "local-demo", true).unwrap());
+        assert!(wanxiang_grammar_enabled(root, "local-demo").unwrap());
+        materialize(root, &bundled, "local-demo", sources.clone(), None, None).unwrap();
+
+        let runtime = RuntimeDirs::isolated_user_data_dir(root, "local-demo").unwrap();
+        assert!(runtime.join("wanxiang-lts-zh-hans.gram").is_file());
+        assert!(runtime.join(crate::grammar_hint::SCRIPT_PATH).is_file());
+        let custom = fs::read_to_string(runtime.join("local-demo.custom.yaml")).unwrap();
+        assert!(custom.contains("grammar/language: wanxiang-lts-zh-hans"));
+        assert!(custom.contains("lua_filter@*keytao_grammar_hint"));
+        assert_eq!(
+            crate::managed_custom::strip(&custom).unwrap(),
+            "patch:\n  menu/page_size: 7\n"
+        );
+
+        // Disabling removes both managed grammar patch and managed taiji script while preserving user custom yaml.
+        assert!(update_wanxiang_grammar(root, "local-demo", false).unwrap());
+        materialize(root, &bundled, "local-demo", sources, None, None).unwrap();
+        let custom_after = fs::read_to_string(runtime.join("local-demo.custom.yaml")).unwrap();
+        assert_eq!(custom_after, "patch:\n  menu/page_size: 7\n");
+        assert!(!runtime.join(crate::grammar_hint::SCRIPT_PATH).exists());
     }
 }

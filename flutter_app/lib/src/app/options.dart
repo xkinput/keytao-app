@@ -101,6 +101,10 @@ const keytaoWebsiteOrigins = [
 const candidateFontMin = 10.0;
 const candidateFontMax = 36.0;
 const candidateFontDivisions = 26;
+const candidatePanelMaxWidthMin = 240.0;
+const candidatePanelMaxWidthMax = 1600.0;
+const candidatePanelMaxWidthDivisions = 68;
+const candidatePanelMaxWidthDefaultPreview = 640.0;
 
 enum AppPage {
   input('ime', AppStrings.input),

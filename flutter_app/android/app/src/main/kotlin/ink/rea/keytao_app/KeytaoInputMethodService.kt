@@ -334,6 +334,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         applyKeyboardPresentation(loadPresentationConfig())
         view.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
+        refreshVoiceRecognitionAvailability()
         refreshVoiceInput()
         KeytaoRuntimeLog.event("lifecycle", "ime_create_input_view", KeytaoRuntimeLog.elapsedMs(started))
         return host
@@ -379,7 +380,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         resetDeploymentInput()
         cancelVoiceInput()
-        voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
+        refreshVoiceRecognitionAvailability()
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
         onEvaluateInputViewShown()
@@ -449,6 +450,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
         keyboardView?.updateState(currentState)
+        refreshVoiceRecognitionAvailability()
         refreshVoiceInput()
         if (!configurationChanging) scheduleAvailabilityRefresh()
         logStartInput("input_view", info, restarting, started)
@@ -611,7 +613,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val inputType = info?.inputType ?: InputType.TYPE_NULL
         val imeOptions = info?.imeOptions ?: EditorInfo.IME_ACTION_NONE
         val nextPrivacy = KeytaoEditorPolicy.resolvePrivacyMode(inputType, imeOptions)
-        directInputEditor = KeytaoEditorPolicy.isDirectInputEditor(inputType)
+        val nextDirectInput = KeytaoEditorPolicy.isDirectInputEditor(inputType)
+        val directInputChanged = nextDirectInput != directInputEditor
+        directInputEditor = nextDirectInput
         if (nextPrivacy != privacyMode) {
             cancelVoiceInput()
             privacyMode = nextPrivacy
@@ -633,6 +637,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 lastCommittedText = null
                 restoreAllOnNextDirectionalRestore = false
             }
+        } else if (directInputChanged) {
+            if (directInputEditor) cancelVoiceInput()
+            refreshVoiceInput()
         }
         val bypass = !privacyMode.allowsComposing || directInputEditor
         val targetAsciiMode = if (bypass && !bypassAsciiActive) {
@@ -3432,10 +3439,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (voiceInput.state != KeytaoVoiceInput.State.IDLE) cancelVoiceInput()
     }
 
+    private fun refreshVoiceRecognitionAvailability() {
+        voiceRecognitionAvailable = KeytaoVoiceSupport.isVoiceInputEnabled(this) &&
+            KeytaoVoiceSupport.isRecognitionAvailable(this)
+    }
+
     private fun refreshVoiceInput() {
         keyboardView?.updateVoiceInput(
             available = voiceRecognitionAvailable && inputViewShown && !serviceDestroyed,
-            privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsLearning,
+            privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsVoiceInput,
             permanentlyDenied = KeytaoVoicePermissionActivity.isPermanentlyDenied(this),
             voiceState = voiceInput.state,
         )
@@ -3467,9 +3479,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onVoiceInputRequested(): Boolean {
         if (voiceInput.state != KeytaoVoiceInput.State.IDLE || !inputViewShown || serviceDestroyed || currentInputConnection == null) return false
+        refreshVoiceRecognitionAvailability()
         if (!KeytaoVoiceInput.isOffered(
                 recognitionAvailable = voiceRecognitionAvailable,
-                privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsLearning,
+                privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsVoiceInput,
                 hasComposition = composing || currentState.hasComposition,
                 hasConfiguredAction = false,
                 permanentlyDenied = KeytaoVoicePermissionActivity.isPermanentlyDenied(this),

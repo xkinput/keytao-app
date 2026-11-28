@@ -57,6 +57,7 @@ pub struct ImeUiSettings {
     pub embedded_composition: bool,
     pub hide_candidate_panel: bool,
     pub show_tray_mode_indicator: bool,
+    pub candidate_panel_max_width: Option<f32>,
     pub effective_embedded_composition: bool,
     pub accent_color: String,
     pub accent_color_override: Option<String>,
@@ -107,6 +108,7 @@ fn ime_ui_settings_from_paths(
         embedded_composition: theme.ui.embedded_composition,
         hide_candidate_panel: theme.ui.hide_candidate_panel,
         show_tray_mode_indicator: theme.ui.show_tray_mode_indicator,
+        candidate_panel_max_width: theme.ui.candidate_panel_max_width,
         effective_embedded_composition: theme.ui.effective_embedded_composition(),
         accent_color: color_to_hex(accent_color),
         accent_color_override: theme.ui.accent_color.map(color_to_hex),
@@ -209,6 +211,41 @@ fn write_ime_ui_flag_to_path(
         serde_yaml::Value::String(key.into()),
         serde_yaml::Value::Bool(value),
     );
+    let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
+    write_file_atomic(&theme_path, content.as_bytes())
+        .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_candidate_panel_max_width_to_path(
+    theme_path: PathBuf,
+    max_width: Option<f32>,
+) -> Result<(), String> {
+    let normalized = max_width
+        .map(keytao_theme::normalize_candidate_panel_max_width)
+        .transpose()?;
+    if let Some(parent) = theme_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
+    }
+    let mut root = keytao_theme::theme_store::read_theme_for_update(&theme_path)?;
+    let mapping = root
+        .as_mapping_mut()
+        .ok_or("主题配置根节点必须是 YAML mapping")?;
+    mapping
+        .entry(serde_yaml::Value::String("version".into()))
+        .or_insert_with(|| {
+            serde_yaml::Value::Number(serde_yaml::Number::from(keytao_theme::THEME_SCHEMA_VERSION))
+        });
+    let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
+    ui_mapping.remove(&serde_yaml::Value::String("candidate_panel_max_width".into()));
+    if let Some(value) = normalized {
+        ui_mapping.insert(
+            serde_yaml::Value::String("candidatePanelMaxWidth".into()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(value as f64)),
+        );
+    } else {
+        ui_mapping.remove(&serde_yaml::Value::String("candidatePanelMaxWidth".into()));
+    }
     let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
     write_file_atomic(&theme_path, content.as_bytes())
         .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
@@ -1098,6 +1135,17 @@ pub fn set_ime_show_tray_mode_indicator(show: bool) -> Result<ImeUiSettings, Cor
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn set_ime_candidate_panel_max_width(
+    max_width: Option<f32>,
+) -> Result<ImeUiSettings, CoreError> {
+    let result: Result<_, String> = (|| {
+        write_ime_candidate_panel_max_width_to_path(ime_theme_path()?, max_width)?;
+        ime_ui_settings_with_message("已保存候选条最大宽度设置".into())
+    })();
+    result.map_err(CoreError::Other)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn set_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
@@ -1872,6 +1920,40 @@ mod tests {
         assert_eq!(settings.accent_color_override.as_deref(), Some("#123456"));
         assert_eq!(settings.corner_radius, Some(24.0));
         assert_eq!(settings.background_color, "#654321");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn candidate_panel_max_width_round_trip_and_reset() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-ime-max-width-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("theme.yaml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "version: 2\nui:\n  embeddedComposition: false\n  candidate_panel_max_width: 480\ncandidate:\n  labelSuffix: ')'\n",
+        )
+        .unwrap();
+
+        write_ime_candidate_panel_max_width_to_path(path.clone(), Some(680.4)).unwrap();
+        let written: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["ui"]["candidatePanelMaxWidth"].as_f64(), Some(680.0));
+        assert!(written["ui"].get("candidate_panel_max_width").is_none());
+        let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+        assert_eq!(settings.candidate_panel_max_width, Some(680.0));
+        assert!(!settings.embedded_composition);
+
+        write_ime_candidate_panel_max_width_to_path(path.clone(), None).unwrap();
+        let written: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written["ui"].get("candidatePanelMaxWidth").is_none());
+        let settings = ime_ui_settings_from_paths(path, None, String::new()).unwrap();
+        assert_eq!(settings.candidate_panel_max_width, None);
 
         std::fs::remove_dir_all(dir).ok();
     }

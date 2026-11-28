@@ -56,6 +56,7 @@ struct ImeTheme: Codable {
         var accentColor: ThemeColor?
         var embeddedComposition: Bool
         var hideCandidatePanel: Bool
+        var candidatePanelMaxWidth: CGFloat?
 
         var effectiveEmbeddedComposition: Bool {
             embeddedComposition || hideCandidatePanel
@@ -181,6 +182,7 @@ extension ImeTheme.Ui {
         accentColor = try container.decodeIfPresent(ThemeColor.self, forKey: .accentColor)
         embeddedComposition = try container.decode(Bool.self, forKey: .embeddedComposition)
         hideCandidatePanel = try container.decodeIfPresent(Bool.self, forKey: .hideCandidatePanel) ?? false
+        candidatePanelMaxWidth = try container.decodeIfPresent(CGFloat.self, forKey: .candidatePanelMaxWidth)
     }
 }
 

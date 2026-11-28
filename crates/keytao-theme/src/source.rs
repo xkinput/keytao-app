@@ -716,6 +716,7 @@ pub fn compile_theme(source: &ThemeSource, base_theme_yaml: &str) -> Result<Stri
         theme.ui.embedded_composition = local.embedded_composition;
         theme.ui.hide_candidate_panel = local.hide_candidate_panel;
         theme.ui.show_tray_mode_indicator = local.show_tray_mode_indicator;
+        theme.ui.candidate_panel_max_width = local.candidate_panel_max_width;
     }
     let mut root = base;
     root.as_object_mut().unwrap().retain(|key, _| {
@@ -756,7 +757,11 @@ pub fn compile_theme(source: &ThemeSource, base_theme_yaml: &str) -> Result<Stri
     root["mobile"] = light.mobile.clone();
     root["themeId"] = json!(source.id());
     root["themeHash"] = json!(&crate::share::theme_source_hash(source)?[..16]);
-    root["ui"] = json!({"colorScheme":local.color_scheme,"embeddedComposition":local.embedded_composition,"hideCandidatePanel":local.hide_candidate_panel,"showTrayModeIndicator":local.show_tray_mode_indicator});
+    let mut ui_root = json!({"colorScheme":local.color_scheme,"embeddedComposition":local.embedded_composition,"hideCandidatePanel":local.hide_candidate_panel,"showTrayModeIndicator":local.show_tray_mode_indicator});
+    if let Some(max_width) = local.candidate_panel_max_width {
+        ui_root["candidatePanelMaxWidth"] = json!(max_width);
+    }
+    root["ui"] = ui_root;
     let source_ui = |ui: &UiTheme| json!({"effectiveColorScheme":ui.effective_color_scheme,"accentColor":ui.accent_color,"cornerRadius":ui.corner_radius,"backgroundColor":ui.background_color});
     let mut ui = json!({"light":source_ui(&light.ui),"dark":source_ui(&dark.ui)});
     encode_colors(&mut ui);

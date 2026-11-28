@@ -45,6 +45,8 @@ pub const THEME_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
 pub const MIN_CANDIDATE_FONT_SIZE: f32 = 10.0;
 pub const MAX_CANDIDATE_FONT_SIZE: f32 = 36.0;
+pub const MIN_CANDIDATE_PANEL_MAX_WIDTH: f32 = 240.0;
+pub const MAX_CANDIDATE_PANEL_MAX_WIDTH: f32 = 2400.0;
 const IME_UI_RADIUS_CHANGED: u8 = 1;
 const IME_UI_BACKGROUND_CHANGED: u8 = 2;
 const IME_UI_ORIENTATION_CHANGED: u8 = 4;
@@ -166,6 +168,15 @@ fn normalize_corner_radius(value: f32) -> Result<f32, String> {
         return Err("圆角必须是有效数字".into());
     }
     Ok(value.clamp(0.0, 28.0))
+}
+
+pub fn normalize_candidate_panel_max_width(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err("候选条最大宽度必须是有效数字".into());
+    }
+    Ok(value
+        .round()
+        .clamp(MIN_CANDIDATE_PANEL_MAX_WIDTH, MAX_CANDIDATE_PANEL_MAX_WIDTH))
 }
 
 fn normalize_background_color(value: &str) -> Result<String, String> {
@@ -299,13 +310,19 @@ pub struct UiTheme {
     pub embedded_composition: bool,
     pub hide_candidate_panel: bool,
     pub show_tray_mode_indicator: bool,
+    pub candidate_panel_max_width: Option<f32>,
 }
 
 impl Serialize for UiTheme {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("UiTheme", 9)?;
+        let len = if self.candidate_panel_max_width.is_some() {
+            10
+        } else {
+            9
+        };
+        let mut state = serializer.serialize_struct("UiTheme", len)?;
         state.serialize_field("colorScheme", &self.color_scheme)?;
         state.serialize_field("effectiveColorScheme", &self.effective_color_scheme)?;
         state.serialize_field("accentColor", &self.accent_color)?;
@@ -314,6 +331,9 @@ impl Serialize for UiTheme {
         state.serialize_field("embeddedComposition", &self.embedded_composition)?;
         state.serialize_field("hideCandidatePanel", &self.hide_candidate_panel)?;
         state.serialize_field("showTrayModeIndicator", &self.show_tray_mode_indicator)?;
+        if let Some(max_width) = self.candidate_panel_max_width {
+            state.serialize_field("candidatePanelMaxWidth", &max_width)?;
+        }
         state.serialize_field(
             "effectiveEmbeddedComposition",
             &self.effective_embedded_composition(),
@@ -1378,6 +1398,7 @@ impl Default for UiTheme {
             embedded_composition: true,
             hide_candidate_panel: false,
             show_tray_mode_indicator: true,
+            candidate_panel_max_width: None,
         }
     }
 }
@@ -1420,6 +1441,12 @@ struct PartialUiTheme {
     hide_candidate_panel: Option<bool>,
     #[serde(alias = "show_tray_mode_indicator")]
     show_tray_mode_indicator: Option<bool>,
+    #[serde(
+        default,
+        alias = "candidate_panel_max_width",
+        deserialize_with = "optional_candidate_panel_max_width"
+    )]
+    candidate_panel_max_width: Option<Option<f32>>,
     #[serde(alias = "night_mode")]
     night_mode: Option<bool>,
     #[serde(default, deserialize_with = "optional_color")]
@@ -1574,6 +1601,10 @@ impl UiTheme {
         if let Some(show_tray_mode_indicator) = partial.show_tray_mode_indicator {
             self.show_tray_mode_indicator = show_tray_mode_indicator;
         }
+        assign(
+            &mut self.candidate_panel_max_width,
+            partial.candidate_panel_max_width,
+        );
     }
 }
 
@@ -1726,6 +1757,22 @@ where
     Ok(value
         .as_f64()
         .and_then(|value| normalize_corner_radius(value as f32).ok())
+        .map(Some))
+}
+
+fn optional_candidate_panel_max_width<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<f32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(Some(None));
+    }
+    Ok(value
+        .as_f64()
+        .and_then(|value| normalize_candidate_panel_max_width(value as f32).ok())
         .map(Some))
 }
 
@@ -3049,5 +3096,40 @@ mod tests {
         assert!(model.candidates[0].selected);
         assert!(model.navigation.can_go_previous);
         assert!(model.navigation.can_go_next);
+    }
+
+    #[test]
+    fn candidate_panel_max_width_defaults_none_clamps_and_survives_compile() {
+        let default_theme = ResolvedImeTheme::default();
+        assert_eq!(default_theme.ui.candidate_panel_max_width, None);
+
+        for (yaml, expected) in [
+            ("ui:\n  candidatePanelMaxWidth: 520\n", Some(520.0)),
+            ("ui:\n  candidate_panel_max_width: 640\n", Some(640.0)),
+            (
+                "ui:\n  candidatePanelMaxWidth: 100\n",
+                Some(MIN_CANDIDATE_PANEL_MAX_WIDTH),
+            ),
+            (
+                "ui:\n  candidatePanelMaxWidth: 9999\n",
+                Some(MAX_CANDIDATE_PANEL_MAX_WIDTH),
+            ),
+            ("ui:\n  candidatePanelMaxWidth: null\n", None),
+        ] {
+            let theme = resolve_compiled_theme_yaml(yaml, EffectiveColorScheme::Light);
+            assert_eq!(theme.ui.candidate_panel_max_width, expected, "{yaml}");
+        }
+
+        let source = source::parse_theme_source_json(
+            r#"{"version":3,"meta":{"id":"my.maxw","name":"MaxW","appearance":"both"}}"#,
+        )
+        .unwrap();
+        let compiled =
+            source::compile_theme(&source, "ui:\n  candidatePanelMaxWidth: 720\n").unwrap();
+        let resolved = resolve_compiled_theme_yaml(&compiled, EffectiveColorScheme::Dark);
+        assert_eq!(resolved.ui.candidate_panel_max_width, Some(720.0));
+        let json: serde_json::Value =
+            serde_json::from_str(&resolved_renderer_theme_json(&resolved).unwrap()).unwrap();
+        assert_eq!(json["ui"]["candidatePanelMaxWidth"], 720.0);
     }
 }

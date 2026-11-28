@@ -91,6 +91,9 @@ pub(crate) fn is_generated(relative: &str, bytes: &[u8]) -> bool {
     if relative == crate::remove_filter::SCRIPT_PATH {
         return bytes == crate::remove_filter::SCRIPT.as_bytes();
     }
+    if relative == crate::grammar_hint::SCRIPT_PATH {
+        return bytes == crate::grammar_hint::SCRIPT.as_bytes();
+    }
     relative.ends_with(".custom.yaml")
         && std::str::from_utf8(bytes).is_ok_and(|content| {
             content.contains(BEGIN) || strip(content).is_ok_and(|original| original != content)
@@ -100,9 +103,20 @@ pub(crate) fn is_generated(relative: &str, bytes: &[u8]) -> bool {
 pub(crate) fn generated_paths(root: &Path) -> Result<Vec<String>, String> {
     let mut paths = Vec::new();
     collect_generated_customs(root, "", &mut paths)?;
-    let script = crate::packages::safe_path(root, crate::remove_filter::SCRIPT_PATH)?;
-    if fs::read(script).is_ok_and(|bytes| bytes == crate::remove_filter::SCRIPT.as_bytes()) {
-        paths.push(crate::remove_filter::SCRIPT_PATH.into());
+    for (relative, expected) in [
+        (
+            crate::remove_filter::SCRIPT_PATH,
+            crate::remove_filter::SCRIPT.as_bytes(),
+        ),
+        (
+            crate::grammar_hint::SCRIPT_PATH,
+            crate::grammar_hint::SCRIPT.as_bytes(),
+        ),
+    ] {
+        let script = crate::packages::safe_path(root, relative)?;
+        if fs::read(script).is_ok_and(|bytes| bytes == expected) {
+            paths.push(relative.into());
+        }
     }
     paths.sort();
     Ok(paths)
@@ -192,6 +206,13 @@ pub(crate) fn strip_file(root: &Path, relative: &str) -> Result<bool, String> {
         fs::remove_file(path).map_err(|error| error.to_string())?;
         return Ok(true);
     }
+    if relative == crate::grammar_hint::SCRIPT_PATH {
+        if bytes != crate::grammar_hint::SCRIPT.as_bytes() {
+            return Ok(false);
+        }
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
     if !relative.ends_with(".custom.yaml") {
         return Ok(false);
     }
@@ -199,7 +220,16 @@ pub(crate) fn strip_file(root: &Path, relative: &str) -> Result<bool, String> {
     write_custom(root, relative, content, &strip(content)?)
 }
 
+#[cfg(test)]
 pub(crate) fn regenerate(root: &Path, schemas: &BTreeSet<String>) -> Result<bool, String> {
+    regenerate_with_options(root, schemas, false)
+}
+
+pub(crate) fn regenerate_with_options(
+    root: &Path,
+    schemas: &BTreeSet<String>,
+    wanxiang_grammar: bool,
+) -> Result<bool, String> {
     let mut changed = false;
     for path in generated_paths(root)? {
         if path
@@ -210,6 +240,12 @@ pub(crate) fn regenerate(root: &Path, schemas: &BTreeSet<String>) -> Result<bool
         }
     }
     changed |= crate::remove_filter::ensure_for_schemas(root, schemas)?;
+    changed |= crate::grammar_hint::ensure_wanxiang_grammar_for_schemas(
+        root,
+        schemas,
+        wanxiang_grammar,
+    )?;
+    changed |= crate::grammar_hint::ensure_for_schemas(root, schemas)?;
     changed |= crate::candidate_page_size::apply_for_schemas(
         root,
         crate::ime_settings::read_candidate_page_size(root),

@@ -99,6 +99,7 @@ class CandidatePanelPreview extends StatelessWidget {
     this.fontCatalog,
     this.highlightPath,
     this.onEditField,
+    this.maxPanelWidth,
   }) : assert(candidateCount >= 1 && candidateCount <= 255);
 
   final Map<String, dynamic> theme;
@@ -114,6 +115,7 @@ class CandidatePanelPreview extends StatelessWidget {
   final SystemFontCatalog? fontCatalog;
   final String? highlightPath;
   final ValueChanged<String>? onEditField;
+  final double? maxPanelWidth;
   // The IME shows the preedit in the panel only when it is not embedded.
   final bool showPreedit;
 
@@ -596,6 +598,13 @@ class CandidatePanelPreview extends StatelessWidget {
                 naturalWidth + padding.horizontal,
                 _metric(panel, 'minWidth'),
               );
+              final configuredMaxWidth =
+                  maxPanelWidth ??
+                  ((theme['ui'] as Map?)?['candidatePanelMaxWidth'] as num?)
+                      ?.toDouble();
+              final widthLimit = configuredMaxWidth == null
+                  ? constraints.maxWidth
+                  : math.min(constraints.maxWidth, configuredMaxWidth);
               return Semantics(
                 container: true,
                 label: '候选窗预览',
@@ -603,7 +612,7 @@ class CandidatePanelPreview extends StatelessWidget {
                   'pc.panel.background',
                   Container(
                     key: const ValueKey('candidate-panel-preview'),
-                    width: math.min(width, constraints.maxWidth),
+                    width: math.min(width, widthLimit),
                     constraints: BoxConstraints(
                       maxHeight: math.min(360, _metric(panel, 'maxHeight')),
                     ),

@@ -187,4 +187,110 @@ class KeytaoVoiceInputTest {
         voice.runIfCurrent(token) { committed.add("duplicate result") }
         assertEquals(listOf("final result"), committed)
     }
+
+    @Test
+    fun `no suggestions text editors still allow voice input while password and incognito block it`() {
+        val plain = InputPrivacyMode(password = false, noLearning = false, noSuggestions = false)
+        val noSuggestions = InputPrivacyMode(password = false, noLearning = false, noSuggestions = true)
+        val incognito = InputPrivacyMode(password = false, noLearning = true, noSuggestions = false)
+        val password = InputPrivacyMode(password = true, noLearning = false, noSuggestions = false)
+
+        assertTrue(plain.allowsVoiceInput)
+        assertTrue(noSuggestions.allowsVoiceInput)
+        assertFalse(noSuggestions.allowsLearning)
+        assertFalse(incognito.allowsVoiceInput)
+        assertFalse(password.allowsVoiceInput)
+    }
+
+    @Test
+    fun `voice support status distinguishes missing engine, unselected engine, and ready engine`() {
+        val google = VoiceEngineInfo(
+            label = "Google Speech",
+            packageName = "com.google.android.tts",
+            component = "com.google.android.tts/com.google.android.apps.speech.tts.googletts.service.GoogleTTSRecognitionService",
+            settingsActivity = "com.google.android.tts.VoiceSettingsActivity",
+        )
+        val futo = VoiceEngineInfo(
+            label = "FUTO Voice",
+            packageName = "org.futo.voiceinput",
+            component = "org.futo.voiceinput/.RecognitionService",
+            settingsActivity = null,
+        )
+
+        val missing = KeytaoVoiceSupport.resolveStatus(
+            enabled = true,
+            recognitionAvailable = false,
+            engines = emptyList(),
+            configuredComponent = null,
+            permissionGranted = false,
+            permissionPermanentlyDenied = false,
+        )
+        assertFalse(missing.engineInstalled)
+        assertFalse(missing.engineSelected)
+        assertFalse(missing.ready)
+
+        val stale = KeytaoVoiceSupport.resolveStatus(
+            enabled = true,
+            recognitionAvailable = true,
+            engines = listOf(google, futo),
+            configuredComponent = "com.removed.pkg/.OldService",
+            permissionGranted = true,
+            permissionPermanentlyDenied = false,
+        )
+        assertTrue(stale.engineInstalled)
+        assertFalse(stale.engineSelected)
+        assertTrue(stale.selectionInvalid)
+        assertFalse(stale.ready)
+
+        val selectedShorthand = KeytaoVoiceSupport.resolveStatus(
+            enabled = true,
+            recognitionAvailable = true,
+            engines = listOf(google, futo),
+            configuredComponent = "org.futo.voiceinput/.RecognitionService",
+            permissionGranted = true,
+            permissionPermanentlyDenied = false,
+        )
+        assertTrue(selectedShorthand.engineInstalled)
+        assertTrue(selectedShorthand.engineSelected)
+        assertFalse(selectedShorthand.selectionInvalid)
+        assertEquals("FUTO Voice", selectedShorthand.selectedEngineName)
+        assertTrue(selectedShorthand.hasModelSettings)
+        assertTrue(selectedShorthand.ready)
+
+        val systemDefaultSingle = KeytaoVoiceSupport.resolveStatus(
+            enabled = true,
+            recognitionAvailable = true,
+            engines = listOf(google),
+            configuredComponent = null,
+            permissionGranted = false,
+            permissionPermanentlyDenied = true,
+        )
+        assertTrue(systemDefaultSingle.engineInstalled)
+        assertTrue(systemDefaultSingle.engineSelected)
+        assertTrue(systemDefaultSingle.usesSystemDefault)
+        assertEquals("Google Speech", systemDefaultSingle.selectedEngineName)
+        assertTrue(systemDefaultSingle.permissionPermanentlyDenied)
+        assertFalse(systemDefaultSingle.ready)
+    }
+
+    @Test
+    fun `voice support normalizes component and relative settings activity names`() {
+        assertEquals(
+            "org.example/org.example.MyService",
+            KeytaoVoiceSupport.normalizeComponentName("org.example/.MyService"),
+        )
+        assertEquals(
+            "org.example/org.example.MyService",
+            KeytaoVoiceSupport.normalizeComponentName("org.example/org.example.MyService"),
+        )
+        assertNull(KeytaoVoiceSupport.normalizeComponentName("   "))
+        assertEquals(
+            "org.example.VoiceSettings",
+            KeytaoVoiceSupport.resolveSettingsActivityClass("org.example", ".VoiceSettings"),
+        )
+        assertEquals(
+            "com.other.Settings",
+            KeytaoVoiceSupport.resolveSettingsActivityClass("org.example", "com.other.Settings"),
+        )
+    }
 }

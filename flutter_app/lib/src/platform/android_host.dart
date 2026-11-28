@@ -41,6 +41,15 @@ class AndroidHost {
 
   Future<Map<String, dynamic>> paths() => _map('paths');
   Future<Map<String, dynamic>> imeStatus() => _map('imeStatus');
+  Future<Map<String, dynamic>> voiceInputStatus() => _map('voiceInputStatus');
+  Future<Map<String, dynamic>> setVoiceInputEnabled(bool enabled) =>
+      _map('setVoiceInputEnabled', {'enabled': enabled});
+  Future<Map<String, dynamic>> requestVoicePermission() =>
+      _map('requestVoicePermission');
+  Future<void> openVoiceInputSettings() =>
+      _channel.invokeMethod<void>('openVoiceInputSettings');
+  Future<void> openVoiceModelSettings() =>
+      _channel.invokeMethod<void>('openVoiceModelSettings');
   Future<Map<String, dynamic>> storagePermissionStatus() =>
       _map('storagePermissionStatus');
   Future<void> openStoragePermissionSettings() =>

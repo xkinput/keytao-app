@@ -84,6 +84,7 @@ class _SchemeScreenshotController extends ViewController {
       installed: false,
       version: '',
       size: BigInt.zero,
+      enabledPackages: const [],
     );
     final rimeIceStatus = rimeAddons['rime_ice']!.status;
     for (final slot in rimeAddons.values) {

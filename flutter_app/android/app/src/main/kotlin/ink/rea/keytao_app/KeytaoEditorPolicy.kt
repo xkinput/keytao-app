@@ -59,6 +59,16 @@ internal data class InputPrivacyMode(
     /** Whether clipboard contents may be remembered or previewed on the keyboard. */
     val allowsClipboard: Boolean get() = !password && !noLearning
 
+    /**
+     * Whether speech recognition may be offered for this editor.
+     *
+     * Password and incognito (`IME_FLAG_NO_PERSONALIZED_LEARNING`) fields stay
+     * blocked, while `TYPE_TEXT_FLAG_NO_SUGGESTIONS` only disables spellcheck
+     * and autocomplete and is widely set by ordinary apps (browsers, chat
+     * search bars, WebViews, custom editors).
+     */
+    val allowsVoiceInput: Boolean get() = !password && !noLearning
+
     /** Whether committed text may be kept in memory for backspace restore. */
     val allowsTextRecall: Boolean get() = !password
 }

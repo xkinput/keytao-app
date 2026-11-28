@@ -4292,6 +4292,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val slots = key.slots
         if (slots != null && slots.hasContent() && !isEnglishMode && !state.asciiMode) {
             drawSlottedKeyContent(canvas, keyRect, label, slots, style, pressProgress)
+            if (isVoiceInputOffered(key) && slots.topRight.isNullOrBlank()) {
+                drawVoiceHintIcon(canvas, keyRect, style)
+            }
             return
         }
         textPaint.textAlign = Paint.Align.CENTER
@@ -4306,9 +4309,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.drawText(label, keyRect.centerX(), keyRect.centerY() + textBaselineOffset(textPaint), textPaint)
 
         val voiceHint = isVoiceInputOffered(key)
+        if (voiceHint) {
+            drawVoiceHintIcon(canvas, keyRect, style)
+            return
+        }
         val effectiveHint = key.slots?.topRight ?: key.hint
-        val swipeHint = !voiceHint && effectiveHint?.length == 1
-        (if (voiceHint) "🎤" else effectiveHint)?.takeIf {
+        val swipeHint = effectiveHint?.length == 1
+        effectiveHint?.takeIf {
             config.keyHintVisible && (!swipeHint || style.swipeHintVisible)
         }?.let { hint ->
             textPaint.textAlign = Paint.Align.RIGHT
@@ -4316,6 +4323,64 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             textPaint.color = (if (swipeHint) style.swipeHintForeground else style.hintForeground).toArgb()
             canvas.drawText(hint, keyRect.right - dp(7f), keyRect.top + dp(13f), textPaint)
         }
+    }
+
+    private fun drawVoiceHintIcon(canvas: Canvas, keyRect: RectF, style: KeytaoKeyStyle) {
+        val iconHeight = min(dp(11f) * style.hintFontScale.coerceIn(0.8f, 1.35f), keyRect.height() * 0.34f)
+        if (iconHeight < dp(4f)) return
+        val cx = keyRect.right - dp(10.5f)
+        val top = keyRect.top + dp(4.5f)
+        val color = style.hintForeground.toArgb()
+
+        val capsuleWidth = iconHeight * 0.34f
+        val capsuleHeight = iconHeight * 0.54f
+        val capsuleLeft = cx - capsuleWidth / 2f
+        val capsuleRight = cx + capsuleWidth / 2f
+        val capsuleBottom = top + capsuleHeight
+
+        val previousStyle = paint.style
+        val previousStrokeWidth = paint.strokeWidth
+        val previousCap = paint.strokeCap
+
+        paint.color = color
+        paint.style = Paint.Style.FILL
+        canvas.drawRoundRect(
+            capsuleLeft,
+            top,
+            capsuleRight,
+            capsuleBottom,
+            capsuleWidth / 2f,
+            capsuleWidth / 2f,
+            paint,
+        )
+
+        val strokeWidth = max(1.2f, dp(1.15f))
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = strokeWidth
+        paint.strokeCap = Paint.Cap.ROUND
+
+        val cradleHalfWidth = iconHeight * 0.32f
+        val cradleTop = top + capsuleHeight * 0.32f
+        val cradleBottom = capsuleBottom + iconHeight * 0.14f
+        canvas.drawArc(
+            cx - cradleHalfWidth,
+            cradleTop,
+            cx + cradleHalfWidth,
+            cradleBottom,
+            0f,
+            180f,
+            false,
+            paint,
+        )
+
+        val stemBottom = cradleBottom + iconHeight * 0.18f
+        canvas.drawLine(cx, cradleBottom, cx, stemBottom, paint)
+        val baseHalfWidth = iconHeight * 0.22f
+        canvas.drawLine(cx - baseHalfWidth, stemBottom, cx + baseHalfWidth, stemBottom, paint)
+
+        paint.style = previousStyle
+        paint.strokeWidth = previousStrokeWidth
+        paint.strokeCap = previousCap
     }
 
     private fun drawSlottedKeyContent(
